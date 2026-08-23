@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { PurchaseChannel, PurchaseType, ReferralRewardType } from '@prisma/client';
 
 import { AdminReferralsController } from '../src/modules/referrals/controllers/admin-referrals.controller';
 import { ReferralManualAttachService } from '../src/modules/referrals/services/referral-manual-attach.service';
+import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
 
 /**
@@ -90,6 +92,9 @@ interface ReferralRow {
   referredId: string;
   level: number;
   inviteSource: string;
+  qualifiedAt: Date | null;
+  qualifiedTransactionId: string | null;
+  qualifiedPurchaseChannel: string | null;
 }
 
 interface TransactionRow {
@@ -99,6 +104,31 @@ interface TransactionRow {
   amount: number;
   gatewayType: string;
   createdAt: Date;
+  purchaseType: PurchaseType;
+  channel: PurchaseChannel;
+  planSnapshot: Record<string, unknown>;
+}
+
+/** The minimum `Partner` shape the replay boundary and qualification read. */
+interface PartnerRow {
+  id: string;
+  userId: string;
+  isActive: boolean;
+  createdAt: Date;
+}
+
+/**
+ * A `PartnerReferral` edge as `attachPartnerReferralChain` would write it —
+ * the fake's `attachPartnerReferralChain` mints these from `seed.partnerChain`
+ * when the service calls it, so the edge exists by the time the replay reads
+ * the chain, exactly as in production.
+ */
+interface ChainEdgeRow {
+  id: string;
+  partnerId: string;
+  referralUserId: string;
+  level: number;
+  partner: { createdAt: Date };
 }
 
 interface EmittedEvent {
@@ -131,16 +161,40 @@ function project(row: Record<string, unknown>, select?: Record<string, unknown>)
  * under test, and a call counter cannot tell `user.referral.attached` from
  * `user.partner.referral.attached`, nor a row naming its operator from one
  * that does not.
+ *
+ * `realQualification: true` wires the REAL `ReferralQualificationService`
+ * onto this fake (it needs `$transaction`/`$queryRaw` pass-throughs, a
+ * `settings.findFirst`, `referral.update` and `referralReward.create`) — the
+ * retroactive-reward tests below assert on reward ROWS, not on "the double
+ * was called".
  */
-function makeDb(seed: { users: UserRow[]; transactions?: TransactionRow[] }) {
+function makeDb(
+  seed: {
+    users: UserRow[];
+    transactions?: TransactionRow[];
+    /** Partner rows findable by userId — the referrer becoming a partner. */
+    partners?: PartnerRow[];
+    /** Edges the fake `attachPartnerReferralChain` mints for the payer. */
+    partnerChain?: Array<{ partnerId: string; level: number; partner: { createdAt: Date } }>;
+    /** `Settings.referralSettings` the real qualification service reads. */
+    referralSettings?: Record<string, unknown>;
+    /** Run the real ReferralQualificationService against this fake. */
+    realQualification?: boolean;
+  },
+) {
   const users = [...seed.users];
   const referrals: ReferralRow[] = [];
-  const partnerReferrals: Array<{ id: string; referralUserId: string }> = [];
+  const partnerReferrals: ChainEdgeRow[] = [];
   const transactions = [...(seed.transactions ?? [])];
+  const partners = [...(seed.partners ?? [])];
+  const rewards: Array<Record<string, unknown>> = [];
   const auditLogs: Array<Record<string, unknown>> = [];
   let referralSeq = 0;
+  let edgeSeq = 0;
 
   const client = {
+    $queryRaw: async () => [],
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(client),
     user: {
       findUnique: async (args: {
         where: { id?: string; telegramId?: bigint };
@@ -171,17 +225,66 @@ function makeDb(seed: { users: UserRow[]; transactions?: TransactionRow[] }) {
         const row = referrals.find((r) => r.referredId === args.where.referredId);
         return row ? project(row as unknown as Record<string, unknown>, args.select) : null;
       },
-      create: async (args: { data: Omit<ReferralRow, 'id'>; select?: Record<string, unknown> }) => {
-        const row: ReferralRow = { id: `ref-${++referralSeq}`, ...args.data };
+      create: async (args: { data: Record<string, unknown>; select?: Record<string, unknown> }) => {
+        const row = Object.assign(
+          {
+            id: `ref-${++referralSeq}`,
+            qualifiedAt: null,
+            qualifiedTransactionId: null,
+            qualifiedPurchaseChannel: null,
+          },
+          args.data,
+        ) as unknown as ReferralRow;
         referrals.push(row);
         return project(row as unknown as Record<string, unknown>, args.select);
+      },
+      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        const row = referrals.find((r) => r.id === args.where.id);
+        if (row) Object.assign(row, args.data);
+        return row;
+      },
+    },
+    partner: {
+      findUnique: async (args: { where: { userId?: string }; select?: Record<string, unknown> }) => {
+        const row = partners.find((p) => p.userId === args.where.userId);
+        return row ? project(row as unknown as Record<string, unknown>, args.select) : null;
       },
     },
     partnerReferral: {
       findFirst: async (args: { where: { referralUserId?: string } }) =>
         partnerReferrals.find((p) => p.referralUserId === args.where.referralUserId) ?? null,
+      findMany: async (args: {
+        where: { referralUserId?: string };
+        select?: Record<string, unknown>;
+      }) =>
+        partnerReferrals
+          .filter((p) => p.referralUserId === args.where.referralUserId)
+          .map((p) =>
+            args.select && 'partner' in args.select
+              ? { partner: { createdAt: p.partner.createdAt } }
+              : { ...p },
+          ),
+    },
+    settings: {
+      findFirst: async () => ({
+        referralSettings:
+          seed.referralSettings ?? {
+            enabled: true,
+            reward: { type: 'POINTS', strategy: 'AMOUNT', config: { FIRST: 100 } },
+          },
+      }),
+    },
+    referralReward: {
+      create: async (args: { data: Record<string, unknown> }) => {
+        rewards.push(args.data);
+        return args.data;
+      },
     },
     transaction: {
+      findUnique: async (args: { where: { id?: string }; select?: Record<string, unknown> }) => {
+        const row = transactions.find((t) => t.id === args.where.id);
+        return row ? project(row as unknown as Record<string, unknown>, args.select) : null;
+      },
       findMany: async (args: {
         where: { userId?: string; status?: string };
         select?: Record<string, unknown>;
@@ -211,7 +314,22 @@ function makeDb(seed: { users: UserRow[]; transactions?: TransactionRow[] }) {
   const replayed: ReplayedEarning[] = [];
   const failures = { earningAfter: Number.POSITIVE_INFINITY };
   const partnerEarnings = {
-    attachPartnerReferralChain: async () => true,
+    // Mints the seeded chain the way the real method does: edges exist right
+    // after this call, which is what the replay's activation boundary reads.
+    // Seeds with no chain keep the historical `true` answer the older tests
+    // pinned ("chain attached" = the referrer simply is not a partner).
+    attachPartnerReferralChain: async () => {
+      for (const edge of seed.partnerChain ?? []) {
+        partnerReferrals.push({
+          id: `pr-${++edgeSeq}`,
+          partnerId: edge.partnerId,
+          referralUserId: 'u-referred',
+          level: edge.level,
+          partner: edge.partner,
+        });
+      }
+      return seed.partnerChain === undefined ? true : seed.partnerChain.length > 0;
+    },
     processPartnerEarning: async (input: { payerUserId: string; sourceTransactionId: string }) => {
       if (replayed.length >= failures.earningAfter) {
         throw new Error('partner earning refused');
@@ -219,9 +337,10 @@ function makeDb(seed: { users: UserRow[]; transactions?: TransactionRow[] }) {
       replayed.push({ payerUserId: input.payerUserId, sourceTransactionId: input.sourceTransactionId });
     },
   };
-  const qualification = {
-    qualifyReferralAfterPurchase: async () => undefined,
-  };
+  const qualification =
+    seed.realQualification === true
+      ? new ReferralQualificationService(client as never, events as never)
+      : { qualifyReferralAfterPurchase: async () => undefined };
 
   return {
     client,
@@ -229,6 +348,7 @@ function makeDb(seed: { users: UserRow[]; transactions?: TransactionRow[] }) {
     emitted,
     replayed,
     failures,
+    rewards,
     state: { users, referrals, partnerReferrals, auditLogs },
     partnerEarnings,
     qualification,
@@ -299,6 +419,9 @@ function seed(completedPayments = 0): Db {
       amount: 1_000,
       gatewayType: 'YOOKASSA',
       createdAt: new Date(Date.now() - (30 - i) * DAY_MS),
+      purchaseType: PurchaseType.NEW,
+      channel: PurchaseChannel.WEB,
+      planSnapshot: { id: 'plan-1' },
     });
   }
   return makeDb({
@@ -707,5 +830,120 @@ describe('the refusals still refuse, and leave nothing behind', () => {
 
     assert.deepEqual(db.state.auditLogs, []);
     assert.deepEqual(db.emitted, []);
+  });
+});
+
+/**
+ * The replay's two owner decisions, one test per side (both 2026-08-23):
+ *
+ * РЕШЕНИЕ А — «Ретроактивная оплата при ручной привязке реферера ДА нужна:
+ * если пользователь сам не привязался и успел оплатить, то при ручной
+ * привязке мы ОБЯЗАНЫ зачитать его». Referral rewards (ReferralReward,
+ * points/days) are replayed for EVERY completed payment, however old.
+ *
+ * РЕШЕНИЕ Б — «Партнёрка считается ТОЛЬКО с момента активации партнёра;
+ * деньги задним числом НЕ платятся, спор только о будущих оплатах старых
+ * приглашённых». Partner earnings (PartnerEarning, money to balance) are
+ * replayed only for payments made AFTER the payer's partner chain became
+ * partners — `Partner.createdAt`, the schema's only activation date.
+ *
+ * Both tests run the REAL qualification service (test А) or the recording
+ * partner double (test Б) and assert on rows, so deleting either replay half
+ * redden ITS test and only its test.
+ */
+describe('the replay honours both owner decisions about retroactive payment', () => {
+  it('РЕШЕНИЕ А: a payment completed BEFORE the attach still earns the referrer his reward', async () => {
+    // The referrer is NOT a partner here — an active-partner referrer gets
+    // partner money instead of a referral reward (`createConfiguredRewards`
+    // skips him), and this test pins the REFERRAL half of the rule.
+    const db = makeDb({
+      users: [makeUser('u-referred', REFERRED_TG), makeUser('u-referrer', REFERRER_TG)],
+      transactions: [
+        {
+          id: 'tx-old',
+          userId: 'u-referred',
+          status: 'COMPLETED',
+          amount: 1_000,
+          gatewayType: 'YOOKASSA',
+          createdAt: new Date(Date.now() - 30 * DAY_MS),
+          purchaseType: PurchaseType.NEW,
+          channel: PurchaseChannel.WEB,
+          planSnapshot: { id: 'plan-1' },
+        },
+      ],
+      realQualification: true,
+    });
+
+    const result = await makeAttachService(db).attachReferrerManually({
+      userId: 'u-referred',
+      referrerId: 'u-referrer',
+      inviteSource: 'UNKNOWN' as never,
+      operator: null,
+    });
+
+    // The edge qualified against the OLD transaction, and the reward ROW for
+    // the referrer exists — the replay credited it, not just called a double.
+    assert.equal(result.historicalPaymentsProcessed, 1);
+    assert.equal(db.state.referrals[0]?.qualifiedTransactionId, 'tx-old');
+    assert.ok(db.state.referrals[0]?.qualifiedAt instanceof Date);
+    assert.deepEqual(db.rewards, [
+      {
+        referralId: 'ref-1',
+        userId: 'u-referrer',
+        type: ReferralRewardType.POINTS,
+        amount: 100,
+      },
+    ]);
+  });
+
+  it('РЕШЕНИЕ Б: no partner earning for payments made before the partner existed, but payments after activation are credited', async () => {
+    // The referrer became a partner 10 days ago. The payer paid 30 days ago
+    // (before that) and 5 days ago (after). Only the recent payment may move
+    // partner money — the old one is exactly the retroactive payout РЕШЕНИЕ Б
+    // forbids.
+    const partnerSince = new Date(Date.now() - 10 * DAY_MS);
+    const db = makeDb({
+      users: [makeUser('u-referred', REFERRED_TG), makeUser('u-referrer', REFERRER_TG)],
+      partners: [{ id: 'partner-1', userId: 'u-referrer', isActive: true, createdAt: partnerSince }],
+      partnerChain: [{ partnerId: 'partner-1', level: 1, partner: { createdAt: partnerSince } }],
+      transactions: [
+        {
+          id: 'tx-old',
+          userId: 'u-referred',
+          status: 'COMPLETED',
+          amount: 1_000,
+          gatewayType: 'YOOKASSA',
+          createdAt: new Date(Date.now() - 30 * DAY_MS),
+          purchaseType: PurchaseType.NEW,
+          channel: PurchaseChannel.WEB,
+          planSnapshot: { id: 'plan-1' },
+        },
+        {
+          id: 'tx-new',
+          userId: 'u-referred',
+          status: 'COMPLETED',
+          amount: 1_000,
+          gatewayType: 'YOOKASSA',
+          createdAt: new Date(Date.now() - 5 * DAY_MS),
+          purchaseType: PurchaseType.NEW,
+          channel: PurchaseChannel.WEB,
+          planSnapshot: { id: 'plan-1' },
+        },
+      ],
+    });
+
+    const result = await makeAttachService(db).attachReferrerManually({
+      userId: 'u-referred',
+      referrerId: 'u-referrer',
+      inviteSource: 'UNKNOWN' as never,
+      operator: null,
+    });
+
+    assert.deepEqual(
+      db.replayed.map((r) => r.sourceTransactionId),
+      ['tx-new'],
+      'only the payment made after the partner chain existed is replayed into partner earnings',
+    );
+    assert.equal(result.historicalPaymentsProcessed, 2, 'both payments still replay — the referral half is unaffected');
   });
 });

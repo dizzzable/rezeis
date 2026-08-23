@@ -84,8 +84,10 @@ export interface ReferralManualAttachOperatorInterface {
  * (e.g. the user forgot to use the invite link). The service:
  *   1. Creates the Referral edge.
  *   2. Attaches the partner referral chain (L1/L2/L3).
- *   3. Replays all historical completed payments — qualifying the referral
- *      and crediting partner earnings for each.
+ *   3. Replays historical completed payments — qualifying the referral for
+ *      EVERY one of them (РЕШЕНИЕ А), but crediting partner earnings only
+ *      for those made after the payer's partner chain became partners
+ *      (РЕШЕНИЕ Б; see the replay loop for both decisions verbatim).
  */
 @Injectable()
 export class ReferralManualAttachService {
@@ -197,7 +199,7 @@ export class ReferralManualAttachService {
         status: TransactionStatus.COMPLETED,
       },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, amount: true, gatewayType: true },
+      select: { id: true, amount: true, gatewayType: true, createdAt: true },
     });
 
     // The replay is the part that MOVES MONEY, and it is the part that can
@@ -207,20 +209,50 @@ export class ReferralManualAttachService {
     // however many transactions got through, and nothing at all naming the
     // operator. The failure is re-thrown unchanged below — the only difference
     // is that the row exists first.
+    //
+    // TWO owner decisions govern this replay (both 2026-08-23, both final) —
+    // read before "fixing" either half:
+    //
+    // РЕШЕНИЕ А (реферальные награды — ReferralReward, баллы/дни):
+    //   «Ретроактивная оплата при ручной привязке реферера ДА нужна: если
+    //   пользователь сам не привязался и успел оплатить, то при ручной
+    //   привязке мы ОБЯЗАНЫ зачитать его».
+    //   → `qualifyReferralAfterPurchase` runs for EVERY completed transaction,
+    //   however old. Do not add an age/activation cutoff to it.
+    //
+    // РЕШЕНИЕ Б (партнёрские начисления — PartnerEarning, деньги на баланс):
+    //   «Партнёрка считается ТОЛЬКО с момента активации партнёра; деньги
+    //   задним числом НЕ платятся, спор только о будущих оплатах старых
+    //   приглашённых».
+    //   → `processPartnerEarning` runs only for transactions created at or
+    //   after the payer's partner chain became partners (`partnerSince`
+    //   below). The same rule, for the activation path, is pinned in
+    //   `PartnersService.applyActiveTransition` (no retroactive edges) and
+    //   `test/partner-activation-surfaces.spec.ts`; before the cutoff existed
+    //   here, a manual attach paid a partner for payments made BEFORE he was
+    //   a partner — exactly what РЕШЕНИЕ Б forbids.
+    const partnerSince = await this.latestPartnerChainActivation(input.userId);
     let historicalPaymentsProcessed = 0;
     let replayFailure: unknown = null;
     try {
       for (const tx of historicalTransactions) {
-        // Qualify referral (creates reward for referrer)
+        // Qualify referral — РЕШЕНИЕ А: every completed payment, however old.
         await this.qualificationService.qualifyReferralAfterPurchase(tx.id);
 
-        // Credit partner earnings
-        await this.partnerEarningsService.processPartnerEarning({
-          payerUserId: input.userId,
-          paymentAmountMinorUnits: toMinorUnits(tx.amount), // Decimal → minor units (rounded)
-          gatewayType: tx.gatewayType,
-          sourceTransactionId: tx.id,
-        });
+        // Credit partner earnings — РЕШЕНИЕ Б: only for payments made after
+        // the partner chain was in place. A chain edge that does not exist
+        // (partnerSince === null) leaves the call to
+        // `processPartnerEarning`, which exits on its own when the payer has
+        // no partner chain — the shape of the replay, and its audit counter,
+        // stay unchanged for non-partner attaches.
+        if (partnerSince === null || tx.createdAt.getTime() >= partnerSince.getTime()) {
+          await this.partnerEarningsService.processPartnerEarning({
+            payerUserId: input.userId,
+            paymentAmountMinorUnits: toMinorUnits(tx.amount), // Decimal → minor units (rounded)
+            gatewayType: tx.gatewayType,
+            sourceTransactionId: tx.id,
+          });
+        }
 
         historicalPaymentsProcessed++;
       }
@@ -253,6 +285,48 @@ export class ReferralManualAttachService {
       partnerChainAttached,
       historicalPaymentsProcessed,
     };
+  }
+
+  /**
+   * The replay boundary for РЕШЕНИЕ Б: the latest `Partner.createdAt` across
+   * the payer's partner chain, or `null` when the payer has no chain.
+   *
+   * Schema reality, and the limits it forces (do not invent fields that are
+   * not there — `prisma/schema.prisma`, model Partner):
+   *   - `Partner` has NO `activatedAt` and NO activation history. A partner
+   *     row is born active (`PartnersService.createPartnerForUser` creates it
+   *     with `isActive: true`), so `createdAt` IS the moment the user became
+   *     a partner — the best "activated at" the data has.
+   *   - Deactivation/reactivation only flips `isActive`
+   *     (`PartnersService.applyActiveTransition`); a currently-deactivated
+   *     partner is already excluded from payouts by the `isActive` check in
+   *     `processPartnerEarning`. The DATE of a reactivation is stored
+   *     nowhere (`updatedAt` is moved by every balance increment), so after a
+   *     deactivate/reactivate cycle the boundary stays at the original
+   *     `createdAt`. Limitation, accepted: the window between deactivation
+   *     and reactivation may be under-credited for, but nothing is ever paid
+   *     for a period before the user was a partner at all.
+   *   - `processPartnerEarning` pays the WHOLE chain (L1/L2/L3) per call and
+   *     cannot price one level differently by date, so the boundary is the
+   *     LATEST activation in the chain: any earlier cut-off would pay some
+   *     level for a period when that partner was not yet a partner — the
+   *     retroactive payment РЕШЕНИЕ Б forbids. A partner who activated
+   *     earlier than the chain's latest activation is correspondingly not
+   *     replay-credited for the gap window; future payments are unaffected.
+   */
+  private async latestPartnerChainActivation(userId: string): Promise<Date | null> {
+    const edges = await this.prismaService.partnerReferral.findMany({
+      where: { referralUserId: userId },
+      select: { partner: { select: { createdAt: true } } },
+    });
+    let latest: Date | null = null;
+    for (const edge of edges) {
+      const activatedAt = edge.partner.createdAt;
+      if (latest === null || activatedAt.getTime() > latest.getTime()) {
+        latest = activatedAt;
+      }
+    }
+    return latest;
   }
 
   /**

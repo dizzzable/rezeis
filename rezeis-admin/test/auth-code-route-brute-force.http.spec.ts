@@ -27,6 +27,9 @@ import { TelegramAuthService } from '../src/modules/oauth/services/telegram-auth
 import { GitHubAuthService } from '../src/modules/oauth/services/github-auth.service';
 import { CryptoService } from '../src/modules/oauth/services/crypto.service';
 import { encryptTotpSecret } from '../src/modules/two-factor/utils/secret-cipher';
+import { base32Decode } from '../src/modules/two-factor/utils/base32';
+import { computeTotpCode } from '../src/modules/two-factor/utils/totp';
+import type { RequestMetadataInterface } from '../src/modules/auth/interfaces/request-metadata.interface';
 
 /**
  * Brute-force ceilings on every route in the admin panel that checks a
@@ -66,6 +69,13 @@ import { encryptTotpSecret } from '../src/modules/two-factor/utils/secret-cipher
  * answered `{"401":600,"429":100}` to 700 wrong guesses with the first refusal
  * at attempt 601, and the OAuth path wrote nothing to `admin_login_attempts`
  * while doing it.
+ *
+ * 2026-08-23: the four 2FA routes additionally sit behind the account-level
+ * `LoginGuardService` budget (owner decision — recovery is waiting out the
+ * 15-minute window or admin-cli), so with the counter modelled their
+ * histograms below answer `{"401":5,"429":…}` with the first refusal at
+ * attempt 6 — the guard-side 429 lands before every per-minute ceiling in the
+ * table. The per-route `@Throttle` caps remain in force above that.
  */
 
 const CRYPT_KEY = 'brute-force-spec-crypt-key';
@@ -136,6 +146,14 @@ interface AppContext {
   readonly rateLimitChecks: Array<{ ip: string; login: string }>;
   verifyForLoginCalls: number;
   totpEnabled: boolean;
+  /**
+   * Mutable on purpose (`AppOptions` is fixed at build time): read at call
+   * time by the fake hasher, so a test can flip password acceptance
+   * mid-scenario — a run of accepted enrolments, then a run of rejected
+   * ones.
+   */
+  acceptSecondFactor: boolean;
+  passwordAccepted: boolean;
 }
 
 interface AppOptions {
@@ -147,7 +165,29 @@ interface AppOptions {
   readonly withoutLoginGuard?: boolean;
   /** Makes the second factor accept the code, so the success path can be asserted. */
   readonly acceptSecondFactor?: boolean;
+  /**
+   * Makes the fake counter MODEL the real per-(login, ip) budget: 5 recorded
+   * failures for the same (ip, login) pair — `LoginGuardService`'s
+   * `MAX_FAILURES_PER_LOGIN` — and `isRateLimited` refuses. Without this the
+   * fake answers a constant, which is what the @Throttle-measuring tests
+   * need (a stateful budget would refuse everything before the throttle's
+   * ceiling was ever reached, and the throttle would become unobservable);
+   * with it, the account-budget tests measure the combined behaviour that
+   * ships: the 2FA routes' guard-side 429 lands at failure 6, BEFORE the
+   * route's per-minute ceiling.
+   */
+  readonly enforceLoginBudget?: boolean;
+  /**
+   * Pre-spends failures under (127.0.0.1, 'root') — the rows
+   * `AdminAuthService.loginAdmin` would have written for five mistyped
+   * passwords — so a test can prove these routes read the SAME budget the
+   * sign-in form spends, without firing sign-in requests.
+   */
+  readonly seedLoginFailures?: number;
 }
+
+/** `LoginGuardService.MAX_FAILURES_PER_LOGIN`, mirrored here. */
+const BUDGET_FAILURES_PER_LOGIN = 5;
 
 async function buildApp(options: AppOptions = {}): Promise<AppContext> {
   const context = {
@@ -155,7 +195,20 @@ async function buildApp(options: AppOptions = {}): Promise<AppContext> {
     rateLimitChecks: [] as Array<{ ip: string; login: string }>,
     verifyForLoginCalls: 0,
     totpEnabled: options.totpEnabled ?? true,
+    acceptSecondFactor: options.acceptSecondFactor === true,
+    passwordAccepted: false,
   };
+  for (let seeded = 0; seeded < (options.seedLoginFailures ?? 0); seeded += 1) {
+    context.recordedAttempts.push({
+      loginNormalized: 'root',
+      ipAddress: '127.0.0.1',
+      success: false,
+      // The reason `AdminAuthService` writes for a mistyped password, so the
+      // seeded rows are the sign-in form's rows, not a lookalike.
+      reason: 'invalid_password',
+      userAgent: null,
+    });
+  }
 
   const prismaService = {
     adminUser: {
@@ -212,45 +265,65 @@ async function buildApp(options: AppOptions = {}): Promise<AppContext> {
 
   const passwordHashService = {
     hashPassword: async () => 'stored-hash',
-    verifyPassword: async () => false,
+    verifyPassword: async () => context.passwordAccepted,
   } as unknown as PasswordHashService;
+
+  // The fail2ban counter. Defined BEFORE `realTwoFactor` because the real
+  // service now takes it as its fifth constructor argument — the account-level
+  // budget these routes sit behind is the service's, and the service under
+  // test must spend the same fake the container would inject.
+  const loginGuard = {
+    isRateLimited: async (ip: string, login: string) => {
+      context.rateLimitChecks.push({ ip, login });
+      if (options.rateLimited === true) return true;
+      if (options.enforceLoginBudget === true) {
+        const failures = context.recordedAttempts.filter(
+          (attempt) =>
+            attempt.success === false && attempt.ipAddress === ip && attempt.loginNormalized === login,
+        ).length;
+        return failures >= BUDGET_FAILURES_PER_LOGIN;
+      }
+      return false;
+    },
+    recordAttempt: async (input: RecordedAttempt) => {
+      context.recordedAttempts.push(input);
+      return { autoBlocked: false, failureCount: context.recordedAttempts.length };
+    },
+  };
 
   const realTwoFactor = new TwoFactorService(
     prismaService,
     { cryptKey: CRYPT_KEY, serviceName: 'Rezeis Admin' } as never,
     rawCacheService,
     passwordHashService,
+    loginGuard as unknown as LoginGuardService,
   );
 
   // Real `TwoFactorService` behaviour for every method, with `verifyForLogin`
   // counted so a test can assert how many guesses actually reached the
-  // verifier — the number the throttle is there to cap.
+  // verifier — the number the throttle is there to cap. The metadata argument
+  // is forwarded on every credential-checking method: dropping it here would
+  // key the budget on the empty IP and the account-level tests would measure
+  // a counter nobody spends.
   const countingTwoFactor = {
     isEnabled: async () => context.totpEnabled,
     verifyForLogin: async (adminId: string, code: string) => {
       context.verifyForLoginCalls += 1;
-      if (options.acceptSecondFactor === true) return true;
+      if (context.acceptSecondFactor) return true;
       return realTwoFactor.verifyForLogin(adminId, code);
     },
     getStatus: (adminId: string) => realTwoFactor.getStatus(adminId),
-    beginEnrollment: (adminId: string, password?: string) =>
-      realTwoFactor.beginEnrollment(adminId, password),
-    confirmEnrollment: (adminId: string, code: string) =>
-      realTwoFactor.confirmEnrollment(adminId, code),
-    disable: (adminId: string, code: string) => realTwoFactor.disable(adminId, code),
-    regenerateRecoveryCodes: (adminId: string, code: string) =>
-      realTwoFactor.regenerateRecoveryCodes(adminId, code),
-  };
-
-  const loginGuard = {
-    isRateLimited: async (ip: string, login: string) => {
-      context.rateLimitChecks.push({ ip, login });
-      return options.rateLimited === true;
-    },
-    recordAttempt: async (input: RecordedAttempt) => {
-      context.recordedAttempts.push(input);
-      return { autoBlocked: false, failureCount: context.recordedAttempts.length };
-    },
+    beginEnrollment: (adminId: string, password?: string, metadata?: RequestMetadataInterface) =>
+      realTwoFactor.beginEnrollment(adminId, password, metadata),
+    confirmEnrollment: (adminId: string, code: string, metadata?: RequestMetadataInterface) =>
+      realTwoFactor.confirmEnrollment(adminId, code, metadata),
+    disable: (adminId: string, code: string, metadata?: RequestMetadataInterface) =>
+      realTwoFactor.disable(adminId, code, metadata),
+    regenerateRecoveryCodes: (
+      adminId: string,
+      code: string,
+      metadata?: RequestMetadataInterface,
+    ) => realTwoFactor.regenerateRecoveryCodes(adminId, code, metadata),
   };
 
   const providers: Array<Record<string, unknown>> = [
@@ -318,8 +391,13 @@ async function withApp(
 }
 
 describe('brute-force ceilings on the credential-checking admin routes', () => {
-  it('POST /admin/2fa/disable refuses the 11th wrong code in a minute', async () => {
-    await withApp({}, async (context) => {
+  it('POST /admin/2fa/disable refuses the 6th wrong code — the account budget, before the 11th-request throttle', async () => {
+    // `enforceLoginBudget` models the real counter, so what is measured is
+    // what ships: five failures land in `admin_login_attempts`, then the
+    // pre-flight 429s every further attempt from inside the 15-minute window
+    // — attempts 6-10, which the old 10/60 s ceiling alone would have let
+    // through, and 11-15, which it would not.
+    await withApp({ enforceLoginBudget: true }, async (context) => {
       const result = await measure(
         context.port,
         'POST',
@@ -329,15 +407,18 @@ describe('brute-force ceilings on the credential-checking admin routes', () => {
       );
       assert.deepEqual(
         result.histogram,
-        { '401': 10, '429': 5 },
+        { '401': 5, '429': 10 },
         `600 wrong codes a minute deleted the second factor at leisure; got ${JSON.stringify(result.histogram)}`,
       );
-      assert.equal(result.firstRefusal, 11);
+      assert.equal(result.firstRefusal, 6);
+      // Only the five guesses that were actually judged wrote a row; the ten
+      // 429s were refused before the credential was consulted.
+      assert.equal(context.recordedAttempts.filter((a) => !a.success).length, 5);
     });
   });
 
-  it('POST /admin/2fa/recovery-codes/regenerate refuses the 11th wrong code in a minute', async () => {
-    await withApp({}, async (context) => {
+  it('POST /admin/2fa/recovery-codes/regenerate refuses the 6th wrong code — the account budget, before the 11th-request throttle', async () => {
+    await withApp({ enforceLoginBudget: true }, async (context) => {
       const result = await measure(
         context.port,
         'POST',
@@ -345,15 +426,16 @@ describe('brute-force ceilings on the credential-checking admin routes', () => {
         { code: '000000' },
         15,
       );
-      assert.deepEqual(result.histogram, { '401': 10, '429': 5 });
-      assert.equal(result.firstRefusal, 11);
+      assert.deepEqual(result.histogram, { '401': 5, '429': 10 });
+      assert.equal(result.firstRefusal, 6);
+      assert.equal(context.recordedAttempts.filter((a) => !a.success).length, 5);
     });
   });
 
-  it('POST /admin/2fa/enroll refuses the 11th wrong password in a minute', async () => {
+  it('POST /admin/2fa/enroll refuses the 6th wrong password — the account budget, before the 11th-request throttle', async () => {
     // 2FA must be OFF, or `beginEnrollment` answers 409 before it ever looks at
     // the password and the route under test is not the route being measured.
-    await withApp({ totpEnabled: false }, async (context) => {
+    await withApp({ totpEnabled: false, enforceLoginBudget: true }, async (context) => {
       const result = await measure(
         context.port,
         'POST',
@@ -361,15 +443,15 @@ describe('brute-force ceilings on the credential-checking admin routes', () => {
         { password: 'wrong-password' },
         15,
       );
-      assert.deepEqual(result.histogram, { '401': 10, '429': 5 });
-      assert.equal(result.firstRefusal, 11);
+      assert.deepEqual(result.histogram, { '401': 5, '429': 10 });
+      assert.equal(result.firstRefusal, 6);
     });
   });
 
-  it('POST /admin/2fa/confirm refuses the 21st wrong code in a minute', async () => {
-    // Deliberately the loosest of the set: this is where an operator fumbles a
-    // freshly-scanned code, and it is the weakest target in the file.
-    await withApp({ totpEnabled: false }, async (context) => {
+  it('POST /admin/2fa/confirm refuses the 6th wrong code — the account budget, before the 21st-request throttle', async () => {
+    // Deliberately the loosest @Throttle of the set (20/60 s) — and the
+    // account budget still lands first, at failure 6 of 20 allowed.
+    await withApp({ totpEnabled: false, enforceLoginBudget: true }, async (context) => {
       const result = await measure(
         context.port,
         'POST',
@@ -377,8 +459,8 @@ describe('brute-force ceilings on the credential-checking admin routes', () => {
         { code: '000000' },
         25,
       );
-      assert.deepEqual(result.histogram, { '401': 20, '429': 5 });
-      assert.equal(result.firstRefusal, 21);
+      assert.deepEqual(result.histogram, { '401': 5, '429': 20 });
+      assert.equal(result.firstRefusal, 6);
     });
   });
 
@@ -412,6 +494,212 @@ describe('brute-force ceilings on the credential-checking admin routes', () => {
       const result = await measure(context.port, 'GET', '/admin/2fa/status', undefined, 25);
       assert.deepEqual(result.histogram, { '200': 25 });
       assert.equal(result.firstRefusal, null);
+    });
+  });
+});
+
+describe('the account-level attempt budget on the four 2FA routes', () => {
+  // Two named tests per route for the wiring `TwoFactorService` gained on
+  // 2026-08-23: the budget refusal arriving BEFORE the route's per-minute
+  // throttle, and a successful operation spending no failure budget. The
+  // histograms above measure the combined ceiling; these measure each half on
+  // its own, so a regression names which half broke.
+
+  it('disable: after 5 wrong codes in the window the 6th is refused by the account budget, before the global throttle', async () => {
+    await withApp({ enforceLoginBudget: true }, async (context) => {
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/disable',
+        { code: '000000' },
+        6,
+      );
+      // Six requests is deliberately under the route's own 10/60 s ceiling:
+      // the 429 on the 6th can only come from the login guard.
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+      // The rows the five judged guesses wrote — the real login, the real IP,
+      // the route's own reason prefix. An empty-string login here is the
+      // 2FA budget silently split from the sign-in budget it shares.
+      const failures = context.recordedAttempts.filter((attempt) => !attempt.success);
+      assert.equal(failures.length, 5);
+      assert.equal(failures[0]!.loginNormalized, 'root');
+      assert.equal(failures[0]!.ipAddress, '127.0.0.1');
+      assert.equal(failures[0]!.reason, '2fa_disable_invalid_code');
+      // The refused 6th attempt wrote no row: it was turned away BEFORE the
+      // credential was consulted — a blocked caller gets no free guess out of
+      // the refusal.
+    });
+  });
+
+  it('disable: a successful disable spends no failure budget', async () => {
+    await withApp({ enforceLoginBudget: true }, async (context) => {
+      // A REAL TOTP for the fixture secret — the success path through the
+      // real verifier, not a stubbed acceptance.
+      const goodCode = computeTotpCode(base32Decode(SECRET), Math.floor(Date.now() / 1000));
+      assert.equal(await fire(context.port, 'POST', '/admin/2fa/disable', { code: goodCode }), 200);
+      // The success row exists (a trail, not a counter input)…
+      const successes = context.recordedAttempts.filter((attempt) => attempt.success);
+      assert.equal(successes.length, 1);
+      assert.equal(successes[0]!.loginNormalized, 'root');
+      assert.equal(successes[0]!.ipAddress, '127.0.0.1');
+      // …and bought nothing against the failure budget: the operator still
+      // gets their full five wrong codes before the window closes on them.
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/disable',
+        { code: '000000' },
+        6,
+      );
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+    });
+  });
+
+  it('recovery-codes/regenerate: after 5 wrong codes in the window the 6th is refused by the account budget, before the global throttle', async () => {
+    await withApp({ enforceLoginBudget: true }, async (context) => {
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/recovery-codes/regenerate',
+        { code: '000000' },
+        6,
+      );
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+      const failures = context.recordedAttempts.filter((attempt) => !attempt.success);
+      assert.equal(failures.length, 5);
+      assert.equal(failures[0]!.loginNormalized, 'root');
+      assert.equal(failures[0]!.reason, '2fa_regenerate_invalid_code');
+    });
+  });
+
+  it('recovery-codes/regenerate: a successful regeneration spends no failure budget', async () => {
+    await withApp({ enforceLoginBudget: true }, async (context) => {
+      const goodCode = computeTotpCode(base32Decode(SECRET), Math.floor(Date.now() / 1000));
+      assert.equal(
+        await fire(context.port, 'POST', '/admin/2fa/recovery-codes/regenerate', {
+          code: goodCode,
+        }),
+        200,
+      );
+      assert.equal(context.recordedAttempts.filter((attempt) => attempt.success).length, 1);
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/recovery-codes/regenerate',
+        { code: '000000' },
+        6,
+      );
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+    });
+  });
+
+  it('enroll: after 5 wrong passwords in the window the 6th is refused by the account budget, before the global throttle', async () => {
+    await withApp({ totpEnabled: false, enforceLoginBudget: true }, async (context) => {
+      // The SPA's probe round-trip: five calls carrying NO password answer
+      // the `factor`-prompt 401 and must spend nothing — billing them would
+      // lock an operator out for opening the dialog five times.
+      const probes = await measure(context.port, 'POST', '/admin/2fa/enroll', {}, 5);
+      assert.deepEqual(probes.histogram, { '401': 5 });
+      assert.equal(
+        context.recordedAttempts.length,
+        0,
+        'the passwordless probe round-trip spent the budget it must not touch',
+      );
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/enroll',
+        { password: 'wrong-password' },
+        6,
+      );
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+      const failures = context.recordedAttempts.filter((attempt) => !attempt.success);
+      assert.equal(failures.length, 5);
+      assert.equal(failures[0]!.loginNormalized, 'root');
+      assert.equal(failures[0]!.reason, '2fa_enroll_invalid_password');
+    });
+  });
+
+  it('enroll: a successful re-authentication spends no failure budget', async () => {
+    await withApp({ totpEnabled: false, enforceLoginBudget: true }, async (context) => {
+      context.passwordAccepted = true;
+      assert.equal(
+        await fire(context.port, 'POST', '/admin/2fa/enroll', { password: 'the-real-one' }),
+        200,
+      );
+      context.passwordAccepted = false;
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/enroll',
+        { password: 'wrong-password' },
+        6,
+      );
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+    });
+  });
+
+  it('confirm: after 5 wrong codes in the window the 6th is refused by the account budget, before the global throttle', async () => {
+    await withApp({ totpEnabled: false, enforceLoginBudget: true }, async (context) => {
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/confirm',
+        { code: '000000' },
+        6,
+      );
+      // The route's own ceiling is the loosest in the file (20/60 s); at six
+      // requests the only thing that can refuse is the account budget.
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+      const failures = context.recordedAttempts.filter((attempt) => !attempt.success);
+      assert.equal(failures.length, 5);
+      assert.equal(failures[0]!.loginNormalized, 'root');
+      assert.equal(failures[0]!.reason, '2fa_confirm_invalid_code');
+    });
+  });
+
+  it('confirm: a successful confirmation spends no failure budget', async () => {
+    await withApp({ totpEnabled: false, enforceLoginBudget: true }, async (context) => {
+      // A REAL TOTP for the fixture secret, computed the way production
+      // verifies it — the success path must be the real one, not a stub.
+      const goodCode = computeTotpCode(base32Decode(SECRET), Math.floor(Date.now() / 1000));
+      assert.equal(await fire(context.port, 'POST', '/admin/2fa/confirm', { code: goodCode }), 200);
+      const result = await measure(
+        context.port,
+        'POST',
+        '/admin/2fa/confirm',
+        { code: '000000' },
+        6,
+      );
+      assert.deepEqual(result.histogram, { '401': 5, '429': 1 });
+      assert.equal(result.firstRefusal, 6);
+    });
+  });
+
+  it('spends the SAME budget the sign-in form spends — five seeded password failures refuse the first 2FA guess', async () => {
+    // The whole point of reusing `LoginGuardService` rather than a private
+    // counter: an operator's (login, ip) budget is one pool across every
+    // credential-checking surface. Key the route on '' — or key it on the
+    // display login — and the pool quietly becomes five guesses PER SURFACE.
+    await withApp({ enforceLoginBudget: true, seedLoginFailures: 5 }, async (context) => {
+      const status = await fire(context.port, 'POST', '/admin/2fa/disable', { code: '000000' });
+      assert.equal(status, 429);
+      // The pre-flight ran with the real normalized key…
+      assert.deepEqual(context.rateLimitChecks, [{ ip: '127.0.0.1', login: 'root' }]);
+      // …and refused BEFORE the credential was consulted: no new row was
+      // written by a request that never got to guess.
+      assert.equal(
+        context.recordedAttempts.filter((attempt) => attempt.reason !== 'invalid_password')
+          .length,
+        0,
+      );
     });
   });
 });

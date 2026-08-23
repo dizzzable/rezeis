@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   Logger,
@@ -14,6 +16,8 @@ import { RawCacheService } from '../../../common/cache/raw-cache.service';
 import { appConfig } from '../../../common/config/app.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
+import type { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { LoginGuardService } from './login-guard.service';
 import { decryptTotpSecret, encryptTotpSecret } from '../utils/secret-cipher';
 import { base32Decode } from '../utils/base32';
 import {
@@ -48,6 +52,19 @@ const TOTP_DRIFT_STEPS = 1;
  * that band to replay.
  */
 const TOTP_REPLAY_TTL_SECONDS = TOTP_PERIOD_SECONDS * (2 * TOTP_DRIFT_STEPS + 1);
+
+/**
+ * What a caller supplies when it has no request to describe — the same shape
+ * `OAuthLoginService` uses. Every field is telemetry (the IP the failure
+ * counter groups by, the user agent on the attempt row), so a missing request
+ * degrades to "unknown" rather than throwing. Positional callers that predate
+ * the account-level budget keep compiling and land here.
+ */
+const UNKNOWN_REQUEST_METADATA: RequestMetadataInterface = {
+  requestId: null,
+  remoteAddress: null,
+  userAgent: null,
+};
 
 export interface TwoFactorEnrollmentInterface {
   readonly secret: string;
@@ -98,6 +115,22 @@ export interface TwoFactorStatusInterface {
  * enrollment. Codes minted before that change are 40 bits behind an unsalted
  * single-round SHA-256 and are still accepted — read `matchLegacy()` there for
  * why, and `getStatus().recoveryCodesLegacy` for how an operator finds out.
+ *
+ * Account-level attempt budget, DECISION 2026-08-23
+ *   The four credential-checking operations below (`beginEnrollment`,
+ *   `confirmEnrollment`, `disable`, `regenerateRecoveryCodes`) now sit behind
+ *   the same consecutive-failure cap the sign-in form sits behind:
+ *   `LoginGuardService.isRateLimited` pre-checks the (loginNormalized, ip)
+ *   budget BEFORE the credential is consulted, and every verdict is written
+ *   back with `recordAttempt`. A hijacked session guessing a TOTP code or the
+ *   password on these routes therefore spends the operator's real sign-in
+ *   budget — 5 failures per (login, ip) per 15-minute window — instead of an
+ *   unbounded well, and the per-IP auto-block (10 failures → 30 min) sees
+ *   these guesses too. This is the wiring `PasskeyService.assertFreshFactor`
+ *   already has and the `@Throttle` caps on the controller deliberately are
+ *   not: a per-minute ceiling permits unbounded attempts given unbounded time.
+ *   The lockout it can produce is the owner-accepted cost: recovery is
+ *   waiting out the 15-minute window or `admin-cli`.
  */
 @Injectable()
 export class TwoFactorService {
@@ -128,6 +161,23 @@ export class TwoFactorService {
      */
     @Optional()
     private readonly passwordHashService?: PasswordHashService,
+    /**
+     * The fail2ban counter the sign-in form spends through — the SAME
+     * counter, reached directly rather than through `ModuleRef`, because
+     * `LoginGuardService` is a provider of this very module. The neighbours
+     * that resolve it lazily (`AdminAuthService`, `PasskeyService`,
+     * `OAuthLoginService`) sit in OTHER modules and would close the import
+     * graph by naming it; no such edge exists here.
+     *
+     * `@Optional()` and last for the same reason as `passwordHashService`
+     * above: the many specs that construct this service positionally keep
+     * compiling. Missing counter means "do not count and do not pre-check",
+     * never "refuse" — the asymmetry `OAuthLoginService` states for a missing
+     * COUNTER (a wiring fault must not become a lockout); the credential
+     * check itself still runs and still protects.
+     */
+    @Optional()
+    private readonly loginGuardService?: LoginGuardService,
   ) {}
 
   public async getStatus(adminId: string): Promise<TwoFactorStatusInterface> {
@@ -152,15 +202,23 @@ export class TwoFactorService {
   public async beginEnrollment(
     adminId: string,
     password?: string,
+    metadata: RequestMetadataInterface = UNKNOWN_REQUEST_METADATA,
   ): Promise<TwoFactorEnrollmentInterface> {
     const admin = await this.prismaService.adminUser.findUniqueOrThrow({
       where: { id: adminId },
-      select: { id: true, login: true, totpEnabled: true, passwordHash: true },
+      select: { id: true, login: true, loginNormalized: true, totpEnabled: true, passwordHash: true },
     });
     if (admin.totpEnabled) {
       throw new ConflictException('2FA is already enabled. Disable it first to re-enroll.');
     }
-    await this.assertPasswordBeforeEnrollment(admin.id, admin.passwordHash, password);
+    await this.assertWithinAttemptBudget(admin.loginNormalized ?? '', metadata);
+    await this.assertPasswordBeforeEnrollment(
+      admin.id,
+      admin.passwordHash,
+      password,
+      admin.loginNormalized ?? '',
+      metadata,
+    );
     const cryptKey = this.applicationConfiguration.cryptKey;
     if (!cryptKey) {
       throw new BadRequestException('REZEIS_CRYPT_KEY is required to enroll 2FA');
@@ -210,12 +268,20 @@ export class TwoFactorService {
   private async assertPasswordBeforeEnrollment(
     adminId: string,
     passwordHash: string,
-    password?: string,
+    password: string | undefined,
+    loginNormalized: string,
+    metadata: RequestMetadataInterface,
   ): Promise<void> {
     const supplied = password ?? '';
     if (supplied.trim().length === 0) {
       // The prompt, not an error. `factor` tells the SPA which credential to
       // ask for; the filter forwards both fields for this code.
+      //
+      // Nothing is charged to the budget here, for the reason
+      // `PasskeyService.assertFreshFactor` gives for its own empty-supply
+      // branch: this is the SPA's expected first round-trip (it calls with no
+      // password on purpose to learn which field to render), and billing it
+      // would spend the operator's sign-in budget for opening the dialog.
       throw new UnauthorizedException({
         statusCode: 401,
         code: 'totp_enroll_reauth_required',
@@ -227,6 +293,10 @@ export class TwoFactorService {
       this.logger.error(
         `2FA enrollment refused for admin ${adminId}: no password verifier is available`,
       );
+      // NOT charged: this branch fires for every caller alike while the
+      // container is mis-wired, so counting it would spend the budget of every
+      // operator who touched the page during an outage. A failure the guesser
+      // did not cause must not spend the guesser's budget — or the victim's.
       throw new UnauthorizedException('Re-authentication is unavailable');
     }
     const accepted = await this.passwordHashService.verifyPassword({
@@ -236,8 +306,19 @@ export class TwoFactorService {
     if (!accepted) {
       this.logger.warn(`2FA enrollment refused for admin ${adminId}: password re-auth failed`);
       await this.recordEnrollmentAudit(adminId, 'admin.2fa.enrollment_rejected');
+      await this.recordSecondFactorVerdict(
+        loginNormalized,
+        metadata,
+        false,
+        '2fa_enroll_invalid_password',
+      );
       throw new UnauthorizedException('Re-authentication failed');
     }
+    // The success row too, for the same reason `assertFreshFactor` writes one:
+    // a burst of failures with no resolution beside it is a misleading trail,
+    // and no query in `LoginGuardService` reads a `success: true` row, so it
+    // costs the operator's budget nothing.
+    await this.recordSecondFactorVerdict(loginNormalized, metadata, true, '2fa_enroll');
   }
 
   /**
@@ -263,10 +344,19 @@ export class TwoFactorService {
    * Verifies the supplied 6-digit code against the pending enrollment
    * secret and, on success, finalises the activation.
    */
-  public async confirmEnrollment(adminId: string, code: string): Promise<TwoFactorStatusInterface> {
+  public async confirmEnrollment(
+    adminId: string,
+    code: string,
+    metadata: RequestMetadataInterface = UNKNOWN_REQUEST_METADATA,
+  ): Promise<TwoFactorStatusInterface> {
     const admin = await this.prismaService.adminUser.findUniqueOrThrow({
       where: { id: adminId },
-      select: { totpEnabled: true, totpSecretEncrypted: true, totpRecoveryCodes: true },
+      select: {
+        loginNormalized: true,
+        totpEnabled: true,
+        totpSecretEncrypted: true,
+        totpRecoveryCodes: true,
+      },
     });
     if (admin.totpEnabled) {
       throw new ConflictException('2FA is already enabled');
@@ -274,9 +364,20 @@ export class TwoFactorService {
     if (!admin.totpSecretEncrypted) {
       throw new BadRequestException('Enrollment was not started — request a new secret first');
     }
+    // The budget check runs after the preconditions and BEFORE the code is
+    // verified — the same position `AdminAuthService.loginAdmin` gives it
+    // relative to the password store. The 409/400 preconditions above check
+    // nothing guessable and are not charged.
+    await this.assertWithinAttemptBudget(admin.loginNormalized ?? '', metadata);
     const cryptKey = this.applicationConfiguration.cryptKey;
     const secret = decryptTotpSecret(admin.totpSecretEncrypted, cryptKey);
     if (!verifyTotpCode(base32Decode(secret), code)) {
+      await this.recordSecondFactorVerdict(
+        admin.loginNormalized ?? '',
+        metadata,
+        false,
+        '2fa_confirm_invalid_code',
+      );
       throw new UnauthorizedException('Invalid verification code');
     }
     const updated = await this.prismaService.adminUser.update({
@@ -289,6 +390,12 @@ export class TwoFactorService {
     });
     this.logger.log(`Admin ${adminId} enabled 2FA`);
     await this.recordEnrollmentAudit(adminId, 'admin.2fa.enabled');
+    await this.recordSecondFactorVerdict(
+      admin.loginNormalized ?? '',
+      metadata,
+      true,
+      '2fa_confirm',
+    );
     return {
       enabled: updated.totpEnabled,
       enrolledAt: updated.totpEnrolledAt?.toISOString() ?? null,
@@ -449,16 +556,27 @@ export class TwoFactorService {
    * Disables 2FA for an admin. Requires a valid code (TOTP or recovery)
    * so a hijacked session cannot turn off the second factor unilaterally.
    */
-  public async disable(adminId: string, code: string): Promise<TwoFactorStatusInterface> {
+  public async disable(
+    adminId: string,
+    code: string,
+    metadata: RequestMetadataInterface = UNKNOWN_REQUEST_METADATA,
+  ): Promise<TwoFactorStatusInterface> {
     const admin = await this.prismaService.adminUser.findUniqueOrThrow({
       where: { id: adminId },
-      select: { totpEnabled: true },
+      select: { loginNormalized: true, totpEnabled: true },
     });
     if (!admin.totpEnabled) {
       throw new NotFoundException('2FA is not enabled for this admin');
     }
+    await this.assertWithinAttemptBudget(admin.loginNormalized ?? '', metadata);
     const ok = await this.verifyForLogin(adminId, code);
     if (!ok) {
+      await this.recordSecondFactorVerdict(
+        admin.loginNormalized ?? '',
+        metadata,
+        false,
+        '2fa_disable_invalid_code',
+      );
       throw new UnauthorizedException('Invalid verification code');
     }
     await this.prismaService.adminUser.update({
@@ -471,6 +589,12 @@ export class TwoFactorService {
       },
     });
     this.logger.warn(`Admin ${adminId} disabled 2FA`);
+    await this.recordSecondFactorVerdict(
+      admin.loginNormalized ?? '',
+      metadata,
+      true,
+      '2fa_disable',
+    );
     return {
       enabled: false,
       enrolledAt: null,
@@ -483,9 +607,30 @@ export class TwoFactorService {
    * Regenerates the recovery code set. Useful when the operator believes
    * the original list has been compromised.
    */
-  public async regenerateRecoveryCodes(adminId: string, code: string): Promise<readonly string[]> {
+  public async regenerateRecoveryCodes(
+    adminId: string,
+    code: string,
+    metadata: RequestMetadataInterface = UNKNOWN_REQUEST_METADATA,
+  ): Promise<readonly string[]> {
+    // `loginNormalized` for the budget key. `findUnique` (not `...OrThrow`)
+    // so an admin deleted mid-session keeps the historical 401 from
+    // `verifyForLogin` rather than gaining a 404; an empty key simply means
+    // the per-IP half of the budget answers, which is the right fallback for
+    // an account that no longer exists.
+    const admin = await this.prismaService.adminUser.findUnique({
+      where: { id: adminId },
+      select: { loginNormalized: true },
+    });
+    const loginNormalized = admin?.loginNormalized ?? '';
+    await this.assertWithinAttemptBudget(loginNormalized, metadata);
     const ok = await this.verifyForLogin(adminId, code);
     if (!ok) {
+      await this.recordSecondFactorVerdict(
+        loginNormalized,
+        metadata,
+        false,
+        '2fa_regenerate_invalid_code',
+      );
       throw new UnauthorizedException('Invalid verification code');
     }
     const recoverySet = await generateRecoveryCodeSet();
@@ -493,7 +638,80 @@ export class TwoFactorService {
       where: { id: adminId },
       data: { totpRecoveryCodes: [...recoverySet.stored] },
     });
+    await this.recordSecondFactorVerdict(loginNormalized, metadata, true, '2fa_regenerate');
     return recoverySet.codes;
+  }
+
+  /**
+   * Refuses a credential-checking 2FA operation whose (login, ip) budget is
+   * already spent — the same pre-flight `AdminAuthService.loginAdmin()` runs
+   * before the password store, run here before the TOTP secret, the pending
+   * secret, or the password is consulted. A blocked caller gets no free
+   * guess out of the refusal.
+   *
+   * 429 rather than the 401 the sign-in form answers with: the form refuses
+   * mid-login where 401 masks whether the login exists; here the caller is
+   * already authenticated, the account is known to both sides, and the
+   * refusal is what the HTTP status line says it is — too many requests.
+   * The message is the form's message, so an operator locked out of their
+   * own security page reads the same sentence they would read on the form
+   * and knows the same remedy: wait out the window, or `admin-cli`.
+   */
+  private async assertWithinAttemptBudget(
+    loginNormalized: string,
+    metadata: RequestMetadataInterface,
+  ): Promise<void> {
+    if (!this.loginGuardService) return;
+    const ipAddress = metadata.remoteAddress ?? '';
+    if (await this.loginGuardService.isRateLimited(ipAddress, loginNormalized)) {
+      this.logger.warn(
+        `2FA operation refused for ${loginNormalized || 'unknown login'}: too many recent ` +
+          `failures from ${ipAddress || 'unknown ip'}`,
+      );
+      throw new HttpException(
+        'Too many login attempts. Try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * One 2FA credential verdict, charged to the (login, ip) budget.
+   *
+   * Keyed on the REAL normalized login, never on `''`: the empty key the
+   * passkey SIGN-IN path passes is a limitation there (usernameless), not a
+   * preference, and would silently split this budget from the sign-in budget
+   * it shares — an attacker would get five guesses on the form plus five on
+   * each of these routes, and the forensic record would lose which account
+   * was being guessed at.
+   *
+   * `reason` carries the `2fa_` prefix because `admin_login_attempts` has no
+   * method column; the prefix is what tells an enrolment/disable row apart
+   * from a sign-in row when the table is read back.
+   *
+   * Never allowed to fail the action it describes — a database hiccup inside
+   * the counter must not turn a correctly rejected code into a 500.
+   */
+  private async recordSecondFactorVerdict(
+    loginNormalized: string,
+    metadata: RequestMetadataInterface,
+    success: boolean,
+    reason: string,
+  ): Promise<void> {
+    if (!this.loginGuardService) return;
+    try {
+      await this.loginGuardService.recordAttempt({
+        loginNormalized,
+        ipAddress: metadata.remoteAddress ?? '',
+        success,
+        reason,
+        userAgent: metadata.userAgent,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record a 2FA attempt verdict for ${loginNormalized}: ${(err as Error).message}`,
+      );
+    }
   }
 
   /**

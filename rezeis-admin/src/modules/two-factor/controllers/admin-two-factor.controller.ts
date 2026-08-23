@@ -5,14 +5,17 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
+import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import {
   TwoFactorDisableDto,
   TwoFactorEnrollDto,
@@ -56,10 +59,15 @@ import { TwoFactorService } from '../services/two-factor.service';
  *   These are per-IP flood caps and nothing more. They are NOT the
  *   consecutive-failure cap NIST SP 800-63B s5.2.2 asks for: a per-minute
  *   ceiling permits unbounded attempts given unbounded time. That cap is
- *   `LoginGuardService`'s job, and it covers the LOGIN routes only. Bringing
- *   these four JWT-protected routes under an account-level counter is a
- *   separate change with a policy decision attached (what a locked-out
- *   operator does next), and it is not smuggled in here.
+ *   `LoginGuardService`'s job, and as of the owner decision of 2026-08-23 it
+ *   covers these four routes too: every handler below passes the request's
+ *   metadata into `TwoFactorService`, which pre-checks the per-(login, ip)
+ *   budget before the credential and charges every verdict to it (see
+ *   `assertWithinAttemptBudget` there). The policy question that used to be
+ *   open — what a locked-out operator does next — is now answered: wait out
+ *   the 15-minute window, or `admin-cli`. The `@Throttle` caps stay because
+ *   they answer a different question (per-minute flood) than the counter
+ *   (consecutive failures over 15 minutes).
  */
 @ApiTags('admin/2fa')
 @ApiBearerAuth('JWT')
@@ -98,8 +106,13 @@ export class AdminTwoFactorController {
   public enroll(
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Body() dto: TwoFactorEnrollDto,
+    @Req() request: Request,
   ) {
-    return this.twoFactorService.beginEnrollment(currentAdmin.id, dto.password);
+    return this.twoFactorService.beginEnrollment(
+      currentAdmin.id,
+      dto.password,
+      extractRequestMetadata(request),
+    );
   }
 
   /**
@@ -125,8 +138,13 @@ export class AdminTwoFactorController {
   public confirm(
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Body() dto: TwoFactorVerifyDto,
+    @Req() request: Request,
   ) {
-    return this.twoFactorService.confirmEnrollment(currentAdmin.id, dto.code);
+    return this.twoFactorService.confirmEnrollment(
+      currentAdmin.id,
+      dto.code,
+      extractRequestMetadata(request),
+    );
   }
 
   /**
@@ -147,8 +165,13 @@ export class AdminTwoFactorController {
   public disable(
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Body() dto: TwoFactorDisableDto,
+    @Req() request: Request,
   ) {
-    return this.twoFactorService.disable(currentAdmin.id, dto.code);
+    return this.twoFactorService.disable(
+      currentAdmin.id,
+      dto.code,
+      extractRequestMetadata(request),
+    );
   }
 
   /**
@@ -166,9 +189,10 @@ export class AdminTwoFactorController {
   public regenerateRecoveryCodes(
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Body() dto: TwoFactorVerifyDto,
+    @Req() request: Request,
   ) {
     return this.twoFactorService
-      .regenerateRecoveryCodes(currentAdmin.id, dto.code)
+      .regenerateRecoveryCodes(currentAdmin.id, dto.code, extractRequestMetadata(request))
       .then((codes) => ({ recoveryCodes: codes }));
   }
 }
