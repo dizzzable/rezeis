@@ -29,7 +29,29 @@ const ADMIN: CurrentAdminInterface = {
   mustChangePassword: false,
 };
 
-const REQ = { headers: {}, ip: null, socket: { remoteAddress: null } } as never;
+/**
+ * Distinct non-null values on every field, the same discipline as `META` in
+ * `admin-rewards.service.spec.ts`. This REQ flows through
+ * `extractRequestMetadata` into the asserted `issue`/`bulkIssue`/
+ * `manualAttach` arguments, and an all-null REQ made a hardcoded
+ * `{ requestId: null, remoteAddress: null, userAgent: null }` literal
+ * IMPERSONATE real extraction — proven by mutation: swapping
+ * `extractRequestMetadata(req)` for that literal kept this suite green, i.e.
+ * the route could stop reading the request and nothing would notice. With
+ * these values the literal no longer matches, so the route has to actually
+ * read the headers and the ip it was handed.
+ */
+const REQ_META = {
+  requestId: 'req-ctrl-4f21',
+  remoteAddress: '203.0.113.24',
+  userAgent: 'rezeis-panel/1.2.3 (ctrl-spec)',
+} as const;
+
+const REQ = {
+  headers: { 'x-request-id': REQ_META.requestId, 'user-agent': REQ_META.userAgent },
+  ip: REQ_META.remoteAddress,
+  socket: { remoteAddress: null },
+} as never;
 
 function route(controller: object, methodName: string): { path: string; method: RequestMethod } {
   const method = Object.getPrototypeOf(controller)[methodName] as object;
@@ -136,12 +158,12 @@ describe('Referral controllers', () => {
       // would still compile against a service with a defaulted parameter and
       // would still issue rewards — it would just stop being able to say from
       // where. Pinning the shape here makes that a failure.
-      ['issue', 'reward-1', 'admin-1', { requestId: null, remoteAddress: null, userAgent: null }],
+      ['issue', 'reward-1', 'admin-1', REQ_META],
       [
         'bulkIssue',
         ['reward-1', 'reward-2'],
         'admin-1',
-        { requestId: null, remoteAddress: null, userAgent: null },
+        REQ_META,
       ],
       ['revoke', 'reward-1', 'duplicate', 'admin-1'],
       // UNKNOWN, and asserted rather than omitted: an admin attaching after the
@@ -162,7 +184,7 @@ describe('Referral controllers', () => {
           inviteSource: 'UNKNOWN',
           operator: {
             currentAdmin: ADMIN,
-            requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+            requestMetadata: REQ_META,
             source: 'referrals_tab',
           },
         },
