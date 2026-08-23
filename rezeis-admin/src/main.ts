@@ -8,7 +8,6 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
-import { AppModule } from './app.module';
 import { appConfig } from './common/config/app.config';
 import { AdminSafeExceptionFilter } from './common/filters/admin-safe-exception.filter';
 import { shouldEnableApiDocs } from './common/http/api-docs';
@@ -25,6 +24,23 @@ import { SystemLogsService } from './modules/system-logs/services/system-logs.se
 configureBigIntJsonSerialization();
 
 async function bootstrap(): Promise<void> {
+  // Loaded HERE, not at module scope. `AppModule` runs
+  // `ConfigModule.forRoot({ validate })` while its own module body executes,
+  // so a STATIC import validated the whole environment as a side effect of
+  // merely importing this file. The `require.main` guard at the bottom stops
+  // `bootstrap()` from running under a test, but it cannot stop an import
+  // that already happened above it.
+  //
+  // Two specs import this file for `applyUploadResponseHeaders` and
+  // `MARKUP_UPLOAD_EXTENSIONS` — they have to, because /uploads is configured
+  // here and nowhere else, and the cross-repo parity digest names this exact
+  // path on both sides. On a developer box the validation passed silently off
+  // the local `.env`; on a runner, which has none, it rejected AFTER the last
+  // test had finished and failed both files with "a resource generated
+  // asynchronous activity after the test ended" while every assertion in them
+  // passed. Green here, red there.
+  const { AppModule } = await import('./app.module');
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
     rawBody: true,
