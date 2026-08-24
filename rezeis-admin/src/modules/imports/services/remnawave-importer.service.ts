@@ -369,20 +369,51 @@ export class RemnawaveImporterService {
       return null;
     }
 
+    const handle = this.publicHandleFrom(panelUser);
     const newUser = await this.prismaService.user.create({
       data: {
         telegramId: panelUser.telegramId !== null ? BigInt(panelUser.telegramId) : null,
-        username: panelUser.username || null,
+        username: handle,
         email: panelUser.email || null,
-        name: panelUser.username || panelUser.uuid.slice(0, 8),
+        name: handle ?? panelUser.uuid.slice(0, 8),
       },
     });
     return newUser.id;
   }
 
+  /**
+   * The panel username as a PUBLIC HANDLE — or `null` when it is not one.
+   *
+   * A profile whose description names a `reiwa_id` was created by US, and its
+   * username is the string our own naming service generated,
+   * `{prefix}_{identity}_{suffix}` — never a handle a person chose. Copying it
+   * into `User.username` is how `2GET_Lant35_sub` came to stand on the
+   * operator's screen as a subscriber's public username; and because the
+   * importer runs on every sync, correcting it by hand never stuck.
+   *
+   * For a FOREIGN profile the panel username may be the only handle that
+   * exists. That is the case this field was added for, and it still works.
+   */
+  private publicHandleFrom(panelUser: RemnawavePanelUser): string | null {
+    if (!panelUser.username) return null;
+    if (REIWA_ID_REGEX.test(panelUser.description ?? '')) return null;
+    return panelUser.username;
+  }
+
   private async updateUserFields(userId: string, panelUser: RemnawavePanelUser): Promise<void> {
+    // Filled ONLY into an account that has no handle yet, and never over one
+    // it already has: the local value is what the subscriber or the operator
+    // set, and this method runs on every sync. Conditional write rather than
+    // read-then-write, so two syncs racing cannot both decide it is empty.
+    const handle = this.publicHandleFrom(panelUser);
+    if (handle !== null) {
+      await this.prismaService.user.updateMany({
+        where: { id: userId, OR: [{ username: null }, { username: '' }] },
+        data: { username: handle },
+      });
+    }
+
     const data: Prisma.UserUpdateInput = {};
-    if (panelUser.username) data.username = panelUser.username;
     if (panelUser.email) data.email = panelUser.email;
     if (panelUser.telegramId !== null) data.telegramId = BigInt(panelUser.telegramId);
     if (Object.keys(data).length > 0) {

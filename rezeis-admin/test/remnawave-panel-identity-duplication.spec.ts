@@ -118,14 +118,19 @@ interface ImportHarness {
   readonly service: RemnawaveImporterService;
   readonly rows: ImportRow[];
   readonly createdUserIds: string[];
+  /** `User.username` per user id — the PUBLIC handle, not the panel profile name. */
+  readonly handles: Map<string, string | null>;
 }
 
 function buildImporter(input: {
   readonly rows: ImportRow[];
   readonly panelUsers: ReadonlyArray<ReturnType<typeof decodedPanelRow>>;
+  /** Seeds `User.username`. Absent means the account has no handle yet. */
+  readonly handles?: Readonly<Record<string, string>>;
 }): ImportHarness {
   const rows = input.rows;
   const createdUserIds: string[] = [];
+  const handles = new Map<string, string | null>(Object.entries(input.handles ?? {}));
   let seq = 0;
   const prisma = {
     user: {
@@ -135,16 +140,40 @@ function buildImporter(input: {
         if (id !== OWNER_ID && !createdUserIds.includes(id)) return null;
         return {
           id,
+          username: handles.get(id) ?? null,
           // Old enough that `wasJustCreated` reports false for a MATCHED user.
           createdAt: createdUserIds.includes(id) ? new Date() : new Date(0),
           currentSubscriptionId: rows.find((r) => r.userId === id)?.id ?? null,
         };
       },
-      update: async ({ where }: { where: { id: string } }) => ({ id: where.id }),
-      create: async () => {
+      // Records what it is told, and — for `updateMany` — REFUSES the write when
+      // the guard does not match. A pass-through that always applied would make
+      // "never overwrites an existing handle" pass against a service that has no
+      // guard at all.
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        if ('username' in data) handles.set(where.id, data.username as string | null);
+        return { id: where.id };
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { id: string; OR?: ReadonlyArray<{ username: string | null }> };
+        data: Record<string, unknown>;
+      }) => {
+        const current = handles.get(where.id) ?? null;
+        const guard = where.OR;
+        const passes =
+          guard === undefined ? true : guard.some((clause) => clause.username === current);
+        if (!passes) return { count: 0 };
+        if ('username' in data) handles.set(where.id, data.username as string | null);
+        return { count: 1 };
+      },
+      create: async ({ data }: { data: Record<string, unknown> }) => {
         seq += 1;
         const id = `minted-user-${seq}`;
         createdUserIds.push(id);
+        handles.set(id, (data.username as string | null) ?? null);
         return { id };
       },
     },
@@ -203,6 +232,7 @@ function buildImporter(input: {
     service: new RemnawaveImporterService(prisma as never, api as never),
     rows,
     createdUserIds,
+    handles,
   };
 }
 
@@ -698,5 +728,89 @@ describe('profile-sync DELETE guard on a row that never recorded a panel usernam
     await harness.processor.process({ data: { syncJobId: 'sync-job-delete' } } as never);
 
     assert.equal(harness.deletedTargets.length, 1);
+  });
+});
+
+/**
+ * THE PANEL PROFILE NAME IS NOT A PERSON'S HANDLE.
+ *
+ * Reported from production on 2026-08-24: a subscriber who registered on the
+ * web with the login `Lant35` was shown to the operator with the public
+ * username `@2GET_Lant35_sub`. That string is not something anyone typed — it
+ * is `{prefix}_{identity}_{suffix}`, the name OUR OWN naming service minted for
+ * the Remnawave profile. The importer read it back off the panel and wrote it
+ * into `User.username`, and because the importer runs on every sync, an
+ * operator correcting it by hand watched it come back.
+ *
+ * The tell is in the profile description: everything we create carries
+ * `reiwa_id: <user id>`. A profile that names one is ours, and its username
+ * says nothing about the person. A profile that does NOT is foreign — imported
+ * from someone else's panel — and there its username may be the only handle
+ * that exists, which is the case this field was added for.
+ *
+ * The three specs below are the same run with ONE field moved.
+ */
+describe('the importer separates our generated profile name from a public handle', () => {
+  it('does not put OUR generated profile name into the public username', async () => {
+    const harness = buildImporter({
+      rows: [legacyRow({ remnawavePanelId: PANEL_ID })],
+      panelUsers: [
+        decodedPanelRow({
+          era: '3.x',
+          username: '2GET_Lant35_sub',
+          panelId: PANEL_ID,
+          legacyUuid: LEGACY_UUID,
+          description: `login: Lant35\nreiwa_id: ${OWNER_ID}`,
+        }),
+      ],
+    });
+
+    await harness.service.run({ mode: 'sync', createdBy: null });
+
+    assert.equal(harness.handles.get(OWNER_ID) ?? null, null);
+  });
+
+  it('still adopts a FOREIGN panel username when the account has no handle', async () => {
+    // Same run, `reiwa_id` removed from the description. Without this the fix
+    // above would read as "never fill the handle", which would silently undo
+    // what importing a stranger's panel is for.
+    const harness = buildImporter({
+      rows: [legacyRow({ remnawavePanelId: PANEL_ID })],
+      panelUsers: [
+        decodedPanelRow({
+          era: '3.x',
+          username: 'someone_elses_handle',
+          panelId: PANEL_ID,
+          legacyUuid: LEGACY_UUID,
+          description: 'imported from a foreign panel',
+        }),
+      ],
+    });
+
+    await harness.service.run({ mode: 'sync', createdBy: null });
+
+    assert.equal(harness.handles.get(OWNER_ID), 'someone_elses_handle');
+  });
+
+  it('never overwrites a handle the account already has', async () => {
+    // This one runs on EVERY sync. Overwriting would mean the operator cannot
+    // keep a correction, and the subscriber cannot keep a chosen name.
+    const harness = buildImporter({
+      rows: [legacyRow({ remnawavePanelId: PANEL_ID })],
+      panelUsers: [
+        decodedPanelRow({
+          era: '3.x',
+          username: 'someone_elses_handle',
+          panelId: PANEL_ID,
+          legacyUuid: LEGACY_UUID,
+          description: 'imported from a foreign panel',
+        }),
+      ],
+      handles: { [OWNER_ID]: 'chosen_by_the_subscriber' },
+    });
+
+    await harness.service.run({ mode: 'sync', createdBy: null });
+
+    assert.equal(harness.handles.get(OWNER_ID), 'chosen_by_the_subscriber');
   });
 });
