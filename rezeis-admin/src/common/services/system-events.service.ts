@@ -687,15 +687,43 @@ export class SystemEventsService {
           }),
         );
       } catch (err) {
-        const hint = this.isLikelyReiwaUrl(url)
-          ? ' — this URL points at reiwa, which has NO generic /webhook endpoint. ' +
-            'The reiwa integration uses REIWA_URL (+ /api/v1/webhooks/rezeis), NOT WEBHOOK_URL. ' +
-            'Set WEBHOOK_ENABLED=false or point WEBHOOK_URL at a real external consumer.'
-          : '';
-        this.logger.warn(`Webhook to ${url} failed: ${(err as Error).message}${hint}`);
+        // A MISCONFIGURATION IS NOT AN OUTAGE, and the two must not be logged
+        // the same way.
+        //
+        // This dispatcher runs on EVERY system event. When `WEBHOOK_URL`
+        // points at reiwa the failure is permanent — reiwa has no generic
+        // /webhook route and will not grow one between two events — so the
+        // same three-sentence hint repeated per event does not inform anyone;
+        // it buries the events it was meant to sit beside, and an operator
+        // reading the log finds the hint everywhere and the reason nowhere.
+        // Said once per URL per process: a restart says it again, which is
+        // exactly when somebody is looking at the log.
+        //
+        // A REAL external consumer keeps warning on every failure. That one
+        // is transient by nature, and suppressing it would hide an outage.
+        if (this.isLikelyReiwaUrl(url)) {
+          if (this.reportedReiwaWebhookUrls.has(url)) continue;
+          this.reportedReiwaWebhookUrls.add(url);
+          this.logger.warn(
+            `Webhook to ${url} failed: ${(err as Error).message}` +
+              ' — this URL points at reiwa, which has NO generic /webhook endpoint. ' +
+              'The reiwa integration uses REIWA_URL (+ /api/v1/webhooks/rezeis), NOT WEBHOOK_URL. ' +
+              'Set WEBHOOK_ENABLED=false or point WEBHOOK_URL at a real external consumer. ' +
+              'Reported once per process: this condition does not change on its own.',
+          );
+          continue;
+        }
+        this.logger.warn(`Webhook to ${url} failed: ${(err as Error).message}`);
       }
     }
   }
+
+  /**
+   * URLs already reported as pointing at reiwa. Not a cache of a result — a
+   * record of what the operator has already been told, so the hint above is
+   * said once instead of once per system event.
+   */
+  private readonly reportedReiwaWebhookUrls = new Set<string>();
 
   /**
    * Heuristic: does a generic-webhook URL actually point at reiwa? Operators
