@@ -11,6 +11,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { SettingsService } from '../../settings/services/settings.service';
+import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import { encryptTotpSecret } from '../../two-factor/utils/secret-cipher';
 
 /**
@@ -141,6 +142,50 @@ interface PushSubscriptionPayload {
  * installs it from Safari's Share menu, push delivery works
  * identically to Chrome / Firefox / desktop Safari.
  */
+/**
+ * Last-resort title when the caller sent none and branding could not be read.
+ * Reached only when both have failed; the normal path uses the operator brand.
+ */
+const DEFAULT_PUSH_BRAND_NAME = 'Reiwa';
+
+/**
+ * WEB PUSH PAYLOADS ARE TINY, AND A BRANDING IMAGE IS NOT.
+ *
+ * The encrypted payload a push service accepts is about 4 KB. A branding
+ * image may legitimately be stored as a `data:` URI — the settings DTO allows
+ * up to 524288 characters — so putting one in `icon` does not produce an
+ * unbranded notification, it produces NO notification: the push service
+ * rejects the payload outright. That is a worse outcome than the bug this
+ * whole change exists to fix, so the two forms that cost nothing are the only
+ * ones allowed through.
+ *
+ * A `/uploads/...` path is the good case and the common one: it is a handful
+ * of bytes, and the service worker resolves it against ITS OWN origin, so the
+ * subscriber fetches the logo from the cabinet it is already talking to
+ * rather than reaching across to the panel.
+ *
+ * SVG IS REJECTED TOO, and this is the trap worth naming. A notification icon
+ * is decoded by the ANDROID notification shade, not by a browser engine, and
+ * it takes raster formats only. The operator whose report started this had a
+ * 1024x1024 SVG in `logoUrl` — so sending that path would have shipped a
+ * change that looks correct, passes review, and leaves the notification
+ * exactly as unbranded as before. `pwaIconUrl` exists precisely because an
+ * install icon must be an opaque square raster; when it is missing, no icon
+ * is better than one that silently never renders.
+ */
+const MAX_PUSH_ICON_URL_LENGTH = 512;
+
+export function pushSafeIconUrl(candidate: string | null | undefined): string | null {
+  if (typeof candidate !== 'string') return null;
+  const trimmed = candidate.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length > MAX_PUSH_ICON_URL_LENGTH) return null;
+  if (/^data:/i.test(trimmed)) return null;
+  // Extension check, not content sniffing: the value may carry a query or a
+  // fragment, and we only ever need to answer "could the shade decode this".
+  if (/\.svgz?($|[?#])/i.test(trimmed)) return null;
+  return trimmed;
+}
 @Injectable()
 export class WebPushService implements OnModuleInit {
   private readonly logger = new Logger(WebPushService.name);
@@ -247,6 +292,39 @@ export class WebPushService implements OnModuleInit {
       return;
     }
     this.announceUnconfigured(adoption);
+  }
+
+  /**
+   * THE OPERATOR BRAND, AS A NOTIFICATION RENDERS IT.
+   *
+   * A push notification is drawn by the SERVICE WORKER, which is a static
+   * file built long before the operator configured anything. It cannot know
+   * the brand unless this payload carries it — so before this existed, every
+   * subscriber saw the stock product name and the stock icon from the bundle,
+   * whatever the operator had uploaded. Reported from production on
+   * 2026-08-24 with a screenshot: the notification read `Reiwa`.
+   */
+  private async resolveNotificationBrand(): Promise<{
+    readonly brandName: string;
+    readonly icon: string | null;
+  }> {
+    try {
+      const settings = await this.prismaService.settings.findFirst({
+        select: { brandingSettings: true },
+      });
+      const branding = readBrandingSettings(settings?.brandingSettings ?? null);
+      return {
+        brandName: branding.brandName,
+        // Each candidate is filtered SEPARATELY, not coalesced first: an SVG
+        // logo must not shadow a perfectly good PWA raster, and a `??` over
+        // the raw values would let it.
+        icon: pushSafeIconUrl(branding.pwaIconUrl) ?? pushSafeIconUrl(branding.logoUrl),
+      };
+    } catch {
+      // Branding is decoration on a delivery path. A settings read that fails
+      // must cost the icon, never the notification.
+      return { brandName: DEFAULT_PUSH_BRAND_NAME, icon: null };
+    }
   }
 
   /**
@@ -508,10 +586,15 @@ export class WebPushService implements OnModuleInit {
     if (subs.length === 0) {
       return { attempted: 0, delivered: 0, failed: 0, disabled: false };
     }
+    const brand = await this.resolveNotificationBrand();
     const payload = JSON.stringify({
-      title: input.title,
+      // The brand fills an empty title HERE, where the brand is known. The
+      // service worker cannot do it: it would have to guess, and its guess
+      // was the stock product name.
+      title: input.title.trim().length > 0 ? input.title : brand.brandName,
       body: input.body,
       url: input.url ?? '/dashboard',
+      ...(brand.icon === null ? {} : { icon: brand.icon }),
     });
     const outcomes = await Promise.all(
       subs.map((sub) => this.deliverOne(sub, payload, vapidDetails)),
@@ -729,10 +812,12 @@ export class WebPushService implements OnModuleInit {
       where: { adminId: input.adminId },
     });
     if (subs.length === 0) return;
+    const brand = await this.resolveNotificationBrand();
     const payload = JSON.stringify({
-      title: input.title,
+      title: input.title.trim().length > 0 ? input.title : brand.brandName,
       body: input.body,
       url: input.url ?? '/',
+      ...(brand.icon === null ? {} : { icon: brand.icon }),
     });
     await Promise.all(subs.map((sub) => this.deliverOneAdmin(sub, payload, vapidDetails)));
   }
