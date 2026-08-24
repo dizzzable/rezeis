@@ -24,6 +24,8 @@
  * deleted, which is why the calls are counted here.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ru } from '@/i18n/ru'
+import { en } from '@/i18n/en'
 
 const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
 
@@ -204,5 +206,40 @@ describe('hasPushOptOut', () => {
     // the operator never opted out of anything.
     expect(hasPushOptOut()).toBe(false)
     spy.mockRestore()
+  })
+})
+
+describe('the copy for a refused subscription names the half that actually failed', () => {
+  /**
+   * `enablePush` returns `push-disabled` when the server hands back an empty
+   * VAPID key, and `subscribe-failed` only AFTER a non-empty key was fetched
+   * and handed to `pushManager.subscribe`. So reaching `subscribe-failed`
+   * PROVES the keys are fine.
+   *
+   * The shipped copy said "check the server VAPID keys and the browser push
+   * service" — sending the operator to inspect the one thing the code had
+   * already verified. Reported from production on 2026-08-24 by an operator on
+   * Brave, which disables Google push messaging by default: the panel was
+   * configured correctly and its own message pointed away from the cause.
+   *
+   * Two different outcomes must keep two different explanations.
+   */
+  const dictionaries = [
+    { name: 'ru', push: ru.pushNotifications },
+    { name: 'en', push: en.pushNotifications },
+  ] as const
+
+  it.each(dictionaries)('$name: does not blame VAPID for a browser refusal', ({ push }) => {
+    expect(push.subscribeFailed).not.toMatch(/VAPID/i)
+  })
+
+  it.each(dictionaries)('$name: still blames VAPID when the server has no key', ({ push }) => {
+    // ANTI-VACUITY. Without this, deleting the word from BOTH messages would
+    // pass the spec above while destroying the one place it belongs.
+    expect(push.disabledServer).toMatch(/VAPID/i)
+  })
+
+  it.each(dictionaries)('$name: keeps the two explanations distinct', ({ push }) => {
+    expect(push.subscribeFailed).not.toBe(push.disabledServer)
   })
 })

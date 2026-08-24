@@ -136,6 +136,12 @@ export async function enablePush(): Promise<EnablePushResult> {
     // problem — it's the push service rejecting the subscription (e.g. a
     // VAPID key mismatch, or the browser's push service being unreachable).
     // Report it distinctly instead of the misleading "permission denied".
+    // Reaching here PROVES the server key is fine: a missing key returns
+    // `push-disabled` twenty lines up, and this call already used the key it
+    // got. So the copy for this outcome must NOT send the operator to check
+    // VAPID — it did, and that is the wrong half of the system. The usual
+    // real causes are browser-side: Brave ships with Google push messaging
+    // OFF by default, and any browser refuses on an insecure origin.
     console.error('[push] pushManager.subscribe failed', err)
     return 'subscribe-failed'
   }

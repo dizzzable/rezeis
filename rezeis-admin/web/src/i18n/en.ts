@@ -2079,7 +2079,7 @@ export const en = {
     permissionDenied: 'Notification permission was not granted',
     disabledServer: 'Push is disabled on the server (VAPID keys not configured).',
     subscribeFailed:
-      'Could not create the push subscription (check the server VAPID keys and the browser push service).',
+      'The browser refused the subscription. The server key did arrive, so it is not the keys: in Brave enable Google push messaging in privacy settings, elsewhere unblock push for this site. The exact reason is in the developer console.',
     endpointTaken:
       'This browser is already registered to another admin account. The local subscription has been cleared — press the toggle again to register it to yours.',
     unsupported: 'This browser does not support push notifications.',
