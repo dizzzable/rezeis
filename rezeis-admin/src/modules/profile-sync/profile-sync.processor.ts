@@ -1221,7 +1221,14 @@ export class ProfileSyncProcessor extends WorkerHost {
         `${other.id} (user ${other.userId}, profile '${other.remnawaveId ?? 'none'}') already ` +
         'claims. Two live subscriptions are on one Remnawave profile: they overwrite each ' +
         "other's limits and expiry, and a delete of either is now refused rather than run. " +
-        'Untangle them before deleting either.';
+        // Naming the remedy is the point. The refusal above is correct and
+        // deliberate, but an operator who reads only "untangle them" has been
+        // handed a dead end: the tool that resolves exactly this pair already
+        // exists, is not on the user card where the alert is felt, and previews
+        // by default so reading this message is never a risk.
+        'Untangle them before deleting either: run the duplicate-subscription merge on the ' +
+        'Subscriptions page. It previews by default, keeps the OLDER row (the one carrying ' +
+        'the history and payments), and moves the panel identity onto it.';
       this.logger.error(message);
       this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', message, {
         subscriptionId: subscription.id,
