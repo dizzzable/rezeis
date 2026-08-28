@@ -25,6 +25,7 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  Optional,
   Param,
   Patch,
   Post,
@@ -36,6 +37,7 @@ import { Request } from 'express';
 import { createHash, randomBytes } from 'node:crypto';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
 import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
@@ -66,6 +68,12 @@ export class AdminUserWebController {
     private readonly prismaService: PrismaService,
     private readonly passwordHashService: PasswordHashService,
     private readonly cacheService: RawCacheService,
+    /**
+     * Optional so every existing construction of this controller keeps
+     * working. Absent, a Telegram binding still lands locally and simply
+     * reaches the VPN panel on the next sync instead of immediately.
+     */
+    @Optional() private readonly profileSyncQueue?: ProfileSyncQueueService,
   ) {}
 
   /**
@@ -287,7 +295,16 @@ export class AdminUserWebController {
       previousTelegramId: user.telegramId?.toString() ?? null,
       newTelegramId: nextTelegramId.toString(),
     });
-    return { telegramId: nextTelegramId.toString(), changed: true };
+    // The VPN profile carries the customer's Telegram id, and nothing used to
+    // tell it that this one changed. The sync payload has always included the
+    // field, but only as a passenger on a job something else created — so the
+    // panel kept showing the previous id until an unrelated edit happened to
+    // push, which on an account nobody edits again is forever.
+    //
+    // After the audit row on purpose: the binding is done and recorded either
+    // way, and a queue hiccup must not turn a completed edit into an error.
+    const synced = (await this.profileSyncQueue?.enqueueContactRefresh(user.id)) ?? 0;
+    return { telegramId: nextTelegramId.toString(), changed: true, syncedProfiles: synced };
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────

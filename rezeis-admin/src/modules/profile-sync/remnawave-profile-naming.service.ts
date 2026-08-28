@@ -174,11 +174,33 @@ export class RemnawaveProfileNamingService {
   }> {
     const user = await this.prismaService.user.findUnique({
       where: { id: userId },
-      select: { telegramId: true, email: true },
+      select: {
+        telegramId: true,
+        email: true,
+        // The second place an e-mail lives, and for a large share of
+        // customers the ONLY place. `User.email` is a unique column that
+        // social sign-up deliberately leaves unset — the identity lives on
+        // the `WebAccount`, so setting it there too would collide with an
+        // imported row carrying the same address.
+        //
+        // Reading only the first column therefore pushed a NULL e-mail to
+        // the VPN panel for every Google / Yandex / Mail.ru customer, and
+        // for anybody whose address was added after registration. The panel
+        // showed a profile with no contact while the panel screen beside it
+        // showed the address.
+        webAccount: { select: { email: true, emailNormalized: true } },
+      },
     });
     return {
       telegramId: user?.telegramId?.toString() ?? null,
-      email: user?.email ?? null,
+      // Order is deliberate: the canonical column first, then the account
+      // the customer actually signs in with. `email` before
+      // `emailNormalized` so the panel shows the address as it was typed.
+      email:
+        user?.email ??
+        user?.webAccount?.email ??
+        user?.webAccount?.emailNormalized ??
+        null,
     };
   }
 

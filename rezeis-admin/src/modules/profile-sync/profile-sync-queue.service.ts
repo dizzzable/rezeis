@@ -1,7 +1,7 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { SyncJobStatus } from '@prisma/client';
+import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -65,6 +65,69 @@ export class ProfileSyncQueueService {
    * FAILED: because we keep finished jobs around (`removeOnComplete/Fail`),
    * a plain re-`add` with the same `jobId` is silently ignored by BullMQ.
    */
+  /**
+   * Pushes a user's CONTACT details to every VPN profile they own.
+   *
+   * ── The gap this closes ──────────────────────────────────────────────
+   *
+   * The sync payload has always carried the Telegram id and the e-mail, and
+   * the processor has always sent them — but only ever as a passenger on a
+   * job something else created. Nothing enqueued a job when the CONTACT
+   * itself changed, so binding a Telegram id on the user card wrote the
+   * local column and left the panel profile showing the old one until an
+   * unrelated edit happened to push. On an account nobody edited again,
+   * that is forever.
+   *
+   * ── Why `propagateStatus` is false ───────────────────────────────────
+   *
+   * A contact change says nothing about whether the subscription should be
+   * enabled. Asserting a status here would push the local column upstream
+   * as a side effect of correcting an e-mail address — and the local column
+   * is not always what the panel should hear (`AutoRenewService` moves rows
+   * to EXPIRED every minute).
+   */
+  public async enqueueContactRefresh(userId: string): Promise<number> {
+    const subscriptions = await this.prismaService.subscription.findMany({
+      where: {
+        userId,
+        status: { not: SubscriptionStatus.DELETED },
+        // A row with no upstream profile has no contact to correct, and a
+        // job for it would be delegated to CREATE — provisioning a profile
+        // as a side effect of an e-mail edit.
+        remnawaveId: { not: null },
+      },
+      select: { id: true },
+    });
+
+    let queued = 0;
+    for (const subscription of subscriptions) {
+      try {
+        const job = await this.prismaService.profileSyncJob.create({
+          data: {
+            subscriptionId: subscription.id,
+            action: SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            payload: {
+              source: 'CONTACT_REFRESH',
+              propagateStatus: false,
+            } as Prisma.InputJsonObject,
+          },
+          select: { id: true },
+        });
+        await this.enqueue(job.id);
+        queued += 1;
+      } catch (err) {
+        // Best-effort: the edit that triggered this has already been made
+        // and audited. Losing the push delays it to the next sync, and the
+        // sweep recovers a PENDING row that never reached the queue.
+        this.logger.warn(
+          `Contact refresh could not be queued for ${subscription.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+    return queued;
+  }
+
   public async enqueue(syncJobId: string, force = false): Promise<void> {
     const jobId = `sync_${syncJobId}`;
     if (force) {

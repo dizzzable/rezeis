@@ -332,6 +332,11 @@ describe('AdminUserWebController telegramId range', () => {
     assert.deepStrictEqual(await controller.bindTelegramId('42', { telegramId: IN_RANGE }, ADMIN, REQ), {
       telegramId: IN_RANGE,
       changed: true,
+      // Zero because this controller is built without the sync queue: the
+      // binding still lands locally and reaches the VPN panel on the next sync
+      // instead of immediately. Asserted rather than omitted so the count
+      // cannot quietly become wrong.
+      syncedProfiles: 0,
     });
     assert.deepStrictEqual(boundTelegramIds(calls), [42n, MAX_POSTGRES_BIGINT]);
     assert.equal(updates.length, 1);
