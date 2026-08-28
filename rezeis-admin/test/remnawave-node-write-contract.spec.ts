@@ -5,14 +5,20 @@ import { Logger } from '@nestjs/common';
 import { Observable, of, throwError } from 'rxjs';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
-import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
+import {
+  NODE_USERS_BANDWIDTH_TOP_LIMIT as DETECTOR_TOP_LIMIT,
+  RemnawaveDetectors,
+} from '../src/modules/anti-fraud/detectors/remnawave-detectors';
 import {
   buildNodeUsersBandwidthPath,
   NODE_USERS_BANDWIDTH_TOP_LIMIT,
   RemnawaveApiService,
 } from '../src/modules/remnawave/services/remnawave-api.service';
-import { RemnawaveVersionService } from '../src/modules/remnawave/services/remnawave-version.service';
+import { PanelCommandExecutor } from '../src/modules/remnawave/services/panel-command.executor';
+import { PanelInfraClient } from '../src/modules/remnawave/services/panel-infra.client';
+import { AxiosPanelTransport } from '../src/modules/remnawave/services/panel-transport';
 import { tunablesFromEnv } from './fixtures/anti-fraud-tunables';
+import { panelDevicesDouble, panelNode } from './fixtures/anti-fraud-panel-clients';
 
 /**
  * Wire-shape tests for the two node WRITE requests rezeis sends to the panel.
@@ -200,45 +206,77 @@ interface PanelUser {
 }
 
 /**
- * A 2.8.0-shaped panel: it serves `/api/nodes`, requires `topUsersLimit` on
- * the bandwidth endpoint, and — like the real one — honours that limit by
- * returning only the top N rows.
+ * The panel-facing half of the detector's stack, built for real.
+ *
+ * The thing under test is the OUTGOING request — that `topUsersLimit` reaches
+ * the wire carrying a value big enough for the cohort median to be a baseline —
+ * so everything from the vendor command down runs unmocked and only the socket
+ * is a stand-in. A client double would prove that the double agrees with the
+ * test and nothing else.
  */
+function makeInfraClient(handler: PanelHandler): {
+  readonly client: PanelInfraClient;
+  readonly requests: CapturedRequest[];
+} {
+  const requests: CapturedRequest[] = [];
+  const httpService = {
+    request: (input: { method: string; url: string; data?: unknown }) => {
+      const captured: CapturedRequest = {
+        method: input.method,
+        url: input.url,
+        data: input.data,
+      };
+      requests.push(captured);
+      return handler(captured);
+    },
+  };
+  const transport = new AxiosPanelTransport(httpService as never, { ...CONFIG });
+  return { client: new PanelInfraClient(new PanelCommandExecutor(transport)), requests };
+}
+
+/** One node on the wire: the contract's own shape, with its dates as strings. */
+function wireNode(): unknown {
+  return JSON.parse(
+    JSON.stringify(panelNode({ uuid: NODE_UUID, name: 'de-1', lastStatusChange: new Date(0) })),
+  );
+}
+
 function makeDetectors(population: readonly PanelUser[]): {
   readonly detectors: RemnawaveDetectors;
   readonly bandwidthCalls: number[];
 } {
   const bandwidthCalls: number[] = [];
-  const { service } = makeService((request) => {
-    if (request.url === '/api/nodes') {
-      return of({
-        status: 200,
-        data: { response: [{ uuid: NODE_UUID, name: 'de-1', isConnected: true, isDisabled: false }] },
-      });
+  const { client } = makeInfraClient((request) => {
+    if (request.url.startsWith('/api/nodes')) {
+      return of({ status: 200, data: { response: [wireNode()] } });
     }
     const limit = queryOf(request.url).get('topUsersLimit');
     if (limit === null) {
-      // 2.8.0 marks it `required: true` in query.
       return httpError(400, 'topUsersLimit is required');
     }
     bandwidthCalls.push(Number(limit));
     const topUsers = [...population]
       .sort((a, b) => b.total - a.total)
-      .slice(0, Number(limit));
-    return of({ status: 200, data: { response: { topUsers } } });
+      .slice(0, Number(limit))
+      .map((row) => ({ color: '#000000', ...row }));
+    return of({
+      status: 200,
+      data: { response: { categories: [], sparklineData: [], topUsers } },
+    });
   });
 
-  const versionService = {
-    getCapabilities: () => Promise.resolve({ bandwidthNodesUsers: true }),
-  } as unknown as RemnawaveVersionService;
-
   return {
-    detectors: new RemnawaveDetectors({} as unknown as PrismaService, service, versionService, tunablesFromEnv()),
+    detectors: new RemnawaveDetectors(
+      {} as unknown as PrismaService,
+      panelDevicesDouble().client,
+      client,
+      tunablesFromEnv(),
+    ),
     bandwidthCalls,
   };
 }
 
-describe('detectPerUserNodeTrafficAbuse — against a 2.8.0-shaped panel', () => {
+describe('detectPerUserNodeTrafficAbuse — against a panel 3.x', () => {
   const originalWarn = Logger.prototype.warn;
 
   afterEach(() => {
@@ -268,7 +306,10 @@ describe('detectPerUserNodeTrafficAbuse — against a 2.8.0-shaped panel', () =>
       new Date('2026-08-05T12:00:00.000Z'),
     );
 
-    assert.deepStrictEqual(bandwidthCalls, [NODE_USERS_BANDWIDTH_TOP_LIMIT]);
+    // The DETECTOR's own constant, not the adapter's copy of it: the detector
+    // is the one that sizes this request, and a test reading a second literal
+    // keeps passing after the request stops asking for that many.
+    assert.deepStrictEqual(bandwidthCalls, [DETECTOR_TOP_LIMIT]);
     const offender = candidates.find(
       (c) => c.metadata?.['remnawaveUsername'] === 'offender',
     );
@@ -286,22 +327,16 @@ describe('detectPerUserNodeTrafficAbuse — against a 2.8.0-shaped panel', () =>
 
     // A panel that answers `/api/nodes` but refuses the bandwidth read — the
     // exact production state since 2.8 shipped.
-    const { service } = makeService((request) => {
-      if (request.url === '/api/nodes') {
-        return of({
-          status: 200,
-          data: {
-            response: [{ uuid: NODE_UUID, name: 'de-1', isConnected: true, isDisabled: false }],
-          },
-        });
+    const { client } = makeInfraClient((request) => {
+      if (request.url.startsWith('/api/nodes')) {
+        return of({ status: 200, data: { response: [wireNode()] } });
       }
       return httpError(400, 'Validation failed');
     });
     const detectors = new RemnawaveDetectors(
       {} as unknown as PrismaService,
-      service,
-      { getCapabilities: () => Promise.resolve({ bandwidthNodesUsers: true }) } as unknown as
-        RemnawaveVersionService,
+      panelDevicesDouble().client,
+      client,
       tunablesFromEnv(),
     );
 

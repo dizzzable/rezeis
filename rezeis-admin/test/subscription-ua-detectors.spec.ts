@@ -6,16 +6,14 @@ import { FraudSignalSeverity } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { SubscriptionUaDetectors } from '../src/modules/anti-fraud/detectors/subscription-ua-detectors';
-import { RemnawaveSubscriptionRequestEntryInterface } from '../src/modules/remnawave/interfaces/remnawave-extended.interface';
 import {
-  strictInvalidContract,
-  strictOk,
-  strictUnavailable,
-  type RemnawaveStrictOutcome,
-} from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
-import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+  PanelInfraClient,
+  type PanelReadOutcome,
+  type PanelSubscriptionRequestHistoryPage,
+} from '../src/modules/remnawave/services/panel-infra.client';
 import type { StoredAntiFraudSettings } from '../src/modules/settings/utils/anti-fraud-settings.util';
 import { tunablesFromEnv, tunablesThatFail } from './fixtures/anti-fraud-tunables';
+import { panelOk } from './fixtures/anti-fraud-panel-clients';
 import {
   subscriptionFindManyDouble,
   type SubscriptionQuery,
@@ -41,30 +39,62 @@ function ago(minutesAgo: number): string {
 /** A vless config URI carrying a credential, as a re-hoster's UA presents it. */
 const CONFIG_UA = 'vless://b7f1e0c2-1111-2222-3333-444455556666@10.0.0.9:443?type=tcp';
 
+/**
+ * THE OWNER FIELD IS ONE NUMBER NOW.
+ *
+ * A 3.x request-log row is `{ id, userId, srrResponseType, srrRuleName,
+ * requestIp, userAgent, requestAt }`, and `userId` is the panel's own integer —
+ * the only identity a row carries. The nullable PAIR this replaces (`userUuid`
+ * on 2.7.4, `panelUserId` on 2.8.0, exactly one of them ever populated) went
+ * with the versions that spelled it that way, and so did the whole-panel user
+ * walk the detector used to run to turn the second into the first.
+ */
+const DEFAULT_USER_ID = 4471;
+/** What `Subscription.remnawaveId` holds for that profile on a 3.x panel. */
+const DEFAULT_IDENTITY = String(DEFAULT_USER_ID);
+
+type PanelRequestRecord = PanelSubscriptionRequestHistoryPage['records'][number];
+
 function record(
-  over: Partial<RemnawaveSubscriptionRequestEntryInterface> = {},
-): RemnawaveSubscriptionRequestEntryInterface {
+  over: {
+    id?: number;
+    userId?: number | string;
+    userAgent?: string | null;
+    ipAddress?: string | null;
+    /** ISO-8601. An unparseable literal is passed through verbatim — see below. */
+    requestedAt?: string;
+  } = {},
+): PanelRequestRecord {
+  const requestedAt = over.requestedAt ?? ago(5);
   return {
-    id: '1',
-    userUuid: 'uuid-1',
-    panelUserId: null,
-    userAgent: 'v2rayNG/1.8.5',
-    clientType: 'v2rayNG',
-    ipAddress: '203.0.113.1',
-    requestedAt: ago(5),
-    ...over,
-  };
+    id: over.id ?? 1,
+    userId: over.userId ?? DEFAULT_USER_ID,
+    srrResponseType: 'OK',
+    srrRuleName: null,
+    requestIp: over.ipAddress === undefined ? '203.0.113.1' : over.ipAddress,
+    userAgent: over.userAgent === undefined ? 'v2rayNG/1.8.5' : over.userAgent,
+    // The contract turns `requestAt` into a `Date`, so a validated response
+    // hands the detector a Date. A literal the schema would have REJECTED can
+    // only reach it on the executor's drift path, where the raw wire string
+    // comes through instead — so that is what an unparseable one is sent as.
+    requestAt: Number.isFinite(Date.parse(requestedAt)) ? new Date(requestedAt) : requestedAt,
+  } as unknown as PanelRequestRecord;
 }
 
 interface Mock {
-  readonly records?: readonly RemnawaveSubscriptionRequestEntryInterface[];
-  /** Overrides `records` to simulate a log read the adapter refused. */
-  readonly pageOutcome?: RemnawaveStrictOutcome<unknown>;
+  readonly records?: readonly PanelRequestRecord[];
+  /** Overrides `records` to simulate a log read that did not come back. */
+  readonly pageOutcome?: PanelReadOutcome<PanelSubscriptionRequestHistoryPage>;
   readonly total?: number;
-  /** Defaults to one more than the record count, i.e. a NOT-full page. */
+  /**
+   * The page size the detector will be configured to ASK for.
+   *
+   * The panel does not echo the requested size back — the caller is the only
+   * one that knows it — so a test that wants a FULL page sets this to the
+   * record count. It reaches the detector through the stored tunable, which is
+   * where the number really comes from.
+   */
   readonly requestedSize?: number;
-  readonly panelUsers?: ReadonlyArray<{ uuid: string; panelId: number | null }>;
-  readonly panelBulkOutcome?: RemnawaveStrictOutcome<unknown>;
   /**
    * `remnawavePanelId` absent === the column is NULL, which is what most rows
    * look like — and why a lookup that ever asks for `remnawavePanelId: null`
@@ -84,17 +114,17 @@ interface SubRow {
 
 interface Harness {
   readonly detectors: SubscriptionUaDetectors;
-  /** How many times the panel-wide user walk was performed. */
-  readonly panelUserCalls: () => number;
   /** The `size` every subscription-request-log read asked the panel for. */
   readonly pageSizesRequested: () => readonly number[];
+  /** Every panel method the detector called, in order. */
+  readonly panelCalls: readonly string[];
   /** Every `subscription.findMany`: the `where` sent and the rows it selected. */
   readonly subscriptionQueries: readonly SubscriptionQuery<SubRow>[];
 }
 
 function makeHarness(mock: Mock): Harness {
-  let panelUserCalls = 0;
   const pageSizes: number[] = [];
+  const panelCalls: string[] = [];
   const records = mock.records ?? [];
   // The `where` is HONOURED, not ignored — see `test/fixtures/subscription-where.ts`.
   const subscriptions = subscriptionFindManyDouble(mock.subs ?? []);
@@ -103,38 +133,39 @@ function makeHarness(mock: Mock): Harness {
     subscription: { findMany: subscriptions.findMany },
   } as unknown as PrismaService;
 
-  const remnaMock = {
-    strictGetSubscriptionRequestHistory: (size: number) => {
-      pageSizes.push(size);
+  // Only the request-log read is stubbed, because after the migration it is the
+  // ONLY panel surface this detector touches. There is no whole-panel user walk
+  // left to fake: a 3.x row's numeric owner is already the identity rezeis
+  // stores, so nothing needs translating.
+  const infraMock = {
+    getSubscriptionRequestHistory: (input: { start?: number; size?: number } = {}) => {
+      panelCalls.push('getSubscriptionRequestHistory');
+      pageSizes.push(input.size ?? -1);
       return Promise.resolve(
         mock.pageOutcome ??
-          strictOk(
-            {
-              records,
-              total: mock.total ?? records.length,
-              requestedSize: mock.requestedSize ?? records.length + 1,
-            },
-            '2.8.0',
-          ),
+          panelOk({
+            records,
+            total: mock.total ?? records.length,
+          } as unknown as PanelSubscriptionRequestHistoryPage),
       );
     },
-    strictGetAllPanelUsers: () => {
-      panelUserCalls += 1;
-      return Promise.resolve(
-        mock.panelBulkOutcome ??
-          strictOk({ users: mock.panelUsers ?? [], total: (mock.panelUsers ?? []).length }),
-      );
-    },
-  } as unknown as RemnawaveApiService;
+  } as unknown as PanelInfraClient;
+
+  const stored =
+    mock.stored ??
+    (mock.requestedSize === undefined
+      ? ENABLED
+      : {
+          subscriptionUa: {
+            enableSubscriptionUaTunnel: true,
+            uaRequestPageSize: mock.requestedSize,
+          },
+        });
 
   return {
-    detectors: new SubscriptionUaDetectors(
-      prismaMock,
-      remnaMock,
-      tunablesFromEnv(mock.stored ?? ENABLED),
-    ),
-    panelUserCalls: () => panelUserCalls,
+    detectors: new SubscriptionUaDetectors(prismaMock, infraMock, tunablesFromEnv(stored)),
     pageSizesRequested: () => pageSizes,
+    panelCalls,
     subscriptionQueries: subscriptions.queries,
   };
 }
@@ -165,7 +196,7 @@ describe('SubscriptionUaDetectors — the signal', () => {
   it('flags a fetch whose User-Agent carries a proxy config, and resolves the rezeis user', async () => {
     const { detectors } = makeHarness({
       records: [record({ userAgent: CONFIG_UA })],
-      subs: [{ remnawaveId: 'uuid-1', userId: 'user-1' }],
+      subs: [{ remnawaveId: DEFAULT_IDENTITY, userId: 'user-1' }],
     });
 
     const candidates = await detectors.detectSubscriptionUaTunnel(NOW);
@@ -173,20 +204,18 @@ describe('SubscriptionUaDetectors — the signal', () => {
     assert.equal(candidates.length, 1);
     assert.equal(candidates[0].code, 'SUBSCRIPTION_UA_TUNNEL');
     assert.deepEqual(candidates[0].affectedUserIds, ['user-1']);
-    assert.equal(candidates[0].fingerprint, '2026-08-06|uuid-1');
+    assert.equal(candidates[0].fingerprint, `2026-08-06|${DEFAULT_IDENTITY}`);
     assert.deepEqual((candidates[0].metadata as { schemes: string[] }).schemes, ['vless']);
   });
 
   it('deep-links a 3.x identity to the uuid-era row it belongs to', async () => {
-    // On a 3.x panel the log row identifies its owner by the numeric `id`, and
-    // the user list resolves that to the same decimal — there is no uuid left
-    // anywhere on the panel. The subscription was linked during the 2.x era, so
-    // `remnawaveId` still holds the uuid and always will. Matching on that one
-    // column alone finds nothing, `affectedUserIds` comes back empty, and the
-    // operator gets a signal that opens onto nobody.
+    // On a 3.x panel the log row identifies its owner by the numeric `id` and
+    // there is no uuid left anywhere on the panel. The subscription was linked
+    // during the 2.x era, so `remnawaveId` still holds the uuid and always
+    // will. Matching on that one column alone finds nothing, `affectedUserIds`
+    // comes back empty, and the operator gets a signal that opens onto nobody.
     const { detectors } = makeHarness({
-      records: [record({ userUuid: null, panelUserId: 4471, userAgent: CONFIG_UA })],
-      panelUsers: [{ uuid: '4471', panelId: 4471 }],
+      records: [record({ userId: 4471, userAgent: CONFIG_UA })],
       subs: [
         { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
         { remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9', remnawavePanelId: 4471, userId: 'user-42' },
@@ -208,8 +237,7 @@ describe('SubscriptionUaDetectors — the signal', () => {
     // putting a null in the `in` list, would sweep up every one of these
     // strangers and file one customer's evidence against another.
     const { detectors, subscriptionQueries } = makeHarness({
-      records: [record({ userUuid: null, panelUserId: 4471, userAgent: CONFIG_UA })],
-      panelUsers: [{ uuid: '4471', panelId: 4471 }],
+      records: [record({ userId: 4471, userAgent: CONFIG_UA })],
       subs: [
         { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
         { remnawaveId: '9e7c1a54-0000-4000-8000-000000000002', userId: 'stranger-2' },
@@ -226,26 +254,14 @@ describe('SubscriptionUaDetectors — the signal', () => {
     );
   });
 
-  it('asks one column only when the batch holds no numeric identity', async () => {
-    // A 2.x panel: no numeric angle exists to ask about, so the arm is OMITTED
-    // rather than emitted empty or null.
-    const { detectors, subscriptionQueries } = makeHarness({
-      records: [record({ userAgent: CONFIG_UA })],
-      subs: [
-        { remnawaveId: '9e7c1a54-0000-4000-8000-000000000001', userId: 'stranger-1' },
-        { remnawaveId: 'uuid-1', userId: 'user-1' },
-      ],
-    });
-
-    await detectors.detectSubscriptionUaTunnel(NOW);
-
-    assert.equal(subscriptionQueries.length, 1);
-    assert.deepEqual(subscriptionQueries[0].where, { remnawaveId: { in: ['uuid-1'] } });
-    assert.deepEqual(
-      subscriptionQueries[0].matched.map((row) => row.userId),
-      ['user-1'],
-    );
-  });
+  // REMOVED: "asks one column only when the batch holds no numeric identity".
+  // It described a 2.x panel, whose log rows carried a uuid and no numeric
+  // angle at all, so `panelIdentityLookup` emitted the string arm alone. Every
+  // identity this detector can produce on a 3.x panel is a decimal id, so the
+  // condition the test set up is unreachable from here. The rule itself is
+  // still pinned where it remains reachable — `sharing-detectors.spec.ts`,
+  // whose identities come from the panel user list and can still be 2.x-era
+  // uuids.
 
   it('files a single sighting at LOW and never above MEDIUM when it repeats', async () => {
     // A UA heuristic is weaker evidence than a device count. The concurrent-IP
@@ -258,9 +274,9 @@ describe('SubscriptionUaDetectors — the signal', () => {
 
     const repeated = await makeHarness({
       records: [
-        record({ id: '1', userAgent: CONFIG_UA, requestedAt: ago(1) }),
-        record({ id: '2', userAgent: CONFIG_UA, requestedAt: ago(2) }),
-        record({ id: '3', userAgent: CONFIG_UA, requestedAt: ago(3) }),
+        record({ id: 1, userAgent: CONFIG_UA, requestedAt: ago(1) }),
+        record({ id: 2, userAgent: CONFIG_UA, requestedAt: ago(2) }),
+        record({ id: 3, userAgent: CONFIG_UA, requestedAt: ago(3) }),
       ],
     }).detectors.detectSubscriptionUaTunnel(NOW);
     assert.equal(repeated[0].severity, FraudSignalSeverity.MEDIUM);
@@ -281,22 +297,38 @@ describe('SubscriptionUaDetectors — the signal', () => {
     assert.ok(serialized.includes('<redacted>'), serialized);
   });
 
-  it('ignores ordinary client User-Agents without paying for a panel user walk', async () => {
+  it('ignores ordinary client User-Agents, and costs exactly one panel call', async () => {
     const harness = makeHarness({
       records: [
-        record({ id: '1', userAgent: 'v2rayNG/1.8.5' }),
-        record({ id: '2', userAgent: 'okhttp/4.9.0' }),
-        record({ id: '3', userAgent: null }),
-        record({ id: '4', userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/120.0' }),
+        record({ id: 1, userAgent: 'v2rayNG/1.8.5' }),
+        record({ id: 2, userAgent: 'okhttp/4.9.0' }),
+        record({ id: 3, userAgent: null }),
+        record({ id: 4, userAgent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/120.0' }),
       ],
     });
 
     const candidates = await harness.detectors.detectSubscriptionUaTunnel(NOW);
 
     assert.deepEqual(candidates, []);
-    // The clean case is the overwhelmingly common one and must cost exactly
-    // one HTTP call, not a 50-page walk of the whole panel.
-    assert.equal(harness.panelUserCalls(), 0);
+    // ONE request, not two, and not a 50-page walk of the whole panel. The user
+    // walk that used to be conditional on seeing a 2.8.0 record is gone
+    // outright: the identity is on the row.
+    assert.deepEqual(harness.panelCalls, ['getSubscriptionRequestHistory']);
+  });
+
+  it('names a hit without reading the panel user list at all', async () => {
+    // The counterpart to the case above, and the one that would have paid for
+    // the walk on a 2.8.0 panel. A row's numeric owner IS the identity, so a
+    // detection costs the same single request a clean run does.
+    const harness = makeHarness({
+      records: [record({ userAgent: CONFIG_UA })],
+      subs: [{ remnawaveId: DEFAULT_IDENTITY, userId: 'user-1' }],
+    });
+
+    const candidates = await harness.detectors.detectSubscriptionUaTunnel(NOW);
+
+    assert.equal(candidates.length, 1);
+    assert.deepEqual(harness.panelCalls, ['getSubscriptionRequestHistory']);
   });
 
   it('ignores fetches older than the evidence window', async () => {
@@ -327,7 +359,7 @@ describe('SubscriptionUaDetectors — the operator switch', () => {
   it('a stored OFF switch silences a run that would otherwise have named somebody', async () => {
     const on = makeHarness({
       records: [record({ userAgent: CONFIG_UA })],
-      subs: [{ remnawaveId: 'uuid-1', userId: 'user-1' }],
+      subs: [{ remnawaveId: DEFAULT_IDENTITY, userId: 'user-1' }],
     });
     assert.equal(
       (await on.detectors.detectSubscriptionUaTunnel(NOW)).length,
@@ -338,7 +370,7 @@ describe('SubscriptionUaDetectors — the operator switch', () => {
     const off = makeHarness({
       stored: { subscriptionUa: { enableSubscriptionUaTunnel: false } },
       records: [record({ userAgent: CONFIG_UA })],
-      subs: [{ remnawaveId: 'uuid-1', userId: 'user-1' }],
+      subs: [{ remnawaveId: DEFAULT_IDENTITY, userId: 'user-1' }],
     });
     assert.deepEqual(await off.detectors.detectSubscriptionUaTunnel(NOW), []);
     assert.deepEqual(off.pageSizesRequested(), []);
@@ -357,8 +389,8 @@ describe('SubscriptionUaDetectors — the operator switch', () => {
         },
       },
       records: [
-        record({ id: '1', userAgent: CONFIG_UA, requestedAt: ago(5) }),
-        record({ id: '2', userAgent: CONFIG_UA, requestedAt: ago(40) }),
+        record({ id: 1, userAgent: CONFIG_UA, requestedAt: ago(5) }),
+        record({ id: 2, userAgent: CONFIG_UA, requestedAt: ago(40) }),
       ],
     });
 
@@ -388,13 +420,15 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
   it('warns and raises nothing when the request log is unavailable', async () => {
     const capture = captureLogs();
     try {
-      const { detectors } = makeHarness({ pageOutcome: strictUnavailable(null) });
+      const { detectors } = makeHarness({
+        pageOutcome: { kind: 'network', detail: 'socket hang up' },
+      });
       const candidates = await detectors.detectSubscriptionUaTunnel(NOW);
 
       assert.deepEqual(candidates, []);
       // An unreadable log must be distinguishable from a clean one.
       assert.ok(
-        capture.warns.some((w) => w.includes('not readable') && w.includes('unavailable')),
+        capture.warns.some((w) => w.includes('not readable') && w.includes('socket hang up')),
         capture.warns.join('\n'),
       );
     } finally {
@@ -402,16 +436,22 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
     }
   });
 
-  it('names an invalidContract specifically, so a shape change is not read as a quiet panel', async () => {
+  it('names an unreadable body specifically, so a shape change is not read as a quiet panel', async () => {
+    // `unreadable` is the panel answering 2xx with a body carrying no `records`
+    // array. Reported as "the panel was briefly down" it sends an operator
+    // looking at a healthy panel; reported as an empty log it lets a panel that
+    // changed shape read as a panel where nothing happened.
     const capture = captureLogs();
     try {
       const { detectors } = makeHarness({
-        pageOutcome: strictInvalidContract('no "records" array'),
+        pageOutcome: { kind: 'unreadable', detail: '`response.records` is null, not an array' },
       });
       await detectors.detectSubscriptionUaTunnel(NOW);
 
       assert.ok(
-        capture.warns.some((w) => w.includes('invalidContract')),
+        capture.warns.some(
+          (w) => w.includes('could not read') && w.includes('`response.records`'),
+        ),
         capture.warns.join('\n'),
       );
     } finally {
@@ -419,41 +459,15 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
     }
   });
 
-  it('refuses the run when 2.8.0 numeric ids cannot be resolved to uuids', async () => {
-    const capture = captureLogs();
-    try {
-      const { detectors } = makeHarness({
-        records: [record({ userUuid: null, panelUserId: 1337, userAgent: CONFIG_UA })],
-        panelBulkOutcome: strictUnavailable(null),
-      });
-
-      const candidates = await detectors.detectSubscriptionUaTunnel(NOW);
-
-      // The fingerprint is keyed by uuid: a guessed mapping would file one
-      // customer's evidence against another.
-      assert.deepEqual(candidates, []);
-      assert.ok(
-        capture.warns.some((w) => w.includes('panel user list') && w.includes('not trustworthy')),
-        capture.warns.join('\n'),
-      );
-    } finally {
-      capture.restore();
-    }
-  });
-
-  it('resolves a 2.8.0 numeric id through the panel user list', async () => {
-    const harness = makeHarness({
-      records: [record({ userUuid: null, panelUserId: 1337, userAgent: CONFIG_UA })],
-      panelUsers: [{ uuid: 'uuid-9', panelId: 1337 }],
-      subs: [{ remnawaveId: 'uuid-9', userId: 'user-9' }],
-    });
-
-    const candidates = await harness.detectors.detectSubscriptionUaTunnel(NOW);
-
-    assert.equal(candidates.length, 1);
-    assert.deepEqual(candidates[0].affectedUserIds, ['user-9']);
-    assert.equal(harness.panelUserCalls(), 1);
-  });
+  // REMOVED: "refuses the run when 2.8.0 numeric ids cannot be resolved to
+  // uuids" and "resolves a 2.8.0 numeric id through the panel user list". Both
+  // pinned the translation step between a 2.8.0 row's numeric `userId` and the
+  // uuid its fingerprint had to be keyed on — a step that needed the whole
+  // panel user list and abandoned the run when that list could not be vouched
+  // for. On 3.x the numeric id IS the identity, so there is no translation, no
+  // second panel read, and no run to abandon. The 3.x path they were guarding
+  // is covered by "deep-links a 3.x identity to the uuid-era row it belongs to"
+  // and by "names a hit without reading the panel user list at all".
 
   it('warns and drops records whose timestamp cannot be parsed', async () => {
     const capture = captureLogs();
@@ -478,13 +492,18 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
     const capture = captureLogs();
     try {
       // A FULL page whose oldest row is still inside the window proves older
-      // requests existed and were never examined.
+      // requests existed and were never examined. The page has to be full at a
+      // size the panel tunable actually permits (min 100), because the size the
+      // detector asks for is the size an operator can store — a fabricated
+      // smaller one would test arithmetic no deployment can reach.
       const { detectors } = makeHarness({
         records: [
-          record({ id: '1', userAgent: CONFIG_UA, requestedAt: ago(1) }),
-          record({ id: '2', userAgent: 'v2rayNG/1.8.5', requestedAt: ago(2) }),
+          record({ id: 1, userAgent: CONFIG_UA, requestedAt: ago(1) }),
+          ...Array.from({ length: 99 }, (_unused, index) =>
+            record({ id: index + 2, userAgent: 'v2rayNG/1.8.5', requestedAt: ago(2) }),
+          ),
         ],
-        requestedSize: 2,
+        requestedSize: 100,
         total: 50_000,
       });
 
@@ -535,10 +554,10 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
       const detectors = new SubscriptionUaDetectors(
         { subscription: { findMany: () => Promise.resolve([]) } } as unknown as PrismaService,
         {
-          strictGetSubscriptionRequestHistory: () => {
+          getSubscriptionRequestHistory: () => {
             throw new Error('the panel must not be read without effective tunables');
           },
-        } as unknown as RemnawaveApiService,
+        } as unknown as PanelInfraClient,
         tunablesThatFail(),
       );
 
@@ -551,11 +570,16 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
     }
   });
 
-  it('warns and drops a matching record that carries no owner field at all', async () => {
+  it('warns and drops a matching record whose owner id is not an integer', async () => {
+    // Only reachable on the executor's DRIFT path — the contract declares
+    // `userId` as a number — but reachable, and the wrong handling is not a
+    // dropped row: `Number.parseInt` reads a LEADING run of digits and stops,
+    // so a uuid-shaped value would become panel user #3 and file one customer's
+    // evidence under another customer's fingerprint.
     const capture = captureLogs();
     try {
       const { detectors } = makeHarness({
-        records: [record({ userUuid: null, panelUserId: null, userAgent: CONFIG_UA })],
+        records: [record({ userId: '3f2a-not-an-id', userAgent: CONFIG_UA })],
       });
 
       assert.deepEqual(await detectors.detectSubscriptionUaTunnel(NOW), []);

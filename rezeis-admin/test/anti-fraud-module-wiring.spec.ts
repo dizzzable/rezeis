@@ -9,7 +9,11 @@ import { AntiFraudModule } from '../src/modules/anti-fraud/anti-fraud.module';
 import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
 import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SubscriptionUaDetectors } from '../src/modules/anti-fraud/detectors/subscription-ua-detectors';
+import { AntiFraudService } from '../src/modules/anti-fraud/services/anti-fraud.service';
 import { AntiFraudTunablesService } from '../src/modules/anti-fraud/services/anti-fraud-tunables.service';
+import { PanelDevicesClient } from '../src/modules/remnawave/services/panel-devices.client';
+import { PanelInfraClient } from '../src/modules/remnawave/services/panel-infra.client';
+import { RemnawaveVersionService } from '../src/modules/remnawave/services/remnawave-version.service';
 import { IconUploadService } from '../src/modules/settings/services/icon-upload.service';
 import { SettingsModule } from '../src/modules/settings/settings.module';
 import { SettingsService } from '../src/modules/settings/services/settings.service';
@@ -69,6 +73,44 @@ describe('AntiFraudModule wiring', () => {
       assert.ok(
         params.includes(AntiFraudTunablesService),
         `${detector.name} must take the tunables reader by injection`,
+      );
+    }
+  });
+
+  it('takes the panel through the contract-driven clients, and no version service', () => {
+    // The panel clients are provided AND exported by `RemnawaveModule`, so
+    // injecting them by class token is all this module has to do. The assertion
+    // that matters is the SECOND half: `RemnawaveVersionService` must not be a
+    // constructor argument of anything here any more.
+    //
+    // Every gate it fed asked which of 2.7 / 2.8 / 3.x the panel is, and this
+    // build serves 3.x only — a 2.x panel is refused once, centrally, by
+    // `LegacyPanelRefusal`. Worse, those gates answered "stand down" for an
+    // UNKNOWN version, which is the state a healthy panel passes through on a
+    // token blip, so a detector went quiet exactly when it was least able to
+    // tell that from a clean panel. Re-introducing the dependency here is how
+    // that comes back.
+    type Named = { readonly name: string };
+    const byDetector: ReadonlyArray<[Named, readonly Named[]]> = [
+      [SharingDetectors, [PanelDevicesClient, PanelInfraClient]],
+      [RemnawaveDetectors, [PanelDevicesClient, PanelInfraClient]],
+      [SubscriptionUaDetectors, [PanelInfraClient]],
+      [AntiFraudService, [PanelDevicesClient]],
+    ];
+    for (const [detector, required] of byDetector) {
+      const params = Reflect.getMetadata(
+        'design:paramtypes',
+        detector as object,
+      ) as readonly unknown[];
+      for (const client of required) {
+        assert.ok(
+          params.includes(client),
+          `${detector.name} must take ${client.name} by injection`,
+        );
+      }
+      assert.ok(
+        !params.includes(RemnawaveVersionService),
+        `${detector.name} must not read panel capabilities any more`,
       );
     }
   });

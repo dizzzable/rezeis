@@ -157,16 +157,31 @@ export function selectConcurrentSamples<T extends { readonly lastSeenMs: number 
 }
 
 /**
- * Parse an `ip-control` row's `userId` into a panel user id, or `null`.
+ * A live-connection row's owner, as a panel user id, or `null`.
  *
- * The vendored contract declares that field as a plain string with no numeric
- * constraint, and the call site used to do `Number.parseInt(value, 10)`, which
- * stops at the first non-digit: a uuid-shaped id like `3f2a-…` came back as the
- * number `3` and the row's IP samples were silently attributed to panel user
- * #3 — one customer's connections filed against another customer's name. A
- * value we cannot read is skipped, never approximated.
+ * ── Why this refuses rather than approximates ───────────────────────────────
+ * The call site used to do `Number.parseInt(value, 10)`, which reads a LEADING
+ * run of digits and stops: a uuid-shaped id like `3f2a-…` came back as the
+ * number `3`, and that row's IP samples were attributed to panel user #3 —
+ * one customer's connections filed against another customer's name, in the
+ * detector that decides whether to accuse somebody of sharing their account.
+ * So the WHOLE string must be digits. A value we cannot read is skipped and
+ * counted as unreadable; it is never guessed at.
+ *
+ * ── Why it accepts a number AND a string ────────────────────────────────────
+ * The contract declares `userId` as a number, so the numeric arm is the normal
+ * path. The string arm is reachable only when a response fails the pinned
+ * schema and `PanelCommandExecutor` hands back the raw wire body — and it IS
+ * reachable, which is the point: a `'42'` refused there would take a genuine
+ * offender's connections out of the count and read as innocence.
+ *
+ * This lives here, and not beside its one caller, because the hazard above is
+ * the reason the function exists and `test/sharing-detection.util.spec.ts`
+ * already guards every case of it. A local copy in the detector — which is
+ * what this replaced — meant the rule and its test could drift apart.
  */
-export function parsePanelId(value: string): number | null {
+export function parsePanelId(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null;
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   // The WHOLE string must be digits — not merely start with them.

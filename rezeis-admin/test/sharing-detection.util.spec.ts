@@ -171,6 +171,31 @@ describe('parsePanelId', () => {
     assert.equal(parsePanelId('-1'), null);
     assert.equal(parsePanelId('99999999999999999999999'), null);
   });
+
+  it('takes the number the contract actually declares', () => {
+    // `userId` is a number on 3.x, so this is the NORMAL path — the string
+    // cases above survive only for the executor's drift arm, where a response
+    // that fails the pinned schema comes back as raw wire bytes.
+    assert.equal(parsePanelId(7), 7);
+    assert.equal(parsePanelId(0), 0);
+  });
+
+  it('refuses a number that is not a whole, safe id', () => {
+    // `4471.5` and `1e21` both pass the vendor's own coercing param schema,
+    // and `String()` renders them as `'4471.5'` and `'1e+21'` — neither
+    // addresses a profile. A row we cannot attribute is skipped, not rounded
+    // onto whoever is nearest.
+    assert.equal(parsePanelId(4471.5), null);
+    assert.equal(parsePanelId(1e21), null);
+    assert.equal(parsePanelId(Number.NaN), null);
+    assert.equal(parsePanelId(Number.POSITIVE_INFINITY), null);
+  });
+
+  it('refuses everything that is neither a number nor a string', () => {
+    for (const value of [null, undefined, {}, [], true]) {
+      assert.equal(parsePanelId(value), null, JSON.stringify(value) ?? 'undefined');
+    }
+  });
 });
 
 describe('isNetworkSharingOffender', () => {

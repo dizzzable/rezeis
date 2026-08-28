@@ -11,7 +11,7 @@ import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawav
 import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SubscriptionUaDetectors } from '../src/modules/anti-fraud/detectors/subscription-ua-detectors';
 import { FraudSignalCandidate } from '../src/modules/anti-fraud/interfaces/fraud-signal.interface';
-import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+import { panelDevicesDouble } from './fixtures/anti-fraud-panel-clients';
 import {
   AntiFraudService,
   AUTO_RESOLVED_NOTE,
@@ -145,7 +145,7 @@ function build(input: {
     remnawaveDetectors,
     sharingDetectors,
     subscriptionUaDetectors,
-    {} as unknown as RemnawaveApiService,
+    panelDevicesDouble().client,
     systemEvents,
   );
 
@@ -804,7 +804,7 @@ describe('HIGH-severity notifications are throttled per affected user', () => {
       {
         detectSubscriptionUaTunnel: () => Promise.resolve([]),
       } as unknown as SubscriptionUaDetectors,
-      {} as unknown as RemnawaveApiService,
+      panelDevicesDouble().client,
       {
         info: () => undefined,
         warn: (type: string) => {

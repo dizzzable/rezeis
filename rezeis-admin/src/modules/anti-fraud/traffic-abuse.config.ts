@@ -1,7 +1,7 @@
 /**
  * Tunables for the per-user node-traffic-abuse detector.
  *
- * Powered by Remnawave 2.8's `bandwidth-stats/nodes/users` endpoint (per-user
+ * Powered by the panel's `bandwidth-stats/nodes/users` endpoint (per-user
  * traffic across nodes). The detector is **advisory** — it flags users whose
  * bandwidth is a clear outlier (heavy enough in absolute terms AND far above
  * the cohort), which on a VPN usually means torrenting / bulk transfer / a
@@ -24,7 +24,18 @@
 import type { NumericTunableRange } from './sharing-detection.config';
 
 export interface TrafficAbuseConfig {
-  /** Master switch for the detector (also gated by the 2.8 capability). */
+  /**
+   * Master switch for the detector, and now the ONLY switch.
+   *
+   * It used to say "also gated by the 2.8 capability", and that second gate
+   * is gone with 2.x support. Worth recording why its removal is a gain
+   * rather than a loss of safety: the capability answered "stand down" for an
+   * UNKNOWN panel version as well as for an old one, and unknown is the state
+   * a perfectly healthy panel passes through whenever the version probe has a
+   * bad moment. So the detector fell silent exactly when silence is
+   * indistinguishable from a clean panel. A 2.x panel is now turned away
+   * centrally by `LegacyPanelRefusal`, once, with a message naming the remedy.
+   */
   readonly enabled: boolean;
   /** Absolute floor: ignore anyone below this many GB over the panel window. */
   readonly minGb: number;

@@ -2,10 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { FraudSignalSeverity } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { RemnawaveSubscriptionRequestEntryInterface } from '../../remnawave/interfaces/remnawave-extended.interface';
-import { describeStrictOutcome } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
-import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { panelIdentityLookup } from '../../remnawave/services/panel-user-address';
+import {
+  PanelInfraClient,
+  type PanelReadOutcome,
+  type PanelSubscriptionRequestHistoryPage,
+} from '../../remnawave/services/panel-infra.client';
 import { FraudSignalCandidate } from '../interfaces/fraud-signal.interface';
 import { AntiFraudTunablesService } from '../services/anti-fraud-tunables.service';
 import { SubscriptionUaDetectionConfig } from '../subscription-ua-detection.config';
@@ -37,18 +39,25 @@ import { findProxyConfigUri, redactUserAgentForEvidence } from '../subscription-
  * base that is actively encouraged to try several clients.
  *
  * WHAT IT CAN AND CANNOT SEE.
- * `GET /api/subscription-request-history` takes `size` and `start` and nothing
- * else on both 2.7.4 and 2.8.0 — no user filter, no time filter. So this reads
- * the newest `uaRequestPageSize` rows once per run and windows them itself.
- * When the whole page is newer than the window, the window was not fully
- * covered and the run says so rather than implying it saw everything.
- * Under-detection is the acceptable direction here; a silent claim of full
- * coverage is not.
+ * `GET /api/subscription-request-history` takes `start` and `size` and nothing
+ * this detector can use — no user filter, no time filter. So it reads the
+ * newest `uaRequestPageSize` rows once per run and windows them itself. When
+ * the whole page is newer than the window, the window was not fully covered
+ * and the run says so rather than implying it saw everything. Under-detection
+ * is the acceptable direction here; a silent claim of full coverage is not.
  *
- * COST. One HTTP call in the overwhelmingly common case. The panel user list —
- * needed only to turn 2.8.0's numeric `userId` into a uuid — is fetched ONLY
- * once a config-carrying UA has actually been seen, so a clean panel never
- * pays for the 50-page walk.
+ * COST. ONE HTTP call, always — which is a change, and a simplification the
+ * 3.x-only target hands over for free. A record identifies its owner by the
+ * panel's numeric `userId`, and on 3.x that decimal IS the identity
+ * `Subscription.remnawaveId` holds, so there is nothing left to translate.
+ * The whole-panel user walk this used to run whenever a 2.8.0 record turned up
+ * — 50 pages, and a run ABANDONED outright when the list came back
+ * untrustworthy — is gone with the panel version that needed it.
+ *
+ * A row created back in the 2.x era still stores a uuid in `remnawaveId`, and
+ * that is handled where it belongs: `panelIdentityLookup` matches the numeric
+ * angle through `Subscription.remnawavePanelId` as well as the string one, so
+ * the deep link survives the upgrade without a panel round-trip.
  *
  * WIRED, SWITCHED OFF BY DEFAULT.
  * Registered in `AntiFraudService.runDetectors` as `observational` — it reads a
@@ -69,7 +78,7 @@ export class SubscriptionUaDetectors {
 
   public constructor(
     private readonly prismaService: PrismaService,
-    private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly infraClient: PanelInfraClient,
     private readonly tunablesService: AntiFraudTunablesService,
   ) {}
 
@@ -107,17 +116,21 @@ export class SubscriptionUaDetectors {
     // detector off cannot auto-resolve the signals it already raised.
     if (!config.enableSubscriptionUaTunnel) return [];
     try {
-      const page = await this.remnawaveApiService.strictGetSubscriptionRequestHistory(
-        config.uaRequestPageSize,
-      );
+      const requestedSize = config.uaRequestPageSize;
+      const page = await this.infraClient.getSubscriptionRequestHistory({
+        start: 0,
+        size: requestedSize,
+      });
       if (page.kind !== 'ok') {
-        // Loud, and specific about which failure it was: an `invalidContract`
-        // here means the panel changed the log's shape and this detector is
-        // blind until someone looks, which is a different operator action from
-        // "the panel was briefly down".
+        // Loud, and specific about which failure it was: `unreadable` here
+        // means the panel answered `2xx` with a body carrying no `records`
+        // array — the log's shape changed and this detector is blind until
+        // someone looks, which is a different operator action from "the panel
+        // was briefly down". Reporting that as an empty log would let a panel
+        // that changed shape read as a panel where nothing happened.
         this.logger.warn(
-          `Subscription-UA detection skipped: the subscription request log is not readable ` +
-            `(${describeStrictOutcome(page)})`,
+          'Subscription-UA detection skipped: the subscription request log is not readable ' +
+            `(${describeReadFailure(page)})`,
         );
         return [];
       }
@@ -125,23 +138,26 @@ export class SubscriptionUaDetectors {
       const windowMinutes = config.uaEvidenceWindowMinutes;
       const nowMs = now.getTime();
       const windowStartMs = nowMs - windowMinutes * 60_000;
-      const records = page.value.records;
+      const records = page.data.records;
 
       let undatedRecords = 0;
+      let unattributableRecords = 0;
       let oldestInPageMs: number | null = null;
-      const windowed: RemnawaveSubscriptionRequestEntryInterface[] = [];
+      const windowed: Array<{ readonly record: PanelRequestRecord; readonly atIso: string }> = [];
       for (const record of records) {
-        const atMs = Date.parse(record.requestedAt);
-        if (!Number.isFinite(atMs)) {
-          // A fetch we cannot place in time cannot be placed in the window
-          // either. Keeping it would let an arbitrarily old record be judged as
-          // if it had just happened.
+        // `requestAt` arrives as a `Date` on the validated path and as the wire
+        // string on the executor's drift path. Both are read; anything else is
+        // a fetch we cannot place in time, and a fetch we cannot place in time
+        // cannot be placed in the window either. Keeping it would let an
+        // arbitrarily old record be judged as if it had just happened.
+        const at = readInstant(record.requestAt);
+        if (at === null) {
           undatedRecords += 1;
           continue;
         }
-        oldestInPageMs = oldestInPageMs === null ? atMs : Math.min(oldestInPageMs, atMs);
-        if (atMs < windowStartMs) continue;
-        windowed.push(record);
+        oldestInPageMs = oldestInPageMs === null ? at.ms : Math.min(oldestInPageMs, at.ms);
+        if (at.ms < windowStartMs) continue;
+        windowed.push({ record, atIso: at.iso });
       }
       if (undatedRecords > 0) {
         this.logger.warn(
@@ -153,36 +169,56 @@ export class SubscriptionUaDetectors {
 
       // Coverage: the page is capped at `size` and cannot be filtered by time,
       // so a FULL page whose oldest row is still inside the window means the
-      // window extends past what we were served.
+      // window extends past what we were served. `requestedSize` is what THIS
+      // call asked for — the panel does not echo it back, and reading a size
+      // off the response would compare the page against itself.
       const windowFullyCovered =
-        records.length < page.value.requestedSize ||
+        records.length < requestedSize ||
         (oldestInPageMs !== null && oldestInPageMs < windowStartMs);
-      this.reportCoverage(windowFullyCovered, page.value.total, records.length, windowMinutes);
+      this.reportCoverage(windowFullyCovered, page.data.total, records.length, windowMinutes);
 
-      // Classify first, resolve identities second. The overwhelmingly common
-      // outcome is zero hits, and that outcome must not cost a panel-wide user
-      // walk.
       const hits: UaHit[] = [];
-      for (const record of windowed) {
+      for (const { record, atIso } of windowed) {
         const finding = findProxyConfigUri(record.userAgent);
         if (finding === null) continue;
+        // The identity, straight off the record. A 3.x request-log row carries
+        // the panel's numeric `userId` and nothing else, and its decimal
+        // rendering is exactly what `Subscription.remnawaveId` holds for a
+        // profile created on 3.x — so this is a format, not a lookup. It is
+        // also the fingerprint key, which is why an unreadable one is dropped
+        // rather than approximated: a wrong mapping does not mislabel a row, it
+        // files one customer's evidence against another.
+        const identity = readPanelUserIdentity(record.userId);
+        if (identity === null) {
+          unattributableRecords += 1;
+          continue;
+        }
         hits.push({
-          userUuid: record.userUuid,
-          panelUserId: record.panelUserId,
+          identity,
           scheme: finding.scheme,
           percentEncoded: finding.percentEncoded,
           // Redacted at the point of capture, never after: a `vless://` UA
           // carries the client uuid and a `trojan://` UA carries the password.
           evidence: redactUserAgentForEvidence(record.userAgent ?? ''),
-          requestedAt: record.requestedAt,
-          ipAddress: record.ipAddress,
+          requestedAt: atIso,
+          ipAddress: record.requestIp,
         });
+      }
+      if (unattributableRecords > 0) {
+        this.logger.warn(
+          `Subscription-UA detection dropped ${unattributableRecords} matching request record(s) ` +
+            'whose userId is not an integer panel id — they cannot be attributed to a user ' +
+            'without guessing',
+        );
       }
       if (hits.length === 0) return [];
 
-      const attributed = await this.attributeHits(hits);
-      if (attributed === null) return [];
-      if (attributed.size === 0) return [];
+      const attributed = new Map<string, UaHit[]>();
+      for (const hit of hits) {
+        const group = attributed.get(hit.identity);
+        if (group === undefined) attributed.set(hit.identity, [hit]);
+        else group.push(hit);
+      }
 
       const subscriptionUserIdByUuid = await this.resolveRezeisUserIds([...attributed.keys()]);
       const day = utcDay(now);
@@ -228,8 +264,11 @@ export class SubscriptionUaDetectors {
             // this row later has to know the run only saw part of its window.
             windowFullyCovered,
             recordsScanned: records.length,
-            panelLogTotal: page.value.total,
-            detectedVersion: page.detectedVersion,
+            panelLogTotal: page.data.total,
+            // `detectedVersion` is gone. It came off the legacy strict-outcome
+            // envelope, and it recorded which of 2.7.4 / 2.8.0 / 3.x answered —
+            // a question with one possible answer now, and a field an operator
+            // would read as still meaning something.
             samples: group.slice(0, MAX_SAMPLES_IN_METADATA).map((h) => ({
               at: h.requestedAt,
               ip: h.ipAddress,
@@ -246,69 +285,6 @@ export class SubscriptionUaDetectors {
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
-
-  /**
-   * Group hits by Remnawave uuid, resolving 2.8.0's numeric ids on the way.
-   *
-   * `null` means the run must be abandoned: 2.8.0 records identify their owner
-   * only by the panel-internal integer, and without a trustworthy user list
-   * that integer cannot become a uuid. Guessing is not available — the
-   * fingerprint is keyed by uuid, so a wrong mapping does not merely mislabel a
-   * row, it files one customer's evidence against another.
-   */
-  private async attributeHits(hits: readonly UaHit[]): Promise<Map<string, UaHit[]> | null> {
-    const byUuid = new Map<string, UaHit[]>();
-    const needsPanelLookup = hits.filter((h) => h.userUuid === null && h.panelUserId !== null);
-    const unattributable = hits.filter((h) => h.userUuid === null && h.panelUserId === null);
-    if (unattributable.length > 0) {
-      this.logger.warn(
-        `Subscription-UA detection dropped ${unattributable.length} matching request record(s) ` +
-          'carrying neither userUuid (2.7.4) nor userId (2.8.0) — they cannot be attributed to a ' +
-          'user without guessing',
-      );
-    }
-
-    let uuidByPanelId: Map<number, string> | null = null;
-    if (needsPanelLookup.length > 0) {
-      const bulk = await this.remnawaveApiService.strictGetAllPanelUsers();
-      if (bulk.kind !== 'ok') {
-        this.logger.warn(
-          `Subscription-UA detection skipped: ${needsPanelLookup.length} matching record(s) are ` +
-            'identified only by the panel-internal numeric id, and the panel user list needed to ' +
-            `resolve them is not trustworthy (${describeStrictOutcome(bulk)})`,
-        );
-        return null;
-      }
-      uuidByPanelId = new Map<number, string>();
-      for (const user of bulk.value.users) {
-        if (user.panelId !== null) uuidByPanelId.set(user.panelId, user.uuid);
-      }
-    }
-
-    let unresolvedPanelIds = 0;
-    for (const hit of hits) {
-      let uuid: string | null = hit.userUuid;
-      if (uuid === null && hit.panelUserId !== null) {
-        uuid = uuidByPanelId?.get(hit.panelUserId) ?? null;
-        if (uuid === null) {
-          unresolvedPanelIds += 1;
-          continue;
-        }
-      }
-      if (uuid === null) continue;
-      const group = byUuid.get(uuid);
-      if (group === undefined) byUuid.set(uuid, [hit]);
-      else group.push(hit);
-    }
-    if (unresolvedPanelIds > 0) {
-      this.logger.warn(
-        `Subscription-UA detection dropped ${unresolvedPanelIds} matching request record(s) whose ` +
-          'panel numeric id is absent from the panel user list — the user was most likely deleted ' +
-          'between the log write and this read',
-      );
-    }
-    return byUuid;
-  }
 
   /**
    * A degraded evidence window has to leave a trace, and a persistent one must
@@ -373,16 +349,101 @@ export class SubscriptionUaDetectors {
   }
 }
 
+/** One row of the panel's subscription-request log, as the contract declares it. */
+type PanelRequestRecord = PanelSubscriptionRequestHistoryPage['records'][number];
+
 /** One request record whose UA was found to carry a proxy config. */
 interface UaHit {
-  readonly userUuid: string | null;
-  readonly panelUserId: number | null;
+  /**
+   * The panel's numeric user id in decimal — the same string
+   * `Subscription.remnawaveId` holds for a profile created on 3.x, and the key
+   * both the fingerprint and the deep-link lookup use.
+   *
+   * The pair of nullable owner fields this replaces (`userUuid` for 2.7.4,
+   * `panelUserId` for 2.8.0) is gone with the versions that spelled it that
+   * way: a 3.x row carries one owner field and it is never absent.
+   */
+  readonly identity: string;
   readonly scheme: string;
   readonly percentEncoded: boolean;
   /** ALREADY REDACTED — never the raw UA. */
   readonly evidence: string;
+  /** ISO-8601, normalised — see {@link readInstant}. */
   readonly requestedAt: string;
   readonly ipAddress: string | null;
+}
+
+/**
+ * A panel timestamp as milliseconds plus the ISO string a signal carries.
+ *
+ * BOTH SHAPES ARE READ. The contract transforms `requestAt` into a `Date`, so
+ * that is what a validated response yields; on the executor's DRIFT path the
+ * panel's raw bytes come back and the field is the wire string. A reader that
+ * handled only one of them would drop every record on a drifted response — and
+ * "dropped" here means the fetch is judged as undated and never examined.
+ *
+ * `null` for anything that is not a placeable instant.
+ */
+function readInstant(value: unknown): { readonly ms: number; readonly iso: string } | null {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? { ms, iso: value.toISOString() } : null;
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    const ms = Date.parse(value);
+    // The panel's own characters, kept: an operator comparing a signal against
+    // the panel's request log should see the same string.
+    return Number.isFinite(ms) ? { ms, iso: value } : null;
+  }
+  return null;
+}
+
+/**
+ * A request record's owner, as the identity string rezeis stores.
+ *
+ * The contract declares `userId` as a number, so the string arm is only
+ * reachable on the drift path — but it is reachable, and refusing a `'4471'`
+ * there would drop a genuine sighting. The WHOLE string has to be digits:
+ * `Number.parseInt` reads a LEADING run and stops, so a uuid-shaped value would
+ * become panel user #3 and file one customer's evidence against another's name.
+ */
+function readPanelUserIdentity(value: unknown): string | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? String(value) : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? String(parsed) : null;
+}
+
+/**
+ * How a failed panel read is rendered into an operator-facing log line.
+ *
+ * `unreadable` is named separately from `rejected` on purpose: they are
+ * different operator actions. `rejected` is the panel saying no. `unreadable`
+ * is the panel saying yes and answering a body with no `records` array — a
+ * shape change somebody has to look at, and the case this detector must never
+ * report as an empty log.
+ */
+function describeReadFailure(outcome: PanelReadOutcome<unknown>): string {
+  switch (outcome.kind) {
+    case 'ok':
+      // Unreachable by construction — the caller checks `kind` first — but a
+      // silent empty string here would read as "no reason given" in the log.
+      return 'the read succeeded';
+    case 'rejected':
+      return `the panel refused it: HTTP ${outcome.status}${
+        outcome.code === null ? '' : ` ${outcome.code}`
+      }`;
+    case 'network':
+      return `nothing came back: ${outcome.detail}`;
+    case 'unconfigured':
+      return 'the Remnawave connection is not configured';
+    case 'invalid-request':
+      return `rezeis built the request wrong and it was never sent: ${outcome.detail}`;
+    case 'unreadable':
+      return `the panel answered a shape this build could not read: ${outcome.detail}`;
+  }
 }
 
 /*

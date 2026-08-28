@@ -11,16 +11,23 @@ import {
   ratioStrength,
 } from '../src/modules/anti-fraud/confidence.util';
 import { FraudDetectors } from '../src/modules/anti-fraud/detectors/fraud-detectors';
-import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
-import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import {
   NODE_USERS_BANDWIDTH_TOP_LIMIT,
-  RemnawaveApiService,
-} from '../src/modules/remnawave/services/remnawave-api.service';
-import { RemnawaveVersionService } from '../src/modules/remnawave/services/remnawave-version.service';
+  RemnawaveDetectors,
+} from '../src/modules/anti-fraud/detectors/remnawave-detectors';
+import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
+import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import type { StoredAntiFraudSettings } from '../src/modules/settings/utils/anti-fraud-settings.util';
 import { tunablesFromEnv } from './fixtures/anti-fraud-tunables';
+import {
+  hwidTopUsersPage,
+  nodeUsersBandwidth,
+  panelDevicesDouble,
+  panelInfraDouble,
+  panelNode,
+  panelOk,
+} from './fixtures/anti-fraud-panel-clients';
 
 /**
  * `confidence` has to be a reading of the evidence, not a per-detector label.
@@ -352,8 +359,10 @@ function sharingDetectors(input: {
     remnawaveMetricSample: { findMany: () => Promise.resolve([]) },
   } as unknown as PrismaService;
 
+  // The one call still made through the legacy adapter: the whole-panel user
+  // walk that supplies every subscriber's device limit and, through
+  // `complete`/`total`, the data-quality input this whole suite is about.
   const api = {
-    getHwidTopUsers: () => Promise.resolve(input.topUsers ?? []),
     strictGetAllPanelUsers: () =>
       Promise.resolve(
         strictOk({
@@ -362,23 +371,60 @@ function sharingDetectors(input: {
           complete: input.panelComplete ?? true,
         }),
       ),
-    getAllNodes: () =>
-      Promise.resolve(
-        (input.nodes ?? [{ uuid: 'n1', isConnected: true, isDisabled: false }]).map((n) => ({
-          ...n,
-          name: n.uuid,
-          countryCode: 'DE',
-          lastStatusChange: LONG_AGO,
-        })),
-      ),
-    fetchUsersIpsForNode: (uuid: string) => Promise.resolve(input.ipsByNode?.[uuid] ?? []),
   } as unknown as RemnawaveApiService;
 
-  const version = {
-    getCapabilities: () => Promise.resolve({ liveIpControl: true, bandwidthNodesUsers: true }),
-  } as unknown as RemnawaveVersionService;
+  // A 3.x top-users row carries the numeric id and no uuid, so the test's
+  // `userUuid` is resolved through the panel user list exactly as the panel
+  // would have keyed it.
+  const panelIdByUuid = new Map<string, number>();
+  for (const user of panelUsers) {
+    if (user.panelId !== null) panelIdByUuid.set(user.uuid, user.panelId);
+  }
+  const nodes = input.nodes ?? [{ uuid: 'n1', isConnected: true, isDisabled: false }];
+  const devices = panelDevicesDouble({
+    topUsers: panelOk(
+      hwidTopUsersPage(
+        (input.topUsers ?? []).map((row) => ({
+          id: panelIdByUuid.get(row.userUuid) ?? -1,
+          username: row.username,
+          devicesCount: row.devicesCount,
+        })),
+      ),
+    ),
+    nodeConnections: Object.fromEntries([
+      // Listed but unmentioned means READ AND QUIET, never "could not read".
+      ...nodes.map((n) => [n.uuid, []]),
+      ...Object.entries(input.ipsByNode ?? {}).map(([uuid, rows]) => [
+        uuid,
+        rows.map((row) => ({
+          userId: row.userId,
+          ips: row.ips.map((sample) => ({ ip: sample.ip, lastSeen: new Date(sample.lastSeen) })),
+        })),
+      ]),
+    ]) as never,
+  });
+  const infra = panelInfraDouble({
+    nodes: panelOk(
+      nodes.map((n) =>
+        panelNode({
+          uuid: n.uuid,
+          name: n.uuid,
+          countryCode: 'DE',
+          isConnected: n.isConnected,
+          isDisabled: n.isDisabled,
+          lastStatusChange: new Date(LONG_AGO),
+        }),
+      ),
+    ),
+  });
 
-  return new SharingDetectors(prisma, api, version, tunablesFromEnv(input.stored));
+  return new SharingDetectors(
+    prisma,
+    api,
+    devices.client,
+    infra.client,
+    tunablesFromEnv(input.stored),
+  );
 }
 
 /** One offender at `devices` against `limit`, on an otherwise empty panel. */
@@ -607,27 +653,29 @@ function trafficDetectors(input: {
     remnawaveMetricSample: { findMany: () => Promise.resolve([]) },
   } as unknown as PrismaService;
 
-  const api = {
-    getAllNodes: () =>
-      Promise.resolve(
-        (input.nodes ?? [{ uuid: 'a1', isConnected: true, isDisabled: false }]).map((n) => ({
-          ...n,
+  const infra = panelInfraDouble({
+    nodes: panelOk(
+      (input.nodes ?? [{ uuid: 'a1', isConnected: true, isDisabled: false }]).map((n) =>
+        panelNode({
+          uuid: n.uuid,
           name: n.uuid,
           countryCode: 'DE',
-          lastStatusChange: LONG_AGO,
+          isConnected: n.isConnected,
+          isDisabled: n.isDisabled,
+          lastStatusChange: new Date(LONG_AGO),
           usersOnline: 10,
-          trafficLimitBytes: null,
-          trafficUsedBytes: null,
-        })),
+        }),
       ),
-    getNodeUsersBandwidth: () => Promise.resolve(input.cohort),
-  } as unknown as RemnawaveApiService;
+    ),
+    nodeUsersBandwidth: panelOk(nodeUsersBandwidth(input.cohort)),
+  });
 
-  const version = {
-    getCapabilities: () => Promise.resolve({ bandwidthNodesUsers: true }),
-  } as unknown as RemnawaveVersionService;
-
-  return new RemnawaveDetectors(prisma, api, version, tunablesFromEnv(input.stored));
+  return new RemnawaveDetectors(
+    prisma,
+    panelDevicesDouble().client,
+    infra.client,
+    tunablesFromEnv(input.stored),
+  );
 }
 
 /** One heavy account plus `tail` ordinary ones. */

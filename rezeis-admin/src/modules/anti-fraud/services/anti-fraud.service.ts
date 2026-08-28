@@ -20,10 +20,10 @@ import {
 } from '../../../common/services/system-events.service';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import {
-  RemnawaveApiService,
-  RemnawaveDropConnectionsInput,
-  RemnawaveUserNodeIps,
-} from '../../remnawave/services/remnawave-api.service';
+  PanelDevicesClient,
+  type PanelDevicesOutcome,
+  type PanelDropConnectionsBody,
+} from '../../remnawave/services/panel-devices.client';
 import { FraudDetectors } from '../detectors/fraud-detectors';
 import { OperationalAlert, RemnawaveDetectors } from '../detectors/remnawave-detectors';
 import { SharingDetectors } from '../detectors/sharing-detectors';
@@ -111,7 +111,7 @@ const STALE_BUCKET_GRACE_MS = 24 * 60 * 60 * 1000;
  * signal is allowed to open.
  *
  * Until now the first detection was the accusation. A momentary panel state, a
- * transient IP reading, one `ip-control` response caught mid-handoff — each was
+ * transient IP reading, one live-connection job caught mid-handoff — each was
  * enough to file a row against a paying customer and, at HIGH, to page someone.
  * Three runs at the 5-minute cadence is ~15 minutes of the condition refusing to
  * go away, which is short enough that no genuine abuse escapes (the abuse has to
@@ -338,7 +338,7 @@ export class AntiFraudService {
     private readonly remnawaveDetectors: RemnawaveDetectors,
     private readonly sharingDetectors: SharingDetectors,
     private readonly subscriptionUaDetectors: SubscriptionUaDetectors,
-    private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly devicesClient: PanelDevicesClient,
     private readonly systemEventsService: SystemEventsService,
   ) {}
 
@@ -560,10 +560,20 @@ export class AntiFraudService {
 
   /**
    * Drops a flagged user's (or specific IPs') live connections across all
-   * nodes via Remnawave `ip-control`. Resolves the Remnawave subscription
-   * UUIDs from the signal (`metadata.remnawaveUuid` first, then the affected
-   * rezeis users' subscriptions). Writes an audit entry + FRAUD event; does
-   * not change the signal status (the operator still acknowledges/resolves).
+   * nodes. Resolves the panel's own user ids from the signal
+   * (`metadata.remnawaveUuid` first, then the affected rezeis users'
+   * subscriptions). Writes an audit entry + FRAUD event; does not change the
+   * signal status (the operator still acknowledges/resolves).
+   *
+   * THE USER ARM IS `userIds: number[]`, WHICH IS 3.x's SPELLING and the whole
+   * reason the identity resolution below is as fussy as it is. The 2.x arm was
+   * `userUuids: string[]`; a migration that turned a stored identity into an id
+   * with `Number.parseInt` would read a LEADING run of digits out of a 2.x-era
+   * uuid (`330f2b38-…` → `330`) — a valid-looking id belonging to somebody
+   * else, whose connections this call then drops. `PanelDevicesClient` takes
+   * numbers precisely so that parse cannot live in the client, and
+   * {@link resolveSignalPanelUserIds} is where it does live: digits-only, safe
+   * integer, or the identity is refused.
    */
   public async enforceDropConnections(input: {
     readonly signalId: string;
@@ -577,7 +587,7 @@ export class AntiFraudService {
     if (!signal) throw new NotFoundException('Fraud signal not found');
 
     const metadata = (signal.metadata as Record<string, unknown>) ?? {};
-    let dropBy: RemnawaveDropConnectionsInput['dropBy'];
+    let dropBy: PanelDropConnectionsBody['dropBy'];
     let auditTargets: readonly string[];
 
     if (input.mode === 'ip') {
@@ -588,23 +598,25 @@ export class AntiFraudService {
       dropBy = { by: 'ipAddresses', ipAddresses: [...ips] };
       auditTargets = ips;
     } else {
-      const uuids = await this.resolveSignalUserUuids(signal.affectedUserIds, metadata);
-      if (uuids.length === 0) {
+      const userIds = await this.resolveSignalPanelUserIds(signal.affectedUserIds, metadata);
+      if (userIds.length === 0) {
         throw new BadRequestException('Signal has no resolvable Remnawave users to drop');
       }
-      dropBy = { by: 'userUuids', userUuids: [...uuids] };
-      auditTargets = uuids;
+      dropBy = { by: 'userIds', userIds: [...userIds] };
+      auditTargets = userIds.map((id) => String(id));
     }
 
-    let outcome: { ok: boolean };
-    try {
-      outcome = await this.remnawaveApiService.dropConnections({
-        dropBy,
-        targetNodes: { target: 'allNodes' },
-      });
-    } catch (err) {
+    const outcome = await this.devicesClient.dropConnections({
+      dropBy,
+      targetNodes: { target: 'allNodes' },
+    });
+    if (outcome.kind !== 'ok') {
+      // A refusal is surfaced, never swallowed. This is an operator pressing a
+      // button and being told what happened — and `invalid-request` in
+      // particular is rezeis's own bug caught before the request left the
+      // process, which must not be reported to them as a panel outage.
       throw new BadRequestException(
-        `Failed to drop connections: ${(err as Error).message}`,
+        `Failed to drop connections: ${describeDropFailure(outcome)}`,
       );
     }
 
@@ -637,44 +649,106 @@ export class AntiFraudService {
       },
     );
 
-    return { ok: outcome.ok, dropped: { by: input.mode, count: auditTargets.length } };
+    // `ok` here means ACCEPTED, not done: the panel answers a drop with `202`
+    // and an empty body, so nothing on the wire confirms the connections
+    // actually went away.
+    return { ok: true, dropped: { by: input.mode, count: auditTargets.length } };
   }
 
   /**
-   * On-demand live IP drilldown for a signal's user (read-only) — used by the
-   * detail sheet. Returns the per-node IP breakdown via `ip-control`, or `[]`.
+   * On-demand live per-node IP drilldown for a signal's user (read-only) —
+   * used by the detail sheet.
+   *
+   * FLATTENS "we could not look" INTO `[]`, and this is the one place in the
+   * module where that is the right call. Everywhere else the distinction
+   * decides whether somebody is accused; here it decides what a panel renders
+   * in a drilldown an operator opened by hand, and the HTTP contract that
+   * drilldown is built on is a list. The failure is not lost — it is logged
+   * with its reason, and the operator is looking at the panel anyway.
+   *
+   * The timestamps are normalised to ISO strings on the way out. The contract
+   * transforms `lastSeen` into a `Date` while the executor's drift path hands
+   * back the wire string, and a drilldown that changes its payload shape
+   * depending on whether the panel's response validated is a drilldown that
+   * breaks intermittently.
    */
-  public async getSignalLiveIps(signalId: string): Promise<readonly RemnawaveUserNodeIps[]> {
+  public async getSignalLiveIps(signalId: string): Promise<readonly FraudSignalLiveNodeIps[]> {
     const signal = await this.prismaService.fraudSignal.findUnique({
       where: { id: signalId },
     });
     if (!signal) throw new NotFoundException('Fraud signal not found');
     const metadata = (signal.metadata as Record<string, unknown>) ?? {};
-    const uuids = await this.resolveSignalUserUuids(signal.affectedUserIds, metadata);
-    if (uuids.length === 0) return [];
-    return this.remnawaveApiService.fetchUserIps(uuids[0]);
+    const userIds = await this.resolveSignalPanelUserIds(signal.affectedUserIds, metadata);
+    const userId = userIds[0];
+    if (userId === undefined) return [];
+    const nodes = await this.devicesClient.fetchUserConnections(userId);
+    if (nodes === null) {
+      this.logger.warn(
+        `Live IP drilldown for fraud signal ${signalId}: the panel could not be read for user ` +
+          `${userId} — the empty result is "we could not look", not "this user is offline"`,
+      );
+      return [];
+    }
+    return nodes.map((node) => ({
+      nodeUuid: node.nodeUuid,
+      nodeName: node.nodeName,
+      countryCode: node.countryCode.length > 0 ? node.countryCode : null,
+      ips: node.ips.map((sample) => ({
+        ip: sample.ip,
+        lastSeen: readInstantIso(sample.lastSeen),
+      })),
+    }));
   }
 
   /**
-   * Resolves a signal's affected users to Remnawave subscription UUIDs.
-   * Prefers `metadata.remnawaveUuid` (sharing signals carry it) and falls
-   * back to the affected rezeis users' subscriptions.
+   * Resolves a signal's affected users to the panel's own NUMERIC user ids.
+   *
+   * Prefers `metadata.remnawaveUuid` (every sharing and UA signal carries it)
+   * and falls back to the affected rezeis users' subscriptions.
+   *
+   * TWO ANGLES, because one is not enough on a panel that used to be 2.x. The
+   * stored `remnawaveId` is the panel's identity as a string — a decimal id for
+   * a profile created on 3.x, and a UUID, forever, for one created before the
+   * operator upgraded. `Subscription.remnawavePanelId` carries the numeric id
+   * for both, because every ordinary read of a 2.x row already returned one, so
+   * it is the column that recovers the second population.
+   *
+   * DIGITS-ONLY, and never `Number.parseInt` on its own: `parseInt` reads a
+   * LEADING run of digits and stops, so `330f2b38-1362-…` parses to `330` — a
+   * valid-looking id belonging to a different customer, whose live connections
+   * this call would then drop.
    */
-  private async resolveSignalUserUuids(
+  private async resolveSignalPanelUserIds(
     affectedUserIds: readonly string[],
     metadata: Record<string, unknown>,
-  ): Promise<readonly string[]> {
-    const fromMeta = typeof metadata.remnawaveUuid === 'string' ? [metadata.remnawaveUuid] : [];
-    if (fromMeta.length > 0) return fromMeta;
+  ): Promise<readonly number[]> {
+    const identity = typeof metadata.remnawaveUuid === 'string' ? metadata.remnawaveUuid : null;
+    if (identity !== null && identity.length > 0) {
+      const direct = readPanelUserId(identity);
+      if (direct !== null) return [direct];
+      // A 2.x-era uuid in the metadata. The numeric id it maps to is on the
+      // subscription row, and looking it up is the only alternative to
+      // guessing.
+      const rows = await this.prismaService.subscription.findMany({
+        where: { remnawaveId: identity },
+        select: { remnawavePanelId: true },
+      });
+      const mapped = dedupeIds(rows.map((row) => row.remnawavePanelId));
+      if (mapped.length > 0) return mapped;
+      this.logger.warn(
+        `Fraud signal identity ${identity} is not a numeric panel id and no subscription row ` +
+          'records one for it — the panel cannot be told which user to act on',
+      );
+      return [];
+    }
     if (affectedUserIds.length === 0) return [];
     const subs = await this.prismaService.subscription.findMany({
       where: { userId: { in: [...affectedUserIds] }, remnawaveId: { not: null } },
-      select: { remnawaveId: true },
+      select: { remnawaveId: true, remnawavePanelId: true },
     });
-    const uuids = subs
-      .map((s) => s.remnawaveId)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0);
-    return [...new Set(uuids)];
+    return dedupeIds(
+      subs.map((s) => s.remnawavePanelId ?? readPanelUserId(s.remnawaveId ?? '')),
+    );
   }
 
   /**
@@ -769,9 +843,9 @@ export class AntiFraudService {
         //
         // AUTO-RESOLVE. It reads the panel's subscription-request log, and returns
         // `[]` for a panel that is unreachable, a log whose shape it no longer
-        // recognises, timestamps it cannot parse, 2.8.0 ids it cannot attribute,
-        // and for being switched off in the panel. None of those mean the
-        // condition cleared, so an empty run must never close an open signal.
+        // recognises, timestamps it cannot parse, and for being switched off in
+        // the panel. None of those mean the condition cleared, so an empty run
+        // must never close an open signal.
         //
         // HYSTERESIS — the same declaration also gates it, and it should be gated.
         // What a gated run costs it here is ~15 minutes and nothing else: the
@@ -783,10 +857,9 @@ export class AntiFraudService {
         // detector has already flagged as `windowFullyCovered: false` and warned
         // about. Against that: this is a UA *heuristic* filing against a paying
         // customer, it is new and unproven in production, and its inputs flicker
-        // (a truncated UA, a panel user list momentarily missing the id a 2.8.0
-        // record needs). Ungating it would buy back a quarter of an hour on a
-        // LOW/MEDIUM advisory signal in exchange for letting one bad read accuse
-        // somebody. Gated.
+        // (a truncated UA, a log page that scrolled). Ungating it would buy back
+        // a quarter of an hour on a LOW/MEDIUM advisory signal in exchange for
+        // letting one bad read accuse somebody. Gated.
         evidence: 'observational',
         run: () => this.subscriptionUaDetectors.detectSubscriptionUaTunnel(now),
       },
@@ -2128,6 +2201,93 @@ function extractIps(metadata: Record<string, unknown>): readonly string[] {
     })
     .filter((ip): ip is string => ip !== null && ip.length > 0);
   return [...new Set(ips)];
+}
+
+/**
+ * One node a flagged user is connected to, as the drilldown endpoint serves it.
+ *
+ * Declared here rather than re-exported from the panel client because it is a
+ * WIRE shape: `GET /admin/fraud/signals/:id/live-ips` returns it verbatim, and
+ * the client's own type follows the vendor contract — including a `lastSeen`
+ * that is a `Date` after validation and a string after drift. Pinning the
+ * response here is what stops the admin SPA's payload changing shape depending
+ * on whether the panel's answer matched the pinned contract.
+ */
+export interface FraudSignalLiveNodeIps {
+  readonly nodeUuid: string;
+  readonly nodeName: string;
+  readonly countryCode: string | null;
+  readonly ips: ReadonlyArray<{ readonly ip: string; readonly lastSeen: string | null }>;
+}
+
+/**
+ * Why a drop was not accepted, in words an operator can act on.
+ *
+ * `invalid-request` is called out separately and deliberately: it is rezeis's
+ * own bug, caught by the contract before anything left the process, and telling
+ * an operator "the panel refused" about it sends them to look at a healthy
+ * panel.
+ */
+function describeDropFailure(outcome: PanelDevicesOutcome<unknown>): string {
+  switch (outcome.kind) {
+    case 'ok':
+      // Unreachable — the caller checks `kind` first — but an empty string here
+      // would surface to the operator as a bare "Failed to drop connections:".
+      return 'the panel accepted it';
+    case 'rejected':
+      return `the panel refused it (HTTP ${outcome.status}${
+        outcome.code === null ? '' : ` ${outcome.code}`
+      })${outcome.detail === null ? '' : `: ${outcome.detail}`}`;
+    case 'network':
+      return `the panel did not answer: ${outcome.detail}`;
+    case 'unconfigured':
+      return 'the Remnawave connection is not configured';
+    case 'invalid-request':
+      return `rezeis built the request wrong, so nothing was sent: ${outcome.detail}`;
+    case 'unreadable':
+      return `the panel answered a shape this build could not read: ${outcome.detail}`;
+  }
+}
+
+/**
+ * A panel identity as its numeric user id, or `null`.
+ *
+ * The WHOLE string has to be digits. `Number.parseInt` reads a LEADING run and
+ * stops, so a 2.x-era uuid (`330f2b38-1362-46ab-…`) would come back as `330` —
+ * a perfectly valid-looking id belonging to somebody else, and this value
+ * decides whose connections get dropped.
+ */
+function readPanelUserId(identity: string): number | null {
+  const trimmed = identity.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/** Safe-integer ids only, deduped, order preserved. */
+function dedupeIds(values: ReadonlyArray<number | null | undefined>): readonly number[] {
+  const seen = new Set<number>();
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isSafeInteger(value)) seen.add(value);
+  }
+  return [...seen];
+}
+
+/**
+ * A panel timestamp as ISO-8601, reading BOTH the `Date` the contract produces
+ * and the wire string the executor's drift path hands back. `null` for anything
+ * that is not a placeable instant, so a drilldown row never carries a
+ * timestamp nobody can interpret.
+ */
+function readInstantIso(value: unknown): string | null {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? value.toISOString() : null;
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    return Number.isFinite(Date.parse(value)) ? value : null;
+  }
+  return null;
 }
 
 function mapSignal(row: FraudSignal): FraudSignalInterface {

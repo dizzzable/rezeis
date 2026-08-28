@@ -7,11 +7,19 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
 import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { AntiFraudTunablesUnavailableError } from '../src/modules/anti-fraud/services/anti-fraud-tunables.service';
+import { PanelInfraClient } from '../src/modules/remnawave/services/panel-infra.client';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
-import { RemnawaveVersionService } from '../src/modules/remnawave/services/remnawave-version.service';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import type { StoredAntiFraudSettings } from '../src/modules/settings/utils/anti-fraud-settings.util';
 import { tunablesFromEnv, tunablesThatFail } from './fixtures/anti-fraud-tunables';
+import {
+  hwidTopUsersPage,
+  nodeUsersBandwidth,
+  panelDevicesDouble,
+  panelInfraDouble,
+  panelNode,
+  panelOk,
+} from './fixtures/anti-fraud-panel-clients';
 
 /**
  * The end of the wire: a value an operator saved in the panel has to change what
@@ -34,36 +42,34 @@ function sharingDetectors(stored: StoredAntiFraudSettings, scanned: string[] = [
   } as unknown as PrismaService;
 
   const api = {
-    getHwidTopUsers: () =>
-      Promise.resolve([
-        { userUuid: 'uuid-1', username: 'sharer', telegramId: null, devicesCount: 9, lastSeenAt: null },
-      ]),
     strictGetAllPanelUsers: () =>
       Promise.resolve(
         strictOk({ users: [{ uuid: 'uuid-1', panelId: 1, hwidDeviceLimit: 2 }], total: 1 }),
       ),
-    getAllNodes: () =>
-      Promise.resolve(
-        ['n1', 'n2', 'n3'].map((uuid) => ({
-          uuid,
-          name: uuid,
-          countryCode: 'DE',
-          isConnected: true,
-          isDisabled: false,
-          lastStatusChange: LONG_AGO,
-        })),
-      ),
-    fetchUsersIpsForNode: (nodeUuid: string) => {
-      scanned.push(nodeUuid);
-      return Promise.resolve([]);
-    },
   } as unknown as RemnawaveApiService;
 
-  const version = {
-    getCapabilities: () => Promise.resolve({ liveIpControl: true, bandwidthNodesUsers: true }),
-  } as unknown as RemnawaveVersionService;
+  const devices = panelDevicesDouble({
+    // A 3.x top-users row is keyed by the numeric panel id — `panelId: 1` above.
+    topUsers: panelOk(hwidTopUsersPage([{ id: 1, username: 'sharer', devicesCount: 9 }])),
+    nodeConnections: { n1: [], n2: [], n3: [] },
+  });
+  const fetchNodeConnections = devices.client.fetchNodeConnections.bind(devices.client);
+  (devices.client as { fetchNodeConnections: unknown }).fetchNodeConnections = (
+    nodeUuid: string,
+  ) => {
+    scanned.push(nodeUuid);
+    return fetchNodeConnections(nodeUuid);
+  };
 
-  return new SharingDetectors(prisma, api, version, tunablesFromEnv(stored));
+  const infra = panelInfraDouble({
+    nodes: panelOk(
+      ['n1', 'n2', 'n3'].map((uuid) =>
+        panelNode({ uuid, name: uuid, lastStatusChange: new Date(LONG_AGO) }),
+      ),
+    ),
+  });
+
+  return new SharingDetectors(prisma, api, devices.client, infra.client, tunablesFromEnv(stored));
 }
 
 describe('the sharing detectors run on the panel value, not the environment', () => {
@@ -129,13 +135,11 @@ describe('the sharing detectors run on the panel value, not the environment', ()
     const prisma = {
       subscription: { findMany: () => Promise.resolve([]) },
     } as unknown as PrismaService;
-    const api = {
-      getHwidTopUsers: () => Promise.resolve([]),
-    } as unknown as RemnawaveApiService;
     const detectors = new SharingDetectors(
       prisma,
-      api,
-      {} as unknown as RemnawaveVersionService,
+      {} as unknown as RemnawaveApiService,
+      panelDevicesDouble().client,
+      panelInfraDouble().client,
       tunablesThatFail(),
     );
 
@@ -170,32 +174,32 @@ function trafficDetectors(stored: StoredAntiFraudSettings, probed: string[][] = 
     remnawaveMetricSample: { findMany: () => Promise.resolve([]) },
   } as unknown as PrismaService;
 
-  const api = {
-    getAllNodes: () =>
+  const infra = {
+    getNodes: () =>
       Promise.resolve(
-        ['a1', 'b2', 'c3'].map((uuid) => ({
-          uuid,
-          name: uuid,
-          countryCode: 'DE',
-          isConnected: true,
-          isDisabled: false,
-          lastStatusChange: LONG_AGO,
-          usersOnline: 10,
-          trafficLimitBytes: null,
-          trafficUsedBytes: null,
-        })),
+        panelOk(
+          ['a1', 'b2', 'c3'].map((uuid) =>
+            panelNode({
+              uuid,
+              name: uuid,
+              lastStatusChange: new Date(LONG_AGO),
+              usersOnline: 10,
+            }),
+          ),
+        ),
       ),
-    getNodeUsersBandwidth: (uuids: readonly string[]) => {
-      probed.push([...uuids]);
-      return Promise.resolve(COHORT);
+    getNodeUsersBandwidth: (request: { nodeUuids: readonly string[] }) => {
+      probed.push([...request.nodeUuids]);
+      return Promise.resolve(panelOk(nodeUsersBandwidth(COHORT)));
     },
-  } as unknown as RemnawaveApiService;
+  } as unknown as PanelInfraClient;
 
-  const version = {
-    getCapabilities: () => Promise.resolve({ bandwidthNodesUsers: true }),
-  } as unknown as RemnawaveVersionService;
-
-  return new RemnawaveDetectors(prisma, api, version, tunablesFromEnv(stored));
+  return new RemnawaveDetectors(
+    prisma,
+    panelDevicesDouble().client,
+    infra,
+    tunablesFromEnv(stored),
+  );
 }
 
 describe('the traffic-abuse detector runs on the panel value, not the environment', () => {
@@ -254,8 +258,8 @@ describe('the traffic-abuse detector runs on the panel value, not the environmen
     process.env.ANTIFRAUD_NODE_TRAFFIC_USER_ENABLED = 'true';
     const detectors = new RemnawaveDetectors(
       {} as unknown as PrismaService,
-      { getAllNodes: () => Promise.resolve([]) } as unknown as RemnawaveApiService,
-      {} as unknown as RemnawaveVersionService,
+      panelDevicesDouble().client,
+      panelInfraDouble().client,
       tunablesThatFail(),
     );
     await assert.rejects(
@@ -270,12 +274,8 @@ describe('the traffic-abuse detector runs on the panel value, not the environmen
     // this run would produce offenders instead of rejecting.
     const detectors = new RemnawaveDetectors(
       { remnawaveMetricSample: { findMany: () => Promise.resolve([]) } } as unknown as PrismaService,
-      {
-        getAllNodes: () => Promise.resolve([]),
-        getNodeUsersBandwidth: () => Promise.resolve(COHORT),
-      } as unknown as RemnawaveApiService,
-      { getCapabilities: () => Promise.resolve({ bandwidthNodesUsers: true }) } as unknown as
-        RemnawaveVersionService,
+      panelDevicesDouble().client,
+      panelInfraDouble({ nodeUsersBandwidth: panelOk(nodeUsersBandwidth(COHORT)) }).client,
       tunablesThatFail(),
     );
     await assert.rejects(

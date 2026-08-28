@@ -15,6 +15,18 @@ import {
 import { resolveSharingDetectionConfig } from '../src/modules/anti-fraud/sharing-detection.config';
 import { tunablesFromEnv } from './fixtures/anti-fraud-tunables';
 import {
+  hwidTopUsersPage,
+  panelDevicesDouble,
+  panelInfraDouble,
+  panelNode,
+  panelOk,
+  type PanelDevicesDoubleInput,
+} from './fixtures/anti-fraud-panel-clients';
+import type {
+  PanelNode,
+  PanelReadOutcome,
+} from '../src/modules/remnawave/services/panel-infra.client';
+import {
   subscriptionFindManyDouble,
   type SubscriptionQuery,
 } from './fixtures/subscription-where';
@@ -44,19 +56,52 @@ interface SnapshotNode {
 }
 
 interface RemnaMock {
-  hwidTopUsers?: Array<{ userUuid: string; username: string; telegramId: string | null; devicesCount: number; lastSeenAt: string | null }>;
+  /**
+   * Top-users rows, still declared by the panel UUID they belong to.
+   *
+   * A 3.x panel does NOT send a uuid on this row — it sends `{ id, username,
+   * devicesCount }` and the numeric id is the only identity there is — so the
+   * harness resolves `userUuid` to the `panelId` of the matching `panelUsers`
+   * entry and hands the detector what the panel would really have sent. Writing
+   * the tests in terms of the profile keeps them about behaviour; a uuid with
+   * no matching panel user deliberately becomes an id nothing can be joined to,
+   * which is how the "we saw a device-heavy row we cannot judge" path is
+   * reached.
+   */
+  hwidTopUsers?: Array<{
+    userUuid: string;
+    username: string;
+    telegramId?: string | null;
+    devicesCount: number;
+    lastSeenAt?: string | null;
+  }>;
+  /** Overrides `hwidTopUsers` when the read itself is what a test is about. */
+  hwidTopUsersOutcome?: PanelDevicesDoubleInput['topUsers'];
   panelUsers?: Array<{ uuid: string; panelId: number | null; hwidDeviceLimit: number }>;
   /** Overrides `panelUsers` to simulate a bulk read the adapter refused. */
   panelBulkOutcome?: RemnawaveStrictOutcome<unknown>;
   nodes?: NodeMock[];
+  /** Overrides `nodes` when the node READ itself is what a test is about. */
+  nodesOutcome?: PanelReadOutcome<readonly PanelNode[]>;
   /** `RemnawaveMetricSample.nodesSnapshot` rows inside the stability window. */
   snapshots?: SnapshotNode[][];
-  usersIpsByNode?: Record<string, Array<{ userId: string; ips: Array<{ ip: string; lastSeen: string }> }>>;
+  /**
+   * Live connections per node uuid.
+   *
+   * A node listed in `nodes` but absent here was READ AND WAS QUIET (`[]`) —
+   * the state most of these tests are about. An explicit `null` is the other
+   * fact entirely: the node could not be read. The two must never be spelled
+   * the same way, which is why a test that means the second has to say it.
+   */
+  usersIpsByNode?: Record<
+    string,
+    Array<{ userId: string | number; ips: Array<{ ip: string; lastSeen: string }> }> | null
+  >;
 }
 
 interface Harness {
   readonly detectors: SharingDetectors;
-  /** Node uuids passed to `fetchUsersIpsForNode`, in call order. */
+  /** Node uuids passed to `fetchNodeConnections`, in call order. */
   readonly scannedNodeUuids: string[];
   /** Every `subscription.findMany`: the `where` sent and the rows it selected. */
   readonly subscriptionQueries: readonly SubscriptionQuery<SubRow>[];
@@ -102,36 +147,103 @@ function makeHarness(remna: RemnaMock, subs: SubRow[] = []): Harness {
     },
   } as unknown as PrismaService;
 
+  // The one call the detectors still make through the legacy adapter: the
+  // whole-panel user walk that supplies every subscriber's device limit.
   const remnaMock = {
-    getHwidTopUsers: () => Promise.resolve(remna.hwidTopUsers ?? []),
     strictGetAllPanelUsers: () =>
       Promise.resolve(
         remna.panelBulkOutcome ??
           strictOk({ users: remna.panelUsers ?? [], total: (remna.panelUsers ?? []).length }),
       ),
-    // Nodes default to "last changed three days ago" so a test that does not
-    // care about stability gets a quiet panel rather than an accidental flap.
-    getAllNodes: () =>
-      Promise.resolve(
-        (remna.nodes ?? []).map((n) => ({
-          ...n,
-          lastStatusChange: n.lastStatusChange === undefined ? LONG_AGO : n.lastStatusChange,
-        })),
-      ),
-    fetchUsersIpsForNode: (nodeUuid: string) => {
-      scannedNodeUuids.push(nodeUuid);
-      return Promise.resolve(remna.usersIpsByNode?.[nodeUuid] ?? []);
-    },
   } as unknown as RemnawaveApiService;
 
-  // ip-control detector is gated on the 2.8 `liveIpControl` capability; the
-  // tests assume a 2.8 panel so the detector actually runs.
-  const versionMock = {
-    getCapabilities: () => Promise.resolve({ liveIpControl: true, bandwidthNodesUsers: true }),
-  } as unknown as import('../src/modules/remnawave/services/remnawave-version.service').RemnawaveVersionService;
+  const panelUsers = remna.panelUsers ?? [];
+  const panelIdByUuid = new Map<string, number>();
+  for (const user of panelUsers) {
+    if (user.panelId !== null) panelIdByUuid.set(user.uuid, user.panelId);
+  }
+  /** An id no panel user carries, so a uuid nothing matches stays unjoinable. */
+  let syntheticId = 900_000;
+
+  const devices = panelDevicesDouble({
+    topUsers:
+      remna.hwidTopUsersOutcome ??
+      panelOk(
+        hwidTopUsersPage(
+          (remna.hwidTopUsers ?? []).map((row) => ({
+            id: panelIdByUuid.get(row.userUuid) ?? (syntheticId += 1),
+            username: row.username,
+            devicesCount: row.devicesCount,
+          })),
+        ),
+      ),
+    nodeConnections: Object.fromEntries([
+      // Every listed node defaults to "read, and nobody was on it". Only an
+      // explicit `null` below turns one into "could not be read".
+      ...(remna.nodes ?? []).map((n) => [n.uuid, [] as unknown[]]),
+      ...Object.entries(remna.usersIpsByNode ?? {}).map(([nodeUuid, rows]) => [
+        nodeUuid,
+        rows === null
+          ? null
+          : rows.map((row) => ({
+              userId: row.userId,
+              // The contract transforms `lastSeen` into a `Date`, so that is
+              // what a validated response yields. A value the schema would have
+              // REJECTED could only arrive on the drift path, where the raw
+              // wire string comes through instead — so that is what an
+              // unparseable literal is handed over as.
+              ips: row.ips.map((sample) => ({
+                ip: sample.ip,
+                lastSeen: Number.isFinite(Date.parse(sample.lastSeen))
+                  ? new Date(sample.lastSeen)
+                  : sample.lastSeen,
+              })),
+            })),
+      ]),
+    ]) as never,
+  });
+  // The detector asks node by node, so recording the argument is how a test
+  // proves which slice of the panel was actually scanned.
+  const fetchNodeConnections = devices.client.fetchNodeConnections.bind(devices.client);
+  (devices.client as { fetchNodeConnections: unknown }).fetchNodeConnections = (
+    nodeUuid: string,
+  ) => {
+    scannedNodeUuids.push(nodeUuid);
+    return fetchNodeConnections(nodeUuid);
+  };
+
+  const infra = panelInfraDouble({
+    // Nodes default to "last changed three days ago" so a test that does not
+    // care about stability gets a quiet panel rather than an accidental flap.
+    nodes:
+      remna.nodesOutcome ??
+      panelOk(
+        (remna.nodes ?? []).map((n) =>
+          panelNode({
+            uuid: n.uuid,
+            name: n.name,
+            countryCode: n.countryCode ?? '',
+            isConnected: n.isConnected,
+            isDisabled: n.isDisabled,
+            lastStatusChange:
+              n.lastStatusChange === undefined
+                ? new Date(LONG_AGO)
+                : n.lastStatusChange === null
+                  ? null
+                  : new Date(n.lastStatusChange),
+          }),
+        ),
+      ),
+  });
 
   return {
-    detectors: new SharingDetectors(prismaMock, remnaMock, versionMock, tunablesFromEnv()),
+    detectors: new SharingDetectors(
+      prismaMock,
+      remnaMock,
+      devices.client,
+      infra.client,
+      tunablesFromEnv(),
+    ),
     scannedNodeUuids,
     subscriptionQueries: subscriptions.queries,
   };
@@ -241,26 +353,20 @@ describe('SharingDetectors — HWID overage', () => {
   it('does not judge the survivors of a lossy panel read', async () => {
     const remna = new RemnawaveApiService(
       {
-        request: (input: { url: string }) =>
-          input.url.startsWith('/api/users/')
-            ? // 3 rows on the wire, one of which carries no uuid → 2 decoded.
-              of({
-                data: {
-                  response: {
-                    users: [
-                      { uuid: 'u1', hwidDeviceLimit: 3, id: 1 },
-                      { uuid: '', hwidDeviceLimit: 3, id: 2 },
-                      { uuid: 'u3', hwidDeviceLimit: 3, id: 3 },
-                    ],
-                    total: 3,
-                  },
-                },
-              })
-            : of({
-                data: {
-                  response: [{ userUuid: 'u1', username: 'alice', devicesCount: 99 }],
-                },
-              }),
+        request: () =>
+          // 3 rows on the wire, one of which carries no uuid → 2 decoded.
+          of({
+            data: {
+              response: {
+                users: [
+                  { uuid: 'u1', hwidDeviceLimit: 3, id: 1 },
+                  { uuid: '', hwidDeviceLimit: 3, id: 2 },
+                  { uuid: 'u3', hwidDeviceLimit: 3, id: 3 },
+                ],
+                total: 3,
+              },
+            },
+          }),
       } as never,
       {
         host: 'remnawave',
@@ -269,10 +375,14 @@ describe('SharingDetectors — HWID overage', () => {
         webhookSecret: null,
       } as never,
     );
+    const devices = panelDevicesDouble({
+      topUsers: panelOk(hwidTopUsersPage([{ id: 1, username: 'alice', devicesCount: 99 }])),
+    });
     const detectors = new SharingDetectors(
       { subscription: { findMany: () => Promise.resolve([]) } } as unknown as PrismaService,
       remna,
-      { getCapabilities: () => Promise.resolve({ liveIpControl: true }) } as never,
+      devices.client,
+      panelInfraDouble().client,
       tunablesFromEnv(),
     );
     // `u1` survived the read and is 99 devices over a limit of 3 — scoring it
@@ -1366,9 +1476,9 @@ describe('SharingDetectors — an unreadable panel id names nobody, out loud', (
       assert.notEqual(
         line,
         undefined,
-        `no warning reports the skipped ip-control row; saw ${JSON.stringify(captured.warns)}`,
+        `no warning reports the skipped live-connection row; saw ${JSON.stringify(captured.warns)}`,
       );
-      assert.match(line ?? '', /skipped 1 ip-control row\(s\)/);
+      assert.match(line ?? '', /skipped 1 live-connection row\(s\)/);
     } finally {
       captured.restore();
     }

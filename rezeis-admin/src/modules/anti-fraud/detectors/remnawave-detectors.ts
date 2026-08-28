@@ -7,12 +7,15 @@ import {
   SystemEventCategory,
   SystemEventSeverity,
 } from '../../../common/services/system-events.service';
-import { RemnawaveNodeInterface } from '../../remnawave/interfaces/remnawave-node.interface';
 import {
-  NODE_USERS_BANDWIDTH_TOP_LIMIT,
-  RemnawaveApiService,
-} from '../../remnawave/services/remnawave-api.service';
-import { RemnawaveVersionService } from '../../remnawave/services/remnawave-version.service';
+  PanelDevicesClient,
+  type PanelDevicesOutcome,
+} from '../../remnawave/services/panel-devices.client';
+import {
+  PanelInfraClient,
+  type PanelNode,
+  type PanelReadOutcome,
+} from '../../remnawave/services/panel-infra.client';
 import { computeConfidence, ratioStrength } from '../confidence.util';
 import { FraudSignalCandidate } from '../interfaces/fraud-signal.interface';
 import { AntiFraudTunablesService } from '../services/anti-fraud-tunables.service';
@@ -44,6 +47,25 @@ import { AntiFraudTunablesService } from '../services/anti-fraud-tunables.servic
  * The evidence behind those four never supported an accusation, so they stopped
  * being filed as one. The information itself is preserved, in full, on the
  * operator-alert channel.
+ *
+ * ── THE PANEL IS 3.x, AND THAT DELETED TWO GATES ───────────────────────────
+ *
+ * 1. `caps.bandwidthNodesUsers`. It answered "does this panel have the 2.8
+ *    per-user bandwidth endpoint?", and every panel this build talks to does.
+ *    Worse, it answered NO for an unknown version — the state a healthy panel
+ *    passes through on a token blip or a restart — so the detector stood down,
+ *    at debug, exactly when the panel was already struggling, and a stood-down
+ *    run looks identical to a clean one.
+ * 2. The `/api/hwid/stats` fallback behind `getHwidStats()`. It was a
+ *    pre-2.7 spelling, and the pair was worse than either half alone: a real
+ *    failure on the modern path (an expired token, a restart) was answered by a
+ *    second request that could only 404, and the two together returned `null`
+ *    as if the panel had simply not been asked.
+ *
+ * Nothing replaces them with another gate. Every read below now comes back as
+ * a three-state outcome — the data, "the panel refused", or "the panel
+ * answered a shape we could not read" — so a collector that saw nothing says
+ * WHY it saw nothing instead of inferring it from a version number.
  */
 @Injectable()
 export class RemnawaveDetectors {
@@ -59,9 +81,9 @@ export class RemnawaveDetectors {
   private perUserTrafficBlind = false;
 
   /**
-   * True once every HWID-stats path the adapter knows has failed, and until one
-   * answers again — the same latch, for the same reason, as
-   * {@link perUserTrafficBlind}. See {@link collectHwidAverageAlerts}.
+   * True once the HWID-stats read has failed, and until it answers again — the
+   * same latch, for the same reason, as {@link perUserTrafficBlind}. See
+   * {@link collectHwidAverageAlerts}.
    */
   private hwidStatsBlind = false;
 
@@ -90,8 +112,8 @@ export class RemnawaveDetectors {
 
   public constructor(
     private readonly prismaService: PrismaService,
-    private readonly remnawaveApiService: RemnawaveApiService,
-    private readonly versionService: RemnawaveVersionService,
+    private readonly devicesClient: PanelDevicesClient,
+    private readonly infraClient: PanelInfraClient,
     private readonly tunablesService: AntiFraudTunablesService,
   ) {}
 
@@ -114,17 +136,17 @@ export class RemnawaveDetectors {
    */
   public async collectHwidAverageAlerts(_now: Date): Promise<readonly OperationalAlert[]> {
     try {
-      const hwidStats = await this.remnawaveApiService.getHwidStats();
-      if (!hwidStats) {
-        // `null` HERE IS UNAMBIGUOUS, AND IT IS NOT "THE AVERAGE IS FINE".
+      const stats = await this.devicesClient.getDeviceStats();
+      if (stats.kind !== 'ok') {
+        // A FAILED READ IS NOT "THE AVERAGE IS FINE", and it now says which
+        // failure it was.
         //
-        // `getHwidStats` walks `/api/hwid/devices/stats` and then the legacy
-        // `/api/hwid/stats`, returning the first that answers; `null` is
-        // reachable only when BOTH threw. So unlike the empty-list cases
-        // elsewhere in this module there is nothing to disambiguate — this run
-        // could not look, full stop. Remnawave 3.x answers `/api/hwid/stats`
-        // with 404 and moved the family the modern path belongs to, which is
-        // exactly how a live panel arrives here.
+        // The reader this replaces tried `/api/hwid/devices/stats` and then the
+        // pre-2.7 `/api/hwid/stats` in a bare `catch { continue }`, so an
+        // expired token on the first path was answered by a second request that
+        // could only 404, and the pair returned `null` — the same value a panel
+        // that was never asked would produce. One command, one call, and the
+        // reason survives.
         //
         // It used to return in silence, so a panel-wide device average that
         // could not be read for weeks was indistinguishable from one that never
@@ -140,10 +162,9 @@ export class RemnawaveDetectors {
         if (!this.hwidStatsBlind) {
           this.hwidStatsBlind = true;
           this.logger.warn(
-            'Panel-wide HWID average is BLIND: every HWID stats path the adapter knows ' +
-              '(`/api/hwid/devices/stats`, then the legacy `/api/hwid/stats`) failed, so ' +
-              'this run has no reading at all — not a healthy one. Remnawave 3.x moved ' +
-              'that family. No device-average alert can be raised until it is fixed.',
+            'Panel-wide HWID average is BLIND: the panel did not return its device stats ' +
+              `(${describeReadFailure(stats)}), so this run has no reading at all — not a ` +
+              'healthy one. No device-average alert can be raised until it is fixed.',
           );
         } else {
           this.logger.debug('Panel-wide HWID average still blind');
@@ -155,6 +176,7 @@ export class RemnawaveDetectors {
         this.logger.log('Panel-wide HWID average recovered: the panel answered again');
       }
 
+      const hwidStats = stats.data;
       const avgDevices = hwidStats.stats.averageHwidDevicesPerUser;
       const totalDevices = hwidStats.stats.totalHwidDevices;
       const uniqueDevices = hwidStats.stats.totalUniqueDevices;
@@ -209,8 +231,8 @@ export class RemnawaveDetectors {
    */
   public async collectNodeTrafficAlerts(_now: Date): Promise<readonly OperationalAlert[]> {
     try {
-      const nodes = await this.remnawaveApiService.getAllNodes();
-      if (!nodes || nodes.length === 0) return [];
+      const nodes = await this.readNodes('Node traffic');
+      if (nodes === null || nodes.length === 0) return [];
 
       const alerts: OperationalAlert[] = [];
 
@@ -257,7 +279,7 @@ export class RemnawaveDetectors {
     }
   }
 
-  // ── Detector: Per-User Node Traffic Abuse (Remnawave 2.8+) ─────────────
+  // ── Detector: Per-User Node Traffic Abuse ──────────────────────────────
 
   /**
    * Flags users whose bandwidth across the connected nodes is a clear outlier
@@ -275,11 +297,10 @@ export class RemnawaveDetectors {
    *   - the cohort-size gates below: a share test over three samples is not a
    *     statistic.
    *
-   * Uses the 2.8 `bandwidth-stats/nodes/users` endpoint, so it's gated behind
-   * the detected capability and self-activates once the panel upgrades. The
-   * panel returns usernames (not UUIDs), so the signal carries the username
-   * for the operator to action; `affectedUserIds` stays empty (like the other
-   * node-level detectors). Advisory only — LOW/MEDIUM, never HIGH.
+   * Uses `POST /api/bandwidth-stats/nodes/users`. The panel returns usernames
+   * (not identities), so the signal carries the username for the operator to
+   * action; `affectedUserIds` stays empty (like the other node-level
+   * detectors). Advisory only — LOW/MEDIUM, never HIGH.
    */
   public async detectPerUserNodeTrafficAbuse(now: Date): Promise<readonly FraudSignalCandidate[]> {
     // Effective tunables for this run: panel value, else `ANTIFRAUD_NODE_TRAFFIC_*`,
@@ -289,52 +310,62 @@ export class RemnawaveDetectors {
     // re-enabling itself on env defaults the operator had overridden.
     const config = (await this.tunablesService.resolve()).trafficAbuse;
     if (!config.enabled) return [];
-    const caps = await this.versionService.getCapabilities();
-    if (!caps.bandwidthNodesUsers) {
-      this.logger.debug('Per-user traffic detection skipped: needs Remnawave 2.8+');
-      return [];
-    }
+    // THERE IS NO `caps.bandwidthNodesUsers` GATE HERE ANY MORE. It asked
+    // whether the panel is at least 2.8, and this build serves 3.x only — but
+    // it also answered NO for an unknown version, so a version-probe blip made
+    // the detector return a clean-looking empty list at debug level. See the
+    // class header.
     try {
-      const nodes = await this.remnawaveApiService.getAllNodes();
+      const nodes = await this.readNodes('Per-user traffic');
+      if (nodes === null) return [];
 
       // Guard on the WHOLE panel, not just the nodes we aggregate: when a node
       // outside the slice drops, its users reconnect onto the nodes inside it
       // and arrive as traffic that looks like somebody's new habit.
-      const flap = await this.findRecentNodeFlap(now, nodes ?? []);
+      const flap = await this.findRecentNodeFlap(now, nodes);
       if (flap !== null) {
         this.logNodeFlapSuppression(flap);
         return [];
       }
       this.nodeFlapSuppressionActive = false;
 
-      // Sort before slicing. `getAllNodes` returns the panel's order, which is
+      // Sort before slicing. `getNodes` returns the panel's order, which is
       // not stable — an unsorted `.slice()` means the cohort's composition
       // changes between runs on its own, and the median/share both come out of
       // the cohort. Sorting by uuid makes the same panel produce the same slice.
-      const eligibleNodes = (nodes ?? [])
+      const eligibleNodes = nodes
         .filter((n) => n.isConnected && !n.isDisabled)
         .sort((a, b) => a.uuid.localeCompare(b.uuid));
       const connected = eligibleNodes.slice(0, config.maxNodesPerRun);
+      // THE REQUEST IS NOT MADE WITH AN EMPTY NODE LIST, and this early return
+      // is what guarantees it. `GetStatsNodesUsersUsageCommand` declares
+      // `nodesUuids` with a minimum of one, so an empty list is a request the
+      // panel is right to refuse — and the reader this replaces sent it
+      // unconditionally and reported the refusal as "the panel did not answer",
+      // which is a blind detector reporting a broken panel about our own bug.
       if (connected.length === 0) return [];
 
-      const topUsers = await this.remnawaveApiService.getNodeUsersBandwidth(
-        connected.map((n) => n.uuid),
-      );
-      if (topUsers === null) {
-        // The capability said the endpoint exists and the panel still did not
-        // answer, so this run produced no signal because it could not look —
-        // not because the panel is clean. Logged on the TRANSITION only: this
-        // runs every 5 minutes and the condition, once true, stays true until
-        // somebody fixes it, so a line per run would be 288/day of the same
-        // text and would be tuned out exactly like the failure it is meant to
-        // surface. One WARN when the detector goes blind, one LOG when it
-        // recovers; the runs in between stay at debug.
+      const window = utcDayWindow(now);
+      const usage = await this.infraClient.getNodeUsersBandwidth({
+        nodeUuids: connected.map((n) => n.uuid),
+        start: window.start,
+        end: window.end,
+        topUsersLimit: NODE_USERS_BANDWIDTH_TOP_LIMIT,
+      });
+      if (usage.kind !== 'ok') {
+        // This run produced no signal because it could not look — not because
+        // the panel is clean. Logged on the TRANSITION only: this runs every 5
+        // minutes and the condition, once true, stays true until somebody fixes
+        // it, so a line per run would be 288/day of the same text and would be
+        // tuned out exactly like the failure it is meant to surface. One WARN
+        // when the detector goes blind, one LOG when it recovers; the runs in
+        // between stay at debug.
         if (!this.perUserTrafficBlind) {
           this.perUserTrafficBlind = true;
           this.logger.warn(
-            'Per-user traffic detection is BLIND: the panel reports the 2.8 ' +
-              'bandwidth-stats endpoint as available but rejected the request. ' +
-              'This detector will report zero offenders until that is fixed.',
+            'Per-user traffic detection is BLIND: the panel did not return per-user node ' +
+              `bandwidth (${describeReadFailure(usage)}). This detector will report zero ` +
+              'offenders until that is fixed.',
           );
         } else {
           this.logger.debug('Per-user traffic detection still blind');
@@ -345,6 +376,7 @@ export class RemnawaveDetectors {
         this.perUserTrafficBlind = false;
         this.logger.log('Per-user traffic detection recovered: panel answered again');
       }
+      const topUsers = usage.data.topUsers;
       const valid = topUsers.filter((u) => u.total > 0);
       // Below this there is no cohort to be an outlier of — see
       // MIN_COHORT_FOR_ANY_TEST.
@@ -526,8 +558,8 @@ export class RemnawaveDetectors {
    */
   public async collectGeoConcentrationAlerts(now: Date): Promise<readonly OperationalAlert[]> {
     try {
-      const nodes = await this.remnawaveApiService.getAllNodes();
-      if (!nodes || nodes.length === 0) return [];
+      const nodes = await this.readNodes('Geo concentration');
+      if (nodes === null || nodes.length === 0) return [];
 
       const flap = await this.findRecentNodeFlap(now, nodes);
       if (flap !== null) {
@@ -611,8 +643,8 @@ export class RemnawaveDetectors {
    */
   public async collectOfflineNodeAlerts(_now: Date): Promise<readonly OperationalAlert[]> {
     try {
-      const nodes = await this.remnawaveApiService.getAllNodes();
-      if (!nodes || nodes.length === 0) return [];
+      const nodes = await this.readNodes('Offline node');
+      if (nodes === null || nodes.length === 0) return [];
 
       const offlineNodes = nodes
         .filter((n) => !n.isConnected && !n.isDisabled && !n.isConnecting)
@@ -649,7 +681,13 @@ export class RemnawaveDetectors {
               uuid: n.uuid,
               name: n.name,
               countryCode: n.countryCode,
-              lastStatusChange: n.lastStatusChange,
+              // Rendered here rather than passed through. The contract turns
+              // this field into a `Date`, and a `Date` in an alert payload
+              // reaches the audit row and the Telegram card as whatever the
+              // serializer on that path happens to do with it — while the
+              // executor's drift path hands back the wire string for the same
+              // field. One shape out, always.
+              lastStatusChange: readInstantIso(n.lastStatusChange),
             })),
           },
         },
@@ -658,6 +696,34 @@ export class RemnawaveDetectors {
       this.logger.warn(`Offline node collection failed: ${(error as Error).message}`);
       return [];
     }
+  }
+
+  // ── Panel reads ────────────────────────────────────────────────────────
+
+  /**
+   * The node list, or `null` for "we could not read it".
+   *
+   * `?? []` IS GONE FROM ALL FOUR CALL SITES, and it was a real conflation: the
+   * old reader answered `[]` for an outage, a bad token and a panel with no
+   * nodes alike, so every collector treated an unreachable panel as a panel
+   * with nothing to report. For `collectOfflineNodeAlerts` that is the exact
+   * inversion of its purpose — the run that should shout "the nodes are gone"
+   * was the run that stayed quiet.
+   *
+   * NOT LATCHED, unlike the two blind flags above. These collectors are
+   * edge-triggered and hold their last band across an unobservable run, so a
+   * failure here changes nothing an operator would see; the line exists to
+   * explain the silence, and one per five minutes during an outage is
+   * proportionate to an outage.
+   */
+  private async readNodes(label: string): Promise<readonly PanelNode[] | null> {
+    const outcome = await this.infraClient.getNodes();
+    if (outcome.kind === 'ok') return outcome.data;
+    this.logger.warn(
+      `${label} collection has no node list this run (${describeReadFailure(outcome)}) — ` +
+        'it reports nothing because it could not look, not because the panel is healthy',
+    );
+    return null;
   }
 
   // ── Node stability guard ───────────────────────────────────────────────
@@ -686,7 +752,7 @@ export class RemnawaveDetectors {
    */
   private async findRecentNodeFlap(
     now: Date,
-    liveNodes: readonly RemnawaveNodeInterface[],
+    liveNodes: readonly PanelNode[],
   ): Promise<NodeFlapEvidence | null> {
     const windowStart = now.getTime() - NODE_STABILITY_WINDOW_MINUTES * 60_000;
 
@@ -694,8 +760,10 @@ export class RemnawaveDetectors {
     const recentlyChanged = liveNodes
       .filter((n) => !n.isDisabled)
       .filter((n) => {
-        const changedAt = n.lastStatusChange ? Date.parse(n.lastStatusChange) : NaN;
-        return Number.isFinite(changedAt) && changedAt >= windowStart;
+        // Both shapes are read: the contract transforms this field into a
+        // `Date`, and the executor's drift path hands back the wire string.
+        const changedAt = readInstantMs(n.lastStatusChange);
+        return changedAt !== null && changedAt >= windowStart;
       })
       .map((n) => n.name || n.uuid);
     if (recentlyChanged.length > 0) {
@@ -864,6 +932,41 @@ const NODE_STABILITY_WINDOW_MINUTES = 30;
 const MIN_COHORT_FOR_ANY_TEST = 5;
 
 /**
+ * How many rows to ask `POST /api/bandwidth-stats/nodes/users` for.
+ *
+ * IT LIVES HERE, WITH THE DETECTOR, and that is a move of a decision rather
+ * than a copy. `PanelInfraClient.getNodeUsersBandwidth` takes the window and
+ * the limit from its caller precisely because the sizing is a property of how
+ * the list is CONSUMED, and this detector is the only consumer: it derives its
+ * baseline FROM the returned rows — the cohort median and the sum of the list —
+ * and then flags a user against both.
+ *
+ * Because the panel returns the TOP N by traffic, a small N truncates the light
+ * tail, which is exactly the part that makes the median a baseline. Ask for 100
+ * on a panel with thousands of users and the median lands near the offender's
+ * own magnitude, `total >= median * medianMultiplier` stops being satisfiable,
+ * and a genuine offender is silently dropped — while the smaller sum inflates
+ * every `sharePercent` at the same time. A short list does not merely lose
+ * signal; it makes both configured thresholds mean something other than what
+ * the operator set.
+ *
+ * 25 000 is the repo's own upper bound on "the whole panel": the full-panel
+ * walk pages 500 rows × 50 pages and treats reaching that as bigger than any
+ * expected deployment. Sized this way the returned list is the whole population
+ * with traffic on the selected nodes rather than a top slice. Rows are
+ * `{ username, total }`, so even a full response is ~1 MB on a 5-minute cron.
+ *
+ * A response AT this ceiling is not treated as a complete cohort — see
+ * `SATURATED_COHORT_QUALITY`.
+ *
+ * Exported so a test asserts against the number this detector really asks for
+ * rather than against a second copy of it. There used to be a copy, in
+ * `remnawave-api.service.ts`, which is exactly the arrangement that lets a
+ * saturation test keep passing after the request stops asking for that many.
+ */
+export const NODE_USERS_BANDWIDTH_TOP_LIMIT = 25_000;
+
+/**
  * CONFIDENCE CEILING for the per-user traffic detector — the most its evidence
  * can be worth with a large cohort, both tests firing well past their
  * thresholds, and a complete read.
@@ -920,6 +1023,86 @@ function geoConcentrationBand(pct: number): number | null {
   if (pct >= 90) return 90;
   if (pct > 80) return 80;
   return null;
+}
+
+/**
+ * The one-day UTC window the bandwidth read asks for, as the panel spells
+ * dates.
+ *
+ * Yesterday to today inclusive, computed from `now` rather than from a wall
+ * clock read inside the client, so a run's window is a function of the run.
+ * The panel's `start`/`end` are `YYYY-MM-DD` and it treats them as whole days.
+ */
+function utcDayWindow(now: Date): { readonly start: string; readonly end: string } {
+  const end = now.toISOString().slice(0, 10);
+  const startDate = new Date(now);
+  startDate.setUTCDate(startDate.getUTCDate() - 1);
+  return { start: startDate.toISOString().slice(0, 10), end };
+}
+
+/**
+ * How a failed panel read is rendered into an operator-facing log line.
+ *
+ * `unreadable` is named separately from `rejected` on purpose: they are
+ * different operator actions. `rejected` is the panel saying no — a token, a
+ * permission, a route. `unreadable` is the panel saying yes and answering a
+ * shape this build could not find the data in, which is a contract problem
+ * somebody has to look at. `invalid-request` is neither: it is OUR bug, caught
+ * before the request left the process, and reporting it as "the panel did not
+ * answer" is precisely how a malformed request 400'd on every run for months
+ * while the detector reported a clean panel.
+ */
+function describeReadFailure(
+  outcome: PanelReadOutcome<unknown> | PanelDevicesOutcome<unknown>,
+): string {
+  switch (outcome.kind) {
+    case 'ok':
+      // Unreachable by construction — every caller checks `kind` first — but a
+      // silent empty string here would read as "no reason given" in the log.
+      return 'the read succeeded';
+    case 'rejected':
+      return `the panel refused it: HTTP ${outcome.status}${
+        outcome.code === null ? '' : ` ${outcome.code}`
+      }`;
+    case 'network':
+      return `nothing came back: ${outcome.detail}`;
+    case 'unconfigured':
+      return 'the Remnawave connection is not configured';
+    case 'invalid-request':
+      return `rezeis built the request wrong and it was never sent: ${outcome.detail}`;
+    case 'unreadable':
+      return `the panel answered a shape this build could not read: ${outcome.detail}`;
+  }
+}
+
+/**
+ * A panel timestamp as milliseconds, or `null` when it is not a placeable
+ * instant.
+ *
+ * BOTH SHAPES ARE READ. The vendor contract transforms `lastStatusChange` into
+ * a `Date`, so that is what a validated response yields; on the executor's
+ * DRIFT path the panel's raw bytes come back and the same field is the wire
+ * string. A reader that handled only one would see no status changes at all on
+ * a drifted response — and no status changes means the node-stability guard
+ * disarms, which is the direction that produces false accusations during an
+ * outage.
+ */
+function readInstantMs(value: unknown): number | null {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
+/** {@link readInstantMs}, rendered back out as ISO-8601 for an alert payload. */
+function readInstantIso(value: unknown): string | null {
+  const ms = readInstantMs(value);
+  return ms === null ? null : new Date(ms).toISOString();
 }
 
 function describeFlap(flap: NodeFlapEvidence): string {

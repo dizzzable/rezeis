@@ -14,10 +14,25 @@ import {
 import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SubscriptionUaDetectors } from '../src/modules/anti-fraud/detectors/subscription-ua-detectors';
 import { AntiFraudService } from '../src/modules/anti-fraud/services/anti-fraud.service';
-import { RemnawaveNodeInterface } from '../src/modules/remnawave/interfaces/remnawave-node.interface';
-import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
-import { RemnawaveVersionService } from '../src/modules/remnawave/services/remnawave-version.service';
+import {
+  PanelDevicesClient,
+  type PanelHwidDeviceStats,
+} from '../src/modules/remnawave/services/panel-devices.client';
+import {
+  PanelInfraClient,
+  type PanelNode,
+  type PanelNodeUsersBandwidth,
+  type PanelReadOutcome,
+} from '../src/modules/remnawave/services/panel-infra.client';
 import { tunablesFromEnv } from './fixtures/anti-fraud-tunables';
+import {
+  nodeUsersBandwidth,
+  panelDevicesDouble,
+  panelInfraDouble,
+  panelNode,
+  panelOk,
+  panelRejected,
+} from './fixtures/anti-fraud-panel-clients';
 
 /**
  * A node outage must not be able to produce an accusation against a customer.
@@ -53,33 +68,28 @@ process.env.ANTIFRAUD_NODE_TRAFFIC_MAX_NODES = '25';
 
 // ── Doubles ──────────────────────────────────────────────────────────────────
 
-function node(overrides: Partial<RemnawaveNodeInterface> & { uuid: string }): RemnawaveNodeInterface {
-  return {
-    name: overrides.uuid,
-    address: '10.0.0.1',
-    port: 443,
-    isConnected: true,
-    isDisabled: false,
-    isConnecting: false,
-    isTrafficTrackingActive: true,
-    trafficResetDay: null,
-    trafficLimitBytes: null,
-    trafficUsedBytes: null,
-    notifyPercent: null,
-    viewPosition: 0,
-    countryCode: 'DE',
-    consumptionMultiplier: 1,
-    tags: [],
-    lastStatusChange: LONG_AGO,
-    lastStatusMessage: null,
-    createdAt: LONG_AGO,
-    updatedAt: LONG_AGO,
-    xrayUptime: 1000,
-    usersOnline: 0,
-    activeConfigProfileUuid: null,
-    ips: [],
-    ...overrides,
-  };
+/**
+ * One node as the contract-driven client hands it over.
+ *
+ * `lastStatusChange` is a `Date` here, not a string, because that is what the
+ * vendor schema's transform produces on a validated response — and the node
+ * stability guard reads exactly this field to decide whether a run may accuse
+ * anybody. Tests still write ISO strings; the builder converts.
+ */
+function node(
+  overrides: Partial<Omit<PanelNode, 'lastStatusChange'>> & {
+    uuid: string;
+    lastStatusChange?: string | null;
+  },
+): PanelNode {
+  const { lastStatusChange, ...rest } = overrides;
+  const stamp = lastStatusChange === undefined ? LONG_AGO : lastStatusChange;
+  return panelNode({
+    ...rest,
+    uuid: overrides.uuid,
+    name: overrides.name ?? overrides.uuid,
+    lastStatusChange: stamp === null ? null : new Date(stamp),
+  });
 }
 
 interface SnapshotNode {
@@ -90,17 +100,27 @@ interface SnapshotNode {
 
 interface Harness {
   readonly detectors: RemnawaveDetectors;
-  readonly bandwidthNodeUuids: string[][];
+  /** Every bandwidth request the detector made, whole — node list and window. */
+  readonly bandwidthRequests: ReadonlyArray<{
+    readonly nodeUuids: readonly string[];
+    readonly start: string;
+    readonly end: string;
+    readonly topUsersLimit: number;
+  }>;
 }
 
 function makeDetectors(input: {
-  readonly nodes: readonly RemnawaveNodeInterface[];
+  readonly nodes: readonly PanelNode[];
+  /**
+   * The rows the bandwidth endpoint returns. `null` means the READ FAILED —
+   * "we could not look" — which is a different fact from the empty list a
+   * healthy panel with no traffic produces, and the two must not be spelled
+   * the same way.
+   */
   readonly topUsers?: readonly { username: string; total: number }[] | null;
   readonly snapshots?: readonly (readonly SnapshotNode[])[];
-  readonly hwidStats?: unknown;
+  readonly hwidStats?: PanelHwidDeviceStats | null;
 }): Harness {
-  const bandwidthNodeUuids: string[][] = [];
-
   const prisma = {
     remnawaveMetricSample: {
       findMany: () =>
@@ -110,20 +130,24 @@ function makeDetectors(input: {
     },
   } as unknown as PrismaService;
 
-  const api = {
-    getAllNodes: () => Promise.resolve([...input.nodes]),
-    getNodeUsersBandwidth: (uuids: readonly string[]) => {
-      bandwidthNodeUuids.push([...uuids]);
-      return Promise.resolve(input.topUsers === undefined ? [] : input.topUsers);
-    },
-    getHwidStats: () => Promise.resolve(input.hwidStats ?? null),
-  } as unknown as RemnawaveApiService;
+  const bandwidth: PanelReadOutcome<PanelNodeUsersBandwidth> =
+    input.topUsers === null
+      ? panelRejected(503)
+      : panelOk(nodeUsersBandwidth(input.topUsers ?? []));
 
-  const versionService = {
-    getCapabilities: () => Promise.resolve({ bandwidthNodesUsers: true }),
-  } as unknown as RemnawaveVersionService;
+  const infra = panelInfraDouble({
+    nodes: panelOk([...input.nodes]),
+    nodeUsersBandwidth: bandwidth,
+  });
+  const devices = panelDevicesDouble({
+    deviceStats:
+      input.hwidStats == null ? panelRejected(404) : panelOk(input.hwidStats),
+  });
 
-  return { detectors: new RemnawaveDetectors(prisma, api, versionService, tunablesFromEnv()), bandwidthNodeUuids };
+  return {
+    detectors: new RemnawaveDetectors(prisma, devices.client, infra.client, tunablesFromEnv()),
+    bandwidthRequests: infra.bandwidthRequests,
+  };
 }
 
 /**
@@ -332,8 +356,51 @@ describe('the aggregated node slice', () => {
     const reversed = makeDetectors({ nodes: [...nodes].reverse(), topUsers: [], snapshots });
     await reversed.detectors.detectPerUserNodeTrafficAbuse(NOW);
 
-    assert.deepStrictEqual(forward.bandwidthNodeUuids, [['aaaa-de-1', 'bbbb-nl-1']]);
-    assert.deepStrictEqual(reversed.bandwidthNodeUuids, forward.bandwidthNodeUuids);
+    assert.deepStrictEqual(
+      forward.bandwidthRequests.map((request) => request.nodeUuids),
+      [['aaaa-de-1', 'bbbb-nl-1']],
+    );
+    assert.deepStrictEqual(
+      reversed.bandwidthRequests.map((request) => request.nodeUuids),
+      forward.bandwidthRequests.map((request) => request.nodeUuids),
+    );
+  });
+
+  it('never asks for a node list the contract refuses', async () => {
+    // `GetStatsNodesUsersUsageCommand` declares `nodesUuids` with a minimum of
+    // one, so an empty list is a guaranteed refusal — and the reader this
+    // replaces sent it anyway and reported the refusal as "the panel did not
+    // answer", i.e. as a broken panel rather than as our own bad request.
+    const harness = makeDetectors({
+      nodes: [node({ uuid: 'aaaa-de-1', isConnected: false })],
+    });
+
+    assert.deepEqual(await harness.detectors.detectPerUserNodeTrafficAbuse(NOW), []);
+    assert.deepEqual(harness.bandwidthRequests, []);
+  });
+
+  it('asks for a whole-population cut over a one-day UTC window', async () => {
+    // The window and the row limit belong to the CALLER — the detector derives
+    // its median and its share denominator from exactly these rows, so a small
+    // limit does not merely lose signal, it changes what both configured
+    // thresholds mean.
+    const harness = makeDetectors({
+      nodes: [node({ uuid: 'aaaa-de-1' })],
+      topUsers: [],
+      snapshots: [[{ uuid: 'aaaa-de-1', name: 'aaaa-de-1', isConnected: true }]],
+    });
+
+    await harness.detectors.detectPerUserNodeTrafficAbuse(NOW);
+
+    assert.equal(harness.bandwidthRequests.length, 1);
+    assert.deepEqual(
+      {
+        start: harness.bandwidthRequests[0].start,
+        end: harness.bandwidthRequests[0].end,
+        topUsersLimit: harness.bandwidthRequests[0].topUsersLimit,
+      },
+      { start: '2026-08-04', end: '2026-08-05', topUsersLimit: 25_000 },
+    );
   });
 });
 
@@ -382,12 +449,16 @@ describe('panel-wide observations', () => {
       node({ uuid: 'bbbb-nl-1', name: 'nl-1', isConnected: false }),
     ];
     const prisma = {} as unknown as PrismaService;
-    const versionService = {} as unknown as RemnawaveVersionService;
-    let order: readonly RemnawaveNodeInterface[] = offline;
-    const api = {
-      getAllNodes: () => Promise.resolve([...order]),
-    } as unknown as RemnawaveApiService;
-    const detectors = new RemnawaveDetectors(prisma, api, versionService, tunablesFromEnv());
+    let order: readonly PanelNode[] = offline;
+    const infra = {
+      getNodes: () => Promise.resolve(panelOk([...order])),
+    } as unknown as PanelInfraClient;
+    const detectors = new RemnawaveDetectors(
+      prisma,
+      panelDevicesDouble().client,
+      infra,
+      tunablesFromEnv(),
+    );
 
     const first = await detectors.collectOfflineNodeAlerts(NOW);
     order = [...offline].reverse();
@@ -404,21 +475,23 @@ describe('panel-wide observations', () => {
 
   it('re-announces node traffic only when it crosses a new band', async () => {
     let usedBytes = 91;
-    const api = {
-      getAllNodes: () =>
-        Promise.resolve([
-          node({
-            uuid: 'aaaa-de-1',
-            name: 'de-1',
-            trafficLimitBytes: 100,
-            trafficUsedBytes: usedBytes,
-          }),
-        ]),
-    } as unknown as RemnawaveApiService;
+    const infra = {
+      getNodes: () =>
+        Promise.resolve(
+          panelOk([
+            node({
+              uuid: 'aaaa-de-1',
+              name: 'de-1',
+              trafficLimitBytes: 100,
+              trafficUsedBytes: usedBytes,
+            }),
+          ]),
+        ),
+    } as unknown as PanelInfraClient;
     const detectors = new RemnawaveDetectors(
       {} as unknown as PrismaService,
-      api,
-      {} as unknown as RemnawaveVersionService,
+      panelDevicesDouble().client,
+      infra,
       tunablesFromEnv(),
     );
 
@@ -483,11 +556,13 @@ describe('panel-wide observations', () => {
           ]),
       },
     } as unknown as PrismaService;
-    const api = { getAllNodes: () => Promise.resolve(nodes()) } as unknown as RemnawaveApiService;
+    const infra = {
+      getNodes: () => Promise.resolve(panelOk(nodes())),
+    } as unknown as PanelInfraClient;
     const detectors = new RemnawaveDetectors(
       prisma,
-      api,
-      {} as unknown as RemnawaveVersionService,
+      panelDevicesDouble().client,
+      infra,
       tunablesFromEnv(),
     );
 
@@ -503,21 +578,23 @@ describe('panel-wide observations', () => {
 
   it('bands the panel-wide device average instead of keying on it', async () => {
     let average = 3.4;
-    const api = {
-      getHwidStats: () =>
-        Promise.resolve({
-          stats: {
-            averageHwidDevicesPerUser: average,
-            totalHwidDevices: 900,
-            totalUniqueDevices: 800,
-          },
-          byPlatform: {},
-        }),
-    } as unknown as RemnawaveApiService;
+    const devices = {
+      getDeviceStats: () =>
+        Promise.resolve(
+          panelOk({
+            stats: {
+              averageHwidDevicesPerUser: average,
+              totalHwidDevices: 900,
+              totalUniqueDevices: 800,
+            },
+            byPlatform: [],
+          } as unknown as PanelHwidDeviceStats),
+        ),
+    } as unknown as PanelDevicesClient;
     const detectors = new RemnawaveDetectors(
       {} as unknown as PrismaService,
-      api,
-      {} as unknown as RemnawaveVersionService,
+      devices,
+      panelInfraDouble().client,
       tunablesFromEnv(),
     );
 
@@ -633,7 +710,7 @@ describe('AntiFraudService.runDetectors', () => {
       remnawaveDetectors,
       sharingDetectors,
       subscriptionUaDetectors,
-      {} as unknown as RemnawaveApiService,
+      panelDevicesDouble().client,
       systemEvents,
     );
 

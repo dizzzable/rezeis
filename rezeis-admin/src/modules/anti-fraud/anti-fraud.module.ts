@@ -30,6 +30,20 @@ import { DetectorAccuracyService } from './services/detector-accuracy.service';
  * panel's own webhooks already use for these facts) rather than being filed
  * against whoever happens to be online.
  *
+ * Panel access
+ *   `RemnawaveModule` provides and exports `PanelDevicesClient` and
+ *   `PanelInfraClient`, the contract-driven readers this module talks to. They
+ *   are what makes "we looked and found nobody" a different value from "we
+ *   could not look" — the distinction every detector here decides an accusation
+ *   on. `RemnawaveVersionService` is deliberately NOT injected anywhere in this
+ *   module any more: the version gates it fed existed to tell 2.7 from 2.8 from
+ *   3.x, this build serves 3.x only, and `LegacyPanelRefusal` turns a 2.x panel
+ *   away once, centrally, in the transport.
+ *
+ *   `SharingDetectors` still takes `RemnawaveApiService`, for exactly one call:
+ *   the whole-panel user walk that supplies every subscriber's device limit.
+ *   See the note on its constructor.
+ *
  * Scheduling
  *   `AntiFraudService.runDetectorsScheduled` runs every 5 minutes via
  *   `@nestjs/schedule`. The same logic is exposed under

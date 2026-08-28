@@ -8,55 +8,73 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { SystemEventsService } from '../src/common/services/system-events.service';
 import { FraudDetectors } from '../src/modules/anti-fraud/detectors/fraud-detectors';
 import { RemnawaveDetectors } from '../src/modules/anti-fraud/detectors/remnawave-detectors';
-import {
-  SharingDetectors,
-  classifyLiveConnectionBlindness,
-} from '../src/modules/anti-fraud/detectors/sharing-detectors';
+import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SubscriptionUaDetectors } from '../src/modules/anti-fraud/detectors/subscription-ua-detectors';
 import {
   AntiFraudService,
   AUTO_RESOLVED_NOTE,
 } from '../src/modules/anti-fraud/services/anti-fraud.service';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
+import type {
+  PanelDevicesOutcome,
+  PanelHwidDeviceStats,
+  PanelHwidTopUsersPage,
+} from '../src/modules/remnawave/services/panel-devices.client';
+import type {
+  PanelNode,
+  PanelReadOutcome,
+} from '../src/modules/remnawave/services/panel-infra.client';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
-import {
-  RemnawaveVersionService,
-  type RemnawaveCapabilities,
-} from '../src/modules/remnawave/services/remnawave-version.service';
 import { makeAntiFraudStore } from './fixtures/anti-fraud-store';
 import { tunablesFromEnv } from './fixtures/anti-fraud-tunables';
+import {
+  hwidTopUsersPage,
+  panelDevicesDouble,
+  panelInfraDouble,
+  panelNode,
+  panelNetworkFailure,
+  panelOk,
+  panelRejected,
+  panelUnreadable,
+} from './fixtures/anti-fraud-panel-clients';
 
 /**
  * A DETECTOR THAT CANNOT LOOK MUST NOT REPORT A CLEAN PANEL.
  *
- * Three paths in this module returned an empty list in total silence when the
- * thing they read was unavailable, and on a Remnawave 3.x panel all three are
- * unavailable at once:
+ * `[]` means "we looked and found nobody". Anything else means "we could not
+ * look". Those are opposite facts to a module whose whole job is deciding
+ * whether to accuse a paying customer, and for three of these paths they used
+ * to be the same value:
  *
- *   1. `SharingDetectors.detectHwidOverage` — `getHwidTopUsers()` swallows every
- *      transport failure and answers `[]`, which the detector could not tell
- *      from "nobody is over their limit".
- *   2. `RemnawaveDetectors.collectHwidAverageAlerts` — `getHwidStats()` answers
- *      `null` only when BOTH stats paths failed, and the collector returned as
- *      if the average were unremarkable.
- *   3. `SharingDetectors.detectConcurrentIpSharing` — gated on `liveIpControl`,
- *      which is `major === 2 && minor >= 8`, so a 3.2.1 panel that serves live
- *      connections perfectly well under `/api/connections/*` was written off, at
- *      debug, as "lacks mature ip-control (need 2.8+)".
+ *   1. `SharingDetectors.detectHwidOverage` — the device list read swallowed
+ *      every transport failure into `[]`, so the detector could only INFER
+ *      blindness from a contradiction (a populated user list beside an empty
+ *      device list) and could only ever guess.
+ *   2. `RemnawaveDetectors.collectHwidAverageAlerts` — two stats paths tried in
+ *      a bare `catch { continue }`, so an expired token on the first was
+ *      answered by a second request that could only 404, and the pair returned
+ *      `null` exactly as an unasked panel would.
+ *   3. `SharingDetectors.detectConcurrentIpSharing` — gated on a CAPABILITY
+ *      RECORD rather than on any answer. `liveIpControl` was a version fact,
+ *      and version detection folds 401 / timeout / DNS / unconfigured token
+ *      into one "unknown" — so a panel that was merely having a bad second was
+ *      written off, at debug level, as a panel with nothing to report.
  *
- * Every test here therefore asserts on the OPERATOR-VISIBLE record — the WARN —
- * and on the two properties that make the warning worth having: it is emitted
- * once per episode rather than once per run (288 copies a day is how a real
- * failure gets tuned out), and the detector still returns `[]` so an
- * unobservable run cannot auto-resolve anybody's open signal.
+ * All three now read the blindness off the ANSWER. Every test here therefore
+ * asserts on the OPERATOR-VISIBLE record — the WARN — and on the two properties
+ * that make the warning worth having: it is emitted once per episode rather
+ * than once per run (288 copies a day is how a real failure gets tuned out),
+ * and the detector still returns `[]` so an unobservable run cannot
+ * auto-resolve anybody's open signal.
  *
  * The counterpart assertions are the half that stops "warn about everything"
- * passing for "warn about blindness": an empty panel legitimately holds no
- * devices, and a detector that recovers has to say so and go back to work.
+ * passing for "warn about blindness": a panel that answers with no rows is a
+ * FACT and must be silent, a partially-read run is incomplete rather than
+ * blind, and a detector that recovers has to say so and go back to work.
  */
 
 const NOW = new Date('2026-08-10T12:00:00.000Z');
-const LONG_AGO = new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString();
+const LONG_AGO = new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000);
 
 // ── Log capture ──────────────────────────────────────────────────────────────
 
@@ -95,95 +113,6 @@ function captureLogs(): Captured {
 const blindWarns = (captured: Captured, needle: string): string[] =>
   captured.warns.filter((w) => w.includes('BLIND') && w.includes(needle));
 
-// ── Capability doubles ───────────────────────────────────────────────────────
-
-/**
- * A full `RemnawaveCapabilities` record. Spelled out in full rather than cast
- * from a partial so a test cannot accidentally assert against a field the
- * version service does not actually produce.
- */
-function capabilities(over: Partial<RemnawaveCapabilities>): RemnawaveCapabilities {
-  return {
-    version: null,
-    major: null,
-    minor: null,
-    patch: null,
-    supported: false,
-    reachable: false,
-    liveIpControl: false,
-    bandwidthNodesUsers: false,
-    userAddressing: 'unknown',
-    connectionsApi: 'unknown',
-    userLookups: { byTelegramId: false, byEmail: false },
-    ...over,
-  };
-}
-
-/** The three panels this suite cares about, as the version service reports them. */
-const PANEL_2_7_4 = capabilities({
-  version: '2.7.4',
-  major: 2,
-  minor: 7,
-  patch: 4,
-  supported: true,
-  reachable: true,
-  connectionsApi: 'ip-control',
-  userAddressing: 'uuid',
-  userLookups: { byTelegramId: true, byEmail: true },
-});
-const PANEL_2_8_0 = capabilities({
-  version: '2.8.0',
-  major: 2,
-  minor: 8,
-  patch: 0,
-  supported: true,
-  reachable: true,
-  liveIpControl: true,
-  bandwidthNodesUsers: true,
-  connectionsApi: 'ip-control',
-  userAddressing: 'uuid',
-  userLookups: { byTelegramId: true, byEmail: true },
-});
-const PANEL_3_2_1 = capabilities({
-  version: '3.2.1',
-  major: 3,
-  minor: 2,
-  patch: 1,
-  supported: true,
-  reachable: true,
-  // True since the adapter learned `/api/connections/*`. It was false while the
-  // reader did not exist — a 3.x panel then had live-connection data rezeis
-  // could not fetch — and the two had to change together, or the detector would
-  // have walked every node for guaranteed 404s and called the panel clean.
-  liveIpControl: true,
-  bandwidthNodesUsers: true,
-  connectionsApi: 'connections',
-  userAddressing: 'id',
-});
-/** Every version-detection failure collapses into this one shape. */
-const PANEL_UNREACHABLE = capabilities({});
-
-/**
- * A version service that answers with `caps`, or walks a sequence of capability
- * records one per call and then sticks on the last — which is how a panel that
- * is upgraded (or goes unreachable) between two detector runs is expressed.
- *
- * The cursor is per-service, in a closure: a shared counter would make two
- * detectors built in the same test consume each other's answers.
- */
-function versionService(
-  caps: RemnawaveCapabilities | readonly RemnawaveCapabilities[],
-): RemnawaveVersionService {
-  const queue: readonly RemnawaveCapabilities[] = Array.isArray(caps)
-    ? caps
-    : [caps as RemnawaveCapabilities];
-  let cursor = 0;
-  return {
-    getCapabilities: () =>
-      Promise.resolve(queue[Math.min(cursor++, queue.length - 1)]),
-  } as unknown as RemnawaveVersionService;
-}
-
 // ── SharingDetectors harness ─────────────────────────────────────────────────
 
 interface PanelUser {
@@ -198,20 +127,26 @@ interface SharingHarness {
   readonly panelCalls: string[];
 }
 
+/**
+ * `SharingDetectors` over doubles that can express all three answers.
+ *
+ * `topUsers` / `nodes` take a whole OUTCOME rather than rows, because the
+ * distinction under test is between an outcome that carries no rows and an
+ * outcome that is not a read at all — and a harness that only accepts rows
+ * cannot say the second thing.
+ */
 function makeSharingHarness(input: {
-  readonly caps: RemnawaveCapabilities | readonly RemnawaveCapabilities[];
   readonly panelUsers?: readonly PanelUser[];
-  readonly hwidTopUsers?: readonly {
-    userUuid: string;
-    username: string;
-    telegramId: string | null;
-    devicesCount: number;
-    lastSeenAt: string | null;
-  }[];
-  readonly nodes?: readonly { uuid: string; name: string }[];
-  readonly usersIpsByNode?: Record<
-    string,
-    readonly { userId: string; ips: readonly { ip: string; lastSeen: string }[] }[]
+  readonly topUsers?: PanelDevicesOutcome<PanelHwidTopUsersPage>;
+  readonly nodes?: PanelReadOutcome<readonly PanelNode[]>;
+  readonly nodeUuids?: readonly string[];
+  /**
+   * Per node uuid. A listed node ABSENT here answers `null`: "we could not read
+   * this node", which is the state the whole file exists to keep separate from
+   * "this node was read and was quiet" (`[]`).
+   */
+  readonly connectionsByNode?: Readonly<
+    Record<string, ReadonlyArray<{ userId: number; ips: ReadonlyArray<{ ip: string; lastSeen: Date }> }> | null>
   >;
 }): SharingHarness {
   const panelCalls: string[] = [];
@@ -223,66 +158,75 @@ function makeSharingHarness(input: {
   } as unknown as PrismaService;
 
   const api = {
-    getHwidTopUsers: () => {
-      panelCalls.push('getHwidTopUsers');
-      return Promise.resolve([...(input.hwidTopUsers ?? [])]);
-    },
     strictGetAllPanelUsers: () => {
       panelCalls.push('strictGetAllPanelUsers');
       return Promise.resolve(strictOk({ users: [...panelUsers], total: panelUsers.length }));
     },
-    getAllNodes: () => {
-      panelCalls.push('getAllNodes');
-      return Promise.resolve(
-        (input.nodes ?? []).map((n) => ({
-          ...n,
-          countryCode: 'DE',
-          isConnected: true,
-          isDisabled: false,
-          lastStatusChange: LONG_AGO,
-        })),
-      );
-    },
-    fetchUsersIpsForNode: (nodeUuid: string) => {
-      panelCalls.push(`fetchUsersIpsForNode:${nodeUuid}`);
-      return Promise.resolve([...(input.usersIpsByNode?.[nodeUuid] ?? [])]);
-    },
   } as unknown as RemnawaveApiService;
+
+  const nodeUuids = input.nodeUuids ?? [];
+  const devices = panelDevicesDouble({
+    topUsers: input.topUsers ?? panelOk(hwidTopUsersPage([])),
+    nodeConnections: input.connectionsByNode as never,
+  });
+  const infra = panelInfraDouble({
+    nodes:
+      input.nodes ??
+      panelOk(nodeUuids.map((uuid) => panelNode({ uuid, name: uuid, lastStatusChange: LONG_AGO }))),
+  });
+
+  // Both doubles record into their own arrays; this merges them into the single
+  // call log the tests read, in real call order.
+  const record = <T extends object>(client: T, method: keyof T, label: (arg: unknown) => string) => {
+    const original = (client[method] as unknown as (arg: unknown) => unknown).bind(client);
+    (client as Record<string, unknown>)[method as string] = (arg: unknown) => {
+      panelCalls.push(label(arg));
+      return original(arg);
+    };
+  };
+  record(devices.client, 'listTopUsersByDeviceCount', () => 'listTopUsersByDeviceCount');
+  record(devices.client, 'fetchNodeConnections', (uuid) => `fetchNodeConnections:${String(uuid)}`);
+  record(infra.client, 'getNodes', () => 'getNodes');
 
   return {
     detectors: new SharingDetectors(
       prisma,
       api,
-      versionService(input.caps as never),
+      devices.client,
+      infra.client,
       tunablesFromEnv(),
     ),
     panelCalls,
   };
 }
 
+/** Three IPs on three networks, all seen a moment ago — an offender. */
+function offenderIps(at: Date): ReadonlyArray<{ ip: string; lastSeen: Date }> {
+  return [
+    { ip: '1.1.1.1', lastSeen: at },
+    { ip: '2.2.2.2', lastSeen: at },
+    { ip: '3.3.3.3', lastSeen: at },
+  ];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. HWID overage: an empty device list on a populated panel
+// 1. HWID overage: a failed device read is not an empty one
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('detectHwidOverage — an unreadable device list is not a clean panel', () => {
+describe('detectHwidOverage — a device read that failed is not a clean panel', () => {
   let captured: Captured;
   beforeEach(() => {
     captured = captureLogs();
   });
   afterEach(() => captured.restore());
 
-  it('says so, once, when a populated panel reports nobody with a device', async () => {
+  it('says so, once, when the panel refuses the device list', async () => {
     const { detectors } = makeSharingHarness({
-      caps: PANEL_3_2_1,
-      // The strict read vouched for three users; the HWID endpoint claims not
-      // one of them has ever registered a device. On 3.x that is the `/api/hwid`
-      // family having moved, and the adapter turning the 404 into `[]`.
       panelUsers: [
-        { uuid: 'u1', panelId: 1, hwidDeviceLimit: 3 },
-        { uuid: 'u2', panelId: 2, hwidDeviceLimit: 3 },
-        { uuid: 'u3', panelId: 3, hwidDeviceLimit: 3 },
+        { uuid: '1', panelId: 1, hwidDeviceLimit: 3 },
+        { uuid: '2', panelId: 2, hwidDeviceLimit: 3 },
       ],
-      hwidTopUsers: [],
+      topUsers: panelRejected(404),
     });
 
     assert.deepEqual(await detectors.detectHwidOverage(NOW), []);
@@ -295,19 +239,38 @@ describe('detectHwidOverage — an unreadable device list is not a clean panel',
       1,
       `three runs of a five-minute cron must warn once, not three times; saw ${JSON.stringify(captured.warns)}`,
     );
-    assert.match(blind[0], /3 user\(s\)/);
-    assert.match(blind[0], /panel version 3\.2\.1/);
+    assert.match(blind[0], /HTTP 404/);
     assert.match(blind[0], /zero offenders/);
   });
 
-  it('stays silent about a panel that genuinely holds no users', async () => {
-    // The counterpart. No users means no devices, consistently — this is the
-    // one empty answer that IS information, and warning about it would train an
-    // operator to ignore the warning that matters.
+  it('names the failure it actually had, so the two need different fixes', async () => {
+    // `unreadable` is the panel answering 2xx with a body the data is not in —
+    // a contract problem somebody has to look at. Reporting it as a refusal
+    // sends an operator to check a token that is fine.
     const { detectors } = makeSharingHarness({
-      caps: PANEL_2_8_0,
-      panelUsers: [],
-      hwidTopUsers: [],
+      panelUsers: [{ uuid: '1', panelId: 1, hwidDeviceLimit: 3 }],
+      topUsers: panelUnreadable('`response.users` is not an array'),
+    });
+
+    await detectors.detectHwidOverage(NOW);
+
+    assert.match(blindWarns(captured, 'HWID overage')[0] ?? '', /could not read/);
+  });
+
+  it('stays silent when the panel answers that nobody has a device', async () => {
+    // THE ASSERTION THAT FLIPPED, and the reason the migration was worth doing.
+    // This used to be the blind case: the old reader collapsed a 404 into `[]`,
+    // so the detector had to treat "a populated panel with no device rows" as
+    // evidence of a failed read and warn about it. The read now reports its own
+    // failure, so an `ok` with no rows is a FACT about the panel — and warning
+    // about a fact is how an operator learns to ignore the line that matters.
+    const { detectors } = makeSharingHarness({
+      panelUsers: [
+        { uuid: '1', panelId: 1, hwidDeviceLimit: 3 },
+        { uuid: '2', panelId: 2, hwidDeviceLimit: 3 },
+        { uuid: '3', panelId: 3, hwidDeviceLimit: 3 },
+      ],
+      topUsers: panelOk(hwidTopUsersPage([])),
     });
 
     assert.deepEqual(await detectors.detectHwidOverage(NOW), []);
@@ -315,32 +278,27 @@ describe('detectHwidOverage — an unreadable device list is not a clean panel',
   });
 
   it('announces the recovery and re-arms for the next blindness', async () => {
-    let devices: readonly {
-      userUuid: string;
-      username: string;
-      telegramId: string | null;
-      devicesCount: number;
-      lastSeenAt: string | null;
-    }[] = [];
-    const panelUsers = [{ uuid: 'u1', panelId: 1, hwidDeviceLimit: 3 }];
+    let answer: PanelDevicesOutcome<PanelHwidTopUsersPage> = panelRejected(404);
+    const panelUsers = [{ uuid: '1', panelId: 1, hwidDeviceLimit: 3 }];
     const api = {
-      getHwidTopUsers: () => Promise.resolve([...devices]),
       strictGetAllPanelUsers: () =>
         Promise.resolve(strictOk({ users: panelUsers, total: panelUsers.length })),
     } as unknown as RemnawaveApiService;
+    const devices = {
+      listTopUsersByDeviceCount: () => Promise.resolve(answer),
+    } as unknown as import('../src/modules/remnawave/services/panel-devices.client').PanelDevicesClient;
     const detectors = new SharingDetectors(
       { subscription: { findMany: () => Promise.resolve([]) } } as unknown as PrismaService,
       api,
-      versionService(PANEL_3_2_1),
+      devices,
+      panelInfraDouble().client,
       tunablesFromEnv(),
     );
 
     await detectors.detectHwidOverage(NOW); // blind
-    devices = [
-      { userUuid: 'u1', username: 'alice', telegramId: null, devicesCount: 5, lastSeenAt: null },
-    ];
+    answer = panelOk(hwidTopUsersPage([{ id: 1, username: 'alice', devicesCount: 5 }]));
     const named = await detectors.detectHwidOverage(NOW); // sees again
-    devices = [];
+    answer = panelRejected(500);
     await detectors.detectHwidOverage(NOW); // blind again
 
     assert.equal(named.length, 1, 'a recovered detector has to go back to naming offenders');
@@ -357,7 +315,7 @@ describe('detectHwidOverage — an unreadable device list is not a clean panel',
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Panel-wide HWID average: `null` is "we could not look"
+// 2. Panel-wide HWID average: a failed read is "we could not look"
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('collectHwidAverageAlerts — a failed stats read is not a healthy average', () => {
@@ -367,17 +325,25 @@ describe('collectHwidAverageAlerts — a failed stats read is not a healthy aver
   });
   afterEach(() => captured.restore());
 
-  function makeCollector(read: () => unknown): RemnawaveDetectors {
+  function makeCollector(read: () => PanelDevicesOutcome<PanelHwidDeviceStats>): RemnawaveDetectors {
     return new RemnawaveDetectors(
       {} as unknown as PrismaService,
-      { getHwidStats: () => Promise.resolve(read()) } as unknown as RemnawaveApiService,
-      {} as unknown as RemnawaveVersionService,
+      {
+        getDeviceStats: () => Promise.resolve(read()),
+      } as unknown as import('../src/modules/remnawave/services/panel-devices.client').PanelDevicesClient,
+      panelInfraDouble().client,
       tunablesFromEnv(),
     );
   }
 
-  it('says so, once, when every HWID stats path has failed', async () => {
-    const collector = makeCollector(() => null);
+  const healthy = (): PanelDevicesOutcome<PanelHwidDeviceStats> =>
+    panelOk({
+      stats: { averageHwidDevicesPerUser: 3.4, totalHwidDevices: 900, totalUniqueDevices: 800 },
+      byPlatform: [],
+    } as unknown as PanelHwidDeviceStats);
+
+  it('says so, once, when the stats read does not come back', async () => {
+    const collector = makeCollector(() => panelNetworkFailure('socket hang up'));
 
     assert.deepEqual(await collector.collectHwidAverageAlerts(NOW), []);
     assert.deepEqual(await collector.collectHwidAverageAlerts(NOW), []);
@@ -389,26 +355,20 @@ describe('collectHwidAverageAlerts — a failed stats read is not a healthy aver
       1,
       `a broken endpoint stays broken; one WARN per episode, not per run; saw ${JSON.stringify(captured.warns)}`,
     );
-    assert.match(blind[0], /hwid/);
+    assert.match(blind[0], /socket hang up/);
   });
 
   it('recovers loudly, and a blind run does not re-arm the band it never left', async () => {
     // The counterpart, and the reason the blind branch must not reset
     // `lastHwidBand`: an average that was already reported at band 3 and then
     // became unobservable must not re-announce band 3 when it comes back.
-    let stats: unknown = {
-      stats: { averageHwidDevicesPerUser: 3.4, totalHwidDevices: 900, totalUniqueDevices: 800 },
-      byPlatform: {},
-    };
-    const collector = makeCollector(() => stats);
+    let answer = healthy();
+    const collector = makeCollector(() => answer);
 
     const first = await collector.collectHwidAverageAlerts(NOW);
-    stats = null;
+    answer = panelRejected(404);
     const blindRun = await collector.collectHwidAverageAlerts(NOW);
-    stats = {
-      stats: { averageHwidDevicesPerUser: 3.4, totalHwidDevices: 900, totalUniqueDevices: 800 },
-      byPlatform: {},
-    };
+    answer = healthy();
     const afterRecovery = await collector.collectHwidAverageAlerts(NOW);
 
     assert.equal(first.length, 1);
@@ -429,33 +389,8 @@ describe('collectHwidAverageAlerts — a failed stats read is not a healthy aver
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Concurrent-IP: `liveIpControl` had one answer for three different states
+// 3. Concurrent-IP: blindness is read off the answers, not off a version
 // ─────────────────────────────────────────────────────────────────────────────
-
-describe('classifyLiveConnectionBlindness', () => {
-  it('lets a 2.8 panel through', () => {
-    assert.equal(classifyLiveConnectionBlindness(PANEL_2_8_0), null);
-  });
-
-  it('lets a 3.x panel through — the adapter reads its connections family', () => {
-    // This assertion used to be the opposite, and pinning it that way was right
-    // at the time: the reader did not exist, so a 3.x panel was blind and had to
-    // SAY which of the three blindnesses it was. Now that `fetchUsersIpsForNode`
-    // / `fetchUserIps` / `dropConnections` branch on `connectionsApi`, "3.x is
-    // blind" stopped being true, and a test still guarding it would be guarding
-    // the wrong fact while staying green.
-    assert.equal(classifyLiveConnectionBlindness(PANEL_3_2_1), null);
-  });
-
-  it('separates an immature 2.x panel from an unknown one', () => {
-    const older = classifyLiveConnectionBlindness(PANEL_2_7_4);
-    const unknown = classifyLiveConnectionBlindness(PANEL_UNREACHABLE);
-    assert.equal(older?.reason, 'immature_ip_control');
-    assert.equal(unknown?.reason, 'panel_shape_unknown');
-    // Different operator actions: upgrade the panel vs fix the connection.
-    assert.notEqual(older?.message, unknown?.message);
-  });
-});
 
 describe('detectConcurrentIpSharing — a blind run is not a quiet panel', () => {
   let captured: Captured;
@@ -463,8 +398,8 @@ describe('detectConcurrentIpSharing — a blind run is not a quiet panel', () =>
 
   beforeEach(() => {
     captured = captureLogs();
-    // The IP detector is OFF by default; the capability gate under test sits
-    // behind that switch, so it has to be on for any of this to be reached.
+    // The IP detector is OFF by default and everything under test sits behind
+    // that switch, so it has to be on for any of this to be reached.
     previousEnabled = process.env.ANTIFRAUD_SHARING_IP_ENABLED;
     process.env.ANTIFRAUD_SHARING_IP_ENABLED = 'true';
   });
@@ -474,11 +409,14 @@ describe('detectConcurrentIpSharing — a blind run is not a quiet panel', () =>
     else process.env.ANTIFRAUD_SHARING_IP_ENABLED = previousEnabled;
   });
 
-  it('warns once on a pre-2.8 panel, and does not touch the panel to find out', async () => {
-    // The blind case used to be 3.x. It is 2.7.4 now: 3.x serves its live data
-    // under `/api/connections/*` and the adapter reads it, while 2.7.4's
-    // `ip-control` exists but is not trustworthy enough to accuse anybody with.
-    const { detectors, panelCalls } = makeSharingHarness({ caps: PANEL_2_7_4 });
+  it('warns once when the node list cannot be read, and scans nothing', async () => {
+    // `?? []` used to stand here. A node list we could not read produced zero
+    // connected nodes, the run returned `[]`, and an unreachable panel was
+    // indistinguishable from one where nobody is sharing.
+    const { detectors, panelCalls } = makeSharingHarness({
+      panelUsers: [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }],
+      nodes: panelRejected(503),
+    });
 
     assert.deepEqual(await detectors.detectConcurrentIpSharing(NOW), []);
     assert.deepEqual(await detectors.detectConcurrentIpSharing(NOW), []);
@@ -486,78 +424,129 @@ describe('detectConcurrentIpSharing — a blind run is not a quiet panel', () =>
 
     const blind = blindWarns(captured, 'Concurrent-IP');
     assert.equal(blind.length, 1, `saw ${JSON.stringify(captured.warns)}`);
-    assert.match(blind[0], /did not mature/);
+    assert.match(blind[0], /node list/);
     assert.match(blind[0], /not the same fact as a panel/);
-    // Walking the node list for data we have already decided not to trust would
-    // be load with no information at the end of it.
-    assert.deepEqual(panelCalls, [], 'a detector that knows it cannot read must not read');
+    assert.deepEqual(
+      panelCalls.filter((call) => call.startsWith('fetchNodeConnections')),
+      [],
+      'there is nothing to scan and nothing must be scanned',
+    );
   });
 
-  it('reads a 3.x panel instead of standing down', async () => {
-    // The counterpart to the test above, and the reason it had to change: a 3.x
-    // panel is no longer a blindness at all. Without this, "3.x works" would be
-    // asserted only by the absence of a warning.
-    const recent = NOW.toISOString();
-    const { detectors } = makeSharingHarness({
-      caps: PANEL_3_2_1,
+  it('warns once when not one connected node could be read', async () => {
+    // Every node answered `null`. The run examined nobody, so its silence is
+    // not evidence — and a big node is both the slowest to answer and the one
+    // sharers live on, so this is the failure that lands where it matters most.
+    const { detectors, panelCalls } = makeSharingHarness({
       panelUsers: [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }],
-      nodes: [{ uuid: 'n1', name: 'N1' }],
-      usersIpsByNode: {
-        n1: [
-          {
-            userId: '10',
-            ips: [
-              { ip: '1.1.1.1', lastSeen: recent },
-              { ip: '2.2.2.2', lastSeen: recent },
-              { ip: '3.3.3.3', lastSeen: recent },
-            ],
-          },
-        ],
-      },
+      nodeUuids: ['n1', 'n2'],
+      connectionsByNode: { n1: null, n2: null },
+    });
+
+    assert.deepEqual(await detectors.detectConcurrentIpSharing(NOW), []);
+    assert.deepEqual(await detectors.detectConcurrentIpSharing(NOW), []);
+
+    const blind = blindWarns(captured, 'Concurrent-IP');
+    assert.equal(blind.length, 1, `saw ${JSON.stringify(captured.warns)}`);
+    assert.match(blind[0], /not one of the 2 connected node\(s\)/);
+    // The nodes WERE attempted, on both runs — that is what separates this from
+    // the case above, where nothing was scanned at all, and an operator reading
+    // the two lines has two different problems.
+    assert.deepEqual(
+      panelCalls.filter((call) => call.startsWith('fetchNodeConnections')),
+      [
+        'fetchNodeConnections:n1',
+        'fetchNodeConnections:n2',
+        'fetchNodeConnections:n1',
+        'fetchNodeConnections:n2',
+      ],
+    );
+  });
+
+  it('re-announces when the run goes blind for a different reason', async () => {
+    // Latched on the REASON, not on a boolean: a node list that stopped
+    // answering after the user list had already been failing is a new fact and
+    // a different fix.
+    const { detectors: unreadableNodes } = makeSharingHarness({
+      panelUsers: [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }],
+      nodeUuids: ['n1'],
+      connectionsByNode: { n1: null },
+    });
+    await unreadableNodes.detectConcurrentIpSharing(NOW);
+
+    const { detectors: unreadableList } = makeSharingHarness({
+      panelUsers: [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }],
+      nodes: panelUnreadable('`response` is not an array'),
+    });
+    await unreadableList.detectConcurrentIpSharing(NOW);
+
+    const blind = blindWarns(captured, 'Concurrent-IP');
+    assert.equal(blind.length, 2);
+    assert.match(blind[0], /not one of the 1 connected node\(s\)/);
+    assert.match(blind[1], /node list/);
+  });
+
+  it('treats a partly-read panel as incomplete, not as blind', async () => {
+    // The counterpart that stops "warn about everything" passing for the fix. A
+    // run that read SOME nodes has real evidence about those nodes; it is
+    // simply not evidence about the rest, and that is a different (and more
+    // proportionate) sentence than "this run proves nothing".
+    const { detectors } = makeSharingHarness({
+      panelUsers: [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }],
+      nodeUuids: ['n1', 'n2'],
+      connectionsByNode: { n1: [{ userId: 10, ips: offenderIps(NOW) }], n2: null },
     });
 
     const found = await detectors.detectConcurrentIpSharing(NOW);
 
-    assert.equal(found.length, 1, 'a 3.x panel must produce detections, not silence');
+    assert.equal(found.length, 1, 'the nodes that answered still produce their detections');
+    assert.deepEqual(blindWarns(captured, 'Concurrent-IP'), []);
+    assert.ok(
+      captured.warns.some((w) => w.includes('could not read 1 of 2 connected node(s)')),
+      `the unread node has to be visible anyway; saw ${JSON.stringify(captured.warns)}`,
+    );
+  });
+
+  it('reads a panel that answers, and names the offender', async () => {
+    const { detectors } = makeSharingHarness({
+      panelUsers: [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }],
+      nodeUuids: ['n1'],
+      connectionsByNode: { n1: [{ userId: 10, ips: offenderIps(NOW) }] },
+    });
+
+    const found = await detectors.detectConcurrentIpSharing(NOW);
+
+    assert.equal(found.length, 1, 'a readable panel must produce detections, not silence');
+    assert.equal(found[0].code, 'SUBSCRIPTION_SHARING_IP');
     assert.deepEqual(blindWarns(captured, 'Concurrent-IP'), []);
   });
 
-  it('re-announces when the panel moves to a different kind of blindness', async () => {
-    const { detectors } = makeSharingHarness({
-      caps: [PANEL_2_7_4, PANEL_2_7_4, PANEL_UNREACHABLE],
-    });
-
-    await detectors.detectConcurrentIpSharing(NOW);
-    await detectors.detectConcurrentIpSharing(NOW);
-    await detectors.detectConcurrentIpSharing(NOW);
-
-    const blind = blindWarns(captured, 'Concurrent-IP');
-    assert.equal(blind.length, 2, 'a panel we cannot reach is a different fact from an old one');
-    assert.match(blind[0], /did not mature/);
-    assert.match(blind[1], /could not read/);
-  });
-
   it('recovers loudly on a panel it can read, and still names the offender', async () => {
-    const recent = NOW.toISOString();
-    const { detectors } = makeSharingHarness({
-      caps: [PANEL_2_7_4, PANEL_2_8_0],
-      panelUsers: [{ uuid: 'u1', panelId: 10, hwidDeviceLimit: 1 }],
-      nodes: [{ uuid: 'n1', name: 'N1' }],
-      usersIpsByNode: {
-        n1: [
-          {
-            userId: '10',
-            ips: [
-              { ip: '1.1.1.1', lastSeen: recent },
-              { ip: '2.2.2.2', lastSeen: recent },
-              { ip: '3.3.3.3', lastSeen: recent },
-            ],
-          },
-        ],
-      },
-    });
+    let connections: ReadonlyArray<{ userId: number; ips: ReadonlyArray<{ ip: string; lastSeen: Date }> }> | null =
+      null;
+    const panelUsers = [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }];
+    const api = {
+      strictGetAllPanelUsers: () =>
+        Promise.resolve(strictOk({ users: panelUsers, total: panelUsers.length })),
+    } as unknown as RemnawaveApiService;
+    const devices = {
+      fetchNodeConnections: () => Promise.resolve(connections),
+    } as unknown as import('../src/modules/remnawave/services/panel-devices.client').PanelDevicesClient;
+    const detectors = new SharingDetectors(
+      {
+        subscription: { findMany: () => Promise.resolve([]) },
+        remnawaveMetricSample: { findMany: () => Promise.resolve([]) },
+      } as unknown as PrismaService,
+      api,
+      devices,
+      panelInfraDouble({
+        nodes: panelOk([panelNode({ uuid: 'n1', name: 'N1', lastStatusChange: LONG_AGO })]),
+      }).client,
+      tunablesFromEnv(),
+    );
 
     assert.deepEqual(await detectors.detectConcurrentIpSharing(NOW), []);
+    connections = [{ userId: 10, ips: offenderIps(NOW) }];
     const named = await detectors.detectConcurrentIpSharing(NOW);
 
     assert.equal(named.length, 1, 'the fix must not cost a real detection');
@@ -595,10 +584,10 @@ describe('runDetectors — a blind detector must not auto-resolve anybody', () =
   const TODAY = new Date().toISOString().slice(0, 10);
 
   /**
-   * `AntiFraudService` over the REAL `SharingDetectors`, so the blind path this
-   * change added is the thing driving the run rather than a stub of it.
+   * `AntiFraudService` over the REAL `SharingDetectors`, so the blind path is
+   * the thing driving the run rather than a stub of it.
    */
-  function build(caps: RemnawaveCapabilities, offenderIps: boolean) {
+  function build(readable: boolean) {
     const store = makeAntiFraudStore({
       today: TODAY,
       signals: [
@@ -609,51 +598,33 @@ describe('runDetectors — a blind detector must not auto-resolve anybody', () =
         },
       ],
     });
-    const recent = new Date().toISOString();
-    const panelUsers = [{ uuid: 'offender', panelId: 10, hwidDeviceLimit: 1 }];
+    const now = new Date();
+    const panelUsers = [{ uuid: '10', panelId: 10, hwidDeviceLimit: 1 }];
     const api = {
+      strictGetAllPanelUsers: () =>
+        Promise.resolve(strictOk({ users: panelUsers, total: panelUsers.length })),
+    } as unknown as RemnawaveApiService;
+
+    const devices = panelDevicesDouble({
       // A device row for a user who is not over their limit: the HWID detector
       // has looked, found nothing, and — crucially for this suite — is NOT
       // blind, so the only blindness in the run is the one under test.
-      getHwidTopUsers: () =>
-        Promise.resolve([
-          {
-            userUuid: 'offender',
-            username: 'offender',
-            telegramId: null,
-            devicesCount: 1,
-            lastSeenAt: null,
-          },
-        ]),
-      strictGetAllPanelUsers: () =>
-        Promise.resolve(strictOk({ users: panelUsers, total: panelUsers.length })),
-      getAllNodes: () =>
-        Promise.resolve([
-          {
-            uuid: 'n1',
-            name: 'N1',
-            countryCode: 'DE',
-            isConnected: true,
-            isDisabled: false,
-            lastStatusChange: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-          },
-        ]),
-      fetchUsersIpsForNode: () =>
-        Promise.resolve(
-          offenderIps
-            ? [
-                {
-                  userId: '10',
-                  ips: [
-                    { ip: '1.1.1.1', lastSeen: recent },
-                    { ip: '2.2.2.2', lastSeen: recent },
-                    { ip: '3.3.3.3', lastSeen: recent },
-                  ],
-                },
-              ]
-            : [],
-        ),
-    } as unknown as RemnawaveApiService;
+      topUsers: panelOk(hwidTopUsersPage([{ id: 10, username: 'offender', devicesCount: 1 }])),
+      // Readable: the node answered and the offender is on it. Blind: the node
+      // could not be read at all, which is the `null` the whole file is about.
+      nodeConnections: {
+        n1: readable ? [{ userId: 10, ips: offenderIps(now) }] : null,
+      } as never,
+    });
+    const infra = panelInfraDouble({
+      nodes: panelOk([
+        panelNode({
+          uuid: 'n1',
+          name: 'N1',
+          lastStatusChange: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+        }),
+      ]),
+    });
 
     const prisma = {
       ...(store.prisma as unknown as Record<string, unknown>),
@@ -661,7 +632,13 @@ describe('runDetectors — a blind detector must not auto-resolve anybody', () =
       remnawaveMetricSample: { findMany: () => Promise.resolve([]) },
     } as unknown as PrismaService;
 
-    const sharing = new SharingDetectors(prisma, api, versionService(caps), tunablesFromEnv());
+    const sharing = new SharingDetectors(
+      prisma,
+      api,
+      devices.client,
+      infra.client,
+      tunablesFromEnv(),
+    );
     const empty = () => Promise.resolve([]);
     const service = new AntiFraudService(
       prisma,
@@ -680,7 +657,7 @@ describe('runDetectors — a blind detector must not auto-resolve anybody', () =
       } as unknown as RemnawaveDetectors,
       sharing,
       { detectSubscriptionUaTunnel: empty } as unknown as SubscriptionUaDetectors,
-      {} as unknown as RemnawaveApiService,
+      panelDevicesDouble().client,
       {
         info: () => undefined,
         warn: () => undefined,
@@ -691,9 +668,7 @@ describe('runDetectors — a blind detector must not auto-resolve anybody', () =
   }
 
   it('leaves an open sharing signal alone when the panel could not be read', async () => {
-    // 2.7.4, not 3.2.1: a 3.x panel is readable now, so it no longer stands in
-    // for "could not look".
-    const { service, store } = build(PANEL_2_7_4, false);
+    const { service, store } = build(false);
 
     await service.runDetectors();
 
@@ -712,7 +687,7 @@ describe('runDetectors — a blind detector must not auto-resolve anybody', () =
     // The detector has to produce SOMETHING for its code to become reconcilable
     // at all — that is the `observational` rule — so this run names a different
     // user, and the stale row for `someone-else` closes as it always did.
-    const { service, store } = build(PANEL_2_8_0, true);
+    const { service, store } = build(true);
 
     await service.runDetectors();
 

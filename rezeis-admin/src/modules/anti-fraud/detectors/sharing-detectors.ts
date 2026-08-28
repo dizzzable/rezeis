@@ -2,14 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { FraudSignalSeverity } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { RemnawaveNodeInterface } from '../../remnawave/interfaces/remnawave-node.interface';
 import { describeStrictOutcome } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { panelIdentityLookup } from '../../remnawave/services/panel-user-address';
 import {
-  RemnawaveVersionService,
-  type RemnawaveCapabilities,
-} from '../../remnawave/services/remnawave-version.service';
+  PanelDevicesClient,
+  type PanelDevicesOutcome,
+} from '../../remnawave/services/panel-devices.client';
+import {
+  PanelInfraClient,
+  type PanelNode,
+  type PanelReadOutcome,
+} from '../../remnawave/services/panel-infra.client';
 import { computeConfidence, ratioStrength } from '../confidence.util';
 import { FraudSignalCandidate } from '../interfaces/fraud-signal.interface';
 import { SharingDetectionConfig } from '../sharing-detection.config';
@@ -29,14 +33,46 @@ import type { NodeFlapEvidence } from './remnawave-detectors';
  *   - HWID over-limit: a user has more *registered devices* than their plan's
  *     `hwidDeviceLimit` (cheap, uses the top-users endpoint).
  *   - Concurrent-IP: a user is connected from more *distinct networks* than
- *     their device limit, at the same time (uses whichever live-connection
- *     family the panel serves behind its "Active sessions" view —
- *     `/api/ip-control/*` on 2.8+, `/api/connections/*` on 3.x, picked by the
- *     adapter from the detected panel shape).
+ *     their device limit, at the same time (the `/api/connections/*` family
+ *     behind the panel's own "Active sessions" view).
  *
  * Both resolve the Remnawave user to a rezeis user id (via
  * `Subscription.remnawaveId`) for deep-linking, and fail soft so a panel
  * outage never aborts the cron detector batch.
+ *
+ * ── THE PANEL IS 3.x, AND THAT DELETED THREE THINGS FROM THIS FILE ─────────
+ *
+ * 1. `/api/ip-control/*`. It was the 2.x spelling of the live-connection
+ *    family and panel 3.3.x does not serve it, so nothing here chooses between
+ *    families any more. A 2.x panel is turned away ONCE, centrally, by
+ *    `LegacyPanelRefusal` in `panel-transport.ts`; a second opinion at this
+ *    call site is how the old code ended up with nine sites that each guessed
+ *    differently about an unknown version.
+ * 2. The `RemnawaveVersionService` capability gate. `liveIpControl` /
+ *    `connectionsApi` existed to tell 2.7 from 2.8 from 3.x, and this build
+ *    serves only the last of those. Worse, the gate answered "stand down" for
+ *    an UNKNOWN version, which is the state every healthy panel passes through
+ *    during a blip — so the detector went quiet exactly when the panel was
+ *    already struggling, and quiet here reads as a clean panel.
+ * 3. The `immature_ip_control` blindness classification, which described a
+ *    2.x build this build no longer talks to at all.
+ *
+ * What replaces all three is not another gate: blindness is now READ OFF THE
+ * ANSWER. `PanelDevicesClient` and `PanelInfraClient` report "we could not
+ * look" as a distinct outcome, so the detector no longer has to infer from a
+ * version number whether the silence it is holding means anything.
+ *
+ * ── WHY `RemnawaveApiService` IS STILL HERE, FOR ONE CALL ──────────────────
+ * `strictGetAllPanelUsers()`. Both detectors need every subscriber's
+ * `hwidDeviceLimit`, and that is a WHOLE-PANEL walk — keyset-paged, refusing a
+ * page it never received, believing an empty answer only when the panel
+ * confirms `total: 0`. `PanelUsersClient` deliberately serves ONE page and
+ * says so: whether a short read may be treated as the whole panel is a
+ * judgement about what the caller does with a miss, not about HTTP. Copying
+ * that walk into a detector would be a second implementation of the most
+ * identity-sensitive read in the integration, free to drift from the first —
+ * so the call stays until the users/imports migration lands one walk that both
+ * sides can share.
  *
  * WHAT "AT THE SAME TIME" MEANS HERE, and why it is the whole design.
  * The panel gives one fact per connection: `{ ip, lastSeen }`. There are no
@@ -70,9 +106,8 @@ export class SharingDetectors {
   private nodeFlapSuppressionActive = false;
 
   /**
-   * True once the HWID device endpoint has answered "nobody" for a panel that
-   * demonstrably has users, and until it answers with rows again — the latch
-   * behind the transition-only WARN in {@link detectHwidOverage}.
+   * True once the HWID top-users read has failed, and until it answers again —
+   * the latch behind the transition-only WARN in {@link detectHwidOverage}.
    *
    * Same shape and same reason as `RemnawaveDetectors.perUserTrafficBlind`:
    * process-local, deliberately not persisted, and a restart re-announcing a
@@ -82,16 +117,19 @@ export class SharingDetectors {
 
   /**
    * Which blindness the concurrent-IP detector last announced, or `null` while
-   * it can actually see. Keyed by REASON rather than a bare boolean so a panel
-   * that moves between states (2.7 → 3.x, reachable → unreachable) re-announces
-   * once per state instead of staying quiet under a stale latch.
+   * it can actually see. Keyed by REASON rather than a bare boolean so a run
+   * that goes blind for a NEW reason (the node list stopped answering after the
+   * user list had already been failing) announces the new one instead of
+   * staying quiet under a stale latch.
    */
   private concurrentIpBlindReason: LiveConnectionBlindness['reason'] | null = null;
 
   public constructor(
     private readonly prismaService: PrismaService,
+    /** The whole-panel user walk, and nothing else — see the class header. */
     private readonly remnawaveApiService: RemnawaveApiService,
-    private readonly versionService: RemnawaveVersionService,
+    private readonly devicesClient: PanelDevicesClient,
+    private readonly infraClient: PanelInfraClient,
     private readonly tunablesService: AntiFraudTunablesService,
   ) {}
 
@@ -184,8 +222,8 @@ export class SharingDetectors {
     if (!config.enableHwidOverage) return [];
     try {
       const [topUsers, panelLimits] = await Promise.all([
-        this.remnawaveApiService.getHwidTopUsers(),
-        this.buildDeviceLimitByUuid(),
+        this.devicesClient.listTopUsersByDeviceCount(),
+        this.buildPanelUserFacts(),
       ]);
       // A partial device-limit map does not under-report — it MIS-reports. A
       // user whose row we lost reads back as limit 0 and is silently dropped,
@@ -194,39 +232,64 @@ export class SharingDetectors {
         this.logger.warn('HWID overage detection skipped: the panel user list is not trustworthy');
         return [];
       }
-      const { limitByUuid, coverage } = panelLimits;
-      if (topUsers.length === 0) {
-        // "NOBODY HAS A DEVICE" AND "WE COULD NOT READ THE DEVICE LIST" ARRIVE
-        // AS THE SAME EMPTY ARRAY, and until this branch existed the second one
-        // returned in silence — a detector reporting a clean panel forever.
-        //
-        // The distinction is destroyed one layer down: `getHwidTopUsers` wraps
-        // its request in `try { … } catch { return [] }`, so a 404, a 401 and a
-        // panel that genuinely has no registered devices are one value by the
-        // time they get here. Restoring it properly means teaching the adapter
-        // to report the failure — `src/modules/remnawave/**`, which this change
-        // does not own. What IS available here is the contradiction: the strict
-        // panel-user read above just vouched for a list of users, and an
-        // endpoint that answers "not one of them has ever registered a device"
-        // about a populated panel is far more likely to be a read we cannot
-        // make than a fact. Remnawave 3.x moved the `/api/hwid/*` family, which
-        // is exactly how a live panel arrives in this state.
-        //
-        // An empty panel is NOT this: no users means no devices, consistently,
-        // so it stays silent.
-        await this.reportHwidBlind(limitByUuid.size);
+      const { byPanelId, coverage } = panelLimits;
+      // "WE LOOKED AND FOUND NOBODY" AND "WE COULD NOT LOOK" NO LONGER ARRIVE
+      // AS THE SAME VALUE, and this branch is the whole reason the migration
+      // was worth doing. The old adapter wrapped the walk in
+      // `try { … } catch { return [] }`, so a 404, a 401 and a panel that
+      // genuinely has no registered devices were one empty array by the time
+      // they reached here — a detector reporting a clean panel forever. The
+      // detector had to guess from a CONTRADICTION (a populated user list
+      // beside an empty device list) and could only ever guess.
+      //
+      // `PanelDevicesClient` reports the failure itself, so the guess is gone:
+      // `ok` with no rows is now a fact about the panel, and anything else is a
+      // read we could not make.
+      if (topUsers.kind !== 'ok') {
+        this.reportHwidBlind(topUsers);
         return [];
       }
       this.clearHwidBlind();
+      if (!topUsers.data.complete) {
+        // A prefix of the device-heavy population, not all of it. The list is
+        // ordered by device count so the rows we hold are the worst offenders,
+        // but a clean verdict covers only them — say so rather than let a
+        // truncated walk read like an exhausted one.
+        this.logger.warn(
+          `HWID overage detection judged the top ${topUsers.data.users.length} of ` +
+            `${topUsers.data.total} device-registering user(s): the walk stopped at its ceiling, ` +
+            'so this run is INCOMPLETE for the tail, not clean',
+        );
+      }
 
-      const offenders = topUsers
-        .map((u) => ({
-          uuid: u.userUuid,
-          username: u.username,
-          devices: u.devicesCount,
-          limit: limitByUuid.get(u.userUuid) ?? 0,
-        }))
-        .filter((u) => u.limit > 0 && u.devices > u.limit);
+      // JOINED ON THE NUMERIC PANEL ID, NOT ON A UUID. Panel 3.x deleted the
+      // uuid column from the users table, so a top-users row is
+      // `{ id, username, devicesCount }` and `id` is the only identity it
+      // carries. The old join read `u.userUuid`, a field 3.3.x does not send.
+      let unjoinableRows = 0;
+      const offenders = topUsers.data.users
+        .map((u) => {
+          const meta = byPanelId.get(u.id) ?? null;
+          if (meta === null) unjoinableRows += 1;
+          return {
+            uuid: meta?.identity ?? '',
+            username: u.username,
+            devices: u.devicesCount,
+            limit: meta?.limit ?? 0,
+          };
+        })
+        .filter((u) => u.uuid.length > 0 && u.limit > 0 && u.devices > u.limit);
+      if (unjoinableRows > 0) {
+        // Not silent, and not fatal: on a truncated user read these are simply
+        // rows the prefix did not reach. Judging them would mean inventing a
+        // device limit, and inventing one is how a customer gets named for a
+        // number nobody set.
+        this.logger.warn(
+          `HWID overage detection could not judge ${unjoinableRows} device-registering user(s): ` +
+            'the panel user list holds no row for their id, so their device limit is unknown. ' +
+            'They were skipped, not cleared.',
+        );
+      }
       if (offenders.length === 0) return [];
 
       // One query, already needed for the user deep-link, now also carrying the
@@ -464,48 +527,26 @@ export class SharingDetectors {
   public async detectConcurrentIpSharing(now: Date): Promise<readonly FraudSignalCandidate[]> {
     const config = await this.resolveConfig();
     if (!config.enableIpSharing) return [];
-    // WHY THIS IS NOT `if (!caps.liveIpControl) return []` ANY MORE.
+    // THERE IS NO CAPABILITY GATE HERE ANY MORE, and its removal is the point.
     //
-    // That test had one true answer and three different meanings, and it
-    // reported the same silent nothing for all of them. Two questions are
-    // asked separately instead:
+    // The old test was `classifyLiveConnectionBlindness(caps)` over
+    // `liveIpControl` / `connectionsApi` — version facts that existed only to
+    // tell 2.7 from 2.8 from 3.x. This build serves 3.x and refuses 2.x once,
+    // centrally, in `LegacyPanelRefusal`, so the only answers the gate had left
+    // were "3.x, proceed" and "we could not read the version". The second is
+    // the state every healthy panel passes through during a token blip or a
+    // restart, and the gate turned it into a silent empty run — a detector
+    // standing down precisely when the panel is already struggling, reporting
+    // the same value a clean panel reports.
     //
-    //   • does the panel HAVE live-connection data?  `connectionsApi`
-    //   • can this detector READ it?                 `liveIpControl`
+    // Blindness is now read off the ANSWERS instead: the panel user list, the
+    // node list and each node's live connections each report "we could not
+    // look" as a distinct outcome, and every one of them is announced below.
     //
-    // A "no" to the second is a blind detector whatever the first says, and it
-    // now says so out loud instead of returning a clean-looking empty list.
-    //
-    // WHAT IS TRUE OF A 3.x PANEL TODAY, because this comment used to say the
-    // opposite and read as a live defect report rather than as history. It
-    // stated that `liveIpControl` is `major === 2 && minor >= 8` and that
-    // `fetchUsersIpsForNode` "is hard-wired to the `/api/ip-control/*` family
-    // 3.x deleted", so every call 404s. Both halves are now false, and a reader
-    // who believes them concludes this detector is dead on the operator's 3.3.2
-    // panel — which would mean either "fixing" working code or discounting a
-    // real signal:
-    //
-    //   • `liveIpControl` is `major === 3 || (major === 2 && minor >= 8)`, so a
-    //     3.x panel reports TRUE;
-    //   • the adapter reads both families and picks by the DETECTED PANEL
-    //     SHAPE — `fetchUsersIpsForNode`, `fetchUserIps` and `dropConnections`
-    //     each branch on `connectionsApi`, taking `/api/connections/*` on 3.x
-    //     and `/api/ip-control/*` on 2.8+.
-    //
-    // So on 3.x this detector runs, and the blindness classifier below has no
-    // `connections` branch left to take — see the note there.
-    //
-    // Returning `[]` is still the only safe output when it IS blind — see the
-    // class header and `AntiFraudService`'s `observational` evidence class: an
-    // empty run from a panel-backed detector is no information at all and must
-    // never auto-resolve anybody's open signal.
-    const caps = await this.versionService.getCapabilities();
-    const blindness = classifyLiveConnectionBlindness(caps);
-    if (blindness !== null) {
-      this.reportConcurrentIpBlind(blindness);
-      return [];
-    }
-    this.clearConcurrentIpBlind();
+    // Returning `[]` is still the only safe output when it IS blind — see
+    // `AntiFraudService`'s `observational` evidence class: an empty run from a
+    // panel-backed detector is no information at all and must never
+    // auto-resolve anybody's open signal.
     try {
       // Degrade, never guess: this detector writes a fraud signal keyed by
       // `day|uuid`, and a uuid-less row would collide every such user onto one
@@ -513,24 +554,52 @@ export class SharingDetectors {
       // than quietly under-detecting for a run.
       const bulk = await this.remnawaveApiService.strictGetAllPanelUsers();
       if (bulk.kind !== 'ok') {
-        this.logger.warn(
-          `Concurrent-IP detection skipped: the panel user list is not trustworthy (${describeStrictOutcome(bulk)})`,
-        );
+        this.reportConcurrentIpBlind({
+          reason: 'panel_user_list_unreadable',
+          message:
+            `the panel user list is not trustworthy (${describeStrictOutcome(bulk)}), and without ` +
+            'it an online panel id cannot be attributed to a subscriber or measured against a ' +
+            'device limit.',
+        });
         return [];
       }
       const panelUsers = bulk.value.users;
-      if (panelUsers.length === 0) return [];
+      if (panelUsers.length === 0) {
+        // A vouched-for empty panel. Nobody to be online, so nobody to accuse —
+        // and unlike every other empty above, this one really is a fact.
+        this.clearConcurrentIpBlind();
+        return [];
+      }
       const coverage = panelReadCoverage(bulk.value);
 
-      // panelId → { uuid, username, limit } (ip-control keys online users by panel id)
-      const byPanelId = new Map<number, { uuid: string; username: string; limit: number }>();
+      // panelId → { identity, username, limit }. The connections rows key
+      // online users by the panel's numeric id, on every 3.x build.
+      const byPanelId = new Map<number, { identity: string; username: string; limit: number }>();
       for (const u of panelUsers) {
         if (u.panelId !== null) {
-          byPanelId.set(u.panelId, { uuid: u.uuid, username: u.username, limit: u.hwidDeviceLimit ?? 0 });
+          byPanelId.set(u.panelId, {
+            identity: u.uuid,
+            username: u.username,
+            limit: u.hwidDeviceLimit ?? 0,
+          });
         }
       }
 
-      const nodes = (await this.remnawaveApiService.getAllNodes()) ?? [];
+      // `?? []` IS GONE, and that was a real conflation: a node list we could
+      // not read produced zero connected nodes, the run returned `[]` two lines
+      // later, and a panel that never answered was indistinguishable from one
+      // where nobody is sharing.
+      const nodeList = await this.infraClient.getNodes();
+      if (nodeList.kind !== 'ok') {
+        this.reportConcurrentIpBlind({
+          reason: 'node_list_unreadable',
+          message:
+            `the panel did not return its node list (${describeReadFailure(nodeList)}), so there ` +
+            'is nothing to scan and no way to tell a quiet panel from an unreachable one.',
+        });
+        return [];
+      }
+      const nodes = nodeList.data;
 
       // Node-stability guard, same evidence and same window as
       // `RemnawaveDetectors.findRecentNodeFlap`. When a node drops, every user
@@ -547,7 +616,7 @@ export class SharingDetectors {
       }
       this.nodeFlapSuppressionActive = false;
 
-      // Sort before slicing. `getAllNodes` returns the panel's order, which is
+      // Sort before slicing. `getNodes` returns the panel's order, which is
       // not stable, so an unsorted `.slice()` scans a different set of nodes
       // from one run to the next — and the distinct-IP count that this whole
       // accusation rests on is taken over exactly those nodes. Sorting by uuid
@@ -557,55 +626,71 @@ export class SharingDetectors {
         .filter((n) => n.isConnected && !n.isDisabled)
         .sort((a, b) => a.uuid.localeCompare(b.uuid))
         .slice(0, config.maxNodesPerRun);
-      if (connected.length === 0) return [];
+      if (connected.length === 0) {
+        // The node list was READ and holds nothing to scan — a panel with every
+        // node disabled or down. Not blindness: we know why we saw nobody.
+        this.clearConcurrentIpBlind();
+        return [];
+      }
 
       const nowMs = now.getTime();
       const staleBefore = nowMs - config.ipWindowMinutes * 60_000;
-      // panelId → ip → sample
-      const byUser = new Map<string, Map<string, IpAggregate>>();
+      // panel user id → ip → sample
+      const byUser = new Map<number, Map<string, IpAggregate>>();
       let undatedSamples = 0;
+      let unreadablePanelIds = 0;
 
       let unreadableNodes = 0;
       for (const node of connected) {
-        const rows = await this.remnawaveApiService.fetchUsersIpsForNode(node.uuid);
+        const rows = await this.devicesClient.fetchNodeConnections(node.uuid);
         // `null` is "this node could not be read", not "this node was quiet".
-        // Counting it is the whole point: a node whose collection job failed or
-        // timed out contributes nobody, and without this the run would report a
-        // clean panel having looked at a fraction of it.
+        // Counting it is the whole point: a node whose collection job failed,
+        // timed out, or completed carrying nothing usable contributes nobody,
+        // and without this the run would report a clean panel having looked at
+        // a fraction of it. `PanelDevicesClient.pollJob` is what makes the two
+        // separable — the reader it replaces let a completed job with
+        // `result: null` fall through to an extractor that answers `[]` for any
+        // non-array, so a collection that ran and produced nothing came back as
+        // "node read, nobody online".
         if (rows === null) {
           unreadableNodes += 1;
           continue;
         }
         for (const row of rows) {
+          const panelId = parsePanelId(row.userId);
+          if (panelId === null) {
+            unreadablePanelIds += 1;
+            continue;
+          }
           for (const sample of row.ips) {
-            const lastSeenMs = Date.parse(sample.lastSeen);
+            const lastSeen = readInstant(sample.lastSeen);
             // An unparseable timestamp used to be KEPT — `Number.isFinite(seen)
             // && seen < windowStart` only excluded samples it could read, so a
             // malformed `lastSeen` counted as in-window and as concurrent with
             // everything else. Fail-open is the wrong direction for evidence:
             // a sighting we cannot place in time cannot show simultaneity.
-            if (!Number.isFinite(lastSeenMs)) {
+            if (lastSeen === null) {
               undatedSamples += 1;
               continue;
             }
-            if (lastSeenMs < staleBefore) continue;
-            let ipMap = byUser.get(row.userId);
+            if (lastSeen.ms < staleBefore) continue;
+            let ipMap = byUser.get(panelId);
             if (!ipMap) {
               ipMap = new Map<string, IpAggregate>();
-              byUser.set(row.userId, ipMap);
+              byUser.set(panelId, ipMap);
             }
             const existing = ipMap.get(sample.ip);
             // The same IP can appear on several nodes. Keep the NEWEST sighting,
             // not the first node's: recency is now what decides concurrency, and
             // first-wins would date a live IP by whichever node we happened to
             // scan first and drop it out of its own user's cluster.
-            if (existing !== undefined && existing.lastSeenMs >= lastSeenMs) continue;
+            if (existing !== undefined && existing.lastSeenMs >= lastSeen.ms) continue;
             ipMap.set(sample.ip, {
               ip: sample.ip,
-              lastSeen: sample.lastSeen,
-              lastSeenMs,
+              lastSeen: lastSeen.iso,
+              lastSeenMs: lastSeen.ms,
               nodeName: node.name,
-              countryCode: node.countryCode ?? null,
+              countryCode: node.countryCode.length > 0 ? node.countryCode : null,
             });
           }
         }
@@ -627,13 +712,7 @@ export class SharingDetectors {
         observedIpCount: number;
         distinctNetworks: number;
       }> = [];
-      let unreadablePanelIds = 0;
-      for (const [panelIdStr, ipMap] of byUser) {
-        const panelId = parsePanelId(panelIdStr);
-        if (panelId === null) {
-          unreadablePanelIds += 1;
-          continue;
-        }
+      for (const [panelId, ipMap] of byUser) {
         const meta = byPanelId.get(panelId);
         if (!meta || meta.limit <= 0) continue;
         const observed = [...ipMap.values()];
@@ -658,7 +737,7 @@ export class SharingDetectors {
           continue;
         }
         offenders.push({
-          uuid: meta.uuid,
+          uuid: meta.identity,
           username: meta.username,
           limit: meta.limit,
           ips,
@@ -667,10 +746,13 @@ export class SharingDetectors {
         });
       }
       if (unreadablePanelIds > 0) {
-        // Never silent: the old code turned `3f2a-…` into panel user #3 and
-        // filed those IPs against whoever that was.
+        // Never silent: an earlier reader turned `3f2a-…` into panel user #3
+        // and filed those IPs against whoever that was. The contract now
+        // declares `userId` as a number, so this is only reachable on the
+        // drift path — where the executor hands back the panel's raw bytes and
+        // the field can be anything at all.
         this.logger.warn(
-          `Concurrent-IP detection skipped ${unreadablePanelIds} ip-control row(s) whose ` +
+          `Concurrent-IP detection skipped ${unreadablePanelIds} live-connection row(s) whose ` +
             'userId is not an integer panel id — they cannot be attributed to a user without guessing',
         );
       }
@@ -678,16 +760,26 @@ export class SharingDetectors {
       // clean panel also contributes. Said out loud, at a level proportional to
       // how much of the panel went unseen: the run is still worth completing on
       // the nodes that answered, but its silence is not evidence.
+      if (unreadableNodes === connected.length) {
+        // Nothing was seen at all. That is not a degraded run, it is a blind
+        // one, and it goes through the same latch as the other two blindnesses
+        // so an operator gets one WARN per episode rather than one per run.
+        this.reportConcurrentIpBlind({
+          reason: 'live_connections_unreadable',
+          message:
+            `not one of the ${connected.length} connected node(s) could be read — every ` +
+            'collection job failed, was refused, or did not finish inside its poll budget. This ' +
+            'run examined nobody.',
+        });
+        return [];
+      }
+      this.clearConcurrentIpBlind();
       if (unreadableNodes > 0) {
-        const total = connected.length;
-        const message =
-          `Concurrent-IP detection could not read ${unreadableNodes} of ${total} connected node(s) — ` +
-          'their live connections were NOT examined, so a clean result covers only the rest';
-        if (unreadableNodes === total) {
-          this.logger.warn(`${message}. This run saw nothing at all and proves nothing.`);
-        } else {
-          this.logger.warn(message);
-        }
+        this.logger.warn(
+          `Concurrent-IP detection could not read ${unreadableNodes} of ${connected.length} ` +
+            'connected node(s) — their live connections were NOT examined, so a clean result ' +
+            'covers only the rest',
+        );
       }
       if (offenders.length === 0) return [];
 
@@ -800,33 +892,32 @@ export class SharingDetectors {
   // ── Blindness reporting ─────────────────────────────────────────────────
 
   /**
-   * The HWID device endpoint returned nothing for a panel holding
-   * `panelUserCount` users.
+   * The HWID top-users read did not answer, and why.
    *
    * WARN on the transition into blindness, debug on every run after it. This
    * runs every 5 minutes and the condition, once true, stays true until somebody
-   * fixes the panel or the adapter — a line per run would be 288 copies a day of
-   * the same text and would be tuned out exactly like the failure it exists to
-   * surface. One WARN when the detector goes blind, one LOG when it recovers.
-   * Once per RUN, never per user: the blindness is a property of the read, not
-   * of anybody's account.
+   * fixes the panel — a line per run would be 288 copies a day of the same text
+   * and would be tuned out exactly like the failure it exists to surface. One
+   * WARN when the detector goes blind, one LOG when it recovers. Once per RUN,
+   * never per user: the blindness is a property of the read, not of anybody's
+   * account.
+   *
+   * There is no "the list was empty" branch any more, and there must not be
+   * one. `PanelDevicesClient` reports a failure AS a failure, so an `ok` with
+   * no rows is the panel saying nobody has registered a device — a fact, not a
+   * symptom. Warning about it as well would train an operator to ignore the
+   * line that means something.
    */
-  private async reportHwidBlind(panelUserCount: number): Promise<void> {
-    // No users, no devices — a consistent, unremarkable empty panel.
-    if (panelUserCount <= 0) return;
+  private reportHwidBlind(failure: PanelDevicesOutcome<unknown>): void {
     if (this.hwidTopUsersBlind) {
       this.logger.debug('HWID overage detection still blind');
       return;
     }
     this.hwidTopUsersBlind = true;
     this.logger.warn(
-      `HWID overage detection is BLIND: the panel user list vouches for ${panelUserCount} ` +
-        'user(s), and the HWID device endpoint reports that not one of them has a ' +
-        `registered device (${await this.describePanel()}). The adapter collapses a 404, ` +
-        'a rejected request and a genuinely empty list into the same empty array, so ' +
-        'this run cannot tell "nobody is over their limit" from "we could not look" — ' +
-        'and Remnawave 3.x moved the `/api/hwid/*` family this reads. This detector ' +
-        'will report zero offenders until that is resolved; it is not evidence of a ' +
+      'HWID overage detection is BLIND: the panel did not return its device top-users list ' +
+        `(${describeReadFailure(failure)}). This run cannot tell "nobody is over their limit" ` +
+        'from "we could not look", so it reports zero offenders — which is not evidence of a ' +
         'clean panel.',
     );
   }
@@ -861,39 +952,25 @@ export class SharingDetectors {
     if (this.concurrentIpBlindReason === null) return;
     this.concurrentIpBlindReason = null;
     this.logger.log(
-      'Concurrent-IP detection recovered: the panel serves a live-connection family this ' +
-        'detector can read',
+      'Concurrent-IP detection recovered: the panel answered with live-connection data again',
     );
-  }
-
-  /**
-   * The panel's self-reported version, for a log line and never for a decision.
-   *
-   * Swallows its own failure twice over: a message that cannot name the panel is
-   * still worth sending, and a capability read that throws must not turn a blind
-   * detector into a *failed* one — the caller sits inside the detector's
-   * try/catch, where a throw would be reported as "HWID overage detection
-   * failed" and lose the blindness it was trying to announce.
-   */
-  private async describePanel(): Promise<string> {
-    try {
-      const caps = await this.versionService.getCapabilities();
-      return typeof caps.version === 'string' && caps.version.length > 0
-        ? `panel version ${caps.version}`
-        : 'the panel version could not be read';
-    } catch {
-      return 'the panel version could not be read';
-    }
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   /**
-   * Map Remnawave subscription UUIDs → device limits via panel users, together
-   * with how much of the panel that map actually covers.
-   * Keyed by uuid for the HWID detector (top-users endpoint gives uuid).
+   * Map the panel's NUMERIC user id → that user's stored identity, name and
+   * device limit, together with how much of the panel the map covers.
    *
-   * `null` when the bulk read could not be vouched for — a missing uuid is
+   * KEYED BY THE NUMERIC ID, not by a uuid, and that is a 3.x fact rather than
+   * a preference: panel 3.x deleted the uuid column from the users table, so a
+   * `/api/hwid/devices/top-users` row is `{ id, username, devicesCount }` and
+   * the numeric id is the only identity it carries. The `identity` field is
+   * whatever `Subscription.remnawaveId` would hold for that profile — the
+   * decimal id on 3.x, a uuid on a row created before the upgrade — because
+   * that is what the fingerprint and the deep-link lookup are keyed on.
+   *
+   * `null` when the bulk read could not be vouched for — a missing row is
    * indistinguishable from `limit 0` in this map, so a lossy read would exempt
    * exactly the users it lost instead of failing visibly.
    *
@@ -904,8 +981,8 @@ export class SharingDetectors {
    * evidence base all the same, and the number that says so travels with the
    * map instead of being rediscovered at the call site.
    */
-  private async buildDeviceLimitByUuid(): Promise<{
-    readonly limitByUuid: Map<string, number>;
+  private async buildPanelUserFacts(): Promise<{
+    readonly byPanelId: Map<number, PanelUserFacts>;
     readonly coverage: number;
   } | null> {
     const bulk = await this.remnawaveApiService.strictGetAllPanelUsers();
@@ -913,11 +990,16 @@ export class SharingDetectors {
       this.logger.warn(`Panel user list unusable: ${describeStrictOutcome(bulk)}`);
       return null;
     }
-    const limitByUuid = new Map<string, number>();
+    const byPanelId = new Map<number, PanelUserFacts>();
     for (const u of bulk.value.users) {
-      limitByUuid.set(u.uuid, u.hwidDeviceLimit ?? 0);
+      if (u.panelId === null) continue;
+      byPanelId.set(u.panelId, {
+        identity: u.uuid,
+        username: u.username,
+        limit: u.hwidDeviceLimit ?? 0,
+      });
     }
-    return { limitByUuid, coverage: panelReadCoverage(bulk.value) };
+    return { byPanelId, coverage: panelReadCoverage(bulk.value) };
   }
 
   /**
@@ -950,15 +1032,18 @@ export class SharingDetectors {
    */
   private async findRecentNodeFlap(
     now: Date,
-    liveNodes: readonly RemnawaveNodeInterface[],
+    liveNodes: readonly PanelNode[],
   ): Promise<NodeFlapEvidence | null> {
     const windowStart = now.getTime() - NODE_STABILITY_WINDOW_MINUTES * 60_000;
 
     const recentlyChanged = liveNodes
       .filter((n) => !n.isDisabled)
       .filter((n) => {
-        const changedAt = n.lastStatusChange ? Date.parse(n.lastStatusChange) : NaN;
-        return Number.isFinite(changedAt) && changedAt >= windowStart;
+        // The contract transforms this field to a `Date`; on the executor's
+        // drift path it arrives as the wire string instead. Both are read, and
+        // anything else is simply not a timestamp we can place in the window.
+        const changedAt = readInstant(n.lastStatusChange);
+        return changedAt !== null && changedAt.ms >= windowStart;
       })
       .map((n) => n.name || n.uuid);
     if (recentlyChanged.length > 0) {
@@ -1120,75 +1205,33 @@ export class SharingDetectors {
 }
 
 /**
- * Why the concurrent-IP detector cannot see who is connected this run.
+ * Why the concurrent-IP detector could not see who is connected this run.
  *
  * `reason` is the latch key and the stable token a test can assert on; `message`
- * is the operator-facing half. Two states, and they are two different operator
- * actions — which is the whole reason the old single `liveIpControl` test was
- * not good enough:
+ * is the operator-facing half. All three are things the RUN observed, not
+ * things a version number implied — the classification this replaces read
+ * `liveIpControl` / `connectionsApi` off the capability record and could
+ * therefore only ever describe the panel's era, never its behaviour. Its
+ * `immature_ip_control` arm named a 2.x build `LegacyPanelRefusal` now turns
+ * away centrally, and its `panel_shape_unknown` arm fired on a version probe
+ * blip against a panel that was answering everything else perfectly well.
  *
- *   `immature_ip_control` — a 2.x panel below 2.8, where the active-session data
- *      exists but is not trustworthy. Fixed by upgrading the panel, and the
- *      detector lights up on its own when that happens.
- *   `panel_shape_unknown` — we do not know what the panel is. Version detection
- *      collapses 401 / timeout / DNS / unconfigured token into one "no version",
- *      so this is a rezeis-side configuration or connectivity problem.
+ *   `panel_user_list_unreadable`   — no device limits and no way to attribute
+ *      an online panel id to a subscriber. Everything downstream is unsound.
+ *   `node_list_unreadable`         — nothing to scan, and no way to tell that
+ *      from a panel with no connected nodes.
+ *   `live_connections_unreadable`  — every connected node was scanned and not
+ *      one of them answered. The run examined nobody.
+ *
+ * A run that reads SOME nodes is not blind: it is incomplete, which is a
+ * different (and separately logged) fact.
  */
 interface LiveConnectionBlindness {
-  readonly reason: 'immature_ip_control' | 'panel_shape_unknown';
+  readonly reason:
+    | 'panel_user_list_unreadable'
+    | 'node_list_unreadable'
+    | 'live_connections_unreadable';
   readonly message: string;
-}
-
-/**
- * Can {@link SharingDetectors.detectConcurrentIpSharing} observe this panel?
- * `null` = yes; anything else is why not.
- *
- * Reads `connectionsApi` — the field the version service already exposes and its
- * own comment nominates as the eventual gate — for "does live-connection data
- * exist?", and `liveIpControl` for "can this detector read it?". Deliberately a
- * pure function of the capability record and nothing else, so the classification
- * is testable without a panel and cannot acquire a side effect later.
- */
-function classifyLiveConnectionBlindness(
-  caps: Pick<RemnawaveCapabilities, 'liveIpControl' | 'connectionsApi' | 'version'>,
-): LiveConnectionBlindness | null {
-  // `liveIpControl` is "this build can read live connections from this panel",
-  // and the adapter backs that with BOTH families — `ip-control/*` from 2.8 up,
-  // `connections/*` on 3.x — chosen by the detected panel shape. This line used
-  // to read "the only family the adapter can currently read is `ip-control`,
-  // and only from 2.8 up", which the note a dozen lines below already
-  // contradicts: that window closed when the connections reader landed.
-  // Everything else is blind, in one of the two ways the union above names.
-  if (caps.liveIpControl) return null;
-  const panel =
-    typeof caps.version === 'string' && caps.version.length > 0
-      ? `panel version ${caps.version}`
-      : 'a panel version rezeis could not read';
-  // There is deliberately no `connectionsApi === 'connections'` branch. It used
-  // to exist, for the window in which a 3.x panel served live-connection data
-  // the adapter could not read. That window closed: `connectionsApiFor` only
-  // ever answers 'connections' for major 3, and `liveIpControl` is true for
-  // major 3, so the branch became unreachable the moment the reader landed.
-  // Keeping it would have left an operator-facing message asserting something
-  // false ("rezeis cannot, until the adapter learns the connections family")
-  // behind a condition no panel can satisfy.
-  if (caps.connectionsApi === 'ip-control') {
-    return {
-      reason: 'immature_ip_control',
-      message:
-        `the panel reports ${panel}: \`/api/ip-control/*\` exists but did not mature ` +
-        'until 2.8, and the active-session data older builds return is not reliable ' +
-        'enough to accuse anybody with.',
-    };
-  }
-  return {
-    reason: 'panel_shape_unknown',
-    message:
-      `rezeis is running against ${panel}, so it cannot tell which live-connection ` +
-      'family the panel serves. Every version-detection failure — 401, request ' +
-      'timeout, DNS, an unconfigured token, a panel mid-restart — collapses into this ' +
-      'one state, so the panel may well be fine and unreachable.',
-  };
 }
 
 /** Local facts about the subscription behind a Remnawave profile. */
@@ -1413,10 +1456,81 @@ function clampScore(value: number): number {
   return Math.round(value);
 }
 
+/**
+ * How a failed panel read is rendered into an operator-facing log line.
+ *
+ * Every arm is named, and `unreadable` is named separately from `rejected` on
+ * purpose: they are different operator actions. `rejected` is the panel saying
+ * no — a token, a permission, a route. `unreadable` is the panel saying yes and
+ * answering a shape this build could not find the data in, which is a contract
+ * problem somebody has to look at. Collapsing them into "the panel did not
+ * answer" is what the old adapter did, and it is why a malformed request could
+ * 400 on every run for months while the detector reported a clean panel.
+ */
+function describeReadFailure(outcome: PanelReadOutcome<unknown>): string {
+  switch (outcome.kind) {
+    case 'ok':
+      // Unreachable by construction — every caller checks `kind` first — but a
+      // silent empty string here would read as "no reason given" in the log.
+      return 'the read succeeded';
+    case 'rejected':
+      return `the panel refused it: HTTP ${outcome.status}${
+        outcome.code === null ? '' : ` ${outcome.code}`
+      }`;
+    case 'network':
+      return `nothing came back: ${outcome.detail}`;
+    case 'unconfigured':
+      return 'the Remnawave connection is not configured';
+    case 'invalid-request':
+      return `rezeis built the request wrong and it was never sent: ${outcome.detail}`;
+    case 'unreadable':
+      return `the panel answered a shape this build could not read: ${outcome.detail}`;
+  }
+}
+
+/** One panel profile's facts, as both detectors need them. */
+interface PanelUserFacts {
+  /** What `Subscription.remnawaveId` holds for this profile — see the builder. */
+  readonly identity: string;
+  readonly username: string;
+  readonly limit: number;
+}
+
+/**
+ * A timestamp the panel sent, as both the milliseconds the window arithmetic
+ * needs and the ISO string the signal metadata carries.
+ *
+ * BOTH SHAPES ARE READ, and neither is a fallback for sloppiness. The vendor
+ * contract transforms every `lastSeen` / `lastStatusChange` into a `Date`, so
+ * that is what a validated response yields; on the executor's DRIFT path the
+ * panel's raw bytes come back instead and the same field is the wire string.
+ * A reader that handled only one of them would silently drop every sample from
+ * a panel whose response the pinned contract does not fully accept — and
+ * dropping samples here means under-counting networks, which means not naming
+ * a sharer.
+ *
+ * `null` for anything that is not a placeable instant. Fail-open is the wrong
+ * direction for evidence: a sighting we cannot place in time cannot show
+ * simultaneity, so it is dropped and counted rather than treated as current.
+ */
+function readInstant(value: unknown): { readonly ms: number; readonly iso: string } | null {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? { ms, iso: value.toISOString() } : null;
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    const ms = Date.parse(value);
+    // The ORIGINAL string is kept, not a re-rendered one: it is what the panel
+    // said, and an operator comparing a signal against the panel's own view
+    // should see the same characters.
+    return Number.isFinite(ms) ? { ms, iso: value } : null;
+  }
+  return null;
+}
+
 // Re-exported for tests that want to assert on the resolved config shape.
 export type { SharingDetectionConfig };
 
-// Exported so the observability classification can be asserted directly, on
-// every capability shape, without standing up a panel double per case.
-export { classifyLiveConnectionBlindness };
+// Exported so a test can name the blindness it expects by its stable token
+// rather than by matching prose.
 export type { LiveConnectionBlindness };
