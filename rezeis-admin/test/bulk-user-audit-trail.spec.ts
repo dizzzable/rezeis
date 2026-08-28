@@ -214,6 +214,7 @@ function buildUserCard(db: Db): AdminUserManagementController {
     {} as never, // PartnersService
     {} as never, // PlansAdminService
     buildBlockService(db),
+    { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
   );
 }
 

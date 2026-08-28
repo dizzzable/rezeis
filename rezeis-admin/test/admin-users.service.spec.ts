@@ -80,6 +80,10 @@ describe('AdminUsersService', () => {
         },
       } as never,
       {} as never,
+      // The badge on the users list. A REAL count for one of the two rows,
+      // because a stub answering zero for everybody would let the mapping
+      // drop the field entirely and still pass.
+      { openFlagCounts: async () => new Map([['user-1', 1]]) } as never,
     );
 
     assert.deepStrictEqual(await service.listUsers({}), {
@@ -97,6 +101,7 @@ describe('AdminUsersService', () => {
           updatedAt: '2026-04-16T00:00:00.000Z',
           login: null,
           lastSeenAt: '2026-04-16T09:30:00.000Z',
+          openReviewFlags: 1,
         },
         {
           id: 'user-2',
@@ -111,6 +116,11 @@ describe('AdminUsersService', () => {
           updatedAt: '2026-04-17T00:00:00.000Z',
           login: 'web-first-login',
           lastSeenAt: null,
+          // Zero, and asserted rather than assumed: the count comes from a
+          // separate grouped query keyed by user id, and a badge that leaked
+          // from one row to the next would mark innocent accounts as
+          // suspected ban evaders.
+          openReviewFlags: 0,
         },
       ],
       total: 2,

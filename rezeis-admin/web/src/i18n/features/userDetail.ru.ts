@@ -7,6 +7,15 @@
 
 export const ru = {
   userDetailPanel: {
+    reviewFlags: {
+      deviceMatch: 'Устройство этого аккаунта принадлежит и заблокированному. Одна машина — не один и тот же человек: семья или офис выглядят здесь так же.',
+      relatedUser: 'Заблокированный аккаунт: {{userId}}',
+      openSince: 'Помечен {{date}}',
+      clearedOn: 'Просмотрено {{date}}',
+      clear: 'Отметить просмотренным',
+      cleared: 'Отметка снята',
+      clearError: 'Не удалось отметить просмотренным',
+    },
     notFound: 'Пользователь не найден',
     reiwaIdCopied: 'Reiwa ID скопирован',
     blocked: '🔴 Заблокирован',

@@ -68,8 +68,13 @@ export function normaliseBlockedIdentity(
     case BlockedIdentityKind.WEB_LOGIN: {
       return { ok: true, value: trimmed.toLowerCase() };
     }
+    case BlockedIdentityKind.DEVICE_FP:
     case BlockedIdentityKind.DEVICE_HWID: {
-      // Opaque to us — a uuid or a hash the client software invents. Nothing
+      // Both are opaque to us — a uuid or a hash invented by the VPN client
+      // (`DEVICE_HWID`) or by our own cabinet (`DEVICE_FP`). They share a
+      // branch because they share a normalisation, not because they are the
+      // same thing: one is reported by software on the customer machine and
+      // one is derived from what their graphics stack does. Nothing
       // is validated beyond the shared length and emptiness checks above,
       // because there is no format to validate against and inventing one
       // would refuse the very ids a future client version reports.

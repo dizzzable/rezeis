@@ -158,6 +158,7 @@ function buildController(db: ReturnType<typeof makeDb>): AdminUserManagementCont
     {} as never, // PartnersService
     {} as never, // PlansAdminService
     undefined as never,
+    { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
   );
 }
 

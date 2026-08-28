@@ -69,6 +69,7 @@ import { AdjustUserPartnerBalanceDto } from '../dto/adjust-user-partner-balance.
 import { AdjustUserPointsDto } from '../dto/adjust-user-points.dto';
 import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
+import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { UserBlockService } from '../services/user-block.service';
 import { UserDeletionService } from '../services/user-deletion.service';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
@@ -94,6 +95,7 @@ export class AdminUserManagementController {
     private readonly partnersService: PartnersService,
     private readonly plansAdminService: PlansAdminService,
     private readonly userBlockService: UserBlockService,
+    private readonly deviceIntelligenceService: DeviceIntelligenceService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -369,6 +371,13 @@ export class AdminUserManagementController {
       'view_registration',
     );
 
+    // Review flags ride on the card unconditionally, unlike the registration
+    // block above. They contain no PII — a signal name, a strength and a
+    // pointer to another account — and they exist to be acted on by whoever
+    // is looking at the account, which is exactly the audience that has the
+    // card open.
+    const reviewFlags = await this.deviceIntelligenceService.listForUser(user.id);
+
     // Drop raw registration columns from the spread; re-attach under RBAC.
     const {
       registrationIp: _rip,
@@ -450,6 +459,7 @@ export class AdminUserManagementController {
           }
         : null,
       canViewRegistration,
+      reviewFlags,
     };
 
     if (!canViewRegistration) {
@@ -691,6 +701,39 @@ export class AdminUserManagementController {
     });
     this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User unblocked: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
     return { blocked: false, cascade: report };
+  }
+
+  // ── Review flags ────────────────────────────────────────────────────────────
+
+  /**
+   * Marks a review flag judged.
+   *
+   * Under `users:edit` rather than a permission of its own: clearing a flag
+   * is a decision about an account, taken by whoever can already block or
+   * unblock it, and a separate permission would only produce roles that can
+   * see the mark and not resolve it.
+   *
+   * The row is NOT deleted — see the model. "Was this account ever flagged,
+   * and what did we decide" is the question that gets asked later, and a
+   * queue that deletes what it resolves cannot answer it.
+   */
+  @Post(':telegramId/review-flags/:flagId/clear')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('users', 'edit')
+  public async clearReviewFlag(
+    @Param('telegramId') telegramId: string,
+    @Param('flagId') flagId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    const user = await this.findUserByTelegramId(telegramId);
+    await this.deviceIntelligenceService.clear(flagId, admin.id);
+    await this.auditLog(admin, req, 'user.review_flag_cleared', {
+      userId: user.id,
+      telegramId: user.telegramId?.toString() ?? null,
+      flagId,
+    });
+    return { cleared: true };
   }
 
   // ── Delete User ─────────────────────────────────────────────────────────────

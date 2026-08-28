@@ -50,6 +50,7 @@ describe('AdminUserManagementController operations history', () => {
       {} as never,
       {} as never, // PlansAdminService
       undefined as never, // UserBlockService
+      { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
     );
 
     const result = await controller.listUserOperations('123', '1', '25');

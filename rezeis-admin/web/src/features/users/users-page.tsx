@@ -22,7 +22,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Search, Users as UsersIcon, Plus, Loader2, ListChecks, ArrowLeft, Download } from 'lucide-react'
+import { Search, Users as UsersIcon, Plus, Loader2, ListChecks, ArrowLeft, Download, Flag } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { toast } from 'sonner'
@@ -80,6 +80,13 @@ interface UserListItem {
   login: string | null
   role: string
   isBlocked: boolean
+  /**
+   * Open review flags — a device this account uses also belongs to a blocked
+   * one. A COUNT, because two independent signals matching is a different
+   * thing from one, and the operator picking which row to open first should
+   * see that without clicking into every marked account.
+   */
+  openReviewFlags: number
   lastSeenAt: string | null
 }
 
@@ -94,6 +101,7 @@ interface UserListResponse {
     role: string
     language: string
     isBlocked: boolean
+    openReviewFlags: number
     createdAt: string
     lastSeenAt: string | null
   }>
@@ -185,6 +193,7 @@ interface UserListRowProps {
 }
 
 const UserListRow = memo(function UserListRow({ user, isSelected, onSelect }: UserListRowProps) {
+  const { t } = useTranslation()
   return (
     <button
       type="button"
@@ -199,6 +208,22 @@ const UserListRow = memo(function UserListRow({ user, isSelected, onSelect }: Us
           <p className="min-w-0 flex-1 truncate text-sm font-medium">{user.name || user.username || user.login || '—'}</p>
           {user.role !== 'USER' && (
             <span className="shrink-0 text-[10px] text-muted-foreground">{user.role}</span>
+          )}
+          {user.openReviewFlags > 0 && (
+            // Amber and an outline icon, deliberately unlike the solid red dot
+            // that means BLOCKED. This mark is a question for an operator, not
+            // a verdict on the account, and two markers that look alike would
+            // turn "somebody should look at this" into "this person is banned".
+            <span
+              className="shrink-0 inline-flex items-center gap-0.5 text-amber-500"
+              title={t('usersPage.reviewFlagged', { count: user.openReviewFlags })}
+              aria-label={t('usersPage.reviewFlagged', { count: user.openReviewFlags })}
+            >
+              <Flag className="h-3 w-3" aria-hidden="true" />
+              {user.openReviewFlags > 1 && (
+                <span className="text-[10px] tabular-nums">{user.openReviewFlags}</span>
+              )}
+            </span>
           )}
           <span className={`shrink-0 inline-block h-2.5 w-2.5 rounded-full ${getUserStatusClass(user)}`} />
         </div>
@@ -253,6 +278,10 @@ function UsersListTab() {
         login: u.login,
         role: u.role,
         isBlocked: u.isBlocked,
+        // Defaulted rather than required, so the list still renders against a
+        // panel build that predates the field instead of showing NaN beside
+        // every name.
+        openReviewFlags: u.openReviewFlags ?? 0,
         lastSeenAt: u.lastSeenAt,
       })),
     [listData?.items],

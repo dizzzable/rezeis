@@ -93,6 +93,7 @@ function buildController(
     {} as never,
     {} as never, // PlansAdminService
     undefined as never, // UserBlockService
+    { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
   );
   return { controller, panelLookups, profileSyncJobCalls };
 }

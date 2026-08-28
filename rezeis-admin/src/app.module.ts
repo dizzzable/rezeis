@@ -48,6 +48,7 @@ import { ConfigPortabilityModule } from './modules/config-portability/config-por
 import { ContestsModule } from './modules/contests/contests.module';
 import { CustomEmojiModule } from './modules/custom-emoji/custom-emoji.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { DeviceIntelligenceModule } from './modules/device-intelligence/device-intelligence.module';
 import { FaqModule } from './modules/faq/faq.module';
 import { HealthModule } from './modules/health/health.module';
 import { ImportsModule } from './modules/imports/imports.module';
@@ -152,6 +153,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     AutomationsModule,
     BackupModule,
     BlockedIdentitiesModule,
+    DeviceIntelligenceModule,
     BlockedIpsModule,
     BotConfigModule,
     BotFlowModule,

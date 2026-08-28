@@ -73,6 +73,7 @@ describe('InternalUserController', () => {
       'trialActivate',
       'markBotBlocked',
       'recordSurfaceSeen',
+      'reportDeviceSignals',
     ]);
 
     for (const route of INTERNAL_USER_ROUTES) {
@@ -311,6 +312,7 @@ function createController(input: {
     (input.internalUserService ?? {}) as never,
     (input.internalUserEdgeService ?? {}) as never,
     (input.subscriptionMutationsService ?? {}) as never,
+    { report: async () => undefined } as never, // DeviceIntelligenceService
   );
 }
 
@@ -350,6 +352,7 @@ const INTERNAL_USER_ROUTES: readonly InternalUserRoute[] = [
   { handler: handlers.trialActivate, method: RequestMethod.POST, path: 'trial' },
   { handler: handlers.markBotBlocked, method: RequestMethod.POST, path: 'bot-blocked' },
   { handler: handlers.recordSurfaceSeen, method: RequestMethod.POST, path: 'surface-seen' },
+  { handler: handlers.reportDeviceSignals, method: RequestMethod.POST, path: 'device-signals' },
 ];
 
 function createSession(): InternalUserSessionInterface {

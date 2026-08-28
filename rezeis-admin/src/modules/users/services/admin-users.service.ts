@@ -1,7 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Optional, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { InternalUserService } from '../../internal-user/services/internal-user.service';
 import { AdminUserListQueryDto } from '../dto/admin-user-list-query.dto';
@@ -30,6 +31,13 @@ export class AdminUsersService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly internalUserService: InternalUserService,
+    /**
+     * Optional so every existing construction of this service keeps working.
+     * Absent, the badge column reads zero for everybody — the list still
+     * renders, which is the right failure for a decoration on a screen
+     * operators need up whatever else is broken.
+     */
+    @Optional() private readonly deviceIntelligenceService?: DeviceIntelligenceService,
   ) {}
 
   /**
@@ -114,6 +122,14 @@ export class AdminUsersService {
       this.prismaService.user.count({ where }),
     ]);
 
+    // ONE query for the whole page, after the page is known. A relation
+    // count inside the `findMany` above would put a correlated subquery on
+    // the busiest admin screen there is, and a per-row lookup would be one
+    // round-trip per row. This is a single grouped read over fifty ids.
+    const flagCounts =
+      (await this.deviceIntelligenceService?.openFlagCounts(rows.map((r) => r.id))) ??
+      new Map<string, number>();
+
     const items: AdminUserListItemInterface[] = rows.map((user) => ({
       id: user.id,
       telegramId: user.telegramId === null ? null : user.telegramId.toString(),
@@ -124,6 +140,7 @@ export class AdminUsersService {
       role: user.role,
       language: user.language,
       isBlocked: user.isBlocked,
+      openReviewFlags: flagCounts.get(user.id) ?? 0,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
       lastSeenAt: user.lastSeenAt?.toISOString() ?? null,

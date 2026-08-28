@@ -21,6 +21,7 @@ import {
   Calendar,
   ChevronDown,
   Copy,
+  Flag,
   Globe,
   Hash,
   Infinity as InfinityIcon,
@@ -56,6 +57,7 @@ import type {
   UserSubscription,
   UserReferralEntry,
   UserPartnerTransaction,
+  UserReviewFlag,
 } from './user-detail-shape'
 import { DatePicker } from '@/components/ui/date-picker'
 import { Badge } from '@/components/ui/badge'
@@ -1478,6 +1480,100 @@ function UserHeader({
           {t(`userDetailPanel.header.attachReason.${user.attachReferrerReason}`)}
         </div>
       )}
+      <ReviewFlags telegramId={telegramId} flags={user.reviewFlags ?? []} queryKey={queryKey} />
+    </div>
+  )
+}
+
+/**
+ * Quiet marks asking an operator to look at this account.
+ *
+ * ── Why this is an alert and not a tab ─────────────────────────────────
+ *
+ * It is a question with a short shelf life: somebody has to decide whether
+ * this is a ban evader or a family sharing a laptop, and then it is done.
+ * Filed behind a tab it would be seen by nobody, which is the same as not
+ * raising it.
+ *
+ * ── Why it never says the account is guilty ────────────────────────────
+ *
+ * A device match proves the same MACHINE, not the same person. The wording
+ * and the amber (rather than destructive) treatment are load-bearing: an
+ * operator who reads this as a verdict will ban a household, and the
+ * customer will never be told why.
+ *
+ * Cleared flags are kept and shown greyed rather than hidden — "was this
+ * account ever flagged, and what did we decide" is the question that gets
+ * asked the second time somebody looks.
+ */
+function ReviewFlags({
+  telegramId,
+  flags,
+  queryKey,
+}: {
+  telegramId: string
+  flags: ReadonlyArray<UserReviewFlag>
+  queryKey: string[]
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const clear = useMutation({
+    mutationFn: (flagId: string) =>
+      api.post(`/admin/users/${telegramId}/review-flags/${flagId}/clear`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey })
+      toast.success(t('userDetailPanel.reviewFlags.cleared'))
+    },
+    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.reviewFlags.clearError'))),
+  })
+
+  if (flags.length === 0) return null
+
+  return (
+    <div className="space-y-1.5">
+      {flags.map((flag) => (
+        <div
+          key={flag.id}
+          className={cn(
+            'flex items-start gap-2 rounded-md border px-3 py-2 text-xs',
+            flag.clearedAt === null
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+              : 'border-muted bg-muted/30 text-muted-foreground',
+          )}
+        >
+          <Flag className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p>{t('userDetailPanel.reviewFlags.deviceMatch')}</p>
+            {flag.relatedUserId !== null && (
+              <p className="mt-0.5 break-all opacity-80">
+                {t('userDetailPanel.reviewFlags.relatedUser', { userId: flag.relatedUserId })}
+              </p>
+            )}
+            <p className="mt-0.5 opacity-70">
+              {flag.clearedAt === null
+                ? t('userDetailPanel.reviewFlags.openSince', {
+                    date: new Date(flag.createdAt).toLocaleString(),
+                  })
+                : t('userDetailPanel.reviewFlags.clearedOn', {
+                    date: new Date(flag.clearedAt).toLocaleString(),
+                  })}
+            </p>
+          </div>
+          {flag.clearedAt === null && (
+            <PermissionGate resource="users" action="edit">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 shrink-0 px-2 text-xs"
+                disabled={clear.isPending}
+                onClick={() => clear.mutate(flag.id)}
+              >
+                {t('userDetailPanel.reviewFlags.clear')}
+              </Button>
+            </PermissionGate>
+          )}
+        </div>
+      ))}
     </div>
   )
 }

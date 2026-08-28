@@ -51,6 +51,7 @@ describe('AdminUserManagementController referral repair actions', () => {
       {} as never,
       {} as never, // PlansAdminService
       undefined as never, // UserBlockService
+      { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
     );
     const admin = { id: 'admin-1' } as never;
     const request = { headers: {}, ip: null, socket: { remoteAddress: null } } as never;

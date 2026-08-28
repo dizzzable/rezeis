@@ -1,6 +1,18 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dto';
 import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-account-email-verification.dto';
@@ -10,6 +22,7 @@ import { InternalSurfaceSeenDto } from '../dto/internal-surface-seen.dto';
 import { InternalUpdateLanguageDto } from '../dto/internal-update-language.dto';
 import { IssueWebAccountEmailVerificationChallengeDto } from '../dto/issue-web-account-email-verification-challenge.dto';
 import { InternalUserSessionQueryDto } from '../dto/internal-user-session-query.dto';
+import { ReportDeviceSignalsDto } from '../dto/report-device-signals.dto';
 import { LinkedWebAccountSignInDto } from '../dto/linked-web-account-sign-in.dto';
 import { SetWebAccountPasswordDto } from '../dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../dto/snooze-web-account-link-prompt.dto';
@@ -37,7 +50,39 @@ export class InternalUserController {
     private readonly internalUserService: InternalUserService,
     private readonly internalUserEdgeService: InternalUserEdgeService,
     private readonly subscriptionMutationsService: SubscriptionMutationsService,
+    private readonly deviceIntelligenceService: DeviceIntelligenceService,
   ) {}
+
+  /**
+   * Records the device signals the cabinet computed for the caller.
+   *
+   * ── Why the answer is always the same ───────────────────────────────────
+   *
+   * `{ ok: true }` whether the report was stored, rejected as malformed, or
+   * matched a banned machine and marked the account. The mark is the whole
+   * value of the feature and it only works while the person marked cannot
+   * tell: a distinguishable response teaches an evader which of the two
+   * signals gave them away and what to change before the next attempt.
+   *
+   * ── Why it is its own endpoint ─────────────────────────────────────────
+   *
+   * Not folded into the session read, which happens on every navigation and
+   * must stay fast, and not folded into registration, which would miss a
+   * device that first appears on an account months old. One call the
+   * cabinet makes once it knows who it is talking to covers both.
+   */
+  @Post('device-signals')
+  @HttpCode(HttpStatus.OK)
+  public async reportDeviceSignals(
+    @Body() input: ReportDeviceSignalsDto,
+  ): Promise<{ readonly ok: true }> {
+    await this.deviceIntelligenceService.report({
+      userId: input.userId,
+      installId: input.installId ?? null,
+      deviceHash: input.deviceHash ?? null,
+    });
+    return { ok: true };
+  }
 
   /**
    * Returns the resolved user session payload.

@@ -7,6 +7,15 @@
 
 export const en = {
   userDetailPanel: {
+    reviewFlags: {
+      deviceMatch: 'A device this account uses also belongs to a blocked account. Same machine is not the same person — a household or an office looks identical here.',
+      relatedUser: 'Blocked account: {{userId}}',
+      openSince: 'Flagged {{date}}',
+      clearedOn: 'Reviewed {{date}}',
+      clear: 'Mark reviewed',
+      cleared: 'Flag marked reviewed',
+      clearError: 'Could not mark the flag reviewed',
+    },
     notFound: 'User not found',
     reiwaIdCopied: 'Reiwa ID copied',
     blocked: '🔴 Blocked',

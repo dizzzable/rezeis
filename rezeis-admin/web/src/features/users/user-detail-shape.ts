@@ -220,6 +220,15 @@ export interface UserDetail {
     readonly campaignId: string
     readonly campaignName: string
   } | null
+  /**
+   * Quiet operator-facing marks on this account.
+   *
+   * Optional so the card renders against a panel build that predates them.
+   * Never reaches the customer — the cabinet reads a different projection
+   * entirely, and a mark the marked person can see is a mark that teaches
+   * them what to change.
+   */
+  readonly reviewFlags?: ReadonlyArray<UserReviewFlag>
   readonly acquiredByPartner?: {
     readonly partnerId: string
     readonly level?: number | null
@@ -227,4 +236,24 @@ export interface UserDetail {
     readonly username?: string | null
     readonly telegramId?: string | null
   } | null
+}
+
+/**
+ * A mark asking an operator to look at an account.
+ *
+ * `DEVICE_MATCH` means a device signal this account reported also belongs to
+ * a blocked one. It is never a verdict: households share computers and
+ * offices deploy one image to hundreds of them, so the same machine is not
+ * the same person.
+ */
+export interface UserReviewFlag {
+  readonly id: string
+  readonly kind: 'DEVICE_MATCH'
+  /** The blocked account this one resembles, when it still exists. */
+  readonly relatedUserId: string | null
+  readonly detail: Record<string, unknown>
+  readonly createdAt: string
+  /** Set once an operator has judged it. The row stays either way. */
+  readonly clearedAt: string | null
+  readonly clearedById: string | null
 }

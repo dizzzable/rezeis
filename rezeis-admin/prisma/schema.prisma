@@ -707,6 +707,12 @@ enum BlockedIdentityKind {
   /// Hardware id a VPN client reports to Remnawave. Lower-cased. Captured from
   /// a blocked user's own devices, never typed by a person at sign-up.
   DEVICE_HWID
+  /// Browser device fingerprint the cabinet computes — see
+  /// {@link DeviceSignalKind}. Listed so the evidence outlives the account:
+  /// `device_observations` cascade-delete with the user, and an operator who
+  /// deletes a banned account would otherwise take the only record of that
+  /// person's machine with them.
+  DEVICE_FP
 }
 
 /// Identity-based access blocklist — the pre-emptive half of banning.
@@ -764,6 +770,118 @@ model BlockedIdentity {
   @@map("blocked_identities")
 }
 
+/// What kind of device signal the cabinet reported.
+///
+/// TWO OF THEM, ON PURPOSE, because they fail in opposite directions and a
+/// single identifier would inherit the worse half of each.
+///
+/// `INSTALL_ID` is exact and fragile: it names one browser profile with
+/// certainty and disappears the moment somebody clears site data or opens a
+/// private window.
+///
+/// `DEVICE_HASH` is approximate and durable: it is derived from what the
+/// GRAPHICS STACK does rather than from what the browser stores, so it
+/// survives a cleared profile and, in most cases, a different browser on the
+/// same machine — which is the specific evasion this whole table exists for.
+/// The cost of that durability is that it is not unique to a person: two
+/// identical corporate laptops produce the same value.
+///
+/// So a match on `DEVICE_HASH` alone is a lead, a match on both is close to
+/// proof, and NEITHER is ever a refusal — see {@link UserReviewFlag}.
+enum DeviceSignalKind {
+  INSTALL_ID
+  DEVICE_HASH
+}
+
+/// One (user, device signal) pair the cabinet has reported.
+///
+/// Rows are OBSERVATIONS, not a device registry: the same person legitimately
+/// has several, and the same signal legitimately belongs to several people
+/// (a family, an office). Modelling it as "this user owns this device" would
+/// bake an assumption into the schema that the data does not support.
+///
+/// `hits` and `lastSeenAt` are what separate a machine somebody actually uses
+/// from one they touched once — a distinction an operator needs before acting
+/// on a match, and one a bare existence row cannot make.
+///
+/// Cascade-deleted with the user, which is deliberate and is also why a block
+/// copies these values onto `blocked_identities`: the observation is working
+/// data, the blocklist entry is the evidence that has to outlive the account.
+model DeviceObservation {
+  id          String           @id @default(cuid()) @map("id")
+  userId      String           @map("user_id")
+  kind        DeviceSignalKind @map("kind")
+  /// Opaque. An install id is a random uuid the cabinet stores; a device hash
+  /// is a digest the cabinet computes. Neither is reversible into anything
+  /// about the person, and no raw component is stored — see the service.
+  value       String           @map("value")
+  firstSeenAt DateTime         @default(now()) @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt  DateTime         @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  /// How many times this pair has been reported. Cheap use-frequency signal.
+  hits        Int              @default(1) @map("hits")
+
+  user User @relation("UserDeviceObservations", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, kind, value])
+  /// The lookup the whole feature turns on: who ELSE has this signal.
+  @@index([kind, value])
+  @@index([userId])
+  @@map("device_observations")
+}
+
+/// Why an operator is being asked to look at an account.
+enum UserReviewFlagKind {
+  /// A device signal on this account also belongs to a blocked one.
+  DEVICE_MATCH
+}
+
+/// A quiet mark on an account for an operator to judge.
+///
+/// ── Why a flag and not a refusal ─────────────────────────────────────────
+///
+/// A device match says the same MACHINE is involved, never the same person.
+/// Households share computers, offices deploy identical images, and a public
+/// terminal touches dozens of accounts a day. Refusing on that evidence turns
+/// every one of those into a customer who cannot register and does not know
+/// why. So the account is created normally and an operator decides.
+///
+/// ── Invisible to the account it is on ────────────────────────────────────
+///
+/// Nothing in the cabinet-facing projection reads this table, and the endpoint
+/// that raises a flag answers identically whether or not it raised one. A
+/// visible flag would teach an evader exactly which signal gave them away and
+/// what to change before the next attempt.
+///
+/// `fingerprint` deduplicates: every session load reports the same device, and
+/// an operator queue that grows by one row per page view is a queue nobody
+/// reads.
+model UserReviewFlag {
+  id            String             @id @default(cuid()) @map("id")
+  userId        String             @map("user_id")
+  kind          UserReviewFlagKind @map("kind")
+  /// Stable per (kind, evidence) so repeated reports update one row.
+  fingerprint   String             @map("fingerprint")
+  /// The blocked account this one resembles, when it still exists. NOT a
+  /// relation: the flag has to survive deletion of the account it points at,
+  /// which is frequently the first thing an operator does after a ban.
+  relatedUserId String?            @map("related_user_id")
+  /// What matched, in the operator's words. No raw fingerprint components.
+  detail        Json               @default("{}") @map("detail")
+  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  /// Set when an operator has judged it. The row STAYS — "was this account
+  /// ever flagged, and what did we decide" is the question that gets asked.
+  clearedAt     DateTime?          @map("cleared_at") @db.Timestamptz(3)
+  clearedById   String?            @map("cleared_by_id")
+
+  user User @relation("UserReviewFlags", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, kind, fingerprint])
+  /// The badge query on the users list: open flags for a page of user ids.
+  @@index([userId, clearedAt])
+  @@index([clearedAt])
+  @@map("user_review_flags")
+}
 // =============================================================================
 //  PHASE 6 — Webhook Subscriptions + Delivery History
 // =============================================================================
@@ -1334,6 +1452,8 @@ model User {
   paymentMethodSetups     PaymentMethodSetup[]     @relation("UserPaymentMethodSetups")
   fraudExemptions         FraudExemption[]         @relation("UserFraudExemptions")
   legalConsents           UserLegalConsent[]       @relation("UserLegalConsents")
+  deviceObservations      DeviceObservation[]      @relation("UserDeviceObservations")
+  reviewFlags             UserReviewFlag[]         @relation("UserReviewFlags")
 
   @@index([telegramId])
   @@index([role])

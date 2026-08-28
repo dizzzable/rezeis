@@ -50,6 +50,7 @@ describe('InternalUserController activity endpoints', () => {
         },
       } as never,
       {} as never,
+      { report: async () => undefined } as never, // DeviceIntelligenceService
     );
 
     await controller.listNotifications({ userId: 'cmphfcr6i007v01jg0lcu653h' });

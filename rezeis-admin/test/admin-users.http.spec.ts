@@ -202,6 +202,7 @@ function buildListResult() {
         updatedAt: '2026-04-16T00:00:00.000Z',
         login: null,
         lastSeenAt: null,
+        openReviewFlags: 0,
       },
     ],
     total: 1,

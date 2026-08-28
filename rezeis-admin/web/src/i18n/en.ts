@@ -2139,6 +2139,7 @@ export const en = {
     listError: 'Failed to load the user list',
     listFooter: 'Showing {{shown}} of {{total}}',
     listFooterAll: 'Total users: {{total}}',
+    reviewFlagged: 'Flagged for review: a device on this account also belongs to a blocked one ({{count}})',
     selectUser: 'Select a user on the left',
     backToList: 'Back to list',
     createUser: 'Create user',

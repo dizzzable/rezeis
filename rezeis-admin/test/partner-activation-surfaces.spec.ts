@@ -310,6 +310,7 @@ function buildUserPanel(db: ReturnType<typeof makeDb>) {
     partnersService,
     {} as never, // PlansAdminService
     undefined as never,
+    { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
   );
 }
 

@@ -4,6 +4,7 @@ import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/c
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { BlockedIpService } from '../../blocked-ips/services/blocked-ip.service';
+import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { classifyCascadeIp, CascadeIpRefusal } from '../utils/cascade-ip.util';
@@ -30,8 +31,11 @@ import { classifyCascadeIp, CascadeIpRefusal } from '../utils/cascade-ip.util';
  *     blocklist, which is what makes the ban survive the account: `is_blocked`
  *     can only refuse a row that exists, and a fresh Telegram account has none.
  *
- *  3. THE DEVICE CASCADE. Hardware ids are read from the VPN panel and listed
- *     too. Best-effort by design — see {@link captureDevices}.
+ *  3. THE DEVICE CASCADE. Hardware ids from the VPN panel and device
+ *     fingerprints from the cabinet are listed too. These are the only two
+ *     things a ban evader carries across a new Telegram account and a new
+ *     mailbox, and neither of them refuses anybody at a door — see
+ *     {@link captureDevices} and `DeviceIntelligenceService`.
  *
  *  4. THE REGISTRATION ADDRESS. Listed on the IP blocklist, with a refusal
  *     that fails closed around our own nodes — see {@link captureIp}.
@@ -58,7 +62,7 @@ export class UserBlockService {
     private readonly prismaService: PrismaService,
     private readonly blockedIdentityService: BlockedIdentityService,
     /**
-     * The three below are optional so a container that never loaded the VPN
+     * The rest are optional so a container that never loaded the VPN
      * integration — and every unit test of the surrounding controllers — still
      * constructs. An absent dependency means that half of the cascade is
      * skipped and SAID SO in the report, never silently counted as done.
@@ -66,6 +70,7 @@ export class UserBlockService {
     @Optional() private readonly blockedIpService?: BlockedIpService,
     @Optional() private readonly remnawaveApiService?: RemnawaveApiService,
     @Optional() private readonly profileSyncQueue?: ProfileSyncQueueService,
+    @Optional() private readonly deviceIntelligenceService?: DeviceIntelligenceService,
   ) {}
 
   public async block(input: {
@@ -80,12 +85,15 @@ export class UserBlockService {
     });
 
     const hwids = await this.captureDevices(user.subscriptions);
+    const fingerprints =
+      (await this.deviceIntelligenceService?.valuesForUser(user.id)) ?? [];
     const captured = await this.blockedIdentityService.captureFromUser({
       userId: user.id,
       telegramId: user.telegramId,
       email: user.webAccount?.emailNormalized ?? user.email,
       webLogin: user.webAccount?.loginNormalized ?? null,
       hwids: hwids.values,
+      deviceFingerprints: fingerprints,
       reason: input.reason ?? 'Account blocked',
       createdById: input.adminId,
     });

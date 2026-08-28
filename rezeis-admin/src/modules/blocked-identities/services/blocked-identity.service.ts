@@ -239,6 +239,15 @@ export class BlockedIdentityService {
     readonly webLogin: string | null;
     /** Hardware ids read from the VPN panel. Empty when it was unreachable. */
     readonly hwids?: readonly string[];
+    /**
+     * Device fingerprints the cabinet observed for this account.
+     *
+     * Copied here because `device_observations` cascade-deletes with the
+     * user, and deleting a banned account is frequently the next thing an
+     * operator does. Without this copy the ban would forget the machine at
+     * the exact moment the account it belonged to went away.
+     */
+    readonly deviceFingerprints?: readonly string[];
     readonly reason?: string | null;
     readonly createdById?: string | null;
   }): Promise<{ readonly identities: number; readonly devices: number }> {
@@ -257,6 +266,12 @@ export class BlockedIdentityService {
     if (hwids.length > 0) {
       jobs.push({ kind: BlockedIdentityKind.DEVICE_HWID, values: [...hwids] });
     }
+    const fingerprints = (input.deviceFingerprints ?? []).filter(
+      (value) => value.trim().length > 0,
+    );
+    if (fingerprints.length > 0) {
+      jobs.push({ kind: BlockedIdentityKind.DEVICE_FP, values: [...fingerprints] });
+    }
 
     let identities = 0;
     let devices = 0;
@@ -269,8 +284,14 @@ export class BlockedIdentityService {
         createdById: input.createdById ?? null,
         originUserId: input.userId,
       });
-      if (job.kind === BlockedIdentityKind.DEVICE_HWID) devices += result.added.length;
-      else identities += result.added.length;
+      if (
+        job.kind === BlockedIdentityKind.DEVICE_HWID ||
+        job.kind === BlockedIdentityKind.DEVICE_FP
+      ) {
+        devices += result.added.length;
+      } else {
+        identities += result.added.length;
+      }
     }
     return { identities, devices };
   }
