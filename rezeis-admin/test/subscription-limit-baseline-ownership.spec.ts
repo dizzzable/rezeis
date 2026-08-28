@@ -371,6 +371,10 @@ describe('panel webhook limit mirror', () => {
       { webhookSecret: 'secret' } as never,
       { emit: () => undefined } as never,
       { getPanelUserUsage: async () => null } as never,
+      // Notice builder + notification sink. Inert here: the traffic-limit
+      // notice has its own spec, and this case is about limit ownership.
+      { build: async () => ({}) } as never,
+      { create: async () => undefined } as never,
     );
     const reconcile = (
       service as unknown as {

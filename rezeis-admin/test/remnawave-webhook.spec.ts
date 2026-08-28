@@ -25,6 +25,10 @@ function buildService(webhookSecret: string | null): RemnawaveWebhookService {
     { webhookSecret } as never,
     systemEvents as never,
     { getPanelUserUsage: async () => null } as never,
+    // Notice builder + notification sink. Inert here: the traffic-limit
+    // notice has its own spec, and these cases are about reconciliation.
+    { build: async () => ({}) } as never,
+    { create: async () => undefined } as never,
   );
 }
 

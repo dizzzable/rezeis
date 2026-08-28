@@ -60,6 +60,9 @@ function createHarness(opts: {
     userNotifications as never,
     { createCheckout: async () => ({}) } as never,
     { findPreferredForCharge: async () => null } as never,
+    // The shared notice-payload builder. Inert here: what these cases are
+    // about is who gets notified and how often, not what the message says.
+    { build: async () => ({}) } as never,
   );
   return { service, createdFor, counters };
 }
@@ -151,6 +154,9 @@ describe('AutoRenewService.processAutopayCharges', () => {
           gatewayType: PaymentGatewayType.YOOKASSA,
         }),
       } as never,
+      // The shared notice-payload builder. Inert here: what these cases are
+      // about is who gets notified and how often, not what the message says.
+      { build: async () => ({}) } as never,
     );
 
     const result = await service.processAutopayCharges();

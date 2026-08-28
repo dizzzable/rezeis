@@ -82,6 +82,10 @@ function buildService(panelUsage: PanelUsage | null = null): {
     config as never,
     systemEvents as never,
     remnawaveApi as never,
+    // Notice builder + notification sink. Inert here: the traffic-limit
+    // notice has its own spec, and these cases are about reconciliation.
+    { build: async () => ({}) } as never,
+    { create: async () => undefined } as never,
   );
   return { service, stored, emitted, reconciled, usageCalls };
 }
@@ -369,6 +373,10 @@ describe('panel user identity across panel versions', () => {
         { webhookSecret: null } as never,
         systemEvents as never,
         remnawaveApi as never,
+        // Notice builder + notification sink. Inert here: the traffic-limit
+        // notice has its own spec, and these cases are about reconciliation.
+        { build: async () => ({}) } as never,
+        { create: async () => undefined } as never,
       ),
       emitted,
       reconciled,
@@ -613,6 +621,10 @@ describe('RemnawaveWebhookService first traffic usage', () => {
         { webhookSecret: null } as never,
         systemEvents as never,
         { getPanelUserUsage: async () => null } as never,
+        // Notice builder + notification sink. Inert here: the traffic-limit
+        // notice has its own spec, and these cases are about reconciliation.
+        { build: async () => ({}) } as never,
+        { create: async () => undefined } as never,
       ),
       emitted,
       getFirstTrafficUpdates: () => firstTrafficUpdates,
@@ -936,6 +948,10 @@ describe('the first-connection panel read cannot hold the webhook open', () => {
       { emit: (event: EmittedEvent) => emitted.push(event) } as never,
       // Never settles — the panel accepted the connection and went quiet.
       { getPanelUserUsage: () => new Promise(() => {}) } as never,
+      // Notice builder + notification sink. Inert here: the traffic-limit
+      // notice has its own spec, and these cases are about reconciliation.
+      { build: async () => ({}) } as never,
+      { create: async () => undefined } as never,
     );
 
     const startedAt = Date.now();

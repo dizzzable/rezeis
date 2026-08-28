@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { AutoRenewService } from '../src/modules/auto-renew/auto-renew.service';
+import { SubscriptionNoticePayloadService } from '../src/modules/remnawave/services/subscription-notice-payload.service';
 
 /**
  * The facts an expiry notice carries, and the notices that never fired.
@@ -88,6 +89,14 @@ function buildService(options: {
           },
   };
 
+  // The REAL payload builder over the fake panel, not a stub: what these
+  // cases assert is the contents of the payload, and a stub would let the
+  // builder stop reading a field while every assertion kept passing.
+  const noticePayload = new SubscriptionNoticePayloadService(
+    prisma as never,
+    remnawave as never,
+  );
+
   const service = new AutoRenewService(
     prisma as never,
     {
@@ -97,7 +106,7 @@ function buildService(options: {
     } as never,
     {} as never,
     { findPreferredForCharge: async () => null } as never,
-    remnawave as never,
+    noticePayload,
   );
   return { service, created, queries };
 }
@@ -181,8 +190,11 @@ describe('the facts a notice carries', () => {
         hwidDeviceLimit: 0,
       },
     });
-    (service as unknown as { remnawaveApiService: { strictListUserDevices: () => unknown } })
-      .remnawaveApiService.strictListUserDevices = () => {
+    (
+      service as unknown as {
+        noticePayload: { remnawaveApiService: { strictListUserDevices: () => unknown } };
+      }
+    ).noticePayload.remnawaveApiService.strictListUserDevices = () => {
       deviceCalls += 1;
       return { kind: 'ok', value: { devices: [] } };
     };

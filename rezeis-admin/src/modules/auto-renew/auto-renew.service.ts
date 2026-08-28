@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   PurchaseChannel,
   PurchaseType,
@@ -10,7 +10,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
-import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
+import { SubscriptionNoticePayloadService } from '../remnawave/services/subscription-notice-payload.service';
 
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -32,32 +32,11 @@ const EXPIRY_NOTICE_WINDOW_MS = 3 * 60 * 60 * 1000;
 /**
  * Everything an expiry notice needs from the row.
  *
- * Shared by the warning and the expired arms so the two cannot drift into
- * printing different facts about the same subscription.
+ * Borrowed from the payload builder rather than restated: the columns a
+ * notice prints are decided there, and a local copy would silently stop
+ * selecting a field the builder started reading.
  */
-const EXPIRY_NOTICE_SELECT = {
-  id: true,
-  userId: true,
-  expiresAt: true,
-  planSnapshot: true,
-  trafficLimit: true,
-  deviceLimit: true,
-  remnawaveId: true,
-  remnawavePanelId: true,
-  remnawavePanelUsername: true,
-} as const;
-
-interface ExpiryNoticeSubscription {
-  readonly id: string;
-  readonly userId: string;
-  readonly expiresAt: Date | null;
-  readonly planSnapshot: unknown;
-  readonly trafficLimit: number | null;
-  readonly deviceLimit: number;
-  readonly remnawaveId: string | null;
-  readonly remnawavePanelId: number | null;
-  readonly remnawavePanelUsername: string | null;
-}
+const EXPIRY_NOTICE_SELECT = SubscriptionNoticePayloadService.SELECT;
 
 /**
  * Auto-renewal service — donor: altshop `src/services/auto_renew.py` +
@@ -87,11 +66,11 @@ export class AutoRenewService {
     private readonly paymentsRenewalCheckoutService: PaymentsRenewalCheckoutService,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     /**
-     * Optional so a container without the VPN integration still constructs.
-     * Absent, an expiry notice carries the facts the local row knows — plan,
-     * allowances, expiry — and simply omits the ones only the panel has.
+     * Assembles the facts a notice prints. Shared with the panel webhook, so
+     * a limit notice and an expiry notice describe the same subscription in
+     * the same words.
      */
-    @Optional() private readonly remnawaveApiService?: RemnawaveApiService,
+    private readonly noticePayload: SubscriptionNoticePayloadService,
   ) {}
 
   /**
@@ -411,7 +390,7 @@ export class AutoRenewService {
       await this.userNotifications.create({
         userId: sub.userId,
         type: input.notificationType,
-        payload: await this.buildNoticePayload(sub, { daysLeft: input.daysAhead }),
+        payload: await this.noticePayload.build(sub, { daysLeft: input.daysAhead }),
       });
       created++;
     }
@@ -485,7 +464,7 @@ export class AutoRenewService {
       await this.userNotifications.create({
         userId: sub.userId,
         type: input.notificationType,
-        payload: await this.buildNoticePayload(sub, { daysLeft: 0 }),
+        payload: await this.noticePayload.build(sub, { daysLeft: 0 }),
       });
       created++;
     }
@@ -493,94 +472,6 @@ export class AutoRenewService {
       this.logger.log(`Created ${created} "${input.notificationType}" notifications`);
     }
     return created;
-  }
-
-  /**
-   * The facts an expiry notice prints.
-   *
-   * ── Raw numbers, never rendered strings ──────────────────────────────
-   *
-   * Gigabytes and counts, plus the expiry as an ISO instant. The words —
-   * "Безлимит", "28 августа" — are produced when the template is rendered,
-   * because that is where the reader's locale is known. Formatting here
-   * would freeze one language into the stored payload.
-   *
-   * ── Why the panel read is inside the loop ────────────────────────────
-   *
-   * The cycle runs every minute over up to two hundred candidates, but only
-   * the handful not yet notified reach this point. Enriching the CANDIDATES
-   * would mean hundreds of panel calls a minute for notices that are not
-   * being sent; enriching the ones actually being created costs a call each,
-   * a few times a day per customer.
-   *
-   * ── And why an unreachable panel is not an error ─────────────────────
-   *
-   * `getPanelUserUsage` answers `null` on any failure. The notice still goes
-   * out carrying what the local row knows; the fields only the panel has are
-   * omitted, and the renderer prints nothing for them. A notification the
-   * customer never receives is a worse outcome than one missing a figure.
-   */
-  private async buildNoticePayload(
-    sub: ExpiryNoticeSubscription,
-    context: { readonly daysLeft: number },
-  ): Promise<Record<string, unknown>> {
-    const planName = readPlanName(sub.planSnapshot);
-    const payload: Record<string, unknown> = {
-      subscriptionId: sub.id,
-      expiresAt: sub.expiresAt?.toISOString() ?? null,
-      plan: planName,
-      planName,
-      daysLeft: context.daysLeft,
-      // Local columns. `0` means unlimited by the product rule, and the
-      // renderer applies that rule — it is not translated here.
-      trafficLimitGb: sub.trafficLimit,
-      deviceLimit: sub.deviceLimit,
-    };
-    if (sub.remnawavePanelUsername !== null) {
-      payload['profile'] = sub.remnawavePanelUsername;
-    }
-
-    if (this.remnawaveApiService === undefined || sub.remnawaveId === null) {
-      return payload;
-    }
-    const identity = {
-      remnawaveId: sub.remnawaveId,
-      panelId: sub.remnawavePanelId,
-      panelUsername: sub.remnawavePanelUsername,
-    };
-    try {
-      const usage = await this.remnawaveApiService.getPanelUserUsage(identity);
-      if (usage !== null) {
-        if (usage.username !== null) payload['profile'] = usage.username;
-        if (usage.usedTrafficBytes !== null) {
-          payload['trafficUsedGb'] = Math.round((usage.usedTrafficBytes / 1024 ** 3) * 100) / 100;
-        }
-        // The panel is authoritative for the limits: an operator editing a
-        // profile there directly is a supported thing to do, and a notice
-        // quoting the stale local number would contradict the cabinet.
-        if (usage.trafficLimitBytes !== null) {
-          payload['trafficLimitGb'] =
-            Math.round((usage.trafficLimitBytes / 1024 ** 3) * 100) / 100;
-        }
-        if (usage.hwidDeviceLimit !== null) payload['deviceLimit'] = usage.hwidDeviceLimit;
-      }
-
-      // Bound devices, and ONLY for a finite allowance: counting them against
-      // an unlimited plan answers a question nobody asked and spends a second
-      // panel call to do it.
-      const limit = payload['deviceLimit'];
-      if (typeof limit === 'number' && limit > 0) {
-        const devices = await this.remnawaveApiService.strictListUserDevices(identity);
-        if (devices.kind === 'ok') {
-          payload['devicesUsed'] = devices.value.devices.length;
-        }
-      }
-    } catch (err) {
-      this.logger.warn(
-        `Expiry notice for ${sub.id}: panel facts unavailable (${(err as Error).message})`,
-      );
-    }
-    return payload;
   }
 
   /**
@@ -704,12 +595,3 @@ function buildAttemptIdempotencyKey(
   return `${IDEMPOTENCY_PREFIX}${subscriptionId}:${expiresAtMs}:a${attempt}`;
 }
 
-function readPlanName(snapshot: unknown): string {
-  if (typeof snapshot === 'object' && snapshot !== null && !Array.isArray(snapshot)) {
-    const candidate = (snapshot as Record<string, unknown>).name;
-    if (typeof candidate === 'string') {
-      return candidate;
-    }
-  }
-  return 'Unknown';
-}

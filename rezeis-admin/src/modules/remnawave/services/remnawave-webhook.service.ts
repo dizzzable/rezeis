@@ -14,7 +14,9 @@ import {
   type SystemEventCategory,
   type SystemEventSeverity,
 } from '../../../common/services/system-events.service';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { RemnawaveApiService } from './remnawave-api.service';
+import { SubscriptionNoticePayloadService } from './subscription-notice-payload.service';
 import { panelTrafficLimitToGb } from '../utils/panel-traffic-limit.util';
 
 /**
@@ -402,6 +404,15 @@ export class RemnawaveWebhookService {
     // exactly one path: filling the traffic counter a first-connection payload
     // does not carry (see `enrichConnectionTraffic`).
     private readonly remnawaveApiService: RemnawaveApiService,
+    /**
+     * The two halves of telling a customer their traffic ran out.
+     *
+     * This service is the ONLY thing that can know it: a traffic limit is
+     * reached by usage, not by the clock, so no scheduled pass can notice it
+     * — the panel says so and nothing else does.
+     */
+    private readonly noticePayload: SubscriptionNoticePayloadService,
+    private readonly userNotifications: UserNotificationsService,
   ) {}
 
   /**
@@ -746,7 +757,25 @@ export class RemnawaveWebhookService {
       status: { not: SubscriptionStatus.DELETED },
     };
 
+    // Read BEFORE the write, and only when this event is the one that can
+    // produce a notice. The question is whether the subscription CROSSED
+    // into LIMITED, and after the update every row reads LIMITED whether it
+    // just got there or has been there for a week — Remnawave repeats the
+    // event, so notifying on the post-state would notify on every repeat.
+    const beforeLimited =
+      update.status === SubscriptionStatus.LIMITED
+        ? await this.prismaService.subscription.findMany({
+            where,
+            select: { ...SubscriptionNoticePayloadService.SELECT, userId: true, status: true },
+          })
+        : [];
+
     const result = await this.prismaService.subscription.updateMany({ where, data: update });
+
+    for (const subscription of beforeLimited) {
+      if (subscription.status === SubscriptionStatus.LIMITED) continue;
+      await this.notifyTrafficLimited(subscription);
+    }
 
     // Additive second pass, never a replacement for the write above. It exists
     // only to move `planSnapshot` to wherever the columns just landed, and it
@@ -883,6 +912,52 @@ export class RemnawaveWebhookService {
       select: { id: true, telegramId: true, name: true, username: true },
     });
     return user === null ? null : { user, subscription: null };
+  }
+
+  /**
+   * Tells the customer their traffic limit was reached.
+   *
+   * ── Why this lives here and nowhere else ─────────────────────────────
+   *
+   * The `limited` template has shipped since the bot-map module landed —
+   * editable, toggleable, with its own buttons, wired into the notification
+   * target resolver — and nothing ever created one. It could not have: a
+   * traffic limit is reached by usage, so there is no clock a scheduled pass
+   * could watch. The panel is the only party that knows, and this is where
+   * the panel tells us.
+   *
+   * ── Best-effort, deliberately ────────────────────────────────────────
+   *
+   * The webhook's job is to reconcile our row with the panel, and that has
+   * already happened by the time this runs. A notification that fails must
+   * not fail the reconciliation — the customer would then keep a row saying
+   * ACTIVE while their access is restricted, which is a worse wrong than a
+   * missing message.
+   */
+  private async notifyTrafficLimited(subscription: {
+    readonly id: string;
+    readonly userId: string;
+    readonly expiresAt: Date | null;
+    readonly planSnapshot: unknown;
+    readonly trafficLimit: number | null;
+    readonly deviceLimit: number;
+    readonly remnawaveId: string | null;
+    readonly remnawavePanelId: number | null;
+    readonly remnawavePanelUsername: string | null;
+  }): Promise<void> {
+    try {
+      const payload = await this.noticePayload.build(subscription, { daysLeft: 0 });
+      await this.userNotifications.create({
+        userId: subscription.userId,
+        type: 'limited',
+        payload,
+      });
+      this.logger.log(`Traffic-limit notice created for subscription ${subscription.id}`);
+    } catch (err) {
+      this.logger.warn(
+        `Traffic-limit notice failed for ${subscription.id}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private async emitFirstTrafficUsage(

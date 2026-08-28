@@ -114,6 +114,9 @@ describe('autopay never attempts a blocked owner', () => {
       {} as never,
       {} as never,
       {} as never,
+      // The shared notice-payload builder. Inert here: what these cases are
+      // about is who gets notified and how often, not what the message says.
+      { build: async () => ({}) } as never,
     );
 
     await service.processAutopayCharges();
