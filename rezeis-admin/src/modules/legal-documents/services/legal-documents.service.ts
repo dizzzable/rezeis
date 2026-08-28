@@ -5,7 +5,20 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 
 /** The two documents, in the order the operator and the sign-up form show them. */
-export const LEGAL_DOCUMENT_KEYS: readonly LegalDocumentKey[] = ['USER_AGREEMENT', 'OFFER'];
+/**
+ * Declaration order, which is the order every surface renders them in.
+ *
+ * The privacy policy sits between the agreement and the offer because that is
+ * the order somebody reads them: what the service is, what it does with their
+ * data, what they are paying for. The Postgres enum appends its labels and is
+ * only ever compared for equality, so this array is the one place order is
+ * decided.
+ */
+export const LEGAL_DOCUMENT_KEYS: readonly LegalDocumentKey[] = [
+  'USER_AGREEMENT',
+  'PRIVACY_POLICY',
+  'OFFER',
+];
 
 /** Locale of the cabinet the reader is using. `ru` is the primary locale. */
 export type LegalDocumentLocale = 'ru' | 'en';

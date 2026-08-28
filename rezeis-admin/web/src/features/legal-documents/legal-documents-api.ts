@@ -10,7 +10,12 @@ import { z } from 'zod'
 import { api } from '@/lib/api'
 import { unwrapPayload, unwrapPayloadOrArray } from '@/lib/api-utils'
 
-export const LEGAL_DOCUMENT_KEYS = ['USER_AGREEMENT', 'OFFER'] as const
+/**
+ * Mirrors `LEGAL_DOCUMENT_KEYS` in the panel service, including its order —
+ * the two lists decide the same thing and are checked against each other by
+ * `legal-document-keys-parity.test.ts`.
+ */
+export const LEGAL_DOCUMENT_KEYS = ['USER_AGREEMENT', 'PRIVACY_POLICY', 'OFFER'] as const
 export type LegalDocumentKey = (typeof LEGAL_DOCUMENT_KEYS)[number]
 
 /**

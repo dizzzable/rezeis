@@ -200,10 +200,15 @@ describe('LegalDocumentsService', () => {
 
     const documents = await service.listForAdmin();
 
+    // Every declared key, in declaration order, each an empty placeholder. The
+    // editor renders one card per entry, so a key missing here is a document
+    // with nowhere to write its body — and activation refuses an empty body,
+    // which makes it a document that can never be switched on.
     assert.deepStrictEqual(
       documents.map((d) => [d.key, d.isActive]),
       [
         ['USER_AGREEMENT', false],
+        ['PRIVACY_POLICY', false],
         ['OFFER', false],
       ],
     );

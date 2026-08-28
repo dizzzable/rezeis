@@ -29,6 +29,10 @@ export const en = {
         title: 'User agreement',
         description: 'Terms of using the service.',
       },
+      privacyPolicy: {
+        title: 'Privacy policy',
+        description: 'What the service collects about visitors and why.',
+      },
       offer: {
         title: 'Public offer',
         description: 'Payment and service delivery terms.',

@@ -3411,6 +3411,11 @@ model SupportDocumentRequest {
 /// with reiwa. A slug would turn that contract into "whatever rows exist".
 enum LegalDocumentKey {
   USER_AGREEMENT
+  /// Privacy policy. Added when the cabinet started deriving device signals:
+  /// what a service collects and why is a statement it has to be able to MAKE,
+  /// and folding it into the user agreement makes the one document people
+  /// actually look for unfindable.
+  PRIVACY_POLICY
   OFFER
 }
 
