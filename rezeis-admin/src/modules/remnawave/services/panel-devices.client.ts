@@ -130,6 +130,13 @@ export class PanelDevicesClient {
     const ceiling = Math.max(1, Math.min(Math.trunc(limit), PANEL_ALL_DEVICES_CEILING));
     const devices: PanelHwidDevice[] = [];
     let total = 0;
+    // Whether the panel ever told us how many rows it holds. Without this the
+    // walk could not tell "the panel says zero" from "we never read a count":
+    // `total` starts at 0, so on the drift path — where a renamed or absent
+    // field leaves it there — the very first full page satisfied
+    // `devices.length >= total` and the walk returned `complete: true` after
+    // one page of a fifteen-thousand-row fleet, at full confidence.
+    let totalKnown = false;
 
     while (devices.length < ceiling) {
       const query = {
@@ -149,7 +156,10 @@ export class PanelDevicesClient {
       const page = unwrapEnvelope(outcome, 'devices');
       if (page.kind !== 'ok') return page;
 
-      total = typeof page.data.total === 'number' ? page.data.total : total;
+      if (typeof page.data.total === 'number') {
+        total = page.data.total;
+        totalKnown = true;
+      }
       devices.push(...page.data.devices);
 
       // A short page ends the list on any build that honours `size`, and also
@@ -158,12 +168,13 @@ export class PanelDevicesClient {
       if (page.data.devices.length === 0 || page.data.devices.length < query.size) {
         return { kind: 'ok', data: { devices, total, complete: true }, drifted: page.drifted };
       }
-      if (devices.length >= total) {
+      // Only an answer we actually read can end the walk this way.
+      if (totalKnown && devices.length >= total) {
         return { kind: 'ok', data: { devices, total, complete: true }, drifted: page.drifted };
       }
     }
 
-    const complete = devices.length >= total;
+    const complete = totalKnown && devices.length >= total;
     if (!complete) {
       this.logger.warn(
         `Remnawave HWID inventory: stopped at the ${devices.length}-row ceiling with ${total} ` +

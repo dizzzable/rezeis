@@ -639,12 +639,28 @@ export class SharingDetectors {
       this.clearSharedHwidBlind();
       const { byPanelId, coverage: userCoverage } = panelFacts;
       if (!inventory.data.complete) {
+        // REPORTS NOTHING, rather than reporting what it happened to see.
+        //
+        // A partial answer is worse than none here, and not because of what it
+        // misses. The orchestrator adds a code to the reconcile set as soon as
+        // the detector produces ANY candidate, and then auto-resolves every
+        // open signal of that code the run did not re-observe. So a truncated
+        // walk that still found one group would close the signals for every
+        // group beyond the ceiling — marking them "no longer detected" on the
+        // strength of a read this same line calls incomplete.
+        //
+        // An empty result from an `observational` detector resolves nothing, so
+        // saying nothing is the safe shape. The cost is that a fleet past the
+        // ceiling gets no cross-account detection at all until the ceiling is
+        // raised — which is a limitation an operator can read here, rather than
+        // a set of findings quietly destroyed.
         this.logger.warn(
           `Cross-account device detection read ${inventory.data.devices.length} of ` +
             `${inventory.data.total} bound device(s): the walk stopped at its ceiling, so ` +
-            'this run is INCOMPLETE for the rest of the fleet, not clean. A duplicate ' +
-            'whose second row sits past the ceiling is invisible to it.',
+            'this run is INCOMPLETE and reports nothing at all. A partial answer would ' +
+            'auto-resolve the open signals it could not re-observe.',
         );
+        return [];
       }
 
       // ── Group the inventory by device ─────────────────────────────────
@@ -822,10 +838,23 @@ export class SharingDetectors {
           ],
         });
 
-        const usernames = group.profiles.map((p) => p.username).sort();
+        // NAMES ONLY THE PROFILES THE COUNT INCLUDES. `group.profiles` also
+        // holds the ones that resolved to no local customer — they are dropped
+        // from `owners` on purpose, and listing them here put three usernames
+        // beside a count of two, one of which the detector had just concluded
+        // it could not attribute to anybody.
+        const usernames = [...owners.values()]
+          .flat()
+          .map((p) => p.username)
+          .sort();
         candidates.push({
           code: 'SHARED_DEVICE_MULTI_ACCOUNT',
-          fingerprint: `${day}|${group.hwid}`,
+          // `#` IS ESCAPED, because the lifecycle strips a trailing `#<digits>`
+          // to recognise a re-filed signal. An hwid is a client-chosen string:
+          // `laptop-7#4021` and `laptop-7` would be read as the same condition
+          // re-filed, and one device's row would be overwritten with the
+          // other's owners — silently unreporting a real group.
+          fingerprint: `${day}|${group.hwid.replace(/#/g, '%23')}`,
           severity:
             accountCount >= 3 ? FraudSignalSeverity.HIGH : FraudSignalSeverity.MEDIUM,
           title: 'Shared device — one HWID across several accounts',

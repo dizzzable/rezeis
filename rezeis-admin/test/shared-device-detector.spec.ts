@@ -436,12 +436,24 @@ describe('what the confidence is measured from', () => {
     assert.deepStrictEqual(Object.keys(metadata.confidenceFactors), ['sharedAccountCount']);
   });
 
-  it('lowers confidence when the inventory walk was a prefix of the fleet', async () => {
+  it('lowers confidence when the panel user list was a prefix', async () => {
+    // The user list can be short while the device inventory is whole — the two
+    // are separate reads — and a name produced from a partial map rests on a
+    // weaker evidence base.
     const whole = await harness(twoCustomersOneDevice()).detectors.detectSharedHwidAcrossAccounts(
       NOW,
     );
     const partial = await harness(
-      twoCustomersOneDevice({ incompleteWalk: true }),
+      twoCustomersOneDevice({
+        panelBulkOutcome: strictOk({
+          users: [
+            { uuid: '1', panelId: 1, hwidDeviceLimit: 5 },
+            { uuid: '2', panelId: 2, hwidDeviceLimit: 5 },
+          ],
+          total: 400,
+          complete: false,
+        }),
+      }),
     ).detectors.detectSharedHwidAcrossAccounts(NOW);
 
     assert.ok(
@@ -484,14 +496,24 @@ describe('a read it could not make is never reported as a clean panel', () => {
     assert.deepStrictEqual(candidates, []);
   });
 
-  it('announces a truncated walk as incomplete rather than clean', async () => {
+  it('reports nothing at all when the inventory walk was a prefix of the fleet', async () => {
+    // A PARTIAL ANSWER IS WORSE THAN NONE, and not because of what it misses.
+    // The orchestrator adds a code to the reconcile set as soon as the detector
+    // produces any candidate, then auto-resolves every open signal of that code
+    // the run did not re-observe. A truncated walk that still found one group
+    // would therefore close the signals for every group beyond the ceiling —
+    // "no longer detected", on the strength of a read the detector itself calls
+    // incomplete. An empty result resolves nothing, so silence is the safe
+    // shape, and the log is what makes the silence legible.
     const capture = captureLogs();
     try {
-      await harness(twoCustomersOneDevice({ incompleteWalk: true })).detectors.detectSharedHwidAcrossAccounts(
-        NOW,
-      );
+      const candidates = await harness(
+        twoCustomersOneDevice({ incompleteWalk: true }),
+      ).detectors.detectSharedHwidAcrossAccounts(NOW);
+
+      assert.deepStrictEqual(candidates, []);
       assert.ok(
-        capture.warns.some((line) => line.includes('INCOMPLETE for the rest of the fleet')),
+        capture.warns.some((line) => line.includes('reports nothing at all')),
         `expected the truncation to be announced, got ${JSON.stringify(capture.warns)}`,
       );
     } finally {
@@ -610,5 +632,56 @@ describe('the query it puts to Postgres', () => {
     assert.equal(candidates.length, 2);
     // A panel with a hundred shared devices must not cost a hundred queries.
     assert.equal(subscriptions.queries.length, 1);
+  });
+});
+
+describe('the prose and the fingerprint say what the count says', () => {
+  it('names only the profiles the count actually includes', async () => {
+    // `group.profiles` also holds the ones that resolved to no local customer.
+    // They are dropped from the count on purpose, and listing them anyway put
+    // three usernames beside a count of two — one of which the detector had
+    // just concluded it could not attribute to anybody.
+    const candidates = await harness({
+      devices: [
+        { hwid: 'dev-a', userId: 1 },
+        { hwid: 'dev-a', userId: 2 },
+        { hwid: 'dev-a', userId: 3 },
+      ],
+      panelUsers: [
+        { uuid: '1', panelId: 1 },
+        { uuid: '2', panelId: 2 },
+        { uuid: '3', panelId: 3 },
+      ],
+      // Profile 3 has no subscription row here, so it cannot be attributed.
+      subscriptions: [
+        { remnawaveId: '1', remnawavePanelId: 1, userId: 'user-1' },
+        { remnawaveId: '2', remnawavePanelId: 2, userId: 'user-2' },
+      ],
+    }).detectors.detectSharedHwidAcrossAccounts(NOW);
+
+    assert.equal(candidates.length, 1);
+    assert.equal((candidates[0].metadata as { accountCount: number }).accountCount, 2);
+    assert.equal(candidates[0].description.includes('rz_3'), false);
+  });
+
+  it('escapes a hash in the device id so two devices cannot collide', async () => {
+    // The signal lifecycle strips a trailing `#<digits>` to recognise a re-filed
+    // signal. An hwid is a client-chosen string, so `laptop-7#4021` and
+    // `laptop-7` would read as one condition re-filed, and one device's row
+    // would be overwritten with the other's owners — silently unreporting a
+    // real group.
+    const candidates = await harness(
+      twoCustomersOneDevice({
+        devices: [
+          { hwid: 'laptop-7#4021', userId: 1 },
+          { hwid: 'laptop-7#4021', userId: 2 },
+        ],
+      }),
+    ).detectors.detectSharedHwidAcrossAccounts(NOW);
+
+    assert.equal(candidates[0].fingerprint.endsWith('laptop-7%234021'), true);
+    assert.match(candidates[0].fingerprint, /^\d{4}-\d{2}-\d{2}\|/);
+    // The raw value still travels in the metadata, where an operator needs it.
+    assert.equal((candidates[0].metadata as { hwid: string }).hwid, 'laptop-7#4021');
   });
 });

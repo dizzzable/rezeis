@@ -1945,7 +1945,20 @@ export class AntiFraudService {
       affectedUserIds: candidate.affectedUserIds,
     };
 
-    const rezeisUserId = candidate.affectedUserIds[0] ?? null;
+    // ONE NAME ONLY WHEN THERE IS ONE. `affectedUserIds[0]` is the
+        // lexicographically smallest id, which is a fine choice when the signal
+        // names one customer and a wrong one when it names a relation between
+        // several: `SHARED_DEVICE_MULTI_ACCOUNT` puts every co-owner on the
+        // list, so the operator alert used to headline one arbitrary member of
+        // the group as «Нарушитель», with their real name, @username, Telegram
+        // id and e-mail — and never mention the others. The detector's own
+        // design note says the evidence does not identify which of them it is.
+        //
+        // For a multi-user signal the identity block is left out entirely and
+        // the count travels instead; the operator opens the signal to see who.
+        const namesOneCustomer = candidate.affectedUserIds.length === 1;
+        payload.fraudAffectedCount = candidate.affectedUserIds.length;
+        const rezeisUserId = namesOneCustomer ? (candidate.affectedUserIds[0] ?? null) : null;
     if (rezeisUserId) {
       const user = await this.prismaService.user.findUnique({
         where: { id: rezeisUserId },

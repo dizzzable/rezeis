@@ -330,6 +330,23 @@ describe('the whole device inventory is walked', () => {
     assert.equal(outcome.kind, 'network');
   });
 
+  it('does not call a walk complete on a row count it never read', async () => {
+    // THE drift case, and it silently hid most of a fleet. `total` starts at 0
+    // and is only assigned when the field is a number, so a panel minor that
+    // renamed or dropped it left the counter at zero — and the very first full
+    // page then satisfied "we hold at least as many as the panel reports". The
+    // walk returned one page of a fifteen-thousand-row fleet flagged complete,
+    // at full confidence, with nothing logged.
+    const page = inventoryPage(1, 1000);
+    const { client, calls } = clientOver([ok({ response: { devices: page } })]);
+
+    const outcome = await client.listAllDevices();
+
+    assert.equal(outcome.kind === 'ok' ? outcome.data.complete : null, false);
+    // And it kept walking rather than stopping on the invented count.
+    assert.ok(calls.length > 1);
+  });
+
   it('reports an inventory whose device list is missing as unreadable, not empty', async () => {
     // The drift path: the panel answered 2xx with a body the row list is not
     // findable in. `[]` here would mean "no device is bound to two accounts".
