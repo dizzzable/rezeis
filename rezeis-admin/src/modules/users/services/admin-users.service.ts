@@ -198,7 +198,14 @@ function buildUserListWhere(query: AdminUserListQueryDto): Prisma.UserWhereInput
     });
   }
 
-  if (query.subscriptionStatuses !== undefined && query.subscriptionStatuses.length > 0) {
+  // `!== undefined` and NOT `length > 0`, for all three enum-backed filters.
+  //
+  // The DTO now returns an EMPTY array for "the caller named members, none of
+  // which exist" — `?roles=SUPERADMIN` — and `undefined` only for "no filter at
+  // all". A `length > 0` guard collapses those back together and returns every
+  // user for a filter the page's badge is still counting as applied.
+  // `in: []` is the honest answer: no rows.
+  if (query.subscriptionStatuses !== undefined) {
     // Not filtered by `liveSubscription`: an operator who explicitly asks for
     // DELETED means it.
     and.push({ subscriptions: { some: { status: { in: query.subscriptionStatuses } } } });
@@ -221,10 +228,10 @@ function buildUserListWhere(query: AdminUserListQueryDto): Prisma.UserWhereInput
   }
 
   // ── Account filters ─────────────────────────────────────────────────
-  if (query.roles !== undefined && query.roles.length > 0) {
+  if (query.roles !== undefined) {
     and.push({ role: { in: query.roles } });
   }
-  if (query.languages !== undefined && query.languages.length > 0) {
+  if (query.languages !== undefined) {
     and.push({ language: { in: query.languages } });
   }
   if (query.isBlocked !== undefined) {

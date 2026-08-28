@@ -129,10 +129,29 @@ describe('subscription filters', () => {
     assert.ok('none' in (has['subscriptions'] as Record<string, unknown>));
   });
 
-  it('drops a status nobody defines instead of refusing the request', async () => {
-    // A shared link outliving a rename should return the rest of the filter,
-    // not a validation error the operator cannot act on.
-    assert.deepStrictEqual(whereFor({ subscriptionStatuses: 'NOT_A_STATUS' }), {});
+  it('matches nothing for a status nobody defines, rather than everything', async () => {
+    // Still no validation error — a shared link outliving a rename should not
+    // become a 400 the operator cannot act on. But "no filter" was the wrong
+    // way to be lenient: `?subscriptionStatuses=NOT_A_STATUS` returned EVERY
+    // user while the page's own badge counted the filter as applied. A badge
+    // over an unfiltered list is precisely what the filter module says it
+    // exists to prevent, and a hand-edited or shared URL is all it takes.
+    //
+    // An empty `in` is the honest answer to "show me the NOT_A_STATUS ones":
+    // there are none. Zero rows is also a state an operator can read; a full
+    // list that claims to be filtered is not.
+    const terms = andTerms(whereFor({ subscriptionStatuses: 'NOT_A_STATUS' }));
+    assert.equal(terms.length, 1);
+    assert.deepStrictEqual(terms[0], {
+      subscriptions: { some: { status: { in: [] } } },
+    });
+  });
+
+  it('still treats an EMPTY parameter as no filter at all', async () => {
+    // The other half of the distinction. `?subscriptionStatuses=` is a caller
+    // who named nothing, not a caller who named something unmatched — and it
+    // must not render an empty page.
+    assert.deepStrictEqual(whereFor({ subscriptionStatuses: '' }), {});
   });
 });
 

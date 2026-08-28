@@ -47,11 +47,27 @@ function toStringArray(value: unknown): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
+/**
+ * The members of `allowed` the caller asked for.
+ *
+ * ── AN UNKNOWN MEMBER MUST NOT WIDEN THE QUERY ────────────────────────────
+ *
+ * This used to answer `undefined` — "no filter" — when nothing survived the
+ * check, which is the same value an ABSENT parameter produces. So `?roles=`
+ * and `?roles=SUPERADMIN` meant the same thing, and the second returned EVERY
+ * user while the page's own badge still counted the filter as applied. An
+ * operator looking at "1 filter" over an unfiltered list is the exact failure
+ * the filter module says it exists to prevent, and a shared or hand-edited URL
+ * is all it takes.
+ *
+ * The two cases are now told apart. Nothing asked for is no filter; something
+ * asked for that cannot match anything is an EMPTY list, which Prisma renders
+ * as `IN ()` — no rows. That is the honest answer to "show me the SUPERADMINs".
+ */
 function toEnumArray<T extends string>(value: unknown, allowed: readonly T[]): T[] | undefined {
   const items = toStringArray(value);
   if (items === undefined) return undefined;
-  const known = items.filter((entry): entry is T => (allowed as readonly string[]).includes(entry));
-  return known.length > 0 ? known : undefined;
+  return items.filter((entry): entry is T => (allowed as readonly string[]).includes(entry));
 }
 
 /**

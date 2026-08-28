@@ -10,6 +10,11 @@
  * Returns the active tab plus a `setTab(value)` function that updates
  * state and pushes a `#hash` URL fragment with `replace: true` so the
  * back button is not polluted with intra-page tab clicks.
+ *
+ * The query string is preserved across a tab change. That is not incidental:
+ * a page whose state lives in the URL — filters, a search term — loses all of
+ * it otherwise, and loses it silently, because the tab still switches and the
+ * list still renders.
  */
 
 import { useState } from 'react'
@@ -24,7 +29,11 @@ export function useTabSync<TTab extends string>(
   allowedTabs: readonly TTab[],
   defaultTab: TTab,
 ): UseTabSyncResult<TTab> {
-  const { hash: locationHash, pathname: locationPathname } = useLocation()
+  const {
+    hash: locationHash,
+    pathname: locationPathname,
+    search: locationSearch,
+  } = useLocation()
   const navigate = useNavigate()
 
   const allowedSet = allowedTabs as readonly string[]
@@ -50,7 +59,14 @@ export function useTabSync<TTab extends string>(
     if (!allowedSet.includes(value)) return
     const tab = value as TTab
     setActiveTab(tab)
-    navigate(`${locationPathname}#${tab}`, { replace: true })
+    // THE SEARCH IS CARRIED, and leaving it out silently discarded it.
+    // react-router resolves a string destination with `search = ''` unless the
+    // string carries one, so switching tabs wiped every query parameter on the
+    // page. On Users that is the whole filter set and the search box: filter to
+    // twelve rows, click Bulk to copy ids, click back to List — and the badge
+    // reads 0 over every user in the install. Acting on "the twelfth row" then
+    // acts on a different account.
+    navigate(`${locationPathname}${locationSearch}#${tab}`, { replace: true })
   }
 
   return { activeTab, setTab }

@@ -19,6 +19,12 @@ const SHARING = {
   ipV4PrefixLength: 24,
   ipV6PrefixLength: 48,
   ipOverageMargin: 1,
+  // The cross-account device knobs. Present because the fixture is typed
+  // against the real config — a partial one would compile only as long as
+  // nothing new is added, which is exactly what happened here.
+  enableSharedHwid: true,
+  sharedHwidMinAccounts: 2,
+  sharedHwidMaxAccounts: 10,
 } as const
 
 const TRAFFIC = {

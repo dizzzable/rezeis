@@ -49,8 +49,52 @@ export const SUBSCRIPTION_STATUSES = [
   'DELETED',
 ] as const
 
-export const USER_ROLES = ['USER', 'ADMIN'] as const
-export const USER_LANGUAGES = ['RU', 'EN'] as const
+/**
+ * Every role the `UserRole` enum declares, in the order an operator scans them.
+ *
+ * `DEV` was missing, and its absence hid accounts rather than merely offering
+ * fewer boxes: an operator ticking both offered roles believes that means "any
+ * role", and every DEV account — the role that short-circuits every permission
+ * check — silently vanished from the list.
+ */
+export const USER_ROLES = ['DEV', 'ADMIN', 'USER'] as const
+
+/**
+ * Every locale the `Locale` enum declares.
+ *
+ * Two of twenty-seven were offered. Same failure as the roles above: a customer
+ * whose language is anything but RU or EN could not be filtered to, and ticking
+ * every visible box still excluded them.
+ */
+export const USER_LANGUAGES = [
+  'RU',
+  'EN',
+  'AR',
+  'AZ',
+  'BE',
+  'CS',
+  'DE',
+  'ES',
+  'FA',
+  'FR',
+  'HE',
+  'HI',
+  'ID',
+  'IT',
+  'JA',
+  'KK',
+  'KO',
+  'MS',
+  'NL',
+  'PL',
+  'PT',
+  'RO',
+  'SR',
+  'TR',
+  'UK',
+  'UZ',
+  'VI',
+] as const
 
 /** Every tri-state key, so the switches render and serialise from one list. */
 export const TRI_STATE_KEYS = [
