@@ -479,17 +479,42 @@ describe('a partially failing run records what it did, and only that', () => {
     assert.equal(summary[0].metadata['failed'], 1);
   });
 
-  it('writes no row for a user the run skipped', async () => {
-    const db = makeDb([makeUser('u-1', 101n, true), makeUser('u-2', 102n)]);
+  it('writes no row for a token that resolves to nobody', async () => {
+    const db = makeDb([makeUser('u-2', 102n)]);
 
-    const result = await runBulk(db, 'block', ['u-1', 'u-2', 'u-missing']);
+    const result = await runBulk(db, 'block', ['u-2', 'u-missing']);
 
-    assert.equal(result.succeeded, 1, 'only u-2 changed');
-    assert.equal(result.skipped, 2, 'u-1 was already blocked, u-missing resolves to nobody');
+    assert.equal(result.succeeded, 1);
+    assert.equal(result.skipped, 1, 'u-missing resolves to nobody');
     assert.deepEqual(
       auditRows(db, 'user.blocked').map((row) => metadataOf(row)['userId']),
       ['u-2'],
-      'a no-op is not an act and leaves no row',
+      'a token nobody answers to is not an act and leaves no row',
+    );
+  });
+
+  it('re-runs the cascade for an account that is already blocked', async () => {
+    // This used to answer "skipped — Already blocked", on the reading that a
+    // second block is a no-op. It is not: `block()` writes the flag FIRST, so
+    // an unreachable panel cannot lose it, and only THEN captures identities,
+    // devices and the address before pushing the VPN state. Any of those can
+    // throw — leaving an account that is flagged with nothing listed, an ACTIVE
+    // panel profile and live connections.
+    //
+    // The operator's obvious move is to re-run the batch, and the skip made
+    // that impossible: a half-executed ban could only be finished from the user
+    // card. Re-running is safe — the flag write is idempotent, a duplicate
+    // blocklist entry reports as a duplicate, and a second sync job supersedes
+    // the first.
+    const db = makeDb([makeUser('u-1', 101n, true)]);
+
+    const result = await runBulk(db, 'block', ['u-1']);
+
+    assert.equal(result.succeeded, 1);
+    assert.equal(result.skipped, 0);
+    assert.deepEqual(
+      auditRows(db, 'user.blocked').map((row) => metadataOf(row)['userId']),
+      ['u-1'],
     );
   });
 

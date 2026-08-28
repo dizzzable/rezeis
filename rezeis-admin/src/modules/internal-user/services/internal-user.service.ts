@@ -223,7 +223,16 @@ export class InternalUserService {
   ): Promise<InternalUserSessionInterface> {
     const user = await this.getRequiredUser(query);
     if (user.isBlocked) {
-      throw new ForbiddenException('USER_BLOCKED');
+      // TYPED, like every other `USER_BLOCKED` refusal in this codebase — the
+      // bot bootstrap and the payment guard both send `{ code }`, and only this
+      // one sent a bare string.
+      //
+      // The shape is what the cabinet can act on. It reads the code to END THE
+      // SESSION: without that, a blocked customer's profile screen 403s while
+      // the cookie survives, and every other cabinet route keeps working
+      // because they authenticate against the cabinet's own session store and
+      // never ask the panel again.
+      throw new ForbiddenException({ code: 'USER_BLOCKED', message: 'USER_BLOCKED' });
     }
     return mapInternalUserSession(user);
   }

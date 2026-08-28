@@ -404,7 +404,21 @@ export class BulkUserOperationsService {
 
     switch (input.action) {
       case 'block':
-        if (user.isBlocked) return { userId, status: 'skipped', message: 'Already blocked' };
+        // ALREADY BLOCKED IS NOT A REASON TO STAND DOWN, and treating it as one
+        // made a half-executed ban impossible to finish.
+        //
+        // `block()` writes the flag FIRST — deliberately, so an unreachable
+        // panel cannot lose it — and then captures identities, devices and the
+        // address before pushing the VPN state. Any of those later steps can
+        // throw. The account is then flagged with nothing listed, an ACTIVE
+        // panel profile and live connections; the row reports `error`; and the
+        // operator's obvious move, re-running the batch, answered
+        // "skipped — Already blocked" and left the tunnel up.
+        //
+        // Re-running is safe: the flag write is idempotent, a duplicate
+        // blocklist entry is reported as a duplicate rather than an error, and
+        // a second sync job supersedes the first.
+        //
         // The same act as the user card performs, through the same service.
         // Two inline `is_blocked` updates is exactly how the two screens came
         // to disagree about what a ban does.
