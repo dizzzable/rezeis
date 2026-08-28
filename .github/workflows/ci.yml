@@ -105,6 +105,21 @@ jobs:
 
       - run: npm ci
       - run: npm run prisma:generate
+      # `npm test` registers ts-node in TRANSPILE-ONLY mode, and that is the
+      # difference between a five-minute job and a twenty-five-minute one.
+      #
+      # Node's test runner spawns a process per spec file — around 340 of them
+      # — and a type-checking ts-node made every one of those processes compile
+      # and CHECK the whole graph it imports, from scratch. Measured on the
+      # full suite: 335s with checking, 76s without, same 5526 tests passing.
+      #
+      # Nothing is lost, because the check was redundant here rather than
+      # unique: `backend-quality` runs `npm run typecheck:test`, which compiles
+      # `tsconfig.test.json` — every file under `test/`, including the ones no
+      # spec imports, which the run-time check never reached at all. That job
+      # is the type authority for the suite; this one is the behaviour
+      # authority. Doing both in both places bought nothing and cost twenty
+      # minutes a push.
       - name: Run backend test suite
         run: npm test
 
