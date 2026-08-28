@@ -12,6 +12,13 @@ import { PaymentsRenewalCheckoutService } from '../payments/services/payments-re
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
 import { SubscriptionNoticePayloadService } from '../remnawave/services/subscription-notice-payload.service';
 
+/**
+ * One tick's worth of expiry warnings. Larger than the expired batch because a
+ * warning window is entered by every ACTIVE subscription approaching its date,
+ * while the expired one is entered only as a subscription lapses.
+ */
+const WARNING_BATCH_SIZE = 200;
+
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 /** Start charging this long before expiresAt. */
@@ -375,6 +382,33 @@ export class AutoRenewService {
     }
   }
 
+  /**
+   * The customers already told about this notification type inside the throttle
+   * window.
+   *
+   * READ FIRST AND EXCLUDED IN THE QUERY, which is the whole point. Both
+   * emitters used to take a batch and then drop the already-notified rows in
+   * memory — so once the batch was full of customers who had all been told, the
+   * same batch came back every tick and the ones behind it were never reached.
+   *
+   * That is not a delay, it is a permanent miss: a subscription only sits in
+   * its window for three hours, and the rows the ordering put last are the ones
+   * closest to falling out of it. More than a batch of expiries inside one
+   * window and the oldest simply never heard from us, with nothing logged —
+   * `created` was 0, which reads exactly like a quiet night.
+   */
+  private async recentlyNotifiedUserIds(
+    notificationType: string,
+    since: Date,
+  ): Promise<readonly string[]> {
+    const rows = await this.prismaService.userNotificationEvent.findMany({
+      where: { type: notificationType, createdAt: { gt: since } },
+      select: { userId: true },
+      distinct: ['userId'],
+    });
+    return rows.map((row) => row.userId);
+  }
+
   public async createExpiryWarnings(input: {
     readonly daysAhead: number;
     readonly notificationType: string;
@@ -384,29 +418,39 @@ export class AutoRenewService {
     const windowStart = new Date(horizon.getTime() - 3 * 60 * 60 * 1000);
     const recentThreshold = new Date(now.getTime() - 20 * 60 * 60 * 1000);
 
+    const alreadyNotifiedIds = await this.recentlyNotifiedUserIds(
+      input.notificationType,
+      recentThreshold,
+    );
+
     const expiringSoon = await this.prismaService.subscription.findMany({
       where: {
         status: SubscriptionStatus.ACTIVE,
         expiresAt: { gt: windowStart, lt: horizon },
+        // Excluded HERE, not after the take — see `recentlyNotifiedUserIds`.
+        ...(alreadyNotifiedIds.length > 0
+          ? { userId: { notIn: [...alreadyNotifiedIds] } }
+          : {}),
       },
       select: EXPIRY_NOTICE_SELECT,
-      take: 200,
+      // Soonest first. The batch is a bound on one tick's work, so whatever it
+      // cannot reach waits for the next one — and the row nearest its deadline
+      // is the one that must not wait.
+      orderBy: { expiresAt: 'asc' },
+      take: WARNING_BATCH_SIZE,
     });
 
     if (expiringSoon.length === 0) {
       return 0;
     }
+    if (expiringSoon.length === WARNING_BATCH_SIZE) {
+      this.logger.log(
+        `"${input.notificationType}": the batch was full, so more subscriptions are waiting ` +
+          'in this window and will be picked up by the following ticks.',
+      );
+    }
 
-    const userIds = Array.from(new Set(expiringSoon.map((sub) => sub.userId)));
-    const alreadyNotified = await this.prismaService.userNotificationEvent.findMany({
-      where: {
-        userId: { in: userIds },
-        type: input.notificationType,
-        createdAt: { gt: recentThreshold },
-      },
-      select: { userId: true },
-    });
-    const notifiedUserIds = new Set(alreadyNotified.map((event) => event.userId));
+    const notifiedUserIds = new Set<string>(alreadyNotifiedIds);
 
     let created = 0;
     for (const sub of expiringSoon) {
@@ -463,27 +507,36 @@ export class AutoRenewService {
     const windowStart = new Date(mark.getTime() - EXPIRY_NOTICE_WINDOW_MS);
     const recentThreshold = new Date(now.getTime() - 20 * 60 * 60 * 1000);
 
+    const alreadyNotifiedIds = await this.recentlyNotifiedUserIds(
+      input.notificationType,
+      recentThreshold,
+    );
+
     const justEnded = await this.prismaService.subscription.findMany({
       where: {
         status: SubscriptionStatus.EXPIRED,
         expiresAt: { gt: windowStart, lte: mark },
+        // Excluded HERE, not after the take — see `recentlyNotifiedUserIds`.
+        ...(alreadyNotifiedIds.length > 0
+          ? { userId: { notIn: [...alreadyNotifiedIds] } }
+          : {}),
       },
       select: EXPIRY_NOTICE_SELECT,
       take: BATCH_SIZE,
-      orderBy: { expiresAt: 'desc' },
+      // OLDEST first, which is the reverse of what this used to do. The window
+      // is three hours wide and the oldest rows leave it first, so serving the
+      // newest meant the ones about to become unreachable were served last.
+      orderBy: { expiresAt: 'asc' },
     });
     if (justEnded.length === 0) return 0;
+    if (justEnded.length === BATCH_SIZE) {
+      this.logger.log(
+        `"${input.notificationType}": the batch was full, so more subscriptions are waiting ` +
+          'in this window and will be picked up by the following ticks.',
+      );
+    }
 
-    const userIds = Array.from(new Set(justEnded.map((sub) => sub.userId)));
-    const alreadyNotified = await this.prismaService.userNotificationEvent.findMany({
-      where: {
-        userId: { in: userIds },
-        type: input.notificationType,
-        createdAt: { gt: recentThreshold },
-      },
-      select: { userId: true },
-    });
-    const notifiedUserIds = new Set(alreadyNotified.map((event) => event.userId));
+    const notifiedUserIds = new Set<string>(alreadyNotifiedIds);
 
     let created = 0;
     for (const sub of justEnded) {

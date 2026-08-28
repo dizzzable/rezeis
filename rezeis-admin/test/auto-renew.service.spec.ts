@@ -36,15 +36,30 @@ function createHarness(opts: {
 
   const prisma = {
     subscription: {
-      findMany: async () => opts.expiring,
+      // HONOURS `userId.notIn`. The already-notified customers are now excluded
+      // in the QUERY rather than dropped from the batch afterwards, which is
+      // what stops a full batch of people who have all been told from coming
+      // back every tick and starving the ones behind it. A double that ignored
+      // the term would make that fix untestable.
+      findMany: async (args: {
+        where?: { userId?: { notIn?: string[] } };
+        take?: number;
+      }) => {
+        const excluded = new Set(args.where?.userId?.notIn ?? []);
+        const matching = opts.expiring.filter((row) => !excluded.has(row.userId));
+        // `take` IS honoured, and it has to be: the starvation this fix is
+        // about only appears at the batch boundary. A double that returned
+        // everything would make the batch-full case unreachable and the test
+        // below would pass against the defect.
+        return args.take === undefined ? matching : matching.slice(0, args.take);
+      },
     },
     userNotificationEvent: {
-      findMany: async (args: { where: { userId: { in: string[] } } }) => {
+      // Asked by type and recency only — every customer told inside the window,
+      // not just the ones in some batch we happened to read first.
+      findMany: async () => {
         counters.eventFindMany += 1;
-        const requested = new Set(args.where.userId.in);
-        return opts.alreadyNotifiedUserIds
-          .filter((id) => requested.has(id))
-          .map((userId) => ({ userId }));
+        return opts.alreadyNotifiedUserIds.map((userId) => ({ userId }));
       },
     },
   };
@@ -111,12 +126,63 @@ describe('AutoRenewService.createExpiryWarnings', () => {
     assert.deepEqual(h.createdFor, ['userA']);
   });
 
-  it('returns 0 without querying events when nothing is expiring', async () => {
+  it('sends nothing, and asks for the notified set exactly once, when nothing is expiring', async () => {
+    // The events query now runs FIRST and unconditionally, which reverses what
+    // this test used to assert. It has to: the already-notified customers are
+    // excluded in the subscription query rather than dropped from the batch
+    // afterwards, and that is what stops a full batch of people who have all
+    // been told from coming back every tick while the ones behind it are never
+    // reached — a permanent miss, because a subscription sits in its window for
+    // only three hours.
+    //
+    // The cost is one indexed read per family per tick on an idle install. The
+    // thing it buys is that no customer silently goes untold.
     const h = createHarness({ expiring: [], alreadyNotifiedUserIds: [] });
     const created = await h.service.createExpiryWarnings({ daysAhead: 1, notificationType: 'expires_in_1_days' });
     assert.equal(created, 0);
-    assert.equal(h.counters.eventFindMany, 0);
+    assert.equal(h.counters.eventFindMany, 1);
     assert.deepEqual(h.createdFor, []);
+  });
+
+  it('reaches the customers behind a batch full of already-notified ones', async () => {
+    // THE starvation case. Under the old shape the batch was taken first and
+    // filtered afterwards, so a window holding more expiries than one batch
+    // served the same already-notified rows every tick and never advanced. The
+    // rows it could not reach were the oldest — the ones that leave the window
+    // first — so they were not delayed, they were never told at all, and
+    // `created: 0` read exactly like a quiet night.
+    // One batch (200) of customers who have all been told, plus five behind
+    // them. Under the old shape the take returned the first 200, every one of
+    // them was dropped in memory, and the five were never seen — on this tick
+    // or any other, because the query is deterministic.
+    const WARNING_BATCH = 200;
+    const expiring = Array.from({ length: WARNING_BATCH + 5 }, (_, index) => ({
+      id: `sub-${index}`,
+      userId: `user-${index}`,
+      expiresAt: new Date(Date.now() + 60_000),
+      planSnapshot: null,
+    })) as never[];
+    const h = createHarness({
+      expiring,
+      alreadyNotifiedUserIds: Array.from(
+        { length: WARNING_BATCH },
+        (_, index) => `user-${index}`,
+      ),
+    });
+
+    const created = await h.service.createExpiryWarnings({
+      daysAhead: 3,
+      notificationType: 'expires_in_3_days',
+    });
+
+    assert.equal(created, 5);
+    assert.deepEqual(h.createdFor, [
+      'user-200',
+      'user-201',
+      'user-202',
+      'user-203',
+      'user-204',
+    ]);
   });
 });
 
