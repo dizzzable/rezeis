@@ -29,9 +29,13 @@ import type { NodeFlapEvidence } from './remnawave-detectors';
 /**
  * Subscription-sharing detectors backed by the Remnawave panel.
  *
- * Two complementary signals:
+ * Three complementary signals:
  *   - HWID over-limit: a user has more *registered devices* than their plan's
  *     `hwidDeviceLimit` (cheap, uses the top-users endpoint).
+ *   - Cross-account device: one hwid is bound to the profiles of two or more
+ *     DIFFERENT customers (the whole-inventory endpoint). Asks about a
+ *     RELATION between accounts; the two either side of it ask about one
+ *     account measured against its own plan.
  *   - Concurrent-IP: a user is connected from more *distinct networks* than
  *     their device limit, at the same time (the `/api/connections/*` family
  *     behind the panel's own "Active sessions" view).
@@ -114,6 +118,16 @@ export class SharingDetectors {
    * still-blind detector once is the useful direction to be wrong in.
    */
   private hwidTopUsersBlind = false;
+
+  /**
+   * The same latch for the whole-inventory read behind
+   * {@link detectSharedHwidAcrossAccounts}. Separate from
+   * {@link hwidTopUsersBlind} because they are different endpoints: the
+   * top-users list can answer perfectly well while the inventory walk is
+   * failing, and one latch would let the recovery of either announce the
+   * recovery of both.
+   */
+  private sharedHwidBlind = false;
 
   /**
    * Which blindness the concurrent-IP detector last announced, or `null` while
@@ -522,6 +536,369 @@ export class SharingDetectors {
     }
   }
 
+  // ── Detector: one device, several customers ─────────────────────────────
+
+  /**
+   * One hwid bound to the panel profiles of two or more DIFFERENT customers.
+   *
+   * ── THE QUESTION NOBODY WAS ASKING ────────────────────────────────────
+   *
+   * {@link detectHwidOverage} compares each user's device count against THAT
+   * user's own limit. It is a per-account question and it cannot see across
+   * accounts at all — two people on one machine, each holding one device
+   * against a limit of three, are two clean rows to it and always were. The
+   * seven other detectors in this module group by user, transaction or
+   * referral, so none of them could see it either: before this detector, one
+   * machine registered under three paying identities produced no signal
+   * anywhere in the system.
+   *
+   * That is the shape multi-accounting actually takes here. A blocked customer
+   * comes back on a second account from the same machine; one subscription is
+   * resold to a second household; a trial is claimed repeatedly from one
+   * device. In every one of those the per-account view is clean by
+   * construction, and the duplicate hwid is the only thing that is not.
+   *
+   * ── WHAT THE HWID IS, AND THEREFORE WHAT THIS SIGNAL IS WORTH ─────────
+   *
+   * It is a header the client application chooses. It is NOT a serial number
+   * read off the hardware, nothing verifies it, and a client that wants to
+   * send a fresh one per install can. So:
+   *
+   *   - a MATCH is meaningful. Two independent installs do not arrive at the
+   *     same identifier by accident, and a client with any real derivation
+   *     produces a stable value for one machine — which is exactly why the
+   *     same machine under two identities shows up here;
+   *   - a NON-match proves nothing. Reinstalling, switching client, or
+   *     picking a client that randomises it all defeat this detector
+   *     completely. It finds the careless, not the determined, and its
+   *     silence is never evidence that nobody is multi-accounting.
+   *
+   * The failure mode that matters is the other direction: a client BUILD that
+   * sends one constant string for every install puts the entire customer base
+   * into a single group. Filing that would accuse everybody at once — a page
+   * of hundreds of identical signals gets dismissed wholesale and takes the
+   * genuine pairs beside it down too. `sharedHwidMaxAccounts` bounds it: above
+   * the ceiling the run logs the hwid and the count and files nothing, because
+   * "this client build is broken" is the fact an operator can act on and
+   * "these 400 customers share a laptop" is not.
+   *
+   * ── COUNTED IN CUSTOMERS, NOT IN PROFILES ─────────────────────────────
+   *
+   * The single largest false positive available here is a customer with two
+   * subscriptions. That is two panel profiles, legitimately, and their own
+   * laptop is legitimately on both — an entirely ordinary state this detector
+   * must never name. So the group is collapsed to rezeis users through
+   * `Subscription.userId` BEFORE it is counted, and a group that collapses to
+   * one customer is not a finding at all.
+   *
+   * Two consequences follow, and both under-report rather than over-report:
+   * a panel profile this deployment holds no subscription row for cannot be
+   * attributed to anybody and is dropped (with a count), and a profile whose
+   * panel id is missing from the user list is dropped the same way. Either can
+   * shrink a pair to a single account and hide a real finding for a run. That
+   * is the safe direction and it is logged, never silent.
+   *
+   * ── ONE SIGNAL PER DEVICE, NAMING EVERY OWNER ─────────────────────────
+   *
+   * The finding is a relation, so it is filed once per hwid with every
+   * customer in `affectedUserIds`, rather than once per customer. Two things
+   * follow from that and are intended:
+   *
+   *   - nobody is singled out as the offender, because the evidence does not
+   *     say which of them it is — the operator sees the relation and decides;
+   *   - `findCoveringExemption` matches on ANY affected user, so an exemption
+   *     granted to one member suppresses the whole group. That is the right
+   *     reading: an operator clearing one of two people who share a device has
+   *     cleared the sharing, not half of it.
+   */
+  public async detectSharedHwidAcrossAccounts(
+    now: Date,
+  ): Promise<readonly FraudSignalCandidate[]> {
+    const config = await this.resolveConfig();
+    if (!config.enableSharedHwid) return [];
+    try {
+      const [inventory, panelFacts] = await Promise.all([
+        this.devicesClient.listAllDevices(),
+        this.buildPanelUserFacts(),
+      ]);
+      // Same refusal as the overage detector, for the same reason: a partial
+      // user map does not under-report, it MIS-attributes. A profile whose row
+      // we lost is silently dropped from its group, which can take a genuine
+      // pair down to one account and clear it — while the run still looks
+      // healthy.
+      if (panelFacts === null) {
+        this.logger.warn(
+          'Cross-account device detection skipped: the panel user list is not trustworthy',
+        );
+        return [];
+      }
+      if (inventory.kind !== 'ok') {
+        this.reportSharedHwidBlind(inventory);
+        return [];
+      }
+      this.clearSharedHwidBlind();
+      const { byPanelId, coverage: userCoverage } = panelFacts;
+      if (!inventory.data.complete) {
+        this.logger.warn(
+          `Cross-account device detection read ${inventory.data.devices.length} of ` +
+            `${inventory.data.total} bound device(s): the walk stopped at its ceiling, so ` +
+            'this run is INCOMPLETE for the rest of the fleet, not clean. A duplicate ' +
+            'whose second row sits past the ceiling is invisible to it.',
+        );
+      }
+
+      // ── Group the inventory by device ─────────────────────────────────
+      // Read defensively field by field. `unwrapEnvelope` guarantees that
+      // `devices` is an ARRAY on the drift path and says nothing about what is
+      // in it, so a panel minor that renamed either column would otherwise
+      // arrive here as a group of `undefined`s keyed on `''`.
+      const byHwid = new Map<string, DeviceBinding[]>();
+      let unusableRows = 0;
+      for (const row of inventory.data.devices) {
+        const record = row as unknown as Record<string, unknown>;
+        const rawHwid = record['hwid'];
+        const rawOwner = record['userId'];
+        const hwid = typeof rawHwid === 'string' ? rawHwid.trim() : '';
+        // Bounded locally: the contract declares `hwid` as an unbounded
+        // `z.string()`, the value is chosen by the client, and it ends up in a
+        // fingerprint that carries a UNIQUE index. A value longer than any real
+        // device identifier (a uuid is 36 characters, a sha-256 hex is 64) is a
+        // payload rather than an identifier and is refused rather than
+        // truncated — truncating would collide two different devices into one
+        // signal.
+        if (hwid.length === 0 || hwid.length > MAX_HWID_LENGTH) {
+          unusableRows += 1;
+          continue;
+        }
+        if (typeof rawOwner !== 'number' || !Number.isSafeInteger(rawOwner)) {
+          unusableRows += 1;
+          continue;
+        }
+        const binding: DeviceBinding = {
+          panelUserId: rawOwner,
+          descriptor: deviceDescriptor(record),
+          platform: readOptionalString(record['platform']),
+          deviceModel: readOptionalString(record['deviceModel']),
+          boundAt: readInstant(record['createdAt']),
+        };
+        const bucket = byHwid.get(hwid);
+        if (bucket === undefined) byHwid.set(hwid, [binding]);
+        else bucket.push(binding);
+      }
+      if (unusableRows > 0) {
+        this.logger.warn(
+          `Cross-account device detection skipped ${unusableRows} device row(s) carrying no ` +
+            'usable hwid/owner pair. They were not judged and not cleared — if this is every ' +
+            'row, the panel has renamed a column and the detector is reading a shape it ' +
+            'no longer understands.',
+        );
+      }
+
+      // ── Keep only devices seen under more than one profile ────────────
+      let unjoinableProfiles = 0;
+      const shared: SharedDeviceGroup[] = [];
+      for (const [hwid, bindings] of byHwid) {
+        const panelIds = new Set(bindings.map((b) => b.panelUserId));
+        // The overwhelming majority of devices leave here: one owner, nothing
+        // to compare. Done before any lookup so the expensive half of this
+        // detector only ever sees candidates.
+        if (panelIds.size < 2) continue;
+        const profiles: SharedDeviceProfile[] = [];
+        for (const panelUserId of panelIds) {
+          const facts = byPanelId.get(panelUserId) ?? null;
+          if (facts === null || facts.identity.length === 0) {
+            unjoinableProfiles += 1;
+            continue;
+          }
+          profiles.push({ panelUserId, username: facts.username, identity: facts.identity });
+        }
+        if (profiles.length < 2) continue;
+        shared.push({ hwid, bindings, profiles });
+      }
+      if (unjoinableProfiles > 0) {
+        this.logger.warn(
+          `Cross-account device detection could not attribute ${unjoinableProfiles} profile(s) ` +
+            'holding a shared device: the panel user list holds no row for their id. They ' +
+            'were dropped from their group, which can shrink a genuine pair to a single ' +
+            'account and hide the finding for this run.',
+        );
+      }
+      if (shared.length === 0) return [];
+
+      // ONE query for every group, not one per group: the identities are
+      // gathered first and resolved together, so a panel with a hundred shared
+      // devices still costs a single round-trip to Postgres.
+      const subscriptionByIdentity = await this.resolveSubscriptions([
+        ...new Set(shared.flatMap((group) => group.profiles.map((p) => p.identity))),
+      ]);
+
+      const minAccounts = Math.max(2, Math.trunc(config.sharedHwidMinAccounts));
+      const configuredMax = Math.trunc(config.sharedHwidMaxAccounts);
+      // A ceiling below the floor is a detector that can never fire — the one
+      // shape this module keeps rediscovering — so it is raised to the floor
+      // and the operator is told, rather than silently obeyed into silence.
+      const maxAccounts = Math.max(minAccounts, configuredMax);
+      if (maxAccounts !== configuredMax) {
+        this.logger.warn(
+          `Cross-account device detection: the configured account ceiling (${configuredMax}) ` +
+            `is below the floor (${minAccounts}), which would file nothing at all. Using ` +
+            `${maxAccounts} as the ceiling for this run.`,
+        );
+      }
+
+      const day = utcDay(now);
+      const deviceCoverage = panelReadCoverage({
+        held: inventory.data.devices.length,
+        population: inventory.data.total,
+        complete: inventory.data.complete,
+      });
+      const candidates: FraudSignalCandidate[] = [];
+      let collapsedToOneCustomer = 0;
+      let unlinkedProfiles = 0;
+      const placeholders: string[] = [];
+
+      for (const group of shared) {
+        // COLLAPSED TO CUSTOMERS HERE, and this line is the false-positive
+        // guard the whole detector rests on: two profiles owned by one person
+        // is a second subscription, not a second person.
+        const owners = new Map<string, SharedDeviceProfile[]>();
+        for (const profile of group.profiles) {
+          const userId = subscriptionByIdentity.get(profile.identity)?.userId ?? null;
+          if (userId === null) {
+            unlinkedProfiles += 1;
+            continue;
+          }
+          const existing = owners.get(userId);
+          if (existing === undefined) owners.set(userId, [profile]);
+          else existing.push(profile);
+        }
+        const accountCount = owners.size;
+        if (accountCount < minAccounts) {
+          if (accountCount > 0) collapsedToOneCustomer += 1;
+          continue;
+        }
+        if (accountCount > maxAccounts) {
+          placeholders.push(`${shortHwid(group.hwid)} (${accountCount} accounts)`);
+          continue;
+        }
+
+        // ── Confidence ──────────────────────────────────────────────────
+        //  • ACCOUNTS — how many distinct paying customers hold this device.
+        //    Two is the weakest reading the detector can file and four is
+        //    conclusive; the floor is 1 rather than 2 so a pair still scores
+        //    above zero, because a pair IS the finding and not a near-miss.
+        //  • DESCRIPTOR AGREEMENT — do the rows for this one hwid describe one
+        //    machine? The panel records `platform` and `deviceModel` alongside
+        //    each binding, and they are supplied by the same client that chose
+        //    the hwid. Agreement is consistent with one real machine under two
+        //    identities; DISagreement says the identifier is not tracking a
+        //    machine at all, which is the placeholder story arriving below the
+        //    account ceiling where nothing else would catch it. Omitted
+        //    entirely when fewer than two rows describe themselves — an
+        //    unmeasured factor must not be scored as agreement.
+        const agreement = descriptorAgreement(group.bindings);
+        const { confidence, explanation } = computeConfidence({
+          ceiling: SHARED_HWID_CONFIDENCE,
+          // The weaker of the two reads this signal rests on. Both are needed:
+          // the inventory supplies the binding and the user list supplies the
+          // identity, and a prefix of either is a weaker evidence base for
+          // every name the run produced.
+          dataQuality: Math.min(deviceCoverage, userCoverage),
+          factors: [
+            {
+              name: 'sharedAccountCount',
+              observed: accountCount,
+              strength: ratioStrength(accountCount, 1, 4),
+            },
+            ...(agreement === null
+              ? []
+              : [
+                  {
+                    name: 'deviceDescriptorAgreement',
+                    observed: agreement,
+                    strength: agreement,
+                  },
+                ]),
+          ],
+        });
+
+        const usernames = group.profiles.map((p) => p.username).sort();
+        candidates.push({
+          code: 'SHARED_DEVICE_MULTI_ACCOUNT',
+          fingerprint: `${day}|${group.hwid}`,
+          severity:
+            accountCount >= 3 ? FraudSignalSeverity.HIGH : FraudSignalSeverity.MEDIUM,
+          title: 'Shared device — one HWID across several accounts',
+          description:
+            `Device ${shortHwid(group.hwid)} is registered on ${accountCount} different ` +
+            `customers' profiles (${usernames.join(', ')}). The panel's hwid is chosen by ` +
+            'the client application, so a match means those profiles reported the same ' +
+            'installation — not that the hardware was verified.' +
+            (agreement !== null && agreement < 1
+              ? ' The rows for this hwid disagree about the platform or device model, ' +
+                'which is what a client sending a fixed identifier looks like.'
+              : ''),
+          score: clampScore(50 + (accountCount - 2) * 15),
+          confidence,
+          affectedUserIds: [...owners.keys()].sort(),
+          metadata: {
+            kind: 'shared_hwid',
+            hwid: group.hwid,
+            accountCount,
+            panelProfileCount: group.profiles.length,
+            deviceRowCount: group.bindings.length,
+            // Capped: a group at the account ceiling can still hold more
+            // profiles than that, and signal metadata is rendered in a table
+            // row, not paged.
+            profiles: group.profiles.slice(0, SHARED_HWID_MAX_PROFILES_IN_METADATA).map((p) => ({
+              panelUserId: p.panelUserId,
+              username: p.username,
+              remnawaveId: p.identity,
+              userId: subscriptionByIdentity.get(p.identity)?.userId ?? null,
+            })),
+            ...(agreement === null ? {} : { descriptorAgreement: Math.round(agreement * 100) / 100 }),
+            ...explanation,
+          },
+        } satisfies FraudSignalCandidate);
+      }
+
+      // Never silent. Each of these is a group the run SAW and declined to
+      // file, and an operator asking "why is this obvious duplicate not
+      // listed?" has to be able to find the answer.
+      if (collapsedToOneCustomer > 0) {
+        this.logger.log(
+          `Cross-account device detection: ${collapsedToOneCustomer} shared device(s) belong ` +
+            'to a single customer holding more than one subscription. That is an ordinary ' +
+            'state, not sharing, and it is what this detector counts customers rather than ' +
+            'panel profiles to avoid.',
+        );
+      }
+      if (unlinkedProfiles > 0) {
+        this.logger.log(
+          `Cross-account device detection: ${unlinkedProfiles} panel profile(s) holding a ` +
+            'shared device have no subscription row here, so they cannot be attributed to a ' +
+            'customer and were dropped from their group. A pair that loses one of its two ' +
+            'members this way is not reported at all.',
+        );
+      }
+      if (placeholders.length > 0) {
+        this.logger.error(
+          `Cross-account device detection: ${placeholders.length} hwid(s) are bound to more ` +
+            `than ${maxAccounts} customers each (${placeholders.join(', ')}). Nobody was ` +
+            'named: a device identifier shared by that many paying accounts is a client ' +
+            'build sending a constant value, not a machine somebody is lending out. Fix or ' +
+            'block that client — filing this as fraud would accuse the whole customer base.',
+        );
+      }
+      return candidates;
+    } catch (error) {
+      this.logger.warn(
+        `Cross-account device detection failed: ${(error as Error).message}`,
+      );
+      return [];
+    }
+  }
+
   // ── Detector: concurrent-IP sharing ─────────────────────────────────────
 
   public async detectConcurrentIpSharing(now: Date): Promise<readonly FraudSignalCandidate[]> {
@@ -570,7 +947,11 @@ export class SharingDetectors {
         this.clearConcurrentIpBlind();
         return [];
       }
-      const coverage = panelReadCoverage(bulk.value);
+      const coverage = panelReadCoverage({
+        held: bulk.value.users.length,
+        population: bulk.value.total,
+        complete: bulk.value.complete,
+      });
 
       // panelId → { identity, username, limit }. The connections rows key
       // online users by the panel's numeric id, on every 3.x build.
@@ -930,6 +1311,34 @@ export class SharingDetectors {
   }
 
   /**
+   * The device inventory could not be read this run. Same one-shot shape and
+   * the same reason as {@link reportHwidBlind}: the blindness is a property of
+   * the read, not of anybody's account, so it is announced once at the edge
+   * rather than once per device.
+   */
+  private reportSharedHwidBlind(failure: PanelDevicesOutcome<unknown>): void {
+    if (this.sharedHwidBlind) {
+      this.logger.debug('Cross-account device detection still blind');
+      return;
+    }
+    this.sharedHwidBlind = true;
+    this.logger.warn(
+      'Cross-account device detection is BLIND: the panel did not return its device ' +
+        `inventory (${describeReadFailure(failure)}). This run reports no shared devices, ` +
+        'which is not the same fact as a panel on which no device is shared.',
+    );
+  }
+
+  /** The inventory answered again. Announced once, at the edge. */
+  private clearSharedHwidBlind(): void {
+    if (!this.sharedHwidBlind) return;
+    this.sharedHwidBlind = false;
+    this.logger.log(
+      'Cross-account device detection recovered: the panel returned its device inventory again',
+    );
+  }
+
+  /**
    * This run could not look at who is connected, and why. Same one-shot shape as
    * {@link reportHwidBlind}, latched on the REASON so a panel that changes state
    * announces the new one.
@@ -999,7 +1408,14 @@ export class SharingDetectors {
         limit: u.hwidDeviceLimit ?? 0,
       });
     }
-    return { byPanelId, coverage: panelReadCoverage(bulk.value) };
+    return {
+      byPanelId,
+      coverage: panelReadCoverage({
+        held: bulk.value.users.length,
+        population: bulk.value.total,
+        complete: bulk.value.complete,
+      }),
+    };
   }
 
   /**
@@ -1234,6 +1650,37 @@ interface LiveConnectionBlindness {
   readonly message: string;
 }
 
+/** One row of the panel's device inventory, as this detector reads it. */
+interface DeviceBinding {
+  readonly panelUserId: number;
+  /**
+   * `platform|deviceModel`, lower-cased, or `null` when the client described
+   * neither. `null` is a THIRD state and not a synonym for "they disagree":
+   * a row that says nothing about itself neither confirms nor denies that two
+   * bindings are the same machine, and scoring it either way would invent
+   * evidence.
+   */
+  readonly descriptor: string | null;
+  readonly platform: string | null;
+  readonly deviceModel: string | null;
+  readonly boundAt: { readonly ms: number; readonly iso: string } | null;
+}
+
+/** One panel profile holding a device that other profiles hold too. */
+interface SharedDeviceProfile {
+  readonly panelUserId: number;
+  readonly username: string;
+  /** What `Subscription.remnawaveId` would hold — see `buildPanelUserFacts`. */
+  readonly identity: string;
+}
+
+/** One hwid seen under more than one panel profile. */
+interface SharedDeviceGroup {
+  readonly hwid: string;
+  readonly bindings: readonly DeviceBinding[];
+  readonly profiles: readonly SharedDeviceProfile[];
+}
+
 /** Local facts about the subscription behind a Remnawave profile. */
 interface SubscriptionFacts {
   readonly userId: string;
@@ -1372,6 +1819,42 @@ const PARTLY_EXPLAINED_CONFIDENCE = 65;
 const IP_SHARING_CONFIDENCE = 60;
 
 /**
+ * Best case for a cross-account device finding.
+ *
+ * Below the 80 an unexplained device overage reports, and deliberately. An
+ * overage is measured against a number WE set and the panel enforces; this is
+ * measured against an identifier the client chose and nothing verifies. A
+ * duplicate is strong evidence — two installs do not collide by accident — but
+ * it is evidence about what a client reported, and the ceiling says so. Above
+ * the 60 the IP detector reports, because a matching hwid is a far narrower
+ * coincidence than two addresses in one subnet.
+ */
+const SHARED_HWID_CONFIDENCE = 75;
+
+/**
+ * How many profiles of one shared device are spelled out in signal metadata.
+ *
+ * The account ceiling already bounds the customers; this bounds the PROFILES,
+ * which is a larger number whenever one of those customers holds several
+ * subscriptions. Metadata is rendered inside a table row, so a group that
+ * exceeds this reports its full counts and a prefix of its members.
+ */
+const SHARED_HWID_MAX_PROFILES_IN_METADATA = 20;
+
+/**
+ * Longest hwid this detector will treat as a device identifier.
+ *
+ * The contract declares `hwid` as an unbounded `z.string()` and the value is
+ * chosen by the client, so nothing upstream stops a very long one. It reaches
+ * a `FraudSignal.fingerprint` that carries a UNIQUE index, and PostgreSQL's
+ * btree refuses a key past roughly 2700 bytes — which would turn a hostile
+ * client's registration into a failing upsert on every detector run. 256 is far
+ * above any real identifier (a uuid is 36, a sha-256 hex is 64) and far below
+ * that limit.
+ */
+const MAX_HWID_LENGTH = 256;
+
+/**
  * What fraction of the panel a strict bulk read actually returned, as the
  * `dataQuality` input to {@link computeConfidence}.
  *
@@ -1386,14 +1869,16 @@ const IP_SHARING_CONFIDENCE = 60;
  * required field of `RemnawavePanelUserList`, so an absent one can only come
  * from a hand-built stub, and a stub means "a normal, complete read".
  */
-function panelReadCoverage(list: {
-  readonly users: readonly unknown[];
-  readonly total: number;
+function panelReadCoverage(read: {
+  /** Rows actually in hand. */
+  readonly held: number;
+  /** The panel's own count of the rows it holds. */
+  readonly population: number;
   readonly complete: boolean;
 }): number {
-  if (list.complete !== false) return 1;
-  const held = list.users.length;
-  const population = list.total;
+  if (read.complete !== false) return 1;
+  const held = read.held;
+  const population = read.population;
   if (!Number.isFinite(population) || population <= held) return TRUNCATED_UNKNOWN_COVERAGE;
   if (held <= 0) return 0;
   return held / population;
@@ -1435,6 +1920,62 @@ function parseNodesSnapshot(raw: unknown): readonly NodeSnapshotEntry[] {
   }
   return out;
 }
+
+/** A non-empty trimmed string, or `null`. */
+function readOptionalString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+/**
+ * How a device row describes the machine it is bound to: `platform|deviceModel`,
+ * lower-cased so casing differences between client builds are not read as two
+ * different machines. `null` when the row describes neither.
+ */
+function deviceDescriptor(record: Record<string, unknown>): string | null {
+  const parts = [readOptionalString(record['platform']), readOptionalString(record['deviceModel'])]
+    .filter((part): part is string => part !== null)
+    .map((part) => part.toLowerCase());
+  return parts.length === 0 ? null : parts.join('|');
+}
+
+/**
+ * What share of the self-describing rows for one hwid agree about the machine.
+ *
+ * `1` = every row that said anything said the same thing, which is what one real
+ * machine registered under two identities looks like. Below 1 the rows disagree,
+ * and a single identifier reported by devices that are demonstrably not the same
+ * device is the signature of a client sending a constant value rather than of
+ * somebody lending a laptop out.
+ *
+ * `null` — NOT `1` — when fewer than two rows describe themselves at all. There
+ * is nothing to compare, and reporting perfect agreement for an unmeasured
+ * factor would raise an accusation's confidence on evidence that was never
+ * collected. The caller drops the factor entirely rather than scoring it.
+ */
+function descriptorAgreement(bindings: readonly DeviceBinding[]): number | null {
+  const described = bindings
+    .map((binding) => binding.descriptor)
+    .filter((descriptor): descriptor is string => descriptor !== null);
+  if (described.length < 2) return null;
+  const counts = new Map<string, number>();
+  for (const descriptor of described) {
+    counts.set(descriptor, (counts.get(descriptor) ?? 0) + 1);
+  }
+  return Math.max(...counts.values()) / described.length;
+}
+
+/**
+ * An hwid as it appears in operator-facing prose. The full value is in the
+ * signal metadata; a 64-character hex string in the middle of a sentence is
+ * unreadable and is what the description is competing with.
+ */
+function shortHwid(hwid: string): string {
+  return hwid.length <= HWID_PROSE_LENGTH ? hwid : `${hwid.slice(0, HWID_PROSE_LENGTH)}…`;
+}
+
+const HWID_PROSE_LENGTH = 20;
 
 function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10);

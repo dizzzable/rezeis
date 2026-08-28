@@ -1751,6 +1751,15 @@ describe('resolveSharingDetectionConfig', () => {
       ipV4PrefixLength: 24,
       ipV6PrefixLength: 48,
       ipOverageMargin: 1,
+      // The three cross-account knobs have NO environment layer, so what is
+      // asserted here is the built-in default with nothing under it. The
+      // detector ships ON: it reads the panel and files at most a `notify`,
+      // and the one thing that could make it noisy — a client sending a
+      // constant identifier — is bounded by the ceiling rather than left for
+      // an operator to discover.
+      enableSharedHwid: true,
+      sharedHwidMinAccounts: 2,
+      sharedHwidMaxAccounts: 10,
     });
   });
 

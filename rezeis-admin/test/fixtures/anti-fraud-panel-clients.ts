@@ -1,6 +1,8 @@
 import {
   PanelDevicesClient,
   type PanelDevicesOutcome,
+  type PanelHwidDevice,
+  type PanelHwidDeviceInventory,
   type PanelHwidDeviceStats,
   type PanelHwidTopUsersPage,
   type PanelNodeConnectionUser,
@@ -126,10 +128,48 @@ export function hwidTopUsersPage(
   };
 }
 
+/**
+ * One walk of `/api/hwid/devices`, as the client reports it.
+ *
+ * A spec names the three fields the cross-account detector reads — the device,
+ * its owner, and how the client described itself — and the rest are filled in
+ * because `PanelHwidDevice` is `z.infer` of the vendor's own schema. A partial
+ * cast would let the detector read a column this fixture never modelled.
+ */
+export function hwidDeviceInventory(
+  devices: ReadonlyArray<{
+    hwid: string;
+    userId: number;
+    platform?: string | null;
+    deviceModel?: string | null;
+  }>,
+  over: { total?: number; complete?: boolean } = {},
+): PanelHwidDeviceInventory {
+  return {
+    devices: devices.map(
+      (row) =>
+        ({
+          hwid: row.hwid,
+          userId: row.userId,
+          platform: row.platform ?? null,
+          osVersion: null,
+          deviceModel: row.deviceModel ?? null,
+          userAgent: null,
+          requestIp: null,
+          createdAt: new Date(0),
+          updatedAt: new Date(0),
+        }) as unknown as PanelHwidDevice,
+    ),
+    total: over.total ?? devices.length,
+    complete: over.complete ?? true,
+  };
+}
+
 // ── Clients ──────────────────────────────────────────────────────────────────
 
 export interface PanelDevicesDoubleInput {
   readonly topUsers?: PanelDevicesOutcome<PanelHwidTopUsersPage>;
+  readonly allDevices?: PanelDevicesOutcome<PanelHwidDeviceInventory>;
   readonly deviceStats?: PanelDevicesOutcome<PanelHwidDeviceStats>;
   /**
    * Per node uuid. A uuid ABSENT from this record answers `null` — "this node
@@ -156,6 +196,10 @@ export function panelDevicesDouble(
     listTopUsersByDeviceCount: () => {
       calls.push('listTopUsersByDeviceCount');
       return Promise.resolve(input.topUsers ?? panelOk(hwidTopUsersPage([])));
+    },
+    listAllDevices: () => {
+      calls.push('listAllDevices');
+      return Promise.resolve(input.allDevices ?? panelOk(hwidDeviceInventory([])));
     },
     getDeviceStats: () => {
       calls.push('getDeviceStats');

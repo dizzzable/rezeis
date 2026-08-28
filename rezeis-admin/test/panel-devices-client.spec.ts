@@ -265,6 +265,82 @@ describe('top users are walked, not sampled', () => {
   });
 });
 
+describe('the whole device inventory is walked', () => {
+  /** `count` rows starting at `from`, each bound to its own owner. */
+  const inventoryPage = (from: number, count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      hwid: `hwid-${from + index}`,
+      userId: from + index,
+      platform: 'ios',
+      osVersion: '18.0',
+      deviceModel: 'iPhone15,2',
+      userAgent: null,
+      requestIp: null,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    }));
+
+  it('pages at the contract ceiling rather than taking the default 25', async () => {
+    // The contract defaults `size` to 25. Omitting it would walk a fleet 25
+    // rows at a time — and the caller is looking for one hwid bound to two
+    // owners, which is only visible when BOTH of its rows are in hand.
+    const { client, calls } = clientOver([
+      ok({ response: { devices: inventoryPage(1, 1000), total: 1500 } }),
+      ok({ response: { devices: inventoryPage(1001, 500), total: 1500 } }),
+    ]);
+
+    const outcome = await client.listAllDevices();
+
+    assert.deepStrictEqual(calls[0]?.query, { start: 0, size: 1000 });
+    assert.deepStrictEqual(calls[1]?.query, { start: 1000, size: 1000 });
+    assert.equal(calls[0]?.url, '/api/hwid/devices');
+    assert.equal(outcome.kind === 'ok' ? outcome.data.devices.length : null, 1500);
+    assert.equal(outcome.kind === 'ok' ? outcome.data.complete : null, true);
+  });
+
+  it('sends no filters, because the panel says they cost its own database', async () => {
+    // The contract's endpoint description warns the filters "rely on expensive
+    // operators such as LIKE under the hood" and may hurt "the performance of
+    // your database" — the operator's production one.
+    const { client, calls } = clientOver([ok({ response: { devices: [], total: 0 } })]);
+
+    await client.listAllDevices();
+
+    assert.deepStrictEqual(Object.keys(calls[0]?.query ?? {}).sort(), ['size', 'start']);
+  });
+
+  it('says so when the row budget stops a walk the panel could have continued', async () => {
+    const { client } = clientOver([
+      ok({ response: { devices: inventoryPage(1, 1000), total: 90_000 } }),
+    ]);
+
+    const outcome = await client.listAllDevices(1000);
+
+    // A silently truncated inventory reads exactly like a panel on which no
+    // device is shared.
+    assert.equal(outcome.kind === 'ok' ? outcome.data.complete : null, false);
+    assert.equal(outcome.kind === 'ok' ? outcome.data.total : null, 90_000);
+  });
+
+  it('returns a failed page as the failure, not as the rows gathered so far', async () => {
+    const { client } = clientOver([{ kind: 'network', detail: 'ECONNRESET' }]);
+
+    const outcome = await client.listAllDevices();
+
+    assert.equal(outcome.kind, 'network');
+  });
+
+  it('reports an inventory whose device list is missing as unreadable, not empty', async () => {
+    // The drift path: the panel answered 2xx with a body the row list is not
+    // findable in. `[]` here would mean "no device is bound to two accounts".
+    const { client } = clientOver([ok({ response: { total: 4 } })]);
+
+    const outcome = await client.listAllDevices();
+
+    assert.equal(outcome.kind, 'unreadable');
+  });
+});
+
 describe('a connections job that could not be read is never reported as empty', () => {
   it('answers null when the attempt budget runs out', async () => {
     const { client, calls } = clientOver([

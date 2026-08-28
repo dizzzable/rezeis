@@ -76,6 +76,9 @@ import { readJsonObject } from '../../../common/utils/read-json-object.util';
 export interface StoredSharingSettings {
   enableHwidOverage?: boolean;
   enableIpSharing?: boolean;
+  enableSharedHwid?: boolean;
+  sharedHwidMinAccounts?: number;
+  sharedHwidMaxAccounts?: number;
   ipWindowMinutes?: number;
   ipConcurrencyWindowSeconds?: number;
   maxNodesPerRun?: number;
@@ -212,6 +215,17 @@ export function applyStoredSharingSettings(
   return {
     enableHwidOverage: pickBoolean(stored.enableHwidOverage, fallback.enableHwidOverage),
     enableIpSharing: pickBoolean(stored.enableIpSharing, fallback.enableIpSharing),
+    enableSharedHwid: pickBoolean(stored.enableSharedHwid, fallback.enableSharedHwid),
+    sharedHwidMinAccounts: pickNumber(
+      stored.sharedHwidMinAccounts,
+      fallback.sharedHwidMinAccounts,
+      range.sharedHwidMinAccounts,
+    ),
+    sharedHwidMaxAccounts: pickNumber(
+      stored.sharedHwidMaxAccounts,
+      fallback.sharedHwidMaxAccounts,
+      range.sharedHwidMaxAccounts,
+    ),
     ipWindowMinutes: pickNumber(
       stored.ipWindowMinutes,
       fallback.ipWindowMinutes,
@@ -320,6 +334,7 @@ export function resolveAntiFraudTunables(
 const SHARING_BOOLEAN_KEYS = [
   'enableHwidOverage',
   'enableIpSharing',
+  'enableSharedHwid',
   'ipNetworkGrouping',
 ] as const satisfies readonly (keyof StoredSharingSettings)[];
 

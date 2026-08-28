@@ -829,6 +829,11 @@ function SignalRow({
   const [open, setOpen] = useState(false);
   const isSharing =
     signal.code === 'SUBSCRIPTION_SHARING_HWID' || signal.code === 'SUBSCRIPTION_SHARING_IP';
+  // Deliberately NOT folded into `isSharing`. That flag also drives the
+  // "drop connections" button, which enforces against `metadata.ips` — and a
+  // cross-account device signal carries no ips, so the button would offer an
+  // action with nothing to act on.
+  const isSharedDevice = signal.code === 'SHARED_DEVICE_MULTI_ACCOUNT';
   const canEnforce =
     isSharing && (signal.status === 'OPEN' || signal.status === 'ACKNOWLEDGED');
   const selectable = signal.status === 'OPEN' || signal.status === 'ACKNOWLEDGED';
@@ -874,6 +879,8 @@ function SignalRow({
               <ConfidenceExplainer confidence={signal.confidence} metadata={signal.metadata} />
               {isSharing ? (
                 <SharingMetadata metadata={signal.metadata} />
+              ) : isSharedDevice ? (
+                <SharedDeviceMetadata metadata={signal.metadata} />
               ) : (
                 Object.keys(signal.metadata).length > 0 && (
                   <pre className="text-[10px] bg-muted rounded p-2 max-w-xl overflow-auto max-h-40 whitespace-pre-wrap">
@@ -982,6 +989,93 @@ function SharingMetadata({ metadata }: { metadata: Record<string, unknown> }) {
               );
             })}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The cross-account device signal, which names a RELATION and not a person.
+ *
+ * The generic JSON dump carries the same facts, and buries the two an operator
+ * has to read off the row in one glance: WHICH device, and WHICH accounts. The
+ * accounts especially — the table column shows only how many there are, so
+ * without this the only way to learn who they were is to expand the raw
+ * metadata and read a nested array.
+ *
+ * Both identifiers are printed per account, and both are load-bearing: the
+ * panel username is what an operator types into Remnawave, and the rezeis user
+ * id is what the exemption form takes if the group turns out to be a household
+ * they want to clear.
+ */
+function SharedDeviceMetadata({ metadata }: { metadata: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const hwid = typeof metadata.hwid === 'string' ? metadata.hwid : null;
+  const accountCount = typeof metadata.accountCount === 'number' ? metadata.accountCount : null;
+  const profileCount =
+    typeof metadata.panelProfileCount === 'number' ? metadata.panelProfileCount : null;
+  const agreement =
+    typeof metadata.descriptorAgreement === 'number' ? metadata.descriptorAgreement : null;
+  const profiles = Array.isArray(metadata.profiles)
+    ? (metadata.profiles as Array<Record<string, unknown>>)
+    : [];
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2 text-xs">
+        {accountCount !== null && (
+          <Badge variant="secondary">
+            {t('fraudPage.sharedDevice.accounts')}: {accountCount}
+          </Badge>
+        )}
+        {profileCount !== null && (
+          <Badge variant="outline">
+            {t('fraudPage.sharedDevice.profiles')}: {profileCount}
+          </Badge>
+        )}
+        {/* Shown only when the rows DISAGREE. Perfect agreement is the
+            ordinary case and a badge for it would be noise; a mismatch is the
+            mitigating fact — the identifier may not be tracking a machine at
+            all — and has to be visible without opening the raw metadata. */}
+        {agreement !== null && agreement < 1 && (
+          <Badge variant="outline">{t('fraudPage.sharedDevice.descriptorMismatch')}</Badge>
+        )}
+      </div>
+      {hwid !== null && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            {t('fraudPage.sharedDevice.hwidTitle')}
+          </p>
+          <code className="text-[10px] bg-muted rounded px-1.5 py-0.5 font-mono break-all">
+            {hwid}
+          </code>
+        </div>
+      )}
+      {profiles.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            {t('fraudPage.sharedDevice.profilesTitle')}
+          </p>
+          <ul className="space-y-0.5">
+            {profiles.map((entry, idx) => {
+              const username = typeof entry.username === 'string' ? entry.username : '—';
+              const panelUserId =
+                typeof entry.panelUserId === 'number' ? entry.panelUserId : null;
+              const userId = typeof entry.userId === 'string' ? entry.userId : null;
+              return (
+                <li
+                  key={`${username}-${idx}`}
+                  className="flex flex-wrap items-center gap-2 text-[10px] font-mono"
+                >
+                  <span className="bg-muted rounded px-1.5 py-0.5">{username}</span>
+                  {panelUserId !== null && (
+                    <span className="text-muted-foreground">#{panelUserId}</span>
+                  )}
+                  {userId !== null && <span className="text-muted-foreground">{userId}</span>}
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
     </div>

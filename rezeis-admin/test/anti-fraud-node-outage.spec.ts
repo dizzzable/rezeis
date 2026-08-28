@@ -690,6 +690,7 @@ describe('AntiFraudService.runDetectors', () => {
 
     const sharingDetectors = {
       detectHwidOverage: noFraud,
+      detectSharedHwidAcrossAccounts: noFraud,
       detectConcurrentIpSharing: noFraud,
     } as unknown as SharingDetectors;
 

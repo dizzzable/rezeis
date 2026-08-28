@@ -72,6 +72,7 @@ type SubscriptionUaKey = keyof SubscriptionUaConfig
 /** Order the fields are rendered in — also the order the form reads them back. */
 const SHARING_SWITCHES: readonly SharingKey[] = [
   'enableHwidOverage',
+  'enableSharedHwid',
   'enableIpSharing',
   'ipNetworkGrouping',
 ]
@@ -83,6 +84,8 @@ const SHARING_NUMBERS: readonly SharingKey[] = [
   'ipV6PrefixLength',
   'maxNodesPerRun',
   'maxIpsInMetadata',
+  'sharedHwidMinAccounts',
+  'sharedHwidMaxAccounts',
 ]
 /**
  * Sharing knobs that have NO `ANTIFRAUD_*` variable under them, so the value
@@ -90,7 +93,12 @@ const SHARING_NUMBERS: readonly SharingKey[] = [
  * labelled "Environment:". Everything else in this section predates the panel
  * and keeps its env layer; see `sharing-detection.config.ts`.
  */
-const SHARING_WITHOUT_ENV = new Set<SharingKey>(['ipConcurrencyWindowSeconds'])
+const SHARING_WITHOUT_ENV = new Set<SharingKey>([
+  'ipConcurrencyWindowSeconds',
+  'enableSharedHwid',
+  'sharedHwidMinAccounts',
+  'sharedHwidMaxAccounts',
+])
 const TRAFFIC_NUMBERS: readonly TrafficKey[] = [
   'minGb',
   'medianMultiplier',

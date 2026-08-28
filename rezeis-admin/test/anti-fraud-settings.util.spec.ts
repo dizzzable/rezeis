@@ -24,6 +24,11 @@ const SHARING_DEFAULTS = {
   ipV4PrefixLength: 24,
   ipV6PrefixLength: 48,
   ipOverageMargin: 1,
+  // No env layer under these three — they are new, so nothing can already be
+  // setting them and the built-in default is the whole fallback stack.
+  enableSharedHwid: true,
+  sharedHwidMinAccounts: 2,
+  sharedHwidMaxAccounts: 10,
 } as const;
 
 const TRAFFIC_DEFAULTS = {
@@ -429,6 +434,8 @@ describe('toAntiFraudSettingsView', () => {
       'ipWindowMinutes',
       'maxIpsInMetadata',
       'maxNodesPerRun',
+      'sharedHwidMaxAccounts',
+      'sharedHwidMinAccounts',
     ]);
     assert.deepEqual(Object.keys(ranges.trafficAbuse).sort(), [
       'maxNodesPerRun',

@@ -64,6 +64,7 @@ type DetectorName =
   | 'rapidChurn'
   | 'perUserNodeTrafficAbuse'
   | 'hwidOverage'
+  | 'sharedHwid'
   | 'concurrentIpSharing'
   | 'subscriptionUaTunnel';
 
@@ -121,6 +122,7 @@ function build(input: {
 
   const sharingDetectors = {
     detectHwidOverage: out('hwidOverage'),
+    detectSharedHwidAcrossAccounts: out('sharedHwid'),
     detectConcurrentIpSharing: out('concurrentIpSharing'),
   } as unknown as SharingDetectors;
 
@@ -799,6 +801,7 @@ describe('HIGH-severity notifications are throttled per affected user', () => {
       } as unknown as RemnawaveDetectors,
       {
         detectHwidOverage: () => Promise.resolve([high(`${TODAY}|uuid-2`, ['u1'])]),
+        detectSharedHwidAcrossAccounts: () => Promise.resolve([]),
         detectConcurrentIpSharing: () => Promise.resolve([]),
       } as unknown as SharingDetectors,
       {

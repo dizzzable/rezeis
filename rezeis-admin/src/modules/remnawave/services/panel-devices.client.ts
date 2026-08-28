@@ -7,6 +7,7 @@ import {
   DeleteAllUserHwidDevicesCommand,
   DeleteUserHwidDeviceCommand,
   DropConnectionsCommand,
+  GetHwidDevicesCommand,
   GetHwidDevicesStatsCommand,
   GetTopUsersByHwidDevicesCommand,
   GetUserHwidDevicesCommand,
@@ -91,6 +92,85 @@ export class PanelDevicesClient {
       { pathParts: [String(userId)] },
     );
     return unwrapDeviceList(outcome);
+  }
+
+  /**
+   * Every HWID device the panel holds, walked page by page.
+   *
+   * `GET /api/hwid/devices` — the SAME rows {@link listUserDevices} serves,
+   * unfiltered by owner, each carrying the `userId` it is bound to. That is
+   * the whole reason this method exists: the per-user route answers "which
+   * devices does THIS profile hold", and no amount of asking it can answer
+   * "is this device also on somebody else's profile" without one call per
+   * subscriber. One paged walk replaces that N+1 entirely.
+   *
+   * NO `filters`, DELIBERATELY. The contract's own endpoint description warns
+   * that the filter parameters "rely on expensive operators such as LIKE under
+   * the hood" and that misusing them "may negatively impact the performance of
+   * your database" — the panel's database, which is the operator's production
+   * one. Paging is cheap; filtering is not, and there is nothing to filter for
+   * anyway: a cross-account duplicate is only visible against the whole set.
+   *
+   * NO `sorting` either, and the cost of that is stated rather than hidden.
+   * Offset paging over a list whose order the panel is free to choose is not a
+   * stable cursor: a device registered mid-walk can shift a row across a page
+   * boundary, so a row can be seen twice or missed. Seeing one twice costs
+   * nothing (the caller groups into a set); missing one can shrink a
+   * two-account group to one and hide a finding for a run. That is the SAFE
+   * direction — it under-reports, never invents — and sending a sort column
+   * whose name is a guess would trade it for a `400` on every run.
+   *
+   * A page that fails is returned AS THE FAILURE. `[]` from here would mean
+   * "no device is bound to two accounts", which is exactly what a healthy
+   * panel looks like.
+   */
+  public async listAllDevices(
+    limit: number = PANEL_ALL_DEVICES_CEILING,
+  ): Promise<PanelDevicesOutcome<PanelHwidDeviceInventory>> {
+    const ceiling = Math.max(1, Math.min(Math.trunc(limit), PANEL_ALL_DEVICES_CEILING));
+    const devices: PanelHwidDevice[] = [];
+    let total = 0;
+
+    while (devices.length < ceiling) {
+      const query = {
+        start: devices.length,
+        size: Math.min(PANEL_ALL_DEVICES_PAGE_SIZE, ceiling - devices.length),
+      };
+      // Same rule as the top-users walk: the query is OURS, so it is checked
+      // against the contract's own schema before a round-trip is spent
+      // learning that a later contract narrowed the page ceiling.
+      const refusal = refuseInvalid(GetHwidDevicesCommand, 'query', query, []);
+      if (refusal !== null) return refusal;
+
+      const outcome = await this.executor.call<PanelHwidDeviceInventoryEnvelope>(
+        GetHwidDevicesCommand,
+        { query },
+      );
+      const page = unwrapEnvelope(outcome, 'devices');
+      if (page.kind !== 'ok') return page;
+
+      total = typeof page.data.total === 'number' ? page.data.total : total;
+      devices.push(...page.data.devices);
+
+      // A short page ends the list on any build that honours `size`, and also
+      // stops an endless walk against one that ignores it and re-serves the
+      // first page forever.
+      if (page.data.devices.length === 0 || page.data.devices.length < query.size) {
+        return { kind: 'ok', data: { devices, total, complete: true }, drifted: page.drifted };
+      }
+      if (devices.length >= total) {
+        return { kind: 'ok', data: { devices, total, complete: true }, drifted: page.drifted };
+      }
+    }
+
+    const complete = devices.length >= total;
+    if (!complete) {
+      this.logger.warn(
+        `Remnawave HWID inventory: stopped at the ${devices.length}-row ceiling with ${total} ` +
+          'reported — cross-account device detection is INCOMPLETE for this run, not clean',
+      );
+    }
+    return { kind: 'ok', data: { devices, total, complete }, drifted: false };
   }
 
   /**
@@ -501,6 +581,25 @@ type PanelHwidDeviceListEnvelope = z.infer<typeof GetUserHwidDevicesCommand.Resp
 export type PanelHwidDeviceList = PanelHwidDeviceListEnvelope['response'];
 export type PanelHwidDevice = PanelHwidDeviceList['devices'][number];
 
+type PanelHwidDeviceInventoryEnvelope = z.infer<typeof GetHwidDevicesCommand.ResponseSchema>;
+
+/**
+ * One walk of the whole device inventory. `complete` is ours; the rest is the
+ * panel's.
+ *
+ * The row type is deliberately the SAME `PanelHwidDevice` the per-user list
+ * serves. 3.4.2 declares both off `HwidUserDeviceSchema`, so a contract that
+ * ever splits them fails the compile here rather than letting a caller read a
+ * field one of the two routes stopped sending.
+ */
+export interface PanelHwidDeviceInventory {
+  readonly devices: readonly PanelHwidDevice[];
+  /** The panel's own count of bound devices, not `devices.length`. */
+  readonly total: number;
+  /** `false` when the ceiling stopped the walk with rows the panel still had. */
+  readonly complete: boolean;
+}
+
 type PanelHwidDeviceStatsEnvelope = z.infer<typeof GetHwidDevicesStatsCommand.ResponseSchema>;
 export type PanelHwidDeviceStats = PanelHwidDeviceStatsEnvelope['response'];
 
@@ -555,6 +654,29 @@ export const PANEL_TOP_DEVICE_USERS_PAGE_SIZE = 100;
  * found in row 1001.
  */
 export const PANEL_TOP_DEVICE_USERS_CEILING = 1000;
+
+/**
+ * The contract's own ceiling for the inventory route:
+ * `size … .max(1000, 'Size (limit) must be less than 1000')`. Ten times the
+ * top-users page because this route is paging DEVICES, not users, and a fleet
+ * holds several of them per subscriber.
+ */
+export const PANEL_ALL_DEVICES_PAGE_SIZE = 1000;
+
+/**
+ * How many device rows the inventory walk reads before it stops and says so.
+ *
+ * Twenty pages. Sized against what the walk is FOR: finding one hwid bound to
+ * two owners, which is only visible when both of its rows are in hand. Unlike
+ * the top-users list this one has no useful ordering to lean on — the tail is
+ * not "users with one device", it is simply the rest of the fleet — so a
+ * truncated read here is a genuine blind spot rather than a boring one, and
+ * the ceiling has to sit above any realistic fleet rather than at a
+ * comfortable sample. At ~3 devices per subscriber this covers roughly 6–7k
+ * subscribers; past that the walk reports `complete: false` and the detector
+ * says the run was incomplete instead of calling the panel clean.
+ */
+export const PANEL_ALL_DEVICES_CEILING = 20_000;
 
 /**
  * Twelve attempts at half a second: the same ~6-second budget the hand-rolled

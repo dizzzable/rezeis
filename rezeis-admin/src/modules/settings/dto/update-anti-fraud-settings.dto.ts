@@ -48,6 +48,9 @@ class UpdateSharingDetectionSettingsDto {
   public readonly enableIpSharing?: boolean | null;
 
   @IsOptional() @ValidateIf((_o, v) => v !== null) @IsBoolean()
+  public readonly enableSharedHwid?: boolean | null;
+
+  @IsOptional() @ValidateIf((_o, v) => v !== null) @IsBoolean()
   public readonly ipNetworkGrouping?: boolean | null;
 
   @IsOptional() @ValidateIf((_o, v) => v !== null)
@@ -77,6 +80,14 @@ class UpdateSharingDetectionSettingsDto {
   @IsOptional() @ValidateIf((_o, v) => v !== null)
   @IsInt() @Min(S.ipOverageMargin.min) @Max(S.ipOverageMargin.max)
   public readonly ipOverageMargin?: number | null;
+
+  @IsOptional() @ValidateIf((_o, v) => v !== null)
+  @IsInt() @Min(S.sharedHwidMinAccounts.min) @Max(S.sharedHwidMinAccounts.max)
+  public readonly sharedHwidMinAccounts?: number | null;
+
+  @IsOptional() @ValidateIf((_o, v) => v !== null)
+  @IsInt() @Min(S.sharedHwidMaxAccounts.min) @Max(S.sharedHwidMaxAccounts.max)
+  public readonly sharedHwidMaxAccounts?: number | null;
 }
 
 class UpdateTrafficAbuseSettingsDto {

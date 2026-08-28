@@ -1986,6 +1986,10 @@ export const en = {
           label: 'Concurrent-network detector',
           hint: 'Advisory only. Counts distinct networks, never emits HIGH severity.',
         },
+        enableSharedHwid: {
+          label: 'Cross-account device detector',
+          hint: 'Flags one device registered on the profiles of two or more different customers. A customer with several subscriptions is one customer, not two.',
+        },
         ipNetworkGrouping: {
           label: 'Group IPs into networks',
           hint: 'Collapses carrier/CGNAT churn and IPv6 privacy-address rotation. Strongly recommended.',
@@ -1997,6 +2001,14 @@ export const en = {
         ipConcurrencyWindowSeconds: {
           label: 'Concurrency window (seconds)',
           hint: 'How close two sightings must be to count as simultaneous. Lower values make sequential network switching collapse to one network.',
+        },
+        sharedHwidMinAccounts: {
+          label: 'Accounts before a shared device is flagged',
+          hint: 'How many different customers must hold the same device. Raise it if you consider a pair ordinary and only want to hear about three or more.',
+        },
+        sharedHwidMaxAccounts: {
+          label: 'Shared-device account ceiling',
+          hint: 'Above this many customers on one device, nothing is flagged and the run logs it instead: an identifier that many accounts report is a client build sending a constant value, not a shared machine.',
         },
         ipOverageMargin: {
           label: 'Network overage margin',
@@ -2940,6 +2952,13 @@ export const en = {
       window: 'Window',
       windowMinutes: '{{count}} min',
       ipsTitle: 'IP addresses',
+    },
+    sharedDevice: {
+      accounts: 'Accounts',
+      profiles: 'Panel profiles',
+      descriptorMismatch: 'Rows describe different devices',
+      hwidTitle: 'Device identifier',
+      profilesTitle: 'Registered on',
     },
     trend: {
       title: 'Signals over the last 14 days',

@@ -240,6 +240,7 @@ export async function revokeFraudExemption(id: string): Promise<FraudExemption> 
  */
 export const FRAUD_DETECTOR_CODES = [
   'SUBSCRIPTION_SHARING_HWID',
+  'SHARED_DEVICE_MULTI_ACCOUNT',
   'SUBSCRIPTION_SHARING_IP',
   'SUBSCRIPTION_UA_TUNNEL',
   'NODE_TRAFFIC_USER_ABUSE',

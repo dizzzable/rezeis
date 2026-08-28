@@ -60,6 +60,53 @@ export interface SharingDetectionConfig {
    */
   readonly enableIpSharing: boolean;
   /**
+   * Enable the cross-account device detector: ONE hwid bound to the profiles
+   * of two or more DIFFERENT customers.
+   *
+   * A different question from {@link SharingDetectionConfig.enableHwidOverage},
+   * which asks whether one customer holds more devices than their own plan
+   * allows and never compares two customers to each other. Over-limit is about
+   * a plan being exceeded; this is about one machine appearing under two
+   * identities — the shape a second account bought to dodge a block, or one
+   * subscription resold to a second household, actually takes.
+   *
+   * ON by default. It reads the panel and files at most a `notify`, and the
+   * one thing that could make it noisy — a client that reports a constant
+   * identifier for every install — is bounded by
+   * {@link SharingDetectionConfig.sharedHwidMaxAccounts} rather than left to an
+   * operator to discover.
+   */
+  readonly enableSharedHwid: boolean;
+  /**
+   * How many DISTINCT customers must share one hwid before it is named.
+   *
+   * Two is the point of the detector and the default. Raising it is for a
+   * deployment that has decided a pair is ordinary — a household, a couple
+   * sharing a laptop — and only wants to hear about three or more.
+   *
+   * Counted in rezeis users, never in panel profiles: one customer with two
+   * subscriptions has two profiles and is not two customers. See the detector.
+   */
+  readonly sharedHwidMinAccounts: number;
+  /**
+   * Above this many customers on one hwid, the hwid is treated as a BROKEN
+   * CLIENT and nobody is named.
+   *
+   * The panel's hwid is a header the client application chooses — the whole
+   * reason it can be shared at all — and a build that sends a constant string
+   * for every install puts the entire customer base into one group. Filing
+   * that would accuse everybody at once, which is worse than accusing nobody:
+   * a page of hundreds of identical signals gets dismissed wholesale, and the
+   * genuine pairs sitting next to them go with it. Above the ceiling the run
+   * logs the hwid and the count instead, which is the fact an operator can
+   * actually act on (fix or block that client build).
+   *
+   * Ten. A real machine shared by more than ten paying accounts is already
+   * indistinguishable from a placeholder, and the signals below the ceiling
+   * lose nothing by it.
+   */
+  readonly sharedHwidMaxAccounts: number;
+  /**
    * Staleness bound: an IP sample older than this many minutes is evicted and
    * never considered. This is a LOOKBACK, not a concurrency test — see
    * {@link SharingDetectionConfig.ipConcurrencyWindowSeconds}, which is what
@@ -152,12 +199,15 @@ export const SHARING_TUNABLE_RANGES = {
   ipV4PrefixLength: { default: 24, min: 8, max: 32, integer: true },
   ipV6PrefixLength: { default: 48, min: 16, max: 128, integer: true },
   ipOverageMargin: { default: 1, min: 0, max: 50, integer: true },
+  sharedHwidMinAccounts: { default: 2, min: 2, max: 20, integer: true },
+  sharedHwidMaxAccounts: { default: 10, min: 2, max: 500, integer: true },
 } as const satisfies Record<string, NumericTunableRange>;
 
 /** Defaults for the boolean sharing tunables (nothing to range-check). */
 export const SHARING_TUNABLE_BOOLEAN_DEFAULTS = {
   enableHwidOverage: true,
   enableIpSharing: false,
+  enableSharedHwid: true,
   ipNetworkGrouping: true,
 } as const satisfies Record<string, boolean>;
 
@@ -202,6 +252,11 @@ export function resolveSharingDetectionConfig(
   return {
     enableHwidOverage: parseBoolean(env.ANTIFRAUD_SHARING_HWID_ENABLED, bool.enableHwidOverage),
     enableIpSharing: parseBoolean(env.ANTIFRAUD_SHARING_IP_ENABLED, bool.enableIpSharing),
+    // The three cross-account knobs take no env layer, for the reason in the
+    // header: they are new, so no deployment can already be setting them and an
+    // env layer would buy zero compatibility at the price of a second source of
+    // truth. Panel-editable like the rest; precedence is stored value → default.
+    enableSharedHwid: bool.enableSharedHwid,
     ipWindowMinutes: fromEnv(env.ANTIFRAUD_SHARING_IP_WINDOW_MINUTES, range.ipWindowMinutes),
     // No `fromEnv`, and no variable to read: this knob is new, so the env layer
     // would be a second source of truth that buys no backward compatibility.
@@ -217,5 +272,7 @@ export function resolveSharingDetectionConfig(
     ipV4PrefixLength: fromEnv(env.ANTIFRAUD_SHARING_IP_V4_PREFIX, range.ipV4PrefixLength),
     ipV6PrefixLength: fromEnv(env.ANTIFRAUD_SHARING_IP_V6_PREFIX, range.ipV6PrefixLength),
     ipOverageMargin: fromEnv(env.ANTIFRAUD_SHARING_IP_OVERAGE_MARGIN, range.ipOverageMargin),
+    sharedHwidMinAccounts: range.sharedHwidMinAccounts.default,
+    sharedHwidMaxAccounts: range.sharedHwidMaxAccounts.default,
   };
 }

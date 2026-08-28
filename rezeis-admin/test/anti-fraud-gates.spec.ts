@@ -79,6 +79,7 @@ type DetectorName =
   | 'rapidChurn'
   | 'perUserNodeTrafficAbuse'
   | 'hwidOverage'
+  | 'sharedHwid'
   | 'concurrentIpSharing'
   | 'subscriptionUaTunnel';
 
@@ -142,6 +143,7 @@ function build(input: {
 
   const sharingDetectors = {
     detectHwidOverage: out('hwidOverage'),
+    detectSharedHwidAcrossAccounts: out('sharedHwid'),
     detectConcurrentIpSharing: out('concurrentIpSharing'),
   } as unknown as SharingDetectors;
 

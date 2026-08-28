@@ -230,7 +230,10 @@ interface UpsertSignalResult {
  *
  *   `observational` — the detector reads a live snapshot of the Remnawave panel.
  *     `SUBSCRIPTION_SHARING_HWID` reads the device list (a stale HWID, a
- *     reinstall, a device the panel has not reaped yet), `SUBSCRIPTION_SHARING_IP`
+ *     reinstall, a device the panel has not reaped yet),
+ *     `SHARED_DEVICE_MULTI_ACCOUNT` reads the whole device inventory (a walk
+ *     stopped at its ceiling, a user list that came back short, a profile
+ *     whose subscription row is mid-write), `SUBSCRIPTION_SHARING_IP`
  *     reads which IPs were concurrent (a mobile handoff, CGNAT, a VPN reconnect),
  *     `NODE_TRAFFIC_USER_ABUSE` reads traffic counters against a moving median
  *     (a counter reset moves every node's share at once), `SUBSCRIPTION_UA_TUNNEL`
@@ -829,6 +832,25 @@ export class AntiFraudService {
         codes: ['SUBSCRIPTION_SHARING_HWID'],
         evidence: 'observational',
         run: () => this.sharingDetectors.detectHwidOverage(now),
+      },
+      {
+        name: 'detectSharedHwidAcrossAccounts',
+        codes: ['SHARED_DEVICE_MULTI_ACCOUNT'],
+        // `observational`, and the auto-resolve half is what makes it so. The
+        // detector reads the panel's device inventory: it returns `[]` for an
+        // unreachable panel, for a user list it could not vouch for, and for
+        // being switched off. None of those mean the device stopped being
+        // shared, so an empty run must never close an open signal.
+        //
+        // The hysteresis half is cheap here and worth having: the binding is a
+        // stored row on the panel, so a genuine duplicate is re-observed by
+        // every run and reaches three consecutive sightings in fifteen minutes
+        // on its own. What the gate buys is that a single truncated inventory
+        // walk — the one read that can group two profiles it should not have,
+        // or drop one it should have kept — cannot file an accusation by
+        // itself.
+        evidence: 'observational',
+        run: () => this.sharingDetectors.detectSharedHwidAcrossAccounts(now),
       },
       {
         name: 'detectConcurrentIpSharing',

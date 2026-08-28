@@ -98,6 +98,9 @@ const notificationBotDeliveryBatchResultSchema = z.object({ attempted: z.number(
 const sharingDetectionConfigSchema = z.object({
   enableHwidOverage: z.boolean(),
   enableIpSharing: z.boolean(),
+  enableSharedHwid: z.boolean(),
+  sharedHwidMinAccounts: z.number(),
+  sharedHwidMaxAccounts: z.number(),
   ipWindowMinutes: z.number(),
   ipConcurrencyWindowSeconds: z.number(),
   maxNodesPerRun: z.number(),
