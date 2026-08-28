@@ -872,7 +872,11 @@ export class AdminUserSubscriptionsController {
   @Post('subscriptions/:subscriptionId/reset-traffic')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('subscriptions', 'edit')
-  public async resetTraffic(@Param('subscriptionId') subscriptionId: string) {
+  public async resetTraffic(
+    @Param('subscriptionId') subscriptionId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
       // The two supplementary identity columns come along wherever the row is
@@ -884,13 +888,22 @@ export class AdminUserSubscriptionsController {
     const identity = storedIdentityOf(sub);
     if (identity === null) return { reset: false, message: 'No Remnawave profile linked' };
     await this.remnawaveApiService.resetPanelUserTraffic(identity);
+    // AFTER the panel call, like every other audited action in this file: a
+    // row written first would answer "who reset this" about a reset that
+    // threw. The same action name the bulk toolbar writes, so one query
+    // answers the question whichever screen performed it.
+    await this.auditLog(admin, req, 'user.subscription.traffic_reset', { subscriptionId });
     return { reset: true };
   }
 
   @Post('subscriptions/:subscriptionId/sync')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('subscriptions', 'edit')
-  public async syncSubscription(@Param('subscriptionId') subscriptionId: string) {
+  public async syncSubscription(
+    @Param('subscriptionId') subscriptionId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
       select: {
@@ -957,6 +970,13 @@ export class AdminUserSubscriptionsController {
         data: refreshed,
       });
     }
+    // The same action name the all-subscriptions button writes, with the one
+    // subscription named — so "who re-synced this" is one query whether the
+    // operator pushed one row or all of them.
+    await this.auditLog(admin, req, 'user.sync.requested', {
+      subscriptionId,
+      refreshed: Object.keys(refreshed),
+    });
     return {
       synced: true,
       // What actually changed, so the operator is not told "synced" and left to
@@ -1002,6 +1022,7 @@ export class AdminUserSubscriptionsController {
     @Param('subscriptionId') subscriptionId: string,
     @Param('hwid') hwid: string,
     @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
   ) {
     const sub = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
@@ -1065,6 +1086,16 @@ export class AdminUserSubscriptionsController {
         adminId: admin.id,
       },
     );
+
+    // A system event is not an audit row: the feed is a timeline operators
+    // watch, the audit log is what answers "who did this" months later, and
+    // only one of the two is queried by admin. Both, then — this action is not
+    // undoable and the customer feels it immediately.
+    await this.auditLog(admin, req, 'user.subscription.device_revoked', {
+      subscriptionId,
+      hwid,
+      remainingDevices: result.total,
+    });
 
     return { revoked: true, remainingDevices: result.total };
   }

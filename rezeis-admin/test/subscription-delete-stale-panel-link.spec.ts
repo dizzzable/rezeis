@@ -702,6 +702,10 @@ function adminSubscriptionsController(row: DeviceRow | null, panel: DevicePanelH
     subscription: {
       findUnique: async () => (row === null ? null : { ...row, user: null }),
     },
+    // Revoking a device is now audited. Inert here: this file is about the
+    // stale-link refusal, and the row is written only on the paths that get
+    // past it.
+    adminAuditLog: { create: async () => ({}) },
   };
   const controller = new AdminUserSubscriptionsController(
     prisma as never,
@@ -802,7 +806,7 @@ describe('device deletion is refused on a stale panel link, at every call site',
 
     const refusal = refusalBodyOf(
       await controller
-        .revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never)
+        .revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never, { headers: {}, socket: {} } as never)
         .then(() => null, (e: unknown) => e),
     );
 
@@ -822,7 +826,7 @@ describe('device deletion is refused on a stale panel link, at every call site',
     const panel = devicePanelHarness({ addressing: 'id' });
     const { controller } = adminSubscriptionsController(healthyDeviceRow(), panel);
 
-    const result = await controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never);
+    const result = await controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never, { headers: {}, socket: {} } as never);
 
     assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
     assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUserDevice']);
@@ -875,7 +879,7 @@ describe('device deletion on a link that is NOT stale is untouched', () => {
     const panel = devicePanelHarness({ throws: true });
     const { controller } = adminSubscriptionsController(staleDeviceRow(), panel);
 
-    const result = await controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never);
+    const result = await controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never, { headers: {}, socket: {} } as never);
 
     assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
     assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUserDevice']);

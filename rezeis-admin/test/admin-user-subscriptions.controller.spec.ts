@@ -963,6 +963,10 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
           findUnique: async () => row,
           update: async (input: unknown) => { updates.push(input); return {}; },
         },
+        // The audit sink these routes now write to. Inert here: what these
+        // cases are about is what the panel refresh adopts, and the operator
+        // trail has its own coverage.
+        adminAuditLog: { create: async () => ({}) },
       } as never,
       { getPanelUserOutcome: async () => { panelReads.push('read'); return outcome; } } as never,
       {} as never,
@@ -978,7 +982,7 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
     // expired token, a 5xx and a timeout alike — and "gone" is what makes an
     // operator start repairing a link that was never broken.
     const { controller, updates } = build({ kind: 'unavailable' });
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
     assert.equal(result.synced, false);
     assert.match(String(result.message), /could not be reached/i);
     // And specifically NOT the missing-profile wording — that is the sentence
@@ -989,7 +993,7 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
 
   it('still reports a genuinely missing profile as missing', async () => {
     const { controller, updates } = build({ kind: 'missing' });
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
     assert.equal(result.synced, false);
     assert.equal(result.message, 'Profile not found on panel');
     assert.deepEqual(updates, []);
@@ -997,7 +1001,7 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
 
   it('syncs from the panel row when the read succeeds', async () => {
     const { controller, updates } = build({ kind: 'ok', user: syncedPanelProfile() });
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
     assert.equal(result.synced, true);
     assert.equal(updates.length, 1);
   });
@@ -1054,7 +1058,7 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
         refusal.row === null ? null : undefined,
       );
 
-      const result = await controller.syncSubscription('sub-1');
+      const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
       const body = result as Record<string, unknown>;
 
       assert.equal(body.synced, false);
@@ -1170,6 +1174,10 @@ function syncOver(options: {
           return { ...stored };
         },
       },
+      // The audit sink the refresh now writes to. Inert here: these cases are
+      // about which columns a refresh adopts, and the operator trail has its
+      // own coverage.
+      adminAuditLog: { create: async () => ({}) },
     } as never,
     { getPanelUserOutcome: async () => options.outcome } as never,
     {} as never,
@@ -1199,7 +1207,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
       stored: { configUrl: null, remnawavePanelId: null, remnawavePanelUsername: null },
     });
 
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
     assert.equal(result.synced, true);
     assert.deepEqual(result.refreshed, {
@@ -1221,7 +1229,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
       outcome: { kind: 'ok', user: DRIFTED_PANEL },
     });
 
-    await controller.syncSubscription('sub-1');
+    await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
     // Anchor first: a refresh that wrote nothing at all would satisfy the
     // direction-complete assertion below for the wrong reason.
@@ -1242,7 +1250,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
       outcome: { kind: 'ok', user: DRIFTED_PANEL },
     });
 
-    await controller.syncSubscription('sub-1');
+    await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
     // The panel says 12 devices, 5 GB, one free squad and LIMITED. rezeis sold
     // 3 devices, 200 GB, a paid squad, and an operator disabled the row. The
@@ -1262,7 +1270,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
   it('shows the operator what the panel reports for the columns it did not adopt', async () => {
     const { controller } = syncOver({ outcome: { kind: 'ok', user: DRIFTED_PANEL } });
 
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
     // Refusing to adopt the drift is only half the answer: an operator who
     // pressed "sync" because a customer is complaining still has to be able to
@@ -1292,7 +1300,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
       },
     });
 
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
     assert.equal(result.synced, true);
     assert.deepEqual(result.refreshed, {});
@@ -1314,7 +1322,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
       },
     });
 
-    const result = await controller.syncSubscription('sub-1');
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
     assert.deepEqual(stored.expiresAt, new Date('2099-01-01T00:00:00.000Z'));
     assert.deepEqual(result.refreshed?.expiresAt, new Date('2099-01-01T00:00:00.000Z'));
