@@ -167,6 +167,11 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   imports: ['view', 'create', 'import', 'run'],
   audit: ['view', 'export'],
   blocked_ips: ['view', 'create', 'delete'],
+  /// Identity blocklist (telegram id / e-mail / web login). Mirrors
+  /// `blocked_ips` so an operator trusted with one list is not surprised by
+  /// the other. No `edit`: an entry is added or removed, never amended —
+  /// changing which identity a row names would silently unblock somebody.
+  blocked_identities: ['view', 'create', 'delete'],
 
   // Realtime / events (future fraud signals + automations)
   fraud_signals: ['view', 'resolve', 'enforce'],

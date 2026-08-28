@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Locale, Prisma, ReferralInviteSource } from '@prisma/client';
@@ -15,6 +16,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
+import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
 import { InternalBootstrapUserInput } from '../interfaces/internal-user-bootstrap.interface';
 import {
@@ -58,6 +60,13 @@ export class InternalUserEdgeService {
     private readonly accessModeGuard: AccessModeGuard,
     private readonly systemEventsService: SystemEventsService,
     private readonly referralManualAttachService: ReferralManualAttachService,
+    /**
+     * Optional so every existing construction of this service keeps compiling.
+     * An absent list reads as "nothing is pre-blocked", which is the safe
+     * direction: a missing dependency must never lock everyone out of /start.
+     */
+    @Optional()
+    private readonly blockedIdentityService?: BlockedIdentityService,
   ) {}
 
   // ── Bootstrap / language ─────────────────────────────────────────────────
@@ -101,8 +110,35 @@ export class InternalUserEdgeService {
     // own account.
     const existing = await this.prismaService.user.findUnique({
       where: { telegramId: telegramIdBig },
-      select: { id: true },
+      select: { id: true, isBlocked: true },
     });
+
+    // Refused before anything is written, for two separate reasons.
+    //
+    // ALREADY BLOCKED. The bot used to re-upsert a blocked user on every
+    // `/start` and hand back a full session; the whole menu kept working. The
+    // block never reached the surface the person actually uses.
+    //
+    // ON THE BLOCKLIST. `users.is_blocked` can only refuse a row that exists,
+    // so a fresh Telegram account walked straight past it. The identity list
+    // is checked HERE, before the upsert, which is what makes a ban survive
+    // the account it was applied to — and what lets an operator refuse an id
+    // that has never pressed /start.
+    if (existing?.isBlocked === true) {
+      throw new ForbiddenException({
+        code: 'USER_BLOCKED',
+        message: 'This account is blocked',
+      });
+    }
+    if (existing === null) {
+      const blocked = await this.blockedIdentityService?.findByTelegramId(telegramIdBig);
+      if (blocked !== null && blocked !== undefined) {
+        throw new ForbiddenException({
+          code: 'USER_BLOCKED',
+          message: 'Registration is not available for this account',
+        });
+      }
+    }
     if (existing === null) {
       const policy = await this.settingsService.getInternalPlatformPolicy();
       // A `ref_<code>` deep-link IS the Telegram-side invite: treat it exactly

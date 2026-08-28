@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -204,11 +205,26 @@ export class InternalUserService {
 
   /**
    * Returns the resolved current user session payload.
+   *
+   * REFUSES A BLOCKED USER, and that refusal is what actually ends a live
+   * session. Blocking writes one boolean and touches no session store; the
+   * cabinet cookie is in Redis, its TTL slides on every request, and nothing
+   * revokes it — so an already-signed-in blocked user kept full access
+   * indefinitely. The cabinet reads this endpoint on load, so refusing here
+   * turns the block into something the person actually meets, without a
+   * session index the panel does not have.
+   *
+   * `mapInternalUserSession` serialises `isBlocked` onto the wire and always
+   * did; nothing on the other side ever read it. Acting on it here is the
+   * one place that needs no cooperation from the client.
    */
   public async getSession(
     query: InternalUserSessionQueryDto,
   ): Promise<InternalUserSessionInterface> {
     const user = await this.getRequiredUser(query);
+    if (user.isBlocked) {
+      throw new ForbiddenException('USER_BLOCKED');
+    }
     return mapInternalUserSession(user);
   }
 

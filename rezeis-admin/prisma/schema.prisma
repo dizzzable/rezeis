@@ -678,6 +678,65 @@ model BlockedIp {
   @@map("blocked_ips")
 }
 
+/// What kind of identity a blocklist entry names.
+///
+/// All three are identifiers a person CHOOSES and reuses, which is the whole
+/// point: a ban that only knows the `users` row it was applied to is undone by
+/// signing up again. Deliberately NOT here: IP addresses (they move, and
+/// `BlockedIp` already owns that axis) and device ids (shared households and
+/// reinstalled clients make them a signal, not a verdict).
+enum BlockedIdentityKind {
+  /// Numeric Telegram user id. Stored as text so the entry can exist before
+  /// any `users` row does — the whole reason this table exists.
+  TELEGRAM_ID
+  /// Lower-cased e-mail address.
+  EMAIL
+  /// Lower-cased web-account login.
+  WEB_LOGIN
+}
+
+/// Identity-based access blocklist — the pre-emptive half of banning.
+///
+/// `User.isBlocked` can only refuse somebody who has already registered, and
+/// it is undone by registering again with a fresh Telegram account. This table
+/// is keyed on the identity instead of on the row, so an operator can refuse a
+/// person BEFORE their first `/start`, and so a ban survives the account it was
+/// applied to.
+///
+/// Mirrors `BlockedIp` on purpose — same `reason` / `source` / `createdById` /
+/// `expiresAt` shape, so the two blocklists read and behave alike.
+model BlockedIdentity {
+  id          String              @id @default(cuid()) @map("id")
+  kind        BlockedIdentityKind @map("kind")
+  /// NORMALISED value — digits only for `TELEGRAM_ID`, lower-cased and trimmed
+  /// for the rest. Normalising on write is what makes the unique index mean
+  /// "this person", instead of letting `User@Example.com` slip past an entry
+  /// for `user@example.com`.
+  value       String              @map("value")
+  /// Operator- or rule-supplied reason. Free-form, shown in the admin list.
+  reason      String?             @map("reason")
+  /// `manual` for human entries, `automation` for rule-emitted ones, and
+  /// `cascade` for the identities captured automatically when an existing user
+  /// is blocked.
+  source      String              @default("manual") @map("source")
+  /// Pointer to the admin who created the entry.
+  createdById String?             @map("created_by_id")
+  /// When the block expires. `null` means permanent — same convention as
+  /// `BlockedIp`, and the readers must treat an EXPIRED row as absent rather
+  /// than deleting it, so the history of a temporary ban survives it.
+  expiresAt   DateTime?           @map("expires_at") @db.Timestamptz(3)
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  /// The lookup every registration path performs, and the guarantee that one
+  /// identity cannot be listed twice with two different reasons.
+  @@unique([kind, value])
+  @@index([source])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("blocked_identities")
+}
+
 // =============================================================================
 //  PHASE 6 — Webhook Subscriptions + Delivery History
 // =============================================================================

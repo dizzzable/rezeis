@@ -34,6 +34,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { AutoRenewModule } from './modules/auto-renew/auto-renew.module';
 import { AutomationsModule } from './modules/automations/automations.module';
 import { BackupModule } from './modules/backup/backup.module';
+import { BlockedIdentitiesModule } from './modules/blocked-identities/blocked-identities.module';
 import { BlockedIpsModule } from './modules/blocked-ips/blocked-ips.module';
 import { BlockedIpGuard } from './modules/blocked-ips/guards/blocked-ip.guard';
 import { BotConfigModule } from './modules/bot-config/bot-config.module';
@@ -150,6 +151,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     AutoRenewModule,
     AutomationsModule,
     BackupModule,
+    BlockedIdentitiesModule,
     BlockedIpsModule,
     BotConfigModule,
     BotFlowModule,

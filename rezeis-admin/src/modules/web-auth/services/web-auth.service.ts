@@ -685,9 +685,24 @@ export class WebAuthService {
     const loginNormalized = loginPolicy.normalizeLogin(input.login);
     const webAccount = await this.prismaService.webAccount.findUnique({
       where: { loginNormalized },
-      include: { user: { select: { telegramId: true } } },
+      include: { user: { select: { telegramId: true, isBlocked: true } } },
     });
     if (webAccount === null) {
+      throw new UnauthorizedException('Invalid login or password');
+    }
+    // A blocked user could log in here with their password.
+    //
+    // The sibling door, `InternalUserService.signInLinkedWebAccount`, has
+    // always refused them — the two verify the SAME `WebAccount.passwordHash`
+    // and disagreed about who may enter, and the cabinet uses this one. That
+    // is drift, not a decision: every other sign-in route (magic link, OAuth,
+    // Mini App bootstrap) refuses a blocked user too.
+    //
+    // Refused BEFORE the password is verified, unlike the sibling, which
+    // checks after. Nothing here is a credential oracle either way — the
+    // message is identical to "no such account" — and refusing first means a
+    // blocked account cannot be used to test passwords at all.
+    if (webAccount.user.isBlocked) {
       throw new UnauthorizedException('Invalid login or password');
     }
     // Claim-on-first-login: a migrated web-only account (importer-flagged) has
