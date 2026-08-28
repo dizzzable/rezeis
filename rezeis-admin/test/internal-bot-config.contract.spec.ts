@@ -31,6 +31,7 @@ const EXPECTED_TOP_LEVEL_KEYS = [
   'buttons',
   'customEmojis',
   'features',
+  'menuButton',
   'menuTextCustomEmojiIds',
   'profile',
   'screens',
@@ -298,6 +299,9 @@ describe('operator-managed bot settings', () => {
       name: '',
       description: '',
       shortDescription: '',
+      nameEn: '',
+      descriptionEn: '',
+      shortDescriptionEn: '',
     });
   });
 
@@ -312,7 +316,61 @@ describe('operator-managed bot settings', () => {
       name: 'Rezeis VPN',
       description: 'Быстрый VPN',
       shortDescription: 'VPN',
+      nameEn: '',
+      descriptionEn: '',
+      shortDescriptionEn: '',
     });
+  });
+
+  it('reads the English variants out of the @en sibling rows', async () => {
+    // The sibling arrives as a SEPARATE row keyed `<key>@en`, which `mapTexts`
+    // projects to a `.en` suffix in the map. Reading the row key here instead
+    // of the projected one would find nothing and silently ship an empty
+    // English profile — the failure has no error, only a Russian name shown
+    // to English users.
+    const { service } = buildService([
+      { key: 'bot.profile.name', value: 'Резеис', visible: false },
+      { key: 'bot.profile.name@en', value: 'Rezeis', visible: false },
+      { key: 'bot.profile.short_description@en', value: 'Fast VPN', visible: false },
+    ]);
+    const payload = await service.getConfig();
+    assert.equal(payload.profile.name, 'Резеис');
+    assert.equal(payload.profile.nameEn, 'Rezeis');
+    assert.equal(payload.profile.shortDescriptionEn, 'Fast VPN');
+    // No English description was written, and an absent variant must stay
+    // empty rather than inheriting the default: reiwa reads empty as "no
+    // dedicated English version", which is what Telegram already does.
+    assert.equal(payload.profile.descriptionEn, '');
+  });
+
+  it('defaults the menu button to the command list', async () => {
+    // Telegram’s own default. An install that never touched this must not have
+    // its button repointed by an update.
+    const { service } = buildService();
+    assert.deepStrictEqual((await service.getConfig()).menuButton, {
+      kind: 'commands',
+      text: '',
+    });
+  });
+
+  it('carries the Mini App menu button and its label', async () => {
+    const { service } = buildService([
+      { key: 'bot.menu_button', value: 'web_app', visible: false },
+      { key: 'bot.menu_button_text', value: '  Кабинет  ', visible: false },
+    ]);
+    assert.deepStrictEqual((await service.getConfig()).menuButton, {
+      kind: 'web_app',
+      text: 'Кабинет',
+    });
+  });
+
+  it('reads any unrecognised menu-button value as the command list', async () => {
+    // A hand-edited row with junk in it must not produce a third state reiwa
+    // has no branch for.
+    const { service } = buildService([
+      { key: 'bot.menu_button', value: 'webapp', visible: false },
+    ]);
+    assert.equal((await service.getConfig()).menuButton.kind, 'commands');
   });
 
   it('keeps every config row out of the translations map', async () => {

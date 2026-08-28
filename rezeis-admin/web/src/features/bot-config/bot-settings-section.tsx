@@ -22,6 +22,16 @@
  * this screen, and their profile was written in @BotFather; the alternative
  * would wipe it on the next deploy. So there is deliberately no way to CLEAR a
  * field from here, and the hint says so instead of pretending otherwise.
+ *
+ * ── Why the English boxes need the Russian one first ──────────────────────
+ *
+ * Each Telegram setter takes a `language_code`, so the bot can serve a real
+ * English profile. The English value lives in the `<key>@en` sibling row, and
+ * `@` is not a legal operator key character — the server owns that row and
+ * writes it through the base row's `valueEn` field. No base row, no id to
+ * patch. That is also the right product rule: the default is what every
+ * non-English user sees, so an English-only name would be a profile most
+ * people never get.
  */
 import { useEffect, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -37,6 +47,8 @@ export const FEATURE_MINI_APP_KEY = 'bot.feature.mini_app'
 export const PROFILE_NAME_KEY = 'bot.profile.name'
 export const PROFILE_DESCRIPTION_KEY = 'bot.profile.description'
 export const PROFILE_SHORT_DESCRIPTION_KEY = 'bot.profile.short_description'
+export const MENU_BUTTON_KEY = 'bot.menu_button'
+export const MENU_BUTTON_TEXT_KEY = 'bot.menu_button_text'
 
 /** Telegram's own limits — the same numbers reiwa refuses to exceed. */
 const LIMITS = {
@@ -50,15 +62,24 @@ export interface BotTextRow {
   readonly key: string
   readonly value: string
   readonly visible: boolean
+  /** The `<key>@en` sibling, folded in by `listForAdmin`. `null` when absent. */
+  readonly valueEn?: string | null
+}
+
+export interface BotSettingsSaveInput {
+  readonly key: string
+  readonly value: string
+  readonly row: BotTextRow | null
+  /**
+   * English sibling. Only ever sent with an EXISTING row — see the header for
+   * why the server owns the `@en` key.
+   */
+  readonly valueEn?: string
 }
 
 export interface BotSettingsSectionProps {
   readonly rows: readonly BotTextRow[] | undefined
-  readonly onSave: (input: {
-    readonly key: string
-    readonly value: string
-    readonly row: BotTextRow | null
-  }) => void
+  readonly onSave: (input: BotSettingsSaveInput) => void
   readonly disabled: boolean
 }
 
@@ -77,7 +98,7 @@ function SavedTextField(props: {
   readonly id: string
   readonly label: string
   readonly hint: string
-  readonly placeholder: string
+  readonly placeholder?: string
   readonly value: string
   readonly limit?: number
   readonly multiline?: boolean
@@ -166,6 +187,49 @@ function SavedSwitch(props: {
   )
 }
 
+/**
+ * The English half of a profile field. Disabled until the base value exists,
+ * because the `@en` row is written through the base row's id — see the file
+ * header.
+ *
+ * MODULE SCOPE, not nested inside the section. Defined during render it would
+ * get a fresh identity every time, and React reads a new identity as a
+ * different component type: the input would remount and drop whatever the
+ * operator was typing, the moment any sibling save refetched the rows.
+ */
+function EnglishVariant(props: {
+  readonly id: string
+  readonly baseKey: string
+  readonly limit: number
+  readonly multiline?: boolean
+  readonly rows: readonly BotTextRow[] | undefined
+  readonly disabled: boolean
+  readonly onSave: (input: BotSettingsSaveInput) => void
+}): JSX.Element {
+  const { t } = useTranslation()
+  const row = findRow(props.rows, props.baseKey)
+  const hasBase = row !== null && row.value.trim().length > 0
+  return (
+    <SavedTextField
+      id={props.id}
+      label={t('botStudio.replyKeyboard.settings.englishVariant')}
+      hint={
+        hasBase
+          ? t('botStudio.replyKeyboard.settings.englishVariantHint')
+          : t('botStudio.replyKeyboard.settings.englishVariantLocked')
+      }
+      value={(row?.valueEn ?? '').trim()}
+      limit={props.limit}
+      {...(props.multiline === true ? { multiline: true } : {})}
+      disabled={props.disabled || !hasBase}
+      onCommit={(v) => {
+        if (row === null) return
+        props.onSave({ key: props.baseKey, value: row.value, row, valueEn: v })
+      }}
+    />
+  )
+}
+
 export function BotSettingsSection({
   rows,
   onSave,
@@ -188,6 +252,8 @@ export function BotSettingsSection({
   }
   const save = (key: string, value: string): void =>
     onSave({ key, value, row: findRow(rows, key) })
+
+  const menuOpensApp = read(MENU_BUTTON_KEY) === 'web_app'
 
   return (
     <section className="space-y-3 rounded-md border p-3">
@@ -227,6 +293,36 @@ export function BotSettingsSection({
       <div className="space-y-3 rounded-md border border-dashed bg-muted/20 p-2.5">
         <div>
           <h5 className="text-xs font-semibold">
+            {t('botStudio.replyKeyboard.settings.menuButtonTitle')}
+          </h5>
+          <p className="text-[10px] leading-snug text-muted-foreground">
+            {t('botStudio.replyKeyboard.settings.menuButtonHint')}
+          </p>
+        </div>
+
+        <SavedSwitch
+          label={t('botStudio.replyKeyboard.settings.menuButtonWebApp')}
+          hint={t('botStudio.replyKeyboard.settings.menuButtonWebAppHint')}
+          checked={menuOpensApp}
+          disabled={disabled}
+          onChange={(next) => save(MENU_BUTTON_KEY, next ? 'web_app' : 'commands')}
+        />
+
+        {menuOpensApp ? (
+          <SavedTextField
+            id="bot-menu-button-text"
+            label={t('botStudio.replyKeyboard.settings.menuButtonText')}
+            hint={t('botStudio.replyKeyboard.settings.menuButtonTextHint')}
+            value={read(MENU_BUTTON_TEXT_KEY)}
+            disabled={disabled}
+            onCommit={(v) => save(MENU_BUTTON_TEXT_KEY, v)}
+          />
+        ) : null}
+      </div>
+
+      <div className="space-y-3 rounded-md border border-dashed bg-muted/20 p-2.5">
+        <div>
+          <h5 className="text-xs font-semibold">
             {t('botStudio.replyKeyboard.settings.profileTitle')}
           </h5>
           <p className="text-[10px] leading-snug text-muted-foreground">
@@ -244,29 +340,53 @@ export function BotSettingsSection({
           disabled={disabled}
           onCommit={(v) => save(PROFILE_NAME_KEY, v)}
         />
+        <EnglishVariant
+          id="bot-profile-name-en"
+          baseKey={PROFILE_NAME_KEY}
+          limit={LIMITS[PROFILE_NAME_KEY]}
+          rows={rows}
+          disabled={disabled}
+          onSave={onSave}
+        />
 
         <SavedTextField
           id="bot-profile-short-description"
           label={t('botStudio.replyKeyboard.settings.profileShortDescription')}
           hint={t('botStudio.replyKeyboard.settings.profileShortDescriptionHint')}
-          placeholder=""
           value={read(PROFILE_SHORT_DESCRIPTION_KEY)}
           limit={LIMITS[PROFILE_SHORT_DESCRIPTION_KEY]}
           multiline
           disabled={disabled}
           onCommit={(v) => save(PROFILE_SHORT_DESCRIPTION_KEY, v)}
         />
+        <EnglishVariant
+          id="bot-profile-short-description-en"
+          baseKey={PROFILE_SHORT_DESCRIPTION_KEY}
+          limit={LIMITS[PROFILE_SHORT_DESCRIPTION_KEY]}
+          multiline
+          rows={rows}
+          disabled={disabled}
+          onSave={onSave}
+        />
 
         <SavedTextField
           id="bot-profile-description"
           label={t('botStudio.replyKeyboard.settings.profileDescription')}
           hint={t('botStudio.replyKeyboard.settings.profileDescriptionHint')}
-          placeholder=""
           value={read(PROFILE_DESCRIPTION_KEY)}
           limit={LIMITS[PROFILE_DESCRIPTION_KEY]}
           multiline
           disabled={disabled}
           onCommit={(v) => save(PROFILE_DESCRIPTION_KEY, v)}
+        />
+        <EnglishVariant
+          id="bot-profile-description-en"
+          baseKey={PROFILE_DESCRIPTION_KEY}
+          limit={LIMITS[PROFILE_DESCRIPTION_KEY]}
+          multiline
+          rows={rows}
+          disabled={disabled}
+          onSave={onSave}
         />
       </div>
     </section>

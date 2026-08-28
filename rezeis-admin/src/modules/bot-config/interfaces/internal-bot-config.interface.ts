@@ -157,6 +157,34 @@ export interface InternalBotConfigProfileInterface {
   readonly description: string;
   /** Shown on the profile page and in link previews. */
   readonly shortDescription: string;
+  /**
+   * English variants. Every one of the three setters takes a
+   * `language_code`, and reiwa serves ru + en, so leaving these out meant
+   * an English-speaking user saw the Russian profile. Empty = no dedicated
+   * English version, which is exactly what Telegram means by omitting the
+   * parameter: fall back to the default for every language without one.
+   */
+  readonly nameEn: string;
+  readonly descriptionEn: string;
+  readonly shortDescriptionEn: string;
+}
+
+/**
+ * The button beside the message input (`setChatMenuButton`).
+ *
+ * `commands` is Telegram's own default — it opens the slash-command list.
+ * `web_app` replaces it with a one-tap door to the cabinet, which is the
+ * single most-used destination in this bot.
+ *
+ * Reiwa refuses `web_app` when it has no Mini App URL, or when the operator
+ * switched the Mini App off: a menu button that opens a feature the same
+ * panel disabled is a contradiction the bot resolves in favour of the
+ * feature switch.
+ */
+export interface InternalBotConfigMenuButtonInterface {
+  readonly kind: 'commands' | 'web_app';
+  /** Label for the `web_app` kind. Empty → reiwa uses its own localised one. */
+  readonly text: string;
 }
 
 /**
@@ -261,6 +289,8 @@ export interface InternalBotConfigInterface {
    * and a reiwa newer than the panel sees it absent and applies nothing.
    */
   readonly profile: InternalBotConfigProfileInterface;
+  /** Additive — an older reiwa ignores it and leaves the button alone. */
+  readonly menuButton: InternalBotConfigMenuButtonInterface;
   readonly botEmojis: InternalBotEmojiMap;
   /**
    * Subset of `botEmojis` that reiwa renders inside menu copy text rather

@@ -4624,6 +4624,20 @@ export const en = {
         miniAppHint:
           'Off — the cabinet button is not shown in the menu or on /start.',
         profileTitle: 'Telegram bot profile',
+        englishVariant: 'English',
+        englishVariantHint:
+          'What English-speaking users see. Empty — they see the value above.',
+        englishVariantLocked:
+          'Fill in the field above first — the English variant is stored next to it.',
+        menuButtonTitle: 'Button beside the message input',
+        menuButtonHint:
+          'Opens the command list by default. It can be a one-tap door to the cabinet instead.',
+        menuButtonWebApp: 'Open the cabinet',
+        menuButtonWebAppHint:
+          'Off — the command list. If the Mini App is switched off above, the bot keeps commands.',
+        menuButtonText: 'Button label',
+        menuButtonTextHint:
+          'Telegram shows one label to every language. Empty — the bot supplies its own.',
         profileHint:
           'What Telegram shows before the first message. An empty field keeps the current value — clearing from here is not possible, only replacing.',
         profileName: 'Bot name',

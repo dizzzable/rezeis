@@ -160,6 +160,27 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
         name: readTrimmedText(textMap, PROFILE_NAME_KEY),
         description: readTrimmedText(textMap, PROFILE_DESCRIPTION_KEY),
         shortDescription: readTrimmedText(textMap, PROFILE_SHORT_DESCRIPTION_KEY),
+        // Per-language variants. Telegram takes a `language_code` on each of
+        // these setters, and the bot serves ru + en, so an operator who only
+        // ever gets the default is being sold half the feature. Stored as the
+        // ordinary `@en` sibling rows the text editor already writes, which
+        // `mapTexts` projects to a `.en` suffix.
+        nameEn: readTrimmedText(textMap, `${PROFILE_NAME_KEY}${EN_MAP_SUFFIX}`),
+        descriptionEn: readTrimmedText(textMap, `${PROFILE_DESCRIPTION_KEY}${EN_MAP_SUFFIX}`),
+        shortDescriptionEn: readTrimmedText(
+          textMap,
+          `${PROFILE_SHORT_DESCRIPTION_KEY}${EN_MAP_SUFFIX}`,
+        ),
+      },
+      // The button beside the message input. `commands` is what Telegram
+      // shows by default; `web_app` turns it into a one-tap door to the
+      // cabinet, which is the single most-used thing in this bot.
+      menuButton: {
+        kind: readTrimmedText(textMap, MENU_BUTTON_KEY) === 'web_app' ? 'web_app' : 'commands',
+        // Empty means "use the bot’s own localised label" — the panel has no
+        // access to reiwa's i18n, so a default typed here would be a Russian
+        // string on an English install.
+        text: readTrimmedText(textMap, MENU_BUTTON_TEXT_KEY),
       },
       botEmojis: emojiMap,
       menuTextCustomEmojiIds: toCustomEmojiIdMap(emojiMap),
@@ -322,6 +343,8 @@ const FEATURE_MINI_APP_KEY = 'bot.feature.mini_app';
 const PROFILE_NAME_KEY = 'bot.profile.name';
 const PROFILE_DESCRIPTION_KEY = 'bot.profile.description';
 const PROFILE_SHORT_DESCRIPTION_KEY = 'bot.profile.short_description';
+const MENU_BUTTON_KEY = 'bot.menu_button';
+const MENU_BUTTON_TEXT_KEY = 'bot.menu_button_text';
 
 /**
  * Reserved suffix for the per-text English sibling row, mirrored from
@@ -329,6 +352,12 @@ const PROFILE_SHORT_DESCRIPTION_KEY = 'bot.profile.short_description';
  * `<key>.en` translation entries.
  */
 const EN_KEY_SUFFIX = '@en';
+/**
+ * The projected form of {@link EN_KEY_SUFFIX} inside the text MAP. `mapTexts`
+ * rewrites the `@en` ROW key into a `.en` MAP key, so anything reading the map
+ * has to ask for the projection, not for the row.
+ */
+const EN_MAP_SUFFIX = '.en';
 
 type SubscriptionInfoFormat = InternalBotConfigVisualInterface['subscriptionInfoFormat'];
 

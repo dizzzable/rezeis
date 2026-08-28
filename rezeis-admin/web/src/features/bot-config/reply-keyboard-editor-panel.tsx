@@ -72,7 +72,10 @@ import {
   BotButtonCreateDialog,
 } from './bot-button-dialogs'
 import { buildActionPayload } from './bot-button-payload'
-import { BotSettingsSection } from './bot-settings-section'
+import {
+  BotSettingsSection,
+  type BotTextRow as BotSettingsTextRow,
+} from './bot-settings-section'
 
 const REPLY_BUTTON_STYLES: BotButtonStyle[] = ['DEFAULT', 'PRIMARY', 'SUCCESS', 'DANGER']
 
@@ -88,12 +91,10 @@ const BOT_TEXTS_QUERY_KEY = ['bot-texts'] as const
 const BANNER_URL_KEY = 'bot.banner_url'
 const BANNER_APPLY_ALL_KEY = 'bot.banner_apply_all'
 
-interface BotTextRow {
-  readonly id: string
-  readonly key: string
-  readonly value: string
-  readonly visible: boolean
-}
+// Re-exported from the settings section rather than declared twice: it now
+// carries `valueEn`, and a second copy without it would silently type-check
+// while dropping the English variant on the floor.
+type BotTextRow = BotSettingsTextRow
 
 export function ReplyKeyboardEditorPanel(): JSX.Element {
   const { t } = useTranslation()
@@ -127,15 +128,26 @@ export function ReplyKeyboardEditorPanel(): JSX.Element {
       key,
       value,
       row,
+      valueEn,
     }: {
       readonly key: string
       readonly value: string
       readonly row: BotTextRow | null
+      readonly valueEn?: string
     }) => {
       if (row !== null) {
         // Raw PATCH (not botConfigApi.updateText) so an empty value is
         // accepted as a soft-clear, mirroring BotBannerTab's remove path.
-        await api.patch(`/admin/bot-config/texts/${row.id}`, { value })
+        //
+        // `valueEn` rides along ONLY when the caller sent it. The server
+        // reads an absent `valueEn` as "leave the sibling alone" and a
+        // present-but-empty one as "delete it", so passing it
+        // unconditionally would wipe every English variant on the next
+        // unrelated save of the same row.
+        await api.patch(`/admin/bot-config/texts/${row.id}`, {
+          value,
+          ...(valueEn === undefined ? {} : { valueEn }),
+        })
       } else if (value.length > 0) {
         await api.post('/admin/bot-config/texts', { key, value, visible: false })
       }
