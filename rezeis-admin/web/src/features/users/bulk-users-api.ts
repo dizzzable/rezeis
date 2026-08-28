@@ -6,6 +6,10 @@ export type BulkUserAction =
   | 'delete'
   | 'set_language'
   | 'set_max_subscriptions'
+  | 'reset_traffic'
+  | 'resync_profiles'
+  | 'revoke_devices'
+  | 'extend_subscription'
 
 export interface BulkUserOperationItem {
   userId: string

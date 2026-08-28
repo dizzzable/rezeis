@@ -24,7 +24,7 @@ import {
 const ACTIONS: ReadonlyArray<{
   readonly value: BulkUserAction
   readonly labelKey: string
-  readonly needsInput?: 'language' | 'maxSubscriptions'
+  readonly needsInput?: 'language' | 'maxSubscriptions' | 'days'
 }> = [
   { value: 'block', labelKey: 'bulkUsersPage.actions.block' },
   { value: 'unblock', labelKey: 'bulkUsersPage.actions.unblock' },
@@ -35,9 +35,33 @@ const ACTIONS: ReadonlyArray<{
     labelKey: 'bulkUsersPage.actions.setMaxSubs',
     needsInput: 'maxSubscriptions',
   },
+  { value: 'reset_traffic', labelKey: 'bulkUsersPage.actions.resetTraffic' },
+  {
+    value: 'extend_subscription',
+    labelKey: 'bulkUsersPage.actions.extendSubscription',
+    needsInput: 'days',
+  },
+  { value: 'resync_profiles', labelKey: 'bulkUsersPage.actions.resyncProfiles' },
+  { value: 'revoke_devices', labelKey: 'bulkUsersPage.actions.revokeDevices' },
 ]
 
-const DESTRUCTIVE: ReadonlyArray<BulkUserAction> = ['block', 'delete']
+/**
+ * Actions that ask for the typed confirmation.
+ *
+ * `revoke_devices` joins them because it is not undoable and the customer
+ * feels it immediately: every device is unbound and has to reconnect. The
+ * others on the list are reversible (`unblock`), queued (`resync_profiles`)
+ * or generous (`extend_subscription`), and asking for a typed confirmation
+ * on those trains people to type it without reading.
+ */
+/** One example per parameter kind — keyed so a fourth cannot be forgotten. */
+const PARAM_PLACEHOLDER: Record<'language' | 'maxSubscriptions' | 'days', string> = {
+  language: 'EN',
+  maxSubscriptions: '5',
+  days: '7',
+}
+
+const DESTRUCTIVE: ReadonlyArray<BulkUserAction> = ['block', 'delete', 'revoke_devices']
 
 /**
  * Bulk user operations.
@@ -77,11 +101,7 @@ export default function BulkUsersPage() {
       executeBulkUserOperation({
         userIds: uniqueIds,
         action,
-        payload: needsParam
-          ? needsParam === 'language'
-            ? { language: param.toUpperCase() }
-            : { maxSubscriptions: Number.parseInt(param, 10) }
-          : undefined,
+        payload: buildPayload(needsParam, param),
       }),
     onSuccess: (data) => {
       setResult(data)
@@ -136,16 +156,12 @@ export default function BulkUsersPage() {
 
           {needsParam ? (
             <div className="space-y-2">
-              <Label htmlFor="bulk-param">
-                {needsParam === 'language'
-                  ? t('bulkUsersPage.params.language')
-                  : t('bulkUsersPage.params.maxSubs')}
-              </Label>
+              <Label htmlFor="bulk-param">{t(`bulkUsersPage.params.${needsParam}`)}</Label>
               <Input
                 id="bulk-param"
                 value={param}
                 onChange={(e) => setParam(e.target.value)}
-                placeholder={needsParam === 'language' ? 'EN' : '5'}
+                placeholder={PARAM_PLACEHOLDER[needsParam]}
               />
             </div>
           ) : null}
@@ -261,4 +277,27 @@ function ResultCard({ result }: { readonly result: BulkUserOperationResult }) {
       </CardContent>
     </Card>
   )
+}
+
+/**
+ * The payload for the one parameter an action takes.
+ *
+ * A function rather than a nested ternary because there are three kinds now
+ * and the next one would have made it four levels deep — which is where the
+ * wrong branch stops being visible.
+ */
+function buildPayload(
+  needsParam: 'language' | 'maxSubscriptions' | 'days' | undefined,
+  param: string,
+): Record<string, unknown> | undefined {
+  switch (needsParam) {
+    case 'language':
+      return { language: param.toUpperCase() }
+    case 'maxSubscriptions':
+      return { maxSubscriptions: Number.parseInt(param, 10) }
+    case 'days':
+      return { days: Number.parseInt(param, 10) }
+    default:
+      return undefined
+  }
 }
