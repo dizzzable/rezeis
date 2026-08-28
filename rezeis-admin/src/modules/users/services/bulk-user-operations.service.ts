@@ -585,7 +585,20 @@ export class BulkUserOperationsService {
         }
         const now = new Date();
         let extended = 0;
+        // WHAT ACTUALLY LANDED IS RECORDED EVEN WHEN THE REST DID NOT.
+        //
+        // This loop had no per-subscription guard, so a throw on the second of
+        // three rows propagated out, the row was reported `error`, and the
+        // FIRST subscription was already extended in the database with no audit
+        // evidence at all. The operator then re-runs that id — and the first
+        // subscription gets the days twice while the trail says once.
+        //
+        // The two panel actions beside this one already count per profile and
+        // report what succeeded; extension was the one that did not.
+        let failure: Error | null = null;
         for (const subscription of subscriptions) {
+          if (failure !== null) break;
+          try {
           // Measured from NOW when the subscription has already lapsed, and
           // from its own expiry when it has not. Adding to a date in the past
           // would hand somebody three days that expired last week, which is
@@ -626,14 +639,40 @@ export class BulkUserOperationsService {
             await this.profileSyncQueue?.enqueue(job.id);
           }
           extended += 1;
+          } catch (err) {
+            // Remembered, not rethrown: the audit row below has to be written
+            // for the subscriptions that DID move before this one failed.
+            failure = err as Error;
+          }
         }
-        await this.recordOperatorRow(
-          BULK_AUDIT_ACTION.extend_subscription,
-          input,
-          batchId,
-          user,
-          { days: wholeDays, subscriptions: extended },
-        );
+        // Written whenever anything changed, success or not. An audit trail
+        // that records only complete runs is one that quietly loses every
+        // partial one — and a partial run is exactly the state somebody has to
+        // reconstruct later.
+        if (extended > 0) {
+          await this.recordOperatorRow(
+            BULK_AUDIT_ACTION.extend_subscription,
+            input,
+            batchId,
+            user,
+            {
+              days: wholeDays,
+              subscriptions: extended,
+              // Present only when the run fell short, so a complete row keeps
+              // exactly the shape it always had.
+              ...(failure !== null ? { partial: true, of: subscriptions.length } : {}),
+            },
+          );
+        }
+        if (failure !== null) {
+          return {
+            userId,
+            status: 'error',
+            // The count is in the message because it is what decides whether a
+            // re-run is safe: re-running this id extends those rows again.
+            message: `Extended ${extended} of ${subscriptions.length} subscriptions, then failed: ${failure.message}`,
+          };
+        }
         return { userId, status: 'ok' };
       }
 

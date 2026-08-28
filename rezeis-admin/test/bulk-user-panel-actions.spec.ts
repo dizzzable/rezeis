@@ -28,6 +28,8 @@ function buildService(options: {
   readonly subscriptions?: ReadonlyArray<Record<string, unknown>>;
   readonly panelThrowsOn?: number;
   readonly withoutPanel?: boolean;
+  /** 1-based index of the `subscription.update` call that should throw. */
+  readonly updateThrowsOn?: number;
 } = {}) {
   const calls: string[] = [];
   const updates: Array<Record<string, unknown>> = [];
@@ -53,6 +55,9 @@ function buildService(options: {
         ],
       update: async (args: Record<string, unknown>) => {
         updates.push(args);
+        if (options.updateThrowsOn === updates.length) {
+          throw new Error('serialization failure');
+        }
         return {};
       },
     },
@@ -264,5 +269,62 @@ describe('the action list', () => {
 
     assert.ok(declared.length > 0, 'could not read the action union');
     assert.deepStrictEqual(accepted, declared);
+  });
+});
+
+describe('an extension that fell short says so, and says how far it got', () => {
+  const TWO_SUBS = [
+    {
+      id: 'sub-1',
+      status: SubscriptionStatus.ACTIVE,
+      expiresAt: new Date(NOW + 5 * 24 * 60 * 60 * 1000),
+      remnawaveId: null,
+      remnawavePanelId: null,
+      remnawavePanelUsername: null,
+    },
+    {
+      id: 'sub-2',
+      status: SubscriptionStatus.ACTIVE,
+      expiresAt: new Date(NOW + 5 * 24 * 60 * 60 * 1000),
+      remnawaveId: null,
+      remnawavePanelId: null,
+      remnawavePanelUsername: null,
+    },
+  ];
+
+  it('records the subscriptions that DID move before the failure', async () => {
+    // THE case. The loop had no per-subscription guard, so a throw on the
+    // second row propagated out, the row was reported `error`, and the first
+    // subscription was already extended in the database with no audit evidence
+    // at all. An operator re-running that id then extends it twice while the
+    // trail says once.
+    const { run, audit } = buildService({ subscriptions: TWO_SUBS, updateThrowsOn: 2 });
+
+    const result = await run('extend_subscription', { days: 3 });
+
+    assert.equal(result.failed, 1);
+    assert.equal(audit.length, 1);
+    const metadata = audit[0]['metadata'] as { subscriptions: number; partial?: boolean };
+    assert.equal(metadata.subscriptions, 1);
+    assert.equal(metadata.partial, true);
+  });
+
+  it('tells the operator how many landed, because that decides whether a re-run is safe', async () => {
+    const { run } = buildService({ subscriptions: TWO_SUBS, updateThrowsOn: 2 });
+
+    const result = await run('extend_subscription', { days: 3 });
+
+    assert.match(String(result.items[0].message), /Extended 1 of 2/);
+  });
+
+  it('writes no audit row when the very first subscription failed', async () => {
+    // Nothing moved, so there is nothing to record — and a row claiming an
+    // extension that did not happen is worse than no row.
+    const { run, audit } = buildService({ subscriptions: TWO_SUBS, updateThrowsOn: 1 });
+
+    const result = await run('extend_subscription', { days: 3 });
+
+    assert.equal(result.failed, 1);
+    assert.deepStrictEqual(audit, []);
   });
 });
