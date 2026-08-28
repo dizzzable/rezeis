@@ -12,6 +12,9 @@ import {
   storedIdentityOf,
   type PanelIdentityColumns,
 } from '../src/modules/remnawave/services/panel-user-address';
+import { PanelCommandExecutor } from '../src/modules/remnawave/services/panel-command.executor';
+import { AxiosPanelTransport } from '../src/modules/remnawave/services/panel-transport';
+import { PanelUsersClient } from '../src/modules/remnawave/services/panel-users.client';
 import {
   RemnawaveApiService,
   RemnawaveProfileNotFoundError,
@@ -63,18 +66,24 @@ type Req = { readonly method?: string; readonly url: string; readonly data?: unk
  */
 function panelOn(version: string, answer: (req: Req) => unknown) {
   const seen: Req[] = [];
-  const service = new RemnawaveApiService(
-    {
-      request: (input: Req) => {
-        seen.push(input);
-        if (input.url.startsWith('/api/system/')) return of({ data: { response: { version } } });
-        return answer(input);
-      },
-    } as never,
-    CONFIG as never,
+  const http = {
+    request: (input: Req) => {
+      seen.push(input);
+      if (input.url.startsWith('/api/system/')) return of({ data: { response: { version } } });
+      return answer(input);
+    },
+  };
+  const service = new RemnawaveApiService(http as never, CONFIG as never);
+  // The SAME fake transport, driving the contract-based client the expired
+  // sweep now reads through. Sharing `seen` is the point: the two halves of
+  // this file must be looking at one panel.
+  const client = new PanelUsersClient(
+    new PanelCommandExecutor(
+      new AxiosPanelTransport(http as never, { host: CONFIG.host, port: CONFIG.port, token: CONFIG.token }),
+    ),
   );
   const userCalls = (): Req[] => seen.filter((req) => !req.url.startsWith('/api/system/'));
-  return { service, userCalls };
+  return { service, client, userCalls };
 }
 
 function httpError(status: number, data?: unknown) {
@@ -170,7 +179,7 @@ type DeletionInput = {
  * outcome: a subscription is either retired or left in the candidate set to be
  * re-read next sweep, forever.
  */
-function sweepOver(api: RemnawaveApiService, row: Row) {
+function sweepOver(panelUsers: PanelUsersClient, row: Row) {
   const deletions: DeletionInput[] = [];
   const updates: Array<{ where: unknown; data: Record<string, unknown> }> = [];
   const service = new ExpiredProfileCleanupService(
@@ -198,7 +207,7 @@ function sweepOver(api: RemnawaveApiService, row: Row) {
     {
       getRemnawaveCleanupSettings: async () => ({ deleteEnabled: true, graceDays: 3 }),
     } as never,
-    api as never,
+    panelUsers as never,
     {
       deleteExpiredIfUnchanged: async (input: DeletionInput) => {
         deletions.push(input);
@@ -245,15 +254,15 @@ describe('GET /api/users/{…} — A063 is the panel confirming the profile is g
   for (const era of ERAS) {
     for (const [shape, body] of PANEL_SAYS_ABSENT) {
       it(`${era.label}: ${shape} retires the subscription instead of deferring forever`, async () => {
-        const { service: api, userCalls } = panelOn(era.version, () => httpError(404, body));
-        const { service, deletions, updates } = sweepOver(api, era.row);
+        const { client, userCalls } = panelOn(era.version, () => httpError(404, body));
+        const { service, deletions, updates } = sweepOver(client, era.row);
 
         const retired = await service.runSweep();
 
         assert.deepEqual(
           userCalls().map((call) => call.url),
-          [era.route],
-          'the sweep must have addressed the profile the way this era names it',
+          [`/api/users/${era.row.remnawavePanelId}`],
+          'the sweep addresses the profile by the numeric id this panel answers to',
         );
         assert.equal(
           retired,
@@ -272,8 +281,8 @@ describe('GET /api/users/{…} — A063 is the panel confirming the profile is g
 
     for (const [shape, body] of PROXY_404) {
       it(`${era.label}: a bare 404 (${shape}) still defers — an outage must not retire anyone`, async () => {
-        const { service: api, userCalls } = panelOn(era.version, () => httpError(404, body));
-        const { service, deletions, updates } = sweepOver(api, era.row);
+        const { client, userCalls } = panelOn(era.version, () => httpError(404, body));
+        const { service, deletions, updates } = sweepOver(client, era.row);
 
         const retired = await service.runSweep();
 
@@ -306,8 +315,8 @@ describe('the same read still reaches its other outcomes — this is not a harne
 
     it(`${era.label}: a live profile self-heals the stale local date and is NOT retired`, async () => {
       const renewedTo = 20 * DAY_MS;
-      const { service: api } = panelOn(era.version, () => of({ data: withExpiry(renewedTo) }));
-      const { service, deletions, updates } = sweepOver(api, era.row);
+      const { client } = panelOn(era.version, () => of({ data: withExpiry(renewedTo) }));
+      const { service, deletions, updates } = sweepOver(client, era.row);
 
       const retired = await service.runSweep();
 
@@ -318,8 +327,8 @@ describe('the same read still reaches its other outcomes — this is not a harne
     });
 
     it(`${era.label}: the same body with a past expiry IS retired, so the zero above means something`, async () => {
-      const { service: api } = panelOn(era.version, () => of({ data: withExpiry(-40 * DAY_MS) }));
-      const { service, deletions, updates } = sweepOver(api, era.row);
+      const { client } = panelOn(era.version, () => of({ data: withExpiry(-40 * DAY_MS) }));
+      const { service, deletions, updates } = sweepOver(client, era.row);
 
       const retired = await service.runSweep();
 
@@ -432,13 +441,12 @@ describe('A063 from an ATTRIBUTE lookup answers a different question and must no
    * renaming a perfectly live profile satisfies. It is not evidence about the
    * profile the subscription points at.
    *
-   * The adapter keeps that distinction structurally rather than by inspecting
-   * the code: every attribute lookup (`resolvePanelIdentity`,
-   * `getPanelUserByUsername`, `readUserSummary`) fails soft to `null`, which
-   * `segmentFor` reports as "cannot act", and none of them consults the
-   * not-found predicate. These two cases pin that — the second is the positive
-   * control, without which the zero in the first would also be produced by a
-   * harness that simply never got anywhere.
+   * The sweep keeps that distinction structurally rather than by inspecting the
+   * code: an unresolvable attribute means the profile could not be ADDRESSED,
+   * and only the read that follows a successful resolve can confirm absence.
+   * These two cases pin that — the second is the positive control, without
+   * which the zero in the first would also be produced by a harness that simply
+   * never got anywhere.
    */
   const MIGRATED_ROW: Row = {
     remnawaveId: '44444444-4444-4444-8444-444444444444',
@@ -453,11 +461,11 @@ describe('A063 from an ATTRIBUTE lookup answers a different question and must no
   });
 
   it('a resolve that finds no such username defers — it never reaches the profile read', async () => {
-    const { service: api, userCalls } = panelOn('3.2.1', (req) => {
+    const { client, userCalls } = panelOn('3.3.2', (req) => {
       assert.equal(req.url, '/api/users/resolve', 'nothing may be read before the identity is known');
       return RESOLVE_MISS;
     });
-    const { service, deletions, updates } = sweepOver(api, MIGRATED_ROW);
+    const { service, deletions, updates } = sweepOver(client, MIGRATED_ROW);
 
     const retired = await service.runSweep();
 
@@ -468,7 +476,7 @@ describe('A063 from an ATTRIBUTE lookup answers a different question and must no
   });
 
   it('but once the resolve succeeds, A063 on the profile itself DOES retire it', async () => {
-    const { service: api, userCalls } = panelOn('3.2.1', (req) =>
+    const { client, userCalls } = panelOn('3.3.2', (req) =>
       req.url === '/api/users/resolve'
         ? of({
             data: {
@@ -477,7 +485,7 @@ describe('A063 from an ATTRIBUTE lookup answers a different question and must no
           })
         : httpError(404, { errorCode: 'A063', message: 'User with specified params not found' }),
     );
-    const { service, deletions } = sweepOver(api, MIGRATED_ROW);
+    const { service, deletions } = sweepOver(client, MIGRATED_ROW);
 
     const retired = await service.runSweep();
 

@@ -22,11 +22,16 @@ import {
  * WHY AN ENDPOINT RATHER THAN A SCRIPT OR A QUEUE JOB:
  *
  *  • It needs the running application. The panel host and token reach the
- *    adapter through Nest's config, the panel ERA is discovered and cached by
- *    `RemnawaveApiService.getPanelShape()`, and the identity rules live in
- *    injected services. A standalone script would have to boot the same
- *    container to reach any of it, and would then be a second, untested way to
- *    perform the most dangerous write in the system.
+ *    transport through Nest's config, and the identity rules live in injected
+ *    services. A standalone script would have to boot the same container to
+ *    reach any of it, and would then be a second, untested way to perform the
+ *    most dangerous write in the system.
+ *
+ *    This used to name the panel ERA as a third thing the running application
+ *    supplies, discovered through `RemnawaveApiService.getPanelShape()`. There
+ *    is one era now: the sweep no longer asks, and a panel too old to serve it
+ *    is refused centrally by `LegacyPanelRefusal` rather than quietly changing
+ *    what this endpoint does.
  *  • The operator already repairs ONE row this way, with this exact permission.
  *    The mass repair performs the same write for many rows, so it answers to
  *    the same authority and appears on the same surface.

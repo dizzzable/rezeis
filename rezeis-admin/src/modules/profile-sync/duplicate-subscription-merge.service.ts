@@ -3,13 +3,10 @@ import { Prisma, SubscriptionStatus, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
-import {
-  panelShortUuidFromConfigUrl,
-  type StoredPanelIdentity,
-} from '../remnawave/services/panel-user-address';
-import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
+import { panelShortUuidFromConfigUrl } from '../remnawave/services/panel-user-address';
+import { PanelUsersClient } from '../remnawave/services/panel-users.client';
 import { PanelLinkReconciliationService } from './panel-link-reconciliation.service';
-import { assertPanelProfileOwnership } from './profile-sync.processor';
+import { assertPanelProfileOwnership, readPanelFailure } from './profile-sync.processor';
 
 /** How many PAIRS one invocation may merge. Each costs the panel two resolves. */
 export const DUPLICATE_MERGE_DEFAULT_LIMIT = 25;
@@ -192,7 +189,15 @@ export interface DuplicateMergeReport {
   /** `true` when the DISCOVERY sweep stopped at its cap with rows remaining. */
   readonly hasMore: boolean;
   readonly nextCursor: string | null;
-  /** The era the discovery sweep believed it was talking to; `null` on an explicit list. */
+  /**
+   * The panel era the discovery sweep reports; `null` on an explicit list,
+   * where no sweep ran.
+   *
+   * Only ever `PANEL_ERA_3X` now — a 2.x panel is refused centrally by
+   * `LegacyPanelRefusal`, so there is nothing left to discover. The field stays
+   * because the operator SPA reads it and because reports stored on older audit
+   * rows carry the other value.
+   */
   readonly panelEra: string | null;
 }
 
@@ -522,7 +527,7 @@ export class DuplicateSubscriptionMergeService {
 
   public constructor(
     private readonly prismaService: PrismaService,
-    private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly panelUsers: PanelUsersClient,
     private readonly reconciliation: PanelLinkReconciliationService,
     private readonly events: SystemEventsService,
   ) {}
@@ -940,26 +945,38 @@ export class DuplicateSubscriptionMergeService {
       );
     }
 
-    const survivorResolved = await this.remnawaveApiService.resolvePanelIdentity(
-      survivorRoute.selector,
-    );
-    if (survivorResolved === null) {
+    // WHY THE PANEL COULD NOT ANSWER IS PART OF THE REFUSAL. The method this
+    // replaces answered `null` for a missing profile, an expired token, a 5xx
+    // and a timeout alike, so a merge attempted during an outage told the
+    // operator every pair was unresolvable — indistinguishable from "these rows
+    // genuinely do not name a profile", which is the one reading that would
+    // send them looking for a repair instead of waiting for the panel.
+    const survivorOutcome = await this.panelUsers.resolveUser(survivorRoute.selector);
+    if (survivorOutcome.kind !== 'ok') {
+      const failure = readPanelFailure(survivorOutcome);
       return refuse(
         'survivorUnresolved',
-        `the panel did not resolve ${describeRoute(survivorRoute)} for subscription ` +
-          `${survivor.id}. Nothing was changed.`,
+        failure.kind === 'missing'
+          ? `the panel did not resolve ${describeRoute(survivorRoute)} for subscription ` +
+            `${survivor.id}. Nothing was changed.`
+          : `the panel could not be asked about ${describeRoute(survivorRoute)} for ` +
+            `subscription ${survivor.id} (${failure.detail}). Nothing was changed.`,
       );
     }
-    const duplicateResolved = await this.remnawaveApiService.resolvePanelIdentity(
-      duplicateRoute.selector,
-    );
-    if (duplicateResolved === null) {
+    const survivorResolved = survivorOutcome.data.response;
+    const duplicateOutcome = await this.panelUsers.resolveUser(duplicateRoute.selector);
+    if (duplicateOutcome.kind !== 'ok') {
+      const failure = readPanelFailure(duplicateOutcome);
       return refuse(
         'duplicateUnresolved',
-        `the panel did not resolve ${describeRoute(duplicateRoute)} for subscription ` +
-          `${duplicate.id}. Nothing was changed.`,
+        failure.kind === 'missing'
+          ? `the panel did not resolve ${describeRoute(duplicateRoute)} for subscription ` +
+            `${duplicate.id}. Nothing was changed.`
+          : `the panel could not be asked about ${describeRoute(duplicateRoute)} for ` +
+            `subscription ${duplicate.id} (${failure.detail}). Nothing was changed.`,
       );
     }
+    const duplicateResolved = duplicateOutcome.data.response;
     if (survivorResolved.id !== duplicateResolved.id) {
       return refuse(
         'differentPanelProfiles',
@@ -970,39 +987,37 @@ export class DuplicateSubscriptionMergeService {
       );
     }
 
-    // Which SPELLING to store is read off the panel's own answer, never off a
-    // version probe — the same rule `parsePanelUserRow` and the reconciliation
-    // sweep follow. Writing the other era's spelling would recreate by hand the
-    // unaddressable row this whole family of code exists to repair.
-    const remnawaveId =
-      typeof survivorResolved.uuid === 'string' && survivorResolved.uuid.length > 0
-        ? survivorResolved.uuid
-        : String(survivorResolved.id);
+    // THE SPELLING TO STORE IS THE PANEL'S OWN, and that is the numeric id in
+    // decimal — there is no uuid to prefer, because 3.x does not have the
+    // column. Same rule the reconciliation sweep follows. Writing anything else
+    // would recreate by hand the unaddressable row this whole family of code
+    // exists to repair.
+    const remnawaveId = String(survivorResolved.id);
     const panelId = survivorResolved.id;
 
     // The resolve says WHERE the profile is; it does not say WHOSE it is. Only
     // a full profile read returns the description that carries the `reiwa_id`
     // marker, so this second round-trip is the ownership check itself.
     //
-    // The probe carries the identity and the numeric id and NOTHING else — no
-    // username, no short UUID — so it cannot silently re-resolve by a key this
-    // method has already reasoned about.
-    const probe: StoredPanelIdentity = { remnawaveId, panelId, panelUsername: null };
-    const outcome = await this.remnawaveApiService.getPanelUserOutcome(probe);
+    // ADDRESSED BY THE NUMERIC ID THE RESOLVE JUST RETURNED, and by nothing
+    // else — no username, no short UUID — so it cannot silently re-resolve by a
+    // key this method has already reasoned about.
+    const outcome = await this.panelUsers.getUserById(panelId);
     if (outcome.kind !== 'ok') {
+      const failure = readPanelFailure(outcome);
       return refuse(
         'profileUnreadable',
-        outcome.kind === 'missing'
+        failure.kind === 'missing'
           ? `both rows resolve to panel profile ${remnawaveId}, but that profile is gone. ` +
             'Nothing was changed.'
-          : `panel profile ${remnawaveId} could not be read back (panel unavailable or ` +
-            'undecodable body), so its owner could not be proven. Nothing was changed.',
+          : `panel profile ${remnawaveId} could not be read back (${failure.detail}), so its ` +
+            'owner could not be proven. Nothing was changed.',
       );
     }
     try {
       assertPanelProfileOwnership(
         duplicate.remnawavePanelUsername ?? survivor.remnawavePanelUsername ?? '',
-        outcome.user.description,
+        outcome.data.response.description,
         userId,
       );
     } catch (err: unknown) {

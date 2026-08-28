@@ -6,9 +6,10 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { storedIdentityOf } from '../remnawave/services/panel-user-address';
-import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
+import { PanelUsersClient } from '../remnawave/services/panel-users.client';
 import { SettingsService } from '../settings/services/settings.service';
 import { SubscriptionDeletionService } from '../subscriptions/services/subscription-deletion.service';
+import { readPanelFailure, resolvePanelUserId } from './profile-sync.processor';
 
 /** Max subscriptions cleaned per sweep — bounds the load on the panel. */
 const CLEANUP_BATCH = 100;
@@ -44,6 +45,24 @@ function hasLostPanelLink(row: {
     typeof row.configUrl === 'string' &&
     row.configUrl.length > 0
   );
+}
+
+/**
+ * A panel instant in milliseconds, or `null` when it is not one.
+ *
+ * The contract TRANSFORMS `expireAt` into a `Date`, but a body the executor
+ * flagged `drifted` is handed back raw and still carries the ISO string. This
+ * sweep DELETES on the strength of that date, so an unreadable one must defer
+ * rather than fall through to `NaN` — which compares false against every
+ * cutoff and would take the deletion branch.
+ */
+function readInstantMs(value: unknown): number | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.getTime();
+  }
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 /**
@@ -87,7 +106,7 @@ export class ExpiredProfileCleanupService {
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
     private readonly settingsService: SettingsService,
-    private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly panelUsers: PanelUsersClient,
     private readonly subscriptionDeletionService: SubscriptionDeletionService,
   ) {}
 
@@ -216,29 +235,31 @@ export class ExpiredProfileCleanupService {
    *     local `expiresAt` (and revive status to ACTIVE when the panel expiry is
    *     in the future) and SKIP the deletion.
    *   • `ok`, panel expiry < cutoff → panel confirms expired past grace → delete.
-   *   • `notFound` → the profile really is gone from the panel → nothing to
+   *   • `missing` → the profile really is gone from the panel → nothing to
    *     protect → delete/clean up. Note what this outcome does and does not
-   *     mean: the adapter only produces it for a 404 carrying one of Remnawave's
-   *     own no-such-user envelopes — `A025` on the writes, `A063` on THIS read;
-   *     the panel picks by endpoint, not by meaning, and both are pinned in
-   *     `PANEL_USER_NOT_FOUND_ERROR_CODES`. A BARE 404 is not a missing profile —
-   *     a reverse proxy mid-deploy answers every request that way, and this
-   *     branch is the one non-`ok` outcome that deletes, so reading a bare 404
-   *     as "gone" retired CLEANUP_BATCH live subscriptions per sweep for the
-   *     length of the outage. That distinction lives in
-   *     `RemnawaveApiService.mapStrictProfileTransport`, because the outcome
-   *     union carries no evidence a caller could re-derive; a bare 404 now
-   *     arrives here as `unavailable` and defers.
-   *   • ANY other outcome — `unavailable`, `unsupported`, `invalidContract` →
-   *     DEFER; never delete on an unverifiable date. Re-evaluated next sweep.
+   *     mean: {@link readPanelFailure} only produces it for a 404 carrying one
+   *     of Remnawave's own no-such-user envelopes — `A025` on the writes,
+   *     `A063` on THIS read; the panel picks by endpoint, not by meaning, and
+   *     both are pinned in `PANEL_USER_NOT_FOUND_ERROR_CODES`. A BARE 404 is
+   *     not a missing profile — a reverse proxy mid-deploy answers every
+   *     request that way, and this branch is the one non-`ok` outcome that
+   *     deletes, so reading a bare 404 as "gone" retired CLEANUP_BATCH live
+   *     subscriptions per sweep for the length of the outage. That distinction
+   *     lives in `readPanelFailure`, because the outcome carries no evidence a
+   *     caller could re-derive; a bare 404 arrives here as `transient` and
+   *     defers.
+   *   • ANY other outcome — `transient`, `terminal`, or a body whose `expireAt`
+   *     will not parse → DEFER; never delete on an unverifiable date.
+   *     Re-evaluated next sweep.
    *
-   * The read MUST be the strict one. `getPanelUser` is best-effort: it
-   * collapses every failure — outage, expired token, 5xx, timeout — into
-   * `null`, and `null` here means "gone". Reading through it made the DEFER
-   * branch unreachable by construction, so one sweep during a panel outage
-   * deleted up to CLEANUP_BATCH live subscriptions while the log looked
-   * ordinary. The test that covered the DEFER branch fed the stub a `throw`,
-   * which the real method cannot produce.
+   * THE READ MUST KEEP ITS FAILURES APART, which is the whole reason this path
+   * goes through the client's outcome rather than a `null`-returning read. The
+   * method it used to call collapsed outage, expired token, 5xx and timeout
+   * into `null`, and `null` here means "gone" — so the DEFER branch was
+   * unreachable by construction and one sweep during a panel outage deleted up
+   * to CLEANUP_BATCH live subscriptions while the log looked ordinary. The test
+   * that covered the DEFER branch fed the stub a `throw`, which the real method
+   * could not produce.
    *
    * Returns the number of subscriptions enqueued for deletion.
    */
@@ -262,10 +283,11 @@ export class ExpiredProfileCleanupService {
         },
       },
       // The supplementary identity columns are selected because the re-check
-      // below ADDRESSES the profile on the panel. A 2.x-created profile whose
-      // panel has since been upgraded to 3.x cannot be named by `remnawaveId`
-      // alone, and an unaddressable profile reads as `unavailable` — a deferral
-      // every sweep, forever, for a subscription that will never be retired.
+      // below ADDRESSES the profile on the panel by its NUMERIC id. A profile
+      // linked before the operator upgraded cannot be named by `remnawaveId`
+      // alone — that column still holds the old uuid — and an unaddressable
+      // profile defers every sweep, forever, for a subscription that will never
+      // be retired.
       select: {
         id: true,
         userId: true,
@@ -300,13 +322,43 @@ export class ExpiredProfileCleanupService {
       if (identity === null || expectedExpiresAt === null) continue;
 
       // ── Panel-authoritative expiry re-check ──────────────────────────────
-      const panelOutcome = await this.remnawaveApiService.strictGetPanelUserExpiry(identity);
+      //
+      // The profile is named by its NUMERIC id, which for a row linked before
+      // the operator upgraded means one `POST /api/users/resolve` through the
+      // short uuid or the panel username first. That is why the supplementary
+      // columns are selected above: without them such a row is unaddressable,
+      // and an unaddressable profile defers every sweep, forever, for a
+      // subscription that will never be retired.
+      const address = await resolvePanelUserId(this.panelUsers, identity);
+      const panelOutcome =
+        address.kind === 'ok' ? await this.panelUsers.getUserById(address.userId) : null;
+      const failure =
+        address.kind !== 'ok'
+          ? address
+          : panelOutcome !== null && panelOutcome.kind !== 'ok'
+            ? readPanelFailure(panelOutcome)
+            : null;
+
       let panelExpiryMs: number | null = null;
       let panelSubscriptionUrl: string | null = null;
-      if (panelOutcome.kind === 'ok') {
-        panelExpiryMs = panelOutcome.value.expireAtMs;
-        panelSubscriptionUrl = panelOutcome.value.subscriptionUrl;
-      } else if (panelOutcome.kind === 'notFound') {
+      if (panelOutcome !== null && panelOutcome.kind === 'ok') {
+        const profile = panelOutcome.data.response;
+        // A response the executor flagged `drifted` is the panel's RAW body,
+        // where `expireAt` is still the string the contract would have turned
+        // into a `Date`. Both are read, and anything else DEFERS rather than
+        // deleting on a date this could not read.
+        const expireAtMs = readInstantMs(profile.expireAt);
+        if (expireAtMs === null) {
+          deferred += 1;
+          deferredKinds.add('unreadableExpiry');
+          continue;
+        }
+        panelExpiryMs = expireAtMs;
+        panelSubscriptionUrl =
+          typeof profile.subscriptionUrl === 'string' && profile.subscriptionUrl.length > 0
+            ? profile.subscriptionUrl
+            : null;
+      } else if (failure !== null && failure.kind === 'missing') {
         // The panel itself says the profile is gone (404 + USER_NOT_FOUND
         // envelope) → nothing left to protect → fall through to the cleanup.
         // Named positively on purpose: deletion is the destructive branch, so
@@ -318,7 +370,7 @@ export class ExpiredProfileCleanupService {
         // row: a panel outage would otherwise emit CLEANUP_BATCH warnings a
         // tick, burying the one line that says the sweep is degraded.
         deferred += 1;
-        deferredKinds.add(panelOutcome.kind);
+        deferredKinds.add(failure?.kind ?? 'unknown');
         continue;
       }
 

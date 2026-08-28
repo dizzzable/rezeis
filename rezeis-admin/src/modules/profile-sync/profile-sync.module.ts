@@ -15,12 +15,22 @@ import { RemnawaveProfileNamingService } from './remnawave-profile-naming.servic
 
 /**
  * Async Remnawave profile provisioning via BullMQ.
+ *
+ * Every panel call in this module goes through `PanelUsersClient`, which
+ * `RemnawaveModule` both provides and exports — so there is nothing to declare
+ * here beyond that import. Injecting it by class token rather than re-providing
+ * it locally is what keeps ONE executor, and therefore one `LegacyPanelRefusal`
+ * and one cached version answer, in front of the whole process; a second
+ * provider would give this module its own transport and its own idea of which
+ * panel it is talking to.
  */
 @Module({
   imports: [
     // `AuthModule` supplies `AdminJwtAuthGuard` for the operator-facing
     // reconciliation route; the RBAC guard comes from its global module.
     AuthModule,
+    // `PanelUsersClient` for the processor, the expiry sweep, the
+    // reconciliation sweep and the duplicate merge.
     RemnawaveModule,
     SettingsModule,
     BullModule.registerQueue({ name: PROFILE_SYNC_QUEUE }),

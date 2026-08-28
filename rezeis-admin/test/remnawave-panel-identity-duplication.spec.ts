@@ -484,7 +484,7 @@ interface GuardRow {
 
 interface GuardHarness {
   readonly processor: ProfileSyncProcessor;
-  /** Every identity that actually reached `deletePanelUser`. */
+  /** Every numeric user id that actually reached `deleteUser`. */
   readonly deletedTargets: unknown[];
 }
 
@@ -526,9 +526,12 @@ function buildDeleteGuard(input: {
       },
     } as never,
     {
-      deletePanelUser: async (ref: unknown) => {
-        deletedTargets.push(ref);
-        return { isDeleted: true };
+      deleteUser: async (userId: number) => {
+        deletedTargets.push(userId);
+        return { kind: 'ok', drifted: false, data: undefined };
+      },
+      resolveUser: async () => {
+        throw new Error('a target that is already a numeric id must never be re-resolved');
       },
     } as never,
     {} as never,
@@ -669,9 +672,14 @@ describe('profile-sync DELETE guard on a row that never recorded a panel usernam
     // ordinary delete, leaving an orphaned profile on the panel for each one.
     // Same shape as above: no usernames anywhere, so the only thing separating
     // this case from the first is WHICH identity the other row holds.
+    //
+    // The TARGET is the decimal here, not the uuid the three refusals carry: a
+    // uuid-shaped target is refused outright by the stale-panel-link guard
+    // (which sits behind the claimant check), so this control would pass
+    // without the claimant check ever having anything to say.
     const harness = buildDeleteGuard({
       payload: {
-        targetRemnawaveId: DOOMED_UUID,
+        targetRemnawaveId: String(SHARED_PANEL_ID),
         targetRemnawavePanelId: SHARED_PANEL_ID,
       },
       doomed: {

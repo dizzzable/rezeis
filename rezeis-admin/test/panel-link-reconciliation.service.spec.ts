@@ -3,7 +3,10 @@ import { describe, it } from 'node:test';
 
 import { SubscriptionStatus } from '@prisma/client';
 
-import { PanelLinkReconciliationService } from '../src/modules/profile-sync/panel-link-reconciliation.service';
+import {
+  PANEL_ERA_3X,
+  PanelLinkReconciliationService,
+} from '../src/modules/profile-sync/panel-link-reconciliation.service';
 
 /**
  * The damaged-row repair, tested against the two things that can go wrong with
@@ -48,35 +51,12 @@ function subscriptionRow(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * The three answers `RemnawaveApiService.getPanelShape()` can give about which
- * era of the panel API is answering.
- *
- * `'unknown'` is not a fourth era — it is the value version detection returns
- * for EVERY failure (401, timeout, DNS, an unconfigured token, a panel
- * mid-restart), which is why it gets a case of its own below rather than being
- * folded into either real era.
+ * THERE IS NO ERA PROBE LEFT TO STUB. The sweep used to ask the panel which
+ * addressing era it spoke and leave both era-dependent arms out unless the
+ * answer was a proven `'id'`; 2.x is now refused centrally by
+ * `LegacyPanelRefusal`, so there is one era and both arms run unconditionally.
+ * `PANEL_ERA_3X` is what every report carries.
  */
-const ERA_2X = {
-  version: '2.8.1',
-  addressing: 'uuid',
-  connectionsApi: 'ip-control',
-  userLookups: { byTelegramId: true, byEmail: true },
-  usersStream: true,
-};
-const ERA_3X = {
-  version: '3.3.2',
-  addressing: 'id',
-  connectionsApi: 'connections',
-  userLookups: { byTelegramId: false, byEmail: false },
-  usersStream: true,
-};
-const ERA_UNKNOWN = {
-  version: null,
-  addressing: 'unknown',
-  connectionsApi: 'unknown',
-  userLookups: { byTelegramId: true, byEmail: true },
-  usersStream: false,
-};
 
 /**
  * Evaluates a Prisma `where` against a plain row.
@@ -403,45 +383,68 @@ interface PanelHarness {
  * a panel MUTATION would die here with "not a function" rather than quietly
  * changing a live panel. `calls` pins the same property positively.
  */
+/**
+ * The panel client, answering only the two READS this sweep may perform.
+ *
+ * THE ABSENCE OF EVERY OTHER METHOD IS PART OF THE TEST. `createUser`,
+ * `updateUser` and `deleteUser` are not stubbed, so a sweep that grew a panel
+ * MUTATION dies here with "not a function" rather than quietly changing a live
+ * panel. `calls` pins the same property positively, by exact list.
+ *
+ * The two callbacks keep answering in the shapes the tests already speak —
+ * `null` for "the panel does not know this key", `{ kind: 'missing' }` for a
+ * profile that is gone — and this function translates them into the outcomes
+ * `PanelUsersClient` actually returns. `profileCalls` records the NUMERIC id
+ * the read was addressed by, which is the whole of the addressing here.
+ */
 function panelHarness(input: {
   resolve?: (selector: unknown) => {
-    id: number;
+    // `id` is typed loosely ON PURPOSE. The executor is LENIENT — a `2xx` whose
+    // body fails the pinned contract is handed back RAW — so a drifted resolve
+    // can carry anything at all here, and the sweep has to survive it.
+    id: number | string;
     shortUuid: string | null;
     username: string | null;
-    uuid: string | null;
   } | null;
-  profile?: (identity: unknown) => { kind: string; user?: Record<string, unknown> };
-  shape?: () => Record<string, unknown>;
+  profile?: (userId: number) => { kind: string; user?: Record<string, unknown> };
 }): PanelHarness {
   const resolveCalls: unknown[] = [];
   const profileCalls: unknown[] = [];
   const calls: string[] = [];
+  const notFound = {
+    kind: 'rejected' as const,
+    status: 404,
+    code: 'A063',
+    detail: 'User with specified params not found',
+    retryAfterMs: null,
+  };
   return {
     resolveCalls,
     profileCalls,
     calls,
     api: {
-      // Defaults to 2.x, the era in which a uuid-shaped identity is CORRECT.
-      // Every pre-existing case therefore keeps describing the panel it was
-      // written against, and the stale population has to be switched on by a
-      // case that means to test it.
-      getPanelShape: async () => {
-        calls.push('getPanelShape');
-        return input.shape === undefined ? ERA_2X : input.shape();
-      },
-      resolvePanelIdentity: async (selector: unknown) => {
-        calls.push('resolvePanelIdentity');
+      resolveUser: async (selector: unknown) => {
+        calls.push('resolveUser');
         resolveCalls.push(selector);
-        return input.resolve === undefined
-          ? { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: null }
-          : input.resolve(selector);
+        const resolved =
+          input.resolve === undefined
+            ? { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' }
+            : input.resolve(selector);
+        return resolved === null
+          ? notFound
+          : { kind: 'ok', drifted: false, data: { response: resolved } };
       },
-      getPanelUserOutcome: async (identity: unknown) => {
-        calls.push('getPanelUserOutcome');
-        profileCalls.push(identity);
-        return input.profile === undefined
-          ? { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } }
-          : input.profile(identity);
+      getUserById: async (userId: number) => {
+        calls.push('getUserById');
+        profileCalls.push(userId);
+        const answer =
+          input.profile === undefined
+            ? { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } }
+            : input.profile(userId);
+        if (answer.kind === 'ok') {
+          return { kind: 'ok', drifted: false, data: { response: answer.user } };
+        }
+        return answer.kind === 'missing' ? notFound : { kind: 'network', detail: 'ECONNREFUSED' };
       },
     },
   };
@@ -472,7 +475,10 @@ describe('PanelLinkReconciliationService — selection', () => {
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-fits' }),
       subscriptionRow({ id: 'sub-b-retired', status: SubscriptionStatus.DELETED }),
-      subscriptionRow({ id: 'sub-c-already-linked', remnawaveId: 'rem-existing', remnawavePanelId: 77 }),
+      // A DECIMAL identity, which is what a healthy linked row holds: the
+      // stale arm selects on a hyphen, so a uuid-shaped decoy would be picked
+      // up by that arm and stop being a decoy for this one.
+      subscriptionRow({ id: 'sub-c-already-linked', remnawaveId: '77', remnawavePanelId: 77 }),
       subscriptionRow({ id: 'sub-d-never-provisioned', remnawavePanelUsername: null }),
       subscriptionRow({ id: 'sub-e-no-config-url', configUrl: null }),
     ]);
@@ -520,42 +526,38 @@ describe('PanelLinkReconciliationService — selection', () => {
 });
 
 describe('PanelLinkReconciliationService — panel era', () => {
-  it('leaves uuid-shaped identities alone on a 2.x panel, where they are correct', async () => {
-    // The whole second population, on the era that issued it. Every one of
-    // these rows is HEALTHY here: 2.x keys users by uuid, so a uuid in
-    // `remnawave_id` is the right value and rewriting it would strand the row.
+  it('reports the one era it can be talking to, without asking the panel', async () => {
+    // The sweep used to probe the panel and leave BOTH era-dependent arms out
+    // unless the answer was a proven `'id'`, because a uuid-shaped identity is
+    // CORRECT on 2.x and rewriting one there strands the row the repair claimed
+    // to fix. `LegacyPanelRefusal` turns a 2.x panel away centrally now, so the
+    // probe had nothing left to decide — and the harness below has no version
+    // method on it at all, so a build that reintroduced the probe fails here
+    // rather than passing quietly.
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-missing-identity' }),
-      subscriptionRow({ id: 'sub-b-uuid-is-correct', remnawaveId: DEAD_UUID }),
-      subscriptionRow({
-        id: 'sub-c-uuid-no-username',
-        remnawaveId: DEAD_UUID,
-        remnawavePanelUsername: null,
-      }),
+      subscriptionRow({ id: 'sub-b-stale', remnawaveId: DEAD_UUID }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_2X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
-    assert.deepEqual(
-      reportedIds(report),
-      ['sub-a-missing-identity'],
-      'on 2.x only the missing-identity population exists',
-    );
-    assert.equal(report.panelEra, '2.x');
-    assert.equal(report.staleIdentityScanned, 0);
-    assert.equal(report.scanned, 1);
-    // The positive half: the sweep did work, it just did not touch these rows.
-    assert.equal(report.linked, 1);
-    assert.equal(prisma.table[1]['remnawaveId'], DEAD_UUID, 'a 2.x uuid must survive untouched');
-    assert.equal(prisma.table[2]['remnawaveId'], DEAD_UUID);
+    assert.equal(report.panelEra, PANEL_ERA_3X);
+    assert.equal(report.staleIdentityScanned, 1, 'the stale arm runs unconditionally');
+    assert.equal(report.linked, 2);
+    assert.deepEqual(panel.calls, [
+      'resolveUser',
+      'getUserById',
+      'resolveUser',
+      'getUserById',
+    ]);
   });
 
   it('selects the stale uuid on a 3.x panel and rewrites it to the identity the panel reports', async () => {
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-stale', remnawaveId: DEAD_UUID }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
@@ -571,11 +573,7 @@ describe('PanelLinkReconciliationService — panel era', () => {
     assert.equal(prisma.table[0]['remnawavePanelId'], 5150);
     // Reads only. A sweep that ever created, renamed or deleted a panel profile
     // would show up right here.
-    assert.deepEqual(panel.calls, [
-      'getPanelShape',
-      'resolvePanelIdentity',
-      'getPanelUserOutcome',
-    ]);
+    assert.deepEqual(panel.calls, ['resolveUser', 'getUserById']);
   });
 
   it('never selects a decimal identity on a 3.x panel — that row is healthy', async () => {
@@ -585,7 +583,7 @@ describe('PanelLinkReconciliationService — panel era', () => {
       subscriptionRow({ id: 'sub-a-healthy-3x', remnawaveId: '7777', remnawavePanelId: 7777 }),
       subscriptionRow({ id: 'sub-b-stale', remnawaveId: DEAD_UUID }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -598,44 +596,6 @@ describe('PanelLinkReconciliationService — panel era', () => {
     assert.equal(report.wouldLink, 1, 'the stale row is still previewed as repairable');
   });
 
-  it('leaves the stale population out when the panel will not say which era it is', async () => {
-    const prisma = prismaHarness([
-      subscriptionRow({ id: 'sub-a-missing-identity' }),
-      subscriptionRow({ id: 'sub-b-uuid-unknown-era', remnawaveId: DEAD_UUID }),
-    ]);
-    const panel = panelHarness({ shape: () => ERA_UNKNOWN });
-
-    const report = await service(prisma, panel).reconcile({ dryRun: false });
-
-    assert.equal(report.panelEra, null, 'an unread era must be reported as unread, not guessed');
-    assert.deepEqual(reportedIds(report), ['sub-a-missing-identity']);
-    assert.equal(report.staleIdentityScanned, 0);
-    assert.equal(report.linked, 1, 'the first population is unaffected by an unknown era');
-    assert.equal(
-      prisma.table[1]['remnawaveId'],
-      DEAD_UUID,
-      'a uuid must not be rewritten on a panel whose era was never established',
-    );
-  });
-
-  it('leaves the stale population out when the era probe throws outright', async () => {
-    const prisma = prismaHarness([
-      subscriptionRow({ id: 'sub-a-missing-identity' }),
-      subscriptionRow({ id: 'sub-b-uuid-unread-era', remnawaveId: DEAD_UUID }),
-    ]);
-    const panel = panelHarness({
-      shape: () => {
-        throw new Error('panel unreachable');
-      },
-    });
-
-    const report = await service(prisma, panel).reconcile({ dryRun: false });
-
-    assert.equal(report.panelEra, null);
-    assert.deepEqual(reportedIds(report), ['sub-a-missing-identity']);
-    assert.equal(report.linked, 1);
-    assert.equal(prisma.table[1]['remnawaveId'], DEAD_UUID);
-  });
 });
 
 describe('PanelLinkReconciliationService — stale rows that cannot be repaired', () => {
@@ -649,7 +609,7 @@ describe('PanelLinkReconciliationService — stale rows that cannot be repaired'
         configUrl: null,
       }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
@@ -671,18 +631,17 @@ describe('PanelLinkReconciliationService — stale rows that cannot be repaired'
   });
 
   it('refuses to invent a repair when the panel answers with the identity the row already holds', async () => {
+    // REACHED THROUGH DRIFT, which is the only way left to reach it: the
+    // contract declares `id` as a number, so a conforming answer can never
+    // equal a uuid-shaped stored identity — but the executor hands back a body
+    // it could not validate RAW rather than refusing it, so the field can
+    // arrive as anything the panel sent. Writing the row's own value back over
+    // itself and reporting `linked` would be a repair that changed nothing.
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-panel-disagrees', remnawaveId: DEAD_UUID }),
     ]);
     const panel = panelHarness({
-      shape: () => ERA_3X,
-      // A panel that reports a uuid for the profile, against the era probe.
-      resolve: () => ({
-        id: 5150,
-        shortUuid: 'AAAshortAAA',
-        username: 'rz_alice_sub',
-        uuid: DEAD_UUID,
-      }),
+      resolve: () => ({ id: DEAD_UUID, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' }),
     });
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
@@ -715,7 +674,7 @@ describe('PanelLinkReconciliationService — duplicate pair', () => {
         remnawavePanelId: 5150,
       }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -763,7 +722,7 @@ describe('PanelLinkReconciliationService — duplicate pair', () => {
         remnawavePanelId: 5150,
       }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -794,7 +753,7 @@ describe('PanelLinkReconciliationService — duplicate pair', () => {
         },
       ],
     );
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
@@ -859,7 +818,7 @@ describe('PanelLinkReconciliationService — which holder a cluster of three nam
 
   it('names the OLDEST live holder on the dry run, not the row the table happens to hold first', async () => {
     const prisma = prismaHarness(cluster());
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -913,7 +872,7 @@ describe('PanelLinkReconciliationService — which holder a cluster of three nam
     const prisma = prismaHarness(rows, (query) =>
       holdersFromSql(rows, query, 'sub-a-stale', 5150),
     );
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
@@ -961,7 +920,7 @@ describe('PanelLinkReconciliationService — which holder a cluster of three nam
       subscriptionRow({ id: 'sub-a-stale', remnawaveId: DEAD_UUID, createdAt: minutesAgo(900) }),
     ];
     const prisma = prismaHarness(rows);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1017,7 +976,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
 
   it('names two live rows that store one identity, anchored on the older one', async () => {
     const prisma = prismaHarness(sharedPair());
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1047,9 +1006,9 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
     assert.equal(newer.holdsLiveIdentity, true);
     assert.match(older.reason ?? '', /BOTH halves are bound/);
     assert.match(older.reason ?? '', /sub-q-older-half is the OLDER row/);
-    // The panel is asked which ERA it is and nothing else: this pair is a
-    // comparison of two local rows.
-    assert.deepEqual(panel.calls, ['getPanelShape']);
+    // The panel is not asked ANYTHING: this pair is a comparison of two local
+    // rows, both of which already name the profile.
+    assert.deepEqual(panel.calls, []);
   });
 
   it('anchors EVERY pair of a three-row cluster on the one oldest row', async () => {
@@ -1079,7 +1038,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
         createdAt: minutesAgo(900),
       }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1126,7 +1085,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
       }),
       ...sharedPair(),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1162,7 +1121,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
       }),
       ...sharedPair(),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1195,7 +1154,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
       unprovisioned('sub-x-blank-c', 300),
       ...sharedPair(),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1228,7 +1187,6 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
       }),
     ]);
     const panel = panelHarness({
-      shape: () => ERA_3X,
       resolve: () => null,
     });
 
@@ -1275,7 +1233,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
         createdAt: minutesAgo(100),
       }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1287,75 +1245,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
     assert.equal(report.unrepaired[1].subscriptionId, 'sub-b-holder');
   });
 
-  it('leaves the shared-identity arm out on a 2.x panel, where duplicates are not this defect', async () => {
-    // The gate, and the fixture is chosen so that an UNGATED arm would fire: two
-    // live rows of one customer recording the same numeric panel id. The numeric
-    // angle has no era-relative shape test to exclude them, so only the gate
-    // stands between this sweep and a merge nomination on a panel whose
-    // duplicates this feature has not explained.
-    const prisma = prismaHarness([
-      subscriptionRow({ id: 'sub-a-missing-identity' }),
-      subscriptionRow({
-        id: 'sub-b-two-x-half',
-        remnawaveId: DEAD_UUID,
-        remnawavePanelId: 5150,
-        createdAt: minutesAgo(800),
-      }),
-      subscriptionRow({
-        id: 'sub-c-two-x-half',
-        remnawaveId: '4f0d1c22-7a3e-4d55-9c81-2b6e7f8a9d10',
-        remnawavePanelId: 5150,
-        createdAt: minutesAgo(100),
-      }),
-    ]);
-    const panel = panelHarness({ shape: () => ERA_2X });
 
-    const report = await service(prisma, panel).reconcile({ dryRun: false });
-
-    assert.equal(report.panelEra, '2.x');
-    assert.equal(report.sharedIdentityPairs, 0);
-    assert.equal(report.duplicatePairs, 0);
-    assert.deepEqual(
-      reportedIds(report),
-      ['sub-a-missing-identity'],
-      'a 2.x sweep reports the missing-identity population and nothing else',
-    );
-    // The arm did not merely find nothing — it never ran. A `groupBy` here would
-    // mean the gate had moved from the caller into the query.
-    assert.equal(
-      prisma.queries.filter((query) => query === 'subscription.groupBy').length,
-      0,
-    );
-    // The positive control: this sweep DID work, so "found no pair" is a fact
-    // about the era and not about a run that reached no rows.
-    assert.equal(report.linked, 1);
-    assert.equal(prisma.table[1]['remnawaveId'], DEAD_UUID, 'a 2.x uuid survives untouched');
-  });
-
-  it('leaves the shared-identity arm out when the panel will not say which era it is', async () => {
-    // `'unknown'` is what version detection returns for an unreachable panel, an
-    // expired token and an unparseable body alike. FAIL CLOSED: an unread panel
-    // must never be the thing that WIDENS what this sweep proposes to merge.
-    const prisma = prismaHarness([
-      subscriptionRow({ id: 'sub-a-missing-identity' }),
-      ...sharedPair(),
-    ]);
-    const panel = panelHarness({ shape: () => ERA_UNKNOWN });
-
-    const report = await service(prisma, panel).reconcile({ dryRun: false });
-
-    assert.equal(report.panelEra, null, 'an unread era is reported as unread, not guessed');
-    assert.equal(report.sharedIdentityPairs, 0);
-    assert.equal(report.duplicatePairs, 0);
-    assert.equal(
-      prisma.queries.filter((query) => query === 'subscription.groupBy').length,
-      0,
-      'the arm did not run at all',
-    );
-    assert.equal(report.linked, 1, 'the first population is unaffected by an unknown era');
-    assert.equal(prisma.table[1]['remnawaveId'], '5150', 'and the pair is left exactly as it was');
-    assert.equal(prisma.table[2]['remnawaveId'], '5150');
-  });
 
   it('writes nothing for a pair it names, even on a real run', async () => {
     // Detection must not be a write. The repairable row is the INERTNESS
@@ -1376,7 +1266,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
         createdAt: minutesAgo(800),
       }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
@@ -1432,10 +1322,10 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
       ...cluster('user-6', '6006', 6006),
     ]);
 
-    const smallReport = await service(small, panelHarness({ shape: () => ERA_3X })).reconcile({
+    const smallReport = await service(small, panelHarness({})).reconcile({
       dryRun: true,
     });
-    const largeReport = await service(large, panelHarness({ shape: () => ERA_3X })).reconcile({
+    const largeReport = await service(large, panelHarness({})).reconcile({
       dryRun: true,
     });
 
@@ -1466,7 +1356,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
       subscriptionRow({ id: 'sub-a-solo', remnawaveId: '4001', remnawavePanelId: 4001 }),
       subscriptionRow({ id: 'sub-b-solo', remnawaveId: '4002', remnawavePanelId: 4002 }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true });
 
@@ -1576,7 +1466,6 @@ describe('PanelLinkReconciliationService — exclusivity', () => {
       subscriptionRow({ id: 'sub-a-stale', remnawaveId: DEAD_UUID }),
     ]);
     const panel = panelHarness({
-      shape: () => ERA_3X,
       profile: () => {
         prisma.table[0]['remnawaveId'] = '9001';
         prisma.table[0]['remnawavePanelId'] = 9001;
@@ -1654,7 +1543,7 @@ describe('PanelLinkReconciliationService — reporting', () => {
       resolve: (selector) =>
         (selector as { shortUuid?: string }).shortUuid === 'GONEGONEGONE'
           ? null
-          : { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: null },
+          : { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' },
     });
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
@@ -1715,7 +1604,7 @@ describe('PanelLinkReconciliationService — reporting', () => {
       subscriptionRow({ id: 'sub-c-missing' }),
       subscriptionRow({ id: 'sub-d-stale', remnawaveId: DEAD_UUID }),
     ]);
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: true, chunkSize: 1 });
 
@@ -1748,30 +1637,23 @@ describe('PanelLinkReconciliationService — reporting', () => {
 });
 
 describe('PanelLinkReconciliationService — stored identity spelling', () => {
-  it('stores the uuid a 2.x panel returns rather than the numeric id', async () => {
+  it('stores the numeric id the panel reports, which is the only identity it has', async () => {
+    // WHICH SPELLING TO STORE IS READ OFF THE PANEL'S OWN ANSWER. There is no
+    // uuid to prefer any more — `POST /api/users/resolve` answers with
+    // `{ id, username, shortUuid }` and nothing else — so writing anything but
+    // the decimal would recreate by hand the unaddressable row this sweep
+    // exists to repair.
     const prisma = prismaHarness([subscriptionRow()]);
-    const panel = panelHarness({
-      resolve: () => ({
-        id: 5150,
-        shortUuid: 'AAAshortAAA',
-        username: 'rz_alice_sub',
-        uuid: '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f',
-      }),
-    });
+    const panel = panelHarness({});
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
     assert.equal(report.linked, 1);
-    assert.equal(prisma.table[0]['remnawaveId'], '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f');
+    assert.equal(prisma.table[0]['remnawaveId'], '5150');
     assert.equal(prisma.table[0]['remnawavePanelId'], 5150);
-    // The profile read-back is addressed by that same uuid — a numeric probe
-    // would 400 on a 2.x panel.
-    assert.deepEqual(panel.profileCalls, [
-      {
-        remnawaveId: '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f',
-        panelId: 5150,
-        panelUsername: null,
-      },
-    ]);
+    // The profile read-back is addressed by that same numeric id — never by a
+    // second resolve through the username, which is the landing this sweep
+    // refuses to make.
+    assert.deepEqual(panel.profileCalls, [5150]);
   });
 });

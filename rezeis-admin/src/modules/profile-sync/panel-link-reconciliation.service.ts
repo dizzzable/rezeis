@@ -3,12 +3,9 @@ import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
-import {
-  panelShortUuidFromConfigUrl,
-  type StoredPanelIdentity,
-} from '../remnawave/services/panel-user-address';
-import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
-import { assertPanelProfileOwnership } from './profile-sync.processor';
+import { panelShortUuidFromConfigUrl } from '../remnawave/services/panel-user-address';
+import { PanelUsersClient } from '../remnawave/services/panel-users.client';
+import { assertPanelProfileOwnership, readPanelFailure } from './profile-sync.processor';
 
 /** How many rows one database page carries. Bounds memory, not panel load. */
 export const PANEL_LINK_RECONCILIATION_DEFAULT_CHUNK = 25;
@@ -23,16 +20,25 @@ export const PANEL_LINK_RECONCILIATION_DEFAULT_LIMIT = 200;
 export const PANEL_LINK_RECONCILIATION_MAX_LIMIT = 1000;
 
 /**
- * The two panel eras this sweep can conclude, and the ONLY two strings
- * {@link PanelLinkReconciliationReport.panelEra} ever carries besides `null`.
+ * The panel era this sweep reports, and the only string
+ * {@link PanelLinkReconciliationReport.panelEra} carries.
  *
- * Spelled as constants rather than inlined because three separate things read
- * them — the selection gate, the report, and the per-row reasons — and a
- * mismatch between any two of those would be a sweep that says it looked at one
- * era while gating on another.
+ * Spelled as a constant rather than inlined because two separate things read it
+ * — the report and the per-row reasons — and the operator SPA mirrors the same
+ * wire value.
+ */
+export const PANEL_ERA_3X = '3.x';
+
+/**
+ * KEPT, THOUGH THIS BUILD CAN NO LONGER PRODUCE IT. Panel 2.x is refused
+ * centrally by `LegacyPanelRefusal`, so no sweep can conclude this era any
+ * more. The constant stays because it is the WIRE value: reports stored on
+ * older audit rows carry it, and the operator SPA declares the same pair
+ * (`web/src/features/subscriptions/panel-link-reconciliation-api.ts`) and
+ * branches on it. Deleting one half of a mirrored pair leaves the other half
+ * looking like the whole set.
  */
 export const PANEL_ERA_2X = '2.x';
-export const PANEL_ERA_3X = '3.x';
 
 /**
  * How many SHARED-IDENTITY groups one invocation reports, and how many rows it
@@ -371,29 +377,27 @@ function pairKey(left: string, right: string): string {
  * the ordinary pre-provision state, and asking the panel to name a profile for
  * them would invent links for subscriptions that never had one.
  *
- * ── POPULATION 2: A STALE IDENTITY (3.x PANELS ONLY) ─────────────────────────
+ * ── POPULATION 2: A STALE IDENTITY ───────────────────────────────────────────
  *
- * Remnawave 3.x dropped the `uuid` column outright, so `parsePanelUserRow` keys
- * a 3.x row by `String(id)` — a decimal. `Subscription.remnawaveId` stores
- * whichever spelling was current when the row was linked and is deliberately
- * never rewritten. After an operator upgrades 2.x → 3.x, every row linked in
- * the old era therefore holds a uuid for a profile the panel now reports a
- * decimal for, and `remnawaveId = panelUser.uuid` compares two spellings of one
- * identity and finds them unequal FOREVER.
+ * Remnawave 3.x dropped the `uuid` column outright and names every user by a
+ * decimal id. `Subscription.remnawaveId` stores whichever spelling was current
+ * when the row was linked and is deliberately never rewritten. Every row linked
+ * before the operator upgraded therefore holds a uuid for a profile the panel
+ * now reports a decimal for, and comparing the two spellings of one identity
+ * finds them unequal FOREVER.
  *
  * THE SHAPE TEST IS SOUND AND IT IS THE SAME ONE THE LINK-REPAIR ENDPOINT USES.
  * `admin-user-subscriptions.controller.ts` (the `namesSameProfile` block, in
  * the "which comparisons are sound" list) states it: "a uuid always carries
- * `-`, so it never equals a decimal". So on a panel PROVEN to be 3.x, a live
- * row whose identity contains `-` is provably holding a name the panel cannot
- * answer to — there is no legitimate way for a 3.x panel to have issued it.
+ * `-`, so it never equals a decimal". A live row whose identity contains `-` is
+ * therefore provably holding a name this panel cannot answer to — there is no
+ * legitimate way for a 3.x panel to have issued one.
  *
- * THE ERA IS DISCOVERED, NEVER ASSUMED — see {@link detectPanelEra}. On a 2.x
- * panel a uuid-shaped identity is CORRECT, so this population is empty and the
- * sweep behaves exactly as it did before it existed. When the era cannot be
- * read, the population is empty too and the report says so with
- * `panelEra: null`: inventing a repair from an unknown era is how this class of
- * bug is made.
+ * THE ERA IS NO LONGER PROBED. It used to be, because on a 2.x panel a
+ * uuid-shaped identity is CORRECT and rewriting one would strand the row the
+ * repair claimed to fix; the population was left empty whenever the answer was
+ * `'uuid'` or unreadable. `LegacyPanelRefusal` now turns a 2.x panel away
+ * centrally, so there is one era and nothing left for the probe to decide.
  *
  * WHAT THIS SWEEP DOES NOT DO. It does not merge the duplicate pair the defect
  * produced. It diagnoses it (`duplicatePair`, with both halves named and the
@@ -409,7 +413,7 @@ export class PanelLinkReconciliationService {
 
   public constructor(
     private readonly prismaService: PrismaService,
-    private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly panelUsers: PanelUsersClient,
     private readonly events: SystemEventsService,
   ) {}
 
@@ -430,48 +434,20 @@ export class PanelLinkReconciliationService {
       PANEL_LINK_RECONCILIATION_MAX_CHUNK,
     );
 
-    // ASKED ONCE, BEFORE THE WALK, and reported. A per-page re-read could see
-    // the era move mid-sweep and produce one report describing two panels.
-    const panelEra = await this.detectPanelEra();
-    const includeStale = panelEra === PANEL_ERA_3X;
-    // THE SAME GATE, AND IT IS A DELIBERATE CHOICE RATHER THAN A REUSED FLAG.
+    // THE ERA IS NOT DISCOVERED ANY MORE, AND THAT IS NOT A GUESS. This used to
+    // probe the panel once before the walk and leave both era-dependent arms
+    // OUT whenever the answer was `'uuid'` or unreadable, because a uuid-shaped
+    // identity is CORRECT on a 2.x panel and rewriting one on a guess strands
+    // the row it repaired. A 2.x panel is now refused centrally by
+    // `LegacyPanelRefusal`, so there is one era, the probe had nothing left to
+    // decide, and both arms run unconditionally.
     //
-    // Shared identity is a different QUESTION from stale identity: it compares
-    // two local rows with each other instead of comparing one row's spelling
-    // against an era, so nothing in the comparison itself needs to know which
-    // panel is answering. It is gated anyway, on three grounds:
-    //
-    //  1. THE POPULATION IS DEFINED BY THE DEFECT, AND THE DEFECT IS 2.x → 3.x.
-    //     Two live rows of one customer on one profile is what the identity
-    //     split produces. On a panel PROVEN to be 2.x that provenance does not
-    //     hold, and what a shared identity means there is something this sweep
-    //     has not established. Every pair reported here is a merge nomination,
-    //     and a merge moves payments, referral spends and the operator's plan.
-    //     Nominating one from a population we cannot explain is the same
-    //     invention the stale arm refuses to make.
-    //  2. FAIL CLOSED ON THE ERA, WHICH IS THE RULE THIS FILE ALREADY OBEYS.
-    //     `'unknown'` is what version detection returns for a panel that is
-    //     unreachable, a token that expired and a body that would not parse.
-    //     Making the new arm the one place where an unread panel WIDENS what
-    //     the sweep proposes to merge would invert that rule exactly where it
-    //     matters most.
-    //  3. THERE IS NOTHING TO CONVERGE ON 2.x. The invisible state this arm
-    //     exists to see is manufactured by a MERGE — the survivor takes the
-    //     duplicate's identity — and merges only come from pairs, and pairs are
-    //     only nominated on a proven 3.x panel. No pairs, no merges, nothing to
-    //     converge.
-    //  4. THE ARM'S OWN PREDICATE IS ERA-RELATIVE, so it cannot be written
-    //     without a proven era at all. It reports duplicates whose identity is
-    //     ALREADY WELL FORMED, and it leaves the stale ones to the walk — and
-    //     "stale" means uuid-shaped, which is true on 3.x and FALSE on 2.x,
-    //     where a uuid is exactly what a correct identity looks like. Running
-    //     this arm on an unidentified panel would not merely widen it; it would
-    //     make its central exclusion meaningless.
-    //
-    // THE COST IS NAMED, NOT HIDDEN: a 2.x install carrying genuinely shared
-    // identities is not reported. That is a smaller harm than nominating merges
-    // off a panel this sweep could not identify.
-    const includeSharedIdentity = panelEra === PANEL_ERA_3X;
+    // WHAT THE ERA GATED IS STILL TRUE, restated so it does not read as a
+    // relaxation: a live row whose identity contains `-` is provably holding a
+    // name this panel cannot answer to, because there is no way for a 3.x panel
+    // to have issued one. The gate was protecting the OTHER era's rows, and
+    // that era is gone.
+    const panelEra = PANEL_ERA_3X;
 
     const repaired: PanelLinkReconciliationRow[] = [];
     const unrepaired: PanelLinkReconciliationRow[] = [];
@@ -501,7 +477,6 @@ export class PanelLinkReconciliationService {
       const page = await this.selectBrokenLinks(
         cursor,
         Math.min(chunkSize, limit - scanned) + 1,
-        includeStale,
       );
       const rows = page.slice(0, Math.min(chunkSize, limit - scanned));
       if (rows.length === 0) break;
@@ -574,9 +549,7 @@ export class PanelLinkReconciliationService {
     // exists to prevent. Re-reporting an already-merged cluster is not the
     // opposite risk it looks like: a merge retires one half, the group drops to
     // one member, and the pair stops being reported by itself.
-    const shared = includeSharedIdentity
-      ? await this.selectSharedIdentityPairs(walkPairKeys)
-      : { rows: [], pairs: 0, truncated: false };
+    const shared = await this.selectSharedIdentityPairs(walkPairKeys);
     for (const row of shared.rows) unrepaired.push(row);
     duplicatePairs += shared.pairs;
     if (shared.truncated) hasMore = true;
@@ -641,47 +614,6 @@ export class PanelLinkReconciliationService {
   }
 
   /**
-   * Which era of the panel API this sweep is talking to — DISCOVERED, and never
-   * defaulted.
-   *
-   * `getPanelShape()` already performs and caches this detection (one
-   * `GET /api/system/stats/recap` per five minutes, shared with every other
-   * version-gated feature), so this is a read of an existing fact rather than a
-   * probe of its own. `addressing` is the derived field that answers the exact
-   * question the stale population turns on: `'uuid'` is the era where a
-   * uuid-shaped identity is CORRECT, `'id'` is the era where it cannot be.
-   *
-   * `'unknown'` YIELDS `null`, NOT A GUESS. Version detection folds every
-   * failure — 401, timeout, DNS, an unconfigured token, a panel mid-restart —
-   * into "no version". Reading that as 3.x would mark every legitimately
-   * uuid-identified row on a 2.x panel as stale and rewrite it to a decimal
-   * that panel has never heard of: the same unaddressable row this sweep exists
-   * to repair, manufactured by the repair. The report carries the `null` so an
-   * operator seeing zero stale rows can tell "there were none" from "the sweep
-   * could not tell whether to look".
-   */
-  private async detectPanelEra(): Promise<string | null> {
-    let addressing: string;
-    try {
-      addressing = (await this.remnawaveApiService.getPanelShape()).addressing;
-    } catch (err: unknown) {
-      this.logger.warn(
-        'Panel link reconciliation: the panel era could not be read ' +
-          `(${(err as Error).message}); the stale-identity population is left OUT of this sweep`,
-      );
-      return null;
-    }
-    if (addressing === 'uuid') return PANEL_ERA_2X;
-    if (addressing === 'id') return PANEL_ERA_3X;
-    this.logger.warn(
-      'Panel link reconciliation: the panel did not identify its era, so the stale-identity ' +
-        'population is left OUT of this sweep — a uuid-shaped identity is correct on 2.x and ' +
-        'rewriting one on a guess would strand the row it repaired',
-    );
-    return null;
-  }
-
-  /**
    * The damaged rows, paged by id, as ONE union across both populations.
    *
    * Paged by `id > cursor` rather than by OFFSET on purpose: a real run REMOVES
@@ -706,11 +638,7 @@ export class PanelLinkReconciliationService {
    *     whole purpose is to end silence. {@link reconcileRow} short-circuits it
    *     before either panel call.
    */
-  private async selectBrokenLinks(
-    cursor: string | null,
-    take: number,
-    includeStale: boolean,
-  ): Promise<BrokenLinkRow[]> {
+  private async selectBrokenLinks(cursor: string | null, take: number): Promise<BrokenLinkRow[]> {
     const missingIdentity: Prisma.SubscriptionWhereInput = {
       remnawaveId: null,
       remnawavePanelUsername: { not: null },
@@ -718,7 +646,8 @@ export class PanelLinkReconciliationService {
     };
     // `contains: '-'` is the whole shape test, and it is exact rather than
     // approximate: a panel id is decimal and can never contain a hyphen, a uuid
-    // always does. Only reached when the era is PROVEN 3.x by the caller.
+    // always does. Unconditional now that 3.x is the only era this build talks
+    // to — see the note in `reconcile`.
     const staleWithRoute: Prisma.SubscriptionWhereInput = {
       remnawaveId: { contains: '-' },
       OR: [{ configUrl: { not: null } }, { remnawavePanelUsername: { not: null } }],
@@ -732,9 +661,7 @@ export class PanelLinkReconciliationService {
       where: {
         status: { not: SubscriptionStatus.DELETED },
         ...(cursor === null ? {} : { id: { gt: cursor } }),
-        OR: includeStale
-          ? [missingIdentity, staleWithRoute, staleWithoutRoute]
-          : [missingIdentity],
+        OR: [missingIdentity, staleWithRoute, staleWithoutRoute],
       },
       orderBy: { id: 'asc' },
       take,
@@ -1108,46 +1035,55 @@ export class PanelLinkReconciliationService {
     const selector = useShortUuid
       ? { shortUuid: shortUuid as string }
       : { username: panelUsername };
-    const resolved = await this.remnawaveApiService.resolvePanelIdentity(selector);
-    if (resolved === null) {
+    const resolution = await this.panelUsers.resolveUser(selector);
+    if (resolution.kind !== 'ok') {
+      const failure = readPanelFailure(resolution);
+      const asked = useShortUuid
+        ? `shortUuid '${shortUuid}'`
+        : `username '${panelUsername}'`;
       return alone(
         describe(
           'unresolved',
-          useShortUuid
-            ? `panel did not resolve shortUuid '${shortUuid}'`
-            : `panel did not resolve username '${panelUsername}'`,
+          // WHY THE PANEL COULD NOT NAME IT IS PART OF THE ROW. This used to
+          // read a `null` that meant a missing profile, an expired token, a
+          // 5xx and a timeout alike, so an operator running the sweep during
+          // an outage was told every row was unresolvable and had no way to
+          // tell that from "these rows are genuinely beyond repair".
+          failure.kind === 'missing'
+            ? `panel did not resolve ${asked}`
+            : `panel could not be asked about ${asked} (${failure.detail}); nothing was changed`,
         ),
       );
     }
+    const resolved = resolution.data.response;
 
-    // WHICH SPELLING TO STORE IS READ OFF THE PANEL'S OWN ANSWER, not off a
-    // version probe — the same rule `parsePanelUserRow` follows for read rows.
-    // A 2.x panel returns the profile's `uuid` and that is what every 2.x-era
-    // route wants; a 3.x panel has none to return and keys everything by the
-    // numeric id. Writing the other era's spelling would recreate, by hand,
-    // exactly the unaddressable row this sweep exists to repair.
-    //
-    // The ERA gates which rows are selected; the ANSWER decides what is
-    // written. Those are two different questions and neither substitutes for
-    // the other.
-    const remnawaveId =
-      typeof resolved.uuid === 'string' && resolved.uuid.length > 0
-        ? resolved.uuid
-        : String(resolved.id);
+    // THE SPELLING TO STORE IS THE PANEL'S OWN. 3.x has no uuid to return and
+    // keys everything by the numeric id, so the decimal IS the identity — the
+    // `uuid` branch this used to carry could only ever be taken on a panel that
+    // is now refused before the request. Writing anything else would recreate,
+    // by hand, exactly the unaddressable row this sweep exists to repair.
+    const remnawaveId = String(resolved.id);
 
     if (stored !== null && stored === remnawaveId) {
       // The row was selected as stale and the panel answers with the very
-      // string it already holds. Nothing to rewrite, and no repair may be
-      // invented from the disagreement between the detected era and this
-      // answer — that invention is the whole bug class. Short-circuited before
-      // the profile read: there is no adoption to prove when nothing changes.
+      // string it already holds, so there is nothing to rewrite and no repair
+      // may be invented from the disagreement — that invention is the whole bug
+      // class. Short-circuited before the profile read: there is no adoption to
+      // prove when nothing changes.
+      //
+      // REACHABLE ONLY THROUGH DRIFT, and kept for exactly that. The contract
+      // declares `id` as a number, so a conforming answer is always a decimal
+      // and can never equal a uuid-shaped stored identity — but the executor is
+      // LENIENT and hands back a body it could not validate RAW, so this field
+      // can arrive as whatever the panel sent. Writing a row's own value back
+      // over itself and reporting it `linked` is a repair that changed nothing,
+      // which is precisely the kind of report this sweep exists to stop.
       return alone(
         describe(
           'staleIdentity',
           `the panel answers for this profile with the identity the row already holds ` +
-            `('${stored}'), so there is nothing to rewrite — this sweep detected the ` +
-            `${PANEL_ERA_3X} era and the panel's own answer disagrees with it. Nothing was ` +
-            'changed.',
+            `('${stored}'), so there is nothing to rewrite — this row was selected as a stale ` +
+            "identity and the panel's own answer disagrees with that. Nothing was changed.",
           remnawaveId,
           resolved.id,
           { holdsLiveIdentity: true },
@@ -1160,32 +1096,28 @@ export class PanelLinkReconciliationService {
     // on a full profile read, so this second round-trip is the ownership check,
     // not a convenience.
     //
-    // The probe carries the identity and the numeric id and NOTHING ELSE: no
-    // username, no short UUID. That is deliberate. Those two fields are what
-    // `panelUserAddress` falls back to when it cannot build a path segment, and
-    // a hidden second resolve — by name — is precisely the landing this method
-    // refuses to make. Without them an unaddressable probe answers `impossible`
-    // and the row is reported unresolved instead of being resolved by a key we
-    // ruled out.
-    const probe: StoredPanelIdentity = {
-      remnawaveId,
-      panelId: resolved.id,
-      panelUsername: null,
-    };
-    const outcome = await this.remnawaveApiService.getPanelUserOutcome(probe);
+    // THE READ IS ADDRESSED BY THE NUMERIC ID THE RESOLVE JUST RETURNED, and by
+    // nothing else — no username, no short UUID. That is deliberate: those two
+    // are the keys `panelUserAddress` falls back to when it cannot build a path
+    // segment, and a hidden second resolve by name is precisely the landing
+    // this method refuses to make. Addressing the id directly makes that
+    // impossible rather than merely unintended.
+    const outcome = await this.panelUsers.getUserById(resolved.id);
     if (outcome.kind !== 'ok') {
+      const failure = readPanelFailure(outcome);
       return alone(
         describe(
           'unresolved',
-          outcome.kind === 'missing'
+          failure.kind === 'missing'
             ? `panel resolved ${resolvedBy} to profile ${remnawaveId} but that profile is gone`
-            : `panel profile ${remnawaveId} could not be read back (panel unavailable or ` +
-              'undecodable body); nothing was changed',
+            : `panel profile ${remnawaveId} could not be read back (${failure.detail}); ` +
+              'nothing was changed',
           remnawaveId,
           resolved.id,
         ),
       );
     }
+    const profile = outcome.data.response;
 
     try {
       // "A profile answers to this name" is not "this profile is mine". Same
@@ -1194,7 +1126,7 @@ export class PanelLinkReconciliationService {
       // (imported, or hand-edited by an operator) stays indeterminate and is
       // allowed, because failing those closed would strand every legacy profile
       // with no other route back.
-      assertPanelProfileOwnership(panelUsername, outcome.user.description, row.userId);
+      assertPanelProfileOwnership(panelUsername, profile.description, row.userId);
     } catch (err: unknown) {
       return alone(describe('notOwned', (err as Error).message, remnawaveId, resolved.id));
     }

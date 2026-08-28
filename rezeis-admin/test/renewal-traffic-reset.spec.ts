@@ -160,9 +160,12 @@ async function runUpdateJob(payload: Record<string, unknown>): Promise<readonly 
           subscription: {
             id: 'sub-1',
             userId: 'user-1',
-            remnawaveId: 'rw-1',
-            remnawavePanelId: null,
-            remnawavePanelUsername: null,
+            // A profile provisioned on this panel: `remnawaveId` IS the
+            // numeric user id, so the PATCH and the reset address it without a
+            // resolve of their own.
+            remnawaveId: '7',
+            remnawavePanelId: 7,
+            remnawavePanelUsername: 'rz_sub_1',
             configUrl: null,
             trafficLimit: 100,
             deviceLimit: 3,
@@ -185,12 +188,23 @@ async function runUpdateJob(payload: Record<string, unknown>): Promise<readonly 
         }),
     } as never,
     {
-      updatePanelUser: async () => {
+      updateUser: async () => {
         calls.push('update');
-        return { createdAt: '2026-08-01T00:00:00.000Z' };
+        return {
+          kind: 'ok' as const,
+          drifted: false,
+          data: {
+            response: {
+              id: 7,
+              username: 'rz_sub_1',
+              createdAt: new Date('2026-08-01T00:00:00.000Z'),
+            },
+          },
+        };
       },
-      resetPanelUserTraffic: async () => {
+      resetTraffic: async () => {
         calls.push('reset');
+        return { kind: 'ok' as const, drifted: false, data: { response: { id: 7 } } };
       },
     } as never,
     {

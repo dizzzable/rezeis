@@ -21,10 +21,51 @@ import {
   ProfileSyncProcessor,
   SCHEMA_DRIFT_GRACE_MS,
 } from '../src/modules/profile-sync/profile-sync.processor';
-import {
-  RemnawaveApiService,
-  RemnawaveProfileNotFoundError,
-} from '../src/modules/remnawave/services/remnawave-api.service';
+import { PanelCommandExecutor } from '../src/modules/remnawave/services/panel-command.executor';
+import { AxiosPanelTransport } from '../src/modules/remnawave/services/panel-transport';
+import { PanelUsersClient } from '../src/modules/remnawave/services/panel-users.client';
+
+/**
+ * A user row as `PanelUsersClient` hands one back.
+ *
+ * Every field the processor reads is present by DEFAULT, because the panel
+ * sends them all: a fixture that omitted `id` or `username` would make a row
+ * the processor now refuses look identical to one it accepts, and the tests
+ * about that refusal would pass for the wrong reason.
+ */
+function panelRow(patch: Record<string, unknown> = {}) {
+  return {
+    id: 4711,
+    username: 'rz_panel_user',
+    description: null,
+    subscriptionUrl: 'https://sub.example/panel',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    trafficLimitBytes: 0,
+    hwidDeviceLimit: null,
+    ...patch,
+  };
+}
+
+/** A successful user route answer, envelope included. */
+function panelOk(patch: Record<string, unknown> = {}) {
+  return { kind: 'ok' as const, drifted: false, data: { response: panelRow(patch) } };
+}
+
+/** The panel's own "no such user" — the ONE refusal that means a gone profile. */
+function panelMissing() {
+  return {
+    kind: 'rejected' as const,
+    status: 404,
+    code: 'A063',
+    detail: 'User with specified params not found',
+    retryAfterMs: null,
+  };
+}
+
+/** A refusal the panel actually sent, with whatever status it chose. */
+function panelRejected(status: number, code: string | null = null, detail: string | null = null) {
+  return { kind: 'rejected' as const, status, code, detail, retryAfterMs: null };
+}
 
 /** Prisma mock for a DELETE job whose handler will throw, at a given attempt. */
 function deleteJobPrismaMock(attempts: number, onUpdate: (input: unknown) => void) {
@@ -39,7 +80,7 @@ function deleteJobPrismaMock(attempts: number, onUpdate: (input: unknown) => voi
         subscription: {
           id: 'subscription-1',
           userId: 'user-1',
-          remnawaveId: 'rem-user-1',
+          remnawaveId: '4711',
           trafficLimit: null,
           deviceLimit: 0,
           internalSquads: [],
@@ -80,7 +121,7 @@ describe('ProfileSyncProcessor', () => {
           update: async (input: unknown) => updates.push(input),
         },
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      { updateUser: async () => { upstreamCalled = true; return panelOk(); } } as never,
       {} as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -103,7 +144,7 @@ describe('ProfileSyncProcessor', () => {
           updateMany: async () => ({ count: 0 }),
         },
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      { updateUser: async () => { upstreamCalled = true; return panelOk(); } } as never,
       {} as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -123,7 +164,7 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-retry', action: SyncAction.UPDATE, status: SyncJobStatus.FAILED,
             attempts: 1, supersededAt: null,
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              id: 'subscription-1', userId: 'user-1', remnawaveId: '4711',
               trafficLimit: 2, deviceLimit: 3, internalSquads: [], externalSquad: null,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
             },
@@ -139,13 +180,16 @@ describe('ProfileSyncProcessor', () => {
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          // Every successful PATCH now carries the panel's `createdAt`, so the
+          // MONTH_ROLLING anchor stamp runs.
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: {
             findMany: async () => [],
             create: async () => ({ id: 'unused-delete-job' }),
           },
         }),
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      { updateUser: async () => { upstreamCalled = true; return panelOk(); } } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'retry profile' }),
         getContactInfo: async () => ({ email: null, telegramId: null }),
@@ -196,7 +240,8 @@ describe('ProfileSyncProcessor', () => {
         desiredRevision: null,
         createdAt: id === 'older' ? new Date('2026-01-01T00:00:00Z') : new Date('2026-01-02T00:00:00Z'),
         subscription: {
-          id: 'subscription-ordered', userId: 'user-1', remnawaveId: 'rem-user-ordered',
+          id: 'subscription-ordered', userId: 'user-1', remnawaveId: '4712',
+          remnawavePanelId: 4712, remnawavePanelUsername: 'rz_ordered', configUrl: null,
           trafficLimit: currentTrafficLimit, deviceLimit: 1, internalSquads: [], externalSquad: null,
           expiresAt: new Date('2099-01-01T00:00:00Z'), planSnapshot: {},
         },
@@ -227,8 +272,8 @@ describe('ProfileSyncProcessor', () => {
       const processor = new ProfileSyncProcessor(
         prisma as never,
         {
-          updatePanelUser: async (_uuid: string, input: { trafficLimitBytes: number }) => {
-            const limitGb = input.trafficLimitBytes / (1024 ** 3);
+          updateUser: async (body: { trafficLimitBytes: number }) => {
+            const limitGb = body.trafficLimitBytes / (1024 ** 3);
             if (limitGb === 1) {
               signalOldWrite();
               await oldWriteReleased;
@@ -237,7 +282,7 @@ describe('ProfileSyncProcessor', () => {
               signalNewWrite();
               panelTrafficLimit = limitGb;
             }
-            return {};
+            return panelOk({ id: 4712, username: 'rz_ordered' });
           },
         } as never,
         {
@@ -282,7 +327,10 @@ describe('ProfileSyncProcessor', () => {
             subscription: {
               id: 'subscription-1',
               userId: 'user-1',
-              remnawaveId: 'rem-user-1',
+              remnawaveId: '4711',
+              remnawavePanelId: 4711,
+              remnawavePanelUsername: 'rz_subscription_1',
+              configUrl: null,
               trafficLimit: 2,
               deviceLimit: 3,
               internalSquads: ['internal-a'],
@@ -315,9 +363,12 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        updatePanelUser: async (...args: unknown[]) => {
-          remnawaveUpdates.push(args);
-          return { createdAt: '2025-03-20T09:15:00.000Z' };
+        updateUser: async (body: unknown) => {
+          remnawaveUpdates.push(body);
+          return panelOk({
+            username: 'rz_subscription_1',
+            createdAt: new Date('2025-03-20T09:15:00.000Z'),
+          });
         },
       } as never,
       {
@@ -331,25 +382,23 @@ describe('ProfileSyncProcessor', () => {
 
     assert.equal((profileSyncUpdates[0] as { readonly data: { readonly status: SyncJobStatus } }).data.status, SyncJobStatus.RUNNING);
     assert.equal((profileSyncUpdates[1] as { readonly data: { readonly status: SyncJobStatus } }).data.status, SyncJobStatus.COMPLETED);
-    assert.deepStrictEqual(remnawaveUpdates, [[
-      // The adapter is handed the FULL stored identity, not a bare string: on a
-      // 3.x panel the uuid alone names nothing, and the numeric id / panel
-      // username are the only way back to the profile.
-      { remnawaveId: 'rem-user-1', panelId: null, panelUsername: null },
-      {
-        telegramId: 123,
-        email: 'user@example.test',
-        description: 'profile description',
-        status: SubscriptionStatus.DISABLED,
-        tag: 'premium',
-        expireAt: '2099-01-01T00:00:00.000Z',
-        trafficLimitBytes: 2 * 1024 * 1024 * 1024,
-        hwidDeviceLimit: 3,
-        trafficLimitStrategy: 'MONTH',
-        activeInternalSquads: ['internal-a'],
-        externalSquadUuid: 'external-a',
-      },
-    ]]);
+    // ONE BODY, IDENTITY INCLUDED. `PATCH /api/users` carries the target in
+    // the body as the numeric `id` the route declares — there is no path
+    // segment and no separate identity argument to get out of step with it.
+    assert.deepStrictEqual(remnawaveUpdates, [{
+      id: 4711,
+      telegramId: 123,
+      email: 'user@example.test',
+      description: 'profile description',
+      status: SubscriptionStatus.DISABLED,
+      tag: 'premium',
+      expireAt: '2099-01-01T00:00:00.000Z',
+      trafficLimitBytes: 2 * 1024 * 1024 * 1024,
+      hwidDeviceLimit: 3,
+      trafficLimitStrategy: 'MONTH',
+      activeInternalSquads: ['internal-a'],
+      externalSquadUuid: 'external-a',
+    }]);
     assert.deepStrictEqual(termAnchorUpdates, [{
       where: {
         subscriptionId: 'subscription-1',
@@ -369,7 +418,8 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-update-delete', action: SyncAction.UPDATE, status: SyncJobStatus.PENDING,
             attempts: 0, supersededAt: null,
             subscription: {
-              id: 'subscription-deleted', userId: 'user-1', remnawaveId: 'rem-user-update',
+              id: 'subscription-deleted', userId: 'user-1', remnawaveId: '4713',
+              remnawavePanelId: 4713, remnawavePanelUsername: 'rz_update', configUrl: null,
               trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
             },
@@ -386,7 +436,7 @@ describe('ProfileSyncProcessor', () => {
           },
         }),
       } as never,
-      { updatePanelUser: async () => undefined } as never,
+      { updateUser: async () => panelOk({ id: 4713, username: 'rz_update' }) } as never,
       {
         generateProfileName: async () => ({ username: 'rz_update', description: 'update' }),
         getContactInfo: async () => ({ email: null, telegramId: null }),
@@ -410,7 +460,8 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-reset-delete', action: SyncAction.TRAFFIC_RESET, status: SyncJobStatus.PENDING,
             attempts: 0, supersededAt: null,
             subscription: {
-              id: 'subscription-deleted', userId: 'user-1', remnawaveId: 'rem-user-reset',
+              id: 'subscription-deleted', userId: 'user-1', remnawaveId: '4714',
+              remnawavePanelId: 4714, remnawavePanelUsername: 'rz_reset', configUrl: null,
               trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
             },
@@ -428,7 +479,12 @@ describe('ProfileSyncProcessor', () => {
           },
         }),
       } as never,
-      { resetPanelUserTraffic: async () => { resetCalled = true; } } as never,
+      {
+        resetTraffic: async () => {
+          resetCalled = true;
+          return panelOk({ id: 4714 });
+        },
+      } as never,
       {} as never,
       { error: () => undefined, info: () => undefined } as never,
       { enqueue: async (jobId: string) => { enqueuedDeleteJobs.push(jobId); } } as never,
@@ -495,20 +551,18 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async (input: unknown) => {
-          remnawaveCreates.push(input);
-          return {
-            uuid: 'rem-user-created',
-            // Every supported panel returns both of these on a created user —
-            // 2.7.4 and 2.8.x alongside the uuid, 3.x instead of it. The fake
-            // omitted them, which let the persistence path look correct while
-            // recording nothing.
-            panelId: 4471,
+        getUserByUsername: async () => panelMissing(),
+        createUser: async (body: unknown) => {
+          remnawaveCreates.push(body);
+          return panelOk({
+            // The numeric id IS the identity on this panel; the row carries no
+            // uuid at all. A fixture without it would let the persistence path
+            // look correct while recording nothing.
+            id: 4471,
             username: 'rz_subscription_1',
             subscriptionUrl: 'https://sub.example/created',
-            createdAt: '2026-01-15T12:30:00.000Z',
-          };
+            createdAt: new Date('2026-01-15T12:30:00.000Z'),
+          });
         },
       } as never,
       {
@@ -538,11 +592,9 @@ describe('ProfileSyncProcessor', () => {
     assert.deepStrictEqual(subscriptionUpdates, [{
       where: { id: 'subscription-1' },
       data: {
-        remnawaveId: 'rem-user-created',
-        // Recorded on EVERY version, not only on 3.x. A 2.x panel already
-        // returns the numeric id on every row, and the upgrade that would make
-        // us need it is the same event that destroys the uuid — so recording it
-        // only once the panel is 3.x is always too late.
+        // The panel's own numeric id, in decimal — the spelling every user
+        // route answers to and the one `remnawaveId` now stores.
+        remnawaveId: '4471',
         remnawavePanelId: 4471,
         remnawavePanelUsername: 'rz_subscription_1',
         configUrl: 'https://sub.example/created',
@@ -590,10 +642,14 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => {
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () => {
           upstreamCreates += 1;
-          return { uuid: 'rem-user-late-create', subscriptionUrl: 'https://sub.example/late-create' };
+          return panelOk({
+            id: 4716,
+            username: 'rz_subscription_deleted',
+            subscriptionUrl: 'https://sub.example/late-create',
+          });
         },
       } as never,
       {
@@ -649,6 +705,9 @@ describe('ProfileSyncProcessor', () => {
           subscription: {
             update: async (input: unknown) => { subscriptionUpdates.push(input); },
           },
+          // The adopted panel row carries a `createdAt`, so the MONTH_ROLLING
+          // anchor stamp runs on the adopt path too.
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: {
             findMany: async () => [],
             create: async () => ({ id: 'unused-delete-job' }),
@@ -656,16 +715,18 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        getPanelUserByUsername: async (username: string) => {
+        getUserByUsername: async (username: string) => {
           assert.equal(username, 'rz_subscription_1');
-          return {
-            uuid: 'rem-user-existing',
-            panelId: 902,
+          return panelOk({
+            id: 902,
             username: 'rz_subscription_1',
             subscriptionUrl: 'https://sub.example/existing',
-          };
+          });
         },
-        createPanelUser: async () => { createCalled = true; },
+        createUser: async () => {
+          createCalled = true;
+          return panelOk();
+        },
       } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'profile description' }),
@@ -680,10 +741,10 @@ describe('ProfileSyncProcessor', () => {
     assert.deepStrictEqual(subscriptionUpdates, [{
       where: { id: 'subscription-1' },
       data: {
-        remnawaveId: 'rem-user-existing',
+        remnawaveId: '902',
         // Reusing a profile records its identity just as fully as creating one:
         // this is the CREATE-retry path, and a profile linked here without its
-        // numeric id would be exactly as unreachable after a panel upgrade.
+        // numeric id would be exactly as unreachable to every later job.
         remnawavePanelId: 902,
         remnawavePanelUsername: 'rz_subscription_1',
         configUrl: 'https://sub.example/existing',
@@ -711,7 +772,11 @@ describe('ProfileSyncProcessor', () => {
             status: SyncJobStatus.PENDING,
             attempts: 0,
             payload: {
-              targetRemnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9',
+              // A DECIMAL, not a uuid: a uuid-shaped target is refused outright
+              // by the stale-panel-link guard, so it would make every case here
+              // pass without the claimant search ever running.
+              targetRemnawaveId: '4471',
+              targetRemnawavePanelId: 4471,
               targetRemnawavePanelUsername: 'rz_bob_sub',
             },
             subscription: {
@@ -735,9 +800,9 @@ describe('ProfileSyncProcessor', () => {
         },
       } as never,
       {
-        deletePanelUser: async (ref: unknown) => {
-          deletedTargets.push(ref);
-          return { isDeleted: true };
+        deleteUser: async (userId: number) => {
+          deletedTargets.push(userId);
+          return { kind: 'ok', drifted: false, data: undefined };
         },
       } as never,
       {} as never,
@@ -762,11 +827,11 @@ describe('ProfileSyncProcessor', () => {
             action: SyncAction.DELETE,
             status: SyncJobStatus.PENDING,
             attempts: 0,
-            payload: { targetRemnawaveId: 'rem-user-1' },
+            payload: { targetRemnawaveId: '4711' },
             subscription: {
               id: 'subscription-1',
               userId: 'user-1',
-              remnawaveId: 'rem-user-1',
+              remnawaveId: '4711',
               status: SubscriptionStatus.ACTIVE,
               trafficLimit: null,
               deviceLimit: 0,
@@ -785,9 +850,9 @@ describe('ProfileSyncProcessor', () => {
         },
       } as never,
       {
-        deletePanelUser: async (ref: unknown) => {
-          deletedTargets.push(ref);
-          return { isDeleted: true };
+        deleteUser: async (userId: number) => {
+          deletedTargets.push(userId);
+          return { kind: 'ok', drifted: false, data: undefined };
         },
       } as never,
       {} as never,
@@ -801,12 +866,12 @@ describe('ProfileSyncProcessor', () => {
   it('refuses a DELETE whose panel username now belongs to a LIVE subscription', async () => {
     // The destructive case, and it needs no exotic state: panel usernames are
     // deterministic, so a profile that was deleted and re-provisioned carries
-    // the SAME name. On a 3.x panel a 2.x uuid can only be addressed by
-    // resolving that name — which answers with the REPLACEMENT. The delete then
-    // lands on a paying customer's live profile, and the panel confirms it.
+    // the SAME name, and a DELETE job outlives the row it was written for. Here
+    // the row has moved on to a different profile while another live row
+    // answers to the recorded name — deleting would take that one.
     const { processor, deletedTargets } = deleteWithRecordedName(
-      [{ id: 'subscription-1', remnawaveId: '4471' }],
-      '4471',
+      [{ id: 'subscription-1', remnawaveId: '9999' }],
+      '9999',
     );
     await assert.rejects(
       () => processor.process({ data: { syncJobId: 'sync-job-delete-stale' } } as never),
@@ -821,8 +886,8 @@ describe('ProfileSyncProcessor', () => {
     // always among the live rows holding that name. It is recognised by still
     // holding the target identity.
     const { processor, deletedTargets, queries } = deleteWithRecordedName(
-      [{ id: 'subscription-1', remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9' }],
-      '330f2b38-1362-46ab-b5c0-dea32167eff9',
+      [{ id: 'subscription-1', remnawaveId: '4471' }],
+      '4471',
     );
     await processor.process({ data: { syncJobId: 'sync-job-delete-stale' } } as never);
     assert.equal(deletedTargets.length, 1);
@@ -848,11 +913,11 @@ describe('ProfileSyncProcessor', () => {
             action: SyncAction.DELETE,
             status: SyncJobStatus.PENDING,
             attempts: 0,
-            payload: { targetRemnawaveId: 'rem-user-old' },
+            payload: { targetRemnawaveId: '4718' },
             subscription: {
               id: 'subscription-1',
               userId: 'user-1',
-              remnawaveId: 'rem-user-new',
+              remnawaveId: '4719',
               trafficLimit: null,
               deviceLimit: 0,
               internalSquads: [],
@@ -866,16 +931,19 @@ describe('ProfileSyncProcessor', () => {
         },
         subscription: {
           findMany: async () => [],
-          // ZERO, faithfully: the row points at `rem-user-new` and the fence
-          // names `rem-user-old`, so nothing matches — which is the CORRECT
-          // outcome here and must not be reported as a divergence.
+          // ZERO, faithfully: the row points at profile 4719 and the fence
+          // names 4718, so nothing matches — which is the CORRECT outcome here
+          // and must not be reported as a divergence.
           updateMany: async (input: unknown) => { subscriptionUpdates.push(input); return { count: 0 }; },
         },
       } as never,
       {
-        deletePanelUser: async (ref: unknown) => {
-          deletedTargets.push(ref);
-          return { isDeleted: true };
+        deleteUser: async (userId: number) => {
+          deletedTargets.push(userId);
+          return { kind: 'ok', drifted: false, data: undefined };
+        },
+        resolveUser: async () => {
+          throw new Error('a decimal target addresses the panel directly, never through a resolve');
         },
       } as never,
       {} as never,
@@ -884,18 +952,17 @@ describe('ProfileSyncProcessor', () => {
 
     await processor.process({ data: { syncJobId: 'sync-job-delete-old' } } as never);
 
-    // The stale target travels ALONE — no panelId, no panelUsername. Those
-    // describe whatever profile the row points at NOW, which is a different
-    // one; attaching them would let the adapter resolve the CURRENT profile and
-    // delete it in place of the stale one.
-    assert.deepEqual(deletedTargets, [
-      { remnawaveId: 'rem-user-old', panelId: null, panelUsername: null },
-    ]);
+    // The stale target travels ALONE — no panelId, no panelUsername, so the
+    // only thing that can be addressed is the target string itself. Those
+    // columns describe whatever profile the row points at NOW, which is a
+    // different one; attaching them would let the address fall back onto the
+    // CURRENT profile and delete it in place of the stale one.
+    assert.deepEqual(deletedTargets, [4718]);
     assert.deepEqual(subscriptionUpdates, [{
       // Two-angled, and with only ONE arm: no numeric id was ever recorded for
       // the stale target, and `remnawavePanelId: null` would match every row
       // that has none.
-      where: { id: 'subscription-1', OR: [{ remnawaveId: 'rem-user-old' }] },
+      where: { id: 'subscription-1', OR: [{ remnawaveId: '4718' }] },
       // The supplementary columns detach with the id they describe: a numeric
       // id left behind would let a later re-provision inherit the DELETED
       // profile's identity and address the corpse.
@@ -921,7 +988,7 @@ describe('ProfileSyncProcessor', () => {
             subscription: {
               id: 'subscription-1',
               userId: 'user-1',
-              remnawaveId: 'rem-user-1',
+              remnawaveId: '4711',
               trafficLimit: null,
               deviceLimit: 0,
               internalSquads: [],
@@ -951,17 +1018,12 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        deletePanelUser: async (ref: unknown) => {
-          // The target matches the row's current link, so the supplementary
-          // identity columns travel with it — here both null, because this
-          // fixture row predates them.
-          assert.deepEqual(ref, {
-            remnawaveId: 'rem-user-1',
-            panelId: null,
-            panelUsername: null,
-            panelShortUuid: null,
-          });
-          return { isDeleted: true };
+        deleteUser: async (userId: number) => {
+          // The stored identity IS the numeric id, so the delete addresses it
+          // directly — no resolve, no username, no second chance to land on
+          // somebody else's profile.
+          assert.equal(userId, 4711);
+          return { kind: 'ok', drifted: false, data: undefined };
         },
       } as never,
       {} as never,
@@ -974,7 +1036,7 @@ describe('ProfileSyncProcessor', () => {
       // One profile answers to two names across the eras, so the fence asks
       // about both. This fixture row never recorded a numeric id, so the
       // numeric arm is OMITTED rather than compared against null.
-      where: { id: 'subscription-1', OR: [{ remnawaveId: 'rem-user-1' }] },
+      where: { id: 'subscription-1', OR: [{ remnawaveId: '4711' }] },
       // The supplementary columns detach with the id they describe: a numeric
       // id left behind would let a later re-provision inherit the DELETED
       // profile's identity and address the corpse.
@@ -987,7 +1049,7 @@ describe('ProfileSyncProcessor', () => {
     }]);
   });
 
-  it('fails the DELETE job for retry when the panel reports not-deleted', async () => {
+  it('fails the DELETE job for retry when the panel refuses the deletion', async () => {
     const subscriptionUpdates: unknown[] = [];
     const profileSyncUpdates: unknown[] = [];
     const processor = new ProfileSyncProcessor(
@@ -1001,7 +1063,7 @@ describe('ProfileSyncProcessor', () => {
             subscription: {
               id: 'subscription-1',
               userId: 'user-1',
-              remnawaveId: 'rem-user-1',
+              remnawaveId: '4711',
               trafficLimit: null,
               deviceLimit: 0,
               internalSquads: [],
@@ -1034,7 +1096,13 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        deletePanelUser: async () => ({ isDeleted: false }),
+        // A refusal the PANEL sent, with no `USER_NOT_FOUND` envelope. The
+        // `isDeleted: false` flag this test used to feed is gone with 2.x: the
+        // contract declares no response body for this route and 3.x answers
+        // `204`, so a `2xx` is the whole of the confirmation. What can still
+        // fail is the request itself, and that must fail the JOB rather than be
+        // read as a deletion that happened.
+        deleteUser: async () => panelRejected(409, 'A099', 'user is locked'),
       } as never,
       {} as never,
       { error: () => undefined, info: () => undefined } as never,
@@ -1042,7 +1110,7 @@ describe('ProfileSyncProcessor', () => {
 
     await assert.rejects(
       () => processor.process({ data: { syncJobId: 'sync-job-1' } } as never),
-      /Panel did not confirm deletion/,
+      /HTTP 409/,
     );
 
     assert.deepEqual(subscriptionUpdates, []);
@@ -1060,7 +1128,12 @@ describe('ProfileSyncProcessor', () => {
     });
     assert.deepEqual((failureUpdates[0] as { data: unknown }).data, {
       status: SyncJobStatus.FAILED,
-      lastError: "Panel did not confirm deletion of Remnawave profile 'rem-user-1'",
+      lastError:
+        "Deleting Remnawave profile '4711' for subscription subscription-1: " +
+        'HTTP 409 A099: user is locked',
+      // The panel READ the request and refused it. Re-sending identical bytes
+      // every five minutes cannot change that, so the row must not be handed
+      // to the recovery sweep as though it might heal on its own.
       recoveryData: { classification: 'TERMINAL' },
     });
   });
@@ -1069,7 +1142,7 @@ describe('ProfileSyncProcessor', () => {
     const errorEvents: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       deleteJobPrismaMock(0, () => undefined) as never,
-      { deletePanelUser: async () => { throw new ServiceUnavailableException('Remnawave integration is unavailable'); } } as never,
+      { deleteUser: async () => ({ kind: 'network', detail: 'ECONNREFUSED' }) } as never,
       {} as never,
       { error: (...a: unknown[]) => { errorEvents.push(a); }, info: () => undefined } as never,
     );
@@ -1082,7 +1155,7 @@ describe('ProfileSyncProcessor', () => {
     const errorEvents: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       deleteJobPrismaMock(4, () => undefined) as never, // attempt 5 = final
-      { deletePanelUser: async () => { throw new ServiceUnavailableException('Remnawave integration is unavailable'); } } as never,
+      { deleteUser: async () => ({ kind: 'network', detail: 'ECONNREFUSED' }) } as never,
       {} as never,
       { error: (...a: unknown[]) => { errorEvents.push(a); }, info: () => undefined } as never,
     );
@@ -1094,7 +1167,8 @@ describe('ProfileSyncProcessor', () => {
     const errorEvents: unknown[] = [];
     const processor = new ProfileSyncProcessor(
       deleteJobPrismaMock(4, () => undefined) as never, // attempt 5 = final
-      { deletePanelUser: async () => ({ isDeleted: false }) } as never, // → plain Error, non-transient
+      // The panel answered and refused → a plain Error, non-transient.
+      { deleteUser: async () => panelRejected(400, 'A001', 'bad request') } as never,
       {} as never,
       { error: (...a: unknown[]) => { errorEvents.push(a); }, info: () => undefined } as never,
     );
@@ -1149,7 +1223,7 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-drift', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,
             attempts, supersededAt: null, createdAt,
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              id: 'subscription-1', userId: 'user-1', remnawaveId: '4711',
               trafficLimit: null, deviceLimit: 0, internalSquads: [], externalSquad: null,
               expiresAt: null, planSnapshot: {},
             },
@@ -1162,7 +1236,7 @@ describe('ProfileSyncProcessor', () => {
           },
         },
       } as never,
-      { deletePanelUser: async () => { throw error; } } as never,
+      { deleteUser: async () => { throw error; } } as never,
       {} as never,
       { error: (...a: unknown[]) => { errorEvents.push(a); }, info: () => undefined } as never,
     );
@@ -1212,10 +1286,9 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => ({
-          uuid: 'rem-user-drift', subscriptionUrl: 'https://sub.example/drift',
-        }),
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () =>
+          panelOk({ id: 4722, username: 'rz_subscription_1', subscriptionUrl: 'https://sub.example/drift' }),
       } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'drift' }),
@@ -1417,7 +1490,7 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-late-failure', action: SyncAction.DELETE,
             status: SyncJobStatus.PENDING, attempts: 0, supersededAt: null,
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              id: 'subscription-1', userId: 'user-1', remnawaveId: '4711',
               trafficLimit: null, deviceLimit: 0, internalSquads: [], externalSquad: null,
               expiresAt: null, planSnapshot: {},
             },
@@ -1433,7 +1506,7 @@ describe('ProfileSyncProcessor', () => {
           update: async () => { throw new Error('failure path must be compare-and-set, never unconditional'); },
         },
       } as never,
-      { deletePanelUser: async () => { throw new Error('late stale failure'); } } as never,
+      { deleteUser: async () => { throw new Error('late stale failure'); } } as never,
       {} as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -1462,7 +1535,7 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-lease-fence', action: SyncAction.UPDATE, status: SyncJobStatus.PENDING,
             attempts: 0, supersededAt: null, startedAt: new Date('2026-01-01T00:00:00.000Z'),
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              id: 'subscription-1', userId: 'user-1', remnawaveId: '4711',
               trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
             },
@@ -1476,10 +1549,11 @@ describe('ProfileSyncProcessor', () => {
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
         }),
       } as never,
-      { updatePanelUser: async () => undefined } as never,
+      { updateUser: async () => panelOk() } as never,
       {
         generateProfileName: async () => ({ username: 'rz_lease', description: 'lease' }),
         getContactInfo: async () => ({ email: null, telegramId: null }),
@@ -1505,7 +1579,7 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-failure-lease-fence', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,
             attempts: 0, supersededAt: null, startedAt: new Date('2026-01-01T00:00:00.000Z'),
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              id: 'subscription-1', userId: 'user-1', remnawaveId: '4711',
               trafficLimit: null, deviceLimit: 0, internalSquads: [], externalSquad: null,
               expiresAt: null, planSnapshot: {},
             },
@@ -1516,7 +1590,7 @@ describe('ProfileSyncProcessor', () => {
           },
         },
       } as never,
-      { deletePanelUser: async () => { throw new Error('lease-fenced failure'); } } as never,
+      { deleteUser: async () => { throw new Error('lease-fenced failure'); } } as never,
       {} as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -1545,7 +1619,14 @@ describe('ProfileSyncProcessor', () => {
     const makeSubscription = () => ({
       id: 'subscription-imported',
       userId: 'user-1',
+      // A donor dump's identity, with the numeric id the panel reported the
+      // last time anything read this row. The PATCH is therefore addressed
+      // directly, which is the only kind of route whose 404 may be read as
+      // "this profile is gone".
       remnawaveId: remnawaveIdCleared ? null : 'rem-stale-uuid',
+      remnawavePanelId: remnawaveIdCleared ? null : 5149,
+      remnawavePanelUsername: 'rz_subscription_imported',
+      configUrl: null,
       trafficLimit: 10,
       deviceLimit: 2,
       internalSquads: ['internal-a'],
@@ -1587,17 +1668,23 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        updatePanelUser: async () => { throw new RemnawaveProfileNotFoundError('rem-stale-uuid'); },
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => {
+        resolveUser: async () => {
+          assert.fail('the recorded numeric id addresses the PATCH; nothing may re-resolve it');
+        },
+        // The identity-addressed PATCH is what discovers the absence, and it is
+        // the ONLY kind of route whose 404 may be read that way: a resolve is
+        // keyed on a mutable attribute, so its 404 is satisfied by an operator
+        // renaming a live profile.
+        updateUser: async () => panelMissing(),
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () => {
           createCalled = true;
-          return {
-            uuid: 'rem-fresh-uuid',
-            panelId: 5150,
+          return panelOk({
+            id: 5150,
             username: 'rz_subscription_imported',
             subscriptionUrl: 'https://sub.example/fresh',
-            createdAt: '2026-02-01T00:00:00.000Z',
-          };
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+          });
         },
       } as never,
       {
@@ -1609,7 +1696,7 @@ describe('ProfileSyncProcessor', () => {
 
     await processor.process({ data: { syncJobId: 'sync-job-reprovision' } } as never);
 
-    assert.equal(createCalled, true, 'must re-provision the missing profile via createPanelUser');
+    assert.equal(createCalled, true, 'must re-provision the missing profile via CREATE');
     // The stale id was detached (fenced on the old uuid) before CREATE...
     assert.deepStrictEqual(subscriptionUpdates[0], {
       where: { id: 'subscription-imported', remnawaveId: 'rem-stale-uuid' },
@@ -1623,16 +1710,71 @@ describe('ProfileSyncProcessor', () => {
         configUrl: null,
       },
     });
-    // ...and the fresh profile was linked back.
+    // ...and the fresh profile was linked back, under the identity this panel
+    // actually answers to.
     assert.deepStrictEqual(subscriptionUpdates[1], {
       where: { id: 'subscription-imported' },
       data: {
-        remnawaveId: 'rem-fresh-uuid',
+        remnawaveId: '5150',
         remnawavePanelId: 5150,
         remnawavePanelUsername: 'rz_subscription_imported',
         configUrl: 'https://sub.example/fresh',
       },
     });
+  });
+
+  it('does NOT re-provision when the RESOLVE cannot find the recorded username', async () => {
+    // The one 404 that must never be read as "the profile is gone".
+    // `POST /api/users/resolve` is keyed on a MUTABLE attribute, so `A063`
+    // there means "no user carries that username right now" — which an
+    // operator who renamed a perfectly live profile satisfies. Re-provisioning
+    // on it mints a SECOND live profile for one paying customer and detaches
+    // the row from the first, and nothing afterwards looks at the original
+    // again.
+    let createCalled = false;
+    let idCleared = false;
+    const processor = new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-renamed', action: SyncAction.UPDATE, status: SyncJobStatus.PENDING,
+            attempts: 0, supersededAt: null, payload: {},
+            subscription: {
+              // No numeric id was ever recorded, so the panel username is the
+              // only address this row has.
+              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-donor-uuid',
+              remnawavePanelId: null, remnawavePanelUsername: 'rz_subscription_1', configUrl: null,
+              trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
+              status: SubscriptionStatus.ACTIVE,
+              expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
+            },
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        subscription: {
+          updateMany: async () => { idCleared = true; return { count: 1 }; },
+        },
+      } as never,
+      {
+        resolveUser: async () => panelMissing(),
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () => { createCalled = true; return panelOk(); },
+      } as never,
+      {
+        generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'x' }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, info: () => undefined, warn: () => undefined } as never,
+    );
+
+    await assert.rejects(
+      () => processor.process({ data: { syncJobId: 'sync-job-renamed' } } as never),
+      (err: Error) =>
+        err instanceof ServiceUnavailableException && /renamed profile answers the same way/.test(err.message),
+    );
+    assert.equal(createCalled, false, 'an unresolvable name must not mint a second profile');
+    assert.equal(idCleared, false, 'and must not detach the row from the one it has');
   });
 
   it('does NOT re-provision on a transient panel outage during UPDATE (fails for retry)', async () => {
@@ -1651,7 +1793,8 @@ describe('ProfileSyncProcessor', () => {
             supersededAt: null,
             payload: {},
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: 'rem-user-1',
+              id: 'subscription-1', userId: 'user-1', remnawaveId: '4711',
+              remnawavePanelId: 4711, remnawavePanelUsername: 'rz_subscription_1', configUrl: null,
               trafficLimit: 1, deviceLimit: 1, internalSquads: [], externalSquad: null,
               status: SubscriptionStatus.ACTIVE,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'), planSnapshot: {},
@@ -1665,9 +1808,11 @@ describe('ProfileSyncProcessor', () => {
         },
       } as never,
       {
-        updatePanelUser: async () => { throw new ServiceUnavailableException('Remnawave integration is unavailable'); },
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => { createCalled = true; return { uuid: 'x' }; },
+        // Nothing was heard back. That is NOT "the profile is gone", and reading
+        // it as one would detach a live subscription during a blip.
+        updateUser: async () => ({ kind: 'network', detail: 'ECONNREFUSED' }),
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () => { createCalled = true; return panelOk(); },
       } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'x' }),
@@ -1678,7 +1823,7 @@ describe('ProfileSyncProcessor', () => {
 
     await assert.rejects(
       () => processor.process({ data: { syncJobId: 'sync-job-outage' } } as never),
-      /unavailable/,
+      (err: Error) => err instanceof ServiceUnavailableException,
     );
     assert.equal(createCalled, false, 'transient outage must not trigger re-provision');
     assert.equal(idCleared, false, 'transient outage must not detach the profile id');
@@ -1727,17 +1872,16 @@ describe('ProfileSyncProcessor', () => {
         }),
       } as never,
       {
-        updatePanelUser: async () => { updatePanelCalled = true; return { uuid: 'should-not-be-called' }; },
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => {
+        updateUser: async () => { updatePanelCalled = true; return panelOk(); },
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () => {
           createCalled = true;
-          return {
-            uuid: 'rem-fresh',
-            panelId: 7788,
+          return panelOk({
+            id: 7788,
             username: 'rz_subscription_unlinked',
             subscriptionUrl: 'https://sub/fresh',
-            createdAt: '2026-02-01T00:00:00.000Z',
-          };
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+          });
         },
       } as never,
       {
@@ -1750,12 +1894,12 @@ describe('ProfileSyncProcessor', () => {
     await processor.process({ data: { syncJobId: 'sync-job-unlinked' } } as never);
 
     assert.equal(updatePanelCalled, false, 'must not PATCH — there is no linked profile to update');
-    assert.equal(createCalled, true, 'must provision the missing profile via createPanelUser');
+    assert.equal(createCalled, true, 'must provision the missing profile via CREATE');
     // The fresh profile was linked back to the previously-unlinked subscription.
     assert.deepStrictEqual(subscriptionUpdates[0], {
       where: { id: 'subscription-unlinked' },
       data: {
-        remnawaveId: 'rem-fresh',
+        remnawaveId: '7788',
         remnawavePanelId: 7788,
         remnawavePanelUsername: 'rz_subscription_unlinked',
         configUrl: 'https://sub/fresh',
@@ -1806,10 +1950,11 @@ describe('ProfileSyncProcessor', () => {
   // unprovisioned subscription that retried until the heat death of the queue
   // with nobody told.
   //
-  // Every test below drives the REAL `RemnawaveApiService` over a fake axios
-  // transport, so the classification is produced by the production chain
-  // (HTTP status → adapter exception → classifyRecovery) rather than by a
-  // stubbed error object that merely resembles one.
+  // Every test below drives the REAL client stack — transport, executor and
+  // `PanelUsersClient` — over a fake axios, so the classification is produced
+  // by the production chain (HTTP status → outcome → `readPanelFailure` →
+  // `classifyRecovery`) rather than by a stubbed object that merely resembles
+  // one.
 
   interface PanelRequest {
     readonly method: string;
@@ -1817,29 +1962,47 @@ describe('ProfileSyncProcessor', () => {
     readonly data?: unknown;
   }
 
-  /** A real adapter whose HTTP layer is driven by `respond`. */
-  function realAdapter(
+  /** A real client whose HTTP layer is driven by `respond`. */
+  function realClient(
     respond: (request: PanelRequest) => { status: number; data?: unknown },
     captured: PanelRequest[] = [],
-  ): RemnawaveApiService {
-    return new RemnawaveApiService(
-      {
-        request: (config: PanelRequest) => {
-          captured.push({ method: config.method, url: config.url, data: config.data });
-          const outcome = respond(config);
-          if (outcome.status >= 200 && outcome.status < 300) {
-            return of({ data: outcome.data ?? {} });
-          }
-          return throwError(() => ({
-            isAxiosError: true,
-            response: { status: outcome.status, data: outcome.data ?? {} },
-            message: `Request failed with status code ${outcome.status}`,
-          }));
-        },
-      } as never,
-      { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
+  ): PanelUsersClient {
+    return new PanelUsersClient(
+      new PanelCommandExecutor(
+        new AxiosPanelTransport(
+          {
+            request: (config: PanelRequest) => {
+              captured.push({ method: config.method, url: config.url, data: config.data });
+              const outcome = respond(config);
+              if (outcome.status >= 200 && outcome.status < 300) {
+                return of({ data: outcome.data ?? {} });
+              }
+              return throwError(() => ({
+                isAxiosError: true,
+                response: { status: outcome.status, headers: {}, data: outcome.data ?? {} },
+                message: `Request failed with status code ${outcome.status}`,
+              }));
+            },
+          } as never,
+          { host: 'remnawave', port: 3000, token: 'secret' },
+        ),
+      ),
     );
   }
+
+  /**
+   * The panel's own "no such user" answer to a `by-username` lookup.
+   *
+   * A BARE 404 WOULD NOT DO, and that is the point of spelling the envelope
+   * out: `readPanelFailure` reads a 404 with no `A025`/`A063` as a gateway
+   * answer and defers, because that is what a reverse proxy returns for every
+   * request while it has no healthy backend. Only the panel's own envelope
+   * means the profile is absent and the CREATE may mint one.
+   */
+  const USER_NOT_FOUND = {
+    status: 404,
+    data: { errorCode: 'A063', message: 'User with specified params not found' },
+  } as const;
 
   interface CreateRunResult {
     readonly failureWrites: unknown[];
@@ -1913,7 +2076,7 @@ describe('ProfileSyncProcessor', () => {
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete-job' }) },
         }),
       } as never,
-      realAdapter(options.respond, requests),
+      realClient(options.respond, requests),
       {
         generateProfileName: async () => ({
           username: options.username ?? 'rz_login_sub',
@@ -1951,7 +2114,7 @@ describe('ProfileSyncProcessor', () => {
       attempts: PROFILE_SYNC_MAX_ATTEMPTS - 1,
       respond: (request) =>
         request.url.startsWith('/api/users/by-username/')
-          ? { status: 404 }
+          ? USER_NOT_FOUND
           : { status: 400, data: { message: 'trafficLimitStrategy must be a string' } },
     });
 
@@ -1977,13 +2140,14 @@ describe('ProfileSyncProcessor', () => {
   it('classifies a rejection by its TYPE, not by whether its text happens to contain "502"', async () => {
     // `classifyRecovery`'s last resort is a substring scan for
     // /timeout|temporar|econn|429|502|503|504|unavailable/ over the message.
-    // A rejection message names the URL, and a Remnawave UUID is hex — so a
-    // profile whose id merely STARTS with `502` would make a permanent 400 read
-    // as TRANSIENT and drop straight back into the forever-retry, no-alert
-    // hole. The `instanceof RemnawaveUpstreamRejectionError` arm is what makes
-    // the classification depend on what happened rather than on how it reads.
-    const transientLookingUuid = '50231111-4222-4333-8444-555566667777';
-    assert.match(transientLookingUuid, /^[0-9a-f-]+$/, 'a plain hex UUID, nothing contrived');
+    // A refusal message names the profile, and a numeric panel id is decimal —
+    // so a profile whose id merely CONTAINS `502` would make a permanent 400
+    // read as TRANSIENT and drop straight back into the forever-retry,
+    // no-alert hole. What keeps the classification honest is that a refusal is
+    // built as a plain `Error` and an outage as a `ServiceUnavailableException`
+    // — the CLASS decides, never the prose.
+    const transientLookingId = '50231111';
+    assert.match(transientLookingId, /^\d+$/, 'an ordinary panel id, nothing contrived');
 
     const failureWrites: unknown[] = [];
     const errorEvents: unknown[] = [];
@@ -1995,7 +2159,7 @@ describe('ProfileSyncProcessor', () => {
             id: 'sync-job-hexy', action: SyncAction.DELETE, status: SyncJobStatus.PENDING,
             attempts: PROFILE_SYNC_MAX_ATTEMPTS - 1, supersededAt: null, createdAt: new Date(), payload: {},
             subscription: {
-              id: 'subscription-1', userId: 'user-1', remnawaveId: transientLookingUuid,
+              id: 'subscription-1', userId: 'user-1', remnawaveId: transientLookingId,
               trafficLimit: null, deviceLimit: 0, internalSquads: [], externalSquad: null,
               // DELETED, which is the state a sweep-enqueued DELETE actually
               // runs against: `SubscriptionDeletionService.deleteSubscription`
@@ -2017,7 +2181,7 @@ describe('ProfileSyncProcessor', () => {
           },
         },
       } as never,
-      realAdapter(() => ({ status: 400, data: { message: 'uuid must be a valid UUID' } })),
+      realClient(() => ({ status: 400, data: { message: 'id must be a number' } })),
       {} as never,
       {
         error: (...args: unknown[]) => { errorEvents.push(args); },
@@ -2055,14 +2219,20 @@ describe('ProfileSyncProcessor', () => {
           },
         },
       } as never,
-      new RemnawaveApiService(
-        {
-          request: () =>
-            throwError(() =>
-              Object.assign(new Error('connect ECONNREFUSED 10.0.0.4:3000'), { isAxiosError: true }),
-            ),
-        } as never,
-        { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
+      new PanelUsersClient(
+        new PanelCommandExecutor(
+          new AxiosPanelTransport(
+            {
+              request: () =>
+                throwError(() =>
+                  Object.assign(new Error('connect ECONNREFUSED 10.0.0.4:3000'), {
+                    isAxiosError: true,
+                  }),
+                ),
+            } as never,
+            { host: 'remnawave', port: 3000, token: 'secret' },
+          ),
+        ),
       ),
       {
         generateProfileName: async () => ({ username: 'rz_login_sub', description: 'reiwa_id: user-1' }),
@@ -2093,20 +2263,29 @@ describe('ProfileSyncProcessor', () => {
       },
       respond: (request) =>
         request.url.startsWith('/api/users/by-username/')
-          ? { status: 404 }
+          ? USER_NOT_FOUND
           : {
               status: 200,
-              data: { response: { uuid: 'rem-created', subscriptionUrl: 'https://sub/x', createdAt: '2026-01-01T00:00:00.000Z' } },
+              data: {
+                response: {
+                  id: 6001,
+                  username: 'rz_login_sub',
+                  subscriptionUrl: 'https://sub/x',
+                  createdAt: '2026-01-01T00:00:00.000Z',
+                },
+              },
             },
     });
 
-    const createBody = requests.find((r) => r.url === '/api/users')?.data as Record<string, unknown>;
-    assert.ok(createBody !== undefined, 'CREATE must reach POST /api/users');
-    assert.equal(
-      'trafficLimitStrategy' in createBody,
-      false,
-      'a snapshot with no strategy must omit the field, not send null',
-    );
+    const createBody = requests.find((r) => r.url === '/api/users/')?.data as Record<string, unknown>;
+    assert.ok(createBody !== undefined, 'CREATE must reach POST /api/users/');
+    // THE FIELD IS PRESENT AND IT IS THE CONTRACT'S OWN DEFAULT, not `null`.
+    // The processor omits it, and the executor sends what the schema PARSED —
+    // so the vendor's `.default(NO_RESET)` reaches the wire instead of the
+    // `null` that used to 400 every 3x-ui import. What must never appear here
+    // is the null itself.
+    assert.notEqual(createBody['trafficLimitStrategy'], null);
+    assert.equal(createBody['trafficLimitStrategy'], 'NO_RESET');
     assert.equal(failureWrites.length, 0);
     assert.equal(completedWrites.length, 1);
   });
@@ -2153,15 +2332,22 @@ describe('ProfileSyncProcessor', () => {
       username: `rz_${'l'.repeat(40)}_sub`,
       respond: (request) =>
         request.url.startsWith('/api/users/by-username/')
-          ? { status: 404 }
+          ? USER_NOT_FOUND
           : {
               status: 200,
-              data: { response: { uuid: 'rem-created', subscriptionUrl: 'https://sub/x', createdAt: '2026-01-01T00:00:00.000Z' } },
+              data: {
+                response: {
+                  id: 6001,
+                  username: 'rz_login_sub',
+                  subscriptionUrl: 'https://sub/x',
+                  createdAt: '2026-01-01T00:00:00.000Z',
+                },
+              },
             },
     });
 
     const lookup = requests.find((r) => r.url.startsWith('/api/users/by-username/'));
-    const created = requests.find((r) => r.url === '/api/users');
+    const created = requests.find((r) => r.url === '/api/users/');
     assert.ok(lookup !== undefined && created !== undefined);
     const lookedUpName = decodeURIComponent(lookup.url.replace('/api/users/by-username/', ''));
     const createdName = (created.data as Record<string, unknown>)['username'];
@@ -2180,14 +2366,15 @@ describe('ProfileSyncProcessor', () => {
               status: 200,
               data: {
                 response: {
-                  uuid: 'rem-belongs-to-someone-else',
+                  id: 6002,
+                  username: 'rz_login_sub',
                   subscriptionUrl: 'https://sub/other',
                   createdAt: '2026-01-01T00:00:00.000Z',
                   description: 'name: Other\nreiwa_id: user-999',
                 },
               },
             }
-          : { status: 200, data: { response: { uuid: 'unreachable' } } },
+          : { status: 200, data: { response: { id: 6003, username: 'unreachable' } } },
     });
 
     assert.deepEqual(linkWrites, [], 'another customer\'s profile must never be linked');
@@ -2212,7 +2399,6 @@ describe('ProfileSyncProcessor', () => {
               status: 200,
               data: {
                 response: {
-                  uuid: 'rem-taken',
                   id: 1203,
                   username: 'rz_subscription_1',
                   subscriptionUrl: 'https://sub/taken',
@@ -2237,10 +2423,9 @@ describe('ProfileSyncProcessor', () => {
               status: 200,
               data: {
                 response: {
-                  uuid: 'rem-mine',
-                  // A real by-username response carries both; without them the
-                  // fixture would prove the link is written but not that the
-                  // identity needed after a panel upgrade is recorded with it.
+                  // The numeric id AND the username: without them the fixture
+                  // would prove the link is written but not that the identity
+                  // every later job addresses by is recorded with it.
                   id: 1201,
                   username: 'rz_subscription_1',
                   subscriptionUrl: 'https://sub/mine',
@@ -2257,7 +2442,7 @@ describe('ProfileSyncProcessor', () => {
       {
         where: { id: 'subscription-1' },
         data: {
-          remnawaveId: 'rem-mine',
+          remnawaveId: '1201',
           remnawavePanelId: 1201,
           remnawavePanelUsername: 'rz_subscription_1',
           configUrl: 'https://sub/mine',
@@ -2277,7 +2462,6 @@ describe('ProfileSyncProcessor', () => {
               status: 200,
               data: {
                 response: {
-                  uuid: 'rem-legacy',
                   id: 1202,
                   username: 'rz_subscription_1',
                   subscriptionUrl: 'https://sub/legacy',
@@ -2294,7 +2478,7 @@ describe('ProfileSyncProcessor', () => {
       {
         where: { id: 'subscription-1' },
         data: {
-          remnawaveId: 'rem-legacy',
+          remnawaveId: '1202',
           remnawavePanelId: 1202,
           remnawavePanelUsername: 'rz_subscription_1',
           configUrl: 'https://sub/legacy',
@@ -2323,7 +2507,10 @@ describe('ProfileSyncProcessor', () => {
       subscription: {
         id: 'subscription-1',
         userId: 'user-1',
-        remnawaveId: 'rem-user-1',
+        remnawaveId: '4711',
+        remnawavePanelId: 4711,
+        remnawavePanelUsername: 'rz_login_sub',
+        configUrl: null,
         trafficLimit: 5,
         deviceLimit: 2,
         internalSquads: [],
@@ -2353,8 +2540,13 @@ describe('ProfileSyncProcessor', () => {
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused' }) },
         }),
       } as never,
-      realAdapter(
-        () => ({ status: 200, data: { response: { uuid: 'rem-user-1', createdAt: '2026-01-01T00:00:00.000Z' } } }),
+      realClient(
+        () => ({
+          status: 200,
+          data: {
+            response: { id: 4711, username: 'rz_login_sub', createdAt: '2026-01-01T00:00:00.000Z' },
+          },
+        }),
         requests,
       ),
       {
@@ -2365,7 +2557,7 @@ describe('ProfileSyncProcessor', () => {
     );
 
     await processor.process({ data: { syncJobId: 'sync-job-status' } } as never);
-    const patch = requests.find((r) => r.url === '/api/users');
+    const patch = requests.find((r) => r.url === '/api/users/');
     assert.ok(patch !== undefined, 'UPDATE must reach PATCH /api/users');
     return { body: patch.data as Record<string, unknown>, failureWrites };
   }
@@ -2390,7 +2582,14 @@ describe('ProfileSyncProcessor', () => {
       // write renewal never undoes, because renewal does not propagate status.
       const { body, failureWrites } = await runStatusUpdate(localStatus);
       assert.equal('status' in body, false);
-      assert.equal(body['expireAt'], '2099-01-01T00:00:00.000Z', 'expiry still travels');
+      // The contract PARSES `expireAt` into a `Date` before the request goes
+      // out, and axios serialises that back to the same ISO string. Asserted on
+      // the instant rather than on the representation.
+      assert.equal(
+        new Date(body['expireAt'] as string | Date).toISOString(),
+        '2099-01-01T00:00:00.000Z',
+        'expiry still travels',
+      );
       assert.equal(failureWrites.length, 0);
     });
   }
@@ -2411,9 +2610,10 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
     const subscription = {
       id: 'subscription-1',
       userId: 'user-1',
-      remnawaveId: 'rem-user-1',
+      remnawaveId: '4711',
       remnawavePanelId: null,
       remnawavePanelUsername: null,
+      configUrl: null,
       trafficLimit: 2,
       deviceLimit: 3,
       internalSquads: [],
@@ -2451,7 +2651,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
         }),
       } as never,
-      { updatePanelUser: async () => panelUser } as never,
+      { updateUser: async () => ({ kind: 'ok', drifted: false, data: { response: panelUser } }) } as never,
       {
         generateProfileName: async () => ({ username: 'rz_bob_1', description: 'd' }),
         getContactInfo: async () => ({ email: null, telegramId: null }),
@@ -2464,7 +2664,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
   it('records the numeric id and the panel username from an ordinary UPDATE', async () => {
     const { processor, subscriptionWrites } = build(
       {},
-      { uuid: 'rem-user-1', panelId: 4471, username: 'rz_bob_1', createdAt: null },
+      { id: 4471, username: 'rz_bob_1', createdAt: null },
     );
 
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
@@ -2472,7 +2672,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
     assert.deepStrictEqual(subscriptionWrites, [{
       // Fenced on the id we addressed by: a re-provision that landed while this
       // job ran must not have the PREVIOUS profile's identity written over it.
-      where: { id: 'subscription-1', remnawaveId: 'rem-user-1' },
+      where: { id: 'subscription-1', remnawaveId: '4711' },
       data: { remnawavePanelId: 4471, remnawavePanelUsername: 'rz_bob_1' },
     }]);
   });
@@ -2481,7 +2681,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
     // Otherwise this would be an extra UPDATE on every sync job forever.
     const { processor, subscriptionWrites } = build(
       { remnawavePanelId: 4471, remnawavePanelUsername: 'rz_bob_1' },
-      { uuid: 'rem-user-1', panelId: 4471, username: 'rz_bob_1', createdAt: null },
+      { id: 4471, username: 'rz_bob_1', createdAt: null },
     );
 
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
@@ -2492,7 +2692,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
   it('fills only the column that is missing', async () => {
     const { processor, subscriptionWrites } = build(
       { remnawavePanelId: 4471 },
-      { uuid: 'rem-user-1', panelId: 4471, username: 'rz_bob_1', createdAt: null },
+      { id: 4471, username: 'rz_bob_1', createdAt: null },
     );
 
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
@@ -2504,11 +2704,11 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
   });
 
   it('does not invent a username from a panel row that carries none', async () => {
-    // `parsePanelUserRow` yields '' when the panel omits the field, and an
-    // empty username resolves to "which user is called nothing?".
+    // A drifted body is handed back RAW, so `username` can arrive empty — and
+    // an empty username resolves to "which user is called nothing?".
     const { processor, subscriptionWrites } = build(
       {},
-      { uuid: 'rem-user-1', panelId: 4471, username: '', createdAt: null },
+      { id: 4471, username: '', createdAt: null },
     );
 
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
@@ -2528,8 +2728,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
 describe('ProfileSyncProcessor — live state must survive the safeguards', () => {
   /** The panel-profile row a CREATE finds when it looks the name up. */
   interface AdoptablePanelUser {
-    readonly uuid: string;
-    readonly panelId: number | null;
+    readonly id: number;
     readonly username: string;
     readonly description: string | null;
     readonly subscriptionUrl: string;
@@ -2661,15 +2860,29 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
         }),
       } as never,
       {
-        getPanelUserByUsername: async () => options.existingPanelUser,
-        createPanelUser: async () => {
+        getUserByUsername: async () =>
+          options.existingPanelUser === null
+            ? {
+                kind: 'rejected',
+                status: 404,
+                code: 'A063',
+                detail: 'User with specified params not found',
+                retryAfterMs: null,
+              }
+            : { kind: 'ok', drifted: false, data: { response: options.existingPanelUser } },
+        createUser: async () => {
           creates += 1;
           return {
-            uuid: 'rem-user-fresh',
-            panelId: 9001,
-            username: 'rz_john_sub',
-            subscriptionUrl: 'https://sub.example/fresh',
-            createdAt: '2026-01-15T12:30:00.000Z',
+            kind: 'ok',
+            drifted: false,
+            data: {
+              response: {
+                id: 9001,
+                username: 'rz_john_sub',
+                subscriptionUrl: 'https://sub.example/fresh',
+                createdAt: new Date('2026-01-15T12:30:00.000Z'),
+              },
+            },
           };
         },
       } as never,
@@ -2737,7 +2950,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
     assert.equal(created.deleteJobPayloads.length, 1);
     assert.deepEqual(created.deleteJobPayloads[0], {
       source: 'CREATE_COMPLETED_AFTER_DELETE',
-      targetRemnawaveId: 'rem-user-fresh',
+      targetRemnawaveId: '9001',
       targetRemnawavePanelId: 9001,
       targetRemnawavePanelUsername: 'rz_john_sub',
     });
@@ -2756,8 +2969,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
     const created = createProcessor({
       subscription: { id: 'subscription-1', userId: 'user-1' },
       existingPanelUser: {
-        uuid: '4471',
-        panelId: 4471,
+        id: 4471,
         username: 'rz_john_sub',
         description: 'name: John\nreiwa_id: user-1',
         subscriptionUrl: 'https://sub.example/adopted',
@@ -2768,9 +2980,9 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
           id: 'subscription-paying',
           userId: 'user-1',
           status: SubscriptionStatus.ACTIVE,
-          // Provisioned on 2.7.4 — the panel's migration to 3.x dropped this
-          // uuid, so the row can only be recognised by the two supplementary
-          // columns beside it.
+          // Provisioned before the operator upgraded — the panel's own
+          // migration dropped this uuid, so the row can only be recognised by
+          // the two supplementary columns beside it.
           remnawaveId: 'd7a1f0c2-9b3e-4d5a-8f61-0c2b9e3d5a8f',
           remnawavePanelId: 4471,
           remnawavePanelUsername: 'rz_john_sub',
@@ -2844,9 +3056,9 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
         },
       } as never,
       {
-        deletePanelUser: async (ref: unknown) => {
-          deletedTargets.push(ref);
-          return { isDeleted: true };
+        deleteUser: async (userId: number) => {
+          deletedTargets.push(userId);
+          return { kind: 'ok', drifted: false, data: undefined };
         },
       } as never,
       {} as never,
@@ -2913,9 +3125,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
 
     await deletion.run();
 
-    assert.deepEqual(deletion.deletedTargets, [
-      { remnawaveId: '4471', panelId: 4471, panelUsername: 'rz_john_sub' },
-    ]);
+    assert.deepEqual(deletion.deletedTargets, [4471]);
   });
 });
 
@@ -3095,8 +3305,11 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
         },
       } as never,
       {
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => panelUser,
+        getUserByUsername: async () => panelMissing(),
+        // `drifted: true` on purpose. The executor is LENIENT — a `2xx` whose
+        // body fails the pinned contract is handed back RAW — so this is the
+        // shape a real panel can produce, not a fixture that could not happen.
+        createUser: async () => ({ kind: 'ok', drifted: true, data: { response: panelUser } }),
       } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'd' }),
@@ -3113,12 +3326,13 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
   }
 
   it('refuses a created profile whose identity did not decode, instead of completing empty', async () => {
-    // EXACTLY the object the pre-fix `unwrapPanelUser` produced on a 3.x panel:
-    // the declared type promises `uuid: string`, and the panel never sent that
-    // field at all. This is the shape that reached Prisma in production.
+    // A body with no `id` at all — which the lenient executor hands straight
+    // through. `String(undefined)` is `'undefined'`, a NON-EMPTY string that
+    // sails past the emptiness guard and names no profile on any panel, so
+    // "completed" would once again mean a job that reported success over a
+    // meaningless column. That is the same defect the old cast produced,
+    // arriving through the one door the new layer deliberately leaves open.
     const attempt = createWithPanelUser({
-      uuid: undefined,
-      panelId: undefined,
       username: 'rz_subscription_1',
       subscriptionUrl: 'https://sub.example/created',
       createdAt: '2026-01-15T12:30:00.000Z',
@@ -3135,10 +3349,11 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
     assert.equal(statuses.includes(SyncJobStatus.COMPLETED), false);
   });
 
-  it('refuses an empty-string identity for the same reason', async () => {
+  it('refuses an id that is not a usable number for the same reason', async () => {
+    // The other spellings a drifted body can carry: a string where the contract
+    // declares a number, and a value too large to survive `String()` intact.
     const attempt = createWithPanelUser({
-      uuid: '',
-      panelId: 4471,
+      id: '4471',
       username: 'rz_subscription_1',
       subscriptionUrl: 'https://sub.example/created',
       createdAt: '2026-01-15T12:30:00.000Z',
@@ -3200,7 +3415,12 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
           },
         },
       } as never,
-      { deletePanelUser: async () => ({ isDeleted: true }) } as never,
+      {
+        deleteUser: async () => ({ kind: 'ok', drifted: false, data: undefined }),
+        resolveUser: async () => {
+          throw new Error('the recorded numeric id is the address; nothing may re-resolve it');
+        },
+      } as never,
       {} as never,
       {
         error: (...args: unknown[]) => { errorEvents.push(args); },
@@ -3215,17 +3435,19 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
     };
   }
 
-  it('asks about the NUMERIC id too, so a job targeting the 2.x uuid still retires the row', async () => {
-    // The subscription was provisioned on 2.x and its DELETE was enqueued under
-    // the uuid. The operator then upgraded, the profile was re-linked under its
-    // 3.x name, and the row now stores the decimal. Both strings name ONE panel
-    // profile, so comparing only `remnawave_id` finds them unequal, touches no
-    // rows, and leaves the subscription live over a profile that is gone.
+  it('asks about the NUMERIC id too, so a row still holding its 2.x uuid is retired', async () => {
+    // The surviving half of the two-era problem. The DELETE targets the profile
+    // by the numeric id the panel answers to, while the ROW has never been
+    // repaired and still stores the uuid it was linked under before the
+    // operator upgraded. Both name ONE panel profile, so a fence that compared
+    // only `remnawave_id` would find them unequal, touch no rows, and leave the
+    // subscription live over a profile that is gone — silently, because nobody
+    // read `count`.
     const attempt = run({
-      rowRemnawaveId: '4471',
+      rowRemnawaveId: UUID,
       rowPanelId: 4471,
       payload: {
-        targetRemnawaveId: UUID,
+        targetRemnawaveId: '4471',
         targetRemnawavePanelId: 4471,
         targetRemnawavePanelUsername: 'rz_john_sub',
       },
@@ -3234,7 +3456,7 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
     await attempt.go();
 
     assert.deepEqual(attempt.retireWheres, [
-      { id: 'subscription-1', OR: [{ remnawaveId: UUID }, { remnawavePanelId: 4471 }] },
+      { id: 'subscription-1', OR: [{ remnawaveId: '4471' }, { remnawavePanelId: 4471 }] },
     ]);
     assert.deepEqual(attempt.errorEvents, [], 'a matched fence is not a divergence');
   });
@@ -3245,15 +3467,15 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
     // therefore turn "this row, if it still holds the target" into "this row,
     // unconditionally", and retire it on a genuine mismatch.
     const attempt = run({
-      rowRemnawaveId: 'rem-user-1',
+      rowRemnawaveId: '4711',
       rowPanelId: null,
-      payload: { targetRemnawaveId: 'rem-user-1' },
+      payload: { targetRemnawaveId: '4711' },
     });
 
     await attempt.go();
 
     assert.deepEqual(attempt.retireWheres, [
-      { id: 'subscription-1', OR: [{ remnawaveId: 'rem-user-1' }] },
+      { id: 'subscription-1', OR: [{ remnawaveId: '4711' }] },
     ]);
   });
 
@@ -3282,9 +3504,9 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
     // was in flight and must keep its live link. Paging for it would page on a
     // documented, healthy path.
     const attempt = run({
-      rowRemnawaveId: 'rem-user-new',
+      rowRemnawaveId: '4719',
       rowPanelId: null,
-      payload: { targetRemnawaveId: 'rem-user-old' },
+      payload: { targetRemnawaveId: '4718' },
       retiredCount: 0,
     });
 

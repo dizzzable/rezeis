@@ -36,6 +36,33 @@ afterEach(() => {
   }
 });
 
+/**
+ * A `PanelUsersClient` stub that records THAT the panel was written to.
+ *
+ * The client returns outcomes rather than throwing, so a stub that answered
+ * `undefined` would make the processor read a successful PATCH as a failure —
+ * which is the one thing every test in this file assumes did not happen.
+ */
+function panelUsersStub(onUpdate: () => void) {
+  const response = {
+    id: 4711,
+    username: 'rz_user1_sub',
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    trafficLimitBytes: 0,
+    hwidDeviceLimit: null,
+  };
+  return {
+    updateUser: async () => {
+      onUpdate();
+      return { kind: 'ok' as const, drifted: false, data: { response } };
+    },
+    getUserById: async () => ({ kind: 'ok' as const, drifted: false, data: { response } }),
+    resolveUser: async () => {
+      throw new Error('a row carrying a numeric identity must never be re-resolved');
+    },
+  };
+}
+
 function versionedUpdateJob(desiredRevision: bigint) {
   return {
     id: 'sync-job-versioned',
@@ -48,7 +75,10 @@ function versionedUpdateJob(desiredRevision: bigint) {
     subscription: {
       id: 'subscription-1',
       userId: 'user-1',
-      remnawaveId: 'rem-user-1',
+      remnawaveId: '4711',
+      remnawavePanelId: 4711,
+      remnawavePanelUsername: 'rz_user1_sub',
+      configUrl: null,
       trafficLimit: 10,
       deviceLimit: 3,
       internalSquads: [],
@@ -78,7 +108,7 @@ describe('ProfileSyncProcessor versioned convergence (T-009a)', () => {
           findUnique: async () => ({ desiredRevision: 5n }),
         },
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      panelUsersStub(() => { upstreamCalled = true; }) as never,
       { generateProfileName: async () => ({ username: 'rz', description: 'd' }), getContactInfo: async () => ({ email: null, telegramId: null }) } as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -123,10 +153,13 @@ describe('ProfileSyncProcessor versioned convergence (T-009a)', () => {
         $transaction: async (cb: (tx: unknown) => Promise<unknown>) => cb({
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async () => undefined },
+          // The panel row carries a `createdAt`, so the MONTH_ROLLING anchor
+          // stamp runs on every successful PATCH.
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
         }),
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      panelUsersStub(() => { upstreamCalled = true; }) as never,
       { generateProfileName: async () => ({ username: 'rz', description: 'd' }), getContactInfo: async () => ({ email: null, telegramId: null }) } as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -157,10 +190,13 @@ describe('ProfileSyncProcessor versioned convergence (T-009a)', () => {
         $transaction: async (cb: (tx: unknown) => Promise<unknown>) => cb({
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: { update: async () => undefined },
+          // The panel row carries a `createdAt`, so the MONTH_ROLLING anchor
+          // stamp runs on every successful PATCH.
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
         }),
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      panelUsersStub(() => { upstreamCalled = true; }) as never,
       { generateProfileName: async () => ({ username: 'rz', description: 'd' }), getContactInfo: async () => ({ email: null, telegramId: null }) } as never,
       { error: () => undefined, info: () => undefined } as never,
     );
@@ -196,7 +232,7 @@ describe('ProfileSyncProcessor versioned convergence (T-009a)', () => {
           findUnique: async () => ({ desiredRevision: 5n }),
         },
       } as never,
-      { updatePanelUser: async () => { upstreamCalled = true; } } as never,
+      panelUsersStub(() => { upstreamCalled = true; }) as never,
       { generateProfileName: async () => ({ username: 'rz', description: 'd' }), getContactInfo: async () => ({ email: null, telegramId: null }) } as never,
       { error: () => undefined, info: () => undefined } as never,
     );

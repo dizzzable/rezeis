@@ -15,19 +15,20 @@ import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
 import { resolveAddOnRolloutFlags } from '../add-on-entitlements/add-on-rollout.config';
+import type { PanelCommandOutcome } from '../remnawave/services/panel-command.executor';
+import { PANEL_USER_NOT_FOUND_ERROR_CODES } from '../remnawave/services/panel-routes';
 import {
   panelShortUuidFromConfigUrl,
+  panelUserAddress,
   storedIdentityOf as panelIdentityOf,
   type StoredPanelIdentity,
 } from '../remnawave/services/panel-user-address';
 import {
-  RemnawaveApiService,
-  RemnawaveProfileNotFoundError,
-  RemnawaveUpstreamRejectionError,
-} from '../remnawave/services/remnawave-api.service';
+  PanelUsersClient,
+  type UpdatePanelUserBody,
+} from '../remnawave/services/panel-users.client';
 import {
-  assessObservedPanelLink,
-  observePanelEra,
+  isUuidShapedPanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
 } from '../remnawave/services/stale-panel-link';
 import {
@@ -51,6 +52,21 @@ interface ProfileSyncJobData {
  *  4. Marks the row as COMPLETED (or FAILED on error)
  *
  * Donor parity: altshop `src/infrastructure/taskiq/tasks/remnawave.py`.
+ *
+ * ── THE PANEL IS 3.x, AND THAT IS NOT A DEFAULT ─────────────────────────────
+ * Every panel call below goes through {@link PanelUsersClient}, which speaks
+ * the vendor's own contract and addresses users by NUMERIC ID, username or
+ * shortUuid — there is no uuid addressing left, because 3.x deleted the column.
+ * A 2.x panel is refused once, centrally, by `LegacyPanelRefusal` in
+ * `panel-transport.ts`; nothing here asks what era it is talking to. The era
+ * observation this file used to thread from the guard into the delete call is
+ * gone with it: there is one era now, so there is nothing for two readings of
+ * it to disagree about.
+ *
+ * WHAT DID NOT GO AWAY is the stale STORED identity. `Subscription.remnawaveId`
+ * still holds whatever spelling was current when the row was linked, so a row
+ * provisioned before the operator upgraded still carries a 2.x uuid that this
+ * panel answers to for NOBODY — see {@link ProfileSyncProcessor.handleDelete}.
  */
 @Processor(PROFILE_SYNC_QUEUE, { concurrency: PROFILE_SYNC_CONCURRENCY })
 export class ProfileSyncProcessor extends WorkerHost {
@@ -58,7 +74,7 @@ export class ProfileSyncProcessor extends WorkerHost {
 
   public constructor(
     private readonly prismaService: PrismaService,
-    private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly panelUsers: PanelUsersClient,
     private readonly namingService: RemnawaveProfileNamingService,
     private readonly events: SystemEventsService,
     private readonly profileSyncQueueService?: ProfileSyncQueueService,
@@ -343,15 +359,61 @@ export class ProfileSyncProcessor extends WorkerHost {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  ADDRESSING AND OUTCOMES
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** {@link resolvePanelUserId}, bound to this processor's client. */
+  private async panelUserIdFor(identity: StoredPanelIdentity): Promise<PanelUserAddress> {
+    return resolvePanelUserId(this.panelUsers, identity);
+  }
+
+  /**
+   * Turns a panel failure into the exception whose CLASS carries the
+   * classification, so {@link classifyRecovery} does not have to read prose.
+   *
+   * The distinction the clients preserve is preserved here too, because it is
+   * the difference between a job that recovers on its own and one that needs a
+   * human: `ServiceUnavailableException` is TRANSIENT and the five-minute
+   * recovery sweep re-drives it, a plain `Error` is TERMINAL and
+   * {@link reportFailure} raises a system event on the final attempt. Getting
+   * that backwards in either direction is a defect this codebase has already
+   * paid for — a refused body retried forever with nobody told, or a panel
+   * restart abandoning a paid subscription.
+   *
+   * RETURNS the exception rather than throwing it, so every call site reads
+   * `throw this.panelFailure(…)` and TypeScript's own control-flow analysis —
+   * not a convention — is what proves the code below is unreachable.
+   */
+  private panelFailure(failure: PanelFailure, context: string): Error {
+    if (failure.kind === 'transient') {
+      return new ServiceUnavailableException(`${context}: ${failure.detail}`);
+    }
+    // `missing` reaches here only where the caller has no re-provision of its
+    // own to run; it is still the panel answering, so it is terminal.
+    return new PanelRefusedError(`${context}: ${failure.detail}`);
+  }
+
   /**
    * Versioned desired-state write (T-009/T-010). Returns `true` when it fully
    * handled the update (caller stops). Flag-gated by `projectionSync` and only
    * for versioned jobs (aggregateKey + desiredRevision) with an existing panel
-   * profile and projection. Uses the STRICT adapter: absolute limit PATCH →
-   * strict read-back → advance `lastAppliedRevision` only on equality (else
-   * record drift and throw so BullMQ retries / the sweep re-drives). Transient
-   * panel failures throw (retry); returns `false` to fall back to the legacy
-   * absolute update otherwise.
+   * profile and projection. Absolute limit PATCH → INDEPENDENT read-back →
+   * advance `lastAppliedRevision` only on equality (else record drift and throw
+   * so BullMQ retries / the sweep re-drives). Transient panel failures throw
+   * (retry); returns `false` to fall back to the legacy absolute update
+   * otherwise.
+   *
+   * THE READ-BACK IS A SECOND REQUEST AND NOT THE PATCH'S OWN ANSWER, which is
+   * the whole point of this path: the panel echoing what we just sent proves
+   * only that it read the body. `GET /api/users/{id}` proves it STORED it.
+   *
+   * The canonical `null`-means-unlimited encoding the strict adapter used to
+   * perform now happens here, because the client hands back the panel's own
+   * numbers: upstream `0` (and, on 3.3.x, an explicit `null` for
+   * `hwidDeviceLimit`) both mean unlimited, and the projection spells unlimited
+   * `null`. Comparing the raw values instead would call `0` and `null`
+   * different and mark every unlimited plan DRIFTED forever.
    */
   private async tryVersionedDesiredStateWrite(
     syncJob: SyncJobRecord,
@@ -371,43 +433,59 @@ export class ProfileSyncProcessor extends WorkerHost {
     const planSnapshot = readRecord(subscription.planSnapshot);
     const identity = panelIdentityOf(subscription);
     if (identity === null) return false;
-    const setOutcome = await this.remnawaveApiService.strictSetUserLimits(identity, {
-      trafficLimitBytes: projection.desiredTrafficLimitBytes,
-      hwidDeviceLimit: projection.desiredDeviceLimit,
+    const address = await this.panelUserIdFor(identity);
+    if (address.kind !== 'ok') {
+      throw this.panelFailure(address, `Desired-state PATCH for subscription ${subscription.id}`);
+    }
+    const userId = address.userId;
+
+    const strategy = readOptionalString(planSnapshot, 'trafficLimitStrategy');
+    const setOutcome = await this.panelUsers.updateUser({
+      id: userId,
+      // Unlimited is `null` locally and `0` upstream, on both fields.
+      trafficLimitBytes: Number(projection.desiredTrafficLimitBytes ?? 0n),
+      hwidDeviceLimit: projection.desiredDeviceLimit ?? 0,
       tag: readOptionalString(planSnapshot, 'tag'),
-      trafficLimitStrategy: readOptionalString(planSnapshot, 'trafficLimitStrategy'),
+      // Never nullable upstream: an absent field means "leave the panel's own
+      // strategy alone", which is exactly what a plan with no opinion wants and
+      // the only encoding the route accepts.
+      ...(strategy === null ? {} : { trafficLimitStrategy: strategy as PanelResetPeriod }),
       activeInternalSquads: subscription.internalSquads,
       externalSquadUuid: subscription.externalSquad,
     });
-    if (setOutcome.kind === 'unavailable') {
-      throw new ServiceUnavailableException('Remnawave unavailable during desired-state PATCH');
-    }
     if (setOutcome.kind !== 'ok') {
-      throw new Error(`Strict desired-state PATCH failed: ${setOutcome.kind}`);
+      throw this.panelFailure(
+        readPanelFailure(setOutcome),
+        `Desired-state PATCH for subscription ${subscription.id}`,
+      );
     }
 
-    const readOutcome = await this.remnawaveApiService.strictGetPanelUser(identity);
-    if (readOutcome.kind === 'unavailable') {
-      throw new ServiceUnavailableException('Remnawave unavailable during desired-state read-back');
-    }
+    const readOutcome = await this.panelUsers.getUserById(userId);
     if (readOutcome.kind !== 'ok') {
-      throw new Error(`Strict desired-state read-back failed: ${readOutcome.kind}`);
+      throw this.panelFailure(
+        readPanelFailure(readOutcome),
+        `Desired-state read-back for subscription ${subscription.id}`,
+      );
     }
+    const observed = readOutcome.data.response;
 
-    // Second back-fill channel. The strict read carries the numeric id but no
-    // username, and the id is the one that matters — it is what a 3.x path
-    // segment is built from; the username is only the last resort when no id
-    // was ever recorded.
+    // Second back-fill channel — and it now carries the username as well as the
+    // id, because the read is the panel's whole user row rather than the nine
+    // fields the strict decoder used to keep. The id is still the one that
+    // matters (it is what the path segment is built from); the username is the
+    // last resort when no id was ever recorded.
     await this.backfillPanelIdentity(subscription, {
-      panelId: readOutcome.value.panelId,
-      username: '',
+      panelId: observed.id,
+      username: observed.username,
     });
 
     const bigintEq = (left: bigint | null, right: bigint | null): boolean =>
       left === null ? right === null : right !== null && left === right;
+    const observedTrafficLimitBytes = canonicalTrafficLimit(observed.trafficLimitBytes);
+    const observedDeviceLimit = canonicalDeviceLimit(observed.hwidDeviceLimit);
     const matches =
-      bigintEq(readOutcome.value.trafficLimitBytes, projection.desiredTrafficLimitBytes) &&
-      readOutcome.value.hwidDeviceLimit === projection.desiredDeviceLimit;
+      bigintEq(observedTrafficLimitBytes, projection.desiredTrafficLimitBytes) &&
+      observedDeviceLimit === projection.desiredDeviceLimit;
     const now = new Date();
 
     if (matches) {
@@ -419,17 +497,23 @@ export class ProfileSyncProcessor extends WorkerHost {
           state: EffectiveProjectionState.APPLIED,
           lastAppliedRevision: projection.desiredRevision,
           lastAppliedAt: now,
-          observedTrafficLimitBytes: readOutcome.value.trafficLimitBytes,
-          observedDeviceLimit: readOutcome.value.hwidDeviceLimit,
+          observedTrafficLimitBytes,
+          observedDeviceLimit,
           observedAt: now,
-          observedContractVersion: readOutcome.detectedVersion,
+          // NULL, and not the contract minor this build is pinned to. The
+          // column records what the PANEL said its build was, and the user
+          // routes do not say — the strict adapter read it off an envelope
+          // field 3.x does not send, so it was already null on every 3.x
+          // answer. Writing our own pin here would put a number in an
+          // operator-facing column that describes us rather than them.
+          observedContractVersion: null,
           driftClass: null,
         },
       });
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
         panelIdentityOf(subscription),
-        readOutcome.value.createdAt,
+        panelTimestamp(observed.createdAt),
         client,
       );
       if (deleteJobId !== null) {
@@ -445,10 +529,10 @@ export class ProfileSyncProcessor extends WorkerHost {
       where: { subscriptionId: subscription.id, desiredRevision: projection.desiredRevision },
       data: {
         state: EffectiveProjectionState.DRIFTED,
-        observedTrafficLimitBytes: readOutcome.value.trafficLimitBytes,
-        observedDeviceLimit: readOutcome.value.hwidDeviceLimit,
+        observedTrafficLimitBytes,
+        observedDeviceLimit,
         observedAt: now,
-        observedContractVersion: readOutcome.detectedVersion,
+        observedContractVersion: null,
         driftClass: 'LIMIT_MISMATCH',
       },
     });
@@ -602,8 +686,39 @@ export class ProfileSyncProcessor extends WorkerHost {
     // but failed to persist the link (e.g. crash between API call and DB
     // write, or a duplicate-name retry). Reuse the existing profile instead
     // of re-creating it — the panel rejects duplicate usernames with 400.
-    const existing = await this.remnawaveApiService.getPanelUserByUsername(panelUsername);
-    if (existing !== null && typeof existing.uuid === 'string' && existing.uuid.length > 0) {
+    //
+    // ONLY A GENUINE ABSENCE FALLS THROUGH TO THE CREATE, which the method this
+    // replaces could not express: it answered `null` for a missing profile, an
+    // expired token, a 5xx and a timeout alike, so a panel that was merely down
+    // sent this path on to mint a duplicate — and the panel refused THAT with
+    // `400 username already exists`, which the sync layer files as terminal. A
+    // transient blip therefore permanently failed a paid provision. Now the
+    // absence has to be the panel's own `404` + `A025`/`A063`; anything else is
+    // raised with its own classification and retried or reported on its merits.
+    const lookup = await this.panelUsers.getUserByUsername(panelUsername);
+    if (lookup.kind !== 'ok') {
+      const failure = readPanelFailure(lookup);
+      if (failure.kind !== 'missing') {
+        throw this.panelFailure(
+          failure,
+          `Looking up Remnawave profile '${panelUsername}' for subscription ${subscription.id}`,
+        );
+      }
+    }
+    if (lookup.kind === 'ok') {
+      const existing = lookup.data.response;
+      // The panel's own identity for this row. On 3.x that is the numeric id in
+      // decimal — there is no uuid to prefer, and `Subscription.remnawaveId`
+      // stores exactly this spelling for anything provisioned since.
+      const existingPanelId = readPanelUserId(existing);
+      if (existingPanelId === null) {
+        throw new Error(
+          `Refusing to adopt Remnawave profile '${panelUsername}' for subscription ` +
+            `${subscription.id}: the panel's answer carries no usable numeric id, so nothing ` +
+            'here names a profile. Linking it would record a dead identity on a live row.',
+        );
+      }
+      const existingRemnawaveId = String(existingPanelId);
       // "A profile answers to this name" is not "this profile is mine" — see
       // `assertPanelProfileOwnership`.
       assertPanelProfileOwnership(panelUsername, existing.description, subscription.userId);
@@ -622,23 +737,22 @@ export class ProfileSyncProcessor extends WorkerHost {
       // Only the ADOPT path needs this. A profile the panel has just minted
       // carries an identity no existing row can be holding.
       //
-      // ASKED ABOUT THE PANEL IDENTITY, NOT ABOUT ONE STRING. `existing.uuid` is
-      // whatever `parsePanelUserRow` could key this row by: on 2.x the uuid, on
-      // 3.x the numeric id rendered as a string, because a 3.x row has no uuid
-      // to give. Every subscription provisioned or imported BEFORE the operator
-      // upgraded still stores the 2.x uuid in `remnawaveId` — so on a 3.x panel
-      // a check that only compares `remnawaveId` compares a decimal against a
+      // ASKED ABOUT THE PANEL IDENTITY, NOT ABOUT ONE STRING. The panel names
+      // this profile by its numeric id, and that is what a row provisioned on
+      // 3.x stores in `remnawaveId`. Every subscription provisioned or imported
+      // BEFORE the operator upgraded still stores the 2.x UUID there — so a
+      // check that only compares `remnawaveId` compares a decimal against a
       // uuid and can never match. It would be inert for exactly the population
-      // this one-build-for-2.7.4-and-3.2.1 patch exists to protect. The two
-      // supplementary columns name the same profile the other way round, and
-      // the panel username is the key a resolve would land on, so all three are
-      // asked at once.
-      const holderClaims: Prisma.SubscriptionWhereInput[] = [{ remnawaveId: existing.uuid }];
-      if (typeof existing.panelId === 'number' && Number.isSafeInteger(existing.panelId)) {
-        holderClaims.push({ remnawavePanelId: existing.panelId });
-      }
-      if (typeof existing.username === 'string' && existing.username.length > 0) {
-        holderClaims.push({ remnawavePanelUsername: existing.username });
+      // this guard exists to protect. The two supplementary columns name the
+      // same profile the other way round, and the panel username is the key a
+      // resolve would land on, so all three are asked at once.
+      const existingUsername = readPanelString(existing.username);
+      const holderClaims: Prisma.SubscriptionWhereInput[] = [
+        { remnawaveId: existingRemnawaveId },
+        { remnawavePanelId: existingPanelId },
+      ];
+      if (existingUsername !== null) {
+        holderClaims.push({ remnawavePanelUsername: existingUsername });
       }
       const holder = await this.prismaService.subscription.findFirst({
         where: {
@@ -650,7 +764,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       });
       if (holder !== null) {
         throw new Error(
-          `Refusing to link Remnawave profile '${existing.uuid}' to subscription ` +
+          `Refusing to link Remnawave profile '${existingRemnawaveId}' to subscription ` +
             `${subscription.id}: subscription ${holder.id} (user ${holder.userId}) is already ` +
             'live on it. Two subscriptions sharing one panel profile overwrite each other and ' +
             "delete each other's service.",
@@ -658,37 +772,37 @@ export class ProfileSyncProcessor extends WorkerHost {
       }
       const deleteScheduled = await this.persistProfileLink(
         subscription.id,
-        existing.uuid,
-        existing.panelId,
+        existingRemnawaveId,
+        existingPanelId,
         // The panel's OWN name for the profile, not the one we asked for. The
         // two normally match, but `generateProfileName` builds from an
         // operator-editable prefix and separator, so recomputing it later would
         // produce a name that no longer resolves.
-        existing.username,
-        existing.subscriptionUrl,
-        existing.createdAt,
+        existingUsername,
+        readPanelString(existing.subscriptionUrl),
+        panelTimestamp(existing.createdAt),
       );
       if (deleteScheduled) {
         await this.enqueueCompensatingDelete(deleteScheduled);
         this.logger.warn(
-          `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existing.uuid}'`,
+          `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existingRemnawaveId}'`,
         );
         return;
       }
       this.logger.log(
-        `Linked existing Remnawave profile '${existing.uuid}' (username: ${panelUsername}) to subscription ${subscription.id}`,
+        `Linked existing Remnawave profile '${existingRemnawaveId}' (username: ${panelUsername}) to subscription ${subscription.id}`,
       );
       this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${panelUsername}`, {
         subscriptionId: subscription.id,
         userId: subscription.userId,
-        remnawaveId: existing.uuid,
+        remnawaveId: existingRemnawaveId,
         remnawaveUsername: panelUsername,
       });
       return;
     }
 
     // Create user on Remnawave panel
-    const panelUser = await this.remnawaveApiService.createPanelUser({
+    const created = await this.panelUsers.createUser({
       username: panelUsername,
       telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
       email: contacts.email,
@@ -697,36 +811,66 @@ export class ProfileSyncProcessor extends WorkerHost {
       expireAt,
       trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024, // GB → bytes
       hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
-      trafficLimitStrategy,
+      // Optional and never nullable upstream: a plan snapshot with no strategy
+      // (every 3x-ui import) must OMIT the field and let the panel apply its own
+      // `NO_RESET`, not send an explicit `null` the route refuses.
+      ...(trafficLimitStrategy === null
+        ? {}
+        : { trafficLimitStrategy: trafficLimitStrategy as PanelResetPeriod }),
       activeInternalSquads: subscription.internalSquads,
       externalSquadUuid: subscription.externalSquad,
     });
+    if (created.kind !== 'ok') {
+      throw this.panelFailure(
+        readPanelFailure(created),
+        `Creating Remnawave profile '${panelUsername}' for subscription ${subscription.id}`,
+      );
+    }
+    const panelUser = created.data.response;
+    // THE PANEL'S ANSWER IS CHECKED BEFORE IT BECOMES AN IDENTITY. The executor
+    // is lenient by design: a `2xx` whose body fails the contract comes back
+    // RAW, so `id` can be missing entirely — and `String(undefined)` is
+    // `'undefined'`, a non-empty string that sails past `persistProfileLink`'s
+    // emptiness guard and names no profile on any panel. That is exactly the
+    // defect the old cast produced (a job that reported success over a NULL
+    // column), arriving through the one door the new layer deliberately leaves
+    // open, so it is closed here instead.
+    const createdPanelId = readPanelUserId(panelUser);
+    if (createdPanelId === null) {
+      throw new Error(
+        `Refusing to link subscription ${subscription.id} to an empty Remnawave identity: the ` +
+          "panel's answer to POST /api/users carries no usable numeric id, so the profile it " +
+          'just created cannot be named. Writing it would leave remnawave_id meaningless on a ' +
+          'job that reported success.',
+      );
+    }
+    const remnawaveId = String(createdPanelId);
 
     const deleteScheduled = await this.persistProfileLink(
       subscription.id,
-      panelUser.uuid,
-      panelUser.panelId,
-      panelUser.username,
-      panelUser.subscriptionUrl,
-      panelUser.createdAt,
+      remnawaveId,
+      createdPanelId,
+      readPanelString(panelUser.username),
+      readPanelString(panelUser.subscriptionUrl),
+      panelTimestamp(panelUser.createdAt),
     );
     if (deleteScheduled) {
       await this.enqueueCompensatingDelete(deleteScheduled);
       this.logger.warn(
-        `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${panelUser.uuid}'`,
+        `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${remnawaveId}'`,
       );
       return;
     }
 
     this.logger.log(
-      `Created Remnawave profile '${panelUser.uuid}' (username: ${panelUsername}) for subscription ${subscription.id}`,
+      `Created Remnawave profile '${remnawaveId}' (username: ${panelUsername}) for subscription ${subscription.id}`,
     );
 
     // Emit event
     this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${panelUsername}`, {
       subscriptionId: subscription.id,
       userId: subscription.userId,
-      remnawaveId: panelUser.uuid,
+      remnawaveId,
       remnawaveUsername: panelUsername,
     });
   }
@@ -734,23 +878,25 @@ export class ProfileSyncProcessor extends WorkerHost {
   /**
    * Records the panel link, including the two supplementary identity columns.
    *
-   * `panelId` and `panelUsername` are recorded on EVERY version, not only on
-   * 3.x, and that is the whole point. A 2.x panel already returns the numeric id
-   * on every user row, so recording it now is free; recording it only after the
-   * operator upgrades would be too late, because the upgrade itself is what
-   * destroys the uuid that would let us find the profile again.
+   * `panelId` and `panelUsername` are recorded beside the identity string
+   * rather than derived from it, and that is the whole point: `remnawaveId`
+   * holds whichever spelling was current when the row was linked and is never
+   * rewritten, so for every row provisioned before the operator upgraded these
+   * two columns are the ONLY route back to the profile.
    *
    * THE IDENTITY IS CHECKED BEFORE THE TRANSACTION IS OPENED, and the check is
    * not defensive decoration — it is the guard whose absence turned a decoding
    * bug into permanent data loss. The parameter is typed `string`, so an
-   * `undefined` reaching it is a lie the type system has already been told
-   * (`unwrapPanelUser` used to cast an undecoded body into `RemnawavePanelUser`,
-   * and a 3.x row has no `uuid` to give). Prisma then reads `undefined` in an
+   * `undefined` reaching it is a lie the type system has already been told (the
+   * adapter this replaces cast an undecoded body into its typed shape, and a
+   * 3.x row has no `uuid` to give). Prisma then reads `undefined` in an
    * `update` payload as "leave this column alone", so the write below SUCCEEDED
    * while recording no link, the advisory-lock key collapsed to the literal
    * `remnawave-profile:undefined` — serialising every concurrent CREATE on one
    * lock — and the job completed. Refusing here converts all of that into one
-   * failed job an operator can see and a retry can fix.
+   * failed job an operator can see and a retry can fix. {@link readPanelUserId}
+   * closes the same hole one layer up, where a drifted body can now produce the
+   * string `'undefined'` instead of an absent one.
    */
   private async persistProfileLink(
     subscriptionId: string,
@@ -936,55 +1082,60 @@ export class ProfileSyncProcessor extends WorkerHost {
         );
       }
 
-      let panelUser: Awaited<ReturnType<RemnawaveApiService['updatePanelUser']>>;
-      try {
-        panelUser = await this.remnawaveApiService.updatePanelUser(updateIdentity, {
-          telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
-          email: contacts.email,
-          description: naming.description,
-          ...(panelStatus !== null ? { status: panelStatus } : {}),
-          tag,
-          expireAt: subscription.expiresAt?.toISOString(),
-          trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
-          hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
-          trafficLimitStrategy,
-          activeInternalSquads: subscription.internalSquads,
-          externalSquadUuid: subscription.externalSquad,
-        });
-      } catch (err: unknown) {
-        // The linked profile no longer exists on the panel (404). This is the
-        // imported-subscription case: `remnawaveId` came from a donor dump but
-        // the profile is gone from the currently connected panel, so a PATCH
-        // can never land and the job would retry forever. Re-provision: detach
-        // the stale id and fall through to CREATE, which idempotently reuses an
-        // existing profile by username or creates a fresh one and re-links it.
-        if (err instanceof RemnawaveProfileNotFoundError) {
-          await this.reprovisionMissingProfile(subscription.id, subscription.remnawaveId);
-          const refreshed = await this.loadSyncJob(this.prismaService, syncJob.id);
-          if (refreshed === null) {
-            const missing = new Error(
-              `Profile sync job ${syncJob.id} disappeared during UPDATE re-provision`,
-            );
-            (missing as Error & { cause?: unknown }).cause = err;
-            throw missing;
-          }
-          this.logger.warn(
-            `Remnawave profile for subscription ${subscription.id} was missing (404); re-provisioning via CREATE`,
-          );
-          await this.handleCreate(refreshed);
-          return;
+      // ADDRESSING CANNOT PRODUCE "THE PROFILE IS GONE", and the asymmetry is
+      // deliberate: `resolvePanelUserId` downgrades a `404` from the resolve to
+      // a deferral, because that route is keyed on a MUTABLE ATTRIBUTE and an
+      // operator renaming a live profile answers it the same way. Only the
+      // identity-addressed PATCH below may say the profile is missing. The
+      // `missing` arm is written anyway rather than folded into the throw, so
+      // that an addressing path which CAN confirm absence is routed to the
+      // re-provision instead of into a retry loop the day one is added.
+      const address = await this.panelUserIdFor(updateIdentity);
+      if (address.kind !== 'ok') {
+        if (address.kind === 'missing') {
+          return this.reprovisionThroughCreate(syncJob, subscription, address.detail);
         }
-        throw err;
+        throw this.panelFailure(address, `Updating subscription ${subscription.id}`);
       }
+
+      const patched = await this.panelUsers.updateUser({
+        id: address.userId,
+        telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
+        email: contacts.email,
+        description: naming.description,
+        ...(panelStatus !== null ? { status: panelStatus } : {}),
+        tag,
+        expireAt: subscription.expiresAt?.toISOString(),
+        trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
+        hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
+        // Never nullable upstream; absence means "leave the panel's strategy
+        // alone", which is what a plan with no opinion wants.
+        ...(trafficLimitStrategy === null
+          ? {}
+          : { trafficLimitStrategy: trafficLimitStrategy as PanelResetPeriod }),
+        activeInternalSquads: subscription.internalSquads,
+        externalSquadUuid: subscription.externalSquad,
+      });
+      if (patched.kind !== 'ok') {
+        const failure = readPanelFailure(patched);
+        if (failure.kind === 'missing') {
+          return this.reprovisionThroughCreate(syncJob, subscription, failure.detail);
+        }
+        throw this.panelFailure(failure, `Updating subscription ${subscription.id}`);
+      }
+      const panelUser = patched.data.response;
 
       // The panel just told us who this profile is. Record it — this is the
       // read the whole design assumed would fill the supplementary columns, and
       // until it existed they were only ever written when a profile was CREATED
       // or manually re-linked, both of which require `remnawaveId` to be null.
       // Every subscription that already existed therefore kept both columns
-      // NULL forever, which is exactly the state that becomes unaddressable the
-      // day the operator upgrades the panel to 3.x.
-      await this.backfillPanelIdentity(subscription, panelUser);
+      // NULL forever, which is exactly the state that becomes unaddressable on
+      // a panel that names users by their numeric id.
+      await this.backfillPanelIdentity(subscription, {
+        panelId: panelUser.id,
+        username: panelUser.username,
+      });
 
       const latest = await this.loadSyncJob(this.prismaService, syncJob.id);
       if (latest === null) {
@@ -1024,7 +1175,17 @@ export class ProfileSyncProcessor extends WorkerHost {
       // most the few megabytes used between the attempts, which is the right
       // side of the trade against not resetting at all.
       if (readBoolean(readRecord(current.payload), 'resetTraffic')) {
-        await this.remnawaveApiService.resetPanelUserTraffic(updateIdentity);
+        // The id the PATCH landed on, not a second resolve. Re-addressing here
+        // would put another round-trip between the two halves of one renewal
+        // and could, on a profile that was deleted and re-provisioned under the
+        // same name in between, zero a different customer's counter.
+        const reset = await this.panelUsers.resetTraffic(address.userId);
+        if (reset.kind !== 'ok') {
+          throw this.panelFailure(
+            readPanelFailure(reset),
+            `Resetting the traffic counter for subscription ${subscription.id}`,
+          );
+        }
         this.logger.log(
           `Reset traffic counter for subscription ${subscription.id} after a paid renewal`,
         );
@@ -1033,7 +1194,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
         panelIdentityOf(subscription),
-        panelUser?.createdAt,
+        panelTimestamp(panelUser.createdAt),
       );
       if (deleteJobId !== null) {
         await this.enqueueCompensatingDelete(deleteJobId);
@@ -1047,6 +1208,49 @@ export class ProfileSyncProcessor extends WorkerHost {
     throw new ServiceUnavailableException(
       `Subscription ${current.subscription.id} changed repeatedly during profile UPDATE`,
     );
+  }
+
+  /**
+   * The UPDATE path's answer to "the panel says this profile is gone".
+   *
+   * This is the imported-subscription case: `remnawaveId` came from a donor
+   * dump but the profile is gone from the currently connected panel, so a PATCH
+   * can never land and the job would retry forever. Detach the stale id and
+   * re-run the job as a CREATE, which idempotently reuses a profile by username
+   * or provisions a fresh one and re-links it.
+   *
+   * TWO CONDITIONS HAVE TO HOLD BEFORE ANYTHING GETS HERE, and both are checks
+   * somebody else already made:
+   *
+   *  • the `404` carried the PANEL'S OWN `A025`/`A063` envelope. A bare 404 is
+   *    what a reverse proxy answers to everything while it has no healthy
+   *    backend, and reading that as "the profile is gone" would detach every
+   *    subscription whose UPDATE happened to run during the outage.
+   *    {@link readPanelFailure} draws that line once.
+   *  • it came from an IDENTITY-ADDRESSED route. A `404` from
+   *    `POST /api/users/resolve` is satisfied by an operator renaming a live
+   *    profile, and re-provisioning on it would mint a second live profile for
+   *    one paying customer. {@link resolvePanelUserId} downgrades that one.
+   */
+  private async reprovisionThroughCreate(
+    syncJob: SyncJobRecord,
+    subscription: SyncJobRecord['subscription'],
+    detail: string,
+  ): Promise<void> {
+    if (subscription.remnawaveId !== null) {
+      await this.reprovisionMissingProfile(subscription.id, subscription.remnawaveId);
+    }
+    const refreshed = await this.loadSyncJob(this.prismaService, syncJob.id);
+    if (refreshed === null) {
+      throw new Error(
+        `Profile sync job ${syncJob.id} disappeared during UPDATE re-provision (${detail})`,
+      );
+    }
+    this.logger.warn(
+      `Remnawave profile for subscription ${subscription.id} was missing (${detail}); ` +
+        're-provisioning via CREATE',
+    );
+    await this.handleCreate(refreshed);
   }
 
   /**
@@ -1465,127 +1669,158 @@ export class ProfileSyncProcessor extends WorkerHost {
     // `classifyRecovery` reads this plain `Error` as TERMINAL rather than
     // retrying it forever.
     //
-    // ONE OBSERVATION OF THE PANEL ERA, TAKEN HERE AND USED TWICE. The guard
-    // below and the address `deletePanelUser` builds are now the SAME reading:
-    // `assessObservedPanelLink` is synchronous and cannot consult the panel,
-    // and `deletePanelUser` takes the observation as a required argument and
-    // never re-reads the shape. They used to be two independent
-    // `getPanelShape()` calls one await apart, and the fifteen-second negative
-    // cache can expire between two adjacent awaits — so the guard could answer
-    // "era unknown, proceed" (harmless: the address builder then emits the
-    // stored string and a 3.x panel answers 400) while the builder, reading a
-    // moment later, saw `'id'`, took the fallback through the panel id or the
-    // username, and aimed the DELETE at whatever profile is live there.
+    // THE ERA IS NO LONGER OBSERVED, AND THE GUARD IS NOT WEAKER FOR IT. This
+    // used to take one reading of the panel shape and use it twice — once to
+    // judge the stored identity, once to build the address — precisely so the
+    // two could not disagree across the fifteen-second negative cache. The
+    // panel is 3.x now, unconditionally, so there is one era and nothing left
+    // for two readings to disagree about; what survives is the SHAPE TEST on
+    // the stored identity, which is the half that was ever load-bearing.
     //
-    // The fail-open on an unreadable era is UNCHANGED and deliberate: see
-    // `stale-panel-link.ts`. What changed is only that there is one observation
-    // instead of two.
-    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
-    const trust = assessObservedPanelLink(era, targetRemnawaveId);
-    if (!trust.trusted) {
+    // `contains '-'` is the whole test and it is exact rather than approximate:
+    // a panel id is decimal and can never carry a hyphen, a uuid always does.
+    // The same spelling `selectBrokenLinks` uses for its stale population, so
+    // the refusal and the remedy describe one set of rows.
+    if (isUuidShapedPanelIdentity(targetRemnawaveId)) {
       throw new Error(
         `${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE}: refusing to delete Remnawave profile ` +
           `'${targetRemnawaveId}' for subscription ${subscription.id} — that is a 2.x uuid and ` +
-          'the panel is 3.x, so it no longer names the profile this job was written for and the ' +
-          'address fallback would resolve it to whatever is live at that address. Run the ' +
-          'panel-link reconciliation, then retry this job.',
+          'the panel answers only to 3.x numeric ids, so it no longer names the profile this job ' +
+          'was written for and the address fallback would resolve it to whatever is live at that ' +
+          'address. Run the panel-link reconciliation, then retry this job.',
       );
     }
 
-    const result = await this.remnawaveApiService.deletePanelUser(identity, era);
-    if (result.isDeleted) {
-      this.logger.log(
-        `Deleted Remnawave profile '${targetRemnawaveId}' for subscription ${subscription.id}`,
-      );
-      // Fully retire the subscription: mark it DELETED and detach the now-gone
-      // panel profile. The row is kept (soft-delete) so trial-claim history via
-      // `isTrial` survives — trial counts include DELETED rows, so a user can
-      // never re-claim a free trial or exceed a paid-trial limit just because
-      // their old subscription was cleaned off. `status = DELETED` removes it
-      // from the cabinet/bot (the internal list filters `status != DELETED`)
-      // and blocks renewal (renewal filters `status != DELETED`), matching the
-      // grace-window contract: EXPIRED stays renewable for `graceDays`, then the
-      // sweep cleans it here. Self-service/admin deletes already set DELETED
-      // before enqueuing, so this is idempotent for them.
-      // See `.kiro/specs/trial-aware-profile-cleanup`.
-      //
-      // THE FENCE IS TWO-ANGLED, not one string comparison, and the difference
-      // is a subscription that never gets retired. One profile has two lawful
-      // names across the two eras — a uuid on 2.x, a decimal on 3.x — and the
-      // job's target is whichever one was current when it was enqueued. On an
-      // upgraded panel `remnawave_id = <2.x uuid>` therefore compares the two
-      // spellings of the same profile and finds them unequal: `updateMany`
-      // touched 0 rows, the panel profile was gone, and the subscription stayed
-      // non-DELETED forever — visible in the cabinet, renewable, backed by
-      // nothing. Silently, because nobody read `count`. Same two-angled form as
-      // `panelIdentityWhere` and the exclusivity check in `handleCreate`.
-      //
-      // The numeric arm is OMITTED, not compared against null, when the column
-      // was never filled: `remnawave_panel_id` carries no unique constraint, so
-      // `remnawavePanelId: null` would match every row that has none — and this
-      // statement's other predicate is the row's own id, so a null arm would
-      // turn "this row, if it still holds the target" into "this row,
-      // unconditionally" and retire it on a mismatch instead of reporting one.
-      const retired = await this.prismaService.subscription.updateMany({
-        where: {
-          id: subscription.id,
-          OR: [
-            { remnawaveId: targetRemnawaveId },
-            ...(identity.panelId !== null ? [{ remnawavePanelId: identity.panelId }] : []),
-          ],
-        },
-        // The two supplementary columns are detached together with the id they
-        // describe. Leaving them behind would let a later re-provision inherit
-        // the DELETED profile's numeric id and panel username, and the adapter
-        // would happily address the corpse.
-        data: {
-          remnawaveId: null,
-          remnawavePanelId: null,
-          remnawavePanelUsername: null,
-          status: SubscriptionStatus.DELETED,
-        },
-      });
-      // `count` is READ, not discarded — that is half the defect. Two different
-      // events reach zero here and they must not be reported as one:
-      //
-      //  • The row no longer names this profile under EITHER spelling. It was
-      //    re-provisioned onto a different one, or already detached, while this
-      //    DELETE was in flight — and leaving it alone is the CORRECT outcome
-      //    (see `does not clear a newer profile link when an older DELETE target
-      //    completes`). Said once at warn, because a profile was destroyed for a
-      //    row that survived it and an operator may want to know.
-      //  • The row still names it. Then the fence should have matched and
-      //    something rewrote the row between the panel round-trip and this
-      //    statement. The subscription is now live with nothing behind it, and
-      //    nothing downstream notices on its own — so this one pages.
-      if (retired.count === 0) {
-        const stillHoldsTarget =
-          subscription.remnawaveId === targetRemnawaveId ||
-          (identity.panelId !== null && subscription.remnawavePanelId === identity.panelId);
-        const detail =
-          `Deleted Remnawave profile '${targetRemnawaveId}' but subscription ${subscription.id} ` +
-          `was not retired (it holds '${subscription.remnawaveId ?? 'none'}', panel id ` +
-          `${subscription.remnawavePanelId ?? 'none'})`;
-        if (stillHoldsTarget) {
-          const divergence =
-            `${detail}: the row still names the profile that was just deleted, so it is live ` +
-            'with no service behind it. Something wrote the row mid-flight.';
-          this.logger.error(divergence);
-          this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', divergence, {
-            subscriptionId: subscription.id,
-            userId: subscription.userId,
-            remnawaveId: targetRemnawaveId,
-          });
-        } else {
-          this.logger.warn(
-            `${detail}: it points at another profile now, so the live link is left alone.`,
-          );
+    const address = await this.panelUserIdFor(identity);
+    // A profile the panel says is GONE is the post-condition this job wants, so
+    // it is the one non-`ok` outcome that may be read as success — and it may
+    // be read that way ONLY when the panel said so about an identity-addressed
+    // route. `readPanelFailure` admits `missing` for a 404 carrying the panel's
+    // own `A025`/`A063` and nothing else; a bare 404 (what a reverse proxy
+    // answers while it has no healthy backend) arrives as transient, and
+    // `resolvePanelUserId` downgrades an unresolvable ATTRIBUTE the same way.
+    // The caller acts on success by writing `status = DELETED` and clearing the
+    // link, so misreading either one detaches live subscriptions wholesale.
+    //
+    // The `missing` arm below is therefore UNREACHABLE FROM ADDRESSING TODAY
+    // and is written anyway, because the alternative is a `default` that reads
+    // an outcome nobody thought about as "the profile is gone".
+    const removal = `Deleting Remnawave profile '${targetRemnawaveId}' for subscription ${subscription.id}`;
+    if (address.kind === 'transient' || address.kind === 'terminal') {
+      throw this.panelFailure(address, removal);
+    }
+    if (address.kind === 'ok') {
+      const outcome = await this.panelUsers.deleteUser(address.userId);
+      if (outcome.kind !== 'ok') {
+        const failure = readPanelFailure(outcome);
+        if (failure.kind !== 'missing') {
+          throw this.panelFailure(failure, removal);
         }
+        this.logger.warn(
+          `Remnawave profile '${targetRemnawaveId}' was already absent (${failure.detail}) — ` +
+            'treating the delete as done',
+        );
       }
+      // Otherwise a `2xx` IS the confirmation. 3.x answers `204` with an empty
+      // body where 2.x answered `200 {"response":{"isDeleted":true}}`, and the
+      // contract declares no response schema for this route at all — so the
+      // `isDeleted` flag this used to read has nothing left to read, and the
+      // branch that threw "panel did not confirm deletion" could only ever
+      // fire on an invented body.
     } else {
-      throw new Error(
-        `Panel did not confirm deletion of Remnawave profile '${targetRemnawaveId}'`,
+      this.logger.warn(
+        `${removal}: the panel says it has no such profile (${address.detail}) — nothing to ` +
+          'remove, retiring the row',
       );
+    }
+
+    this.logger.log(
+      `Deleted Remnawave profile '${targetRemnawaveId}' for subscription ${subscription.id}`,
+    );
+    // Fully retire the subscription: mark it DELETED and detach the now-gone
+    // panel profile. The row is kept (soft-delete) so trial-claim history via
+    // `isTrial` survives — trial counts include DELETED rows, so a user can
+    // never re-claim a free trial or exceed a paid-trial limit just because
+    // their old subscription was cleaned off. `status = DELETED` removes it
+    // from the cabinet/bot (the internal list filters `status != DELETED`)
+    // and blocks renewal (renewal filters `status != DELETED`), matching the
+    // grace-window contract: EXPIRED stays renewable for `graceDays`, then the
+    // sweep cleans it here. Self-service/admin deletes already set DELETED
+    // before enqueuing, so this is idempotent for them.
+    // See `.kiro/specs/trial-aware-profile-cleanup`.
+    //
+    // THE FENCE IS TWO-ANGLED, not one string comparison, and the difference
+    // is a subscription that never gets retired. One profile has two lawful
+    // names across the two eras — a uuid on 2.x, a decimal on 3.x — and the
+    // job's target is whichever one was current when it was enqueued. On an
+    // upgraded panel `remnawave_id = <2.x uuid>` therefore compares the two
+    // spellings of the same profile and finds them unequal: `updateMany`
+    // touched 0 rows, the panel profile was gone, and the subscription stayed
+    // non-DELETED forever — visible in the cabinet, renewable, backed by
+    // nothing. Silently, because nobody read `count`. Same two-angled form as
+    // `panelIdentityWhere` and the exclusivity check in `handleCreate`.
+    //
+    // The numeric arm is OMITTED, not compared against null, when the column
+    // was never filled: `remnawave_panel_id` carries no unique constraint, so
+    // `remnawavePanelId: null` would match every row that has none — and this
+    // statement's other predicate is the row's own id, so a null arm would
+    // turn "this row, if it still holds the target" into "this row,
+    // unconditionally" and retire it on a mismatch instead of reporting one.
+    const retired = await this.prismaService.subscription.updateMany({
+      where: {
+        id: subscription.id,
+        OR: [
+          { remnawaveId: targetRemnawaveId },
+          ...(identity.panelId !== null ? [{ remnawavePanelId: identity.panelId }] : []),
+        ],
+      },
+      // The two supplementary columns are detached together with the id they
+      // describe. Leaving them behind would let a later re-provision inherit
+      // the DELETED profile's numeric id and panel username, and the adapter
+      // would happily address the corpse.
+      data: {
+        remnawaveId: null,
+        remnawavePanelId: null,
+        remnawavePanelUsername: null,
+        status: SubscriptionStatus.DELETED,
+      },
+    });
+    // `count` is READ, not discarded — that is half the defect. Two different
+    // events reach zero here and they must not be reported as one:
+    //
+    //  • The row no longer names this profile under EITHER spelling. It was
+    //    re-provisioned onto a different one, or already detached, while this
+    //    DELETE was in flight — and leaving it alone is the CORRECT outcome
+    //    (see `does not clear a newer profile link when an older DELETE target
+    //    completes`). Said once at warn, because a profile was destroyed for a
+    //    row that survived it and an operator may want to know.
+    //  • The row still names it. Then the fence should have matched and
+    //    something rewrote the row between the panel round-trip and this
+    //    statement. The subscription is now live with nothing behind it, and
+    //    nothing downstream notices on its own — so this one pages.
+    if (retired.count === 0) {
+      const stillHoldsTarget =
+        subscription.remnawaveId === targetRemnawaveId ||
+        (identity.panelId !== null && subscription.remnawavePanelId === identity.panelId);
+      const detail =
+        `Deleted Remnawave profile '${targetRemnawaveId}' but subscription ${subscription.id} ` +
+        `was not retired (it holds '${subscription.remnawaveId ?? 'none'}', panel id ` +
+        `${subscription.remnawavePanelId ?? 'none'})`;
+      if (stillHoldsTarget) {
+        const divergence =
+          `${detail}: the row still names the profile that was just deleted, so it is live ` +
+          'with no service behind it. Something wrote the row mid-flight.';
+        this.logger.error(divergence);
+        this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', divergence, {
+          subscriptionId: subscription.id,
+          userId: subscription.userId,
+          remnawaveId: targetRemnawaveId,
+        });
+      } else {
+        this.logger.warn(
+          `${detail}: it points at another profile now, so the live link is left alone.`,
+        );
+      }
     }
   }
 
@@ -1705,7 +1940,22 @@ export class ProfileSyncProcessor extends WorkerHost {
       return;
     }
 
-    await this.remnawaveApiService.resetPanelUserTraffic(identity);
+    const address = await this.panelUserIdFor(identity);
+    if (address.kind !== 'ok') {
+      // NOT a quiet return. The caller of this job reports success as "the
+      // counter was zeroed", and it was not.
+      throw this.panelFailure(
+        address,
+        `Resetting traffic for Remnawave profile '${subscription.remnawaveId}'`,
+      );
+    }
+    const reset = await this.panelUsers.resetTraffic(address.userId);
+    if (reset.kind !== 'ok') {
+      throw this.panelFailure(
+        readPanelFailure(reset),
+        `Resetting traffic for Remnawave profile '${subscription.remnawaveId}'`,
+      );
+    }
     const deleteJobId = await this.ensureDeleteJobIfDeleted(
       subscription.id,
       identity,
@@ -1717,6 +1967,270 @@ export class ProfileSyncProcessor extends WorkerHost {
       `Reset traffic for Remnawave profile '${subscription.remnawaveId}'`,
     );
   }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  READING A PANEL OUTCOME
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** A resolved numeric user id, or why the profile could not be named. */
+export type PanelUserAddress =
+  | { readonly kind: 'ok'; readonly userId: number }
+  | PanelFailure;
+
+/**
+ * The NUMERIC id `PanelUsersClient` wants, out of the identity a subscription
+ * row carries.
+ *
+ * `panelUserAddress(identity, 'id')` is asked rather than re-implemented, and
+ * `'id'` is passed as a CONSTANT rather than as a discovered era: this build
+ * talks to 3.x only. Its documented fallback chain is what keeps a
+ * 2.x-provisioned row addressable — stored decimal → `remnawavePanelId` → the
+ * subscription short uuid recovered from `config_url` → the panel username —
+ * and the last two need a `POST /api/users/resolve` round-trip, which is why
+ * this is async while the pure helper it wraps is not.
+ *
+ * ONE COPY, SHARED BY THE PROCESSOR AND THE EXPIRED-PROFILE SWEEP, because the
+ * two act on the same rows in opposite directions: the sweep decides a profile
+ * is gone and the processor deletes it. Two implementations of "which profile
+ * is this?" that disagreed by one fallback step would have the sweep confirm
+ * one profile's expiry and the worker remove another — and both of them have to
+ * read a failed RESOLVE the same way, which is the subtlest rule here and is
+ * spelled out at the call below.
+ *
+ * `impossible` comes back TERMINAL, and that is a deliberate change from the
+ * adapter this replaces, which threw `ServiceUnavailableException` for it. That
+ * reads TRANSIENT to {@link classifyRecovery}, so a row holding a dead uuid
+ * with no id, no short uuid and no username retried every five minutes forever
+ * and never raised an operator alert — the hole `panel-user-address.ts` names
+ * in its own `'unknown'` branch. Nothing about such a row changes on its own,
+ * so the honest answer is the one somebody is told about.
+ */
+export async function resolvePanelUserId(
+  panelUsers: PanelUsersClient,
+  identity: StoredPanelIdentity,
+): Promise<PanelUserAddress> {
+  const address = panelUserAddress(identity, 'id');
+  if (address.kind === 'impossible') {
+    return { kind: 'terminal', detail: address.reason };
+  }
+  if (address.kind === 'ready') {
+    const userId = Number.parseInt(address.segment, 10);
+    // `panelUserAddress` guarantees a decimal here, but `String(2 ** 60)` is
+    // still a decimal and still addresses nothing. The client refuses an unsafe
+    // integer too; refusing here names the SUBSCRIPTION's stored identity in
+    // the message rather than the path parameter it became.
+    if (!Number.isSafeInteger(userId)) {
+      return {
+        kind: 'terminal',
+        detail: `stored panel identity '${address.segment}' is not a usable numeric user id`,
+      };
+    }
+    return { kind: 'ok', userId };
+  }
+  const resolved = await panelUsers.resolveUser(address.selector);
+  if (resolved.kind !== 'ok') {
+    const failure = readPanelFailure(resolved);
+    // A `404` FROM A RESOLVE IS NOT A MISSING PROFILE, and this is the one
+    // place that difference has to be enforced rather than assumed.
+    //
+    // `POST /api/users/resolve` is addressed by a MUTABLE ATTRIBUTE — the
+    // stored short uuid or panel username — so the panel's `A063` there means
+    // "no user carries that attribute RIGHT NOW", which an operator renaming a
+    // perfectly live profile satisfies. It says nothing about the profile this
+    // subscription points at. Every caller of this helper acts on `missing` by
+    // doing something irreversible: the expiry sweep retires the subscription,
+    // the DELETE worker treats the profile as already gone and clears the link,
+    // and the UPDATE path detaches the id and mints a replacement — which, on a
+    // renamed profile, is a second live profile for one paying customer.
+    //
+    // So an unresolvable attribute is "we could not ADDRESS it", which defers.
+    // Only the identity-addressed routes (`GET|PATCH|DELETE /api/users/{id}`)
+    // may confirm absence.
+    return failure.kind === 'missing'
+      ? {
+          kind: 'transient',
+          detail:
+            `the panel knows no user by ${describeSelector(address.selector)} — a renamed ` +
+            'profile answers the same way, so this is not evidence that the profile is gone',
+        }
+      : failure;
+  }
+  return { kind: 'ok', userId: resolved.data.response.id };
+}
+
+/** Names the key a resolve was attempted under, for a log-safe refusal. */
+function describeSelector(selector: { readonly shortUuid?: string } | { readonly username?: string }): string {
+  return 'shortUuid' in selector
+    ? `subscription short uuid '${selector.shortUuid ?? ''}'`
+    : `panel username '${(selector as { username?: string }).username ?? ''}'`;
+}
+
+/**
+ * The panel ANSWERED and refused, or we built a request it would refuse.
+ *
+ * A TYPE, not a phrasing, and that is the whole point. {@link classifyRecovery}
+ * falls back to a substring scan over the message
+ * (`/timeout|temporar|econn|429|502|503|504|unavailable/`) for errors it does
+ * not recognise, and a refusal message names the profile — so a customer whose
+ * panel id merely CONTAINS `502` would have a permanent `400` classified
+ * TRANSIENT and dropped straight back into the forever-retry, no-alert hole
+ * this class exists to close. Matching on the class makes the classification
+ * depend on what happened rather than on how it reads.
+ *
+ * A plain `Error`, not an `HttpException`: nothing between here and BullMQ
+ * turns a sync-job failure into an HTTP response, and the legacy adapter's 502
+ * mapping existed for the ~20 admin endpoints that let its exceptions bubble.
+ */
+export class PanelRefusedError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'PanelRefusedError';
+  }
+}
+
+/**
+ * What a non-`ok` panel outcome means to a SYNC JOB.
+ *
+ * `PanelCommandOutcome` says what happened on the wire; this says what the
+ * queue should do about it, and the three answers are not interchangeable:
+ *
+ *  • `missing`   — the panel itself says there is no such profile. The only
+ *                  outcome a caller may read as "the thing I wanted is already
+ *                  true": a DELETE is done, an UPDATE re-provisions, a CREATE's
+ *                  idempotency lookup falls through to minting one.
+ *  • `transient` — nothing was heard back, or the panel asked us to come again.
+ *                  {@link classifyRecovery} reads the resulting
+ *                  `ServiceUnavailableException` as TRANSIENT, so the sweep
+ *                  re-drives it and nobody is woken up.
+ *  • `terminal`  — the panel read the request and refused it, or we built a
+ *                  body the contract does not declare. Re-sending identical
+ *                  bytes every five minutes cannot change either answer, and
+ *                  TRANSIENT would mean nobody is ever told: the sweep resets
+ *                  the row to PENDING forever, the operator alert needs
+ *                  TERMINAL, and checkout keeps saying PROFILE_PENDING.
+ */
+export type PanelFailure =
+  | { readonly kind: 'missing'; readonly detail: string }
+  | { readonly kind: 'transient'; readonly detail: string }
+  | { readonly kind: 'terminal'; readonly detail: string };
+
+/**
+ * Statuses that mean "come back later" rather than "no".
+ *
+ * The same taxonomy the adapter this replaces applied — 408/429/5xx retry, the
+ * rest of 4xx do not — kept in one place so the two halves of a job (address
+ * then act) cannot classify the same status differently.
+ */
+function isTransientPanelStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+/**
+ * Reads a failed outcome. Exported because three services in this module have
+ * to agree on what a `404` means, and a second copy of that rule is how a bare
+ * gateway 404 gets read as "the customer's profile is gone".
+ */
+export function readPanelFailure(outcome: PanelCommandOutcome<unknown>): PanelFailure {
+  switch (outcome.kind) {
+    case 'ok':
+      // Not reachable through the call sites, which all test `kind !== 'ok'`
+      // first. Present so this function is total: a default-less switch over a
+      // union is what makes a member added upstream a compile error here rather
+      // than a silent fall-through to "terminal".
+      return { kind: 'terminal', detail: 'a successful outcome was read as a failure' };
+    case 'invalid-request':
+      // OUR bug, and never sent. Retrying byte-identical bytes cannot fix a
+      // body the contract refuses, so somebody has to be told — with the
+      // command and the field names the contract itself objected to.
+      return { kind: 'terminal', detail: `${outcome.command} refused our request: ${outcome.detail}` };
+    case 'network':
+      return { kind: 'transient', detail: `panel unreachable: ${outcome.detail}` };
+    case 'unconfigured':
+      // A SETTING, not a fault — and transient on purpose: filling in the host
+      // or the token makes every deferred job succeed on its next pass, where
+      // TERMINAL would have burned them all in the meantime.
+      return { kind: 'transient', detail: 'the Remnawave integration is not configured' };
+    case 'rejected': {
+      const described = `HTTP ${outcome.status}${outcome.code === null ? '' : ` ${outcome.code}`}${
+        outcome.detail === null ? '' : `: ${outcome.detail}`
+      }`;
+      // ONLY A 404 CARRYING THE PANEL'S OWN ENVELOPE IS A MISSING PROFILE.
+      // A bare 404 is what a reverse proxy answers to every request while it
+      // has no healthy backend, and the callers act on `missing` by deleting a
+      // row's panel link or by minting a second profile — so reading an outage
+      // that way detaches live subscriptions in bulk. The panel picks its code
+      // by ENDPOINT rather than by meaning (`A063` on the `GET`s, `A025`
+      // everywhere else), which is why both are accepted.
+      if (outcome.status === 404) {
+        return PANEL_USER_NOT_FOUND_CODES.has(outcome.code ?? '')
+          ? { kind: 'missing', detail: described }
+          : {
+              kind: 'transient',
+              detail: `${described} — a 404 with no USER_NOT_FOUND envelope is a gateway answer, not a missing profile`,
+            };
+      }
+      return isTransientPanelStatus(outcome.status)
+        ? { kind: 'transient', detail: described }
+        : { kind: 'terminal', detail: described };
+    }
+  }
+}
+
+const PANEL_USER_NOT_FOUND_CODES: ReadonlySet<string> = new Set(PANEL_USER_NOT_FOUND_ERROR_CODES);
+
+/** The `trafficLimitStrategy` values the contract accepts, named once. */
+type PanelResetPeriod = NonNullable<UpdatePanelUserBody['trafficLimitStrategy']>;
+
+/**
+ * The canonical local encoding of "unlimited", out of the panel's own numbers.
+ *
+ * Upstream `0` means unlimited on both limit fields, and 3.3.x additionally
+ * answers `null` for `hwidDeviceLimit`. The projection spells unlimited `null`,
+ * so comparing the panel's raw value against it would call `0` and `null`
+ * different and mark every unlimited plan DRIFTED forever.
+ */
+function canonicalTrafficLimit(value: number): bigint | null {
+  return value === 0 ? null : BigInt(value);
+}
+
+function canonicalDeviceLimit(value: number | null): number | null {
+  return value === null || value === 0 ? null : value;
+}
+
+/**
+ * The panel's numeric id off a user row, or `null` when the row cannot supply
+ * one.
+ *
+ * NOT `row.id` taken on trust, and the difference is a column written with the
+ * literal string `'undefined'`. The executor is LENIENT by design: a `2xx`
+ * whose body fails the pinned contract is handed back RAW with `drifted: true`,
+ * so every field on it is whatever the panel actually sent — including nothing
+ * at all. `String(undefined)` is `'undefined'`, which is non-empty, passes
+ * `persistProfileLink`'s emptiness guard, and names no profile on any panel.
+ */
+function readPanelUserId(row: { readonly id?: unknown }): number | null {
+  return typeof row.id === 'number' && Number.isSafeInteger(row.id) && row.id > 0 ? row.id : null;
+}
+
+/** A non-empty string off a panel row, read the same defensive way. */
+function readPanelString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * A panel timestamp as the ISO string the callers downstream parse.
+ *
+ * The contract TRANSFORMS every date field into a `Date`, but a response the
+ * executor flagged `drifted` is the panel's raw body — where the same field is
+ * still a string. Both are accepted, and anything else answers `null` rather
+ * than `String(undefined)`: `stampMonthRollingAnchor` would write
+ * `Invalid Date` into a MONTH_ROLLING reset anchor, which silently moves a
+ * customer's reset boundary.
+ */
+function panelTimestamp(value: unknown): string | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 type SyncJobRecord = NonNullable<
@@ -1953,15 +2467,18 @@ function classifyRecovery(
   error: unknown,
   driftAnchor: Date | null | undefined,
 ): RecoveryClassification {
-  // The panel ANSWERED and refused (400/401/403/409/…, or an endpoint it does
-  // not serve). Re-sending identical bytes every 5 minutes forever cannot
-  // change that answer, and TRANSIENT would mean nobody is ever told: the
-  // recovery sweep resets the row to PENDING/attempts=0 indefinitely, the
-  // operator alert in `reportFailure` requires TERMINAL, and checkout keeps
-  // reporting PROFILE_PENDING instead of PROFILE_SYNC_FAILED. Checked before
-  // the `ServiceUnavailableException` arm because this error is an
-  // `HttpException` too — the arm order is the classification.
-  if (error instanceof RemnawaveUpstreamRejectionError) return 'TERMINAL';
+  // THE CLASS IS THE CLASSIFICATION, and that is why the panel calls above
+  // build their exception through `panelFailure` instead of throwing whatever
+  // the failure looked like. The panel ANSWERED and refused (400/401/403/409/…,
+  // or an endpoint it does not serve): re-sending identical bytes every 5
+  // minutes cannot change that answer, and TRANSIENT would mean nobody is ever
+  // told — the recovery sweep resets the row to PENDING/attempts=0
+  // indefinitely, the operator alert in `reportFailure` requires TERMINAL, and
+  // checkout keeps reporting PROFILE_PENDING instead of PROFILE_SYNC_FAILED.
+  //
+  // Checked BEFORE the message scan below, which would otherwise read a
+  // refusal that merely NAMES a profile whose id contains `502` as retryable.
+  if (error instanceof PanelRefusedError) return 'TERMINAL';
   if (error instanceof ServiceUnavailableException) return 'TRANSIENT';
   if (isRetryablePrismaError(error, driftAnchor)) return 'TRANSIENT';
   const message = error instanceof Error ? error.message.toLowerCase() : '';

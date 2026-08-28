@@ -458,12 +458,21 @@ interface PanelHarness {
 }
 
 /**
- * The panel adapter, answering only the two READS a merge may perform.
+ * The panel client, answering only the two READS a merge may perform.
  *
- * THE ABSENCE OF EVERY OTHER METHOD IS PART OF THE TEST. `deletePanelUser`,
- * `createPanelUser` and `updatePanelUser` are not stubbed, so a merge that grew
- * a panel MUTATION dies here with "not a function" rather than quietly changing
- * a live panel. `calls` pins the same property positively, by exact list.
+ * THE ABSENCE OF EVERY OTHER METHOD IS PART OF THE TEST. `deleteUser`,
+ * `createUser` and `updateUser` are not stubbed, so a merge that grew a panel
+ * MUTATION dies here with "not a function" rather than quietly changing a live
+ * panel. `calls` pins the same property positively, by exact list.
+ *
+ * There is no version method either, and that is deliberate: the merge never
+ * asked the panel its era, and neither does the reconciliation sweep any more,
+ * so a build that reintroduced the probe fails here rather than passing.
+ *
+ * The two callbacks keep the shapes the cases already speak — `null` for "the
+ * panel does not know this key", `{ kind: 'missing' }` for a profile that is
+ * gone — and this function translates them into the outcomes the client
+ * actually returns.
  */
 function panelHarness(
   input: {
@@ -471,47 +480,47 @@ function panelHarness(
       id: number;
       shortUuid: string | null;
       username: string | null;
-      uuid: string | null;
     } | null;
     profile?: () => { kind: string; user?: Record<string, unknown> };
-    /**
-     * Only the convergence case needs this: it drives the REAL reconciliation
-     * sweep, which asks the era before deciding which populations to look at.
-     * A merge never asks, so every other case leaves it out and would die here
-     * if the merge ever started asking.
-     */
-    shape?: () => Record<string, unknown>;
   } = {},
 ): PanelHarness {
   const calls: string[] = [];
   const resolveCalls: unknown[] = [];
+  const notFound = {
+    kind: 'rejected' as const,
+    status: 404,
+    code: 'A025',
+    detail: 'User not found',
+    retryAfterMs: null,
+  };
   return {
     calls,
     resolveCalls,
     api: {
-      ...(input.shape === undefined
-        ? {}
-        : {
-            getPanelShape: async () => {
-              calls.push('getPanelShape');
-              return input.shape?.();
-            },
-          }),
-      resolvePanelIdentity: async (selector: Record<string, unknown>) => {
-        calls.push('resolvePanelIdentity');
+      resolveUser: async (selector: Record<string, unknown>) => {
+        calls.push('resolveUser');
         resolveCalls.push(selector);
         // Both halves of the canonical pair name ONE profile: the old row's
         // short UUID still resolves (the panel has no duplicates), and so does
         // the importer-written one.
-        return input.resolve === undefined
-          ? { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: null }
-          : input.resolve(selector);
+        const resolved =
+          input.resolve === undefined
+            ? { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' }
+            : input.resolve(selector);
+        return resolved === null
+          ? notFound
+          : { kind: 'ok', drifted: false, data: { response: resolved } };
       },
-      getPanelUserOutcome: async () => {
-        calls.push('getPanelUserOutcome');
-        return input.profile === undefined
-          ? { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } }
-          : input.profile();
+      getUserById: async () => {
+        calls.push('getUserById');
+        const answer =
+          input.profile === undefined
+            ? { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } }
+            : input.profile();
+        if (answer.kind === 'ok') {
+          return { kind: 'ok', drifted: false, data: { response: answer.user } };
+        }
+        return answer.kind === 'missing' ? notFound : { kind: 'network', detail: 'ECONNREFUSED' };
       },
     },
   };
@@ -748,7 +757,7 @@ describe('DuplicateSubscriptionMergeService — the merge', () => {
     assert.equal(report.merged, 1, 'a merge that did nothing proves nothing about the panel');
     assert.deepEqual(
       panel.calls,
-      ['resolvePanelIdentity', 'resolvePanelIdentity', 'getPanelUserOutcome'],
+      ['resolveUser', 'resolveUser', 'getUserById'],
       'one resolve per half plus one ownership read — no create, no update, no delete',
     );
     // The two resolves are independent: each half goes through its OWN route.
@@ -900,8 +909,8 @@ describe('DuplicateSubscriptionMergeService — re-verification', () => {
     const panel = panelHarness({
       resolve: (selector) =>
         selector['shortUuid'] === 'OLDshortOLD'
-          ? { id: 4040, shortUuid: 'OLDshortOLD', username: 'rz_alice_sub', uuid: null }
-          : { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: null },
+          ? { id: 4040, shortUuid: 'OLDshortOLD', username: 'rz_alice_sub' }
+          : { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' },
     });
 
     const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
@@ -911,7 +920,7 @@ describe('DuplicateSubscriptionMergeService — re-verification', () => {
     assert.match(report.rows[0].reason ?? '', /panel profile 4040 and sub-new-duplicate resolves to panel profile 5150/);
     assert.deepEqual(prisma.writes, [], 'two real subscriptions are not a duplicate pair');
     // Both halves were asked, and the ownership read was never reached.
-    assert.deepEqual(panel.calls, ['resolvePanelIdentity', 'resolvePanelIdentity']);
+    assert.deepEqual(panel.calls, ['resolveUser', 'resolveUser']);
   });
 
   it('refuses a profile carrying another customer reiwa_id marker', async () => {
@@ -1430,15 +1439,6 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
   const CLOCK_ANCHOR = Date.now();
   const minutesAgo = (minutes: number): Date => new Date(CLOCK_ANCHOR - minutes * MINUTE_MS);
 
-  /** A panel that has PROVEN it is 3.x, which is what gates both stale arms. */
-  const ERA_3X = {
-    version: '3.3.2',
-    addressing: 'id',
-    connectionsApi: 'connections',
-    userLookups: { byTelegramId: false, byEmail: false },
-    usersStream: true,
-  };
-
   /**
    * The three rows, oldest first.
    *
@@ -1500,7 +1500,7 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
 
   it('still sees the remaining duplicate after the first merge, and a second merge finishes it', async () => {
     const prisma = prismaHarness({ subscription: cluster() });
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness();
     const merger = service(prisma, panel, sweep(prisma, panel));
 
     // ── ROUND ONE ────────────────────────────────────────────────────────────
@@ -1577,7 +1577,7 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
   it('costs the panel nothing to see a cluster whose identities are already well formed', async () => {
     // The post-merge state on its own: two live rows, one identity, nothing
     // broken. Seeing this is a comparison of two LOCAL rows, so the sweep has no
-    // reason to resolve anything — and `resolvePanelIdentity` appearing here
+    // reason to resolve anything — and `resolveUser` appearing here
     // would mean the new arm was routed through the panel-facing repair path.
     const prisma = prismaHarness({
       subscription: [
@@ -1605,15 +1605,15 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
         },
       ],
     });
-    const panel = panelHarness({ shape: () => ERA_3X });
+    const panel = panelHarness();
 
     const report = await sweep(prisma, panel).reconcile({ dryRun: true });
 
     assert.equal(report.duplicatePairs, 1, 'the pair is seen');
     assert.deepEqual(
       panel.calls,
-      ['getPanelShape'],
-      'the era is the only thing the panel is asked; the pair itself is a local fact',
+      [],
+      'the panel is not asked anything at all; the pair is a local fact',
     );
     // The positive control for that empty-ish list: the adapter DOES answer
     // resolves, so "no resolve happened" is a fact about the sweep and not about
@@ -1654,12 +1654,6 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
  *      this report telling an operator a row is unbound when it never looked.
  */
 describe('DuplicateSubscriptionMergeService — which half holds the live identity', () => {
-  /** A uuid the panel still hands out, so `remnawaveId` is NOT the decimal id. */
-  const LIVE_UUID = 'a7c1e5d2-9b44-4d31-8f02-6c5b1a2d3e4f';
-  const uuidPanel = () =>
-    panelHarness({
-      resolve: () => ({ id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: LIVE_UUID }),
-    });
 
   it('names the DUPLICATE as the bound half on the pair this defect produces', async () => {
     const prisma = prismaHarness({ subscription: [survivorRow(), duplicateRow()] });
@@ -1699,14 +1693,14 @@ describe('DuplicateSubscriptionMergeService — which half holds the live identi
     assert.equal(report.rows[0].duplicateHoldsLiveIdentity, false);
   });
 
-  it('reads a numeric panel id stored as a DECIMAL STRING in remnawaveId', async () => {
-    // THE SPELLING A RE-DERIVATION GETS WRONG. The panel answers with a uuid
-    // here, so `remnawave_id` ('5150') matches NEITHER the resolved identity
-    // nor any column comparison — only `namesProfile`'s second clause,
-    // `row.remnawaveId === String(panelId)`, recognises it. A report that
-    // compared the stored id against the resolved one would call this row
-    // unbound while the merge itself treats it as the identity source, and the
-    // two halves of one report would then disagree about which row is live.
+  it('reads a numeric panel id stored in remnawaveId with NO supplementary column', async () => {
+    // The half the importer wrote before `remnawave_panel_id` was recorded at
+    // all: the profile is named only by the decimal in `remnawave_id`, so
+    // `namesProfile`'s second clause — `row.remnawaveId === String(panelId)` —
+    // is the only one that can recognise it. A report that compared the stored
+    // id against the resolved one alone would call this row unbound while the
+    // merge itself treats it as the identity source, and the two halves of one
+    // report would then disagree about which row is live.
     const prisma = prismaHarness({
       subscription: [
         survivorRow(),
@@ -1714,7 +1708,7 @@ describe('DuplicateSubscriptionMergeService — which half holds the live identi
       ],
     });
 
-    const report = await service(prisma, uuidPanel()).merge({
+    const report = await service(prisma, panelHarness()).merge({
       dryRun: true,
       pairs: CANONICAL_PAIR,
     });
@@ -1724,12 +1718,8 @@ describe('DuplicateSubscriptionMergeService — which half holds the live identi
       'wouldMerge',
       'the merge itself accepts this spelling — the report must agree with it',
     );
-    assert.equal(report.rows[0].remnawaveId, LIVE_UUID);
-    assert.equal(
-      report.rows[0].duplicateHoldsLiveIdentity,
-      true,
-      "'5150' in remnawave_id IS the numeric profile 5150, spelled the 2.x way",
-    );
+    assert.equal(report.rows[0].remnawaveId, '5150');
+    assert.equal(report.rows[0].duplicateHoldsLiveIdentity, true);
     assert.equal(report.rows[0].survivorHoldsLiveIdentity, false);
   });
 
@@ -1742,7 +1732,7 @@ describe('DuplicateSubscriptionMergeService — which half holds the live identi
       ],
     });
 
-    const report = await service(prisma, uuidPanel()).merge({
+    const report = await service(prisma, panelHarness()).merge({
       dryRun: true,
       pairs: CANONICAL_PAIR,
     });
@@ -2270,7 +2260,7 @@ describe('DuplicateSubscriptionMergeService — the username resolve route', () 
     panelHarness({
       resolve: (selector) =>
         selector['username'] === 'rz_alice_sub'
-          ? { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: null }
+          ? { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' }
           : null,
     });
 
@@ -2351,7 +2341,7 @@ describe('DuplicateSubscriptionMergeService — the username resolve route', () 
       ],
     });
     const panel = panelHarness({
-      resolve: () => ({ id: 5150, shortUuid: null, username: 'rz_alice_sub', uuid: null }),
+      resolve: () => ({ id: 5150, shortUuid: null, username: 'rz_alice_sub' }),
       profile: () => ({
         kind: 'ok',
         user: { description: 'name: Mallory\nreiwa_id: user-999', username: 'rz_alice_sub' },
@@ -2377,7 +2367,7 @@ describe('DuplicateSubscriptionMergeService — the username resolve route', () 
       subscription: [survivorRow({ configUrl: NO_SHORT_UUID }), duplicateRow()],
     });
     const panel = panelHarness({
-      resolve: () => ({ id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub', uuid: null }),
+      resolve: () => ({ id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' }),
     });
 
     const report = await service(prisma, panel).merge({ dryRun: true, pairs: CANONICAL_PAIR });

@@ -888,6 +888,38 @@ describe('device deletion on a link that is NOT stale is untouched', () => {
 // ── ProfileSyncProcessor.handleDelete ───────────────────────────────────────
 
 /**
+ * The panel client the DELETE worker calls, and nothing else.
+ *
+ * `deleteUser` IS ABSENT UNLESS `allowDelete` IS SET, and that absence is the
+ * strongest assertion in this block. A refusing case that stubbed it would
+ * record a call and then pass its "no deletion" check by comparing arrays; with
+ * the method missing, a deletion that slips through dies with "not a function"
+ * instead of being silently recorded and asserted away.
+ *
+ * THERE IS NO ERA READ TO STUB ANY MORE. The worker used to observe the panel
+ * shape and hand that observation to the adapter; a 2.x panel is now refused
+ * centrally by `LegacyPanelRefusal`, so the guard tests the STORED identity
+ * alone and the client is only ever asked to delete.
+ */
+function panelUsersHarness(options: { allowDelete?: boolean } = {}): {
+  readonly calls: string[];
+  readonly deleted: number[];
+  readonly client: unknown;
+} {
+  const calls: string[] = [];
+  const deleted: number[] = [];
+  const client: Record<string, unknown> = {};
+  if (options.allowDelete === true) {
+    client['deleteUser'] = async (userId: number) => {
+      calls.push('deleteUser');
+      deleted.push(userId);
+      return { kind: 'ok', drifted: false, data: undefined };
+    };
+  }
+  return { calls, deleted, client };
+}
+
+/**
  * The DELETE worker, built around one durable job.
  *
  * This is the LAST LINE OF DEFENCE, and it is not redundant with the
@@ -897,7 +929,7 @@ describe('device deletion on a link that is NOT stale is untouched', () => {
  */
 function deleteWorker(
   payloadTarget: string,
-  panel: PanelHarness,
+  panel: { readonly client: unknown },
 ): { processor: ProfileSyncProcessor; failures: unknown[] } {
   const failures: unknown[] = [];
   const processor = new ProfileSyncProcessor(
@@ -938,7 +970,7 @@ function deleteWorker(
         updateMany: async () => ({ count: 1 }),
       },
     } as never,
-    panel.api as never,
+    panel.client as never,
     {} as never,
     { error: () => undefined, info: () => undefined } as never,
   );
@@ -946,50 +978,53 @@ function deleteWorker(
 }
 
 describe('ProfileSyncProcessor.handleDelete — the queued-job backlog', () => {
-  it('THE PROOF: refuses a queued DELETE whose target is a 2.x uuid on a 3.x panel', async () => {
-    const panel = panelHarness({ addressing: 'id' });
+  it('THE PROOF: refuses a queued DELETE whose target is a 2.x uuid', async () => {
+    const panel = panelUsersHarness();
     const { processor, failures } = deleteWorker(DEAD_UUID, panel);
 
     await assert.rejects(
       () => processor.process({ data: { syncJobId: 'sync-job-delete' } } as never),
-      // Matched on the CODE, not merely on "it threw". `deletePanelUser` is not
+      // Matched on the CODE, not merely on "it threw". `deleteUser` is not
       // stubbed, so an unguarded build also throws — with a TypeError — and a
       // bare `assert.rejects` would score that as a pass.
       new RegExp(SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE),
     );
 
-    assert.deepEqual(panel.calls, ['getPanelShape']);
+    // NOTHING went to the panel — not even the resolve that would turn the
+    // recorded username into a numeric id. That resolve is the dangerous half:
+    // panel usernames are deterministic, so it lands on whatever profile now
+    // carries the name, which on a re-provisioned customer is a live one.
+    assert.deepEqual(panel.calls, []);
     assert.deepEqual(panel.deleted, []);
     assert.equal(failures.length, 1, 'the job is recorded FAILED so an operator is told');
   });
 
-  it('runs the DELETE unchanged when the panel era cannot be read', async () => {
-    const panel = panelHarness({ throws: true, allowDelete: true });
+  it('refuses WITHOUT asking the panel what version it is', async () => {
+    // The guard used to observe the panel era and refuse only on a proven 3.x
+    // answer, which meant an unreadable era let the delete through. There is one
+    // era now, so the refusal turns on the STORED identity alone — and the
+    // client this worker holds has no version call on it at all, so a build that
+    // reintroduced the probe would fail here rather than pass quietly.
+    const panel = panelUsersHarness({ allowDelete: true });
     const { processor } = deleteWorker(DEAD_UUID, panel);
 
-    await processor.process({ data: { syncJobId: 'sync-job-delete' } } as never);
+    await assert.rejects(
+      () => processor.process({ data: { syncJobId: 'sync-job-delete' } } as never),
+      new RegExp(SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE),
+    );
 
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUser']);
-    assert.equal(panel.deleted.length, 1);
+    assert.deepEqual(panel.deleted, [], 'a uuid target is refused however the panel answers');
   });
 
-  it('2.x panel: the queued uuid target is deleted exactly as before', async () => {
-    const panel = panelHarness({ addressing: 'uuid', allowDelete: true });
-    const { processor } = deleteWorker(DEAD_UUID, panel);
-
-    await processor.process({ data: { syncJobId: 'sync-job-delete' } } as never);
-
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUser']);
-    assert.equal(panel.deleted.length, 1);
-  });
-
-  it('3.x panel: a current decimal target is deleted, so ordinary retirement still works', async () => {
-    const panel = panelHarness({ addressing: 'id', allowDelete: true });
+  it('a current decimal target is deleted, so ordinary retirement still works', async () => {
+    const panel = panelUsersHarness({ allowDelete: true });
     const { processor } = deleteWorker(LIVE_DECIMAL, panel);
 
     await processor.process({ data: { syncJobId: 'sync-job-delete' } } as never);
 
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUser']);
-    assert.equal(panel.deleted.length, 1);
+    assert.deepEqual(panel.calls, ['deleteUser']);
+    // Addressed by the numeric id the row already stores — no resolve, no
+    // username, no second chance to land on somebody else's profile.
+    assert.deepEqual(panel.deleted, [Number(LIVE_DECIMAL)]);
   });
 });

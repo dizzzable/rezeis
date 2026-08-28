@@ -64,7 +64,7 @@ function matchesWhere(row: Record<string, unknown>, where: WhereNode): boolean {
 
 interface Harness {
   readonly processor: ProfileSyncProcessor;
-  /** Every identity that actually reached `deletePanelUser`. */
+  /** Every numeric user id that actually reached `deleteUser`. */
   readonly deletedTargets: unknown[];
   readonly errorEvents: Array<readonly unknown[]>;
   readonly infoEvents: Array<readonly unknown[]>;
@@ -110,9 +110,14 @@ function buildDeleteHarness(input: {
       },
     } as never,
     {
-      deletePanelUser: async (ref: unknown) => {
-        deletedTargets.push(ref);
-        return { isDeleted: true };
+      deleteUser: async (userId: number) => {
+        deletedTargets.push(userId);
+        return { kind: 'ok', drifted: false, data: undefined };
+      },
+      resolveUser: async () => {
+        throw new Error(
+          'a row carrying a numeric identity must be addressed directly, never re-resolved',
+        );
       },
     } as never,
     {} as never,
@@ -125,16 +130,27 @@ function buildDeleteHarness(input: {
   return { processor, deletedTargets, errorEvents, infoEvents };
 }
 
-const DOOMED_UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
+/**
+ * The doomed profile, named the way this panel names profiles.
+ *
+ * IT IS A DECIMAL AND NOT A UUID, and that is not cosmetic. A uuid-shaped
+ * target is refused outright by the stale-panel-link guard (pinned in
+ * `subscription-delete-stale-panel-link.spec.ts`), so a uuid here would make
+ * every case below pass for the wrong reason — the claimant search this file
+ * exists to test would never run at all.
+ */
+const DOOMED_ID = '4711';
+const DOOMED_PANEL_ID = 4711;
 const SHARED_NAME = 'rz_bob_sub';
 
 describe('profile-sync DELETE against a subscription whose panel link was lost', () => {
   it('refuses when the panel username belongs to a row that lost its id but not its profile', async () => {
-    // WHY A DELETE ASKS THIS AT ALL: on a 3.x panel a 2.x uuid can only be
-    // reached through `POST /api/users/resolve` BY USERNAME, and panel usernames
-    // are deterministic — a profile that was deleted and re-provisioned carries
-    // the same name. So the resolve can answer with somebody else's live
-    // profile, and the delete lands on it.
+    // WHY A DELETE ASKS THIS AT ALL: a DELETE job carries its target in the
+    // PAYLOAD and outlives the row it came from, so nothing about the row
+    // vouches for the target by the time the worker runs. Panel usernames are
+    // deterministic, so a profile that was deleted and re-provisioned carries
+    // the same name — and a second live row under that name is a row this
+    // delete can take down.
     //
     // THE HOLE THIS PINS: the claimant search used to require
     // `remnawaveId IS NOT NULL`, reading the id column as proof that a row is
@@ -145,12 +161,12 @@ describe('profile-sync DELETE against a subscription whose panel link was lost',
     // proceeded to destroy a live customer's profile. Silently: the panel
     // confirms the deletion, so the job COMPLETES.
     const harness = buildDeleteHarness({
-      payload: { targetRemnawaveId: DOOMED_UUID, targetRemnawavePanelUsername: SHARED_NAME },
+      payload: { targetRemnawaveId: DOOMED_ID, targetRemnawavePanelUsername: SHARED_NAME },
       jobSubscription: {
         id: 'subscription-doomed',
         status: SubscriptionStatus.DELETED,
-        remnawaveId: DOOMED_UUID,
-        remnawavePanelId: null,
+        remnawaveId: DOOMED_ID,
+        remnawavePanelId: DOOMED_PANEL_ID,
         remnawavePanelUsername: SHARED_NAME,
         configUrl: null,
       },
@@ -158,8 +174,8 @@ describe('profile-sync DELETE against a subscription whose panel link was lost',
         {
           id: 'subscription-doomed',
           status: SubscriptionStatus.DELETED,
-          remnawaveId: DOOMED_UUID,
-          remnawavePanelId: null,
+          remnawaveId: DOOMED_ID,
+          remnawavePanelId: DOOMED_PANEL_ID,
           remnawavePanelUsername: SHARED_NAME,
           configUrl: null,
         },
@@ -190,12 +206,12 @@ describe('profile-sync DELETE against a subscription whose panel link was lost',
     // search must not make every DELETE refuse. Same job, same doomed row, but
     // the other live subscription carries a DIFFERENT panel name.
     const harness = buildDeleteHarness({
-      payload: { targetRemnawaveId: DOOMED_UUID, targetRemnawavePanelUsername: SHARED_NAME },
+      payload: { targetRemnawaveId: DOOMED_ID, targetRemnawavePanelUsername: SHARED_NAME },
       jobSubscription: {
         id: 'subscription-doomed',
         status: SubscriptionStatus.DELETED,
-        remnawaveId: DOOMED_UUID,
-        remnawavePanelId: null,
+        remnawaveId: DOOMED_ID,
+        remnawavePanelId: DOOMED_PANEL_ID,
         remnawavePanelUsername: SHARED_NAME,
         configUrl: null,
       },
@@ -203,8 +219,8 @@ describe('profile-sync DELETE against a subscription whose panel link was lost',
         {
           id: 'subscription-doomed',
           status: SubscriptionStatus.DELETED,
-          remnawaveId: DOOMED_UUID,
-          remnawavePanelId: null,
+          remnawaveId: DOOMED_ID,
+          remnawavePanelId: DOOMED_PANEL_ID,
           remnawavePanelUsername: SHARED_NAME,
           configUrl: null,
         },
