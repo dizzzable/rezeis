@@ -10,6 +10,7 @@ import {
   ExchangeOptionsResponse,
   PointsExchangeType,
 } from '../services/referral-points-exchange.service';
+import { normalizeReferralSettings } from '../services/referral-qualification.service';
 import { ReferralsService } from '../services/referrals.service';
 
 /**
@@ -43,6 +44,12 @@ export class InternalReferralsController {
         pointsBalance: 0,
         programAvailable: false,
         referralCode: null,
+        // Present even on this arm. A client that reads `program` to decide
+        // whether to advertise the program at all must be able to tell "off"
+        // from "this panel is too old to say" — and it can only do that if the
+        // key is either always there or never there. There is no user here, so
+        // there is nothing to promise anyone.
+        program: { enabled: false, reward: null },
       };
     }
 
@@ -50,8 +57,27 @@ export class InternalReferralsController {
       this.prismaService.referral.count({ where: { referrerId: user.id } }),
       this.prismaService.referral.count({ where: { referrerId: user.id, qualifiedAt: { not: null } } }),
       this.isReferralProgramAvailable(user.id),
-      this.prismaService.settings.findUnique({ where: { id: 1 }, select: { accessMode: true } }),
+      this.prismaService.settings.findUnique({
+        where: { id: 1 },
+        // `referralSettings` rides along on the row this handler already
+        // fetched for `accessMode` — no second round trip.
+        select: { accessMode: true, referralSettings: true },
+      }),
     ]);
+
+    // Reward terms, read through the ENGINE’s own normaliser. Reading the raw
+    // JSON here instead would re-implement the camelCase-form / legacy-donor
+    // bridge, and the copy would disagree with the payout engine the first
+    // time an install used the shape it did not handle — the cabinet would
+    // then advertise a reward `createConfiguredRewards` never makes.
+    const program = normalizeReferralSettings(policy?.referralSettings);
+    // `createConfiguredRewards` creates NOTHING when the level-1 amount is
+    // zero, so a zero here is not "0 points", it is "no reward at all".
+    // `reward.strategy` is deliberately not exposed: the engine parses it and
+    // then never reads it — `firstAmount` is always spent as an absolute — so
+    // shipping PERCENT would invite a client to render a "%" the payout path
+    // does not honour.
+    const level1Reward = program.reward?.config.FIRST ?? 0;
 
     return {
       totalReferrals,
@@ -68,6 +94,20 @@ export class InternalReferralsController {
       // client must share a minted token rather than this permanent code —
       // otherwise the friend who taps the link is turned away at registration.
       admissionRequiresInvite: policy?.accessMode === AccessMode.INVITED,
+      // Operator-facing state of the program itself, as opposed to
+      // `programAvailable`, which answers "may THIS user take part" (the
+      // invited-only gate). A client needs both: the first decides whether to
+      // advertise the program, the second whether this person can act on it.
+      program: {
+        // Mirrors the engine kill-switch EXACTLY: only an explicit `false`
+        // disables, an absent flag stays on. A stricter reading here would
+        // hide the program in the cabinet while rewards kept being paid.
+        enabled: program.enabled !== false,
+        reward:
+          level1Reward > 0 && program.reward
+            ? { type: program.reward.type, amount: level1Reward }
+            : null,
+      },
     };
   }
 

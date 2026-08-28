@@ -217,6 +217,95 @@ describe('Referral controllers', () => {
       referralCode: 'user-1',
       // PUBLIC platform: the permanent code admits sign-ups, so no token needed.
       admissionRequiresInvite: false,
+      // Empty `referralSettings`: the engine treats an ABSENT `enabled` as on
+      // (only an explicit `false` disables), and configures no reward, so there
+      // is a program to advertise but nothing to promise for taking part.
+      program: { enabled: true, reward: null },
     });
+  });
+
+  /**
+   * The summary’s `program` block is what a client uses to decide whether to
+   * advertise the referral program AND what reward to name. Both halves are
+   * claims about the payout engine, so both are pinned against the engine’s
+   * own rules rather than against the JSON as written:
+   *
+   *   • `enabled` mirrors `qualifyReferralAfterPurchase`, where only an
+   *     explicit `false` stops accrual. Reading an absent flag as OFF here
+   *     would hide the program in the cabinet while rewards kept being paid.
+   *   • `reward` mirrors `createConfiguredRewards`, which creates NOTHING at
+   *     level 1 when the amount is zero. A zero forwarded as `{ amount: 0 }`
+   *     would let a client advertise a reward that is never granted.
+   *
+   * The legacy case matters because the normaliser bridges two config shapes
+   * and only one of them is what the admin form writes today — an install
+   * carrying donor data would otherwise be told its program pays nothing.
+   */
+  it('reports the referral program’s state and reward exactly as the payout engine reads them', async () => {
+    const summaryWith = async (referralSettings: unknown) => {
+      const controller = new InternalReferralsController(
+        {
+          user: { findUnique: async () => ({ id: 'user-1', points: 0 }) },
+          referral: { count: async () => 0, findUnique: async () => null },
+          settings: { findUnique: async () => ({ referralSettings }) },
+        } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      const summary = await controller.getSummary('cmphfcr6i007v01jg0lcu653h');
+      return summary.program;
+    };
+
+    // Form shape, switched on with a level-1 reward configured.
+    assert.deepStrictEqual(
+      await summaryWith({ enabled: true, rewardType: 'POINTS', level1Reward: 50, level2Reward: 10 }),
+      { enabled: true, reward: { type: 'POINTS', amount: 50 } },
+    );
+
+    // Days, not points: the unit is the operator’s choice and a client that
+    // hardcoded "days" or "points" would be wrong on every other install.
+    assert.deepStrictEqual(
+      await summaryWith({ rewardType: 'EXTRA_DAYS', level1Reward: 7 }),
+      { enabled: true, reward: { type: 'EXTRA_DAYS', amount: 7 } },
+    );
+
+    // Kill-switch off. The reward stays configured in the JSON — the point is
+    // that `enabled` alone has to be enough to stop a client advertising it.
+    assert.deepStrictEqual(
+      await summaryWith({ enabled: false, rewardType: 'POINTS', level1Reward: 50 }),
+      { enabled: false, reward: { type: 'POINTS', amount: 50 } },
+    );
+
+    // Configured type, zero amount: `createConfiguredRewards` skips level 1
+    // entirely, so there is no reward to name.
+    assert.deepStrictEqual(
+      await summaryWith({ rewardType: 'POINTS', level1Reward: 0 }),
+      { enabled: true, reward: null },
+    );
+
+    // Legacy donor shape, and the legacy spelling of the kill-switch.
+    assert.deepStrictEqual(
+      await summaryWith({
+        enable: true,
+        reward: { type: 'EXTRA_DAYS', strategy: 'PERCENT', config: { FIRST: 3, SECOND: 1 } },
+      }),
+      // `strategy` is absent on purpose: the engine parses it and never reads
+      // it, spending `FIRST` as an absolute either way.
+      { enabled: true, reward: { type: 'EXTRA_DAYS', amount: 3 } },
+    );
+
+    // No user resolved: the key is still present, so a client can tell "off"
+    // from "this panel is too old to say".
+    const unknownUser = new InternalReferralsController(
+      { user: { findUnique: async () => null } } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    assert.deepStrictEqual(
+      (await unknownUser.getSummary('cmphfcr6i007v01jg0lcu000z')).program,
+      { enabled: false, reward: null },
+    );
   });
 });
