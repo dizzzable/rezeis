@@ -58,63 +58,105 @@ const PARTNER_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
 ];
 
+/**
+ * The subscription card every expiry-family message carries.
+ *
+ * ── Why one shared body instead of six ───────────────────────────────────
+ *
+ * The six messages differ only in their first line — how long is left, or
+ * that nothing is. Everything under it is the same statement of what the
+ * customer has, and writing it out six times guarantees the six copies drift:
+ * the operator edits one, and the other five keep the old wording.
+ *
+ * ── The placeholders, and where they come from ───────────────────────────
+ *
+ * `{{profile}}`  the VPN profile name, read from the panel.
+ * `{{plan}}`     the plan snapshot on the subscription.
+ * `{{devices}}`  how many devices are free, or the allowance when the bound
+ *                count is unknown, or "Безлимит".
+ * `{{traffic}}`  a whole line with a traffic light — unlimited, or used /
+ *                limit with the remainder. `{{trafficUsed}}`,
+ *                `{{trafficLimit}}` and `{{trafficLeft}}` are available
+ *                separately for an operator who wants a different shape.
+ * `{{expiresDate}}` / `{{expiresTime}}` the deadline, in the time zone the
+ *                operator set in platform settings.
+ *
+ * Every one of them collapses to nothing when the fact is unknown — an
+ * unreachable VPN panel costs a line, never the message.
+ */
+const SUBSCRIPTION_CARD_RU =
+  '\n\n' +
+  '👤 {{profile}}\n' +
+  '📦 Тариф: {{plan}}\n' +
+  '📱 Устройств: {{devices}}\n' +
+  '📊 Трафик — {{traffic}}\n\n' +
+  '📆 Окончание действия подписки: {{expiresDate}}\n' +
+  '⏳ Время: {{expiresTime}}';
+
+const SUBSCRIPTION_CARD_EN =
+  '\n\n' +
+  '👤 {{profile}}\n' +
+  '📦 Plan: {{plan}}\n' +
+  '📱 Devices: {{devices}}\n' +
+  '📊 Traffic — {{traffic}}\n\n' +
+  '📆 Subscription ends: {{expiresDate}}\n' +
+  '⏳ Time: {{expiresTime}}';
+
 const DURATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   {
     type: 'expires_in_3_days',
-    title: '⏳ Подписка истекает через 3 дня',
-    titleEn: '⏳ Subscription expires in 3 days',
-    body:
-      '<b>Привет, {{name}}!</b>\n\n' +
-      'Срок действия вашей подписки <b>{{plan}}</b> истекает <b>{{expiresAt}}</b>.\n' +
-      'Продлите её, чтобы не потерять доступ.',
-    bodyEn:
-      '<b>Hi, {{name}}!</b>\n\n' +
-      'Your <b>{{plan}}</b> subscription expires on <b>{{expiresAt}}</b>.\n' +
-      'Renew it now so you don\'t lose access.',
+    title: '⚠️ Подписка истекает через 3 дня',
+    titleEn: '⚠️ Subscription expires in 3 days',
+    body: 'Привет, {{name}}! Твоя подписка истекает через 3 дня ⚠️' + SUBSCRIPTION_CARD_RU,
+    bodyEn: 'Hi, {{name}}! Your subscription expires in 3 days ⚠️' + SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
   {
     type: 'expires_in_2_days',
-    title: '⏳ Подписка истекает через 2 дня',
-    titleEn: '⏳ Subscription expires in 2 days',
-    body:
-      '<b>Привет, {{name}}!</b>\n\nОсталось всего 2 дня до окончания подписки <b>{{plan}}</b>.',
-    bodyEn:
-      '<b>Hi, {{name}}!</b>\n\nOnly 2 days left on your <b>{{plan}}</b> subscription.',
+    title: '⚠️ Подписка истекает через 2 дня',
+    titleEn: '⚠️ Subscription expires in 2 days',
+    body: 'Привет, {{name}}! Твоя подписка истекает через 2 дня ⚠️' + SUBSCRIPTION_CARD_RU,
+    bodyEn: 'Hi, {{name}}! Your subscription expires in 2 days ⚠️' + SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
   {
     type: 'expires_in_1_days',
-    title: '⏳ Подписка истекает завтра',
-    titleEn: '⏳ Subscription expires tomorrow',
-    body:
-      '<b>Привет, {{name}}!</b>\n\nЗавтра ваша подписка <b>{{plan}}</b> закончится. Продлите её одним кликом.',
-    bodyEn:
-      '<b>Hi, {{name}}!</b>\n\nYour <b>{{plan}}</b> subscription expires tomorrow. Renew it with one tap.',
+    title: '⚠️ Подписка истекает завтра',
+    titleEn: '⚠️ Subscription expires tomorrow',
+    body: 'Привет, {{name}}! Твоя подписка истекает завтра ⚠️' + SUBSCRIPTION_CARD_RU,
+    bodyEn: 'Hi, {{name}}! Your subscription expires tomorrow ⚠️' + SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
   {
     type: 'expired',
-    title: '⛔ Подписка завершена',
-    titleEn: '⛔ Subscription ended',
-    body: 'Подписка <b>{{plan}}</b> закончилась. Продлите доступ в один клик.',
-    bodyEn: 'Your <b>{{plan}}</b> subscription has ended. Renew access with one tap.',
+    title: '⛔ Подписка закончилась',
+    titleEn: '⛔ Subscription has ended',
+    body: 'Привет, {{name}}! Твоя подписка закончилась ⛔' + SUBSCRIPTION_CARD_RU,
+    bodyEn: 'Hi, {{name}}! Your subscription has ended ⛔' + SUBSCRIPTION_CARD_EN,
+    buttons: EXPIRY_BUTTONS,
+  },
+  {
+    type: 'expired_1_day_ago',
+    title: '⏰ Подписка закончилась вчера',
+    titleEn: '⏰ Subscription ended yesterday',
+    body:
+      'Привет, {{name}}! Твоя подписка закончилась вчера — доступ уже отключён ⏰' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! Your subscription ended yesterday — access is already off ⏰' +
+      SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
   {
     type: 'limited',
     title: '⚠️ Подписка ограничена',
     titleEn: '⚠️ Subscription limited',
-    body: 'Превышен лимит трафика по подписке <b>{{plan}}</b>. Доступ временно ограничен.',
-    bodyEn: 'Traffic limit reached on <b>{{plan}}</b>. Access is temporarily restricted.',
-    buttons: EXPIRY_BUTTONS,
-  },
-  {
-    type: 'expired_1_day_ago',
-    title: '⏰ Подписка истекла вчера',
-    titleEn: '⏰ Subscription expired yesterday',
-    body: 'Подписка <b>{{plan}}</b> закончилась вчера. Продлите её, чтобы вернуть доступ.',
-    bodyEn: 'Your <b>{{plan}}</b> subscription expired yesterday. Renew it to restore access.',
+    body:
+      'Привет, {{name}}! Лимит трафика исчерпан, доступ временно ограничен ⚠️' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! Your traffic limit is used up and access is temporarily restricted ⚠️' +
+      SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
 ];

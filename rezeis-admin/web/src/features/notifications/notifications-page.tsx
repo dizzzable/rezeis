@@ -17,6 +17,7 @@ import {
   Mail,
   MessageSquare,
   Power,
+  RotateCcw,
   Save,
   Send,
   Settings2,
@@ -367,6 +368,28 @@ function UserNotificationsTab() {
     onError: () => toast.error(t('notificationsPage.toasts.templateFailed')),
   })
 
+  /**
+   * Rewrites one template back to the shipped default.
+   *
+   * Seeding cannot do this: it inserts what is missing and never touches an
+   * existing row, which is right for something that runs on every boot but
+   * means a template whose DEFAULT changes reaches new installs only. Every
+   * install that has ever booted keeps the old copy, with no way to see the
+   * new one short of retyping it.
+   *
+   * Per template and confirmed, because it is the one action here that
+   * discards authored copy.
+   */
+  const restoreDefaultMutation = useMutation({
+    mutationFn: (id: string) =>
+      api.post(`/admin/notifications/templates/${id}/restore-default`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'notification-templates'] })
+      toast.success(t('notificationsPage.toasts.restoreSuccess'))
+    },
+    onError: () => toast.error(t('notificationsPage.toasts.restoreFailed')),
+  })
+
   const seedMutation = useMutation({
     mutationFn: () => api.post('/admin/notifications/templates/seed'),
     onSuccess: () => {
@@ -445,9 +468,23 @@ function UserNotificationsTab() {
                       {bodyPreview(tpl.body, 80)}
                     </p>
                   </div>
-                  <Button variant="ghost" size="sm" onClick={() => { setEditTemplate(tpl); setEditTitle(tpl.title); setEditBody(tpl.body) }}>
-                    <Edit2 className="h-3.5 w-3.5 mr-1" /> {t('notificationsPage.templates.editButton')}
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={restoreDefaultMutation.isPending}
+                      onClick={() => {
+                        if (!window.confirm(t('notificationsPage.templates.restoreConfirm'))) return
+                        restoreDefaultMutation.mutate(tpl.id)
+                      }}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5 mr-1" />{' '}
+                      {t('notificationsPage.templates.restoreButton')}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => { setEditTemplate(tpl); setEditTitle(tpl.title); setEditBody(tpl.body) }}>
+                      <Edit2 className="h-3.5 w-3.5 mr-1" /> {t('notificationsPage.templates.editButton')}
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>

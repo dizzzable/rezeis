@@ -92,6 +92,7 @@ export function PlatformSettingsForm({ variant = 'full' }: PlatformSettingsFormP
       inviteModeStartedAt: '',
       defaultCurrency: 'USD',
       projectName: '',
+      timezone: '',
       webTitle: '',
       supportUrl: '',
       supportUsername: '',
@@ -124,6 +125,7 @@ export function PlatformSettingsForm({ variant = 'full' }: PlatformSettingsFormP
       inviteModeStartedAt: formatDateTimeInput(settingsQuery.data.inviteModeStartedAt),
       defaultCurrency: readString(settingsQuery.data.defaultCurrency) || 'USD',
       projectName: readString(settingsQuery.data.branding.projectName),
+      timezone: readString(settingsQuery.data.branding.timezone),
       webTitle: readString(settingsQuery.data.branding.webTitle),
       supportUrl: readString(settingsQuery.data.branding.supportUrl),
       supportUsername: readString(settingsQuery.data.branding.supportUsername),
@@ -144,6 +146,7 @@ export function PlatformSettingsForm({ variant = 'full' }: PlatformSettingsFormP
       defaultCurrency: values.defaultCurrency.trim().toUpperCase(),
       branding: {
         projectName: formatNullableString(values.projectName),
+        timezone: formatNullableString(values.timezone),
         webTitle: formatNullableString(values.webTitle),
         supportUrl: formatNullableString(values.supportUrl),
         supportUsername: formatNullableString(values.supportUsername),
@@ -367,6 +370,11 @@ export function PlatformSettingsForm({ variant = 'full' }: PlatformSettingsFormP
                   <Label htmlFor="projectName">{t('settings.platform.labels.projectName')}</Label>
                   <Input id="projectName" placeholder={t('settings.platform.placeholders.projectName')} {...form.register('projectName')} />
                   {form.formState.errors.projectName ? <p className="text-sm text-destructive">{t(form.formState.errors.projectName.message ?? '')}</p> : null}
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="timezone">{t('settings.platform.labels.timezone')}</Label>
+                  <Input id="timezone" placeholder={t('settings.platform.placeholders.timezone')} {...form.register('timezone')} />
+                  {form.formState.errors.timezone ? <p className="text-sm text-destructive">{t(form.formState.errors.timezone.message ?? '')}</p> : null}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="webTitle">{t('settings.platform.labels.webTitle')}</Label>

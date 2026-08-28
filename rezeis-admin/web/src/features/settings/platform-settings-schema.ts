@@ -16,6 +16,10 @@ export function createPlatformSettingsSchema() {
       .min(1, 'settings.platform.errors.defaultCurrencyRequired')
       .max(12, 'settings.platform.errors.defaultCurrencyMax'),
     projectName: z.string().trim().max(120, 'settings.platform.errors.projectNameMax'),
+    // Not checked against the zone database: the list ships with the
+    // runtime, so a check here could refuse a zone the server would accept.
+    // The server falls back to UTC for an unusable value.
+    timezone: z.string().trim().max(64, 'settings.platform.errors.timezoneMax'),
     webTitle: z.string().trim().max(160, 'settings.platform.errors.webTitleMax'),
     supportUrl: z.string().trim().max(500, 'settings.platform.errors.supportUrlMax'),
     supportUsername: z.string().trim().max(64, 'settings.platform.errors.supportUsernameMax'),

@@ -1,4 +1,10 @@
-import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import { NotificationTemplate, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -201,6 +207,54 @@ export class NotificationTemplatesService implements OnModuleInit {
       );
     }
     return { created, skipped };
+  }
+
+  /**
+   * Rewrites one template back to the shipped default.
+   *
+   * ── Why seeding is not enough ────────────────────────────────────────
+   *
+   * {@link seedDefaults} inserts what is missing and never touches a row
+   * that exists, which is right: it runs on every boot and must not undo an
+   * operator's wording. The consequence is that a template whose DEFAULT
+   * changes — a new message format, say — reaches new installs only. Every
+   * install that has ever booted keeps the old copy, with no way to see the
+   * new one short of retyping it from the source.
+   *
+   * This is that way: explicit, one template at a time, and destructive to
+   * exactly the row the operator named. It is the only path in this service
+   * that overwrites authored copy, which is why it is a separate call and
+   * not a flag on the seed.
+   */
+  public async restoreDefault(id: string): Promise<NotificationTemplate> {
+    const existing = await this.prismaService.notificationTemplate.findUnique({
+      where: { id },
+      select: { type: true },
+    });
+    if (existing === null) {
+      throw new NotFoundException('Notification template not found');
+    }
+    const catalog = DEFAULT_NOTIFICATION_TEMPLATES.find(
+      (template) => template.type === existing.type,
+    );
+    if (catalog === undefined) {
+      // A template an operator created themselves has no default to go back
+      // to. Refusing says so; silently blanking it would be worse.
+      throw new BadRequestException({
+        code: 'NO_DEFAULT_FOR_TEMPLATE',
+        message: 'This template is not part of the shipped catalog',
+      });
+    }
+    return this.prismaService.notificationTemplate.update({
+      where: { id },
+      data: {
+        title: catalog.title,
+        body: catalog.body,
+        titleEn: catalog.titleEn ?? null,
+        bodyEn: catalog.bodyEn ?? null,
+        buttons: (catalog.buttons ?? []) as never,
+      },
+    });
   }
 
   /**

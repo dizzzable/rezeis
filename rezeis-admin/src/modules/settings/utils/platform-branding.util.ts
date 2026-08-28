@@ -39,6 +39,7 @@ export function readPlatformBranding(value: unknown): PlatformBrandingInterface 
   const verification = readRecord(record['verification']);
   return {
     projectName: readNullableString(record['projectName']),
+    timezone: readNullableString(record['timezone']),
     webTitle: readNullableString(record['webTitle']),
     channelUsername: readNullableString(record['channelUsername']),
     channelRecheck:
@@ -83,6 +84,8 @@ export function mergePlatformBranding(input: {
       patch.projectName !== undefined
         ? readNullableString(patch.projectName)
         : current.projectName,
+    timezone:
+      patch.timezone !== undefined ? readNullableString(patch.timezone) : current.timezone,
     webTitle:
       patch.webTitle !== undefined ? readNullableString(patch.webTitle) : current.webTitle,
     channelUsername:
@@ -110,6 +113,7 @@ export function mergePlatformBranding(input: {
 
 export interface PlatformBrandingPatch {
   readonly projectName?: string | null;
+  readonly timezone?: string | null;
   readonly webTitle?: string | null;
   readonly channelUsername?: string | null;
   readonly channelRecheck?: boolean;

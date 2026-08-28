@@ -20,6 +20,7 @@ import {
   type NotificationLocale,
 } from '../utils/notification-template-locale.util';
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
+import { buildSubscriptionFacts } from '../utils/subscription-facts.util';
 
 /**
  * Categories the user notifications fall under for topic routing when
@@ -841,11 +842,35 @@ export class UserNotificationsService {
     userName: string | null,
     locale: NotificationLocale,
   ): Promise<{ title: string; body: string; html: string }> {
-    const projectName = await this.resolveProjectName();
-    const ctx: Record<string, unknown> = {
-      ...(payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+    const branding = await this.resolveBranding();
+    const projectName = branding.projectName;
+    const payloadRecord =
+      payload !== null && typeof payload === 'object' && !Array.isArray(payload)
         ? (payload as Record<string, unknown>)
-        : {}),
+        : {};
+    const ctx: Record<string, unknown> = {
+      ...payloadRecord,
+      // Subscription facts derived HERE rather than stored in the payload,
+      // because every one of them is locale-dependent — "Безлимит" and
+      // "Unlimited", "28 августа" and "28 August" — and the locale is not
+      // known when a notification is created. Formatting at emit time would
+      // freeze one language into the row and send Russian to an
+      // English-speaking customer.
+      //
+      // Spread AFTER the payload so a caller that already computed a display
+      // string keeps it; spread from raw numbers so nothing here can be
+      // mistaken for a fact the emitter asserted.
+      ...buildSubscriptionFacts(
+        {
+          expiresAt: readOptionalString(payloadRecord['expiresAt']),
+          trafficLimitGb: readOptionalNumber(payloadRecord['trafficLimitGb']),
+          trafficUsedGb: readOptionalNumber(payloadRecord['trafficUsedGb']),
+          deviceLimit: readOptionalNumber(payloadRecord['deviceLimit']),
+          devicesUsed: readOptionalNumber(payloadRecord['devicesUsed']),
+          timezone: branding.timezone,
+        },
+        locale === 'en' ? 'en' : 'ru',
+      ),
       name: userName ?? '',
       project_name: projectName,
       projectName,
@@ -874,21 +899,48 @@ export class UserNotificationsService {
   }
 
   /**
-   * Reads the operator's configured project name from platform branding
-   * (`Settings.platformPolicy`). Empty string when unset so `{{project_name}}`
-   * collapses cleanly rather than leaking the placeholder.
+   * Reads the operator's project name and time zone from platform branding
+   * (`Settings.platformPolicy`).
+   *
+   * ONE read for both, because both are needed on every render and the second
+   * arrived later: a separate lookup for the zone would have doubled the
+   * settings reads on the notification path for no reason.
+   *
+   * An empty project name so `{{project_name}}` collapses cleanly rather than
+   * leaking the placeholder; a null zone so the formatter states UTC rather
+   * than guessing.
    */
-  private async resolveProjectName(): Promise<string> {
+  private async resolveBranding(): Promise<{
+    readonly projectName: string;
+    readonly timezone: string | null;
+  }> {
     try {
       const settings = await this.prismaService.settings.findUnique({
         where: { id: 1 },
         select: { platformPolicy: true },
       });
-      return readPlatformBranding(settings?.platformPolicy ?? null).projectName ?? '';
+      const branding = readPlatformBranding(settings?.platformPolicy ?? null);
+      return { projectName: branding.projectName ?? '', timezone: branding.timezone };
     } catch {
-      return '';
+      return { projectName: '', timezone: null };
     }
   }
+}
+
+/**
+ * Payload readers for the fact builder.
+ *
+ * A notification payload is stored JSON written by whichever emitter created
+ * it, so every field is `unknown` here. Anything that is not the right type
+ * reads as absent — and absent is a state the builder handles by saying
+ * nothing, which is the only safe answer for a number nobody measured.
+ */
+function readOptionalString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function readOptionalNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 const PLACEHOLDER_PATTERN = /\{\{\s*([\w.]+)\s*\}\}/g;

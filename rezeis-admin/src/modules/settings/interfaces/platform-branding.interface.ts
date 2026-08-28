@@ -16,6 +16,15 @@ export interface VerificationTemplateLocales {
 export interface PlatformBrandingInterface {
   /** Project / brand name, substituted as `{project_name}` in templates. */
   readonly projectName: string | null;
+  /**
+   * IANA time zone the operator works in, e.g. `Europe/Moscow`.
+   *
+   * The panel stores every timestamp in UTC and had nowhere to say what UTC
+   * means locally, so a notification that printed a deadline printed it in a
+   * zone nobody lives in. `null` keeps that behaviour — UTC, stated plainly —
+   * rather than guessing from a server clock that is itself usually UTC.
+   */
+  readonly timezone: string | null;
   /** Browser document title for the Mini App / web cabinet. */
   readonly webTitle: string | null;
   /** Channel `@username` used to resolve the subscription-gate channel. */
@@ -41,6 +50,7 @@ export interface PlatformBrandingInterface {
 
 export const DEFAULT_PLATFORM_BRANDING: PlatformBrandingInterface = {
   projectName: null,
+  timezone: null,
   webTitle: null,
   channelUsername: null,
   channelRecheck: true,

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import {
   PurchaseChannel,
   PurchaseType,
@@ -10,6 +10,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
+import { RemnawaveApiService } from '../remnawave/services/remnawave-api.service';
 
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -18,6 +19,45 @@ const AUTOPAY_WINDOW_MS = 5 * 60 * 1000;
 /** Max off-session charge attempts per subscription expiry epoch. */
 const MAX_AUTOPAY_ATTEMPTS = 3;
 const IDEMPOTENCY_PREFIX = 'auto-renew:';
+/**
+ * How far back an expiry notice looks from its mark.
+ *
+ * Three hours, the same span the warnings use ahead of theirs. It has to be
+ * comfortably wider than the cron interval so nothing slips between ticks, and
+ * narrow enough that a subscription which ended long ago never re-enters the
+ * window when the 20-hour throttle ages out.
+ */
+const EXPIRY_NOTICE_WINDOW_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * Everything an expiry notice needs from the row.
+ *
+ * Shared by the warning and the expired arms so the two cannot drift into
+ * printing different facts about the same subscription.
+ */
+const EXPIRY_NOTICE_SELECT = {
+  id: true,
+  userId: true,
+  expiresAt: true,
+  planSnapshot: true,
+  trafficLimit: true,
+  deviceLimit: true,
+  remnawaveId: true,
+  remnawavePanelId: true,
+  remnawavePanelUsername: true,
+} as const;
+
+interface ExpiryNoticeSubscription {
+  readonly id: string;
+  readonly userId: string;
+  readonly expiresAt: Date | null;
+  readonly planSnapshot: unknown;
+  readonly trafficLimit: number | null;
+  readonly deviceLimit: number;
+  readonly remnawaveId: string | null;
+  readonly remnawavePanelId: number | null;
+  readonly remnawavePanelUsername: string | null;
+}
 
 /**
  * Auto-renewal service — donor: altshop `src/services/auto_renew.py` +
@@ -46,6 +86,12 @@ export class AutoRenewService {
     private readonly userNotifications: UserNotificationsService,
     private readonly paymentsRenewalCheckoutService: PaymentsRenewalCheckoutService,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
+    /**
+     * Optional so a container without the VPN integration still constructs.
+     * Absent, an expiry notice carries the facts the local row knows — plan,
+     * allowances, expiry — and simply omits the ones only the panel has.
+     */
+    @Optional() private readonly remnawaveApiService?: RemnawaveApiService,
   ) {}
 
   /**
@@ -336,7 +382,7 @@ export class AutoRenewService {
         status: SubscriptionStatus.ACTIVE,
         expiresAt: { gt: windowStart, lt: horizon },
       },
-      select: { id: true, userId: true, expiresAt: true, planSnapshot: true },
+      select: EXPIRY_NOTICE_SELECT,
       take: 200,
     });
 
@@ -362,17 +408,10 @@ export class AutoRenewService {
       }
       notifiedUserIds.add(sub.userId);
 
-      const planName = readPlanName(sub.planSnapshot);
       await this.userNotifications.create({
         userId: sub.userId,
         type: input.notificationType,
-        payload: {
-          subscriptionId: sub.id,
-          expiresAt: sub.expiresAt?.toISOString() ?? null,
-          plan: planName,
-          planName,
-          daysLeft: input.daysAhead,
-        },
+        payload: await this.buildNoticePayload(sub, { daysLeft: input.daysAhead }),
       });
       created++;
     }
@@ -386,12 +425,174 @@ export class AutoRenewService {
   }
 
   /**
+   * Notifies about a subscription that has ALREADY ended.
+   *
+   * ── Why this did not exist ────────────────────────────────────────────
+   *
+   * The catalog has shipped `expired` and `expired_1_day_ago` templates since
+   * the bot-map module landed — editable, toggleable, with their own buttons,
+   * and wired into the notification target resolver. Nothing ever created
+   * one. An operator could write the copy, switch it on, and no customer
+   * would ever receive it; the only expiry notices in the product were the
+   * two warnings that fire BEFORE the fact.
+   *
+   * ── The window, and why it is not just `status = EXPIRED` ─────────────
+   *
+   * A bare status filter would re-notify every expired subscription forever,
+   * throttled only by the 20-hour guard below — so a customer who left a year
+   * ago would get a fresh reminder a year later, whenever the guard aged out.
+   * The window bounds it to subscriptions that crossed the mark recently,
+   * exactly as the warnings bound themselves to ones approaching it.
+   *
+   * A renewal moves `expiresAt` forward and puts the row back to ACTIVE, so a
+   * customer who paid never falls into either arm.
+   */
+  public async createExpiredNotices(input: {
+    readonly daysAgo: number;
+    readonly notificationType: string;
+  }): Promise<number> {
+    const now = new Date();
+    const mark = new Date(now.getTime() - input.daysAgo * ONE_DAY_MS);
+    const windowStart = new Date(mark.getTime() - EXPIRY_NOTICE_WINDOW_MS);
+    const recentThreshold = new Date(now.getTime() - 20 * 60 * 60 * 1000);
+
+    const justEnded = await this.prismaService.subscription.findMany({
+      where: {
+        status: SubscriptionStatus.EXPIRED,
+        expiresAt: { gt: windowStart, lte: mark },
+      },
+      select: EXPIRY_NOTICE_SELECT,
+      take: BATCH_SIZE,
+      orderBy: { expiresAt: 'desc' },
+    });
+    if (justEnded.length === 0) return 0;
+
+    const userIds = Array.from(new Set(justEnded.map((sub) => sub.userId)));
+    const alreadyNotified = await this.prismaService.userNotificationEvent.findMany({
+      where: {
+        userId: { in: userIds },
+        type: input.notificationType,
+        createdAt: { gt: recentThreshold },
+      },
+      select: { userId: true },
+    });
+    const notifiedUserIds = new Set(alreadyNotified.map((event) => event.userId));
+
+    let created = 0;
+    for (const sub of justEnded) {
+      if (notifiedUserIds.has(sub.userId)) continue;
+      notifiedUserIds.add(sub.userId);
+      await this.userNotifications.create({
+        userId: sub.userId,
+        type: input.notificationType,
+        payload: await this.buildNoticePayload(sub, { daysLeft: 0 }),
+      });
+      created++;
+    }
+    if (created > 0) {
+      this.logger.log(`Created ${created} "${input.notificationType}" notifications`);
+    }
+    return created;
+  }
+
+  /**
+   * The facts an expiry notice prints.
+   *
+   * ── Raw numbers, never rendered strings ──────────────────────────────
+   *
+   * Gigabytes and counts, plus the expiry as an ISO instant. The words —
+   * "Безлимит", "28 августа" — are produced when the template is rendered,
+   * because that is where the reader's locale is known. Formatting here
+   * would freeze one language into the stored payload.
+   *
+   * ── Why the panel read is inside the loop ────────────────────────────
+   *
+   * The cycle runs every minute over up to two hundred candidates, but only
+   * the handful not yet notified reach this point. Enriching the CANDIDATES
+   * would mean hundreds of panel calls a minute for notices that are not
+   * being sent; enriching the ones actually being created costs a call each,
+   * a few times a day per customer.
+   *
+   * ── And why an unreachable panel is not an error ─────────────────────
+   *
+   * `getPanelUserUsage` answers `null` on any failure. The notice still goes
+   * out carrying what the local row knows; the fields only the panel has are
+   * omitted, and the renderer prints nothing for them. A notification the
+   * customer never receives is a worse outcome than one missing a figure.
+   */
+  private async buildNoticePayload(
+    sub: ExpiryNoticeSubscription,
+    context: { readonly daysLeft: number },
+  ): Promise<Record<string, unknown>> {
+    const planName = readPlanName(sub.planSnapshot);
+    const payload: Record<string, unknown> = {
+      subscriptionId: sub.id,
+      expiresAt: sub.expiresAt?.toISOString() ?? null,
+      plan: planName,
+      planName,
+      daysLeft: context.daysLeft,
+      // Local columns. `0` means unlimited by the product rule, and the
+      // renderer applies that rule — it is not translated here.
+      trafficLimitGb: sub.trafficLimit,
+      deviceLimit: sub.deviceLimit,
+    };
+    if (sub.remnawavePanelUsername !== null) {
+      payload['profile'] = sub.remnawavePanelUsername;
+    }
+
+    if (this.remnawaveApiService === undefined || sub.remnawaveId === null) {
+      return payload;
+    }
+    const identity = {
+      remnawaveId: sub.remnawaveId,
+      panelId: sub.remnawavePanelId,
+      panelUsername: sub.remnawavePanelUsername,
+    };
+    try {
+      const usage = await this.remnawaveApiService.getPanelUserUsage(identity);
+      if (usage !== null) {
+        if (usage.username !== null) payload['profile'] = usage.username;
+        if (usage.usedTrafficBytes !== null) {
+          payload['trafficUsedGb'] = Math.round((usage.usedTrafficBytes / 1024 ** 3) * 100) / 100;
+        }
+        // The panel is authoritative for the limits: an operator editing a
+        // profile there directly is a supported thing to do, and a notice
+        // quoting the stale local number would contradict the cabinet.
+        if (usage.trafficLimitBytes !== null) {
+          payload['trafficLimitGb'] =
+            Math.round((usage.trafficLimitBytes / 1024 ** 3) * 100) / 100;
+        }
+        if (usage.hwidDeviceLimit !== null) payload['deviceLimit'] = usage.hwidDeviceLimit;
+      }
+
+      // Bound devices, and ONLY for a finite allowance: counting them against
+      // an unlimited plan answers a question nobody asked and spends a second
+      // panel call to do it.
+      const limit = payload['deviceLimit'];
+      if (typeof limit === 'number' && limit > 0) {
+        const devices = await this.remnawaveApiService.strictListUserDevices(identity);
+        if (devices.kind === 'ok') {
+          payload['devicesUsed'] = devices.value.devices.length;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Expiry notice for ${sub.id}: panel facts unavailable (${(err as Error).message})`,
+      );
+    }
+    return payload;
+  }
+
+  /**
    * Full cycle: pre-expiry autopay → mark expired (with past-due retries) → warnings.
    */
   public async runCycle(): Promise<{
     readonly expired: number;
     readonly warnings3d: number;
+    readonly warnings2d: number;
     readonly warnings1d: number;
+    readonly expiredNotices: number;
+    readonly expiredYesterdayNotices: number;
     readonly autopayAttempted: number;
     readonly autopaySucceeded: number;
     readonly autopayFailed: number;
@@ -403,14 +604,32 @@ export class AutoRenewService {
       daysAhead: 3,
       notificationType: 'expires_in_3_days',
     });
+    // The two-day warning has had a template, a toggle and a place in the
+    // target resolver since the catalog was written, and nothing ever created
+    // one. Same for both arms below it.
+    const warnings2d = await this.createExpiryWarnings({
+      daysAhead: 2,
+      notificationType: 'expires_in_2_days',
+    });
     const warnings1d = await this.createExpiryWarnings({
       daysAhead: 1,
       notificationType: 'expires_in_1_days',
     });
+    const expiredNotices = await this.createExpiredNotices({
+      daysAgo: 0,
+      notificationType: 'expired',
+    });
+    const expiredYesterdayNotices = await this.createExpiredNotices({
+      daysAgo: 1,
+      notificationType: 'expired_1_day_ago',
+    });
     return {
       expired,
       warnings3d,
+      warnings2d,
       warnings1d,
+      expiredNotices,
+      expiredYesterdayNotices,
       autopayAttempted: autopay.attempted,
       autopaySucceeded: autopay.succeeded,
       autopayFailed: autopay.failed,

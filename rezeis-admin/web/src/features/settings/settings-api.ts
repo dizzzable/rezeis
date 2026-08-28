@@ -30,6 +30,7 @@ const platformSettingsResponseSchema = z.object({
   defaultCurrency: z.string().nullable().optional(),
   branding: z.object({
     projectName: z.string().nullable().catch(null),
+    timezone: z.string().nullable().catch(null),
     webTitle: z.string().nullable().catch(null),
     supportUrl: z.string().nullable().catch(null),
     supportUsername: z.string().nullable().catch(null),
@@ -38,6 +39,7 @@ const platformSettingsResponseSchema = z.object({
     accessRejectedMessage: z.string().nullable().catch(null),
   }).catch({
     projectName: null,
+    timezone: null,
     webTitle: null,
     supportUrl: null,
     supportUsername: null,
@@ -196,6 +198,7 @@ interface PlatformSettingsPayload {
   readonly defaultCurrency: string
   readonly branding?: {
     readonly projectName: string | null
+    readonly timezone: string | null
     readonly webTitle: string | null
     readonly supportUrl: string | null
     readonly supportUsername: string | null

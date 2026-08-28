@@ -71,6 +71,14 @@ export class AdminNotificationTemplatesController {
     return this.notificationTemplatesService.seedDefaults({ emitEvent: true });
   }
 
+  @Post(':id/restore-default')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('notifications', 'edit')
+  @ApiOperation({ summary: 'Rewrite one template back to the shipped default' })
+  public restoreDefault(@Param('id') id: string): Promise<NotificationTemplate> {
+    return this.notificationTemplatesService.restoreDefault(id);
+  }
+
   @Patch(':id')
   @RequirePermission('notifications', 'edit')
   @ApiOperation({ summary: 'Update an existing template' })

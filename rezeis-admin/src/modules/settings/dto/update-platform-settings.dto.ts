@@ -74,6 +74,20 @@ export class PlatformBrandingDto {
   @MaxLength(128)
   public projectName?: string | null;
 
+  /**
+   * IANA time zone, e.g. `Europe/Moscow`.
+   *
+   * Not validated against the zone database here: the list ships with the
+   * runtime and differs between Node builds, so a check here could refuse a
+   * zone the formatter would have accepted. The renderer validates it where it
+   * is used and falls back to UTC — a wrong hour, never a thrown notification.
+   */
+  @IsOptional()
+  @ValidateIf((_o: object, value: unknown): boolean => value !== null)
+  @IsString()
+  @MaxLength(64)
+  public timezone?: string | null;
+
   @IsOptional()
   @ValidateIf((_o: object, value: unknown): boolean => value !== null)
   @IsString()

@@ -15,6 +15,7 @@ function createValidSettingsInput(accessMode: (typeof PLATFORM_ACCESS_MODES)[num
     inviteModeStartedAt: '',
     defaultCurrency: 'USD',
     projectName: 'Rezeis',
+    timezone: 'Europe/Moscow',
     webTitle: 'Rezeis VPN',
     supportUrl: 'https://t.me/rezeis_support',
     supportUsername: '@rezeis_support',
