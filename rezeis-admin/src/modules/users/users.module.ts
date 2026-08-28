@@ -49,5 +49,9 @@ import { UserDeletionService } from './services/user-deletion.service';
   ],
   controllers: [AdminUsersController, AdminUserManagementController, AdminUserSubscriptionsController, AdminUserWebController, AdminBulkUsersController],
   providers: [AdminUsersService, BulkUserOperationsService, RegistrationExportService, UserBlockService, UserDeletionService],
+  // Exported for `AutomationsModule`, whose `block_user` action used to write
+  // the flag by hand. There is one block cascade and every caller goes through
+  // it; see `UserBlockService`.
+  exports: [UserBlockService],
 })
 export class UsersModule {}

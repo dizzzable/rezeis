@@ -2500,7 +2500,12 @@ describe('ProfileSyncProcessor', () => {
    */
   async function runStatusUpdate(
     localStatus: SubscriptionStatus,
-    options: { readonly isBlocked?: boolean; readonly propagateStatus?: boolean } = {},
+    options: {
+      readonly isBlocked?: boolean;
+      readonly propagateStatus?: boolean;
+      /** `USER_UNBLOCK` for the job an unblock queues; anything else otherwise. */
+      readonly source?: string;
+    } = {},
   ): Promise<{
     readonly body: Record<string, unknown>;
     readonly failureWrites: unknown[];
@@ -2515,7 +2520,7 @@ describe('ProfileSyncProcessor', () => {
       supersededAt: null,
       createdAt: new Date(),
       payload: {
-        source: 'ADMIN_MUTATION',
+        source: options.source ?? 'ADMIN_MUTATION',
         propagateStatus: options.propagateStatus ?? true,
       },
       subscription: {
@@ -2653,6 +2658,66 @@ describe('ProfileSyncProcessor', () => {
       assert.equal(failureWrites.length, 0);
     });
   }
+
+  describe('an unblock undoes the status the block wrote', () => {
+    it('restores ACTIVE for a subscription that expired while the customer was blocked', async () => {
+      // THE case, and it left a paying customer without a tunnel.
+      //
+      // The block forces DISABLED whatever the local status says. If the
+      // subscription then expires before an operator clears the account,
+      // `toPanelStatus(EXPIRED)` is `null` — correct as a default, because
+      // mapping EXPIRED onto DISABLED would be a write nothing undoes — and null
+      // OMITS the field. So the unblock pushed every other column and left the
+      // profile disabled, and renewal deliberately propagates no status of its
+      // own, so nothing ever asserted it again.
+      //
+      // ACTIVE is the restoration, not a guess: Remnawave derives expiry from
+      // `expireAt`, which this same PATCH carries. An expired subscription is an
+      // ACTIVE profile with a past `expireAt` — exactly what it was before the
+      // block wrote over it.
+      const { body } = await runStatusUpdate(SubscriptionStatus.EXPIRED, {
+        isBlocked: false,
+        source: 'USER_UNBLOCK',
+      });
+
+      assert.equal(body.status, 'ACTIVE');
+    });
+
+    it('leaves a locally DISABLED subscription disabled', async () => {
+      // The restoration must not override a status the operator meant. DISABLED
+      // maps cleanly, so the unblock asserts it rather than reaching for ACTIVE.
+      const { body } = await runStatusUpdate(SubscriptionStatus.DISABLED, {
+        isBlocked: false,
+        source: 'USER_UNBLOCK',
+      });
+
+      assert.equal(body.status, 'DISABLED');
+    });
+
+    it('still omits the status for an expired subscription on an ordinary sync', async () => {
+      // The narrow scope of the change: only the job an unblock queues restores.
+      // Every other caller keeps the behaviour the comment above `toPanelStatus`
+      // argues for.
+      const { body } = await runStatusUpdate(SubscriptionStatus.EXPIRED, {
+        isBlocked: false,
+        source: 'ADMIN_MUTATION',
+      });
+
+      assert.equal('status' in body, false);
+    });
+
+    it('keeps a blocked owner DISABLED even on an unblock-shaped job', async () => {
+      // The flag is read at execution time and outranks everything, so a stale
+      // unblock job that runs after a re-block cannot re-enable the profile.
+      const { body } = await runStatusUpdate(SubscriptionStatus.EXPIRED, {
+        isBlocked: true,
+        source: 'USER_UNBLOCK',
+      });
+
+      assert.equal(body.status, 'DISABLED');
+    });
+  });
+
 });
 
 describe('ProfileSyncProcessor — recording the panel identity of rows that already exist', () => {

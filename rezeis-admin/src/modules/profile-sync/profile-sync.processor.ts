@@ -1115,11 +1115,33 @@ export class ProfileSyncProcessor extends WorkerHost {
       // deliberately sets no status of its own and would otherwise leave a
       // banned customer re-enabled by their own auto-payment.
       const ownerBlocked = subscription.user?.isBlocked === true;
+      // AN UNBLOCK HAS TO UNDO THE WRITE THE BLOCK MADE, and `toPanelStatus`
+      // alone cannot: it answers `null` for every status but ACTIVE and
+      // DISABLED, and `null` omits the field.
+      //
+      // That is the right default everywhere else — the comment above
+      // explains why EXPIRED must not be mapped onto DISABLED — but it
+      // stranded the one caller that had already written DISABLED itself.
+      // A customer blocked while ACTIVE, whose subscription then expired
+      // before an operator cleared them, was unblocked into a profile that
+      // stayed DISABLED: the field was omitted, and renewal deliberately
+      // propagates no status of its own, so nothing ever asserted it again.
+      // Paying, unblocked, and permanently without a tunnel, recoverable
+      // only by an operator toggling the subscription by hand.
+      //
+      // ACTIVE is the correct restoration, not a guess: Remnawave derives
+      // expiry from `expireAt` and traffic from `trafficLimit`, both of
+      // which this same PATCH carries. An expired subscription is an ACTIVE
+      // profile whose `expireAt` is in the past — which is exactly what it
+      // was before the block wrote over it.
+      const unblocking =
+        readOptionalString(readRecord(current.payload), 'source') === 'USER_UNBLOCK';
+      const derivedStatus = propagateStatus ? toPanelStatus(subscription.status) : null;
       const panelStatus = ownerBlocked
         ? 'DISABLED'
-        : propagateStatus
-          ? toPanelStatus(subscription.status)
-          : null;
+        : unblocking && propagateStatus && derivedStatus === null
+          ? 'ACTIVE'
+          : derivedStatus;
       if (propagateStatus && panelStatus === null) {
         this.logger.warn(
           `Not propagating status '${subscription.status}' for subscription ${subscription.id}: Remnawave accepts only ACTIVE/DISABLED (expiry is derived from expireAt)`,

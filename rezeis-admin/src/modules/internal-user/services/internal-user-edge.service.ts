@@ -690,10 +690,27 @@ export class InternalUserEdgeService {
         : Promise.resolve(true),
       this.prismaService.user.findUnique({
         where: { id: userId },
-        select: { telegramId: true },
+        // `isBlocked` alongside the Telegram id, in the query that was already
+        // being issued — see the refusal below.
+        select: { telegramId: true, isBlocked: true },
       }),
     ]);
 
+    // A BLOCKED CUSTOMER GETS NOTHING, and the free thing was the one door left
+    // open. The block gate was applied to the four paid entry points and to the
+    // bot's bootstrap; the trial was reasoned about as an eligibility question
+    // and never as an access one. But this is the path that hands out actual
+    // service: `grantTrial` writes an ACTIVE subscription and queues a CREATE
+    // job, so a blocked customer whose old subscription had already lapsed
+    // could claim a trial from a cabinet session and be back on the VPN.
+    //
+    // Refused here rather than at the controller because both the eligibility
+    // probe and the activation call run through this method — the offer stops
+    // being shown and the button stops working in one place, instead of the
+    // cabinet advertising something the next call refuses.
+    if (userRow?.isBlocked === true) {
+      return { eligible: false, reason: 'ACCOUNT_BLOCKED' };
+    }
     if (activeSubscriptions > 0) {
       return { eligible: false, reason: 'ALREADY_HAS_SUBSCRIPTION' };
     }

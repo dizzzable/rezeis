@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 
 import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
+import { UsersModule } from '../users/users.module';
 import { AutomationActionRegistry } from './actions/action-registry';
 import { AutomationEventBridgeService } from './automation-event-bridge.service';
 import { AutomationExecutorService } from './automation-executor.service';
@@ -27,6 +28,13 @@ import { AUTOMATION_QUEUE } from './automations.constants';
   imports: [
     AuthModule,
     OutboundHttpModule,
+    // For `UserBlockService`. The `block_user` action wrote `isBlocked = true`
+    // and nothing else — no identity capture, no device capture, no IP capture,
+    // no sync job and no dropped connections — so a rule firing at 03:00
+    // flagged an account whose tunnel kept carrying traffic indefinitely. Of
+    // the three writers of that column it is the one that runs unattended,
+    // which makes it the worst place for the flag to be the only effect.
+    UsersModule,
     BullModule.registerQueue({ name: AUTOMATION_QUEUE }),
   ],
   controllers: [AutomationsController],

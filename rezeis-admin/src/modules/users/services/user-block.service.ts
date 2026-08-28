@@ -4,6 +4,7 @@ import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/c
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { BlockedIpService } from '../../blocked-ips/services/blocked-ip.service';
+import { parseAddressOrCidr } from '../../blocked-ips/utils/cidr-match';
 import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
@@ -300,11 +301,26 @@ export class UserBlockService {
    * EITHER of them removes it. The alternative — leaving it — would strand an
    * unblocked customer behind an address ban with nothing on their account to
    * explain it, which is the worse of the two.
+   *
+   * MATCHED ON THE CANONICAL FORM, because that is what the block stored.
+   * Capture writes `parsed.canonical`, which is lower-cased; this used to
+   * search the raw column value, trimmed only. IPv4 was unaffected — there is
+   * nothing to case-fold — but an IPv6 address reaches
+   * `Subscription.registrationIp` however the upstream proxy spelled it, and
+   * `2001:DB8::1234` was stored as `2001:db8::1234` and then looked up as
+   * `2001:DB8::1234`. No row, no error, no log: `ipsReleased: 0`, the customer
+   * unblocked on paper and still refused by the guard on every request, with
+   * nothing on their account explaining why — the precise failure the
+   * paragraph above says this method exists to avoid.
    */
   private async releaseIp(address: string | null): Promise<number> {
     if (this.blockedIpService === undefined) return 0;
-    const trimmed = (address ?? '').trim();
-    if (trimmed.length === 0) return 0;
+    const raw = (address ?? '').trim();
+    if (raw.length === 0) return 0;
+    // Parsed rather than lower-cased by hand: one function decides what an
+    // address IS on both sides of the ban, so the two spellings cannot drift.
+    const parsed = parseAddressOrCidr(raw);
+    const trimmed = parsed === null ? raw : parsed.canonical;
     // Found here and deleted THROUGH THE SERVICE rather than with a `deleteMany`
     // of my own. The guard in front of every request reads the list through a
     // 30-second in-process cache that only the service's own writes invalidate,

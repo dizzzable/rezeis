@@ -20,13 +20,14 @@ function build(opts: {
   trialSubscriptions?: number;
   activeSubscriptions?: number;
   telegramId?: bigint | null;
+  isBlocked?: boolean;
   grantThrows?: Error;
 }) {
   const prisma = {
     user: {
       findUnique: async (args: { select?: Record<string, unknown> }) =>
         args.select !== undefined && 'telegramId' in args.select
-          ? { telegramId: opts.telegramId ?? 1n }
+          ? { telegramId: opts.telegramId ?? 1n, isBlocked: opts.isBlocked ?? false }
           : { id: 'u1' },
       findFirst: async () => ({ id: 'u1' }),
     },
@@ -134,5 +135,58 @@ describe('trial eligibility', () => {
         }),
       /Remnawave unreachable/,
     );
+  });
+});
+
+describe('a blocked customer is not offered, and cannot take, a free trial', () => {
+  const trialPlan = {
+    id: 'plan-trial',
+    isTrial: true,
+    isActive: true,
+    trialSettings: { free: true },
+    durations: [{ days: 7 }],
+  };
+
+  it('refuses eligibility with a reason of its own', async () => {
+    // The free path was the one door the block gate never reached. It was
+    // reasoned about as an eligibility question and never as an access one —
+    // but it is the path that hands out actual service: the grant writes an
+    // ACTIVE subscription and queues a CREATE job, so a blocked customer whose
+    // old subscription had lapsed could claim a trial from a live cabinet
+    // session and be back on the VPN.
+    const { service } = build({ trialPlan, isBlocked: true });
+
+    const outcome = await service.getTrialEligibility('1');
+
+    assert.equal(outcome.eligible, false);
+    assert.equal(outcome.reason, 'ACCOUNT_BLOCKED');
+  });
+
+  it('still offers it to a customer who is not blocked', async () => {
+    // The positive control: the refusal has to be about the flag, not about the
+    // fixture having drifted into refusing everybody.
+    const { service } = build({ trialPlan, isBlocked: false });
+
+    const outcome = await service.getTrialEligibility('1');
+
+    assert.equal(outcome.eligible, true);
+  });
+
+  it('refuses the activation itself, not only the offer', async () => {
+    // Both the probe and the activation run through the same eligibility
+    // method, so the button stops working in the same place the offer stops
+    // being shown — rather than the cabinet advertising something the next
+    // call refuses.
+    const { service } = build({ trialPlan, isBlocked: true });
+    let granted = false;
+
+    const outcome = await service.activateTrial('1', async () => {
+      granted = true;
+      return { subscriptionId: 'sub-1' };
+    });
+
+    assert.equal(outcome.activated, false);
+    assert.equal(outcome.reason, 'ACCOUNT_BLOCKED');
+    assert.equal(granted, false);
   });
 });

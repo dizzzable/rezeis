@@ -16,6 +16,7 @@ import {
   AutomationActionDefinition,
   AutomationActionResult,
 } from '../interfaces/automation-action.interface';
+import { UserBlockService } from '../../users/services/user-block.service';
 import { AUTOMATION_ACTION_TYPES, AutomationActionType } from '../automations.constants';
 
 /**
@@ -39,6 +40,7 @@ export class AutomationActionRegistry {
     private readonly httpService: HttpService,
     private readonly prismaService: PrismaService,
     private readonly systemEventsService: SystemEventsService,
+    private readonly userBlockService: UserBlockService,
     @Inject(paymentsConfig.KEY)
     private readonly paymentsConfiguration: ConfigType<typeof paymentsConfig>,
   ) {}
@@ -182,7 +184,23 @@ export class AutomationActionRegistry {
     return `blocked ${address}`;
   }
 
-  /** Sets `users.isBlocked = true` for the user id carried by the trigger. */
+  /**
+   * Blocks the user named by the trigger — through the SAME cascade the two
+   * operator screens use.
+   *
+   * IT USED TO WRITE THE FLAG AND NOTHING ELSE. No identity capture, so the
+   * customer's Telegram id and e-mail were never listed and they could register
+   * again in a minute. No device or IP capture. And, worst of the set, no sync
+   * job and no dropped connections: the panel profile stayed ACTIVE and the
+   * established tunnel kept carrying traffic, because the processor re-asserts
+   * a blocked owner's status only when something else enqueues a job for that
+   * subscription — and nothing did.
+   *
+   * Of the three writers of `isBlocked` this is the one that runs unattended,
+   * at three in the morning, with nobody watching a screen. It is therefore the
+   * last place where the flag should have been the whole story, and it was the
+   * one place the unification missed.
+   */
   private async blockUser(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
@@ -191,9 +209,13 @@ export class AutomationActionRegistry {
     const fromTrigger = readString(context.triggerData, 'userId');
     const userId = explicit ?? fromTrigger;
     if (!userId) throw new Error('block_user requires `userId` or trigger data with `userId`');
-    await this.prismaService.user.update({
-      where: { id: userId },
-      data: { isBlocked: true },
+    // No admin id: a rule is not a person. The cascade records the origin
+    // account on every row it writes, so an operator can still see where an
+    // entry came from.
+    const outcome = await this.userBlockService.block({
+      userId,
+      reason: `Automation rule "${context.ruleName}"`,
+      adminId: null,
     });
     this.systemEventsService.warn(
       EVENT_TYPES.USER_BLOCKED,
@@ -204,6 +226,12 @@ export class AutomationActionRegistry {
         ruleId: context.ruleId,
         ruleName: context.ruleName,
         trigger: context.trigger,
+        // What the cascade actually managed. An unattended block that fell
+        // short has to be visible in the event stream, not only in a log line
+        // nobody is reading at 03:00.
+        identitiesCaptured: outcome.identitiesCaptured,
+        devicesCaptured: outcome.devicesCaptured,
+        subscriptionsQueued: outcome.subscriptionsQueued,
       },
     );
     return `blocked user ${userId}`;
