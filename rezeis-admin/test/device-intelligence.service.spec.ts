@@ -29,14 +29,29 @@ function buildService(options: {
   /** True when the value itself is on the identity blocklist. */
   readonly listed?: boolean;
   readonly upsertThrows?: boolean;
+  /** Distinct accounts reporting the same signal — see the crowd guard. */
+  readonly sharedByAccounts?: number;
+  /** Distinct signals this account already holds — see the per-account cap. */
+  readonly signalsHeld?: number;
+  /** True when the reported value is already on file for this account. */
+  readonly alreadyOnFile?: boolean;
 } = {}) {
   const observations: Array<Record<string, unknown>> = [];
+  const refreshes: Array<Record<string, unknown>> = [];
   const flags: Array<Record<string, unknown>> = [];
   const siblingQueries: Array<Record<string, unknown>> = [];
 
   const prisma = {
     deviceObservation: {
-      upsert: async (args: Record<string, unknown>) => {
+      // `record` updates first and creates only on a miss, so the double has
+      // to model both halves — an `upsert`-only stub would make the per-account
+      // cap unreachable.
+      updateMany: async (args: Record<string, unknown>) => {
+        refreshes.push(args);
+        return { count: options.alreadyOnFile === true ? 1 : 0 };
+      },
+      count: async () => options.signalsHeld ?? 0,
+      create: async (args: Record<string, unknown>) => {
         if (options.upsertThrows === true) throw new Error('database is on fire');
         observations.push(args);
         return {};
@@ -48,6 +63,15 @@ function buildService(options: {
           : { userId: options.blockedSibling };
       },
       findMany: async () => [{ value: HASH }],
+      // How many DISTINCT accounts have reported this value. One row per
+      // account, which is what `groupBy: ['userId']` yields. The default is a
+      // single account so every pre-existing case keeps meaning what it meant;
+      // `sharedByAccounts` is what a test raises to reach the crowd guard.
+      groupBy: async () =>
+        Array.from({ length: options.sharedByAccounts ?? 1 }, (_, index) => ({
+          userId: `sharer-${index}`,
+          _count: { _all: 1 },
+        })),
     },
     userReviewFlag: {
       upsert: async (args: Record<string, unknown>) => {
@@ -70,6 +94,7 @@ function buildService(options: {
   return {
     service: new DeviceIntelligenceService(prisma as never, blocklist as never),
     observations,
+    refreshes,
     flags,
     siblingQueries,
   };
@@ -84,7 +109,7 @@ describe('recording what the cabinet reported', () => {
     await service.report({ userId: 'user-1', installId: INSTALL, deviceHash: HASH });
 
     const kinds = observations.map(
-      (call) => (call['create'] as { kind: DeviceSignalKind }).kind,
+      (call) => (call['data'] as { kind: DeviceSignalKind }).kind,
     );
     assert.deepStrictEqual(kinds, [DeviceSignalKind.INSTALL_ID, DeviceSignalKind.DEVICE_HASH]);
   });
@@ -93,10 +118,10 @@ describe('recording what the cabinet reported', () => {
     // `hits` and `lastSeenAt` are what separate a machine somebody uses daily
     // from one they touched once — a distinction an operator needs before
     // acting on a match.
-    const { service, observations } = buildService();
+    const { service, refreshes } = buildService({ alreadyOnFile: true });
     await service.report({ userId: 'user-1', installId: INSTALL });
 
-    const update = observations[0]['update'] as Record<string, unknown>;
+    const update = refreshes[0]['data'] as Record<string, unknown>;
     assert.deepStrictEqual(update['hits'], { increment: 1 });
     assert.ok(update['lastSeenAt'] instanceof Date);
   });
@@ -235,11 +260,55 @@ describe('what the operator screens read', () => {
     // that gets asked later. A queue that deletes what it resolves cannot
     // answer it.
     const { service, flags } = buildService();
-    await service.clear('flag-1', 'admin-1');
+    await service.clear('flag-1', 'admin-1', 'user-1');
 
     const data = (flags[0] as { data: Record<string, unknown> }).data;
     assert.ok(data['clearedAt'] instanceof Date);
     assert.equal(data['clearedById'], 'admin-1');
+  });
+
+  it('scopes the clear to the account it was asked about', async () => {
+    // The route is per-user and the audit row it writes names the user from the
+    // URL. Matching on the flag id alone let an admin clear a flag belonging to
+    // somebody else, and the trail then named the untouched account while the
+    // real one lost its mark with no record at all.
+    const { service, flags } = buildService();
+    await service.clear('flag-1', 'admin-1', 'user-7');
+
+    const where = (flags[0] as { where: Record<string, unknown> }).where;
+    assert.equal(where['id'], 'flag-1');
+    assert.equal(where['userId'], 'user-7');
+  });
+});
+
+describe('a signal a crowd reports is not a device', () => {
+  it('raises no flag once too many accounts share the same value', async () => {
+    // Tor, Firefox with `resistFingerprinting` and Apple Silicon Safari all
+    // spoof or generalise every component the digest is built from, so whole
+    // populations produce an IDENTICAL hash. Without this guard one blocked
+    // member of such a population marks every other member on their next page
+    // load — thousands of innocent accounts, all pointing at the same stranger.
+    const { service, flags } = buildService({
+      blockedSibling: 'blocked-1',
+      sharedByAccounts: 40,
+    });
+
+    await service.report({ userId: 'user-1', installId: null, deviceHash: HASH });
+
+    assert.deepStrictEqual(flags, []);
+  });
+
+  it('still flags a value only a couple of accounts share', async () => {
+    // The positive control: a machine genuinely lent around a household is
+    // exactly what this feature is for, and the guard must not swallow it.
+    const { service, flags } = buildService({
+      blockedSibling: 'blocked-1',
+      sharedByAccounts: 2,
+    });
+
+    await service.report({ userId: 'user-1', installId: null, deviceHash: HASH });
+
+    assert.equal(flags.length, 1);
   });
 });
 
@@ -272,5 +341,40 @@ describe('normalising a signal', () => {
     // A four-character value would be shared by unrelated people, and one flag
     // would become a flag on everybody.
     assert.equal(normaliseDeviceSignal(DeviceSignalKind.INSTALL_ID, 'ab12').ok, false);
+  });
+});
+
+describe('one account cannot write rows without end', () => {
+  it('stops recording new values past the per-account cap', async () => {
+    // The endpoint takes the value from the request body, the unique index
+    // dedupes only identical values, and the only limit in front of it is a
+    // generic per-IP one shared with the rest of the API. A script with a valid
+    // session could mint a fresh install id per request and write until the
+    // disk complained — and Brave does the same thing without meaning to, by
+    // re-randomising its canvas every session.
+    const { service, observations } = buildService({ signalsHeld: 50 });
+
+    await service.report({ userId: 'user-1', installId: INSTALL, deviceHash: HASH });
+
+    assert.deepStrictEqual(observations, []);
+  });
+
+  it('still refreshes a signal it has already seen, however many are on file', async () => {
+    // The cap is about NEW values. Evidence already given must keep its `hits`
+    // and `lastSeenAt`, which are what tell a daily machine from a one-off.
+    const { service, observations } = buildService({ signalsHeld: 500, alreadyOnFile: true });
+
+    await service.report({ userId: 'user-1', installId: INSTALL, deviceHash: HASH });
+
+    // Nothing CREATED, and no refusal either — the update did the work.
+    assert.deepStrictEqual(observations, []);
+  });
+
+  it('records normally below the cap', async () => {
+    const { service, observations } = buildService({ signalsHeld: 3 });
+
+    await service.report({ userId: 'user-1', installId: INSTALL, deviceHash: HASH });
+
+    assert.equal(observations.length, 2);
   });
 });

@@ -727,7 +727,18 @@ export class AdminUserManagementController {
     @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    await this.deviceIntelligenceService.clear(flagId, admin.id);
+    // SCOPED TO THE ACCOUNT IN THE URL. The lookup above was resolved and then
+    // ignored: `clear` matched on the flag id alone, so a flag belonging to
+    // somebody else could be cleared through this route — and the audit row
+    // below, which takes its user from the URL, would name the untouched
+    // account while the real one lost its flag with no record at all.
+    const cleared = await this.deviceIntelligenceService.clear(flagId, admin.id, user.id);
+    if (!cleared) {
+      // Refused rather than reported as done. "Already cleared" and "not this
+      // customer's flag" are both answered here, and neither should leave an
+      // audit row saying an operator judged something they did not.
+      throw new NotFoundException('Review flag not found for this user');
+    }
     await this.auditLog(admin, req, 'user.review_flag_cleared', {
       userId: user.id,
       telegramId: user.telegramId?.toString() ?? null,
