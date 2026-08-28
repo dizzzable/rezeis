@@ -4672,6 +4672,31 @@ export const ru = {
         saved: 'Баннер сохранён',
         saveFailed: 'Не удалось сохранить баннер',
       },
+      settings: {
+        title: 'Настройки бота',
+        subtitle:
+          'Применяются к живому боту. Изменения уходят в reiwa сразу; профиль в Telegram бот обновляет сам.',
+        supportUsername: 'Username поддержки',
+        supportUsernameHint:
+          'Куда ведёт кнопка «Помощь». Пусто — бот берёт значение из своего окружения.',
+        referrals: 'Реферальная программа',
+        referralsHint:
+          'Выключено — экран приглашений в боте скрыт, и инлайн-режим отдаёт обычную ссылку без реферального кода.',
+        miniApp: 'Кнопка мини-приложения',
+        miniAppHint:
+          'Выключено — кнопка кабинета в меню и на /start не показывается.',
+        profileTitle: 'Профиль бота в Telegram',
+        profileHint:
+          'Что видно в Telegram до первого сообщения. Пустое поле — оставить как есть; очистить отсюда нельзя, только заменить.',
+        profileName: 'Имя бота',
+        profileNameHint: 'Telegram ограничивает частоту смены имени.',
+        profileShortDescription: 'Короткое описание',
+        profileShortDescriptionHint:
+          'Видно в профиле бота и в предпросмотре ссылки.',
+        profileDescription: 'Описание',
+        profileDescriptionHint:
+          'Видно на пустом экране чата — до того, как человек нажал «Начать».',
+      },
     },
     drawers: {
       emojisDescription:

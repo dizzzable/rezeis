@@ -72,6 +72,7 @@ import {
   BotButtonCreateDialog,
 } from './bot-button-dialogs'
 import { buildActionPayload } from './bot-button-payload'
+import { BotSettingsSection } from './bot-settings-section'
 
 const REPLY_BUTTON_STYLES: BotButtonStyle[] = ['DEFAULT', 'PRIMARY', 'SUCCESS', 'DANGER']
 
@@ -295,6 +296,12 @@ export function ReplyKeyboardEditorPanel(): JSX.Element {
           />
         </div>
       </section>
+
+      <BotSettingsSection
+        rows={botTexts}
+        onSave={(input) => upsertTextMutation.mutate(input)}
+        disabled={upsertTextMutation.isPending}
+      />
 
       <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
         <Plus className="mr-1 h-4 w-4" aria-hidden />

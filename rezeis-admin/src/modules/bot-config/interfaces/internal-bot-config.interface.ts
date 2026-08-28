@@ -70,9 +70,21 @@ export interface InternalBotConfigVisualInterface {
    * to EN users.
    */
   readonly welcomeMessageEn: string | null;
-  readonly botDescription: string;
+  /**
+   * Operator override for the support handle reiwa deep-links to, from the
+   * `bot.support_username` row. ALWAYS A STRING, never undefined: reiwa calls
+   * `.replace()` on it directly, and an empty value is how it is told to fall
+   * back to its own `BOT_SUPPORT_USERNAME`.
+   *
+   * Two neighbours were REMOVED here rather than left unread:
+   *   • `botDescription` — a constant nothing consumed. The real thing is
+   *     `profile.description`, which reaches Telegram.
+   *   • `channelUsername` — a constant duplicating the LIVE field of the same
+   *     name in platform branding (`Settings.channelUsername`), which is what
+   *     the channel gate actually reads. A second control for it would have
+   *     been a switch that changes nothing.
+   */
   readonly supportUsername: string;
-  readonly channelUsername: string;
   /** Used by reiwa to choose between `full` (default — full mini-profile),
    *  `compact` (status line only) or `minimal` (greeting alone) layouts of
    *  the subscription summary appended to the welcome screen. */
@@ -98,13 +110,53 @@ export interface InternalBotConfigVisualInterface {
   readonly bannerApplyAll: boolean;
 }
 
+/**
+ * Feature switches shipped to reiwa.
+ *
+ * Only TWO of these are read by reiwa, and only those two are
+ * operator-controlled (`bot.feature.*` rows). The rest are emitted from a
+ * constant and have deliberately no control anywhere: grep reiwa for them and
+ * you find the type declaration and nothing else. Wiring a switch to one of
+ * them would produce a setting that visibly does nothing, which is worse than
+ * an absent one — so if you are about to add that switch, wire the READER
+ * first.
+ */
 export interface InternalBotConfigFeaturesInterface {
+  /** Read by the invite hub and by inline mode. Operator-controlled. */
   readonly referralsEnabled: boolean;
-  readonly promoCodesEnabled: boolean;
-  readonly trialEnabled: boolean;
+  /** Read by `/start` and the menu. Operator-controlled. */
   readonly miniAppEnabled: boolean;
+  /** Not read by reiwa. Constant. */
+  readonly promoCodesEnabled: boolean;
+  /** Not read by reiwa. Constant. */
+  readonly trialEnabled: boolean;
+  /** Not read by reiwa. Constant. */
   readonly activityFeedEnabled: boolean;
+  /** Not read by reiwa. Constant. */
   readonly partnersEnabled: boolean;
+}
+
+/**
+ * The bot's own Telegram profile, as the operator wants it.
+ *
+ * Storage only — the panel never calls Bot API for these. Reiwa owns the
+ * user-facing token and applies them with `setMyName` / `setMyDescription` /
+ * `setMyShortDescription`, comparing against what Telegram currently reports
+ * so an unchanged value costs no call. The panel’s own bot token is for admin
+ * notifications and is not guaranteed to be the same bot.
+ *
+ * An EMPTY string means "leave whatever is set in Telegram alone". That is not
+ * the same as clearing a field, and it is the right default: an install that
+ * has never opened the bot card must not wipe a profile someone set up in
+ * @BotFather.
+ */
+export interface InternalBotConfigProfileInterface {
+  /** Display name (`setMyName`). Telegram rate-limits changes hard. */
+  readonly name: string;
+  /** Shown on the empty-chat screen before the first message. */
+  readonly description: string;
+  /** Shown on the profile page and in link previews. */
+  readonly shortDescription: string;
 }
 
 /**
@@ -204,6 +256,11 @@ export interface InternalBotConfigInterface {
   readonly buttons: readonly InternalBotConfigButtonInterface[];
   readonly visual: InternalBotConfigVisualInterface;
   readonly features: InternalBotConfigFeaturesInterface;
+  /**
+   * Operator-managed Telegram profile. Additive — an older reiwa ignores it,
+   * and a reiwa newer than the panel sees it absent and applies nothing.
+   */
+  readonly profile: InternalBotConfigProfileInterface;
   readonly botEmojis: InternalBotEmojiMap;
   /**
    * Subset of `botEmojis` that reiwa renders inside menu copy text rather

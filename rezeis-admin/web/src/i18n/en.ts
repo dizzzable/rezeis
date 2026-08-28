@@ -4610,6 +4610,31 @@ export const en = {
         saved: 'Banner saved',
         saveFailed: 'Failed to save the banner',
       },
+      settings: {
+        title: 'Bot settings',
+        subtitle:
+          'Applied to the live bot. Changes reach reiwa immediately; the bot updates its own Telegram profile.',
+        supportUsername: 'Support username',
+        supportUsernameHint:
+          'Where the Help button leads. Empty — the bot uses the value from its own environment.',
+        referrals: 'Referral program',
+        referralsHint:
+          'Off — the invite screen is hidden in the bot, and inline mode shares a plain link with no referral code.',
+        miniApp: 'Mini App button',
+        miniAppHint:
+          'Off — the cabinet button is not shown in the menu or on /start.',
+        profileTitle: 'Telegram bot profile',
+        profileHint:
+          'What Telegram shows before the first message. An empty field keeps the current value — clearing from here is not possible, only replacing.',
+        profileName: 'Bot name',
+        profileNameHint: 'Telegram rate-limits how often the name can change.',
+        profileShortDescription: 'Short description',
+        profileShortDescriptionHint:
+          'Shown on the bot profile page and in link previews.',
+        profileDescription: 'Description',
+        profileDescriptionHint:
+          'Shown on the empty chat screen — before the person taps Start.',
+      },
     },
     drawers: {
       emojisDescription:

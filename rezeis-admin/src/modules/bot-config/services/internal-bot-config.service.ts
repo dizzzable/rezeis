@@ -132,14 +132,35 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       visual: {
         welcomeMessage: resolveWelcomeMessage(welcomeRow),
         welcomeMessageEn: resolveWelcomeMessageEn(welcomeRow, welcomeEnRow),
-        botDescription: DEFAULT_VISUAL.botDescription,
-        supportUsername: DEFAULT_VISUAL.supportUsername,
-        channelUsername: DEFAULT_VISUAL.channelUsername,
+        // Reiwa calls `.replace()` on this directly, so it is always a string —
+        // never `undefined` — however empty the operator left it. Reiwa keeps
+        // its own `BOT_SUPPORT_USERNAME` fallback for the empty case, so this
+        // is an override, not a requirement.
+        supportUsername: readTrimmedText(textMap, SUPPORT_USERNAME_KEY),
         subscriptionInfoFormat: readSubscriptionInfoFormat(textMap),
         bannerUrl: readBannerUrl(textMap),
         bannerApplyAll: readBannerApplyAll(textMap),
       },
-      features: DEFAULT_FEATURES,
+      // Only the two flags reiwa actually reads are operator-controlled. The
+      // other four are emitted from the constant and consciously have no
+      // switch: nothing in reiwa consults them, so a control for them would be
+      // a switch that does nothing — the worst kind of setting.
+      features: {
+        ...DEFAULT_FEATURES,
+        referralsEnabled: readFlag(textMap, FEATURE_REFERRALS_KEY, DEFAULT_FEATURES.referralsEnabled),
+        miniAppEnabled: readFlag(textMap, FEATURE_MINI_APP_KEY, DEFAULT_FEATURES.miniAppEnabled),
+      },
+      // The bot’s own Telegram profile. Stored here, applied by reiwa through
+      // `setMyName` / `setMyDescription` / `setMyShortDescription` — the panel
+      // deliberately does not call Bot API for these itself, because the token
+      // it holds for admin notifications is not guaranteed to be the
+      // user-facing bot’s token, and renaming the wrong bot is not a mistake
+      // with an undo.
+      profile: {
+        name: readTrimmedText(textMap, PROFILE_NAME_KEY),
+        description: readTrimmedText(textMap, PROFILE_DESCRIPTION_KEY),
+        shortDescription: readTrimmedText(textMap, PROFILE_SHORT_DESCRIPTION_KEY),
+      },
       botEmojis: emojiMap,
       menuTextCustomEmojiIds: toCustomEmojiIdMap(emojiMap),
       translations: visibleTextMap,
@@ -290,6 +311,17 @@ const BANNER_APPLY_ALL_KEY = 'bot.banner_apply_all';
 const SYSBTN_ICON_PREFIX = 'bot.sysbtn_icon.';
 const WELCOME_MESSAGE_KEY = 'bot.welcome_message';
 const SUBSCRIPTION_INFO_FORMAT_KEY = 'bot.subscription_info_format';
+// Operator-managed bot settings. All of these live as `visible: false`
+// `BotText` rows — the `bot.banner_apply_all` pattern — so they cost no
+// migration and never leak into the `translations` copy map. They are NOT in
+// `DEFAULT_TEXTS`: every reader below has a fallback, so an absent row means
+// "operator never touched it" rather than "value missing".
+const SUPPORT_USERNAME_KEY = 'bot.support_username';
+const FEATURE_REFERRALS_KEY = 'bot.feature.referrals';
+const FEATURE_MINI_APP_KEY = 'bot.feature.mini_app';
+const PROFILE_NAME_KEY = 'bot.profile.name';
+const PROFILE_DESCRIPTION_KEY = 'bot.profile.description';
+const PROFILE_SHORT_DESCRIPTION_KEY = 'bot.profile.short_description';
 
 /**
  * Reserved suffix for the per-text English sibling row, mirrored from
@@ -570,6 +602,32 @@ function mapTexts(texts: readonly BotText[]): InternalBotTextMap {
   return map;
 }
 
+/**
+ * A `visible: false` config row as plain text, trimmed. Returns `''` when the
+ * row is absent or blank, so callers can treat "unset" and "cleared" alike —
+ * which is what they mean for every setting read this way.
+ */
+function readTrimmedText(textMap: InternalBotTextMap, key: string): string {
+  const raw = textMap[key];
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/**
+ * A boolean config row. Unlike {@link readBannerApplyAll}, which treats
+ * anything but `'true'` as false, this one keeps the CALLER’s default when the
+ * row is absent or unrecognised: these flags default to ON, and reading a
+ * missing row as `false` would switch features off on every install that has
+ * never opened the bot card.
+ */
+function readFlag(textMap: InternalBotTextMap, key: string, fallback: boolean): boolean {
+  const raw = textMap[key];
+  if (typeof raw !== 'string') return fallback;
+  const value = raw.trim().toLowerCase();
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return fallback;
+}
+
 function readBannerUrl(textMap: InternalBotTextMap): string | null {
   const raw = textMap[BANNER_URL_KEY];
   if (typeof raw !== 'string') return null;
@@ -659,9 +717,7 @@ const DEFAULT_VISUAL: Omit<
 > = {
   welcomeMessage: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
   welcomeMessageEn: null,
-  botDescription: 'Быстрый и надёжный VPN',
   supportUsername: '',
-  channelUsername: '',
   subscriptionInfoFormat: 'full',
 };
 
@@ -741,6 +797,14 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
   { key: 'profile.traffic',            value: 'Трафик' },
   { key: 'profile.until',              value: 'До' },
   { key: 'profile.unlimited',          value: 'Безлимит' },
+  // Slash-command descriptions — the autocomplete bubble Telegram shows on /.
+  // Seeded so they appear in the texts editor at all; reiwa re-registers them
+  // with Telegram on cache invalidation, so an edit lands without a restart.
+  { key: 'commands.start.description',      value: 'Главное меню' },
+  { key: 'commands.help.description',       value: 'Справка и поддержка' },
+  { key: 'commands.lang.description',       value: 'Сменить язык' },
+  { key: 'commands.rules.description',      value: 'Правила сервиса' },
+  { key: 'commands.paysupport.description', value: 'Помощь с оплатой' },
   // Generic fallbacks shared across the bot
   { key: 'common.not_available',       value: 'Н/Д' },
   // Platform access-mode kill-switch banners (used by /start when the
