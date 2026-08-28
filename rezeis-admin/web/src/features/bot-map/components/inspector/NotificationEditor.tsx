@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bell, Plus, Save as SaveIcon, Trash2 } from 'lucide-react'
+import { Bell, Plus, RotateCcw, Save as SaveIcon, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
@@ -32,6 +32,7 @@ import { insertAtCaret } from '../../utils/insert-at-caret'
 import {
   BOT_MAP_QUERY_KEY,
   patchNotificationTemplate,
+  restoreNotificationTemplate,
 } from '../../bot-map-api'
 import type { NotificationButtonShape, NotificationMapNode } from '../../types'
 import { BannerField } from '../BannerField'
@@ -113,6 +114,23 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
     node.buttons,
   ])
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /**
+   * Pulls the shipped default back over this template.
+   *
+   * Here, on the screen the operator actually edits bot copy from, and not
+   * only on the notifications page: a new default that can be adopted from
+   * one screen and not the other is one an operator working in the map will
+   * never find.
+   */
+  const restoreMutation = useMutation({
+    mutationFn: () => restoreNotificationTemplate(node.templateId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: BOT_MAP_QUERY_KEY })
+      toast.success(t('botMapPage.inspector.restored'))
+    },
+    onError: () => toast.error(t('botMapPage.inspector.restoreFailed')),
+  })
 
   const mutation = useMutation({
     mutationFn: (patch: Parameters<typeof patchNotificationTemplate>[1]) =>
@@ -201,6 +219,19 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
             </Badge>
           )}
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2 h-7 px-2 text-xs"
+          disabled={restoreMutation.isPending}
+          onClick={() => {
+            if (!window.confirm(t('botMapPage.inspector.restoreConfirm'))) return
+            restoreMutation.mutate()
+          }}
+        >
+          <RotateCcw className="mr-1 h-3 w-3" aria-hidden />
+          {t('botMapPage.inspector.restore')}
+        </Button>
       </header>
 
       <div className="flex items-center justify-between rounded-lg border p-3">

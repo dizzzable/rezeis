@@ -73,6 +73,20 @@ export async function patchReplyButton(
  * fields shipped in Wave 1. The endpoint accepts a partial DTO — only
  * supplied fields are written.
  */
+/**
+ * Rewrites one notification template back to the shipped default.
+ *
+ * Seeding cannot do this: it inserts what is missing and never touches a
+ * row that exists, so a template whose DEFAULT changes reaches new installs
+ * only. Every install that has ever booted keeps the old copy, with no way
+ * to see the new one short of retyping it.
+ */
+export async function restoreNotificationTemplate(templateId: string): Promise<void> {
+  await api.post(
+    `/admin/notifications/templates/${encodeURIComponent(templateId)}/restore-default`,
+  )
+}
+
 export async function patchNotificationTemplate(
   templateId: string,
   patch: UpdateNotificationTemplatePatch,
