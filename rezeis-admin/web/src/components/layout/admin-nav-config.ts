@@ -43,6 +43,7 @@ import {
   ShieldBan,
   ShieldCheck,
   UsersRound,
+  UserX,
   Webhook,
 } from 'lucide-react';
 
@@ -202,7 +203,14 @@ export const navGroups: ReadonlyArray<NavGroup> = [
 export const HUB_TABS = {
   '/users': ['list', 'bulk'],
   '/partners': ['partners', 'withdrawals', 'analytics', 'settings'],
-  '/admins': ['admins', 'roles', 'ip-allowlist', 'webhooks', 'blocked-ips'],
+  '/admins': [
+    'admins',
+    'roles',
+    'ip-allowlist',
+    'webhooks',
+    'blocked-ips',
+    'blocked-identities',
+  ],
   '/audit': ['audit', 'system-events', 'user-events', 'system-logs'],
   '/settings/panel': [
     'api-tokens',
@@ -287,6 +295,13 @@ export const deepLinkNavItems: ReadonlyArray<NavItem & { readonly groupKey: stri
     icon: ShieldBan,
     groupKey: 'system',
     requiredPermission: { resource: 'blocked_ips', action: 'view' },
+  },
+  {
+    key: 'blockedIdentities',
+    path: '/admins#blocked-identities',
+    icon: UserX,
+    groupKey: 'system',
+    requiredPermission: { resource: 'blocked_identities', action: 'view' },
   },
   {
     key: 'apiTokens',

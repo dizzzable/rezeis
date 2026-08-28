@@ -140,3 +140,19 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   configurable: true,
   value: ResizeObserverMock,
 })
+
+// Pointer-capture and scroll-into-view, which jsdom does not implement.
+//
+// Radix's Select calls `hasPointerCapture` on the trigger during its own
+// pointer-down handling, so without these an unhandled TypeError is thrown
+// out of a React event handler before any assertion runs — a failure that
+// reads as a broken component rather than as a missing DOM API.
+//
+// Shared rather than per-file: it started life inside
+// `features/fraud/detector-accuracy.test.tsx` when that was the only test
+// driving a Select, and a second one arrived with the blocklist screen.
+const elementProto = window.Element.prototype as unknown as Record<string, unknown>;
+elementProto.hasPointerCapture ??= (): boolean => false;
+elementProto.setPointerCapture ??= (): void => {};
+elementProto.releasePointerCapture ??= (): void => {};
+elementProto.scrollIntoView ??= (): void => {};

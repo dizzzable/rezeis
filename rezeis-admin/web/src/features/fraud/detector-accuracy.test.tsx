@@ -75,16 +75,9 @@ const CLEAN = {
 describe('DetectorAccuracyPanel', () => {
   // Radix's Select drives itself with Pointer Events APIs jsdom does not
   // implement, so opening one throws `hasPointerCapture is not a function`
-  // before any assertion runs. Shimmed here rather than in the shared
-  // `setup-tests.ts` because this is the first test in the codebase to drive a
-  // Select, and vitest isolates per file so the prototype patch does not leak.
-  beforeAll(() => {
-    const proto = window.Element.prototype as unknown as Record<string, unknown>
-    proto.hasPointerCapture ??= (): boolean => false
-    proto.setPointerCapture ??= (): void => {}
-    proto.releasePointerCapture ??= (): void => {}
-    proto.scrollIntoView ??= (): void => {}
-  })
+  // before any assertion runs. Now shimmed in the shared `setup-tests.ts`,
+  // because a second screen drives a Select and a third copy is how a shim
+  // starts drifting between files.
 
   beforeEach(() => {
     vi.mocked(getDetectorAccuracy).mockResolvedValue(report([NOISY, CLEAN, SPARSE]))
