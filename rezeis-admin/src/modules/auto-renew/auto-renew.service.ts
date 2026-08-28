@@ -347,6 +347,34 @@ export class AutoRenewService {
    * within the given horizon (e.g., 3 days, 1 day). Idempotent — skips
    * users who already have a recent notification of the same type.
    */
+  /**
+   * Runs one notification family, and contains its failure to itself.
+   *
+   * Answers `0` on a throw — the same value the family reports when it had
+   * nothing to send. Those are genuinely different facts, which is why the
+   * failure is logged at ERROR with the family named: the cycle result feeds an
+   * operator summary, and a family that crashed must be findable there rather
+   * than blending into a quiet night.
+   *
+   * What it must NOT do is rethrow. The five families run in sequence, and a
+   * single unusable row — a `userId` whose `User` was deleted between the read
+   * and the insert, a serialization failure — would otherwise take every family
+   * after it down with it, on every tick, for as long as that row sat inside
+   * its window.
+   */
+  private async runEmitter(family: string, run: () => Promise<number>): Promise<number> {
+    try {
+      return await run();
+    } catch (error) {
+      this.logger.error(
+        `Notification family '${family}' failed this cycle and was skipped; the others ran: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return 0;
+    }
+  }
+
   public async createExpiryWarnings(input: {
     readonly daysAhead: number;
     readonly notificationType: string;
@@ -491,29 +519,37 @@ export class AutoRenewService {
   }> {
     const autopay = await this.processAutopayCharges();
     const expired = await this.markExpiredSubscriptions();
-    const warnings3d = await this.createExpiryWarnings({
-      daysAhead: 3,
-      notificationType: 'expires_in_3_days',
-    });
+    // EACH FAMILY IS ISOLATED, and that is not defensive dressing — it is the
+    // difference between one customer's notice failing and five families going
+    // silent.
+    //
+    // These five ran as a bare `await` chain. Any throw inside one — a userId
+    // whose `User` row was deleted between the read and the insert (the FK
+    // cascades, so the race is real), a serialization failure, a rejected JSON
+    // payload — propagated out of `runCycle` and every family AFTER it was
+    // skipped for that tick. `createExpiredNotices` orders deterministically,
+    // so the next tick stops on the same row: `expired` and `expired_1_day_ago`
+    // would stay silent for as long as the poison row sat inside its window,
+    // with a stack trace as the only symptom. The webhook path already got
+    // this right; the cron did not.
+    const warnings3d = await this.runEmitter('expires_in_3_days', () =>
+      this.createExpiryWarnings({ daysAhead: 3, notificationType: 'expires_in_3_days' }),
+    );
     // The two-day warning has had a template, a toggle and a place in the
     // target resolver since the catalog was written, and nothing ever created
     // one. Same for both arms below it.
-    const warnings2d = await this.createExpiryWarnings({
-      daysAhead: 2,
-      notificationType: 'expires_in_2_days',
-    });
-    const warnings1d = await this.createExpiryWarnings({
-      daysAhead: 1,
-      notificationType: 'expires_in_1_days',
-    });
-    const expiredNotices = await this.createExpiredNotices({
-      daysAgo: 0,
-      notificationType: 'expired',
-    });
-    const expiredYesterdayNotices = await this.createExpiredNotices({
-      daysAgo: 1,
-      notificationType: 'expired_1_day_ago',
-    });
+    const warnings2d = await this.runEmitter('expires_in_2_days', () =>
+      this.createExpiryWarnings({ daysAhead: 2, notificationType: 'expires_in_2_days' }),
+    );
+    const warnings1d = await this.runEmitter('expires_in_1_days', () =>
+      this.createExpiryWarnings({ daysAhead: 1, notificationType: 'expires_in_1_days' }),
+    );
+    const expiredNotices = await this.runEmitter('expired', () =>
+      this.createExpiredNotices({ daysAgo: 0, notificationType: 'expired' }),
+    );
+    const expiredYesterdayNotices = await this.runEmitter('expired_1_day_ago', () =>
+      this.createExpiredNotices({ daysAgo: 1, notificationType: 'expired_1_day_ago' }),
+    );
     return {
       expired,
       warnings3d,

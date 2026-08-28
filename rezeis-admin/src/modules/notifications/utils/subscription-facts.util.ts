@@ -69,12 +69,32 @@ const WORDS = {
  * scanning a message sees the colour before they read the numbers, and a
  * single colour for every state would be decoration rather than information.
  */
-function trafficLamp(usedRatio: number | null): string {
-  if (usedRatio === null) return '🟢';
+function trafficLamp(usedRatio: number): string {
   if (usedRatio >= 0.9) return '🔴';
   if (usedRatio >= 0.75) return '🟡';
   return '🟢';
 }
+
+/**
+ * The lamp for an allowance with nothing to measure against it.
+ *
+ * WHY NOT GREEN, which is what this used to be. `trafficLamp(null)` served
+ * two states that are not the same fact: an UNLIMITED plan, where there is
+ * genuinely nothing to run out of, and a KNOWN limit whose usage we could
+ * not read because the VPN panel was unreachable. The second rendered as a
+ * healthy quarter-full tank.
+ *
+ * It is worst on the message where it matters most. `limited` fires from a
+ * panel webhook saying the allowance is EXHAUSTED, and the panel that sent
+ * it is the same one the usage read goes to — so "webhook arrived, REST
+ * call failed" is a strongly correlated pair, not a freak coincidence. The
+ * customer would read: «Лимит трафика исчерпан» beside 🟢.
+ *
+ * Unlimited keeps its green — there really is nothing to warn about. An
+ * unread measurement gets a lamp of its own, and the number it sits beside
+ * is the limit rather than a usage, so the two cannot be confused.
+ */
+const UNKNOWN_LAMP = '⚪';
 
 /** `0` / negative / null is the product's "unlimited". */
 function isUnlimited(value: number | null | undefined): boolean {
@@ -99,23 +119,29 @@ export function buildSubscriptionFacts(
   const used = input.trafficUsedGb ?? null;
 
   if (isUnlimited(limit)) {
-    out['traffic'] = `${trafficLamp(null)} ${words.unlimited}`;
+    // Green, and correctly so: an unlimited allowance cannot run low.
+    out['traffic'] = `🟢 ${words.unlimited}`;
     out['trafficLimit'] = words.unlimited;
     if (used !== null) {
       out['trafficUsed'] = `${formatAmount(used)} ${words.gb}`;
       // Deliberately no `trafficLeft`: what remains of an unlimited allowance
       // is not a number, and printing one would invent a cap.
-      out['traffic'] = `${trafficLamp(null)} ${words.unlimited} · ${formatAmount(used)} ${words.gb} ${words.used}`;
+      out['traffic'] = `🟢 ${words.unlimited} · ${formatAmount(used)} ${words.gb} ${words.used}`;
     }
   } else if (used === null) {
     // The limit is known and the usage is not — the VPN panel was unreachable.
-    // Say what we know and nothing else.
+    // Say what we know, and say that we do not know the rest: see UNKNOWN_LAMP.
     out['trafficLimit'] = `${formatAmount(limit as number)} ${words.gb}`;
-    out['traffic'] = `${trafficLamp(null)} ${out['trafficLimit']}`;
+    out['traffic'] = `${UNKNOWN_LAMP} ${out['trafficLimit']}`;
   } else {
     const capped = limit as number;
     const left = Math.max(0, capped - used);
-    const ratio = capped <= 0 ? null : Math.min(1, used / capped);
+    // `capped > 0` is guaranteed by the branch — `isUnlimited` already took
+    // every zero and negative limit — so there is no division by zero here and
+    // no unmeasurable case left to represent. The old `capped <= 0 ? null` arm
+    // was unreachable, and it was the only thing that made this lamp's argument
+    // nullable; with it gone the type says what the code already guaranteed.
+    const ratio = Math.min(1, used / capped);
     out['trafficLimit'] = `${formatAmount(capped)} ${words.gb}`;
     out['trafficUsed'] = `${formatAmount(used)} ${words.gb}`;
     out['trafficLeft'] = `${formatAmount(left)} ${words.gb}`;

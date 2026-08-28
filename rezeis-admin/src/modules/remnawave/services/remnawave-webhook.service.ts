@@ -772,8 +772,20 @@ export class RemnawaveWebhookService {
 
     const result = await this.prismaService.subscription.updateMany({ where, data: update });
 
+    // ONE MESSAGE PER CUSTOMER, not one per row.
+    //
+    // `panelIdentityWhere` matches `remnawaveId` OR `remnawavePanelId`, and
+    // `remnawaveId` carries no unique constraint — the schema says so in as
+    // many words, and `stale-panel-link.ts` names the duplicate pairs the old
+    // importer produced as a live production state. A customer holding two
+    // rows for one panel profile would therefore be told twice, by one
+    // webhook, that their traffic ran out. The expiry emitters already dedup
+    // per user; this one did not.
+    const notified = new Set<string>();
     for (const subscription of beforeLimited) {
       if (subscription.status === SubscriptionStatus.LIMITED) continue;
+      if (notified.has(subscription.userId)) continue;
+      notified.add(subscription.userId);
       await this.notifyTrafficLimited(subscription);
     }
 
