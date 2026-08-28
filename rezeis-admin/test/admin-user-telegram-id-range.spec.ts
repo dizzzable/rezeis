@@ -72,6 +72,7 @@ describe('AdminUserManagementController telegramId range', () => {
       undefined as never,
       undefined as never,
       {} as never, // PlansAdminService
+      undefined as never,
     );
   }
 
@@ -137,6 +138,7 @@ describe('AdminUserManagementController telegramId range', () => {
       undefined as never,
       undefined as never,
       {} as never, // PlansAdminService
+      undefined as never,
     );
     // The route param resolves; the pasted referral identifier is the overflow.
     (controller as never as { prismaService: { user: { findFirst: unknown } } }).prismaService.user.findFirst =
@@ -228,6 +230,7 @@ describe('AdminUserManagementController telegramId range', () => {
         undefined as never,
         undefined as never,
         {} as never, // PlansAdminService
+      undefined as never,
       );
 
       await controller.createUser({ telegramId: input }, ADMIN, REQ);

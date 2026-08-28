@@ -309,6 +309,7 @@ function buildUserPanel(db: ReturnType<typeof makeDb>) {
     {} as never, // UserDeletionService
     partnersService,
     {} as never, // PlansAdminService
+    undefined as never,
   );
 }
 

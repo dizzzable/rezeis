@@ -383,5 +383,6 @@ function createController(harness: ReturnType<typeof createHarness>) {
     {} as never,
     {} as never,
     {} as never, // PlansAdminService
+    undefined as never, // UserBlockService
   );
 }

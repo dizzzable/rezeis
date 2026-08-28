@@ -2489,8 +2489,19 @@ describe('ProfileSyncProcessor', () => {
 
   // ── Live 400 #3: PATCH /api/users only accepts ACTIVE | DISABLED ──────────
 
-  /** Runs one UPDATE job with `propagateStatus` against the real adapter. */
-  async function runStatusUpdate(localStatus: SubscriptionStatus): Promise<{
+  /**
+   * Runs one UPDATE job with `propagateStatus` against the real adapter.
+   *
+   * `options` carries the two things a caller may vary beyond the local
+   * status: whether the job asked for the status to be propagated at all, and
+   * whether the OWNER is blocked. Both default to what every pre-existing
+   * case here assumed, so those cases keep asserting what they were written
+   * to assert.
+   */
+  async function runStatusUpdate(
+    localStatus: SubscriptionStatus,
+    options: { readonly isBlocked?: boolean; readonly propagateStatus?: boolean } = {},
+  ): Promise<{
     readonly body: Record<string, unknown>;
     readonly failureWrites: unknown[];
   }> {
@@ -2503,10 +2514,14 @@ describe('ProfileSyncProcessor', () => {
       attempts: 0,
       supersededAt: null,
       createdAt: new Date(),
-      payload: { source: 'ADMIN_MUTATION', propagateStatus: true },
+      payload: {
+        source: 'ADMIN_MUTATION',
+        propagateStatus: options.propagateStatus ?? true,
+      },
       subscription: {
         id: 'subscription-1',
         userId: 'user-1',
+        user: { isBlocked: options.isBlocked ?? false },
         remnawaveId: '4711',
         remnawavePanelId: 4711,
         remnawavePanelUsername: 'rz_login_sub',
@@ -2565,6 +2580,51 @@ describe('ProfileSyncProcessor', () => {
   it('propagates an explicit ACTIVE/DISABLED status unchanged', async () => {
     assert.equal((await runStatusUpdate(SubscriptionStatus.ACTIVE)).body['status'], 'ACTIVE');
     assert.equal((await runStatusUpdate(SubscriptionStatus.DISABLED)).body['status'], 'DISABLED');
+  });
+
+  // ── A blocked owner overrides every one of the rules above ──────────────
+  //
+  // This is the ONLY thing in the product that switches the VPN itself off.
+  // The flag, the identity blocklist and the session refusal all govern our
+  // own surfaces; a provisioned profile keeps carrying traffic regardless of
+  // what the cabinet decides, so a ban that stops here stops at the part the
+  // customer cares least about.
+
+  it('forces DISABLED for a blocked owner whose subscription is ACTIVE', async () => {
+    const { body } = await runStatusUpdate(SubscriptionStatus.ACTIVE, { isBlocked: true });
+    assert.equal(body['status'], 'DISABLED');
+  });
+
+  it('forces DISABLED even when the job never asked for a status', async () => {
+    // The load-bearing case, and the reason this is derived from the column
+    // rather than from the job payload. Renewal deliberately propagates NO
+    // status (see `payment-reconciliation.service.ts`), so a banned customer
+    // whose card charges successfully would otherwise be handed their VPN
+    // back by their own auto-payment.
+    const { body } = await runStatusUpdate(SubscriptionStatus.ACTIVE, {
+      isBlocked: true,
+      propagateStatus: false,
+    });
+    assert.equal(body['status'], 'DISABLED');
+  });
+
+  it('forces DISABLED for a local status that normally propagates nothing', async () => {
+    // EXPIRED sends no status at all for an unblocked owner — Remnawave
+    // derives it. A blocked owner still gets an explicit DISABLED, because
+    // expiry is a state the panel can decide it has left (a renewal moves
+    // `expireAt`) and a ban is not.
+    const { body } = await runStatusUpdate(SubscriptionStatus.EXPIRED, { isBlocked: true });
+    assert.equal(body['status'], 'DISABLED');
+  });
+
+  it('leaves an unblocked owner alone — the control for all three above', async () => {
+    // Without this, an override that fired for everybody would satisfy every
+    // assertion above, and the first customer to renew would be cut off.
+    const { body } = await runStatusUpdate(SubscriptionStatus.ACTIVE, {
+      isBlocked: false,
+      propagateStatus: false,
+    });
+    assert.equal('status' in body, false);
   });
 
   for (const localStatus of [

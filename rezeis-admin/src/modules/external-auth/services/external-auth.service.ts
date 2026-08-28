@@ -2,15 +2,18 @@ import {
   BadRequestException,
   ConflictException,
   HttpException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { ExternalAuthProvider, Prisma } from '@prisma/client';
+import { BlockedIdentityKind, ExternalAuthProvider, Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
+import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import {
@@ -18,6 +21,8 @@ import {
   ExternalUserProfile,
 } from '../interfaces/external-auth.interface';
 import { AuthorizeUrlInput, ExchangeInput, OAuthProviderAdapter } from '../interfaces/oauth-adapter.interface';
+import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { SettingsService } from '../../settings/services/settings.service';
 import { RegistrationSnapshotService } from '../../web-auth/services/registration-snapshot.service';
 import { GoogleOAuthAdapter } from './providers/google-oauth.adapter';
 import { MailruOAuthAdapter } from './providers/mailru-oauth.adapter';
@@ -45,6 +50,9 @@ export class ExternalAuthService {
     private readonly systemEventsService: SystemEventsService,
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly registrationSnapshotService: RegistrationSnapshotService,
+    private readonly settingsService: SettingsService,
+    private readonly accessModeGuard: AccessModeGuard,
+    private readonly blockedIdentityService: BlockedIdentityService,
     google: GoogleOAuthAdapter,
     yandex: YandexOAuthAdapter,
     mailru: MailruOAuthAdapter,
@@ -201,6 +209,22 @@ export class ExternalAuthService {
     }
 
     // 3. New account → shell + finish-setup.
+    //
+    // ── The two gates every OTHER registration path already had ──────────
+    //
+    // Everything above this line is a returning user, and each of those
+    // branches refuses a blocked one. Below it a brand-new account is minted,
+    // and until now that happened with no gate whatsoever: social sign-up was
+    // the single way to create a user that consulted neither the platform
+    // access mode nor the blocklist. `REG_BLOCKED` closed the web form and the
+    // bot's `/start`, and left this door open.
+    //
+    // `hasInvite` is false and cannot be otherwise: an OAuth callback carries
+    // a provider code, never a referral code, so `INVITED` mode refuses social
+    // sign-up outright. That is the honest reading of invite-only — the
+    // alternative is a mode that anyone can walk around by picking the Google
+    // button.
+    await this.guardNewAccount(profile);
     const userId = await this.createShellAccount(profile);
     // Smoking gun for "existing user asked to register again": nothing matched
     // (no OAuth link, no Telegram-id user, no verified-email account) so a new
@@ -310,6 +334,52 @@ export class ExternalAuthService {
     const policy = await this.configService.getPolicy();
     const check = await this.disposableEmailService.check(email, policy);
     return check.allowed ? email : null;
+  }
+
+  /**
+   * Refuses a social sign-up that would create a NEW account when the platform
+   * is closed to registrations or the identity is on the blocklist.
+   *
+   * Throws rather than returning `denied`, and that is deliberate: `denied`
+   * means "this person is banned" to every caller of `resolve`, and a platform
+   * that is merely closed to new sign-ups is a different answer that the
+   * cabinet already knows how to show for the web form. Reusing `denied` would
+   * tell a would-be customer they are banned because the operator paused
+   * registrations.
+   */
+  private async guardNewAccount(profile: ExternalUserProfile): Promise<void> {
+    const policy = await this.settingsService.getInternalPlatformPolicy();
+    const rejection = this.accessModeGuard.evaluate({
+      gate: 'register',
+      mode: policy.accessMode,
+      hasInvite: false,
+    });
+    if (rejection !== null) {
+      throw rejection.status === 503
+        ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
+        : new ForbiddenException({ code: rejection.code, message: rejection.message });
+    }
+
+    // Only the identities this provider actually asserts. A Google profile has
+    // no Telegram id, and asking about `undefined` would be asking whether the
+    // empty identity is blocked.
+    const telegramId =
+      profile.provider === ExternalAuthProvider.TELEGRAM
+        ? parseTelegramId(profile.providerUserId)
+        : null;
+    const listed = await this.blockedIdentityService.findFirstMatch([
+      { kind: BlockedIdentityKind.TELEGRAM_ID, value: telegramId?.toString() ?? null },
+      { kind: BlockedIdentityKind.EMAIL, value: profile.email ?? null },
+    ]);
+    if (listed !== null) {
+      this.logger.warn(
+        `External sign-up refused: identity is on the blocklist (entry ${listed.id})`,
+      );
+      throw new ForbiddenException({
+        code: 'REGISTRATION_DISABLED',
+        message: 'Registration is currently disabled',
+      });
+    }
   }
 
   private async createShellAccount(profile: ExternalUserProfile): Promise<string> {

@@ -12,6 +12,19 @@ import {
 const ADMIN = { id: 'admin-1' } as never;
 const REQUEST_METADATA = { requestId: null, remoteAddress: null, userAgent: null };
 
+/**
+ * A no-op block service.
+ *
+ * Every test in this file is about token RESOLUTION and deletion — the two
+ * `action: 'block'` runs below never resolve a user, so the block never fires.
+ * `bulk-user-audit-trail.spec.ts` is where the block itself is asserted, and it
+ * builds the real service over its fake client for exactly that reason.
+ */
+const NO_BLOCKS = {
+  block: async () => undefined,
+  unblock: async () => undefined,
+} as never;
+
 function buildService(deleteUser: (userId: string) => Promise<void>) {
   const emitted: Array<{ readonly level: string; readonly type: string }> = [];
   const prisma = {
@@ -31,6 +44,7 @@ function buildService(deleteUser: (userId: string) => Promise<void>) {
       prisma as never,
       events as never,
       { deleteUser } as never,
+      NO_BLOCKS,
     ),
   };
 }
@@ -49,6 +63,7 @@ async function captureResolveWhere(token: string): Promise<Record<string, unknow
     } as never,
     { warn: () => undefined, info: () => undefined } as never,
     { deleteUser: async () => undefined } as never,
+    NO_BLOCKS,
   );
 
   await service.execute({
@@ -95,6 +110,7 @@ describe('BulkUserOperationsService token resolution', () => {
       { user: { findFirst: async () => null } } as never,
       { warn: () => undefined, info: () => undefined } as never,
       { deleteUser: async () => undefined } as never,
+      NO_BLOCKS,
     );
 
     const result = await service.execute({

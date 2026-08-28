@@ -146,6 +146,8 @@ export class BlockedIdentityService {
     readonly expiresAt?: Date | null;
     readonly source?: string;
     readonly createdById?: string | null;
+    /** For cascade rows: the user whose block produced them. */
+    readonly originUserId?: string | null;
   }): Promise<{
     readonly added: readonly BlockedIdentity[];
     readonly duplicates: readonly string[];
@@ -178,6 +180,7 @@ export class BlockedIdentityService {
             reason: input.reason ?? null,
             source: input.source ?? 'manual',
             createdById: input.createdById ?? null,
+            originUserId: input.originUserId ?? null,
             expiresAt: input.expiresAt ?? null,
           },
         });
@@ -216,41 +219,60 @@ export class BlockedIdentityService {
    * Captures the identities of an existing user onto the blocklist.
    *
    * This is what makes blocking an account outlast the account. Called when an
-   * operator blocks a user; `source: 'cascade'` keeps those entries
-   * distinguishable from ones an operator typed, so removing a ban can find
-   * exactly what that ban created.
+   * operator blocks a user; `source: 'cascade'` plus `originUserId` keeps those
+   * entries distinguishable from ones an operator typed, so removing a ban can
+   * find exactly what that ban created and nothing else.
+   *
+   * ── Why device ids are captured here but never gate a sign-up ───────────
+   *
+   * A Telegram id, an e-mail and a login are things a person types at
+   * registration, so listing them refuses the next attempt at the door. A
+   * hardware id is not: it appears only once a VPN client connects, long after
+   * the account exists. It is captured anyway because it is the one identifier
+   * a ban evader carries across a new Telegram account and a new mailbox — the
+   * enforcement for it necessarily runs after the fact.
    */
   public async captureFromUser(input: {
+    readonly userId: string;
     readonly telegramId: bigint | null;
     readonly email: string | null;
     readonly webLogin: string | null;
+    /** Hardware ids read from the VPN panel. Empty when it was unreachable. */
+    readonly hwids?: readonly string[];
     readonly reason?: string | null;
     readonly createdById?: string | null;
-  }): Promise<number> {
-    const jobs: Array<{ kind: BlockedIdentityKind; value: string }> = [];
+  }): Promise<{ readonly identities: number; readonly devices: number }> {
+    const jobs: Array<{ kind: BlockedIdentityKind; values: string[] }> = [];
     const telegram = telegramIdToBlockedValue(input.telegramId);
     if (telegram !== null) {
-      jobs.push({ kind: BlockedIdentityKind.TELEGRAM_ID, value: telegram });
+      jobs.push({ kind: BlockedIdentityKind.TELEGRAM_ID, values: [telegram] });
     }
     if (typeof input.email === 'string' && input.email.trim().length > 0) {
-      jobs.push({ kind: BlockedIdentityKind.EMAIL, value: input.email });
+      jobs.push({ kind: BlockedIdentityKind.EMAIL, values: [input.email] });
     }
     if (typeof input.webLogin === 'string' && input.webLogin.trim().length > 0) {
-      jobs.push({ kind: BlockedIdentityKind.WEB_LOGIN, value: input.webLogin });
+      jobs.push({ kind: BlockedIdentityKind.WEB_LOGIN, values: [input.webLogin] });
+    }
+    const hwids = (input.hwids ?? []).filter((value) => value.trim().length > 0);
+    if (hwids.length > 0) {
+      jobs.push({ kind: BlockedIdentityKind.DEVICE_HWID, values: [...hwids] });
     }
 
-    let captured = 0;
+    let identities = 0;
+    let devices = 0;
     for (const job of jobs) {
       const result = await this.addMany({
         kind: job.kind,
-        values: [job.value],
+        values: job.values,
         reason: input.reason ?? null,
         source: 'cascade',
         createdById: input.createdById ?? null,
+        originUserId: input.userId,
       });
-      captured += result.added.length;
+      if (job.kind === BlockedIdentityKind.DEVICE_HWID) devices += result.added.length;
+      else identities += result.added.length;
     }
-    return captured;
+    return { identities, devices };
   }
 
   /**
@@ -261,13 +283,20 @@ export class BlockedIdentityService {
    * "unblock does nothing". Manually typed entries are left alone on purpose:
    * an operator who listed this id by hand meant it, and a later unblock of one
    * account is not consent to drop that.
+   *
+   * TWO WAYS OF FINDING THE SAME ROWS, and both are load-bearing. `originUserId`
+   * is exact and is the only way a captured DEVICE id can be found at all — it
+   * is not derivable from the account. The value lookups additionally catch a
+   * cascade row written before that column carried anything, and cost one more
+   * OR arm in a query that runs once per unblock.
    */
   public async releaseCascadeForUser(input: {
+    readonly userId: string;
     readonly telegramId: bigint | null;
     readonly email: string | null;
     readonly webLogin: string | null;
   }): Promise<number> {
-    const lookups: Prisma.BlockedIdentityWhereInput[] = [];
+    const lookups: Prisma.BlockedIdentityWhereInput[] = [{ originUserId: input.userId }];
     const telegram = telegramIdToBlockedValue(input.telegramId);
     if (telegram !== null) {
       lookups.push({ kind: BlockedIdentityKind.TELEGRAM_ID, value: telegram });
@@ -280,7 +309,6 @@ export class BlockedIdentityService {
       const normalised = normaliseBlockedIdentity(kind, raw);
       if (normalised.ok) lookups.push({ kind, value: normalised.value });
     }
-    if (lookups.length === 0) return 0;
 
     const { count } = await this.prismaService.blockedIdentity.deleteMany({
       where: { source: 'cascade', OR: lookups },

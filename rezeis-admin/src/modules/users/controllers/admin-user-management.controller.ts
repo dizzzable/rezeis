@@ -69,6 +69,7 @@ import { AdjustUserPartnerBalanceDto } from '../dto/adjust-user-partner-balance.
 import { AdjustUserPointsDto } from '../dto/adjust-user-points.dto';
 import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
+import { UserBlockService } from '../services/user-block.service';
 import { UserDeletionService } from '../services/user-deletion.service';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
 
@@ -92,6 +93,7 @@ export class AdminUserManagementController {
     private readonly userDeletionService: UserDeletionService,
     private readonly partnersService: PartnersService,
     private readonly plansAdminService: PlansAdminService,
+    private readonly userBlockService: UserBlockService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -654,14 +656,24 @@ export class AdminUserManagementController {
   @RequirePermission('users', 'edit')
   public async blockUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
-    await this.prismaService.user.update({ where: { id: user.id }, data: { isBlocked: true } });
+    // Everything a block MEANS lives in the service, not here — see its own
+    // header for why it had to stop being an inline UPDATE written twice.
+    const report = await this.userBlockService.block({ userId: user.id, adminId: admin.id });
     await this.auditLog(admin, req, 'user.blocked', {
       userId: user.id,
       telegramId: user.telegramId?.toString() ?? null,
       source: 'user_detail',
+      // The cascade is part of the act, so it belongs in the row that records
+      // the act. `devicesUnreadable` above zero is the one field that says the
+      // ban is INCOMPLETE, and an audit row is where that has to be readable
+      // months later.
+      identitiesCaptured: report.identitiesCaptured,
+      devicesCaptured: report.devicesCaptured,
+      devicesUnreadable: report.devicesUnreadable,
+      subscriptionsQueued: report.subscriptionsQueued,
     });
     this.events.warn(EVENT_TYPES.USER_BLOCKED, 'USER', `User blocked: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
-    return { blocked: true };
+    return { blocked: true, cascade: report };
   }
 
   @Post(':telegramId/unblock')
@@ -669,14 +681,16 @@ export class AdminUserManagementController {
   @RequirePermission('users', 'edit')
   public async unblockUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
     const user = await this.findUserByTelegramId(telegramId);
-    await this.prismaService.user.update({ where: { id: user.id }, data: { isBlocked: false } });
+    const report = await this.userBlockService.unblock({ userId: user.id, adminId: admin.id });
     await this.auditLog(admin, req, 'user.unblocked', {
       userId: user.id,
       telegramId: user.telegramId?.toString() ?? null,
       source: 'user_detail',
+      entriesReleased: report.entriesReleased,
+      subscriptionsQueued: report.subscriptionsQueued,
     });
     this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User unblocked: ${telegramId}`, { userId: user.id, telegramId, adminId: admin.id });
-    return { blocked: false };
+    return { blocked: false, cascade: report };
   }
 
   // ── Delete User ─────────────────────────────────────────────────────────────

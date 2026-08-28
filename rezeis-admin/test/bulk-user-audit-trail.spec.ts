@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { AdminBulkUsersController } from '../src/modules/users/controllers/admin-bulk-users.controller';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
 import { BulkUserOperationsService } from '../src/modules/users/services/bulk-user-operations.service';
+import { UserBlockService } from '../src/modules/users/services/user-block.service';
 
 /**
  * The operator trail behind a bulk user operation.
@@ -67,6 +68,8 @@ interface UserRow {
   telegramId: bigint | null;
   email: string | null;
   isBlocked: boolean;
+  webAccount: null;
+  subscriptions: readonly never[];
   createdAt: Date;
   /** Absent until a run sets it, so "unchanged" and "set to X" stay distinguishable. */
   language?: string;
@@ -84,6 +87,12 @@ function makeUser(id: string, telegramId: bigint, isBlocked = false): UserRow {
     telegramId,
     email: `${id}@example.test`,
     isBlocked,
+    // Both are part of the projection `UserBlockService.loadUser` asks for.
+    // The fake ignores `select`, so it has to carry every field the real
+    // client would return — an absent array here would be a fixture gap that
+    // reads as a crash in the service.
+    webAccount: null,
+    subscriptions: [],
     createdAt: new Date(Date.now() - 30 * DAY_MS),
   };
 }
@@ -184,6 +193,7 @@ function buildBulk(db: Db): AdminBulkUsersController {
       db.client as never,
       db.events as never,
       db.userDeletion as never,
+      buildBlockService(db),
     ),
   );
 }
@@ -203,7 +213,26 @@ function buildUserCard(db: Db): AdminUserManagementController {
     db.userDeletion as never,
     {} as never, // PartnersService
     {} as never, // PlansAdminService
+    buildBlockService(db),
   );
+}
+
+/**
+ * The REAL block service over the same fake client, not a stub.
+ *
+ * These tests assert that `is_blocked` actually moved, and the write moved
+ * behind this service. A stub would make every one of them pass while nothing
+ * was blocked at all — which is precisely the defect the service was extracted
+ * to fix, reintroduced in the fixture.
+ *
+ * The VPN and identity halves stay absent: no fixture user has a subscription
+ * or a panel link, and what these tests are about is the operator trail.
+ */
+function buildBlockService(db: Db): UserBlockService {
+  return new UserBlockService(db.client as never, {
+    captureFromUser: async () => ({ identities: 0, devices: 0 }),
+    releaseCascadeForUser: async () => 0,
+  } as never);
 }
 
 /** Three users, telegram ids 101/102/103, none blocked. */

@@ -5,10 +5,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, ReferralInviteSource } from '@prisma/client';
+import { BlockedIdentityKind, Prisma, ReferralInviteSource } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
@@ -17,6 +18,8 @@ import {
   SystemEventsService,
 } from '../../../common/services/system-events.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
+import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
+import { BlockedIpService } from '../../blocked-ips/services/blocked-ip.service';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { LegalDocumentsService } from '../../legal-documents/services/legal-documents.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
@@ -82,6 +85,13 @@ export class WebAuthService {
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly registrationSnapshotService: RegistrationSnapshotService,
     private readonly legalDocumentsService: LegalDocumentsService,
+    /**
+     * Optional so every existing construction of this service keeps working.
+     * An absent list reads as "nothing is pre-blocked", which is the safe
+     * direction: a missing dependency must never refuse every registration.
+     */
+    @Optional() private readonly blockedIdentityService?: BlockedIdentityService,
+    @Optional() private readonly blockedIpService?: BlockedIpService,
   ) {}
 
   public async register(input: WebAuthRegisterDto): Promise<WebAuthRegisterResultInterface> {
@@ -100,6 +110,56 @@ export class WebAuthService {
       throw rejection.status === 503
         ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
         : new ForbiddenException({ code: rejection.code, message: rejection.message });
+    }
+
+    // The identity blocklist, checked BEFORE the invite resolution and before
+    // any row is written. This is the door `users.is_blocked` cannot guard:
+    // that flag refuses a row that already exists, and somebody registering
+    // again has no row yet. All three identities are asked about at once,
+    // because a person banned by e-mail will simply pick a different login.
+    //
+    // The refusal is deliberately the SAME shape as the access-mode one and
+    // says nothing about which identity matched: a distinguishable answer here
+    // turns the sign-up form into an oracle for "is this e-mail banned".
+    const listed = await this.blockedIdentityService?.findFirstMatch([
+      {
+        kind: BlockedIdentityKind.TELEGRAM_ID,
+        value: input.telegramIdToLink?.toString() ?? null,
+      },
+      { kind: BlockedIdentityKind.EMAIL, value: input.email ?? null },
+      { kind: BlockedIdentityKind.WEB_LOGIN, value: input.login },
+    ]);
+    if (listed !== null && listed !== undefined) {
+      this.logger.warn(`Registration refused: identity is on the blocklist (entry ${listed.id})`);
+      throw new ForbiddenException({
+        code: 'REGISTRATION_DISABLED',
+        message: 'Registration is currently disabled',
+      });
+    }
+
+    // The address the sign-up came FROM, checked against the IP blocklist.
+    //
+    // WHY IT IS READ FROM THE PAYLOAD AND NOT FROM THE REQUEST. The global
+    // `BlockedIpGuard` in front of this panel sees whoever called it, and the
+    // caller here is the cabinet, not the customer: on a split deployment every
+    // sign-up in the world arrives from one address. The customer address is
+    // known only because the cabinet already sends it for the registration
+    // snapshot a few lines below — so this is the ONE place in the panel where
+    // an IP block can actually reach a subscriber.
+    //
+    // It is therefore not a general defence. A blocked address still reaches
+    // login, the bot and the Mini App untouched; this closes the registration
+    // door specifically, which is the door ban evasion has to come through.
+    const snapshotIp = input.registrationSnapshot?.ip ?? null;
+    if (typeof snapshotIp === 'string' && snapshotIp.trim().length > 0) {
+      const verdict = await this.blockedIpService?.isBlocked(snapshotIp);
+      if (verdict?.blocked === true) {
+        this.logger.warn('Registration refused: address is on the IP blocklist');
+        throw new ForbiddenException({
+          code: 'REGISTRATION_DISABLED',
+          message: 'Registration is currently disabled',
+        });
+      }
     }
 
     // Under `INVITED` mode the referral code must actually resolve to a

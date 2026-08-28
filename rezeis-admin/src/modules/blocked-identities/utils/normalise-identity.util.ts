@@ -68,6 +68,18 @@ export function normaliseBlockedIdentity(
     case BlockedIdentityKind.WEB_LOGIN: {
       return { ok: true, value: trimmed.toLowerCase() };
     }
+    case BlockedIdentityKind.DEVICE_HWID: {
+      // Opaque to us — a uuid or a hash the client software invents. Nothing
+      // is validated beyond the shared length and emptiness checks above,
+      // because there is no format to validate against and inventing one
+      // would refuse the very ids a future client version reports.
+      //
+      // Lower-cased for the same reason the other text kinds are: a reinstall
+      // that reports the same id in a different case must not read as a
+      // different device. Two distinct hardware ids that differ only in case
+      // do not occur.
+      return { ok: true, value: trimmed.toLowerCase() };
+    }
     default: {
       // Exhaustiveness: a new kind must decide its own normalisation rather
       // than inherit "trim and lower-case" by accident.

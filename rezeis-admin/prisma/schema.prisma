@@ -680,11 +680,22 @@ model BlockedIp {
 
 /// What kind of identity a blocklist entry names.
 ///
-/// All three are identifiers a person CHOOSES and reuses, which is the whole
-/// point: a ban that only knows the `users` row it was applied to is undone by
-/// signing up again. Deliberately NOT here: IP addresses (they move, and
-/// `BlockedIp` already owns that axis) and device ids (shared households and
-/// reinstalled clients make them a signal, not a verdict).
+/// The first three are identifiers a person CHOOSES and reuses, which is the
+/// whole point: a ban that only knows the `users` row it was applied to is
+/// undone by signing up again.
+///
+/// `DEVICE_HWID` is a different kind of thing and is held to a different
+/// standard. It is not chosen, it is not seen at registration, and a household
+/// shares it — so it can never gate a sign-up (nobody has presented a device
+/// id yet at that point) and a match is not proof of the same PERSON. It earns
+/// its place because it is the one identifier a ban evader carries with them:
+/// new Telegram account, new e-mail, same client. Enforcement therefore runs
+/// AFTER the fact and says so in the audit trail, rather than pretending to be
+/// a door check.
+///
+/// Deliberately NOT here: IP addresses. They move, they are shared by whole
+/// carriers, and `BlockedIp` already owns that axis with CIDR matching and a
+/// request guard.
 enum BlockedIdentityKind {
   /// Numeric Telegram user id. Stored as text so the entry can exist before
   /// any `users` row does — the whole reason this table exists.
@@ -693,6 +704,9 @@ enum BlockedIdentityKind {
   EMAIL
   /// Lower-cased web-account login.
   WEB_LOGIN
+  /// Hardware id a VPN client reports to Remnawave. Lower-cased. Captured from
+  /// a blocked user's own devices, never typed by a person at sign-up.
+  DEVICE_HWID
 }
 
 /// Identity-based access blocklist — the pre-emptive half of banning.
@@ -721,6 +735,18 @@ model BlockedIdentity {
   source      String              @default("manual") @map("source")
   /// Pointer to the admin who created the entry.
   createdById String?             @map("created_by_id")
+  /// For `source: 'cascade'` rows — the user whose block created this entry.
+  ///
+  /// Unblocking has to undo exactly what blocking created, and `source` alone
+  /// cannot say WHOSE cascade a row came from. A Telegram id or a login is
+  /// recoverable from the account itself, but a captured device id is not:
+  /// reading the device list back needs the VPN panel reachable at unblock
+  /// time, and an unreachable panel would leave the person banned by an entry
+  /// their own ban created.
+  ///
+  /// NOT a relation, exactly like `createdById` above — the entry has to
+  /// survive deletion of the account it came from.
+  originUserId String?            @map("origin_user_id")
   /// When the block expires. `null` means permanent — same convention as
   /// `BlockedIp`, and the readers must treat an EXPIRED row as absent rather
   /// than deleting it, so the history of a temporary ban survives it.
@@ -734,6 +760,7 @@ model BlockedIdentity {
   @@index([source])
   @@index([expiresAt])
   @@index([createdAt])
+  @@index([originUserId])
   @@map("blocked_identities")
 }
 

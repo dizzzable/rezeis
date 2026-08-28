@@ -50,6 +50,7 @@ describe('AdminUserManagementController referral repair actions', () => {
       {} as never,
       {} as never,
       {} as never, // PlansAdminService
+      undefined as never, // UserBlockService
     );
     const admin = { id: 'admin-1' } as never;
     const request = { headers: {}, ip: null, socket: { remoteAddress: null } } as never;

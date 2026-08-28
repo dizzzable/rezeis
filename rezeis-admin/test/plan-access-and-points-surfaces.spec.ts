@@ -468,6 +468,7 @@ function buildController(db: ReturnType<typeof makeDb>): AdminUserManagementCont
     {} as never, // UserDeletionService
     {} as never, // PartnersService
     plansAdminService,
+    undefined as never,
   );
 }
 

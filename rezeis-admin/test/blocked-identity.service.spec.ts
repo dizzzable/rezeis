@@ -259,13 +259,15 @@ describe('cascading a user block onto their identities', () => {
     // person signs up again and the ban is gone.
     const { service, prisma } = buildService();
     const captured = await service.captureFromUser({
+      userId: 'user-1',
       telegramId: 123n,
       email: 'Abuser@Example.com',
       webLogin: 'AbUser',
       reason: 'spam',
     });
 
-    assert.equal(captured, 3);
+    assert.equal(captured.identities, 3);
+    assert.equal(captured.devices, 0);
     assert.deepStrictEqual(
       prisma.store.map((r) => [r.kind, r.value, r.source]),
       [
@@ -279,11 +281,12 @@ describe('cascading a user block onto their identities', () => {
   it('skips the identities the account does not have', async () => {
     const { service, prisma } = buildService();
     const captured = await service.captureFromUser({
+      userId: 'user-1',
       telegramId: null,
       email: null,
       webLogin: 'only-login',
     });
-    assert.equal(captured, 1);
+    assert.equal(captured.identities, 1);
     assert.equal(prisma.store.length, 1);
   });
 
@@ -294,6 +297,7 @@ describe('cascading a user block onto their identities', () => {
     // unblocking one account is not consent to drop that.
     const { service, prisma } = buildService();
     await service.releaseCascadeForUser({
+      userId: 'user-1',
       telegramId: 123n,
       email: null,
       webLogin: null,
@@ -301,7 +305,13 @@ describe('cascading a user block onto their identities', () => {
 
     const [, where] = prisma.calls[0] as [string, Record<string, unknown>];
     assert.equal(where.source, 'cascade');
+    // Two arms, and the ORDER is the claim: `originUserId` first because it is
+    // the only arm that can find a captured DEVICE id — that value is not
+    // derivable from the account, so an unblock that relied on the value
+    // lookups alone would leave a person banned by a device entry their own
+    // ban created, with the VPN panel unreachable and no way to notice.
     assert.deepStrictEqual(where.OR, [
+      { originUserId: 'user-1' },
       { kind: BlockedIdentityKind.TELEGRAM_ID, value: '123' },
     ]);
   });

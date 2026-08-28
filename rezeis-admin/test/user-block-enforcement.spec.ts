@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 
+import { ExternalAuthService } from '../src/modules/external-auth/services/external-auth.service';
 import { InternalUserService } from '../src/modules/internal-user/services/internal-user.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
 
@@ -134,5 +135,182 @@ describe('session read', () => {
       () => service.getSession({ userId: 'user-1' } as never),
       (err: unknown) => !(err instanceof ForbiddenException),
     );
+  });
+});
+
+describe('registration doors', () => {
+  /**
+   * `users.is_blocked` can only refuse a row that EXISTS. Somebody who signs
+   * up again has none — which is the whole point of a ban being evaded — so
+   * every path that can mint a new account has to consult the identity
+   * blocklist instead. There are three such paths and each is asserted
+   * separately, because each is reachable on its own.
+   */
+  function buildWebAuth(overrides: {
+    readonly listed?: boolean;
+    readonly ipBlocked?: boolean;
+  } = {}) {
+    const writes: string[] = [];
+    const service = new WebAuthService(
+      {
+        // Any write reaching here is the defect: a refusal must cost nothing,
+        // with no account to delete and no referral edge to unwind.
+        $transaction: async () => {
+          writes.push('transaction');
+          return { userId: 'user-1', webAccountId: 'wa-1' };
+        },
+      } as never,
+      { hashPassword: async () => 'scrypt:x' } as never,
+      {} as never,
+      { getInternalPlatformPolicy: async () => ({ accessMode: 'OPEN' }) } as never,
+      { evaluate: () => null } as never,
+      {} as never,
+      { info: () => undefined } as never,
+      {} as never,
+      { captureBestEffort: async () => undefined } as never,
+      { listRequiredKeys: async () => [], recordConsents: async () => undefined } as never,
+      {
+        findFirstMatch: async () => (overrides.listed === true ? { id: 'entry-1' } : null),
+      } as never,
+      {
+        isBlocked: async () => ({ blocked: overrides.ipBlocked === true }),
+      } as never,
+    );
+    return { service, writes };
+  }
+
+  const REGISTRATION = {
+    login: 'abuser2',
+    password: 'correct-horse',
+    email: 'abuser@example.com',
+    registrationSnapshot: { channel: 'web', ip: '192.0.2.55' },
+  };
+
+  it('refuses a web sign-up whose identity is on the blocklist', async () => {
+    const { service, writes } = buildWebAuth({ listed: true });
+    await assert.rejects(
+      () => service.register(REGISTRATION as never),
+      (err: unknown) => err instanceof ForbiddenException,
+    );
+    assert.deepStrictEqual(writes, [], 'nothing may be written before the refusal');
+  });
+
+  it('refuses a web sign-up from a blocked address', async () => {
+    // The address comes from the PAYLOAD, not from the request. The global IP
+    // guard in front of the panel sees the cabinet, not the customer, so on a
+    // split deployment it would see one address for every sign-up on earth.
+    const { service, writes } = buildWebAuth({ ipBlocked: true });
+    await assert.rejects(
+      () => service.register(REGISTRATION as never),
+      (err: unknown) => err instanceof ForbiddenException,
+    );
+    assert.deepStrictEqual(writes, []);
+  });
+
+  it('says the same thing either way, so the form is not an oracle', async () => {
+    // A distinguishable refusal turns the sign-up form into a lookup for
+    // "is this e-mail banned", runnable against any address an attacker likes.
+    const listedMessage = await refusalCode(buildWebAuth({ listed: true }).service);
+    const addressMessage = await refusalCode(buildWebAuth({ ipBlocked: true }).service);
+    assert.equal(listedMessage, addressMessage);
+    assert.equal(listedMessage, 'REGISTRATION_DISABLED');
+  });
+
+  async function refusalCode(service: WebAuthService): Promise<string | undefined> {
+    try {
+      await service.register(REGISTRATION as never);
+      return undefined;
+    } catch (err) {
+      return ((err as ForbiddenException).getResponse() as { code?: string }).code;
+    }
+  }
+
+  it('still lets an ordinary sign-up through — the control', async () => {
+    // A refusal that fired for everybody would satisfy all three assertions
+    // above and would close registration entirely.
+    const { service, writes } = buildWebAuth();
+    const result = await service.register(REGISTRATION as never);
+    assert.equal(result.userId, 'user-1');
+    assert.deepStrictEqual(writes, ['transaction']);
+  });
+});
+
+describe('the social sign-up door', () => {
+  /**
+   * OAuth was the ONE path that could create a user while consulting neither
+   * the platform access mode nor the blocklist. `REG_BLOCKED` closed the web
+   * form and the bot, and left the Google button working.
+   *
+   * Every returning-user branch above it already refused a blocked account, so
+   * what is asserted here is specifically the NEW-account branch.
+   */
+  function buildExternalAuth(overrides: {
+    readonly rejection?: { code: string; status: 403 | 503; message: string } | null;
+    readonly listed?: boolean;
+  } = {}) {
+    const created: string[] = [];
+    const service = new ExternalAuthService(
+      {
+        userOAuthLink: { findUnique: async () => null },
+        webAccount: { findUnique: async () => null },
+        user: { findUnique: async () => null },
+        $transaction: async () => {
+          created.push('shell');
+          return 'user-new';
+        },
+      } as never,
+      { getPolicy: async () => ({ mode: 'off' }) } as never,
+      { check: async () => ({ allowed: true }) } as never,
+      {} as never,
+      { info: () => undefined } as never,
+      {} as never,
+      { captureBestEffort: async () => undefined } as never,
+      { getInternalPlatformPolicy: async () => ({ accessMode: 'OPEN' }) } as never,
+      { evaluate: () => overrides.rejection ?? null } as never,
+      {
+        findFirstMatch: async () => (overrides.listed === true ? { id: 'entry-1' } : null),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    return { service, created };
+  }
+
+  const PROFILE = {
+    provider: 'GOOGLE',
+    providerUserId: 'google-999',
+    email: 'abuser@example.com',
+    emailVerified: false,
+    name: 'Ab User',
+    rawProfile: {},
+  };
+
+  it('refuses a social sign-up while registration is closed', async () => {
+    const { service, created } = buildExternalAuth({
+      rejection: { code: 'REGISTRATION_DISABLED', status: 403, message: 'closed' },
+    });
+    await assert.rejects(
+      () => service.resolve(PROFILE as never),
+      (err: unknown) => err instanceof ForbiddenException,
+    );
+    assert.deepStrictEqual(created, [], 'no shell account may be minted');
+  });
+
+  it('refuses a social sign-up whose identity is on the blocklist', async () => {
+    const { service, created } = buildExternalAuth({ listed: true });
+    await assert.rejects(
+      () => service.resolve(PROFILE as never),
+      (err: unknown) => err instanceof ForbiddenException,
+    );
+    assert.deepStrictEqual(created, []);
+  });
+
+  it('still mints a shell for an ordinary new visitor — the control', async () => {
+    const { service, created } = buildExternalAuth();
+    const outcome = await service.resolve(PROFILE as never);
+    assert.equal(outcome.action, 'finish_setup');
+    assert.deepStrictEqual(created, ['shell']);
   });
 });

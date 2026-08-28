@@ -421,6 +421,7 @@ function buildUserCard(db: Db): AdminUserManagementController {
     {} as never, // UserDeletionService
     {} as never, // PartnersService
     {} as never, // PlansAdminService
+    undefined as never,
   );
 }
 

@@ -301,6 +301,7 @@ function createHarness(input: { readonly outcomes: readonly Outcome[] }) {
     {} as never,
     {} as never,
     {} as never, // PlansAdminService
+    undefined as never, // UserBlockService
   );
 
   return { controller, state };

@@ -4,6 +4,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { EmailDeliveryModule } from '../email/email.module';
 import { OAuthModule } from '../oauth/oauth.module';
+import { SettingsModule } from '../settings/settings.module';
 import { WebAuthModule } from '../web-auth/web-auth.module';
 import { AdminExternalAuthController } from './controllers/admin-external-auth.controller';
 import { InternalExternalAuthController } from './controllers/internal-external-auth.controller';
@@ -29,6 +30,10 @@ import { YandexOAuthAdapter } from './services/providers/yandex-oauth.adapter';
     OAuthModule,
     AuthModule,
     EmailDeliveryModule,
+    // `SettingsService` + `AccessModeGuard` for the registration gate on the
+    // new-account branch of `resolve` — the one sign-up path that used to
+    // consult neither.
+    SettingsModule,
     WebAuthModule,
     HttpModule.register({ timeout: 10_000 }),
   ],

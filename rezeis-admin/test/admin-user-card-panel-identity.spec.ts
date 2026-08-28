@@ -92,6 +92,7 @@ function buildController(
     {} as never,
     {} as never,
     {} as never, // PlansAdminService
+    undefined as never, // UserBlockService
   );
   return { controller, panelLookups, profileSyncJobCalls };
 }

@@ -120,6 +120,12 @@ function createService(state: MockState) {
         calls.snapshotChannels.push(input.channel);
       },
     } as never,
+    // The two gates the new-account branch runs. Open by default here so the
+    // existing cases keep testing what they were written to test; the gates
+    // themselves are asserted in `external-auth-registration-gate.spec.ts`.
+    { getInternalPlatformPolicy: async () => ({ accessMode: 'OPEN' }) } as never,
+    { evaluate: () => null } as never,
+    { findFirstMatch: async () => null } as never,
     adapter,
     adapter,
     adapter,

@@ -286,6 +286,13 @@ export class ProfileSyncProcessor extends WorkerHost {
           select: {
             id: true,
             userId: true,
+            // The owner's block flag, and it is READ HERE rather than
+            // carried in the job payload on purpose. A payload records what
+            // was true when the job was created; this has to be true when the
+            // job RUNS, because a renewal or an admin edit queued before the
+            // ban would otherwise sail through and re-enable the profile the
+            // ban had just switched off.
+            user: { select: { isBlocked: true } },
             remnawaveId: true,
             // The two supplementary identity columns. They are what makes a
             // profile created on 2.x still addressable after the operator
@@ -1075,7 +1082,21 @@ export class ProfileSyncProcessor extends WorkerHost {
       // admin write and this job running. `toPanelStatus` returns null for
       // exactly those, and null omits the field.
       const propagateStatus = readBoolean(readRecord(current.payload), 'propagateStatus');
-      const panelStatus = propagateStatus ? toPanelStatus(subscription.status) : null;
+      // A blocked owner overrides everything above. This is the ONLY
+      // enforcement that reaches the VPN itself: the flag, the identity
+      // blocklist and the session refusal all govern our own surfaces, while
+      // an established profile keeps carrying traffic no matter what the
+      // cabinet says. Deriving it from the column read a line ago, rather
+      // than from the job that asked for the block, is what makes every
+      // LATER sync keep asserting it — including the renewal path, which
+      // deliberately sets no status of its own and would otherwise leave a
+      // banned customer re-enabled by their own auto-payment.
+      const ownerBlocked = subscription.user?.isBlocked === true;
+      const panelStatus = ownerBlocked
+        ? 'DISABLED'
+        : propagateStatus
+          ? toPanelStatus(subscription.status)
+          : null;
       if (propagateStatus && panelStatus === null) {
         this.logger.warn(
           `Not propagating status '${subscription.status}' for subscription ${subscription.id}: Remnawave accepts only ACTIVE/DISABLED (expiry is derived from expireAt)`,
@@ -2241,6 +2262,7 @@ type SyncJobRecord = NonNullable<
   subscription: {
     id: string;
     userId: string;
+    user?: { isBlocked: boolean } | null;
     remnawaveId: string | null;
     remnawavePanelId: number | null;
     remnawavePanelUsername: string | null;

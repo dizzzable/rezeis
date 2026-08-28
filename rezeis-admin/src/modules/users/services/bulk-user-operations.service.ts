@@ -11,6 +11,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { UserBlockService } from './user-block.service';
 import { UserDeletionService } from './user-deletion.service';
 
 export type BulkUserAction = 'block' | 'unblock' | 'delete' | 'set_language' | 'set_max_subscriptions';
@@ -138,6 +139,7 @@ export class BulkUserOperationsService {
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
     private readonly userDeletionService: UserDeletionService,
+    private readonly userBlockService: UserBlockService,
   ) {}
 
   public async execute(input: BulkUserOperationInputInterface): Promise<BulkUserOperationResultInterface> {
@@ -269,9 +271,12 @@ export class BulkUserOperationsService {
     switch (input.action) {
       case 'block':
         if (user.isBlocked) return { userId, status: 'skipped', message: 'Already blocked' };
-        await this.prismaService.user.update({
-          where: { id: user.id },
-          data: { isBlocked: true },
+        // The same act as the user card performs, through the same service.
+        // Two inline `is_blocked` updates is exactly how the two screens came
+        // to disagree about what a ban does.
+        await this.userBlockService.block({
+          userId: user.id,
+          adminId: input.currentAdmin.id,
         });
         await this.recordOperatorRow(BULK_AUDIT_ACTION.block, input, batchId, user);
         this.events.warn(EVENT_TYPES.USER_BLOCKED, 'USER', `User bulk-blocked: ${user.id}`, {
@@ -285,9 +290,9 @@ export class BulkUserOperationsService {
 
       case 'unblock':
         if (!user.isBlocked) return { userId, status: 'skipped', message: 'Already unblocked' };
-        await this.prismaService.user.update({
-          where: { id: user.id },
-          data: { isBlocked: false },
+        await this.userBlockService.unblock({
+          userId: user.id,
+          adminId: input.currentAdmin.id,
         });
         await this.recordOperatorRow(BULK_AUDIT_ACTION.unblock, input, batchId, user);
         this.events.info(EVENT_TYPES.USER_UNBLOCKED, 'USER', `User bulk-unblocked: ${user.id}`, {

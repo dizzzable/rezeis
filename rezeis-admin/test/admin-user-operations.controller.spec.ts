@@ -49,6 +49,7 @@ describe('AdminUserManagementController operations history', () => {
       {} as never,
       {} as never,
       {} as never, // PlansAdminService
+      undefined as never, // UserBlockService
     );
 
     const result = await controller.listUserOperations('123', '1', '25');
