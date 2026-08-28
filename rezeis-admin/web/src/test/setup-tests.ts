@@ -1,4 +1,46 @@
 import '@testing-library/jest-dom'
+import { configure } from '@testing-library/react'
+
+// ── The wait budget every `findBy*` and `waitFor` in this suite races ───────
+//
+// `vite.config.ts` already decided that waits in this suite need room under
+// worker contention: it raised vitest's own `testTimeout` to 15s because
+// "jsdom + Recharts/userEvent heavy specs occasionally exceed the 5s default
+// under parallel worker contention (they finish in ~2s in isolation)". That
+// decision was only half applied. `testTimeout` bounds the WHOLE test;
+// testing-library keeps a separate budget for a single async query, and it
+// was still the library default of 1000ms. So every wait in the suite gave up
+// at one second no matter what the test timeout said, and the two knobs
+// disagreed about the same machine.
+//
+// That gap is what makes contended runs randomly red. The same config file
+// records it happening for real on the hosted runner — "referral-eligible-
+// plans-catalog, branding, payments-tab-permissions and quick-search-overlay
+// all blew their `waitFor`" — and it recurred here on 28.08.2026 in
+// `quick-search-overlay`, twice in three full runs taken minutes after a
+// five-minute backend suite, then six green runs once the machine settled.
+//
+// HOW WIDE the exposure is was measured rather than guessed: setting this to
+// 1ms and running the full suite fails 486 tests across 79 of 225 files.
+// Those are the tests whose assertion cannot be satisfied on the first
+// synchronous check — a third of the suite's files were racing that one
+// second. Fixing the assertion that happened to lose is fixing one file of
+// seventy-nine.
+//
+// WHY 5000 and not the 15s test timeout: on a green run this costs exactly
+// nothing — a wait returns the moment its element appears, so the budget is
+// only ever spent by a test that is already failing. What it buys there is
+// the error message. Below `testTimeout`, a blown wait fails as
+// testing-library's "Unable to find an element with the text: X" plus a DOM
+// dump; at or above it, vitest kills the test first and all you get is "test
+// timed out". 5s clears the ~2s contended render the config observed by a
+// wide margin and still leaves 10s of headroom, enough for a test with two
+// sequential waits to fail with the useful message. A test with three would
+// hit the test timeout on the last one — rare, and the honest trade.
+//
+// This does NOT weaken a guard. A component that never renders the element
+// still fails; it fails five seconds later.
+configure({ asyncUtilTimeout: 5000 })
 
 // ── No spec may reach the network ───────────────────────────────────────────
 //
