@@ -328,6 +328,8 @@ function createController(gateways: readonly unknown[]): InternalPaymentsControl
     { listGateways: async () => gateways } as never,
     {} as never,
     { getInternalPlatformPolicy: async () => ({ defaultCurrency: Currency.RUB }) } as never,
+    // Stars pre-checkout dependency; no case here calls that route.
+    {} as never,
   );
 }
 

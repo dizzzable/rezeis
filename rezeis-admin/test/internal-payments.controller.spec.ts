@@ -62,6 +62,8 @@ describe('InternalPaymentsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      // Stars pre-checkout dependency; no case here calls that route.
+      {} as never,
     );
 
     assert.deepStrictEqual(
@@ -99,6 +101,8 @@ describe('InternalPaymentsController', () => {
       {
         getInternalPlatformPolicy: async () => ({ defaultCurrency: Currency.RUB }),
       } as never,
+      // Stars pre-checkout dependency; no case here calls that route.
+      {} as never,
     );
 
     assert.deepStrictEqual(await controller.listEnabledGateways('web'), [

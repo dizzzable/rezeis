@@ -1,12 +1,15 @@
 import { Buffer } from 'node:buffer';
 import { isIP } from 'node:net';
-import { BadRequestException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, ServiceUnavailableException, Optional } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Currency, PaymentGateway, PaymentGatewayType, Transaction } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
 import { HttpService } from '@nestjs/axios';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
+import { appConfig } from '../../../common/config/app.config';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readAdminBotToken, readEnvBotToken } from '../../../common/utils/admin-bot-token.util';
 import {
   CHECKOUT_LIFETIME_MINUTES,
   CHECKOUT_LIFETIME_SECONDS,
@@ -92,7 +95,42 @@ export class PaymentProviderExecutionService {
     @Inject(paymentsConfig.KEY)
     private readonly configuration: ConfigType<typeof paymentsConfig>,
     private readonly paymentWebhookPayloadRedactionService: PaymentWebhookPayloadRedactionService,
+    /**
+     * Only Telegram Stars needs these, and only to find a bot token. See
+     * {@link resolveTelegramBotToken}. Optional so every existing construction
+     * of this service keeps working — a gateway that never asks for a token
+     * cannot be affected by their absence.
+     */
+    private readonly prismaService?: PrismaService,
+    @Optional()
+    @Inject(appConfig.KEY)
+    private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
   ) {}
+
+  /**
+   * The bot token `createInvoiceLink` is signed with.
+   *
+   * Panel-managed first, environment second — the same chain
+   * `SystemEventsService` follows, and for the same reason. This used to read
+   * `paymentsConfig.botToken` alone, i.e. `process.env.BOT_TOKEN`, which the
+   * panel does not have on the standard split deployment: rezeis-admin's own
+   * `.env.example` has no such entry and its code says so out loud. So Telegram
+   * Stars answered "bot token is not configured" on exactly the deployment
+   * shape this product ships.
+   */
+  private async resolveTelegramBotToken(): Promise<string | null> {
+    const settings = await this.prismaService?.settings
+      .findFirst({ orderBy: { updatedAt: 'asc' }, select: { systemNotifications: true } })
+      .catch(() => null);
+    return (
+      readAdminBotToken(
+        settings?.systemNotifications,
+        this.applicationConfiguration?.cryptKey,
+      ) ??
+      readEnvBotToken() ??
+      this.configuration.botToken
+    );
+  }
 
   public async createCheckout(input: {
     readonly gateway: PaymentGateway;
@@ -651,7 +689,7 @@ export class PaymentProviderExecutionService {
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
-    const botToken = this.configuration.botToken;
+    const botToken = await this.resolveTelegramBotToken();
     if (botToken === null) {
       throw new ServiceUnavailableException('Telegram bot token is not configured');
     }

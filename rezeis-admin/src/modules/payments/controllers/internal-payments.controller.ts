@@ -18,6 +18,10 @@ import { PaymentGatewayRegistryService } from '../services/payment-gateway-regis
 import { PartnerBalancePaymentService } from '../services/partner-balance-payment.service';
 import { PaymentsCheckoutService } from '../services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from '../services/payments-renewal-checkout.service';
+import {
+  TelegramStarsWebhookService,
+  type TelegramStarsPreCheckoutVerdict,
+} from '../services/telegram-stars-webhook.service';
 
 @Controller('internal/payments')
 @UseGuards(InternalAdminAuthGuard)
@@ -28,7 +32,33 @@ export class InternalPaymentsController {
     private readonly paymentGatewayRegistryService: PaymentGatewayRegistryService,
     private readonly partnerBalancePaymentService: PartnerBalancePaymentService,
     private readonly settingsService: SettingsService,
+    private readonly telegramStarsWebhookService: TelegramStarsWebhookService,
   ) {}
+
+  /**
+   * Verdict for a Telegram Stars pre-checkout query.
+   *
+   * The BOT asks, and the bot answers Telegram — not this panel. That split is
+   * forced by how the bot runs: Telegram allows one consumer per token, the bot
+   * holds it through long polling, and so a `pre_checkout_query` is delivered
+   * to the bot and to nowhere else. The panel could only answer it by holding
+   * the same token, which a split deployment does not guarantee.
+   *
+   * What stays here is the DECISION, because the transaction is here. Telegram
+   * allows ten seconds end to end, so the caller is expected to bound this and
+   * to refuse on timeout: an unanswered query costs the buyer nothing, while a
+   * wrongly approved one takes their stars for something we may not deliver.
+   */
+  @Post('telegram-stars/pre-checkout')
+  public async resolveTelegramStarsPreCheckout(
+    @Body() body: { readonly paymentId?: unknown },
+  ): Promise<TelegramStarsPreCheckoutVerdict> {
+    // Anything that is not a string becomes "unknown payment", which refuses.
+    // Refusing is the safe default on every unclear input here: the money has
+    // not moved yet.
+    const paymentId = typeof body.paymentId === 'string' ? body.paymentId : null;
+    return this.telegramStarsWebhookService.resolvePreCheckout(paymentId);
+  }
 
   /**
    * Returns the list of *enabled and ready* gateways the SPA / Mini App

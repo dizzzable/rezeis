@@ -7,6 +7,21 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PaymentWebhookIngressResultInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { PaymentWebhookIngressService } from './payment-webhook-ingress.service';
 
+/**
+ * Why a pre-checkout query gets approved or refused.
+ *
+ * A CODE rather than prose, because the two callers speak to different
+ * audiences: the bot renders it in the buyer’s own language, while the
+ * webhook path (for an install that points Telegram straight at the panel)
+ * still has to hand Telegram a ready string.
+ */
+export type TelegramStarsPreCheckoutReason = 'OK' | 'UNKNOWN_PAYMENT' | 'NOT_PAYABLE';
+
+export interface TelegramStarsPreCheckoutVerdict {
+  readonly approve: boolean;
+  readonly reason: TelegramStarsPreCheckoutReason;
+}
+
 @Injectable()
 export class TelegramStarsWebhookService {
   public constructor(
@@ -14,6 +29,38 @@ export class TelegramStarsWebhookService {
     private readonly httpService: HttpService,
     private readonly paymentWebhookIngressService: PaymentWebhookIngressService,
   ) {}
+
+  /**
+   * Whether a pre-checkout query for `paymentId` may be approved.
+   *
+   * This is the last moment the purchase can be refused, and Telegram gives
+   * ten seconds to answer. Approving because "a row exists" lets one invoice
+   * link be paid twice: reconciliation exits early on an already-fulfilled
+   * transaction, so the stars are taken and nothing is delivered — and a Stars
+   * refund is a manual, out-of-band affair. Only a draft still awaiting
+   * payment may be approved.
+   *
+   * Extracted so the BOT can ask for the verdict and answer Telegram itself.
+   * It has to: the bot owns the update stream through long polling, and on a
+   * split deployment the panel may not have a bot token at all.
+   */
+  public async resolvePreCheckout(
+    paymentId: string | null,
+  ): Promise<TelegramStarsPreCheckoutVerdict> {
+    if (paymentId === null || paymentId.trim().length === 0) {
+      return { approve: false, reason: 'UNKNOWN_PAYMENT' };
+    }
+    const transaction = await this.prismaService.transaction.findUnique({
+      where: { paymentId: paymentId.trim() },
+      select: { status: true },
+    });
+    if (transaction === null) {
+      return { approve: false, reason: 'UNKNOWN_PAYMENT' };
+    }
+    return transaction.status === TransactionStatus.PENDING
+      ? { approve: true, reason: 'OK' }
+      : { approve: false, reason: 'NOT_PAYABLE' };
+  }
 
   public async handleTelegramUpdate(input: {
     readonly rawBody: Buffer;
@@ -32,23 +79,11 @@ export class TelegramStarsWebhookService {
       if (input.botToken === null) {
         throw new ServiceUnavailableException('Telegram bot token is not configured');
       }
-      const paymentId = parsedPayload.paymentId;
-      if (paymentId === null) {
+      const verdict = await this.resolvePreCheckout(parsedPayload.paymentId);
+      if (verdict.reason === 'UNKNOWN_PAYMENT') {
         throw new NotFoundException('Payment transaction not found');
       }
-      const transaction = await this.prismaService.transaction.findUnique({
-        where: { paymentId },
-      });
-      if (transaction === null) {
-        throw new NotFoundException('Payment transaction not found');
-      }
-      // The pre-checkout query is the last moment we can refuse, and Telegram
-      // expects an answer within 10 seconds. Approving on "a row exists" alone
-      // lets an invoice link be paid a second time: on an already fulfilled
-      // transaction reconciliation exits early, so the stars are taken and
-      // nothing is delivered — and Stars refunds are a manual, out-of-band
-      // affair. Only a draft still awaiting payment may be approved.
-      const payable = transaction.status === TransactionStatus.PENDING;
+      const payable = verdict.approve;
       await firstValueFrom(
         this.httpService.post(
           `https://api.telegram.org/bot${input.botToken}/answerPreCheckoutQuery`,

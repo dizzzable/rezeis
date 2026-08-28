@@ -17,6 +17,7 @@ import { PaymentGatewayRegistryService } from '../src/modules/payments/services/
 import { PaymentsCheckoutService } from '../src/modules/payments/services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from '../src/modules/payments/services/payments-renewal-checkout.service';
 import { SettingsService } from '../src/modules/settings/services/settings.service';
+import { TelegramStarsWebhookService } from '../src/modules/payments/services/telegram-stars-webhook.service';
 import {
   buildRenewalCheckoutFingerprint,
   fingerprint,
@@ -230,6 +231,10 @@ async function boot(
       { provide: PaymentGatewayRegistryService, useValue: {} },
       { provide: PartnerBalancePaymentService, useValue: {} },
       { provide: SettingsService, useValue: {} },
+      // The controller gained a Stars pre-checkout route, and with it this
+      // dependency. Empty because no case here touches that route — the point
+      // is that the module resolves, which is what caught the addition.
+      { provide: TelegramStarsWebhookService, useValue: {} },
     ],
   })
     // API-token verification is the edge, not the seam: it decides whether the
