@@ -25,6 +25,24 @@ import { ipMatchesEntry, parseAddressOrCidr, ParsedAddress } from '../../blocked
  * answer means the panel could not be reached, and guessing in that state is
  * how a whole fleet gets blocked by a single ban.
  *
+ * ENUMERATED MEANS COMPARABLE, PER NODE — and the first version of this
+ * function got that wrong in a way that would have shipped. It counted the
+ * ENTRIES it was handed rather than the ones it could actually compare, so a
+ * node configured by hostname (`de1.example.net`) made the list non-empty,
+ * satisfied the guard, and then contributed nothing: the hostname does not
+ * parse, the loop skipped it, and the address was captured as "not one of
+ * ours" without a single comparison having been made. On a deployment whose
+ * nodes are all hostnames — the panel only started reporting per-node `ips` in
+ * 3.2.3, and rezeis serves installs older than that — the guard was decorative
+ * and one ban could refuse an entire node's customers.
+ *
+ * So the input is grouped BY NODE, and a node that yields no parsable address
+ * is not a node we checked. One such node anywhere in the fleet turns the whole
+ * answer into `NODES_UNKNOWN`: we cannot prove the address is not its exit
+ * address, and the cost of being wrong is asymmetric. Failing to list a banned
+ * customer's address weakens the weakest layer of the ban — identity and device
+ * still hold. Listing a node's address refuses every customer behind it.
+ *
  * PRIVATE AND LOCAL RANGES. A reverse proxy that forgets `X-Forwarded-For`
  * reports `127.0.0.1` for every visitor on earth. Listing it would refuse the
  * entire service, including the admin panel, with a row that reads as a
@@ -71,11 +89,19 @@ export type CascadeIpRefusal =
   /** We could not enumerate our nodes, so we cannot prove it is not one. */
   | 'NODES_UNKNOWN';
 
+/**
+ * One node's addresses: whatever it is configured as, plus every address it
+ * reports for itself. Grouped per node rather than flattened, because the
+ * question the guard asks is "could we compare against THIS node?" and a flat
+ * list cannot answer it — see the file header.
+ */
+export type CascadeNodeAddresses = readonly string[];
+
 export function classifyCascadeIp(input: {
   readonly address: string | null | undefined;
   /**
-   * Addresses of our own nodes, as reported by the panel. `null` means the
-   * enumeration failed.
+   * Our own nodes, one entry per node, as reported by the panel. `null` means
+   * the enumeration failed.
    *
    * An EMPTY array is treated identically to `null`, deliberately. Every real
    * deployment has at least one node, so "no nodes" is what an unreachable
@@ -83,7 +109,7 @@ export function classifyCascadeIp(input: {
    * means no future caller can reintroduce the fleet-wide block by forwarding
    * an empty answer as if it were knowledge.
    */
-  readonly nodeAddresses: readonly string[] | null;
+  readonly nodes: readonly CascadeNodeAddresses[] | null;
 }): CascadeIpDecision {
   const raw = (input.address ?? '').trim();
   if (raw.length === 0) return { capture: false, reason: 'NO_ADDRESS' };
@@ -99,18 +125,38 @@ export function classifyCascadeIp(input: {
     if (ipMatchesEntry(parsed.canonical, range)) return { capture: false, reason: 'NOT_PUBLIC' };
   }
 
-  if (input.nodeAddresses === null || input.nodeAddresses.length === 0) {
+  if (input.nodes === null || input.nodes.length === 0) {
     return { capture: false, reason: 'NODES_UNKNOWN' };
   }
-  for (const nodeAddress of input.nodeAddresses) {
-    const node = parseAddressOrCidr(nodeAddress);
-    // A node whose address is a hostname does not parse. It is skipped rather
-    // than resolved: a DNS lookup here would make the decision depend on a
-    // network call that can time out, and a timeout would silently downgrade
-    // this from "not our node" to "we did not check".
-    if (node === null) continue;
-    if (ipMatchesEntry(parsed.canonical, node)) return { capture: false, reason: 'OUR_NODE' };
+
+  // Every node is examined before the coverage guard below, because a MATCH is
+  // conclusive on its own: if the address is demonstrably one of ours, it makes
+  // no difference that some other node was unreadable.
+  let uncomparableNodes = 0;
+  for (const node of input.nodes) {
+    let comparable = 0;
+    for (const nodeAddress of node) {
+      const parsedNode = parseAddressOrCidr(nodeAddress);
+      // A hostname does not parse, and is deliberately NOT resolved: a DNS
+      // lookup here would make the decision depend on a network call that can
+      // time out, and a timeout would silently downgrade "not our node" into
+      // "we did not check" — the exact confusion this function exists to stop.
+      // It is not skipped silently either; it simply does not count as a
+      // comparison, which is what the tally below is for.
+      if (parsedNode === null) continue;
+      comparable += 1;
+      if (ipMatchesEntry(parsed.canonical, parsedNode)) {
+        return { capture: false, reason: 'OUR_NODE' };
+      }
+    }
+    if (comparable === 0) uncomparableNodes += 1;
   }
+
+  // One node we could not compare against is enough to withhold the capture.
+  // Not a partial answer, not a best effort: the whole value of this function
+  // is that a `capture: true` means every node was ruled out, and a node whose
+  // address is a name we refused to resolve was not ruled out at all.
+  if (uncomparableNodes > 0) return { capture: false, reason: 'NODES_UNKNOWN' };
 
   return { capture: true, value: parsed.canonical };
 }

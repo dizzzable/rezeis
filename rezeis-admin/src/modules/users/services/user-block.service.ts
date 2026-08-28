@@ -262,7 +262,7 @@ export class UserBlockService {
     // treats empty and null alike — there is no way to tell them apart here,
     // and the safe reading of both is "we did not check".
     const nodes = await this.readNodeAddresses();
-    const decision = classifyCascadeIp({ address, nodeAddresses: nodes });
+    const decision = classifyCascadeIp({ address, nodes });
     if (!decision.capture) {
       if (decision.reason !== 'NO_ADDRESS') {
         this.logger.log(`Block cascade: address not listed (${decision.reason})`);
@@ -322,21 +322,25 @@ export class UserBlockService {
     return 1;
   }
 
-  /** Our own node addresses, or `null` when the panel could not be asked. */
-  private async readNodeAddresses(): Promise<readonly string[] | null> {
+  /**
+   * Our own nodes, one entry per node, or `null` when the panel could not be
+   * asked.
+   *
+   * GROUPED PER NODE, not flattened, and that is the whole point of the shape.
+   * A node reached by hostname contributes nothing comparable from its
+   * configured address and everything from the addresses it reports for itself
+   * — but the panel only began reporting those in 3.2.3. On an older one such a
+   * node yields an empty group, and the classifier needs to SEE that emptiness
+   * to know it could not rule the node out. Flattened into one list it is
+   * invisible: the list is non-empty because other nodes filled it, and the
+   * guard passes while the node nobody could compare against is exactly the one
+   * the customer was connected through.
+   */
+  private async readNodeAddresses(): Promise<readonly (readonly string[])[] | null> {
     if (this.remnawaveApiService === undefined) return null;
     try {
       const nodes = await this.remnawaveApiService.getAllNodes();
-      const addresses: string[] = [];
-      for (const node of nodes) {
-        // Both the configured address and every address the node reports for
-        // itself. A node reached by hostname contributes nothing from the
-        // first (the classifier cannot parse it) and everything from the
-        // second.
-        addresses.push(node.address);
-        for (const entry of node.ips) addresses.push(entry.ip);
-      }
-      return addresses;
+      return nodes.map((node) => [node.address, ...node.ips.map((entry) => entry.ip)]);
     } catch (err) {
       this.logger.warn(`Block cascade: could not enumerate nodes: ${(err as Error).message}`);
       return null;

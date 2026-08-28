@@ -808,9 +808,32 @@ export class ProfileSyncProcessor extends WorkerHost {
       return;
     }
 
+    // A blocked owner is DISABLED from the moment the profile exists.
+    //
+    // The contract DEFAULTS `status` to ACTIVE when the field is omitted, and
+    // omitting it is what this call did — so every route into `handleCreate`
+    // minted a live profile for a banned account and nothing came afterwards
+    // to correct it. The override in `handleUpdate` could not help: an UPDATE
+    // whose PATCH answers `missing` is REPROVISIONED through this method, so
+    // the block cascade's own job was one of the routes. Blocking a customer
+    // whose panel profile had been removed upstream therefore re-created it,
+    // active, and marked the job COMPLETED.
+    //
+    // Read from the column rather than the job payload, for the same reason
+    // the update path reads it there: what matters is whether the owner is
+    // blocked when the job RUNS, not when it was queued.
+    const ownerBlocked = subscription.user?.isBlocked === true;
+    if (ownerBlocked) {
+      this.logger.warn(
+        `Creating Remnawave profile '${panelUsername}' DISABLED: subscription ` +
+          `${subscription.id} belongs to a blocked account`,
+      );
+    }
+
     // Create user on Remnawave panel
     const created = await this.panelUsers.createUser({
       username: panelUsername,
+      ...(ownerBlocked ? { status: 'DISABLED' as const } : {}),
       telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
       email: contacts.email,
       description: naming.description,
