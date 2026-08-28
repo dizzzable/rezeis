@@ -109,10 +109,29 @@ describe('every module that declares a relay-queue consumer can resolve it', () 
 
   it('imports ReiwaRelayModule wherever a declared provider needs the queue', async () => {
     const consumers = consumerClassNames();
-    const candidates = walk(SRC_ROOT, '.module.ts').filter((file) => {
-      const source = readFileSync(file, 'utf8');
-      return consumers.some((name) => source.includes(name));
-    });
+    const candidates = walk(SRC_ROOT, '.module.ts')
+      // NEVER the composition root, whatever its text happens to say.
+      //
+      // This filter is a prose search, so a class name written in a COMMENT
+      // selects a module as surely as one written in `providers`. When that
+      // happened to `app.module.ts` the spec imported the application root,
+      // whose module body runs `ConfigModule.forRoot({ validate })` — and the
+      // whole environment schema with it. The result was a file that passed
+      // locally, where `.env` sits next to it, and failed on a runner where it
+      // does not: every assertion inside green, the file itself red, the error
+      // arriving as an unhandled rejection AFTER the last test ended. That
+      // signature costs an afternoon to read.
+      //
+      // Nothing is lost by refusing it. The invariant here is that a module
+      // DECLARING a relay consumer imports the queue module, and the root
+      // declares none — its providers are the app service, the lifecycle
+      // logger and the global guards. A consumer belongs in a feature module;
+      // if one ever appears in the root, that is the defect, not this skip.
+      .filter((file) => !file.endsWith('app.module.ts'))
+      .filter((file) => {
+        const source = readFileSync(file, 'utf8');
+        return consumers.some((name) => source.includes(name));
+      });
 
     const offenders: string[] = [];
     let checked = 0;

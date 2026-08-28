@@ -166,11 +166,19 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     ImportsModule,
     NotificationsModule,
     // Registered here rather than by a feature module because its only consumer
-    // is `SystemEventsService`, which reaches it through `ModuleRef` and so
-    // needs it present in the container without importing it. Every other
+    // is the system-events service, which reaches it through `ModuleRef` and
+    // so needs it present in the container without importing it. Every other
     // queue module is pulled in by whoever enqueues; this one has no such
     // caller, and leaving it out would silently drop every operator card back
     // to a single inline attempt.
+    //
+    // The service is named in prose, NOT as `TheClassName`: this file is the
+    // composition root, and `reiwa-relay-module-wiring.spec.ts` selects the
+    // modules it loads by searching module sources for consumer class names.
+    // A bare class name in a comment here made that spec import the root,
+    // which runs `ConfigModule.forRoot({ validate })` — green locally, red on
+    // a runner with no `.env`. The spec now refuses to load this file at all,
+    // so this is belt and braces; both are cheap and the failure was not.
     TelegramDirectModule,
     OAuthModule,
     ExternalAuthModule,
