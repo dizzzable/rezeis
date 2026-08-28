@@ -1,12 +1,16 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigType } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 
+import { appConfig } from '../../../common/config/app.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { readAdminBotToken, readEnvBotToken } from '../../../common/utils/admin-bot-token.util';
 import { WebPushService } from '../../push/services/web-push.service';
 import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
 
 import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { ReiwaRelayQueueService } from './reiwa-relay-queue.service';
+import { TelegramDirectQueueService } from './telegram-direct-queue.service';
 import { NotificationTemplatesService } from './notification-templates.service';
 import { isNotificationDeliveryEnabled, resolveToggleKey } from '../utils/notification-toggle.util';
 import {
@@ -154,6 +158,20 @@ export class UserNotificationsService {
     private readonly webPushService: WebPushService,
     private readonly customEmojiService: CustomEmojiService,
     private readonly relayQueue: ReiwaRelayQueueService,
+    /**
+     * The panel's own Telegram queue, and the crypt key that unlocks the
+     * token it sends with.
+     *
+     * `@Optional()` and at the tail because the specs construct this service
+     * positionally; DI always supplies both. When the queue is absent the
+     * mirror falls back to the reiwa relay, which is exactly what it did
+     * before — no card is lost by the absence.
+     */
+    @Optional()
+    private readonly telegramDirectQueue?: TelegramDirectQueueService,
+    @Optional()
+    @Inject(appConfig.KEY)
+    private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
   ) {}
 
   /**
@@ -582,6 +600,25 @@ export class UserNotificationsService {
     if (!config.enabled || !config.mirror || config.chatId === null) return;
     const topicThreadId =
       config.topics[USER_NOTIFICATION_CATEGORY] ?? config.defaultTopicId ?? undefined;
+    // This copy is for the OPERATOR, so the panel sends it itself when it can.
+    // The subscriber's own delivery, a few lines above, still goes through the
+    // bot and must: the bot owns the per-recipient state (`isBotBlocked`) and
+    // the knowledge of who has started it. Same event, two audiences, two
+    // roads — which is the whole shape of this change.
+    if (this.telegramDirectQueue !== undefined && config.botToken !== null) {
+      await this.telegramDirectQueue.enqueue(
+        {
+          kind: 'message',
+          chatId: config.chatId,
+          topicId: topicThreadId ?? null,
+          text: html,
+          parseMode: 'HTML',
+          sourceEventType: 'user_notification.operator_mirror',
+        },
+        `${eventId}:operator-mirror`,
+      );
+      return;
+    }
     await this.relayQueue.enqueue('reiwa.channel.broadcast', {
       // Suffix so the bot's idempotency LRU treats the operator-mirror
       // copy as distinct from the per-user delivery of the same event.
@@ -698,6 +735,8 @@ export class UserNotificationsService {
     chatId: string | null;
     defaultTopicId: number | null;
     topics: Record<string, number | null>;
+    /** Panel-managed token, decrypted. Non-null means "send this ourselves". */
+    botToken: string | null;
   }> {
     try {
       const settings = await this.prismaService.settings.findUnique({
@@ -729,6 +768,8 @@ export class UserNotificationsService {
         chatId: typeof tg.chatId === 'string' && tg.chatId.length > 0 ? tg.chatId : null,
         defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
         topics,
+        botToken:
+          readAdminBotToken(sysRaw, this.applicationConfiguration?.cryptKey) ?? readEnvBotToken(),
       };
     } catch (err: unknown) {
       this.logger.warn(
@@ -736,7 +777,14 @@ export class UserNotificationsService {
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      return { enabled: false, mirror: false, chatId: null, defaultTopicId: null, topics: {} };
+      return {
+        enabled: false,
+        mirror: false,
+        chatId: null,
+        defaultTopicId: null,
+        topics: {},
+        botToken: null,
+      };
     }
   }
 

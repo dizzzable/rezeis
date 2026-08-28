@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { InternalPushModule } from '../push/internal-push.module';
 import { CustomEmojiModule } from '../custom-emoji/custom-emoji.module';
 import { ReiwaRelayModule } from './reiwa-relay.module';
+import { TelegramDirectModule } from './telegram-direct.module';
 import { AdminNotificationTemplatesController } from './controllers/admin-notification-templates.controller';
 import { AdminUserNotificationEventsController } from './controllers/admin-user-notification-events.controller';
 import { BotNotifierClient } from './services/bot-notifier.client';
@@ -30,7 +31,7 @@ import { UserNotificationsService } from './services/user-notifications.service'
  * *content*, not the transport.
  */
 @Module({
-  imports: [AuthModule, InternalPushModule, CustomEmojiModule, ReiwaRelayModule],
+  imports: [AuthModule, InternalPushModule, CustomEmojiModule, ReiwaRelayModule, TelegramDirectModule],
   controllers: [AdminNotificationTemplatesController, AdminUserNotificationEventsController],
   providers: [
     NotificationTemplatesService,

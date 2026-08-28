@@ -696,12 +696,12 @@ export const en = {
     botToken: {
       title: 'Bot Token',
       description:
-        'Telegram bot token for direct media broadcast delivery. Stored encrypted at rest.',
+        'The Telegram bot token the panel sends with. Stored encrypted at rest.',
       field: 'Bot token',
       placeholder: '123456:ABC-DEF...',
-      hint: 'Only needed for photo/video broadcasts. Text broadcasts are delivered through the main reiwa bot and do not require a token here.',
-      statusConfigured: 'A token is set and encrypted. Enter a new one to replace it.',
-      statusMissing: 'No token set — the BOT_TOKEN environment variable is used if present.',
+      hint: 'Without a token, event cards, operator copies of notifications and error reports reach Telegram through the reiwa bot. With one, the panel sends them itself — the same messages, one hop fewer. Messages to subscribers are always sent by the bot: only it knows who has started it and who has blocked it.',
+      statusConfigured: 'A token is set and encrypted. The panel sends events to Telegram itself. Enter a new one to replace it.',
+      statusMissing: 'No token set — events go through the reiwa bot. The BOT_TOKEN environment variable is used if present.',
       saved: 'Bot token saved',
       saveFailed: 'Failed to save token',
       saveButton: 'Save Token',

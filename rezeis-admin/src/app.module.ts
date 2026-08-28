@@ -54,6 +54,7 @@ import { InternalUserModule } from './modules/internal-user/internal-user.module
 import { LegalDocumentsModule } from './modules/legal-documents/legal-documents.module';
 import { LinkingModule } from './modules/linking/linking.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { TelegramDirectModule } from './modules/notifications/telegram-direct.module';
 import { OAuthModule } from './modules/oauth/oauth.module';
 import { ExternalAuthModule } from './modules/external-auth/external-auth.module';
 import { EmailDeliveryModule } from './modules/email/email.module';
@@ -164,6 +165,13 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     FaqModule,
     ImportsModule,
     NotificationsModule,
+    // Registered here rather than by a feature module because its only consumer
+    // is `SystemEventsService`, which reaches it through `ModuleRef` and so
+    // needs it present in the container without importing it. Every other
+    // queue module is pulled in by whoever enqueues; this one has no such
+    // caller, and leaving it out would silently drop every operator card back
+    // to a single inline attempt.
+    TelegramDirectModule,
     OAuthModule,
     ExternalAuthModule,
     EmailDeliveryModule,

@@ -32,7 +32,9 @@ import { HttpService } from '@nestjs/axios';
 import { ModuleRef } from '@nestjs/core';
 import { firstValueFrom } from 'rxjs';
 
+import { appConfig } from '../config/app.config';
 import { webhookConfig } from '../config/webhook.config';
+import { readAdminBotToken, readEnvBotToken } from '../utils/admin-bot-token.util';
 import { buildWebhookSignature } from '../http/webhook-signature.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../../modules/realtime/realtime.gateway';
@@ -53,6 +55,8 @@ import { BotNotifierClient } from '../../modules/notifications/services/bot-noti
 import { ReiwaRelayQueueService } from '../../modules/notifications/services/reiwa-relay-queue.service';
 import type { ReiwaRelayEvent } from '../../modules/notifications/reiwa-relay.constants';
 import { isRelayLoopGuardedEvent } from '../../modules/notifications/reiwa-relay.policy';
+import { TelegramDirectQueueService } from '../../modules/notifications/services/telegram-direct-queue.service';
+import { isTelegramDirectLoopGuardedEvent } from '../../modules/notifications/telegram-direct.constants';
 
 // ── Event Types ─────────────────────────────────────────────────────────────
 
@@ -355,6 +359,17 @@ export const EVENT_TYPES = {
    * ring buffer, so a cabinet that stopped accepting relays was invisible.
    */
   REIWA_RELAY_UNDELIVERED: 'reiwa.relay_undelivered',
+  /**
+   * The panel's OWN Telegram send did not get through and nothing further is
+   * coming. Distinct from `reiwa.relay_undelivered` on purpose: they name two
+   * different broken things with two different remedies. The relay one means
+   * the panel cannot reach the cabinet; this one means the panel reached
+   * Telegram and Telegram said no — a revoked token, a chat the bot was
+   * removed from, a group that became a supergroup. Collapsing them into one
+   * event would put "check the cabinet" and "check Settings → Bot Token"
+   * behind the same card.
+   */
+  TELEGRAM_DIRECT_UNDELIVERED: 'telegram.direct_undelivered',
   /** Broadcast fan-out began; `system.broadcast_sent` is the terminal one. */
   BROADCAST_STARTED: 'broadcast.started',
   BROADCAST_BATCH_COMPLETED: 'broadcast.batch_completed',
@@ -464,6 +479,8 @@ export class SystemEventsService {
    */
   private relayQueue: ReiwaRelayQueueService | null = null;
   private relayQueueResolved = false;
+  private telegramDirectQueue: TelegramDirectQueueService | null = null;
+  private telegramDirectQueueResolved = false;
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -473,6 +490,19 @@ export class SystemEventsService {
     private readonly httpService?: HttpService,
     @Optional()
     private readonly moduleRef?: ModuleRef,
+    /**
+     * Source of `REZEIS_CRYPT_KEY`, which is what turns the stored
+     * `botTokenEnc` ciphertext back into a token this service can send with.
+     *
+     * `@Optional()` and LAST in the list for the same reason `httpService`
+     * and `moduleRef` are: a dozen specs construct this service positionally,
+     * and a required parameter anywhere but the tail breaks every one of
+     * them. DI always supplies it — `appConfig` is loaded globally in
+     * `AppModule`.
+     */
+    @Optional()
+    @Inject(appConfig.KEY)
+    private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
   ) {}
 
   /**
@@ -612,7 +642,9 @@ export class SystemEventsService {
     const resolved = resolveTelegramDeliveryTarget(tgConfig, event);
     const via: 'primary' | 'dev' | 'none' =
       resolved === null ? 'none' : resolved.isDevFallback ? 'dev' : 'primary';
-    await this.deliverTelegram(event);
+    // `synchronous` — the operator is looking at a spinner. See the branch in
+    // `deliverTelegram`.
+    await this.deliverTelegram(event, { synchronous: true });
     return { via };
   }
 
@@ -800,7 +832,10 @@ export class SystemEventsService {
    *   ⚙️ Событие: Description!
    *   <blockquote>structured data</blockquote>
    */
-  private async deliverTelegram(event: SystemEventPayload & { timestamp: string }): Promise<void> {
+  private async deliverTelegram(
+    event: SystemEventPayload & { timestamp: string },
+    opts: { readonly synchronous?: boolean } = {},
+  ): Promise<void> {
     if (!this.httpService) return;
 
     const tgConfig = await this.loadTelegramConfig();
@@ -889,6 +924,58 @@ export class SystemEventsService {
     const html = errorEvent
       ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), attachTxt)
       : this.formatTelegramMessage(enriched);
+
+    // ── Durable, or inline? ────────────────────────────────────────────────
+    // The queue is the normal path: it gives a panel-sent card the same four
+    // attempts across a restart that the relay gave it, so "the panel sends
+    // this itself" does not quietly mean "the panel tries once".
+    //
+    // Two cases still send inline, and both would be broken BY the queue:
+    //
+    //  * `synchronous` — the Settings test button. It exists to make an
+    //    attempt whose result a human is waiting on; enqueuing would return
+    //    "sent" before anything was, and a wrong token would surface a minute
+    //    later in the event feed instead of under the button. Same reasoning
+    //    `RELAY_DIRECT_DELIVERY_EXCEPTIONS` records for the broadcast test.
+    //  * the loop-guarded alert — `telegram.direct_undelivered` is emitted BY
+    //    this queue's processor, so queuing it feeds the failure back into the
+    //    thing that failed. See `isTelegramDirectLoopGuardedEvent`.
+    const queue = opts.synchronous ? null : this.resolveTelegramDirectQueue();
+    if (queue !== null && !isTelegramDirectLoopGuardedEvent(event.type)) {
+      await queue.enqueue(
+        {
+          kind: 'message',
+          chatId: targetChatId,
+          topicId: topicId ?? null,
+          text: html,
+          parseMode: 'HTML',
+          sourceEventType: event.type,
+        },
+        `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}`,
+      );
+      if (attachTxt) {
+        // A SECOND job, not a caption, because that is what this path has
+        // always produced: the card as its own message and the `.txt` behind
+        // it. The relay path collapses them into one captioned document
+        // because the cabinet's route takes one call — a difference in the
+        // transport, not something to normalise away here, where changing it
+        // would change what the operator sees.
+        await queue.enqueue(
+          {
+            kind: 'document',
+            chatId: targetChatId,
+            topicId: topicId ?? null,
+            text: '',
+            parseMode: null,
+            filename: buildErrorReportFilename(reportEvent),
+            content: formatErrorReportTxt(reportEvent, getRezeisBuildInfo()),
+            sourceEventType: event.type,
+          },
+          `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}:error-report`,
+        );
+      }
+      return;
+    }
 
     const payload: Record<string, unknown> = {
       chat_id: targetChatId,
@@ -996,6 +1083,27 @@ export class SystemEventsService {
       this.relayQueue = null;
     }
     return this.relayQueue;
+  }
+
+  /**
+   * And again for the panel's own Telegram queue.
+   *
+   * `null` in a runtime where `TelegramDirectModule` is not registered — the
+   * specs that build this service by hand, and any worker runtime that does
+   * not import it. That is not a degraded mode to be alarmed about: the branch
+   * below falls back to the single inline send this path used before it was
+   * durable, which is strictly what it did yesterday.
+   */
+  private resolveTelegramDirectQueue(): TelegramDirectQueueService | null {
+    if (this.telegramDirectQueueResolved) return this.telegramDirectQueue;
+    this.telegramDirectQueueResolved = true;
+    try {
+      this.telegramDirectQueue =
+        this.moduleRef?.get(TelegramDirectQueueService, { strict: false }) ?? null;
+    } catch {
+      this.telegramDirectQueue = null;
+    }
+    return this.telegramDirectQueue;
   }
 
   /**
@@ -1695,7 +1803,15 @@ export class SystemEventsService {
     errorReportMode: 'off' | 'manual' | 'auto';
     errorReportTelegramTxt: boolean;
   }> {
+    // `orderBy` matches `SettingsService.getSettingsRecord` and
+    // `PaymentOpsAlertService.readSettings`. It was absent here, and an
+    // unordered `findFirst` picks whatever row the query plan yields — so on
+    // a database that ever grew a second `Settings` row this service could
+    // read its Telegram config, and now its bot token, from a DIFFERENT row
+    // than the one the Bot Token card writes to. One row is the intent; the
+    // ordering is what makes every reader agree on which one that is.
     const settings = await this.prismaService.settings.findFirst({
+      orderBy: { updatedAt: 'asc' },
       select: { systemNotifications: true },
     });
     if (!settings) {
@@ -1729,7 +1845,21 @@ export class SystemEventsService {
 
     return {
       enabled: tg.enabled === true,
-      botToken: typeof tg.botToken === 'string' ? tg.botToken : (process.env.BOT_TOKEN ?? null),
+      // The panel-managed (encrypted) token first, `BOT_TOKEN` second — the
+      // same order and the same source as every other Telegram sender here
+      // (`BackupService`, `BroadcastMediaUploadService`,
+      // `PaymentOpsAlertService`, the settings test buttons).
+      //
+      // This line used to read `tg.botToken`: a PLAINTEXT key at a path no
+      // write path in this tree has ever produced. It was therefore always
+      // undefined, the env fallback is unset by policy on this product, and
+      // so `deliverTelegram`'s direct branch below was unreachable — every
+      // operator card went out through the reiwa bot, not by design but
+      // because the panel could not find its own token. See
+      // `readAdminBotToken`.
+      botToken:
+        readAdminBotToken(settings.systemNotifications, this.applicationConfiguration?.cryptKey) ??
+        readEnvBotToken(),
       chatId: typeof tg.chatId === 'string' ? tg.chatId : null,
       topicMap,
       defaultTopicId: typeof tg.topicId === 'number' ? tg.topicId : null,
@@ -2078,6 +2208,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'client.error': { emoji: '🖥', title: 'Ошибка в админ-панели' },
   'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },
   'reiwa.relay_undelivered': { emoji: '📡', title: 'Вебхук в reiwa не доставлен' },
+  'telegram.direct_undelivered': { emoji: '📵', title: 'Панель не доставила карточку в Telegram' },
   'system.remnawave_sync': { emoji: '🔄', title: 'Синхронизация с Remnawave' },
   'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
   'notification.template.created': { emoji: '📝', title: 'Создан шаблон уведомления' },

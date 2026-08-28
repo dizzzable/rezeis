@@ -25,6 +25,7 @@ import {
   SystemEventsService,
 } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
+import { readAdminBotToken } from '../../../common/utils/admin-bot-token.util';
 import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
 import {
   mergePaymentOpsAlertSettings,
@@ -624,26 +625,31 @@ export class SettingsService {
 
   /**
    * Returns the decrypted admin bot token stored in settings, or null when no
-   * token is configured. Decryption failures are logged and treated as "no
-   * token" so callers can fall back to the environment variable. Consumed by
-   * the broadcast delivery service for direct media sends.
+   * token is configured. Decryption failures are treated as "no token" so
+   * callers can fall back to the environment variable. Consumed by the
+   * broadcast delivery service for direct media sends.
+   *
+   * The rule itself lives in `readAdminBotToken` rather than here: this
+   * service cannot be the single source for it, because `SystemEventsService`
+   * needs the same answer and importing this file from there would close a
+   * module cycle. The util carries the reasoning and the history.
    */
   public async getDecryptedBotToken(): Promise<string | null> {
     const settings = await this.getSettingsRecord(this.prismaService);
     if (settings === null) return null;
-    const systemNotifications = readJsonObject(settings.systemNotifications);
-    const enc = systemNotifications.botTokenEnc;
-    if (typeof enc !== 'string' || enc.length === 0) return null;
-    const cryptKey = this.applicationConfiguration.cryptKey;
-    if (!cryptKey) return null;
-    try {
-      return decryptTotpSecret(enc, cryptKey);
-    } catch (err: unknown) {
+    const token = readAdminBotToken(
+      settings.systemNotifications,
+      this.applicationConfiguration.cryptKey,
+    );
+    if (token === null && typeof readJsonObject(settings.systemNotifications).botTokenEnc === 'string') {
+      // A token IS stored and did not come back — a wrong `REZEIS_CRYPT_KEY`
+      // or a truncated column. Worth a line: silently behaving as "no token
+      // configured" while the card says "configured" is the confusing case.
       this.logger.warn(
-        `Failed to decrypt stored bot token: ${err instanceof Error ? err.message : String(err)}`,
+        'A Telegram bot token is stored but could not be decrypted; treating it as absent',
       );
-      return null;
     }
+    return token;
   }
 
   /**
