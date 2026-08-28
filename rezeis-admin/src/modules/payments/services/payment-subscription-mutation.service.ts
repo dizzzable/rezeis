@@ -438,6 +438,12 @@ export class PaymentSubscriptionMutationService {
               source: 'PAYMENT_COMPLETION',
               paymentId: transaction.paymentId,
               combined: true,
+              // Same rule as the single renewal below, and it has to be the
+              // same rule: a combined payment renews several subscriptions at
+              // once, and each of them bought a fresh period. Omitting it here
+              // would make "renew three at once" behave differently from
+              // renewing the same three one by one.
+              ...(renewedSubscription.remnawaveId === null ? {} : { resetTraffic: true }),
             } as Prisma.InputJsonObject,
           },
         });
@@ -1300,6 +1306,18 @@ export class PaymentSubscriptionMutationService {
           payload: {
             source: 'PAYMENT_COMPLETION',
             paymentId: input.transaction.paymentId,
+            // The customer paid for a new period, so the period's traffic
+            // allowance starts over. `PATCH /api/users` cannot express that —
+            // it carries the limit and never the usage — so the sync processor
+            // makes the separate reset call when it sees this flag. Without it
+            // a subscriber who hit their cap renews into a profile Remnawave
+            // still reads as LIMITED: paid, active, and passing nothing.
+            //
+            // Set only on the RENEW path. A first purchase provisions a fresh
+            // profile whose counter is already zero, and an add-on top-up
+            // RAISES the limit rather than starting a period — resetting there
+            // would hand out the traffic already used this period for free.
+            ...(renewedSubscription.remnawaveId === null ? {} : { resetTraffic: true }),
           },
         },
       });

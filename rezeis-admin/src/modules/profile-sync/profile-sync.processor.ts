@@ -995,6 +995,41 @@ export class ProfileSyncProcessor extends WorkerHost {
         continue;
       }
 
+      // ── The counter the PATCH cannot touch ──────────────────────────────
+      //
+      // `PATCH /api/users` carries the limit, never the usage, so a renewal
+      // moved `expireAt` forward and left `usedTrafficBytes` exactly where the
+      // previous period ended. On a plan with a traffic cap that is not a
+      // cosmetic stale number: Remnawave DERIVES `LIMITED` from the counter
+      // against the limit — `toPanelStatus` says so, and deliberately declines
+      // to push a status of its own for that reason — so a customer who hit
+      // their cap, paid, and had their expiry extended stayed LIMITED on the
+      // panel. Paid, active, and passing no traffic.
+      //
+      // Zeroing the counter is a SEPARATE call, and until now nothing in the
+      // tree made it on a renewal: `SyncAction.TRAFFIC_RESET` existed in the
+      // schema and was handled below, but no producer ever created one. The
+      // only live reset was the operator's button.
+      //
+      // Carried on the UPDATE job rather than as a second TRAFFIC_RESET job,
+      // for the same reason `propagateStatus` is a payload flag: one job is one
+      // retry unit. Two jobs could interleave, and a reset that landed while
+      // its partner PATCH was still failing would zero the counter against the
+      // OLD limit. Here the order is fixed — the profile is correct first, then
+      // the counter is cleared — and a failure retries both together.
+      //
+      // Placed after the fingerprint check on purpose: the loop above re-PATCHes
+      // when the subscription moved under us, and this is the iteration that
+      // settled. A retry of the whole job can still reset twice; that costs at
+      // most the few megabytes used between the attempts, which is the right
+      // side of the trade against not resetting at all.
+      if (readBoolean(readRecord(current.payload), 'resetTraffic')) {
+        await this.remnawaveApiService.resetPanelUserTraffic(updateIdentity);
+        this.logger.log(
+          `Reset traffic counter for subscription ${subscription.id} after a paid renewal`,
+        );
+      }
+
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
         panelIdentityOf(subscription),

@@ -119,6 +119,23 @@ describe('PaymentSubscriptionMutationService — combined renewal', () => {
     // Both items stamped applied.
     assert.ok(env.committedItems.get('it1')!.appliedAt !== null);
     assert.ok(env.committedItems.get('it2')!.appliedAt !== null);
+    // Each renewed subscription that ALREADY has a panel profile asks the sync
+    // processor to clear its traffic counter, because `PATCH /api/users`
+    // carries the limit and never the usage — see
+    // `test/renewal-traffic-reset.spec.ts` for the full account. Renewing
+    // three at once must behave exactly like renewing the same three one by
+    // one, so this is asserted on the combined path too and not only there.
+    const payloadOf = (subscriptionId: string): Record<string, unknown> =>
+      (syncJobs.find((job) => job.subscriptionId === subscriptionId)!.payload ??
+        {}) as Record<string, unknown>;
+    assert.equal(payloadOf('sub-future').resetTraffic, true);
+    // `sub-expired` holds no profile yet, so its job is a CREATE onto a fresh
+    // profile whose counter is already zero. Nothing to reset, and no identity
+    // to reset it against.
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(payloadOf('sub-expired'), 'resetTraffic'),
+      false,
+    );
   });
 
   it('Property 5: already-applied items are skipped (idempotent replay)', async () => {
