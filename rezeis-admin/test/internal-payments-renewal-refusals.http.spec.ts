@@ -171,7 +171,13 @@ async function boot(
         settings: { shopId: 'test-shop', apiKey: 'test-key' },
       }),
     },
-    user: { findUnique: async () => ({ id: 'user-1' }) },
+    user: {
+      findUnique: async () => ({ id: 'user-1' }),
+      // The purchaser block check every checkout path now runs, ON THE SAME
+      // model — declared here rather than as a second `user` key, because a
+      // duplicate silently wins and takes the sibling with it.
+      findFirst: async () => null,
+    },
     transaction: {
       findFirst: async () => options.existing ?? null,
       findMany: async () => [],

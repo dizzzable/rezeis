@@ -22,6 +22,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PROFILE_SYNC_MAX_ATTEMPTS } from '../../profile-sync/profile-sync.constants';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGate, AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { SettingsService } from '../../settings/services/settings.service';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
 import {
@@ -119,6 +120,10 @@ export class PaymentsCheckoutService {
     }
 
     const userId = await this.resolveUserId(input);
+    // Second layer, exactly like the access-mode gate above: the session
+    // refusal already keeps a blocked person off the checkout screen, and
+    // this keeps them off the endpoint behind it.
+    await assertPurchaserNotBlocked(this.prismaService, { userId });
     const gateway = await this.prismaService.paymentGateway.findUnique({
       where: { type: input.gatewayType },
     });

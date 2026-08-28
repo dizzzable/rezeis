@@ -65,6 +65,19 @@ export class AutoRenewService {
       where: {
         status: SubscriptionStatus.ACTIVE,
         expiresAt: { gt: now, lte: windowEnd },
+        // A blocked owner is excluded HERE rather than refused downstream.
+        //
+        // This is the one payment path with no session and no screen in front
+        // of it: the scheduler reads the table and charges a saved card. Until
+        // this line existed, blocking an account stopped their VPN and kept
+        // charging them for it every renewal — which is worse than a hole, it
+        // is taking money for a service we are deliberately refusing.
+        //
+        // Filtered in the query so the charge is never ATTEMPTED. A refusal
+        // thrown later would still count as a failed autopay attempt against
+        // the retry budget and would still notify the customer about a payment
+        // problem they cannot act on.
+        user: { isBlocked: false },
       },
       select: {
         id: true,

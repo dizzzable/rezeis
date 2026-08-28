@@ -20,6 +20,7 @@ import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGuard, AccessModeGate } from '../../settings/services/access-mode-guard.service';
+import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { SettingsService } from '../../settings/services/settings.service';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
@@ -146,6 +147,7 @@ export class PartnerBalancePaymentService {
 
     // 2. Resolve the canonical user + their balance currency.
     const user = await this.resolveUser(input);
+    await assertPurchaserNotBlocked(this.prismaService, { userId: user.id });
 
     // 3. Operator toggle.
     const partnerSettings = await this.settingsService.getPartnerSettings();

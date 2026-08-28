@@ -683,6 +683,10 @@ function createService(input: {
     updatedAt: new Date('2026-04-19T12:00:00.000Z'),
   }
   const prismaService = {
+    // The purchaser block check every checkout path now runs. `null` reads as
+    // "no such user", which the guard deliberately stays quiet about — the
+    // caller's own resolution raises the better error a few lines later.
+    user: { findFirst: async () => null },
     paymentGateway: {
       findUnique: async () => ({
         id: 'gateway-1',

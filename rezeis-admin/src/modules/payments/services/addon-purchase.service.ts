@@ -34,6 +34,7 @@ import {
 import { PricingService } from '../../plans/services/pricing.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
+import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { buildAddOnCheckoutFingerprint } from '../utils/checkout-fingerprint.util';
@@ -100,6 +101,11 @@ export class AddOnPurchaseService {
         ? new ServiceUnavailableException({ code: rejection.code, message: rejection.message })
         : new ForbiddenException({ code: rejection.code, message: rejection.message });
     }
+
+    await assertPurchaserNotBlocked(this.prismaService, {
+      userId: input.userId,
+      telegramId: input.telegramId,
+    });
 
     const channel = input.channel ?? PurchaseChannel.WEB;
 

@@ -24,6 +24,7 @@ import { PricedRenewalInterface } from '../../subscriptions/interfaces/subscript
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { buildRenewalCheckoutFingerprint, fingerprint } from '../utils/checkout-fingerprint.util';
+import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { claimForImmediateFulfillment, releaseFulfillmentClaim } from './payment-fulfillment-claim.util';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
@@ -87,6 +88,16 @@ export class PaymentsRenewalCheckoutService {
   public async renewalCheckout(
     input: RenewalCheckoutInput,
   ): Promise<InternalPaymentCheckoutInterface> {
+    // BEFORE the keyed replay below, not after it. A replay hands back a
+    // checkout URL that already exists, so a check placed further down would
+    // let a blocked customer re-fetch a live payment link. This is the one
+    // gate here that is about safety rather than about pricing, and the
+    // replay path is explicitly not independent of that.
+    await assertPurchaserNotBlocked(this.prismaService, {
+      userId: input.userId,
+      telegramId: input.telegramId,
+    });
+
     const channel = input.channel ?? PurchaseChannel.WEB;
 
     const idempotencyKey =
