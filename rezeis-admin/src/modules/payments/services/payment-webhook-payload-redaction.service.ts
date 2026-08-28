@@ -38,8 +38,28 @@ function redactRecursive(value: unknown): unknown {
   return result;
 }
 
+/**
+ * Identifiers that survive redaction, because hiding them costs more than
+ * showing them.
+ *
+ * The two charge ids are REFUND HANDLES. `refundStarPayment(userId, chargeId)`
+ * takes the first, and neither is usable without the bot token — they are
+ * addresses, not credentials. They also live in exactly one place: inside the
+ * webhook envelope this service redacts. Nothing extracts them to a column, so
+ * masking them here removed the only way an operator could reach them, and
+ * refunding a Stars payment meant querying Postgres by hand.
+ *
+ * They were never named — `telegram_payment_charge_id` matched the generic
+ * "ends in `_id`" rule, which is why the loss was silent.
+ */
+const NEVER_REDACTED = new Set([
+  'paymentId',
+  'telegram_payment_charge_id',
+  'provider_payment_charge_id',
+]);
+
 function shouldRedactField(key: string): boolean {
-  if (key === 'paymentId') {
+  if (NEVER_REDACTED.has(key)) {
     return false;
   }
   if (SENSITIVE_FIELD_PATTERN.test(key) || SENSITIVE_IDENTIFIER_FIELD_PATTERN.test(key)) {
