@@ -46,6 +46,28 @@ const LAST_RESULT_KEY = 'rezeis:auto-renew:last-result';
 export class AutoRenewScheduler {
   private readonly logger = new Logger(AutoRenewScheduler.name);
 
+  /**
+   * True while a cycle is running, so the next tick stands down.
+   *
+   * THE CRON FIRES EVERY MINUTE AND THE CYCLE IS NO LONGER SHORT. Until the
+   * expiry notices learned to quote the customer's traffic and devices, the
+   * loop body was a single insert and two ticks could not realistically
+   * overlap. Now each notice may consult the panel, so a slow panel stretches
+   * one cycle past its own tick — and two cycles walking the same window both
+   * read "not yet notified" for the customers the first has not reached, and
+   * both write. The customer is told twice.
+   *
+   * The 20-hour throttle cannot help: it is a read-then-write with no unique
+   * constraint underneath, so it stops a LATER cycle and not a CONCURRENT one.
+   *
+   * This guard covers the ticks, which is where the overlap actually comes
+   * from — the cron runs in one process, gated by `shouldRunSchedules`. It does
+   * NOT cover an operator pressing "run now" in the API while the worker's tick
+   * is mid-cycle; that is a deliberate, rare action, and the bounded panel
+   * reads now keep the window it could land in small.
+   */
+  private running = false;
+
   public constructor(
     private readonly autoRenewService: AutoRenewService,
     private readonly rawCacheService: RawCacheService,
@@ -54,10 +76,22 @@ export class AutoRenewScheduler {
   @Cron(CronExpression.EVERY_MINUTE, { name: 'auto-renew-cycle' })
   public async tick(): Promise<void> {
     if (!shouldRunSchedules()) return;
+    if (this.running) {
+      // Debug, not warn: on a healthy install this never fires, and on a slow
+      // panel it fires every minute until the panel recovers. A warning that
+      // repeats sixty times an hour is one an operator filters out.
+      this.logger.debug('Auto-renew cycle still running; this tick stands down');
+      return;
+    }
+    this.running = true;
     try {
       await this.runOnce();
     } catch (error) {
       this.logger.error('AutoRenewScheduler cycle failed', error instanceof Error ? error.stack : undefined);
+    } finally {
+      // `finally`, so a throw cannot leave the flag set and silence the
+      // scheduler for the lifetime of the process.
+      this.running = false;
     }
   }
 

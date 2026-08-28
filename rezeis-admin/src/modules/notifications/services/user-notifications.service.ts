@@ -890,9 +890,14 @@ export class UserNotificationsService {
     //     `:slug:`.
     // Both helpers no-op when the text has no `:` so the common (token-less)
     // notification path stays a single allocation with no settings read.
+    // The HTML body is substituted SEPARATELY, with each value escaped,
+    // while the plain one keeps the values as they are for the cabinet feed
+    // and web-push. Reusing `bodyRaw` here is what let a customer's or an
+    // operator's `<` reach Telegram's parser.
+    const bodyHtmlRaw = substituteHtml(localized.body, ctx);
     const html = `<b>${await this.customEmojiService.substituteTelegramHtml(
       escapeHtml(titleRaw),
-    )}</b>\n\n${await this.customEmojiService.substituteTelegramHtml(bodyRaw)}`;
+    )}</b>\n\n${await this.customEmojiService.substituteTelegramHtml(bodyHtmlRaw)}`;
     const title = await this.customEmojiService.substituteFallbacks(titleRaw);
     const body = await this.customEmojiService.substituteFallbacks(bodyRaw);
     return { title, body, html };
@@ -960,6 +965,31 @@ function substitute(template: string, ctx: Record<string, unknown>): string {
     const value = ctx[key];
     if (value === undefined || value === null) return '';
     return String(value);
+  });
+}
+
+/**
+ * Substitution for the Telegram body, where the result is parsed as HTML.
+ *
+ * ESCAPES THE VALUES AND NOT THE TEMPLATE, which is the only shape that works
+ * here. The template is operator-authored and may legitimately carry markup —
+ * and the emoji pass that runs after this one emits `<tg-emoji>` tags — so
+ * escaping the whole string would break both. The VALUES are the untrusted
+ * half: `{{name}}` is a Telegram display name, `{{plan}}` is typed by an
+ * operator, `{{profile}}` comes from the panel.
+ *
+ * What went wrong without it: a plan named `Pro <Max>` put a bare `<Max>` in
+ * the body, Telegram answered `400 can't parse entities: Unsupported start
+ * tag`, and the durable relay queue then retried a message that could never
+ * succeed. The title was already escaped; the body was not — and the expiry
+ * templates are what put a plan name and a panel username into a body for the
+ * first time.
+ */
+function substituteHtml(template: string, ctx: Record<string, unknown>): string {
+  return template.replace(PLACEHOLDER_PATTERN, (_match, key: string) => {
+    const value = ctx[key];
+    if (value === undefined || value === null) return '';
+    return escapeHtml(String(value));
   });
 }
 

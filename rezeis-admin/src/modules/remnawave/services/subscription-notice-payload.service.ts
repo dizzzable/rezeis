@@ -85,7 +85,20 @@ export class SubscriptionNoticePayloadService {
       panelUsername: subscription.remnawavePanelUsername,
     };
     try {
-      const usage = await this.remnawaveApiService.getPanelUserUsage(identity);
+      // BOUNDED, and the bound is what keeps the cycle shorter than its own
+      // tick. These reads used to sit outside any deadline, on the shared
+      // 45-second outbound timeout, INSIDE a per-subscription loop — so a
+      // half-open panel connection made one cycle take minutes while the cron
+      // fires every minute. Two cycles then walked the same window and told the
+      // same customers twice.
+      //
+      // A notice is worth sending with the facts we have; it is not worth
+      // waiting three quarters of a minute for one number. The same reasoning
+      // already bounds the webhook path.
+      const usage = await withDeadline(
+        this.remnawaveApiService.getPanelUserUsage(identity),
+        PANEL_FACT_DEADLINE_MS,
+      );
       if (usage !== null) {
         if (usage.username !== null) payload['profile'] = usage.username;
         if (usage.usedTrafficBytes !== null) {
@@ -105,8 +118,11 @@ export class SubscriptionNoticePayloadService {
       // panel call to do it.
       const limit = payload['deviceLimit'];
       if (typeof limit === 'number' && limit > 0) {
-        const devices = await this.remnawaveApiService.strictListUserDevices(identity);
-        if (devices.kind === 'ok') {
+        const devices = await withDeadline(
+          this.remnawaveApiService.strictListUserDevices(identity),
+          PANEL_FACT_DEADLINE_MS,
+        );
+        if (devices !== null && devices.kind === 'ok') {
           payload['devicesUsed'] = devices.value.devices.length;
         }
       }
@@ -152,4 +168,37 @@ function readPlanName(planSnapshot: unknown): string {
   if (planSnapshot === null || typeof planSnapshot !== 'object') return '';
   const name = (planSnapshot as Record<string, unknown>)['name'];
   return typeof name === 'string' ? name : '';
+}
+
+/**
+ * How long one notice may wait on the panel for a display fact.
+ *
+ * Three seconds, the same bound the webhook path already applies for the same
+ * reason. The alternative is the shared 45-second outbound timeout, and these
+ * calls run inside a per-subscription loop under a cron that fires every
+ * minute: one unresponsive panel turns a cycle into minutes, two cycles overlap
+ * on the same window, and customers are told twice.
+ */
+const PANEL_FACT_DEADLINE_MS = 3_000;
+
+/**
+ * The promise's value, or `null` when it did not arrive in time.
+ *
+ * Resolves rather than rejects on the timeout, because a missing fact is a
+ * notice with less detail and a thrown one is no notice at all. The underlying
+ * request is left running — there is nothing useful to cancel, and its own
+ * timeout will end it.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
