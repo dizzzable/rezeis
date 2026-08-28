@@ -1,5 +1,5 @@
 import { Injectable, Optional, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
@@ -96,7 +96,7 @@ export class AdminUsersService {
   ): Promise<AdminUserListResultInterface> {
     const limit = query.limit ?? DEFAULT_LIST_LIMIT;
     const offset = query.offset ?? DEFAULT_LIST_OFFSET;
-    const where = buildUserListWhere(query.search);
+    const where = buildUserListWhere(query);
 
     const [rows, total] = await this.prismaService.$transaction([
       this.prismaService.user.findMany({
@@ -162,10 +162,113 @@ export class AdminUsersService {
  * not a narrowing: no row's `telegramId` can equal a value the column cannot
  * store, so the clause could never have matched.
  */
-function buildUserListWhere(search: string | undefined): Prisma.UserWhereInput {
+function buildUserListWhere(query: AdminUserListQueryDto): Prisma.UserWhereInput {
+  // Every filter is an AND term; a multi-value filter is an OR within its own
+  // term. Collected in a list rather than merged into one object because two
+  // filters can both want `subscriptions.some` and the second would silently
+  // replace the first.
+  const and: Prisma.UserWhereInput[] = [];
+
+  const searchTerm = buildSearchTerm(query.search);
+  if (searchTerm !== null) and.push(searchTerm);
+
+  // ── Subscription filters ────────────────────────────────────────────
+  //
+  // DELETED rows are excluded from every one of them. A deleted subscription
+  // is not a subscription the customer has, and counting it would put people
+  // who cancelled months ago in a filter for "customers on Standard".
+  const liveSubscription: Prisma.SubscriptionWhereInput = {
+    status: { not: SubscriptionStatus.DELETED },
+  };
+
+  if (query.planIds !== undefined && query.planIds.length > 0) {
+    // The plan lives in the purchase-time snapshot, not in a column: there is
+    // no `plan_id` on `subscriptions`. That makes this a JSON path read and
+    // therefore unindexed — acceptable on a paged admin screen, and the only
+    // way to ask the question at all without a schema change.
+    and.push({
+      subscriptions: {
+        some: {
+          ...liveSubscription,
+          OR: query.planIds.map((planId) => ({
+            planSnapshot: { path: ['id'], equals: planId },
+          })),
+        },
+      },
+    });
+  }
+
+  if (query.subscriptionStatuses !== undefined && query.subscriptionStatuses.length > 0) {
+    // Not filtered by `liveSubscription`: an operator who explicitly asks for
+    // DELETED means it.
+    and.push({ subscriptions: { some: { status: { in: query.subscriptionStatuses } } } });
+  }
+
+  if (query.isTrial !== undefined) {
+    and.push(
+      query.isTrial
+        ? { subscriptions: { some: { ...liveSubscription, isTrial: true } } }
+        : { subscriptions: { none: { ...liveSubscription, isTrial: true } } },
+    );
+  }
+
+  if (query.hasSubscription !== undefined) {
+    and.push(
+      query.hasSubscription
+        ? { subscriptions: { some: liveSubscription } }
+        : { subscriptions: { none: liveSubscription } },
+    );
+  }
+
+  // ── Account filters ─────────────────────────────────────────────────
+  if (query.roles !== undefined && query.roles.length > 0) {
+    and.push({ role: { in: query.roles } });
+  }
+  if (query.languages !== undefined && query.languages.length > 0) {
+    and.push({ language: { in: query.languages } });
+  }
+  if (query.isBlocked !== undefined) {
+    and.push({ isBlocked: query.isBlocked });
+  }
+  if (query.hasTelegram !== undefined) {
+    and.push(query.hasTelegram ? { telegramId: { not: null } } : { telegramId: null });
+  }
+  if (query.hasWebAccount !== undefined) {
+    and.push(query.hasWebAccount ? { webAccount: { isNot: null } } : { webAccount: null });
+  }
+  if (query.flagged !== undefined) {
+    // Open flags only. A judged one is history, and an operator filtering for
+    // "needs a look" does not want the ones already looked at.
+    and.push(
+      query.flagged
+        ? { reviewFlags: { some: { clearedAt: null } } }
+        : { reviewFlags: { none: { clearedAt: null } } },
+    );
+  }
+
+  if (query.createdFrom !== undefined || query.createdTo !== undefined) {
+    and.push({
+      createdAt: {
+        ...(query.createdFrom === undefined ? {} : { gte: query.createdFrom }),
+        ...(query.createdTo === undefined ? {} : { lte: query.createdTo }),
+      },
+    });
+  }
+
+  if (and.length === 0) return {};
+  return and.length === 1 ? and[0] : { AND: and };
+}
+
+/**
+ * The free-text half, unchanged in behaviour and now one term among many.
+ *
+ * Returns `null` for an empty fragment so the caller adds nothing, rather
+ * than an empty object that would read as a filter.
+ */
+function buildSearchTerm(search: string | undefined): Prisma.UserWhereInput | null {
   const trimmed = search?.trim();
   if (!trimmed) {
-    return {};
+    return null;
   }
 
   const conditions: Prisma.UserWhereInput[] = [

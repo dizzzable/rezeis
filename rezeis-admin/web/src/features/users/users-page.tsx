@@ -15,7 +15,7 @@
  * rendered inline (no separate route needed).
  */
 
-import { lazy, memo, Suspense, useCallback, useMemo, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -28,6 +28,13 @@ import { api } from '@/lib/api'
 import { toast } from 'sonner'
 import { PermissionGate } from '@/features/rbac'
 import { downloadCsv } from '@/features/partners/csv-download'
+import { UsersFilterPanel } from './users-filter-panel'
+import {
+  countActiveFilters,
+  filtersFromParams,
+  filtersToParams,
+  type UserFilters,
+} from './users-filters'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -59,6 +66,16 @@ const UserDetailPanel = lazy(
 const BulkUsersTab = lazy(() => import('@/features/users/bulk-users-page'))
 
 const ALLOWED_TABS = HUB_TABS['/users']
+
+/**
+ * How long typing has to stop before the list follows it.
+ *
+ * Short enough that it feels like the list is filtering as you type, long
+ * enough that a nine-character login is one request rather than nine. The
+ * search hits Postgres with an `OR` across five columns, so the difference
+ * matters on a busy panel.
+ */
+const SEARCH_DEBOUNCE_MS = 300
 type UsersTab = (typeof ALLOWED_TABS)[number]
 
 function getUserStatusClass(user: { isBlocked: boolean; lastSeenAt?: string | null }): string {
@@ -243,10 +260,22 @@ function UsersListTab() {
   const initialSearch = searchParams.get('search') ?? ''
   const [searchInput, setSearchInput] = useState(initialSearch)
   const [searchQuery, setSearchQuery] = useState(initialSearch)
+  // Seeded from the URL so a filtered view survives a reload and can be
+  // pasted to somebody else. Read once: after mount this state is the
+  // source of truth and the URL follows it.
+  const [filters, setFilters] = useState<UserFilters>(() =>
+    filtersFromParams(new URLSearchParams(window.location.search)),
+  )
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
   const [showCreateUser, setShowCreateUser] = useState(false)
 
   const LIST_LIMIT = 100
+
+  // Memoised so the query key is stable across renders that did not change a
+  // filter — otherwise every keystroke in the search box would look like a
+  // new filter set and refetch twice.
+  const filterParams = useMemo(() => filtersToParams(filters), [filters])
+  const activeFilterCount = countActiveFilters(filters)
 
   const {
     data: listData,
@@ -254,9 +283,11 @@ function UsersListTab() {
     isFetching,
     isError,
   } = useQuery({
-    queryKey: ['admin', 'users', 'list', searchQuery],
+    // The filter object is part of the key, so changing a filter refetches
+    // exactly as changing the search term does.
+    queryKey: ['admin', 'users', 'list', searchQuery, filterParams],
     queryFn: async ({ signal }): Promise<UserListResponse> => {
-      const params: Record<string, string | number> = { limit: LIST_LIMIT }
+      const params: Record<string, string | number> = { limit: LIST_LIMIT, ...filterParams }
       const trimmed = searchQuery.trim()
       if (trimmed) {
         params.search = trimmed
@@ -289,6 +320,47 @@ function UsersListTab() {
 
   const total = listData?.total ?? 0
   const hasMore = total > displayedUsers.length
+
+  /**
+   * The list follows the box.
+   *
+   * ── What this replaces ─────────────────────────────────────────────────
+   *
+   * The query only moved on SUBMIT, which made two ordinary things awkward.
+   * Typing a login showed the previous result until you reached for Enter;
+   * and CLEARING the box did nothing at all — the full list came back only
+   * after submitting an empty field, which is not an action anybody thinks
+   * to perform. Deleting what you searched for now returns to where you
+   * started, because the empty box is just another query.
+   *
+   * Enter still works and still bypasses the wait: the submit handler sets
+   * the same state this timer would, so the pending timer becomes a no-op.
+   */
+  useEffect(() => {
+    const handle = window.setTimeout(() => setSearchQuery(searchInput), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(handle)
+  }, [searchInput])
+
+  /**
+   * Mirror the live query into the address bar.
+   *
+   * GUARDED, and that is not a micro-optimisation: `setSearchParams` writes a
+   * new location, which react-router uses to rebuild the setter itself. An
+   * unguarded write in an effect that depends on the setter is a render loop.
+   * Comparing against what the URL already says makes the write happen once
+   * per actual change and never on a re-render.
+   */
+  useEffect(() => {
+    const trimmed = searchQuery.trim()
+    const next: Record<string, string> = { ...filterParams }
+    if (trimmed) next.search = trimmed
+    // Compared as a whole rather than key by key: the write has to happen
+    // when a filter is REMOVED too, and a per-key check would never notice a
+    // key that is no longer there.
+    const current = Object.fromEntries(searchParams.entries())
+    if (JSON.stringify(current) === JSON.stringify(next)) return
+    setSearchParams(next, { replace: true })
+  }, [searchQuery, filterParams, searchParams, setSearchParams])
 
   const handleSearch = (e: React.FormEvent): void => {
     e.preventDefault()
@@ -327,6 +399,7 @@ function UsersListTab() {
         {/* Search header */}
         <div className="space-y-2 p-3">
           <form onSubmit={handleSearch} className="flex gap-2">
+            <UsersFilterPanel filters={filters} onChange={setFilters} />
             <Input
               placeholder={t('usersPage.searchPlaceholder')}
               aria-label={t('usersPage.searchHint')}
@@ -371,7 +444,10 @@ function UsersListTab() {
             <div className="flex flex-col items-center gap-2 py-16 text-muted-foreground">
               <UsersIcon className="h-8 w-8 opacity-30" />
               <p className="px-6 text-center text-xs">
-                {searchQuery.trim()
+                {/* An empty list with filters on is not the same message as an
+                    empty install. Saying "no users yet" to somebody who ticked
+                    four filters sends them looking for a bug. */}
+                {searchQuery.trim() || activeFilterCount > 0
                   ? t('usersPage.noResults')
                   : t('usersPage.listEmpty')}
               </p>
