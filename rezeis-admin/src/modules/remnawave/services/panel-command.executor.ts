@@ -69,6 +69,7 @@ export class PanelCommandExecutor {
     const method = this.readMethod(command);
     const url = resolveCommandUrl(command, input.pathParts ?? []);
 
+    let body = input.body;
     if (input.body !== undefined && command.RequestBodySchema !== undefined) {
       const parsed = command.RequestBodySchema.safeParse(input.body);
       if (!parsed.success) {
@@ -80,12 +81,36 @@ export class PanelCommandExecutor {
           command: describeCommand(command, method, url),
         };
       }
+      // WHAT WE VALIDATED IS WHAT WE SEND.
+      //
+      // This used to validate `input.body` and then send `input.body`,
+      // discarding `parsed.data` — which made the validation advisory. Two
+      // things went wrong quietly. A schema's defaults and `preprocess` steps
+      // never reached the wire (the revoke command's body is
+      // `z.preprocess(v => v || {}, …)`, so an omitted body stayed omitted),
+      // and a caller could hand over a key the contract declares with a
+      // different type and have it sent unconverted. Validating one value and
+      // sending another is worse than not validating: it reads as a guarantee
+      // and is not one.
+      body = parsed.data;
+      // Zod strips keys an object schema does not declare, so enforcement can
+      // also DELETE something a caller meant to send. That is the right
+      // outcome — the contract is the authority on what the panel accepts —
+      // but it must not be a silent one, or a field vanishing between here and
+      // the panel becomes a defect with no trace.
+      const dropped = droppedKeys(input.body, parsed.data);
+      if (dropped.length > 0) {
+        this.logger.warn(
+          `Remnawave ${method.toUpperCase()} ${url}: the pinned contract does not declare ` +
+            `${dropped.join(', ')}; those field(s) were not sent`,
+        );
+      }
     }
 
     const response = await this.transport.send({
       method,
       url,
-      body: input.body,
+      body,
       query: input.query,
     });
 
@@ -200,4 +225,43 @@ function describeCommand(command: PanelCommand, method: PanelMethod, url: string
   return description === undefined
     ? `${method.toUpperCase()} ${url}`
     : `${method.toUpperCase()} ${url} (${description})`;
+}
+
+/**
+ * Top-level keys the schema removed. Names only — a value here would be the
+ * caller's payload, which on this integration carries customer contact
+ * details, and this feeds a log line.
+ */
+function droppedKeys(before: unknown, after: unknown): readonly string[] {
+  if (!isPlainRecord(before) || !isPlainRecord(after)) return [];
+  return Object.keys(before).filter((key) => !(key in after));
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The third state a READ can be in, which the executor has no reason to know
+ * about: the panel answered `2xx`, a body arrived, and the thing we asked for
+ * is not findable in it.
+ *
+ * It is declared here rather than per client because all three domain clients
+ * arrived at it independently, with the same rationale, under three different
+ * names — and three structurally identical types are three places for the
+ * meaning to drift apart.
+ *
+ * Why it must not be folded into `ok` with an empty payload: an empty list and
+ * an unreadable answer are the difference between "we looked and there was
+ * nobody" and "we could not look", and this integration decides whether to
+ * accuse a customer of sharing on exactly that distinction. It must not be
+ * folded into `rejected` either — nothing was refused, so a caller retrying on
+ * rejection would retry a request that will keep succeeding.
+ */
+export type PanelReadOutcome<TResult> =
+  | PanelCommandOutcome<TResult>
+  | { readonly kind: 'unreadable'; readonly detail: string };
+
+export function unreadable(detail: string): { readonly kind: 'unreadable'; readonly detail: string } {
+  return { kind: 'unreadable', detail };
 }

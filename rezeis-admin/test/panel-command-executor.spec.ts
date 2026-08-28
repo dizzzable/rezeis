@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { GetUserByIdCommand, UpdateUserCommand } from '@remnawave/contract-v34';
+import {
+  GetUserByIdCommand,
+  RevokeUserSubscriptionCommand,
+  UpdateUserCommand,
+} from '@remnawave/contract-v34';
 
 import {
   PanelCommandExecutor,
@@ -127,6 +131,39 @@ describe('a body we built wrong never reaches the panel', () => {
     const detail = outcome.kind === 'invalid-request' ? outcome.detail : '';
     assert.equal(detail.includes('customer@example.test'), false);
     assert.equal(detail.includes('813364774'), false);
+  });
+});
+
+describe('what the contract accepted is what goes on the wire', () => {
+  it('applies a schema default the caller did not spell out', async () => {
+    // `RevokeUserSubscriptionCommand`'s body is a zod `preprocess` with a
+    // default. Validating the caller's object and then sending the caller's
+    // object — which is what this did at first — meant the default was
+    // computed and thrown away, so the panel received a body missing a field
+    // the contract says it always carries.
+    const { transport, calls } = stubTransport({ kind: 'ok', data: { response: {} } });
+    const executor = new PanelCommandExecutor(transport);
+
+    await executor.call(RevokeUserSubscriptionCommand as unknown as PanelCommand, {
+      pathParts: ['4471'],
+      body: {},
+    });
+
+    assert.deepStrictEqual(calls[0]?.body, { revokeOnlyPasswords: false });
+  });
+
+  it('strips a field the contract does not declare rather than sending it', async () => {
+    const { transport, calls } = stubTransport({ kind: 'ok', data: { response: {} } });
+    const executor = new PanelCommandExecutor(transport);
+
+    await executor.call(UpdateUserCommand as unknown as PanelCommand, {
+      body: { id: 4471, description: 'ok', bogusField: 'x' },
+    });
+
+    // The contract is the authority on what the panel accepts. Enforcement
+    // that only reads and never rewrites is advisory, and advisory validation
+    // reads as a guarantee it does not give.
+    assert.deepStrictEqual(calls[0]?.body, { id: 4471, description: 'ok' });
   });
 });
 
