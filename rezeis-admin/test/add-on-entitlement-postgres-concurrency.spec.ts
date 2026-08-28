@@ -14,6 +14,16 @@ import { PaymentSubscriptionMutationService } from '../src/modules/payments/serv
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
 
+/**
+ * Panel identities for the two profile-sync race tests.
+ *
+ * Decimal, because this build addresses Remnawave users by the panel's own
+ * numeric id. These are fixtures for a CONCURRENCY test — what they must be is
+ * addressable, so the race gets to run; which number they are does not matter.
+ */
+const LATE_CREATE_PANEL_ID = 90_101;
+const RUNNING_UPDATE_PANEL_ID = 90_102;
+
 const testUrl = process.env.TEST_DATABASE_URL;
 const run = testUrl === undefined ? describe.skip : describe;
 const prefix = `t003-${process.pid}-${Date.now()}`;
@@ -346,11 +356,34 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     const processor = new ProfileSyncProcessor(
       prisma,
       {
-        getPanelUserByUsername: async () => null,
-        createPanelUser: async () => {
+        // The panel's own "no such user" — the ONE refusal `handleCreate` reads
+        // as a gone profile. Anything else is now raised on its merits, so a
+        // bare `null` here would no longer mean "absent".
+        getUserByUsername: async () => ({
+          kind: 'rejected' as const,
+          status: 404,
+          code: 'A063',
+          detail: 'User with specified params not found',
+          retryAfterMs: null,
+        }),
+        createUser: async () => {
           createStarted.resolve();
           await releaseCreate.promise;
-          return { uuid: `${prefix}-rw-late`, subscriptionUrl: `https://sub.example/${prefix}-late` };
+          // The NUMERIC id is the identity on a 3.x panel; there is no uuid to
+          // return. `handleCreate` refuses an answer it cannot name, so a
+          // fixture without `id` would fail for the right reason and hide the
+          // race this test is about.
+          return {
+            kind: 'ok' as const,
+            drifted: false,
+            data: {
+              response: {
+                id: LATE_CREATE_PANEL_ID,
+                username: `${prefix}-profile`,
+                subscriptionUrl: `https://sub.example/${prefix}-late`,
+              },
+            },
+          };
         },
       } as never,
       {
@@ -378,14 +411,27 @@ run('add-on entitlement PostgreSQL concurrency', () => {
 
     const linked = await prisma.subscription.findUniqueOrThrow({ where: { id } });
     assert.equal(linked.status, 'DELETED');
-    assert.equal(linked.remnawaveId, `${prefix}-rw-late`);
+    assert.equal(linked.remnawaveId, String(LATE_CREATE_PANEL_ID));
     assert.equal(await prisma.profileSyncJob.count({ where: { subscriptionId: id, action: 'DELETE' } }), 1);
   });
 
   it('supersedes a RUNNING UPDATE and retains one DELETE job after deletion wins', async () => {
     const id = `${prefix}-running-update-delete`;
     await prisma.subscription.create({
-      data: { id, userId, status: 'ACTIVE', remnawaveId: `${prefix}-rw-update`, planSnapshot: {}, deviceLimit: 1 },
+      // A NUMERIC identity, not a hyphenated one. This build addresses users by
+      // the panel's decimal id; a uuid-shaped `remnawaveId` with no numeric id,
+      // short uuid or panel username recorded beside it is refused outright as
+      // unaddressable — correctly, but it would abort this test long before the
+      // race it exists to exercise.
+      data: {
+        id,
+        userId,
+        status: 'ACTIVE',
+        remnawaveId: String(RUNNING_UPDATE_PANEL_ID),
+        remnawavePanelId: RUNNING_UPDATE_PANEL_ID,
+        planSnapshot: {},
+        deviceLimit: 1,
+      },
     });
     const updateJob = await prisma.profileSyncJob.create({
       data: { subscriptionId: id, action: 'UPDATE', status: 'PENDING', payload: {} },
@@ -396,10 +442,26 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     const processor = new ProfileSyncProcessor(
       prisma,
       {
-        updatePanelUser: async () => {
+        updateUser: async () => {
           updateStarted.resolve();
           await releaseUpdate.promise;
+          return {
+            kind: 'ok' as const,
+            drifted: false,
+            data: {
+              response: {
+                id: RUNNING_UPDATE_PANEL_ID,
+                username: `${prefix}-update-profile`,
+                subscriptionUrl: `https://sub.example/${prefix}-update`,
+              },
+            },
+          };
         },
+        getUserById: async () => ({
+          kind: 'ok' as const,
+          drifted: false,
+          data: { response: { id: RUNNING_UPDATE_PANEL_ID, username: `${prefix}-update-profile` } },
+        }),
       } as never,
       {
         generateProfileName: async () => ({ username: `${prefix}-update-profile`, description: 'update race' }),
