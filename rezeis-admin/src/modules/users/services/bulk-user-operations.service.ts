@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { RbacService } from '../../rbac/services/rbac.service';
 import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
 import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import {
@@ -136,6 +137,25 @@ const BULK_AUDIT_ACTION = {
   extend_subscription: 'user.subscription.extended',
 } as const;
 
+/**
+ * Bulk actions that need MORE than `users:bulk_operations`, and what.
+ *
+ * Only the destructive ones are listed: those that remove an account, cut off
+ * service, or move money-adjacent state. The rest — languages, notes, tags —
+ * are ordinary edits and stay behind the single bulk permission.
+ *
+ * Each entry mirrors the permission the SAME act requires on the single-user
+ * route, so the two surfaces cannot disagree about who may perform it.
+ */
+const DESTRUCTIVE_BULK_PERMISSION: Partial<Record<BulkUserAction, string>> = {
+  delete: 'delete',
+  block: 'edit',
+  unblock: 'edit',
+  revoke_devices: 'edit',
+  reset_traffic: 'edit',
+  extend_subscription: 'edit',
+};
+
 /** Which surface performed the mutation — see {@link BULK_AUDIT_ACTION}. */
 const BULK_AUDIT_SOURCE = 'bulk';
 
@@ -165,6 +185,8 @@ export class BulkUserOperationsService {
     private readonly events: SystemEventsService,
     private readonly userDeletionService: UserDeletionService,
     private readonly userBlockService: UserBlockService,
+    /** For the per-action permission check at the top of `execute`. */
+    private readonly rbacService: RbacService,
     /**
      * Optional, like everywhere else the VPN panel is reached: a container
      * without it must still block, unblock and delete. The panel-backed
@@ -182,6 +204,39 @@ export class BulkUserOperationsService {
     }
     if (ids.length > MAX_BATCH) {
       throw new Error(`Bulk operation exceeds the ${MAX_BATCH}-row limit`);
+    }
+
+    // ── ONE PERMISSION MUST NOT OPEN EVERY ACTION ─────────────────────────
+    //
+    // The endpoint is gated by `users:bulk_operations` alone, so an operator
+    // trusted to set languages in bulk could also bulk-DELETE accounts — the
+    // single-user route for that same act requires `users:delete`, which they
+    // may well not hold. The toolbar was a way around the permission model
+    // rather than a use of it.
+    //
+    // ADDITIVE, deliberately: `users:bulk_operations` is still required for
+    // every action, and the destructive ones now ALSO require the permission
+    // their single-user twin requires. Nobody gains anything; an operator whose
+    // role was never meant to reach deletion stops reaching it. An admin with
+    // full rights is unaffected, which is why this can ship without a role
+    // migration — but a role holding only `bulk_operations` will lose the
+    // destructive subset, and that is the point.
+    const extraPermission = DESTRUCTIVE_BULK_PERMISSION[input.action];
+    if (extraPermission !== undefined) {
+      const allowed = await this.rbacService.hasPermission(
+        input.currentAdmin,
+        'users',
+        extraPermission,
+      );
+      if (!allowed) {
+        throw new ForbiddenException({
+          code: 'INSUFFICIENT_PERMISSION',
+          // Names the missing permission: an operator who cannot see WHY they
+          // were refused asks an administrator to "give them bulk access",
+          // which is how a role ends up with more than it needed.
+          message: `This bulk action also requires the users:${extraPermission} permission`,
+        });
+      }
     }
 
     // Groups every row and every event this one click produces. See the note on

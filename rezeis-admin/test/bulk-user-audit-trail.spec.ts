@@ -194,6 +194,9 @@ function buildBulk(db: Db): AdminBulkUsersController {
       db.events as never,
       db.userDeletion as never,
       buildBlockService(db),
+      // Grants everything: these specs are about what the bulk actions DO, not
+      // about who may run them. The permission split has its own spec.
+      { hasPermission: async () => true } as never,
     ),
   );
 }

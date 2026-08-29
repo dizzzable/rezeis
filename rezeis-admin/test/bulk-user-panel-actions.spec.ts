@@ -95,6 +95,9 @@ function buildService(options: {
     { warn: () => undefined, info: () => undefined } as never,
     { deleteUser: async () => undefined } as never,
     { block: async () => undefined, unblock: async () => undefined } as never,
+    // Grants everything: these specs are about what the bulk actions DO, not
+    // about who may run them. The permission split has its own spec.
+      { hasPermission: async () => true } as never,
     options.withoutPanel === true ? undefined : (remnawave as never),
     { enqueue: async () => undefined } as never,
   );

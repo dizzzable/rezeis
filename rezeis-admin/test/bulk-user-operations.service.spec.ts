@@ -45,6 +45,9 @@ function buildService(deleteUser: (userId: string) => Promise<void>) {
       events as never,
       { deleteUser } as never,
       NO_BLOCKS,
+      // Grants everything: these specs are about what the bulk actions DO, not
+      // about who may run them. The permission split has its own spec.
+      { hasPermission: async () => true } as never,
     ),
   };
 }
@@ -64,6 +67,9 @@ async function captureResolveWhere(token: string): Promise<Record<string, unknow
     { warn: () => undefined, info: () => undefined } as never,
     { deleteUser: async () => undefined } as never,
     NO_BLOCKS,
+    // Grants everything: these specs are about what the bulk actions DO, not
+    // about who may run them. The permission split has its own spec.
+    { hasPermission: async () => true } as never,
   );
 
   await service.execute({
@@ -111,6 +117,9 @@ describe('BulkUserOperationsService token resolution', () => {
       { warn: () => undefined, info: () => undefined } as never,
       { deleteUser: async () => undefined } as never,
       NO_BLOCKS,
+      // Grants everything: these specs are about what the bulk actions DO, not
+      // about who may run them. The permission split has its own spec.
+      { hasPermission: async () => true } as never,
     );
 
     const result = await service.execute({
