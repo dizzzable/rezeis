@@ -67,7 +67,19 @@ export interface UpsertRulePayload {
   actions: AutomationActionDef[];
 }
 
-export async function getCatalog(): Promise<{ actionTypes: AutomationActionType[] }> {
+export interface AutomationCatalog {
+  actionTypes: AutomationActionType[]
+  /**
+   * Sets of events that arrive together as one act by one customer, e.g. a
+   * purchase emitting `payment.completed`, `subscription.created` and
+   * `referral.qualified` within a second. Served by the panel rather than
+   * duplicated here: it is knowledge about this product's flows, and a second
+   * copy would be a second thing to update when a flow changes.
+   */
+  coincidentEventGroups: string[][]
+}
+
+export async function getCatalog(): Promise<AutomationCatalog> {
   const res = await api.get(`${BASE}/catalog`);
   return res.data;
 }

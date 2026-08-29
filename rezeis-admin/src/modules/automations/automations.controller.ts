@@ -38,6 +38,7 @@ import { AutomationsService } from './automations.service';
 import {
   AUTOMATION_ACTION_TYPES,
   AutomationActionType,
+  COINCIDENT_EVENT_GROUPS,
 } from './automations.constants';
 
 class ToggleRuleDto {
@@ -53,6 +54,14 @@ class RunRuleDto {
 
 interface ResourceCatalog {
   readonly actionTypes: readonly AutomationActionType[];
+  /**
+   * Sets of events that arrive together as one act by one customer.
+   *
+   * Served rather than duplicated in the SPA because it is domain knowledge
+   * about this product's flows, not a UI concern — and because a second copy
+   * in the front-end would be a second thing to update when a flow changes.
+   */
+  readonly coincidentEventGroups: readonly (readonly string[])[];
 }
 
 interface ManualRunResponse {
@@ -75,7 +84,10 @@ export class AutomationsController {
   @RequirePermission('automations', 'view')
   @ApiOperation({ summary: 'Returns the action-type catalog supported by the engine' })
   public catalog(): ResourceCatalog {
-    return { actionTypes: AUTOMATION_ACTION_TYPES };
+    return {
+      actionTypes: AUTOMATION_ACTION_TYPES,
+      coincidentEventGroups: COINCIDENT_EVENT_GROUPS,
+    };
   }
 
   // ── Rules ──────────────────────────────────────────────────────────────

@@ -31,7 +31,7 @@ vi.mock('./automations-api', () => ({
 
 describe('AutomationsPage accessibility', () => {
   beforeEach(() => {
-    vi.mocked(getCatalog).mockResolvedValue({ actionTypes: ['notify_telegram'] })
+    vi.mocked(getCatalog).mockResolvedValue({ actionTypes: ['notify_telegram'], coincidentEventGroups: [] })
     vi.mocked(listRules).mockResolvedValue([
       {
         id: 'rule-1',

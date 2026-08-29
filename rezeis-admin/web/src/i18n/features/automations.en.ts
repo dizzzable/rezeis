@@ -10,6 +10,11 @@ export const en = {
     title: 'Automations',
     subtitle: "React to events, run things on a schedule, fire ad-hoc workflows. Each rule is evaluated independently — failures of one action don't abort the rest.",
     newRule: 'New rule',
+    hintCollision: {
+      title: 'The customer will see more than one window',
+      body: '{{count}} other enabled rule shows a hint on an event that arrives alongside this one. A single purchase emits several events within seconds, and the customer gets window after window.',
+      fix: 'If that is not deliberate, give both hints the same group — then only the newest is shown.',
+    },
     tabs: {
       rules: 'Rules',
       hints: 'Hints',

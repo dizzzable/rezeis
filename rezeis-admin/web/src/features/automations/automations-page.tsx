@@ -64,6 +64,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { listUserHints } from '@/features/user-hints/user-hints-api';
+import { findHintCollisions } from './hint-collision';
 import { useTabSync } from '@/lib/use-tab-sync';
 import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
@@ -678,7 +679,12 @@ function RuleEditor({
             {!isNew && <TabsTrigger value="executions">{t('automationsPage.editor.tabs.executions')}</TabsTrigger>}
           </TabsList>
           <TabsContent value="config" className="space-y-4 pt-4">
-            <ConfigEditor draft={draft} setDraft={setDraft} actionCatalog={actionCatalog} />
+            <ConfigEditor
+              draft={draft}
+              setDraft={setDraft}
+              actionCatalog={actionCatalog}
+              ruleId={isNew ? undefined : ruleId}
+            />
           </TabsContent>
           {!isNew && (
             <TabsContent value="executions" className="pt-4">
@@ -695,10 +701,13 @@ function ConfigEditor({
   draft,
   setDraft,
   actionCatalog,
+  ruleId,
 }: {
   draft: UpsertRulePayload;
   setDraft: (next: UpsertRulePayload) => void;
   actionCatalog: readonly AutomationActionType[];
+  /** Undefined for an unsaved draft — it cannot collide with itself. */
+  ruleId?: string;
 }) {
   const { t } = useTranslation();
   const conditionsText = useMemo(
@@ -805,7 +814,79 @@ function ConfigEditor({
         actionCatalog={actionCatalog}
         onChange={(actions) => setDraft({ ...draft, actions })}
       />
+
+      <HintCollisionNotice ruleId={ruleId} draft={draft} />
     </div>
+  );
+}
+
+/**
+ * Says when saving this rule will put a SECOND window in front of the same
+ * customer for the same act.
+ *
+ * A first purchase through a referral link with a promo code emits four events
+ * within a second or two; a hint on each is four modals, and a customer who
+ * meets four learns to close them unread. The queue's group already collapses
+ * that — what it cannot do is tell the operator they needed one.
+ *
+ * It warns and does not refuse. Two hints for one purchase, shown one per
+ * visit, is a defensible sequence; it is only a mistake when nobody meant it.
+ */
+function HintCollisionNotice({
+  ruleId,
+  draft,
+}: {
+  ruleId: string | undefined;
+  draft: UpsertRulePayload;
+}) {
+  const { t } = useTranslation();
+  const rulesQuery = useQuery({ queryKey: RULES_KEY, queryFn: listRules });
+  const hintsQuery = useQuery({
+    queryKey: ['admin', 'user-hints'],
+    queryFn: listUserHints,
+    staleTime: 5 * 60 * 1000,
+  });
+  const catalogQuery = useQuery({
+    queryKey: ['admin', 'automations', 'catalog'],
+    queryFn: getCatalog,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const collisions = findHintCollisions({
+    draft: {
+      id: ruleId,
+      triggerKind: draft.triggerKind,
+      triggerSpec: draft.triggerSpec ?? '',
+      actions: draft.actions,
+    },
+    rules: rulesQuery.data ?? [],
+    hints: hintsQuery.data ?? [],
+    coincidentEventGroups: catalogQuery.data?.coincidentEventGroups ?? [],
+  });
+
+  if (collisions.length === 0) return null;
+
+  return (
+    <Alert>
+      <AlertTitle>{t('automationsPage.hintCollision.title')}</AlertTitle>
+      <AlertDescription className="space-y-2">
+        <p>{t('automationsPage.hintCollision.body', { count: collisions.length })}</p>
+        <ul className="list-disc pl-4 text-sm">
+          {collisions.map((collision) => (
+            <li key={`${collision.ruleId}:${collision.hintTitle}`}>
+              <span className="font-medium">{collision.ruleName}</span>
+              {' — '}
+              <code className="text-xs">{collision.triggerSpec}</code>
+              {' — '}
+              {collision.hintTitle}
+            </li>
+          ))}
+        </ul>
+        <p className="text-sm text-muted-foreground">
+          {t('automationsPage.hintCollision.fix')}
+        </p>
+      </AlertDescription>
+    </Alert>
   );
 }
 
