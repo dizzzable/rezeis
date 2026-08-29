@@ -33,6 +33,8 @@ const OTHER = 'ffffffffffffffff';
 function build(options: {
   readonly entries?: ReadonlyArray<{ source: string }>;
   readonly observedOnBlocked?: boolean;
+  /** Prior guest conversations from the same machine, inside the window. */
+  readonly priorConversations?: number;
 } = {}) {
   const queries: Array<Record<string, unknown>> = [];
   const prisma = {
@@ -44,6 +46,12 @@ function build(options: {
     },
     deviceObservation: {
       findFirst: async () => (options.observedOnBlocked === true ? { userId: 'u-1' } : null),
+    },
+    supportGuest: {
+      count: async (args: Record<string, unknown>) => {
+        queries.push(args);
+        return options.priorConversations ?? 0;
+      },
     },
   };
   return { service: new GuestGateService(prisma as never), queries };
@@ -140,5 +148,56 @@ describe('what it does with signals it cannot use', () => {
 
     const where = queries[0].where as { value: { in: string[] } };
     assert.deepStrictEqual(where.value.in, [FP, OTHER]);
+  });
+});
+
+describe('the pest who never had an account', () => {
+  it('marks a device that keeps coming back', async () => {
+    // Everything else here matches against a BLOCKED ACCOUNT, and somebody can
+    // flood anonymous support without ever registering — no account, no ban,
+    // nothing for those checks to find. What gives them away is the one thing
+    // they cannot avoid while using the channel: coming back.
+    const { service } = build({ entries: [], priorConversations: 3 });
+
+    const verdict = await service.evaluate({ deviceHash: FP });
+
+    assert.equal(verdict.kind, 'allow');
+    assert.match(String((verdict as { flaggedReason: string }).flaggedReason), /3 conversations/);
+  });
+
+  it('leaves a second conversation alone', async () => {
+    // Two is a person whose first answer did not help. Marking them would put
+    // the queue's own regulars under suspicion.
+    const { service } = build({ entries: [], priorConversations: 2 });
+
+    const verdict = await service.evaluate({ deviceHash: FP });
+
+    assert.deepStrictEqual(verdict, { kind: 'allow', flaggedReason: null });
+  });
+
+  it('counts only inside the window', async () => {
+    // An unbounded count eventually marks a customer who has had three separate
+    // problems across two years — a loyal customer, not a pest.
+    const { service, queries } = build({ entries: [], priorConversations: 0 });
+
+    await service.evaluate({ deviceHash: FP });
+
+    const where = queries[queries.length - 1].where as { createdAt: { gte: Date } };
+    const days = (Date.now() - where.createdAt.gte.getTime()) / (24 * 60 * 60 * 1000);
+    assert.ok(days > 6.9 && days < 7.1, `window should be a week, got ${days} days`);
+  });
+
+  it('does not count when the blocked-account match already spoke', async () => {
+    // The stronger reason wins and the count is not even taken — a conversation
+    // carries one reason, and "device of a blocked account" is the one an
+    // operator acts on.
+    const { service } = build({ entries: [{ source: 'cascade' }], priorConversations: 99 });
+
+    const verdict = await service.evaluate({ deviceHash: FP });
+
+    assert.match(
+      String((verdict as { flaggedReason: string }).flaggedReason),
+      /blocklist from a blocked account/,
+    );
   });
 });

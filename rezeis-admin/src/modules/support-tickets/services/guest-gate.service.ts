@@ -41,6 +41,26 @@ export type GuestGateVerdict =
  * So only `source: 'manual'` silences. A cascade row still MARKS, which is what
  * makes the operator's decision an informed one.
  */
+/**
+ * How many conversations from one machine, inside {@link REPEAT_WINDOW_DAYS},
+ * stop looking like somebody with problems and start looking like somebody
+ * with a point to make.
+ *
+ * Three. Two is a person whose first answer did not help; the third inside a
+ * week is a pattern. It marks and never refuses, so being wrong about it costs
+ * an operator one glance.
+ */
+const REPEAT_CONVERSATION_THRESHOLD = 3;
+
+/**
+ * The window the count is taken over.
+ *
+ * Bounded because an unbounded count eventually marks a customer who has had
+ * three separate problems across two years — which describes a loyal customer,
+ * not a pest.
+ */
+const REPEAT_WINDOW_DAYS = 7;
+
 @Injectable()
 export class GuestGateService {
   private readonly logger = new Logger(GuestGateService.name);
@@ -95,6 +115,37 @@ export class GuestGateService {
         flaggedReason: 'device was seen on a blocked account',
       };
     }
+
+    // ── The pest who never had an account ────────────────────────────────
+    //
+    // Everything above matches against a BLOCKED ACCOUNT, and somebody can
+    // flood anonymous support without ever having registered — in which case
+    // there is no account, no ban, and nothing for those checks to find.
+    //
+    // What gives them away is the only thing they cannot avoid while using the
+    // channel: coming back. Three conversations from one machine inside a week
+    // is not how somebody with a problem behaves; it is how somebody with a
+    // point to make behaves.
+    //
+    // Time-bounded on purpose. An unbounded count would eventually mark a
+    // customer who has had three separate problems over two years, which is a
+    // loyal customer rather than a pest.
+    const since = new Date(Date.now() - REPEAT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const priorConversations = await this.prismaService.supportGuest.count({
+      where: {
+        createdAt: { gte: since },
+        OR: [{ installId: { in: signals } }, { deviceHash: { in: signals } }],
+      },
+    });
+    if (priorConversations >= REPEAT_CONVERSATION_THRESHOLD) {
+      return {
+        kind: 'allow',
+        flaggedReason:
+          `${priorConversations} conversations from this device in the last ` +
+          `${REPEAT_WINDOW_DAYS} days`,
+      };
+    }
+
     return { kind: 'allow', flaggedReason: null };
   }
 }

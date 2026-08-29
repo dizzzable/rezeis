@@ -379,24 +379,45 @@ function TicketDetail({
                 {/* The mark, and the action it exists to inform. Shown only when
                     there is something to judge — a badge on every anonymous
                     conversation would say nothing. */}
-                {ticket.guest?.flaggedReason && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline" className="gap-1 border-amber-500/50 text-amber-600 text-[10px]">
+<div className="flex flex-wrap items-center gap-2">
+                  {ticket.guest?.flaggedReason ? (
+                    <Badge
+                      variant="outline"
+                      className="gap-1 border-amber-500/50 text-amber-600 text-[10px]"
+                      title={ticket.guest.flaggedReason}
+                    >
                       <ShieldAlert className="h-3 w-3" />
                       {t('supportTicketsPage.detail.flaggedDevice')}
                     </Badge>
-                    {ticket.guest?.hasDeviceSignal && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 px-2 text-xs text-muted-foreground"
-                        onClick={onSilenceDevice}
-                      >
-                        {t('supportTicketsPage.detail.silenceDevice')}
-                      </Button>
-                    )}
-                  </div>
-                )}
+                  ) : (
+                    /* Shown even when there is nothing to report, because the
+                       ABSENCE of device data is itself something the operator
+                       needs to know: on this conversation they are flying
+                       blind, and a silent screen would not say so.
+
+                       It is not an accusation. Tor and Firefox with
+                       `resistFingerprinting` suppress these signals by default,
+                       a private window loses the install id legitimately, and
+                       managed browsers block the APIs by policy. Marking those
+                       people would punish a privacy setting and refill the
+                       queue with exactly the noise this feature removes. */
+                    <span className="text-[10px] text-muted-foreground">
+                      {ticket.guest?.hasDeviceSignal
+                        ? t('supportTicketsPage.detail.deviceNew')
+                        : t('supportTicketsPage.detail.deviceUnknown')}
+                    </span>
+                  )}
+                  {ticket.guest?.hasDeviceSignal && ticket.guest?.flaggedReason && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground"
+                      onClick={onSilenceDevice}
+                    >
+                      {t('supportTicketsPage.detail.silenceDevice')}
+                    </Button>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">

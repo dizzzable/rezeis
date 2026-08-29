@@ -3104,6 +3104,8 @@ export const en = {
       keyHint: 'Enter to send · Shift+Enter for new line',
       guestBadge: 'Anonymous guest',
       flaggedDevice: 'Device of a blocked account',
+      deviceNew: 'Device: not seen before',
+      deviceUnknown: 'Device: no data',
       silenceDevice: 'Silence device',
       silenceConfirm: 'Stop this device opening anonymous conversations? It will no longer be able to appeal a ban this way — make sure this is not an appeal.',
       guestContact: 'Contact',
