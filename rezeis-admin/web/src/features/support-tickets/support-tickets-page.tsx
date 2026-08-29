@@ -80,6 +80,26 @@ interface Ticket {
     telegramId: string | null;
     login?: string | null;
     email?: string | null;
+    /**
+     * Context, not identity — the facts that change the FIRST reply and which
+     * an operator otherwise had to look up elsewhere or ask the customer for.
+     */
+    isBlocked?: boolean;
+    /**
+     * The sharpest of them. "It does not work" from somebody who has never had
+     * a byte of traffic is a setup problem; the same sentence from somebody who
+     * was online yesterday is not, and they deserve opposite first answers.
+     */
+    hasEverConnected?: boolean;
+    surface?: string | null;
+    formFactor?: string | null;
+    os?: string | null;
+    lastSeenAt?: string | null;
+    subscription?: {
+      status: string;
+      expiresAt: string | null;
+      isTrial: boolean;
+    } | null;
   } | null;
   guest?: {
     id: string
@@ -438,6 +458,45 @@ function TicketDetail({
                   <span className="truncate">
                     {t('supportTicketsPage.detail.idPrefix')}: {ticket.user.id}
                   </span>
+                )}
+              </div>
+            )}
+            {!guest && ticket.user && (
+              /* The situation, on its own line and in its own register: this is
+                 what the operator answers, while the line above is only who
+                 they answer. */
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                {ticket.user.isBlocked && (
+                  <Badge variant="outline" className="border-rose-500/50 text-rose-600 text-[10px]">
+                    {t('supportTicketsPage.detail.ctx.blocked')}
+                  </Badge>
+                )}
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    'text-[10px]',
+                    ticket.user.hasEverConnected === false && 'border-amber-500/50 text-amber-600',
+                  )}
+                >
+                  {ticket.user.hasEverConnected === false
+                    ? t('supportTicketsPage.detail.ctx.neverConnected')
+                    : t('supportTicketsPage.detail.ctx.hasConnected')}
+                </Badge>
+                {ticket.user.subscription && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {t(
+                      `supportTicketsPage.detail.ctx.sub.${ticket.user.subscription.status}`,
+                      ticket.user.subscription.status,
+                    )}
+                    {ticket.user.subscription.isTrial &&
+                      ` · ${t('supportTicketsPage.detail.ctx.trial')}`}
+                  </Badge>
+                )}
+                {ticket.user.surface && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {t(`supportTicketsPage.detail.ctx.surface.${ticket.user.surface}`, ticket.user.surface)}
+                    {ticket.user.os ? ` · ${ticket.user.os}` : ''}
+                  </Badge>
                 )}
               </div>
             )}

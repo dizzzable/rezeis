@@ -97,6 +97,31 @@ export class SupportTicketsService {
               username: true,
               email: true,
               webAccount: { select: { login: true, email: true } },
+              // ── What support is actually dealing with ──────────────────
+              //
+              // Identity alone answers "who is writing" and nothing about
+              // their situation, so an operator opened every ticket by asking
+              // the same three questions the panel already knew the answers
+              // to. All of it is collected today and none of it was shown.
+              //
+              // `firstTrafficAt` is the one that changes the reply most: a
+              // customer who has NEVER had traffic has a setup problem, and one
+              // who had traffic yesterday has something else entirely. Those
+              // two get opposite first answers, and the difference is invisible
+              // from the message text.
+              isBlocked: true,
+              firstTrafficAt: true,
+              lastSurface: true,
+              lastFormFactor: true,
+              lastOs: true,
+              lastSeenAt: true,
+              subscriptions: {
+                select: { status: true, expiresAt: true, isTrial: true },
+                orderBy: { createdAt: 'desc' },
+                // The current one. A history of six is a different screen's
+                // job; support needs to know what is live right now.
+                take: 1,
+              },
             },
           },
           guest: {

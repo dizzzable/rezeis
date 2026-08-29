@@ -18,7 +18,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { BlockedIdentityKind, Prisma, SupportTicketStatus, SupportTicket, SupportTicketMessage, User } from '@prisma/client';
+import { BlockedIdentityKind, Prisma, SubscriptionStatus, SupportTicketStatus, SupportTicket, SupportTicketMessage, User } from '@prisma/client';
 import type { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -443,6 +443,17 @@ type TicketWithRelations = SupportTicket & {
   readonly user?:
     | (Pick<User, 'id' | 'telegramId' | 'name' | 'username' | 'email'> & {
         readonly webAccount?: { readonly login: string | null; readonly email: string | null } | null;
+        readonly isBlocked?: boolean;
+        readonly firstTrafficAt?: Date | null;
+        readonly lastSurface?: string | null;
+        readonly lastFormFactor?: string | null;
+        readonly lastOs?: string | null;
+        readonly lastSeenAt?: Date | null;
+        readonly subscriptions?: ReadonlyArray<{
+          readonly status: SubscriptionStatus;
+          readonly expiresAt: Date | null;
+          readonly isTrial: boolean;
+        }>;
       })
     | null;
   readonly guest?:
@@ -504,6 +515,32 @@ function serializeTicket(ticket: TicketWithRelations): Record<string, unknown> {
           // ticket even when there's no Telegram username.
           login: ticket.user.webAccount?.login ?? null,
           email: ticket.user.email ?? ticket.user.webAccount?.email ?? null,
+          // ── Context, not identity ──────────────────────────────────────
+          //
+          // The three facts that change the FIRST reply, and which an operator
+          // otherwise had to go and look up on another screen — or, more often,
+          // ask the customer for.
+          //
+          // `hasEverConnected` is the sharpest of them. "It does not work" from
+          // somebody who has never had a byte of traffic is a setup problem;
+          // the same sentence from somebody who was online yesterday is not,
+          // and the two deserve opposite first answers.
+          isBlocked: ticket.user.isBlocked ?? false,
+          hasEverConnected: (ticket.user.firstTrafficAt ?? null) !== null,
+          // Where they use the service. "Open the app" is bad advice for
+          // somebody who lives in the Telegram Mini App, and "install the app"
+          // is worse for somebody who already did.
+          surface: ticket.user.lastSurface ?? null,
+          formFactor: ticket.user.lastFormFactor ?? null,
+          os: ticket.user.lastOs ?? null,
+          lastSeenAt: ticket.user.lastSeenAt ?? null,
+          subscription: ticket.user.subscriptions?.[0]
+            ? {
+                status: ticket.user.subscriptions[0].status.toLowerCase(),
+                expiresAt: ticket.user.subscriptions[0].expiresAt,
+                isTrial: ticket.user.subscriptions[0].isTrial,
+              }
+            : null,
         }
       : null,
     messages: (ticket.messages ?? []).map((message) => ({
