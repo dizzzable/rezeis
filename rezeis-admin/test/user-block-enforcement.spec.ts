@@ -314,3 +314,71 @@ describe('the social sign-up door', () => {
     assert.deepStrictEqual(created, ['shell']);
   });
 });
+
+describe('claiming a Telegram id onto a different account', () => {
+  /**
+   * THE MOVE THE CASCADE'S `TELEGRAM_ID` ROW EXISTS TO STOP, and the one it
+   * could not stop.
+   *
+   * Blocking lists the customer's Telegram id, e-mail and login. They then
+   * register a fresh web account under a NEW e-mail and a NEW login — which
+   * passes, since none of those values is listed — and attach their OLD
+   * Telegram id to it. Neither of the two paths that can do that consulted the
+   * blocklist.
+   *
+   * From that moment the ban is gone: the bot only checks the blocklist when NO
+   * row owns the id, so a row that now owns it makes the account indisputably
+   * theirs and indisputably unblocked. Full bot session, full cabinet,
+   * payments allowed.
+   */
+  function buildClaim(listed: boolean) {
+    const writes: string[] = [];
+    const service = new WebAuthService(
+      {
+        $transaction: async () => {
+          writes.push('transaction');
+          return { status: 'linked' };
+        },
+      } as never,
+      { verifyPassword: async () => true } as never,
+      {} as never,
+      { getInternalPlatformPolicy: async () => ({ accessMode: 'OPEN' }) } as never,
+      { evaluate: () => null } as never,
+      {} as never,
+      { info: () => undefined } as never,
+      {} as never,
+      { captureBestEffort: async () => undefined } as never,
+      { listRequiredKeys: async () => [], recordConsents: async () => undefined } as never,
+      { find: async () => (listed ? { id: 'entry-1' } : null) } as never,
+      { isBlocked: async () => ({ blocked: false }) } as never,
+    );
+    return { service, writes };
+  }
+
+  const CLAIM = { login: 'freshlogin', password: 'correct-horse', telegramId: '111' };
+
+  it('refuses when the Telegram id is on the blocklist', async () => {
+    const { service, writes } = buildClaim(true);
+
+    await assert.rejects(() => service.telegramClaim(CLAIM as never));
+    assert.deepStrictEqual(writes, [], 'nothing may be written before the refusal');
+  });
+
+  it('refuses with the same message a wrong password gets, so it is not an oracle', async () => {
+    // A distinct refusal would tell an evader WHICH of their identities is
+    // listed — the one thing they need in order to route around it.
+    const { service } = buildClaim(true);
+
+    await assert.rejects(
+      () => service.telegramClaim(CLAIM as never),
+      (err: unknown) => (err as Error).message === 'Invalid login or password',
+    );
+  });
+
+  it('still links an id nobody has blocked — the control', async () => {
+    const { service, writes } = buildClaim(false);
+
+    await service.telegramClaim(CLAIM as never);
+    assert.deepStrictEqual(writes, ['transaction']);
+  });
+});

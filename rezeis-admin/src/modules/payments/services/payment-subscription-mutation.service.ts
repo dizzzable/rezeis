@@ -193,6 +193,48 @@ export class PaymentSubscriptionMutationService {
         throw new NotFoundException('Unsupported purchase type');
     }
 
+    // ── MONEY TAKEN FROM SOMEBODY WE ARE REFUSING TO SERVE ────────────────
+    //
+    // `assertPurchaserNotBlocked` gates checkout CREATION. It cannot gate this:
+    // the invoice was created while the customer was in good standing, the
+    // block landed afterwards, and by the time this webhook arrives the
+    // provider has already captured the money.
+    //
+    // Refusing to fulfil here would be the worst of the three options — we
+    // would keep the money AND record nothing, so an operator who later
+    // unblocks the customer has no trace of what they paid for. Fulfilment is
+    // safe on its own terms: the profile comes up DISABLED because
+    // `handleCreate` and `handleUpdate` both read the flag at execution time,
+    // so no service is handed over.
+    //
+    // What was missing is the operator knowing. A refund is a judgement nobody
+    // can make from a payment row alone, and a payment that silently completes
+    // for a banned account is one nobody ever looks at.
+    const purchaserBlocked = await this.prismaService.user
+      .findUnique({ where: { id: transaction.userId }, select: { isBlocked: true } })
+      .then((row) => row?.isBlocked === true)
+      .catch(() => false);
+    if (purchaserBlocked) {
+      this.events.warn(
+        EVENT_TYPES.PAYMENT_COMPLETED,
+        'PAYMENT',
+        `Payment completed for a BLOCKED customer: ${transaction.purchaseType}`,
+        {
+          userId: transaction.userId,
+          paymentId: transaction.paymentId,
+          amount: transaction.amount.toString(),
+          currency: transaction.currency,
+          gatewayType: transaction.gatewayType,
+          // Spelled out because this is the operator's decision, not ours: the
+          // subscription exists and the VPN profile is disabled, so the
+          // customer has paid for something they cannot use until unblocked.
+          note:
+            'The invoice was created before the block and paid after it. The subscription was ' +
+            'recorded and the VPN profile is DISABLED. Decide whether to refund.',
+        },
+      );
+    }
+
     // Emit payment completed event
     this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', `Payment completed: ${transaction.purchaseType}`, {
       userId: transaction.userId,

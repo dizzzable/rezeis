@@ -3,6 +3,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { BlockedIdentityKind } from '@prisma/client';
+import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { EmailService } from '../../email/services/email.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import {
@@ -62,6 +64,7 @@ export class LinkingService {
     private readonly prismaService: PrismaService,
     private readonly emailService: EmailService,
     @Optional() private readonly events?: SystemEventsService,
+    @Optional() private readonly blockedIdentityService?: BlockedIdentityService,
   ) {}
 
   // ── Telegram ─────────────────────────────────────────────────────────
@@ -116,6 +119,23 @@ export class LinkingService {
   ): Promise<LinkTelegramConsumeResultInterface> {
     const codeHash = this.hash(input.code);
     const telegramIdBig = BigInt(input.telegramId);
+
+    // The other door onto the same act — see `WebAuthService.telegramClaim`.
+    // A blocked customer's Telegram id must not be attachable to a fresh
+    // account, or the cascade's TELEGRAM_ID row is inert against the exact move
+    // it exists to stop. Answered as an invalid code, which is what this path
+    // says for everything it refuses: a distinct reason would tell an evader
+    // which identity is listed.
+    const listed = await this.blockedIdentityService?.find(
+      BlockedIdentityKind.TELEGRAM_ID,
+      input.telegramId.toString(),
+    );
+    if (listed !== null && listed !== undefined) {
+      this.logger.warn(
+        `Telegram link refused: the Telegram id is on the blocklist (entry ${listed.id})`,
+      );
+      return { success: false, reason: 'INVALID_OR_EXPIRED_CODE' as const };
+    }
 
     let newlyLinkedUserId: string | null = null;
     const result = await this.prismaService.$transaction(async (tx) => {

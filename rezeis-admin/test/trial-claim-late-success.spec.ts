@@ -333,7 +333,13 @@ function createLedgerWorld(input: { readonly maxClaims: number }) {
     profileSyncJob: {
       create: async () => ({ id: `sync-${++sequence}` }),
     },
-    user: { updateMany: async () => ({ count: 1 }) },
+    // `findUnique` alongside `updateMany`: fulfilment asks whether the
+    // purchaser was blocked between the invoice and the payment, so it can tell
+    // an operator that money arrived from an account we are refusing to serve.
+    user: {
+      updateMany: async () => ({ count: 1 }),
+      findUnique: async () => ({ isBlocked: false }),
+    },
     paymentGateway: { findUnique: async () => null },
   };
   const prismaDouble = {

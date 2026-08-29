@@ -408,6 +408,31 @@ export class WebAuthService {
     const loginNormalized = loginPolicy.normalizeLogin(input.login);
     const telegramIdBig = BigInt(input.telegramId);
 
+    // ── THE BAN HAS TO SURVIVE THE ACCOUNT IT WAS APPLIED TO ─────────────
+    //
+    // Registration checks the blocklist; this path did not, and it is the
+    // second way a Telegram id gets attached to an account. So the cascade's
+    // TELEGRAM_ID row was inert against exactly the move it exists to stop: a
+    // blocked customer registers a fresh web account under a new e-mail and
+    // login — which passes, none of those three values being listed — and then
+    // claims their OLD Telegram id onto it. The bot only consults the blocklist
+    // when NO row owns the id, so from that moment the account is indisputably
+    // theirs and indisputably unblocked.
+    //
+    // Refused with the same generic failure the credential path uses. A
+    // distinct message here would tell an evader which of their identities is
+    // listed, which is the one thing they need to know to route around it.
+    const listedTelegram = await this.blockedIdentityService?.find(
+      BlockedIdentityKind.TELEGRAM_ID,
+      input.telegramId.toString(),
+    );
+    if (listedTelegram !== null && listedTelegram !== undefined) {
+      this.logger.warn(
+        `Telegram claim refused: the Telegram id is on the blocklist (entry ${listedTelegram.id})`,
+      );
+      throw new UnauthorizedException('Invalid login or password');
+    }
+
     const outcome = await this.prismaService.$transaction(async (tx) => {
       // 1. Verify credentials → resolve the target web account / user.
       const webAccount = await tx.webAccount.findUnique({
