@@ -44,6 +44,21 @@ RUN npm run build
 
 # ── Stage 4: runtime ─────────────────────────────────────────────────────────
 FROM node:24-alpine AS runtime
+# ── OS packages, patched at build time ─────────────────────────────────────
+#
+# `node:24-alpine` is rebuilt on its own schedule, so between two of its
+# rebuilds this image inherits whatever OpenSSL that snapshot happened to ship.
+# Trivy found ten CVEs that way — `libssl3` 3.5.7-r0 against a fixed 3.5.8-r0 —
+# and every one of them was already patched in Alpine's repository at the time.
+# Nothing was wrong with the code; the image was simply older than the fix.
+#
+# Upgrading here closes that window without waiting for upstream. The cost is
+# that the same Dockerfile no longer produces byte-identical images over time,
+# and for a RUNTIME image that is the right side of the trade: the alternative
+# is shipping known-vulnerable libraries on purpose so that rebuilds match.
+#
+# `--no-cache` keeps the package index out of the layer.
+RUN apk upgrade --no-cache
 
 RUN addgroup -g 1001 -S rezeis && adduser -u 1001 -S rezeis -G rezeis
 
