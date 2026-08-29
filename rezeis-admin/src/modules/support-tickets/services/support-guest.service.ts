@@ -51,6 +51,10 @@ export class SupportGuestService {
     readonly message: string;
     readonly email?: string | null;
     readonly ipHash?: string | null;
+    readonly installId?: string | null;
+    readonly deviceHash?: string | null;
+    /** Non-null when the gate found this device on a blocked account. */
+    readonly flaggedReason?: string | null;
   }): Promise<{ readonly token: string; readonly ticketId: string }> {
     const token = generateToken();
     const limits = await this.settingsService.getSupportLimits();
@@ -60,6 +64,9 @@ export class SupportGuestService {
         secretHash: hashToken(token),
         email: input.email ?? null,
         ipHash: input.ipHash ?? null,
+        installId: input.installId ?? null,
+        deviceHash: input.deviceHash ?? null,
+        flaggedReason: input.flaggedReason ?? null,
         expiresAt,
       },
       select: { id: true },

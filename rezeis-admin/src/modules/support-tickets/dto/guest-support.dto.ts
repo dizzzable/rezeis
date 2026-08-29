@@ -17,6 +17,29 @@ export class CreateGuestTicketDto {
   @IsEmail()
   @MaxLength(254)
   public readonly email?: string;
+
+  /**
+   * Browser device signals, sent by the cabinet at the moment the conversation
+   * is opened.
+   *
+   * Both optional and both useless to lie about in the direction that would
+   * help: omitting them, or sending junk, produces an unmarked conversation —
+   * which is what an unrecognised visitor gets anyway. What they cannot do is
+   * make somebody ELSE look like the pest, because the values are only ever
+   * compared against the blocklist and never written to another account.
+   *
+   * Length bounds match `normaliseDeviceSignal`, which is what actually
+   * validates them; these keep an oversized body from reaching it at all.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly installId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  public readonly deviceHash?: string;
 }
 
 /** Body for appending a guest reply to an open conversation. */

@@ -3335,6 +3335,21 @@ model SupportGuest {
   email           String?  @map("email")
   displayName     String?  @map("display_name")
   ipHash          String?  @map("ip_hash")
+  /// Browser device signals, captured ONLY at the moment a conversation is
+  /// opened — never while somebody is merely reading the site.
+  ///
+  /// They exist for one job: telling a person appealing a ban from a person
+  /// who was silenced and came back. Both are anonymous by construction, and
+  /// without a signal that survives an incognito window the two are the same
+  /// visitor to us.
+  installId       String?  @map("install_id")
+  deviceHash      String?  @map("device_hash")
+  /// Set when this conversation was opened from a device or address tied to a
+  /// blocked account. It does NOT refuse anything — the appeal from somebody
+  /// blocked by mistake arrives on exactly this path, and refusing it would
+  /// make a wrong ban unappealable. It sorts the queue, and it is what an
+  /// operator judges before deciding to silence the device by hand.
+  flaggedReason   String?  @map("flagged_reason")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   lastSeenAt      DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
   expiresAt       DateTime @map("expires_at") @db.Timestamptz(3)
@@ -3342,6 +3357,9 @@ model SupportGuest {
   ticket SupportTicket?
 
   @@index([expiresAt])
+  /// The lookup that finds a returning visitor by their machine.
+  @@index([deviceHash])
+  @@index([installId])
   @@map("support_guests")
 }
 

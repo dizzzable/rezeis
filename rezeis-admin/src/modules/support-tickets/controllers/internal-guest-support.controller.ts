@@ -21,6 +21,7 @@ import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.gu
 import { SettingsService } from '../../settings/services/settings.service';
 import { UploadAttachmentDto } from '../dto/attachment.dto';
 import { CreateGuestTicketDto, GuestReplyDto } from '../dto/guest-support.dto';
+import { GuestGateService } from '../services/guest-gate.service';
 import { SupportGuestService } from '../services/support-guest.service';
 import { AttachGuestDto } from '../dto/guest-support.dto';
 import { AttachmentValidationError } from '../utils/support-attachment.util';
@@ -49,6 +50,7 @@ export class InternalGuestSupportController {
     private readonly guestService: SupportGuestService,
     private readonly systemEvents: SystemEventsService,
     private readonly settingsService: SettingsService,
+    private readonly guestGate: GuestGateService,
   ) {}
 
   @Get('config')
@@ -69,18 +71,38 @@ export class InternalGuestSupportController {
   ): Promise<GuestCreateResponse> {
     const runtime = await this.settingsService.getSupportRuntimeConfig();
     if (!runtime.enabled) throw new NotFoundException('Conversation not found');
+
+    // ── The gate ────────────────────────────────────────────────────────
+    // A device an operator silenced by hand is turned away with the SAME
+    // answer a disabled support surface gives. Not politeness — a distinct
+    // refusal is an oracle: it tells whoever is testing which of their
+    // machines is known to us, which is the one thing that makes churning
+    // through devices cheap for them.
+    const verdict = await this.guestGate.evaluate({
+      installId: body.installId ?? null,
+      deviceHash: body.deviceHash ?? null,
+    });
+    if (verdict.kind === 'silenced') {
+      throw new NotFoundException('Conversation not found');
+    }
+
     const subject = body.subject.trim();
     const { token, ticketId } = await this.guestService.createConversation({
       subject,
       message: body.message.trim(),
       email: body.email?.trim() || null,
       ipHash: hashIp(clientIp),
+      installId: body.installId ?? null,
+      deviceHash: body.deviceHash ?? null,
+      flaggedReason: verdict.flaggedReason,
     });
     this.systemEvents.info(
       EVENT_TYPES.SUPPORT_TICKET_CREATED,
       'SUPPORT',
       `Гостевой тикет: ${subject}`,
-      { ticketId, subject, guest: true },
+      // The mark travels into the event too, so a flooded queue is visible in
+      // the operator's own stream rather than only when somebody opens tickets.
+      { ticketId, subject, guest: true, flagged: verdict.flaggedReason !== null },
     );
     const ticket = await this.guestService.getConversation(token);
     return {

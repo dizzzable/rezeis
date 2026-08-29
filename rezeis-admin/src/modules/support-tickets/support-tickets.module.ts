@@ -8,6 +8,7 @@ import { InternalGuestSupportController } from './controllers/internal-guest-sup
 import { InternalUserSupportController } from './controllers/internal-user-support.controller';
 import { SupportNotificationsService } from './services/support-notifications.service';
 import { SupportAttachmentService } from './services/support-attachment.service';
+import { GuestGateService } from './services/guest-gate.service';
 import { SupportGuestService } from './services/support-guest.service';
 import { SupportTicketsService } from './services/support-tickets.service';
 
@@ -23,6 +24,7 @@ import { SupportTicketsService } from './services/support-tickets.service';
     SupportNotificationsService,
     SupportGuestService,
     SupportAttachmentService,
+    GuestGateService,
   ],
   exports: [SupportTicketsService, SupportGuestService],
 })

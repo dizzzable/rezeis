@@ -61,6 +61,10 @@ function build() {
     guestService as never,
     systemEvents as never,
     settings as never,
+    // The gate. Allowing-and-unmarked is the answer for a visitor nobody
+    // recognises, which is what these cases are about; the gate's own
+    // behaviour is pinned in `guest-support-gate.spec.ts`.
+    { evaluate: async () => ({ kind: 'allow', flaggedReason: null }) } as never,
   );
   return { controller, calls };
 }
