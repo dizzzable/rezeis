@@ -43,6 +43,31 @@ class HintAudienceDto {
   public readonly locale?: 'ru' | 'en';
 }
 
+/**
+ * Moments the CABINET detects for itself, and may therefore raise.
+ *
+ * ── Why a closed list, when the identity is already the session's ─────────
+ *
+ * A client can only ever raise a hint for itself, so this is not an
+ * authorisation boundary. It is a naming one: the moment name IS the hint key,
+ * so an open list would let a browser queue any hint an operator ever authored
+ * — including one meant for a payment failure — out of context and at will.
+ *
+ * ── Why the moment name is the hint key ───────────────────────────────────
+ *
+ * No binding table and no second screen. An operator authoring a hint with the
+ * key `subscription-ready` has, by that act, put it on the moment; deleting it
+ * takes it off. The alternative is a mapping an operator has to maintain
+ * separately from the thing it maps, which is one more place for the two to
+ * disagree.
+ */
+const CLIENT_MOMENTS = ['subscription-ready'] as const;
+
+class HintMomentDto extends HintAudienceDto {
+  @IsIn(CLIENT_MOMENTS)
+  public readonly moment!: (typeof CLIENT_MOMENTS)[number];
+}
+
 class HintOutcomeDto extends HintAudienceDto {
   @IsString()
   @Length(1, 64)
@@ -83,6 +108,27 @@ export class InternalUserHintsController {
       },
     });
     return { hint };
+  }
+
+  /**
+   * The cabinet noticed something it can see for itself.
+   *
+   * Some of what a hint should follow is not an event on this side at all: the
+   * cabinet polls until a freshly bought subscription's profile is ready, and
+   * that instant exists only in the browser. Rather than invent a server event
+   * for it, the client says so and the queue does the rest — including "once",
+   * which is what stops a refresh raising it again.
+   */
+  @Post('moment')
+  public async moment(@Body() dto: HintMomentDto): Promise<{ raised: boolean }> {
+    const userId = await this.resolveUserId(dto);
+    if (userId === null) return { raised: false };
+    const delivery = await this.deliveries.raise({
+      userId,
+      hintKey: dto.moment,
+      source: `moment:${dto.moment}`,
+    });
+    return { raised: delivery !== null };
   }
 
   /** Stamped when it actually reaches the screen, not when it was fetched. */
