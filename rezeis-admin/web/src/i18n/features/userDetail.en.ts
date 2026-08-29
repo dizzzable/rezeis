@@ -7,6 +7,11 @@
 
 export const en = {
   userDetailPanel: {
+    sharedAddresses: {
+      title: 'Address shared with blocked accounts',
+      line: '{{blocked}} blocked account(s) here too; {{hits}} sighting(s) for this customer',
+      caveat: 'A match means "same place", not "same person" — households, offices and shared connections are ordinary. The sighting count separates a home connection from somewhere passed through once.',
+    },
     reviewFlags: {
       deviceMatch: 'A device this account uses also belongs to a blocked account. Same machine is not the same person — a household or an office looks identical here.',
       relatedUser: 'Blocked account: {{userId}}',

@@ -25,6 +25,7 @@ import {
   HttpStatus,
   Logger,
   NotFoundException,
+  Optional,
   Param,
   Patch,
   Post,
@@ -70,6 +71,7 @@ import { AdjustUserPointsDto } from '../dto/adjust-user-points.dto';
 import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
 import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
+import { UserIpObservationService } from '../../device-intelligence/services/user-ip-observation.service';
 import { UserBlockService } from '../services/user-block.service';
 import { UserDeletionService } from '../services/user-deletion.service';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
@@ -96,6 +98,14 @@ export class AdminUserManagementController {
     private readonly plansAdminService: PlansAdminService,
     private readonly userBlockService: UserBlockService,
     private readonly deviceIntelligenceService: DeviceIntelligenceService,
+    /**
+     * Optional, like every dependency this controller gained after its first
+     * dozen: an absent one means the card simply carries no addresses, which is
+     * a missing decoration rather than a broken screen. It also keeps every
+     * existing unit test of this controller constructing without a stub for a
+     * service they do not exercise.
+     */
+    @Optional() private readonly ipObservations?: UserIpObservationService,
   ) {}
 
   // ── User Profile ────────────────────────────────────────────────────────────
@@ -378,6 +388,18 @@ export class AdminUserManagementController {
     // card open.
     const reviewFlags = await this.deviceIntelligenceService.listForUser(user.id);
 
+    // Addresses, under the SAME permission as the registration block below and
+    // not with the review flags above — and the difference is deliberate.
+    //
+    // A review flag is a signal name and a pointer; an address is where a
+    // person was. That belongs with `registrationIp` behind
+    // `users:view_registration`, so an operator who is not trusted with one is
+    // not handed the other through a different field.
+    const ipObservations =
+      canViewRegistration && this.ipObservations !== undefined
+        ? await this.ipObservations.listForUser(user.id)
+        : [];
+
     // Drop raw registration columns from the spread; re-attach under RBAC.
     const {
       registrationIp: _rip,
@@ -460,6 +482,7 @@ export class AdminUserManagementController {
         : null,
       canViewRegistration,
       reviewFlags,
+      ipObservations,
     };
 
     if (!canViewRegistration) {

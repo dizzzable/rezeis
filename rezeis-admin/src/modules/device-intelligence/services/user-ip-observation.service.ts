@@ -1,8 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { NodeAddressesService } from '../../remnawave/services/node-addresses.service';
 import { classifyCascadeIp } from '../../users/utils/cascade-ip.util';
+
+/** One address an account has been seen from, as the card renders it. */
+export interface UserIpSummary {
+  readonly address: string;
+  readonly hits: number;
+  readonly firstSeenAt: Date;
+  readonly lastSeenAt: Date;
+  /** Blocked accounts also seen from it. Empty for almost every address. */
+  readonly sharedWithBlocked: readonly string[];
+}
 
 /** One prior sighting of an address on somebody else's account. */
 export interface IpMatch {
@@ -115,7 +127,77 @@ export class UserIpObservationService {
     return rows;
   }
 
-  /** Drops observations past {@link RETENTION_DAYS}. */
+  /**
+   * The addresses one account has been seen from, and who else was there.
+   *
+   * ── What an operator is looking at ────────────────────────────────────
+   *
+   * `sharedWithBlocked` is the only part worth acting on, and it still says
+   * "same place" rather than "same person" — households, offices and shared
+   * connections are ordinary, and this product moves people's traffic for a
+   * living. `hits` is what separates a home connection from somewhere passed
+   * through once.
+   *
+   * Bounded to the busiest handful: a card is read, not audited, and twenty
+   * addresses would be a wall nobody looks at twice.
+   */
+  public async listForUser(userId: string): Promise<readonly UserIpSummary[]> {
+    const rows = await this.prismaService.userIpObservation.findMany({
+      where: { userId },
+      select: { address: true, hits: true, firstSeenAt: true, lastSeenAt: true },
+      orderBy: [{ hits: 'desc' }, { lastSeenAt: 'desc' }],
+      take: 8,
+    });
+    if (rows.length === 0) return [];
+
+    // One query for the whole set rather than one per address: a card that
+    // costs eight round trips is a card somebody stops opening.
+    const shared = await this.prismaService.userIpObservation.findMany({
+      where: {
+        address: { in: rows.map((row) => row.address) },
+        userId: { not: userId },
+        user: { isBlocked: true },
+      },
+      select: { address: true, userId: true },
+    });
+    const blockedByAddress = new Map<string, string[]>();
+    for (const row of shared) {
+      const list = blockedByAddress.get(row.address) ?? [];
+      list.push(row.userId);
+      blockedByAddress.set(row.address, list);
+    }
+
+    return rows.map((row) => ({
+      address: row.address,
+      hits: row.hits,
+      firstSeenAt: row.firstSeenAt,
+      lastSeenAt: row.lastSeenAt,
+      sharedWithBlocked: blockedByAddress.get(row.address) ?? [],
+    }));
+  }
+
+  /**
+   * Drops observations past {@link RETENTION_DAYS}.
+   *
+   * ── Why this runs on a clock and not on somebody remembering ──────────
+   *
+   * A table nobody prunes quietly becomes a permanent location history. That is
+   * not what was built here and not what anybody agreed to, and the difference
+   * between the two is entirely whether this job exists.
+   *
+   * Daily, in the small hours: the work is a single indexed DELETE over a
+   * bounded slice, and running it more often would only make it smaller.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_4AM, { name: 'user-ip-observation-prune' })
+  public async pruneScheduled(): Promise<void> {
+    if (!shouldRunSchedules()) return;
+    try {
+      await this.prune();
+    } catch (err) {
+      this.logger.warn(`Address observation prune failed: ${(err as Error).message}`);
+    }
+  }
+
   public async prune(now: Date = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
     const outcome = await this.prismaService.userIpObservation.deleteMany({

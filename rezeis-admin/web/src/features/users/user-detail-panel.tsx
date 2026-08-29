@@ -1481,6 +1481,7 @@ function UserHeader({
         </div>
       )}
       <ReviewFlags telegramId={telegramId} flags={user.reviewFlags ?? []} queryKey={queryKey} />
+      <SharedAddresses rows={user.ipObservations ?? []} />
     </div>
   )
 }
@@ -1506,6 +1507,58 @@ function UserHeader({
  * account ever flagged, and what did we decide" is the question that gets
  * asked the second time somebody looks.
  */
+/**
+ * Addresses this account connects from, and whether a blocked one was there too.
+ *
+ * ── Shown ONLY when something is shared ───────────────────────────────────
+ *
+ * A list of a customer's addresses on every card would be a location history
+ * an operator reads out of habit, and nobody asked for that. What is worth
+ * seeing is the overlap: an address a blocked account was also seen from.
+ * Everything else stays collected and unrendered.
+ *
+ * ── It says "same place", never "same person" ─────────────────────────────
+ *
+ * Households, offices and shared connections are ordinary. The sighting count
+ * is what an operator weighs first: a home connection and somewhere passed
+ * through once are the difference between a match worth acting on and a
+ * coincidence, and only the count separates them.
+ */
+function SharedAddresses({
+  rows,
+}: {
+  readonly rows: ReadonlyArray<{
+    readonly address: string
+    readonly hits: number
+    readonly sharedWithBlocked: readonly string[]
+  }>
+}) {
+  const { t } = useTranslation()
+  const shared = rows.filter((row) => row.sharedWithBlocked.length > 0)
+  if (shared.length === 0) return null
+
+  return (
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs">
+      <p className="font-medium text-amber-600">{t('userDetailPanel.sharedAddresses.title')}</p>
+      <ul className="mt-1 space-y-0.5 text-muted-foreground">
+        {shared.map((row) => (
+          <li key={row.address}>
+            <code className="text-[11px]">{row.address}</code>
+            {' — '}
+            {t('userDetailPanel.sharedAddresses.line', {
+              blocked: row.sharedWithBlocked.length,
+              hits: row.hits,
+            })}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        {t('userDetailPanel.sharedAddresses.caveat')}
+      </p>
+    </div>
+  )
+}
+
 function ReviewFlags({
   telegramId,
   flags,

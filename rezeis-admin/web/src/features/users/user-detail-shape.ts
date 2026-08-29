@@ -229,6 +229,21 @@ export interface UserDetail {
    * them what to change.
    */
   readonly reviewFlags?: ReadonlyArray<UserReviewFlag>
+  /**
+   * Addresses this account has been seen connecting from.
+   *
+   * Served only to roles holding `users:view_registration` — an address is
+   * where a person WAS, which belongs with the registration block rather than
+   * with the review flags above. Absent, not empty, for everyone else.
+   */
+  readonly ipObservations?: ReadonlyArray<{
+    readonly address: string
+    readonly hits: number
+    readonly firstSeenAt: string
+    readonly lastSeenAt: string
+    /** Blocked accounts also seen from it. Empty for almost every address. */
+    readonly sharedWithBlocked: readonly string[]
+  }>
   readonly acquiredByPartner?: {
     readonly partnerId: string
     readonly level?: number | null

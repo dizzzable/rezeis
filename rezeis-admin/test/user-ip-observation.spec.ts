@@ -30,6 +30,10 @@ function build(options: {
   /** `null` means the panel could not be asked — not "we have no nodes". */
   readonly nodes?: readonly (readonly string[])[] | null;
   readonly blockedRows?: ReadonlyArray<{ userId: string; hits: number; lastSeenAt: Date }>;
+  /** Rows the card query returns for the account being viewed. */
+  readonly ownRows?: ReadonlyArray<Record<string, unknown>>;
+  /** Rows the "who else was here" query returns. */
+  readonly sharedRows?: ReadonlyArray<{ address: string; userId: string }>;
 } = {}) {
   const upserts: Array<Record<string, unknown>> = [];
   const queries: Array<Record<string, unknown>> = [];
@@ -41,6 +45,17 @@ function build(options: {
       },
       findMany: async (args: Record<string, unknown>) => {
         queries.push(args);
+        const where = args.where as Record<string, unknown>;
+        // Three different callers share this stub. `listForUser` asks twice —
+        // once for the account's own rows, once for everybody else at those
+        // addresses — and telling them apart on the `where` is what keeps this
+        // fake from answering one question with another's data.
+        if (options.ownRows !== undefined && typeof where.userId === 'string') {
+          return options.ownRows;
+        }
+        if (options.sharedRows !== undefined && where.userId !== undefined) {
+          return options.sharedRows;
+        }
         return options.blockedRows ?? [];
       },
       deleteMany: async (args: Record<string, unknown>) => {
@@ -187,5 +202,62 @@ describe('retention', () => {
     const where = queries[0].where as { lastSeenAt: { lt: Date } };
     const days = (now.getTime() - where.lastSeenAt.lt.getTime()) / (24 * 60 * 60 * 1000);
     assert.equal(days, 90);
+  });
+});
+
+describe('the addresses shown on a user card', () => {
+  const NOW = new Date('2026-08-30T12:00:00.000Z');
+
+  it('marks the address a blocked account was also seen from', async () => {
+    const { service } = build({
+      ownRows: [
+        { address: '198.51.100.7', hits: 40, firstSeenAt: NOW, lastSeenAt: NOW },
+        { address: '198.51.100.8', hits: 2, firstSeenAt: NOW, lastSeenAt: NOW },
+      ],
+      sharedRows: [{ address: '198.51.100.7', userId: 'banned-1' }],
+    });
+
+    const rows = await service.listForUser('u-1');
+
+    assert.equal(rows.length, 2);
+    assert.deepStrictEqual(rows[0].sharedWithBlocked, ['banned-1']);
+    assert.deepStrictEqual(rows[1].sharedWithBlocked, [], 'and leaves the clean one clean');
+  });
+
+  it('asks who else was there in ONE query, not one per address', async () => {
+    // A card that costs eight round trips is a card somebody stops opening.
+    const { service, queries } = build({
+      ownRows: [
+        { address: 'a', hits: 1, firstSeenAt: NOW, lastSeenAt: NOW },
+        { address: 'b', hits: 1, firstSeenAt: NOW, lastSeenAt: NOW },
+        { address: 'c', hits: 1, firstSeenAt: NOW, lastSeenAt: NOW },
+      ],
+      sharedRows: [],
+    });
+
+    await service.listForUser('u-1');
+
+    assert.equal(queries.length, 2);
+  });
+
+  it('asks nothing further when the account has no addresses', async () => {
+    const { service, queries } = build({ ownRows: [], sharedRows: [] });
+
+    assert.deepStrictEqual(await service.listForUser('u-1'), []);
+    assert.equal(queries.length, 1);
+  });
+
+  it('excludes the account itself from "who else was here"', async () => {
+    // Without it every address would report its own owner as a match.
+    const { service, queries } = build({
+      ownRows: [{ address: 'a', hits: 1, firstSeenAt: NOW, lastSeenAt: NOW }],
+      sharedRows: [],
+    });
+
+    await service.listForUser('u-1');
+
+    const where = queries[1].where as { userId: { not: string }; user: { isBlocked: boolean } };
+    assert.deepStrictEqual(where.userId, { not: 'u-1' });
+    assert.equal(where.user.isBlocked, true);
   });
 });
