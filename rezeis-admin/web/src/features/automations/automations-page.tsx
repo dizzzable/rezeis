@@ -63,6 +63,8 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useTabSync } from '@/lib/use-tab-sync';
+import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { formatDateTime } from '@/lib/utils';
@@ -145,6 +147,11 @@ const RULE_TEMPLATES: readonly RuleTemplate[] = [
 
 export default function AutomationsPage() {
   const { t } = useTranslation();
+  // Two page-level tabs, synced to the hash so a shared link lands where it was
+  // sent. Hints live here rather than on a page of their own because an
+  // operator reaches for them while thinking about triggers — but their editor
+  // is a separate file, since this one is already long enough.
+  const { activeTab, setTab } = useTabSync(['rules', 'hints'] as const, 'rules');
   const queryClient = useQueryClient();
   const rulesQuery = useQuery({
     queryKey: RULES_KEY,
@@ -214,28 +221,40 @@ export default function AutomationsPage() {
             {t('automationsPage.subtitle')}
           </p>
         </div>
-        <Button
-          onClick={() => {
-            openDraft({
-              name: t('automationsPage.untitledRule'),
-              actions: [{ type: 'notify_telegram', params: { text: 'Triggered' } }],
-            });
-          }}
-        >
-          <Plus className="mr-2 h-4 w-4" />
-          {t('automationsPage.newRule')}
-        </Button>
+        {activeTab === 'rules' && (
+          <Button
+            onClick={() => {
+              openDraft({
+                name: t('automationsPage.untitledRule'),
+                actions: [{ type: 'notify_telegram', params: { text: 'Triggered' } }],
+              });
+            }}
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            {t('automationsPage.newRule')}
+          </Button>
+        )}
       </header>
 
-      <HelpAndTemplates onUseTemplate={useTemplate} />
+      <Tabs value={activeTab} onValueChange={setTab}>
+        <TabsList>
+          <TabsTrigger value="rules">{t('automationsPage.tabs.rules')}</TabsTrigger>
+          <TabsTrigger value="hints">{t('automationsPage.tabs.hints')}</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
-      {rulesQuery.error && (
+      {activeTab === 'hints' && <UserHintsTab />}
+
+      {activeTab === 'rules' && <HelpAndTemplates onUseTemplate={useTemplate} />}
+
+      {activeTab === 'rules' && rulesQuery.error && (
         <Alert variant="destructive">
           <AlertTitle>{t('automationsPage.errors.title')}</AlertTitle>
           <AlertDescription>{t('automationsPage.errors.loadRules')}</AlertDescription>
         </Alert>
       )}
 
+      {activeTab === 'rules' && (
       <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
         <RuleList
           rules={rulesQuery.data ?? []}
@@ -275,6 +294,7 @@ export default function AutomationsPage() {
           />
         )}
       </div>
+      )}
     </div>
   );
 }
