@@ -65,13 +65,48 @@ const NEVER_CAPTURE = [
   '169.254.0.0/16',
   '100.64.0.0/10',
   '0.0.0.0/8',
-  // IPv6 loopback, unique-local and link-local.
+  // IPv6 loopback, unspecified, unique-local and link-local.
+  //
+  // `::` is here because a proxy that cannot resolve a peer reports exactly
+  // that, and without it every such visitor is filed under one address string —
+  // ten unknown peers become ten accounts "seen in the same place", and one ban
+  // marks the other nine.
   '::1/128',
+  '::/128',
   'fc00::/7',
   'fe80::/10',
 ]
   .map((cidr) => parseAddressOrCidr(cidr))
   .filter((parsed): parsed is ParsedAddress => parsed !== null);
+
+/**
+ * `::ffff:1.2.3.4` → `1.2.3.4`. The single most important line in this file.
+ *
+ * A dual-stack listener with no `X-Forwarded-For` hands Node the IPv4-mapped
+ * form, and the cabinet forwards `req.ip` verbatim. Every refusal below is an
+ * IPv4 CIDR, and the range matcher compares families before addresses — so a
+ * mapped address matched NOTHING. CGNAT, all three private blocks, loopback,
+ * link-local and, worst of all, our own nodes' exit addresses were all captured
+ * as ordinary customer addresses.
+ *
+ * That is the exact failure this whole file exists to prevent, arriving through
+ * the one spelling nobody checked: two unrelated carrier subscribers filed under
+ * `::ffff:100.64.7.9`, linked to each other, and a ban on one marking the other.
+ * The mapped form is self-consistent on both the write and the read path, so the
+ * link fires cleanly and looks like evidence.
+ *
+ * Seven other places in this repository already strip this prefix before doing
+ * address work. This was the one where missing it caused a false MATCH rather
+ * than a harmless miss, and it is also what keeps the value written here equal
+ * to the one `BlockedIpGuard` stores and looks up.
+ *
+ * The deprecated IPv4-compatible form (`::1.2.3.4`) is unwrapped too — same
+ * hazard, and no legitimate peer uses it.
+ */
+function unwrapMappedIpv4(address: string): string {
+  const mapped = /^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(address);
+  return mapped === null ? address : mapped[1];
+}
 
 export type CascadeIpDecision =
   | { readonly capture: true; readonly value: string }
@@ -111,7 +146,7 @@ export function classifyCascadeIp(input: {
    */
   readonly nodes: readonly CascadeNodeAddresses[] | null;
 }): CascadeIpDecision {
-  const raw = (input.address ?? '').trim();
+  const raw = unwrapMappedIpv4((input.address ?? '').trim());
   if (raw.length === 0) return { capture: false, reason: 'NO_ADDRESS' };
 
   const parsed = parseAddressOrCidr(raw);

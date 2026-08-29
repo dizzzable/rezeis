@@ -95,12 +95,23 @@ export class AdminBlockedIdentitiesController {
     await this.audit(admin, req, {
       kind: dto.kind,
       added: result.added.length,
+      // Kept apart from `added` in the AUDIT, because the two are different
+      // acts: one listed somebody new, the other took a row a ban had created
+      // automatically and made it an operator's own decision. The second is the
+      // one worth being able to find later.
+      promoted: result.promoted.length,
       duplicates: result.duplicates.length,
       rejected: result.rejected.length,
     });
 
+    // Promotions count as ADDED here, unlike in the audit above. The operator's
+    // question at this screen is "did my paste take effect?", and for a row
+    // that was cascade a moment ago and is now theirs the answer is yes.
+    // Reporting it as neither added nor duplicate — which is what it was before
+    // promotion existed — showed a paste that changed something as a paste that
+    // did nothing at all.
     return {
-      added: result.added.length,
+      added: result.added.length + result.promoted.length,
       duplicates: result.duplicates,
       rejected: result.rejected,
     };

@@ -96,8 +96,12 @@ export class InternalGuestSupportController {
       message: body.message.trim(),
       email: body.email?.trim() || null,
       ipHash: hashIp(clientIp),
-      installId: body.installId ?? null,
-      deviceHash: body.deviceHash ?? null,
+      // NORMALISED, not raw. The gate looks these values up normalised and the
+      // repeat counter counts them normalised; storing the raw spelling meant a
+      // client sending mixed case was filed under a value neither could ever
+      // find again, and its pest signal read zero for ever.
+      installId: verdict.installId,
+      deviceHash: verdict.deviceHash,
       flaggedReason: verdict.flaggedReason,
     });
     this.systemEvents.info(

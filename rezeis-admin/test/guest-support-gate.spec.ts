@@ -31,7 +31,7 @@ const FP = 'a1b2c3d4e5f6a7b8';
 const OTHER = 'ffffffffffffffff';
 
 function build(options: {
-  readonly entries?: ReadonlyArray<{ source: string }>;
+  readonly entries?: ReadonlyArray<{ readonly source: string; readonly kind?: string; readonly value?: string; readonly expiresAt?: Date | null; }>;
   readonly observedOnBlocked?: boolean;
   /** Prior guest conversations from the same machine, inside the window. */
   readonly priorConversations?: number;
@@ -41,9 +41,39 @@ function build(options: {
   const queries: Array<Record<string, unknown>> = [];
   const prisma = {
     blockedIdentity: {
+      /**
+       * OBEYS the `where` it is handed rather than answering everything.
+       *
+       * It used to return `options.entries` whatever was asked, which left two
+       * of this file's own fixes untestable: delete the expiry filter, or the
+       * `(kind, value)` keying, and every test here stayed green — while a
+       * thirty-day entry went on silencing guest support for ever and the query
+       * fell back to a sequential scan on an unauthenticated endpoint.
+       *
+       * It applies only what the caller asked for. A stub that enforces a
+       * constraint of its own makes "the service dropped it" look exactly like
+       * "the service kept it", which is the failure it is here to prevent.
+       */
       findMany: async (args: Record<string, unknown>) => {
         queries.push(args);
-        return (options.entries ?? []).map((entry) => ({ ...entry, reason: null }));
+        const where = (args.where ?? {}) as {
+          kind?: string;
+          value?: { in?: readonly string[] };
+          OR?: ReadonlyArray<{ expiresAt: null | { gt: Date } }>;
+        };
+        return (options.entries ?? [])
+          .filter((e) => where.kind === undefined || (e.kind ?? where.kind) === where.kind)
+          .filter((e) => where.value?.in === undefined || e.value === undefined || where.value.in.includes(e.value))
+          .filter((e) => {
+            if (where.OR === undefined) return true;
+            const expiresAt = e.expiresAt ?? null;
+            return where.OR.some((arm) =>
+              arm.expiresAt === null
+                ? expiresAt === null
+                : expiresAt !== null && expiresAt > arm.expiresAt.gt,
+            );
+          })
+          .map((e) => ({ ...e, reason: null }));
       },
     },
     deviceObservation: {
@@ -81,6 +111,42 @@ describe('a device an operator silenced by hand', () => {
 
     assert.equal((await service.evaluate({ installId: FP })).kind, 'silenced');
   });
+
+  it('stops being silenced once the entry has lapsed', async () => {
+    // The expiry arm of the query, exercised rather than assumed. An operator
+    // may list an identity with an end date, and every other read path honours
+    // it — so without this filter a thirty-day entry kept refusing support for
+    // ever while reading "not blocked" on every screen. A support ban outliving
+    // the ban it came from, and invisible, because the refusal is silent by
+    // design.
+    const { service } = build({
+      entries: [{ source: 'manual', expiresAt: new Date('2020-01-01T00:00:00.000Z') }],
+    });
+
+    assert.equal((await service.evaluate({ deviceHash: FP })).kind, 'allow');
+  });
+
+  it('is still silenced while the entry is live', async () => {
+    // The other half: an end date in the future must not read as lapsed, or the
+    // filter would quietly disarm every timed entry instead of just the old ones.
+    const { service } = build({
+      entries: [{ source: 'manual', expiresAt: new Date('2099-01-01T00:00:00.000Z') }],
+    });
+
+    assert.equal((await service.evaluate({ deviceHash: FP })).kind, 'silenced');
+  });
+
+  it('ignores a row of another kind that happens to share the value', async () => {
+    // The `(kind, value)` keying. Without it the query matched on value alone —
+    // an e-mail or a Telegram id equal to a fingerprint string would silence a
+    // device, and the read stopped using the index on an endpoint anyone can
+    // reach without signing in.
+    const { service } = build({
+      entries: [{ source: 'manual', kind: 'EMAIL', value: FP }],
+    });
+
+    assert.equal((await service.evaluate({ deviceHash: FP })).kind, 'allow');
+  });
 });
 
 describe('a device merely belonging to a blocked account', () => {
@@ -114,7 +180,8 @@ describe('a device merely belonging to a blocked account', () => {
 
     const verdict = await service.evaluate({ deviceHash: OTHER });
 
-    assert.deepStrictEqual(verdict, { kind: 'allow', flaggedReason: null });
+    assert.equal(verdict.kind, 'allow');
+    assert.equal((verdict as { flaggedReason: string | null }).flaggedReason, null);
   });
 });
 
@@ -126,7 +193,8 @@ describe('what it does with signals it cannot use', () => {
 
     const verdict = await service.evaluate({});
 
-    assert.deepStrictEqual(verdict, { kind: 'allow', flaggedReason: null });
+    assert.equal(verdict.kind, 'allow');
+    assert.equal((verdict as { flaggedReason: string | null }).flaggedReason, null);
     assert.deepStrictEqual(queries, [], 'and asks the database nothing');
   });
 
@@ -165,7 +233,7 @@ describe('the pest who never had an account', () => {
     // flood anonymous support without ever registering — no account, no ban,
     // nothing for those checks to find. What gives them away is the one thing
     // they cannot avoid while using the channel: coming back.
-    const { service } = build({ entries: [], priorConversations: 3 });
+    const { service } = build({ entries: [], priorConversations: 2 });
 
     const verdict = await service.evaluate({ deviceHash: FP });
 
@@ -176,11 +244,12 @@ describe('the pest who never had an account', () => {
   it('leaves a second conversation alone', async () => {
     // Two is a person whose first answer did not help. Marking them would put
     // the queue's own regulars under suspicion.
-    const { service } = build({ entries: [], priorConversations: 2 });
+    const { service } = build({ entries: [], priorConversations: 1 });
 
     const verdict = await service.evaluate({ deviceHash: FP });
 
-    assert.deepStrictEqual(verdict, { kind: 'allow', flaggedReason: null });
+    assert.equal(verdict.kind, 'allow');
+    assert.equal((verdict as { flaggedReason: string | null }).flaggedReason, null);
   });
 
   it('counts only inside the window', async () => {
@@ -256,7 +325,8 @@ describe('the address, which on this product says more than the browser', () => 
 
     const verdict = await service.evaluate({ clientIp: '198.51.100.7' });
 
-    assert.deepStrictEqual(verdict, { kind: 'allow', flaggedReason: null });
+    assert.equal(verdict.kind, 'allow');
+    assert.equal((verdict as { flaggedReason: string | null }).flaggedReason, null);
   });
 
   it('does not let an address override a hand-silenced device', async () => {
@@ -267,5 +337,47 @@ describe('the address, which on this product says more than the browser', () => 
     });
 
     assert.equal((await service.evaluate({ deviceHash: FP, clientIp: '198.51.100.7' })).kind, 'silenced');
+  });
+});
+
+describe('the verdict carries the values the caller must store', () => {
+  /**
+   * The controller writes `verdict.installId` / `verdict.deviceHash`, NOT the
+   * raw body — that is the whole point of returning them, and the comment on
+   * the controller says this regression has happened once already.
+   *
+   * Nothing pinned it: every `...normalised` spread could be deleted and all
+   * twenty tests here stayed green, because they only ever asserted `kind` and
+   * `flaggedReason`. A verdict without them stores NULL for every visitor, and
+   * the whole device half of this feature goes quietly inert.
+   */
+  it('returns the NORMALISED signal, not what the browser sent', async () => {
+    const { service } = build();
+
+    const verdict = await service.evaluate({
+      installId: `  ${FP.toUpperCase()}  `,
+      deviceHash: undefined,
+    });
+
+    assert.equal(verdict.kind, 'allow');
+    // Trimmed and lower-cased. Stored raw, this row never matches the
+    // blocklist read, which normalises — so the block would be written and then
+    // never found.
+    assert.equal((verdict as { installId: string | null }).installId, FP);
+    assert.equal((verdict as { deviceHash: string | null }).deviceHash, null);
+  });
+
+  it('carries them on a FLAGGED verdict too, not just a clean one', async () => {
+    // The flagged path is the one that matters most: this is the conversation
+    // an operator may press "silence" on, and the button reads the stored
+    // fingerprint. A flagged verdict that forgot it leaves that button with
+    // nothing to work from.
+    const { service } = build({ entries: [{ source: 'cascade' }] });
+
+    const verdict = await service.evaluate({ installId: FP });
+
+    assert.equal(verdict.kind, 'allow');
+    assert.notEqual((verdict as { flaggedReason: string | null }).flaggedReason, null);
+    assert.equal((verdict as { installId: string | null }).installId, FP);
   });
 });

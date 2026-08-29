@@ -33,9 +33,30 @@ PRISMA="./node_modules/.bin/prisma"
 # it twice is provably harmless. The two panel-identity entries were checked that
 # way — applied, then applied again on the same database, second run clean with
 # nothing but `NOTICE ... already exists, skipping`.
+#
+# THE AUGUST ENTRIES BELOW WERE CHECKED THE SAME WAY, and adding them closes a
+# gap that had been widening for three releases. Every one of them is guarded
+# throughout and says so in its own header — but writing "replay-safe" at the top
+# of a file does nothing on its own. Membership here is the only thing that turns
+# that property into a retry instead of a refusal to boot.
+#
+# What the gap actually cost: these files add foreign keys to `users`, which need
+# a brief SHARE ROW EXCLUSIVE lock. The hourly `pg_dump` holds ACCESS SHARE on
+# every table, so the FK queues behind it and `lock_timeout = '5s'` fires — which
+# is the bound doing its job. Prisma is not transactional per file, so the tables
+# and indexes are already committed and the row is left `finished=false`. Without
+# membership the next start hits P3009, refuses, and the panel stays down until a
+# human runs `prisma migrate resolve` — for a file that would have replayed
+# cleanly on its own.
 is_auto_recoverable_migration() {
   case "$1" in
     20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index|20260724120500_drop_conflicting_subscription_expiry_index|20260724121000_swap_subscription_expiry_index|20260810120000_remnawave_panel_identity|20260810160000_index_subscription_panel_identity)
+      return 0
+      ;;
+    20260823120000_partner_level_accrual_strategy|20260828120000_blocked_identities|20260828160000_blocklist_cascade|20260828180000_device_observations|20260828200000_legal_privacy_policy)
+      return 0
+      ;;
+    20260829120000_user_hints|20260829150000_guest_support_device|20260829170000_user_ip_observations)
       return 0
       ;;
     *)

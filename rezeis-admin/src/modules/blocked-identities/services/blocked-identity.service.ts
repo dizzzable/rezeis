@@ -134,10 +134,31 @@ export class BlockedIdentityService {
    * this exists for is "here is a list of ids to keep out", and a per-row
    * endpoint turns that into N requests with N chances to stop halfway.
    *
-   * Rows are reported individually — added / already present / rejected —
-   * because a paste of two hundred lines with three typos in it must not fail
-   * as a unit. Refusing the whole list would teach operators to paste smaller
-   * lists, not to fix the typos.
+   * Rows are reported individually — added / promoted / already present /
+   * rejected — because a paste of two hundred lines with three typos in it must
+   * not fail as a unit. Refusing the whole list would teach operators to paste
+   * smaller lists, not to fix the typos.
+   *
+   * ── `manual` and `cascade` are not two labels for one row ─────────────────
+   *
+   * They are two different powers. The guest support gate REFUSES on `manual`
+   * and only MARKS on `cascade`, so a collision between them is not "already
+   * there" — it is the caller asking for something the existing row does not do.
+   *
+   * That made the single most important call in the feature a no-op. An
+   * operator silencing the device of somebody they had already blocked hit the
+   * cascade rows the block itself had written, got them counted as duplicates,
+   * and was told `silenced: 2` while both rows kept `source: 'cascade'` and the
+   * device went on opening conversations for ever. Worse, unblocking that user
+   * later deletes cascade rows, so the silence would have evaporated a second
+   * time.
+   *
+   * So a `manual` write PROMOTES the row it collided with. The reverse never
+   * happens: a cascade write leaves an existing row alone, because a ban must
+   * not silently downgrade a decision a person made. An already-`manual` row is
+   * also left alone — re-pasting a list that overlaps the previous one is
+   * ordinary, and rewriting `reason`/`expiresAt` from it would quietly turn a
+   * thirty-day entry somebody chose into a permanent one.
    */
   public async addMany(input: {
     readonly kind: BlockedIdentityKind;
@@ -150,10 +171,13 @@ export class BlockedIdentityService {
     readonly originUserId?: string | null;
   }): Promise<{
     readonly added: readonly BlockedIdentity[];
+    /** Existing `cascade` rows this manual write raised to `manual`. */
+    readonly promoted: readonly BlockedIdentity[];
     readonly duplicates: readonly string[];
     readonly rejected: ReadonlyArray<{ readonly value: string; readonly reason: string }>;
   }> {
     const added: BlockedIdentity[] = [];
+    const promoted: BlockedIdentity[] = [];
     const duplicates: string[] = [];
     const rejected: Array<{ value: string; reason: string }> = [];
     // Within one paste the same id can appear twice; the second occurrence is a
@@ -194,6 +218,35 @@ export class BlockedIdentityService {
           err instanceof Prisma.PrismaClientKnownRequestError &&
           err.code === 'P2002'
         ) {
+          // …but only when the row that is already there does what the caller
+          // asked for. See the note on this method: a `manual` write landing on
+          // a `cascade` row is the operator's silence colliding with the ban's
+          // own mark, and calling that a duplicate left the device unsilenced.
+          if ((input.source ?? 'manual') === 'manual') {
+            const existing = await this.prismaService.blockedIdentity.findUnique({
+              where: { kind_value: { kind: input.kind, value: normalised.value } },
+              select: { id: true, source: true },
+            });
+            if (existing !== null && existing.source !== 'manual') {
+              const entry = await this.prismaService.blockedIdentity.update({
+                where: { id: existing.id },
+                data: {
+                  source: 'manual',
+                  reason: input.reason ?? null,
+                  createdById: input.createdById ?? null,
+                  expiresAt: input.expiresAt ?? null,
+                  // Cleared on purpose. `releaseCascadeForUser` finds rows by
+                  // this column, and a promoted row must survive the unblock of
+                  // the account that first produced it — the operator listed it
+                  // by hand afterwards, and that decision is not undone by
+                  // lifting the ban it happened to start from.
+                  originUserId: null,
+                },
+              });
+              promoted.push(entry);
+              continue;
+            }
+          }
           duplicates.push(normalised.value);
           continue;
         }
@@ -201,12 +254,13 @@ export class BlockedIdentityService {
       }
     }
 
-    if (added.length > 0) {
+    if (added.length > 0 || promoted.length > 0) {
       this.logger.log(
-        `Blocklist: added ${added.length} ${input.kind} entries (source=${input.source ?? 'manual'})`,
+        `Blocklist: added ${added.length}, promoted ${promoted.length} ${input.kind} entries ` +
+          `(source=${input.source ?? 'manual'})`,
       );
     }
-    return { added, duplicates, rejected };
+    return { added, promoted, duplicates, rejected };
   }
 
   public async remove(id: string): Promise<void> {

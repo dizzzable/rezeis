@@ -8,7 +8,22 @@ import { normaliseDeviceSignal } from '../../device-intelligence/utils/device-si
 /** What the gate decided about one attempt to open a guest conversation. */
 export type GuestGateVerdict =
   /** Let it through. `flaggedReason` is non-null when it looked suspicious. */
-  | { readonly kind: 'allow'; readonly flaggedReason: string | null }
+  | {
+      readonly kind: 'allow';
+      readonly flaggedReason: string | null;
+      /**
+       * The signals as they should be STORED — normalised, exactly as the
+       * lookups here spell them.
+       *
+       * Handed back rather than leaving the caller to keep its own raw copy:
+       * that is what holds the write and every later read in one spelling. A
+       * client sending mixed case was filed under a value neither the gate nor
+       * the repeat counter could find again, so its pest signal read zero for
+       * ever.
+       */
+      readonly installId: string | null;
+      readonly deviceHash: string | null;
+    }
   /** An operator silenced this device by hand. */
   | { readonly kind: 'silenced' };
 
@@ -81,16 +96,33 @@ export class GuestGateService {
     // so a value stored by one side is findable by the other. A signal that
     // fails validation is treated as absent rather than as a miss: it is a
     // malformed input, not evidence about anybody.
-    const signals = [
-      normaliseDeviceSignal(DeviceSignalKind.INSTALL_ID, input.installId),
-      normaliseDeviceSignal(DeviceSignalKind.DEVICE_HASH, input.deviceHash),
-    ]
-      .filter((outcome) => outcome.ok)
-      .map((outcome) => (outcome as { value: string }).value);
+    const installOutcome = normaliseDeviceSignal(DeviceSignalKind.INSTALL_ID, input.installId);
+    const hashOutcome = normaliseDeviceSignal(DeviceSignalKind.DEVICE_HASH, input.deviceHash);
+    // Handed back on the verdict so the CALLER stores exactly these spellings.
+    // Storing the raw ones filed a mixed-case client under a value neither the
+    // gate nor the repeat counter could ever find again.
+    const normalised = {
+      installId: installOutcome.ok ? installOutcome.value : null,
+      deviceHash: hashOutcome.ok ? hashOutcome.value : null,
+    };
+    const signals = [normalised.installId, normalised.deviceHash].filter(
+      (value): value is string => value !== null,
+    );
     if (signals.length === 0) return this.byAddress(input.clientIp);
 
+    const now = new Date();
     const entries = await this.prismaService.blockedIdentity.findMany({
-      where: { kind: BlockedIdentityKind.DEVICE_FP, value: { in: signals } },
+      where: {
+        kind: BlockedIdentityKind.DEVICE_FP,
+        value: { in: signals },
+        // EXPIRY IS HONOURED HERE TOO, and omitting it was a defect. An
+        // operator may list an identity with an end date, and every other read
+        // path filters on it — so without this a thirty-day entry kept refusing
+        // support for ever while reading "not blocked" everywhere else. A
+        // support ban outliving the ban it came from, and invisible, because
+        // the refusal is deliberately silent.
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      },
       select: { source: true, reason: true },
     });
 
@@ -102,6 +134,7 @@ export class GuestGateService {
     if (entries.length > 0) {
       return {
         kind: 'allow',
+        ...normalised,
         flaggedReason:
           'device is on the blocklist from a blocked account (captured automatically)',
       };
@@ -111,13 +144,25 @@ export class GuestGateService {
     // has used — the observation table outlives nothing, but the blocklist copy
     // is only written when somebody is actually blocked, and an account can be
     // blocked without its devices ever having been readable.
+    // KEYED BY KIND AS WELL AS VALUE. The table's index is `(kind, value)`, and
+    // a btree cannot serve a predicate that skips its leading column — so the
+    // kindless version was a sequential scan over every observation ever made,
+    // on a public unauthenticated endpoint. It also cross-matched kinds, so an
+    // install id could match a device hash belonging to somebody else entirely.
     const observed = await this.prismaService.deviceObservation.findFirst({
-      where: { value: { in: signals }, user: { isBlocked: true } },
+      where: {
+        OR: [
+          { kind: DeviceSignalKind.INSTALL_ID, value: { in: signals } },
+          { kind: DeviceSignalKind.DEVICE_HASH, value: { in: signals } },
+        ],
+        user: { isBlocked: true },
+      },
       select: { userId: true },
     });
     if (observed !== null) {
       return {
         kind: 'allow',
+        ...normalised,
         flaggedReason: 'device was seen on a blocked account',
       };
     }
@@ -143,11 +188,16 @@ export class GuestGateService {
         OR: [{ installId: { in: signals } }, { deviceHash: { in: signals } }],
       },
     });
-    if (priorConversations >= REPEAT_CONVERSATION_THRESHOLD) {
+    // Counted BEFORE this conversation's row exists, so the count names what is
+    // already on record and this one is the next. Reading it as "the third" was
+    // off by one: the row is written after the gate runs, so a bare `>= 3`
+    // first fired on the fourth and then said "3" about four.
+    if (priorConversations + 1 >= REPEAT_CONVERSATION_THRESHOLD) {
       return {
         kind: 'allow',
+        ...normalised,
         flaggedReason:
-          `${priorConversations} conversations from this device in the last ` +
+          `${priorConversations + 1} conversations from this device in the last ` +
           `${REPEAT_WINDOW_DAYS} days`,
       };
     }
@@ -155,7 +205,7 @@ export class GuestGateService {
     // Nothing on the device. The address is the other half — and on this
     // product it is the stronger half, because it comes from the VPN
     // connection itself rather than from a browser that can decline to answer.
-    return this.byAddress(input.clientIp);
+    return this.byAddress(input.clientIp, normalised);
   }
 
   /**
@@ -167,14 +217,21 @@ export class GuestGateService {
    * NAT, so what survives is worth showing an operator — but it still marks and
    * never refuses.
    */
-  private async byAddress(clientIp: string | null | undefined): Promise<GuestGateVerdict> {
+  private async byAddress(
+    clientIp: string | null | undefined,
+    normalised: { installId: string | null; deviceHash: string | null } = {
+      installId: null,
+      deviceHash: null,
+    },
+  ): Promise<GuestGateVerdict> {
     if (typeof clientIp !== 'string' || clientIp.trim().length === 0) {
-      return { kind: 'allow', flaggedReason: null };
+      return { kind: 'allow', ...normalised, flaggedReason: null };
     }
     const matches = await this.ipObservations.blockedMatches(clientIp);
-    if (matches.length === 0) return { kind: 'allow', flaggedReason: null };
+    if (matches.length === 0) return { kind: 'allow', ...normalised, flaggedReason: null };
     return {
       kind: 'allow',
+      ...normalised,
       flaggedReason:
         `address was seen on ${matches.length} blocked account(s)` +
         // The hit count is what separates a home connection from somewhere

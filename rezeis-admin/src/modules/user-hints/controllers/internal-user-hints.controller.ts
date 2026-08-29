@@ -103,8 +103,19 @@ export class InternalUserHintsController {
       userId,
       locale: dto.locale ?? 'ru',
       audience: {
-        surface: dto.surface ?? 'browser',
-        formFactor: dto.formFactor ?? 'mobile',
+        // NOT DEFAULTED, and this is the whole point of the `string | null`
+        // these fields carry. Substituting `browser` here turned "the client
+        // did not tell us" into a positive match and showed an "install the
+        // app" hint inside the Telegram Mini App — precisely what a surface
+        // restriction exists to prevent. The service SKIPS a restricted hint
+        // when it cannot tell, and it can only do that if the doubt reaches it.
+        //
+        // This mattered more than a missing field looks: the cabinet maps any
+        // surface it does not recognise to `undefined`, so a newer cabinet
+        // reporting a surface this panel has not heard of arrived here as "no
+        // answer" and was silently reclassified as a browser.
+        surface: dto.surface ?? null,
+        formFactor: dto.formFactor ?? null,
       },
     });
     return { hint };

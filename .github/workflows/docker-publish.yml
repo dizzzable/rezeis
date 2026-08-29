@@ -71,6 +71,10 @@ jobs:
           context: ./rezeis-admin
           file: ./rezeis-admin/Dockerfile
           push: true
+          # Re-resolve `node:24-alpine` instead of reusing whatever digest the
+          # runner last saw. Without it the OS-patch layer is keyed to a stale
+          # base and the CVE fix above never re-runs.
+          pull: true
           # Single-manifest image (no provenance index) so Trivy can scan
           # the pushed image by its digest below.
           provenance: false
@@ -80,6 +84,7 @@ jobs:
             APP_VERSION=${{ steps.version.outputs.value }}
             GIT_SHA=${{ github.sha }}
             GIT_BRANCH=${{ github.ref_name }}
+            SECURITY_REFRESH=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

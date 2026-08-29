@@ -427,7 +427,18 @@ function TicketDetail({
                         : t('supportTicketsPage.detail.deviceUnknown')}
                     </span>
                   )}
-                  {ticket.guest?.hasDeviceSignal && ticket.guest?.flaggedReason && (
+                  {/* GATED ON THE SIGNAL ALONE, not on the flag. Requiring a
+                      flag meant the only device an operator could silence was
+                      one already tied to a ban or to a third visit inside a
+                      week — so the ordinary pest, arriving twice a week from a
+                      device with no history, could never be silenced at all,
+                      and neither could a single abusive ticket from an
+                      otherwise clean machine. There is no other route to it:
+                      the panel deliberately ships `hasDeviceSignal` and never
+                      the fingerprint, so the blocklist page cannot stand in.
+                      The flag is a hint for the operator, not a precondition —
+                      the decision was always meant to be theirs. */}
+                  {ticket.guest?.hasDeviceSignal && (
                     <Button
                       variant="ghost"
                       size="sm"

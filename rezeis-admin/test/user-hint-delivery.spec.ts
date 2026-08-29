@@ -85,7 +85,7 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = []) {
     userHintDelivery: {
       count: async ({ where }: { where: { userId: string; hintId: string } }) =>
         deliveries.filter((d) => d.userId === where.userId && d.hintId === where.hintId).length,
-      create: async ({ data }: { data: Omit<FakeDelivery, 'id' | 'shownAt' | 'dismissedAt' | 'actedAt' | 'createdAt'> }) => {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
         seq += 1;
         const row: FakeDelivery = {
           id: 'del-' + seq,
@@ -93,30 +93,60 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = []) {
           dismissedAt: null,
           actedAt: null,
           createdAt: new Date(NOW.getTime() + seq),
-          ...data,
+          ...(data as unknown as Omit<FakeDelivery, 'id' | 'shownAt' | 'dismissedAt' | 'actedAt' | 'createdAt'>),
         };
         deliveries.push(row);
         return row;
       },
-      deleteMany: async ({
+      /**
+       * ONE `updateMany`, serving both callers.
+       *
+       * There were briefly two keys of this name in this object, and the second
+       * silently won — the duplicate-key trap this codebase has hit before. It
+       * has to discriminate on the `where` it is handed, not on which caller it
+       * guesses is asking.
+       */
+      updateMany: async ({
         where,
+        data,
       }: {
-        where: { userId: string; shownAt?: null; hint: { groupKey: string } };
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
       }) => {
-        const doomed = deliveries.filter((d) => {
-          if (d.userId !== where.userId) return false;
-          // OBEYED, not re-implemented. An earlier version of this stub applied
-          // the unshown filter itself whether or not the caller asked for it,
-          // so dropping `shownAt: null` from the service left every test green
-          // while the service happily deleted history.
-          if ('shownAt' in where && d.shownAt !== null) return false;
-          const h = hints.find((x) => x.id === d.hintId);
-          return h?.groupKey === where.hint.groupKey;
+        const w = where as {
+          id?: string;
+          userId?: string;
+          shownAt?: null;
+          dismissedAt?: null;
+          actedAt?: null;
+          expiresAt?: { gt: Date };
+          hint?: { groupKey: string };
+        };
+        const hit = deliveries.filter((d) => {
+          if (w.id !== undefined && d.id !== w.id) return false;
+          if (w.userId !== undefined && d.userId !== w.userId) return false;
+          // OBEYED, not re-implemented: a stub that applies a constraint the
+          // caller did not ask for makes "the service dropped it" look exactly
+          // like "the service kept it".
+          if ('shownAt' in w && d.shownAt !== null) return false;
+          if ('dismissedAt' in w && (d.dismissedAt !== null || d.actedAt !== null)) return false;
+          if (w.expiresAt !== undefined && !(d.expiresAt > w.expiresAt.gt)) return false;
+          if (w.hint !== undefined) {
+            const h = hints.find((x) => x.id === d.hintId);
+            if (h?.groupKey !== w.hint.groupKey) return false;
+          }
+          return true;
         });
-        for (const row of doomed) deliveries.splice(deliveries.indexOf(row), 1);
-        return { count: doomed.length };
+        for (const row of hit) Object.assign(row, data);
+        return { count: hit.length };
       },
-      findMany: async ({
+      /**
+       * The pending-hint read. The audience filter now travels in the QUERY, so
+       * this stub reads that filter rather than re-running the old in-memory
+       * matcher — the point of the change being that the filter and the row
+       * bound stopped fighting each other.
+       */
+      findFirst: async ({
         where,
         orderBy,
       }: {
@@ -126,28 +156,47 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = []) {
         const w = where as {
           userId: string;
           shownAt: null;
+          dismissedAt?: null;
+          actedAt?: null;
           expiresAt: { gt: Date };
-          hint: { isActive: boolean };
+          hint: { isActive: boolean; AND?: ReadonlyArray<Record<string, unknown>> };
         };
-        return deliveries
-          .filter((d) => d.userId === w.userId && d.shownAt === null && d.expiresAt > w.expiresAt.gt)
+        const termMatches = (
+          term: Record<string, unknown>,
+          values: readonly string[],
+        ): boolean => {
+          const clauses = (term.OR as ReadonlyArray<Record<string, unknown>>) ?? [term];
+          return clauses.some((clause) => {
+            const spec = (clause.surfaces ?? clause.formFactors) as
+              | { isEmpty?: boolean; has?: string }
+              | undefined;
+            if (spec === undefined) return false;
+            if (spec.isEmpty === true) return values.length === 0;
+            return spec.has !== undefined && values.includes(spec.has);
+          });
+        };
+        const rows = deliveries
+          .filter((d) => d.userId === w.userId && d.shownAt === null)
+          .filter((d) => !('dismissedAt' in w) || d.dismissedAt === null)
+          .filter((d) => !('actedAt' in w) || d.actedAt === null)
+          .filter((d) => d.expiresAt > w.expiresAt.gt)
           .map((d) => ({ ...d, hint: hints.find((h) => h.id === d.hintId)! }))
           .filter((d) => d.hint.isActive === w.hint.isActive)
+          .filter((d) =>
+            (w.hint.AND ?? []).every((term) =>
+              termMatches(
+                term,
+                JSON.stringify(term).includes('surfaces')
+                  ? d.hint.surfaces
+                  : d.hint.formFactors,
+              ),
+            ),
+          )
           .sort((a, b) => {
             const delta = a.createdAt.getTime() - b.createdAt.getTime();
             return orderBy?.createdAt === 'desc' ? -delta : delta;
           });
-      },
-      updateMany: async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
-        const w = where as Record<string, unknown>;
-        const hit = deliveries.filter((d) => {
-          if (d.id !== w['id'] || d.userId !== w['userId']) return false;
-          if ('shownAt' in w && d.shownAt !== null) return false;
-          if ('dismissedAt' in w && (d.dismissedAt !== null || d.actedAt !== null)) return false;
-          return true;
-        });
-        for (const row of hit) Object.assign(row, data);
-        return { count: hit.length };
+        return rows[0] ?? null;
       },
     },
   };
@@ -240,8 +289,14 @@ describe('one purchase must not become four modals', () => {
     await service.raise({ userId: 'u1', hintKey: 'paid', source: 's', now: NOW });
     await service.raise({ userId: 'u1', hintKey: 'created', source: 's', now: NOW });
 
-    assert.equal(deliveries.length, 1);
-    assert.equal(deliveries[0].hintId, 'h-created', 'the newest wins');
+    // BOTH rows survive — the older one LAPSED rather than being deleted.
+    // The once-only rule counts prior deliveries, so deleting a superseded row
+    // erased the evidence that a non-repeatable hint had already been sent, and
+    // the customer's next purchase delivered it a second time.
+    assert.equal(deliveries.length, 2);
+    const live = deliveries.filter((d) => d.expiresAt > NOW);
+    assert.equal(live.length, 1, 'exactly one is still offerable');
+    assert.equal(live[0].hintId, 'h-created', 'the newest wins');
   });
 
   it('leaves an ALREADY SHOWN delivery alone', async () => {
@@ -492,5 +547,128 @@ describe('recording what happened to it', () => {
 
     assert.equal(await service.close(deliveries[0].id, 'u1', 'acted'), false);
     assert.equal(deliveries[0].actedAt, null);
+  });
+});
+
+describe('the defects a review found, pinned', () => {
+  it('never offers a delivery the customer already closed', async () => {
+    // The cabinet stamps "shown" fire-and-forget and swallows a failure, so a
+    // hint somebody read and dismissed can carry a null `shownAt` for ever.
+    // Gating on `shownAt` alone brought it back on every page load until it
+    // expired, with no way for them to be rid of it.
+    const { service, deliveries } = build([hint({ key: 'x' })]);
+    await service.raise({ userId: 'u1', hintKey: 'x', source: 's', now: NOW });
+    deliveries[0].dismissedAt = NOW;
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: AUDIENCE,
+      now: NOW,
+    });
+
+    assert.equal(next, null);
+  });
+
+  it('never offers a delivery the customer ACTED on', async () => {
+    // The other arm of the same filter, and it had no test at all — delete
+    // `actedAt: null` from the query and every hint test stayed green.
+    //
+    // `close(…, 'acted')` stamps `actedAt` and leaves `dismissedAt` null, so
+    // this is the customer who did the very thing the hint asked for: they
+    // pressed the button and were sent where it pointed. Offering it again on
+    // the next page load is the worst version of this feature — the people it
+    // nags hardest are the ones it worked on.
+    const { service, deliveries } = build([hint({ key: 'x' })]);
+    await service.raise({ userId: 'u1', hintKey: 'x', source: 's', now: NOW });
+    deliveries[0].actedAt = NOW;
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: AUDIENCE,
+      now: NOW,
+    });
+
+    assert.equal(next, null);
+  });
+
+  it('does not deliver a once-only hint twice after a supersession', async () => {
+    // THE bug. Purchase one supersedes `welcome`; purchase two must not resend
+    // it, and it did, because the superseded row had been deleted.
+    const hints = [
+      hint({ key: 'welcome', id: 'h-w', groupKey: 'purchase' }),
+      hint({ key: 'paid', id: 'h-p', groupKey: 'purchase' }),
+    ];
+    const { service, deliveries } = build(hints);
+
+    await service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+    await service.raise({ userId: 'u1', hintKey: 'paid', source: 's', now: NOW });
+    const again = await service.raise({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 's',
+      now: NOW,
+    });
+
+    assert.equal(again, null, 'the second purchase must not resend it');
+    assert.equal(deliveries.filter((d) => d.hintId === 'h-w').length, 1);
+  });
+
+  it('skips a surface-restricted hint when the surface is UNKNOWN', async () => {
+    // "We cannot tell where this person is" must not be turned into a match.
+    // Defaulting an absent surface to `browser` showed "install the app"
+    // inside Telegram — the exact thing the restriction exists to prevent.
+    const { service } = build([hint({ key: 'install', surfaces: ['browser'] })]);
+    await service.raise({ userId: 'u1', hintKey: 'install', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: { surface: null, formFactor: null },
+      now: NOW,
+    });
+
+    assert.equal(next, null);
+  });
+
+  it('still offers an unrestricted hint when the surface is unknown', async () => {
+    // The positive control: unknown narrows, it does not blank the queue.
+    const { service } = build([hint({ key: 'any' })]);
+    await service.raise({ userId: 'u1', hintKey: 'any', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: { surface: null, formFactor: null },
+      now: NOW,
+    });
+
+    assert.equal(next?.key, 'any');
+  });
+
+  it('is not starved by unsuitable deliveries sitting in front', async () => {
+    // A delivery failing the audience filter is never shown, never closed and
+    // never removed, so under a bounded page it sat at the head for its whole
+    // TTL. Twenty of them made every later hint — a failed payment among
+    // them — unreachable for up to ninety days.
+    const hints = [
+      hint({ key: 'tma-only', id: 'h-tma', surfaces: ['tma'], isRepeatable: true }),
+      hint({ key: 'wanted', id: 'h-want' }),
+    ];
+    const { service } = build(hints);
+    for (let i = 0; i < 25; i += 1) {
+      await service.raise({ userId: 'u1', hintKey: 'tma-only', source: 's', now: NOW });
+    }
+    await service.raise({ userId: 'u1', hintKey: 'wanted', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: { surface: 'browser', formFactor: 'mobile' },
+      now: NOW,
+    });
+
+    assert.equal(next?.key, 'wanted');
   });
 });

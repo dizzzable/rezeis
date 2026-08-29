@@ -56,9 +56,15 @@ function buildRegistry(blockImpl?: UserBlockService['block']) {
   } as unknown as UserBlockService;
 
   const prismaService = {
-    // Present so a hand-written `user.update` would still "work" — the test has
-    // to be able to observe the bypass, not crash on it.
     user: {
+      // The action reads this FIRST now: blocking emits `user.blocked`, the
+      // bridge feeds every emitted event back into rule matching, and a rule on
+      // `user.blocked` would otherwise block, emit, match and block again for
+      // ever — hammering the panel on every lap. Standing down when the flag is
+      // already set is what ends the cycle at the second lap.
+      findUnique: async () => ({ isBlocked: false }),
+      // Present so a hand-written `user.update` would still "work" — the test
+      // has to be able to observe the bypass, not crash on it.
       update: async (args: unknown) => {
         userUpdates.push(args);
         return {};

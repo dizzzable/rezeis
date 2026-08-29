@@ -5,10 +5,18 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 
 /** What the cabinet reports about itself when it asks for pending hints. */
 export interface HintAudience {
-  /** `tma` | `pwa` | `browser`, as the cabinet's own three-way probe answers. */
-  readonly surface: string;
-  /** `mobile` | `tablet` | `desktop`. */
-  readonly formFactor: string;
+  /**
+   * `tma` | `pwa` | `browser`, as the cabinet's own three-way probe answers —
+   * or `null` when it did not say.
+   *
+   * `null` is a distinct value on purpose. Substituting a default turns "we
+   * cannot tell where this person is" into a positive match against a
+   * surface-restricted hint, which is how "install the app" ends up inside
+   * Telegram.
+   */
+  readonly surface: string | null;
+  /** `mobile` | `tablet` | `desktop`, or `null` when it did not say. */
+  readonly formFactor: string | null;
 }
 
 /** One hint, resolved for one viewer. */
@@ -90,16 +98,30 @@ export class UserHintDeliveryService {
     // rewriting history to tidy a queue is how a delivery log stops being
     // evidence.
     if (hint.groupKey !== null) {
-      const superseded = await this.prismaService.userHintDelivery.deleteMany({
+      // LAPSED, NOT DELETED — and the difference was a defect in this method.
+      //
+      // The once-only rule above counts prior deliveries. Deleting a superseded
+      // row removes exactly the evidence that count depends on: a customer who
+      // buys, has `welcome` superseded by `paid`, and buys again a week later
+      // has no `welcome` row left, so the count reads zero and the once-ever
+      // onboarding modal is delivered a second time. The comment above promises
+      // that cannot happen; the delete made it happen.
+      //
+      // Expiring the row keeps it countable, stops it being offered (`nextFor`
+      // requires `expiresAt > now`), and — unlike stamping it dismissed — puts
+      // no words in the customer's mouth about a hint they never saw.
+      const superseded = await this.prismaService.userHintDelivery.updateMany({
         where: {
           userId: input.userId,
           shownAt: null,
+          expiresAt: { gt: now },
           hint: { groupKey: hint.groupKey },
         },
+        data: { expiresAt: now },
       });
       if (superseded.count > 0) {
         this.logger.debug(
-          `Hint group "${hint.groupKey}": dropped ${superseded.count} unshown delivery(ies) ` +
+          `Hint group "${hint.groupKey}": lapsed ${superseded.count} unshown delivery(ies) ` +
             `in favour of "${hint.key}"`,
         );
       }
@@ -140,28 +162,66 @@ export class UserHintDeliveryService {
     readonly now?: Date;
   }): Promise<ResolvedHint | null> {
     const now = input.now ?? new Date();
-    const rows = await this.prismaService.userHintDelivery.findMany({
+    const row = await this.prismaService.userHintDelivery.findFirst({
       where: {
         userId: input.userId,
         shownAt: null,
+        // A CLOSED DELIVERY IS NOT PENDING, and leaving these two terms out was
+        // a defect. `shownAt` alone is not enough: the cabinet stamps "shown"
+        // fire-and-forget and swallows a failure, so a hint the customer read
+        // and dismissed can carry a null `shownAt` for ever — and without this
+        // it came back on every page load until it expired, with no way for
+        // them to be rid of it.
+        dismissedAt: null,
+        actedAt: null,
         expiresAt: { gt: now },
         // Read live, which is the whole point of pointing at the library: a
         // hint switched off stops appearing without anybody having to sweep
         // the queue, and switching it back on resumes it.
-        hint: { isActive: true },
+        hint: { isActive: true, ...this.audienceFilter(input.audience) },
       },
       orderBy: { createdAt: 'asc' },
       include: { hint: true },
-      // Bounded: if a person has more than this pending, the tail is stale by
-      // definition and the audience filter has plenty to choose from.
-      take: 20,
     });
+    if (row === null) return null;
+    return this.resolve(row.id, row.hint, input.locale);
+  }
 
-    for (const row of rows) {
-      if (!this.matchesAudience(row.hint, input.audience)) continue;
-      return this.resolve(row.id, row.hint, input.locale);
-    }
-    return null;
+  /**
+   * The audience half of the query, as SQL rather than as a post-filter.
+   *
+   * ── Why it cannot be done in memory ───────────────────────────────────
+   *
+   * It was, over a bounded page of rows, and that bound was a starvation bug.
+   * A delivery failing the filter is never shown, never closed and never
+   * removed, so it sits at the head of an ascending-`createdAt` page for its
+   * whole TTL. Twenty such rows — one repeatable, surface-restricted hint
+   * raised a few times is enough — and every later hint for that person, a
+   * failed payment among them, was silently unreachable for up to ninety days.
+   *
+   * ── An UNKNOWN surface is not a surface ───────────────────────────────
+   *
+   * When the cabinet does not report one, a restricted hint is SKIPPED rather
+   * than matched against a guess. Defaulting it to `browser` turned "we cannot
+   * tell" into a positive match and showed "install the app" inside Telegram —
+   * precisely what the restriction exists to prevent.
+   */
+  private audienceFilter(audience: HintAudience): Record<string, unknown> {
+    return {
+      AND: [
+        audience.surface === null
+          ? { surfaces: { isEmpty: true } }
+          : { OR: [{ surfaces: { isEmpty: true } }, { surfaces: { has: audience.surface } }] },
+        audience.formFactor === null
+          ? { formFactors: { isEmpty: true } }
+          : {
+              OR: [
+                { formFactors: { isEmpty: true } },
+                { formFactors: { has: audience.formFactor } },
+              ],
+            },
+      ],
+    };
   }
 
   /** Marks it as put on screen. Idempotent — a re-render must not re-stamp. */
@@ -194,24 +254,6 @@ export class UserHintDeliveryService {
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
-
-  /**
-   * Is this hint meant for a viewer on this surface and form factor?
-   *
-   * An EMPTY list means "everywhere" — the common case, and the reason the
-   * filter costs nothing for most hints. A non-empty one is for the handful
-   * that are actively WRONG in the wrong place: "install the app" shown to
-   * somebody running the installed app, "open our bot" to somebody already
-   * inside Telegram. An operator who sends those teaches customers to dismiss
-   * hints unread, and then the useful ones go with them.
-   */
-  private matchesAudience(hint: UserHint, audience: HintAudience): boolean {
-    if (hint.surfaces.length > 0 && !hint.surfaces.includes(audience.surface)) return false;
-    if (hint.formFactors.length > 0 && !hint.formFactors.includes(audience.formFactor)) {
-      return false;
-    }
-    return true;
-  }
 
   /** Picks the locale copy, falling back to RU exactly like the templates do. */
   private resolve(deliveryId: string, hint: UserHint, locale: 'ru' | 'en'): ResolvedHint {

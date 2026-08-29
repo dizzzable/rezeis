@@ -225,6 +225,15 @@ export class AdminSupportTicketsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ): Promise<{ readonly silenced: number }> {
+    // GATED LIKE THE READ IT PERFORMS. This route calls the same `getById` that
+    // refuses an archived thread without `support_tickets:archive`, and then
+    // reads the guest's fingerprints off the result — so without this, an
+    // operator who is denied a plain GET of an archived conversation could still
+    // reach into it and write those fingerprints to the blocklist as permanent
+    // rows that refuse that device for ever.
+    if (await this.supportTicketsService.isArchived(ticketId)) {
+      await this.assertArchivePermission(admin);
+    }
     const ticket = await this.supportTicketsService.getById(ticketId);
     const guest = (ticket as TicketWithRelations).guest ?? null;
     if (guest === null) {
@@ -256,12 +265,21 @@ export class AdminSupportTicketsController {
       // copy nobody asked for.
       signalCount: signals.length,
       added: outcome.added.length,
+      // Recorded separately because it is the common case, not the exception:
+      // the operator is usually silencing a device that a block already marked,
+      // so most presses promote rather than insert.
+      promoted: outcome.promoted.length,
       alreadyListed: outcome.duplicates.length,
     });
-    // A duplicate is a success: the device is already silenced, which is the
-    // state the operator wanted. Only a value the normaliser rejected leaves
+    // A duplicate is a success: the device is already silenced by hand, which is
+    // the state the operator wanted. A promotion is one too — and it is the one
+    // that used to be counted here while doing nothing at all, because a
+    // cascade row it collided with was reported as "already listed" and left
+    // marking instead of refusing. Only a value the normaliser rejected leaves
     // nothing behind, and that is the count worth answering with.
-    return { silenced: outcome.added.length + outcome.duplicates.length };
+    return {
+      silenced: outcome.added.length + outcome.promoted.length + outcome.duplicates.length,
+    };
   }
 
   @Post(':ticketId/reopen')

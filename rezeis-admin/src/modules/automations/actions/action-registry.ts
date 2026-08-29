@@ -219,6 +219,33 @@ export class AutomationActionRegistry {
   ): Promise<string> {
     const userId = resolveTriggerUserId(action.params, context.triggerData);
     if (!userId) throw new Error('block_user requires `userId` or trigger data with `userId`');
+
+    // ── ALREADY BLOCKED ENDS HERE, and this guard is load-bearing ────────
+    //
+    // Blocking emits `user.blocked` carrying `metadata.userId`, and the
+    // automation bridge dispatches every emitted event back into rule
+    // matching. Before the customer could be resolved from `metadata` at all
+    // this action threw on every realtime trigger, so the cycle was
+    // unreachable; making the resolver work made it live.
+    //
+    // A rule an operator would plausibly write — REALTIME on `user.blocked`,
+    // or `user.*`, or `*`, with a block action — then blocks, emits, matches,
+    // blocks again, for ever: a device list read per subscription, a node
+    // enumeration, a sync job and a `dropConnections` against the panel on
+    // every lap, with nothing to stop it.
+    //
+    // Standing down here breaks the cycle at the second lap and is the right
+    // answer on its own terms: an unattended rule has no business re-running a
+    // cascade against somebody already blocked. The BULK screen deliberately
+    // does re-run — that is an operator finishing a half-executed ban, with a
+    // person deciding — and it does not come through here.
+    const target = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { isBlocked: true },
+    });
+    if (target?.isBlocked === true) {
+      return `user ${userId} is already blocked; the rule stood down`;
+    }
     // No admin id: a rule is not a person. The cascade records the origin
     // account on every row it writes, so an operator can still see where an
     // entry came from.
@@ -318,8 +345,24 @@ export class AutomationActionRegistry {
    */
   private async showHintToAudience(
     action: AutomationActionDefinition,
-    _context: AutomationActionContext,
+    context: AutomationActionContext,
   ): Promise<string> {
+    // ── NOT ON AN EVENT ──────────────────────────────────────────────────
+    //
+    // This action picks its own recipients, so the trigger contributes
+    // nothing — but bound to a realtime rule it runs a full audience resolve
+    // plus up to five hundred sequential raises on EVERY system event. One
+    // `*` rule saved while the editor still had its default trigger kind turns
+    // a payment burst into thousands of queries.
+    //
+    // The editor says so in words; words are not a constraint, and REALTIME is
+    // what the drawer opens with.
+    if (context.trigger.startsWith('event:')) {
+      throw new Error(
+        'show_hint_to_audience picks its own recipients and must run on a scheduled ' +
+          'rule, not on an event trigger',
+      );
+    }
     const hintKey = readString(action.params, 'hintKey');
     if (!hintKey) throw new Error('show_hint_to_audience requires `hintKey`');
     const audience = readString(action.params, 'audience');
@@ -335,6 +378,14 @@ export class AutomationActionRegistry {
       beforeHours: readNumber(action.params, 'beforeHours'),
     });
     if (outcome.kind === 'blind') {
+      // A BACKWARDS WINDOW IS THE OPERATOR'S MISTAKE, and grading it green
+      // hides it for ever. The justification for reporting blindness as
+      // success — "a retry cannot fix a missing webhook" — does not cover a
+      // pair of numbers somebody typed in the wrong order, which a retry
+      // absolutely can fix once they are told.
+      if (outcome.reason.includes('window is empty')) {
+        throw new Error(`show_hint_to_audience: ${outcome.reason}`);
+      }
       return `stood down without hinting anybody: ${outcome.reason}`;
     }
     if (outcome.userIds.length === 0) {
@@ -430,8 +481,37 @@ export function resolveTriggerUserId(
   const topLevel = readString(triggerData, 'userId');
   if (topLevel !== null) return topLevel;
   const metadata = triggerData['metadata'];
-  if (typeof metadata !== 'object' || metadata === null) return null;
-  return readString(metadata as Record<string, unknown>, 'userId');
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return null;
+  const meta = metadata as Record<string, unknown>;
+  const direct = readString(meta, 'userId');
+  if (direct !== null) return direct;
+
+  // ── THE TWO EVENTS THAT SPELL IT DIFFERENTLY ─────────────────────────
+  //
+  // Reading only `userId` still left the two bindings an operator is most
+  // likely to reach for inert, and the comment above claimed otherwise.
+  //
+  //   `fraud.signal_opened` carries `fraudRezeisUserId`, set only when the
+  //   signal names exactly one customer — which is precisely when acting on it
+  //   is defensible.
+  //
+  //   `user.registered` from the Telegram bot carries `reiwaId`. Its web twin
+  //   carries `userId`, so a welcome hint bound to both fired for half the
+  //   customers and failed for the other half.
+  //
+  // `affectedUserIds` is read ONLY when it names exactly one account. A signal
+  // about several people does not have "the" customer, and picking the first
+  // would be inventing one.
+  const fraud = readString(meta, 'fraudRezeisUserId');
+  if (fraud !== null) return fraud;
+  const reiwaId = readString(meta, 'reiwaId');
+  if (reiwaId !== null) return reiwaId;
+  const affected = meta['affectedUserIds'];
+  if (Array.isArray(affected) && affected.length === 1 && typeof affected[0] === 'string') {
+    const single = affected[0].trim();
+    return single.length > 0 ? single : null;
+  }
+  return null;
 }
 
 function readString(params: Readonly<Record<string, unknown>>, key: string): string | null {
@@ -447,8 +527,15 @@ function readNumber(
   key: string,
 ): number | undefined {
   const value = params[key];
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
-  return value;
+  // A NUMERIC STRING COUNTS. `params` is stored JSON validated only as an
+  // object, so `{"afterHours": "72"}` is an ordinary thing for an API caller to
+  // send — and dropping it silently was worse than rejecting it: both hours
+  // vanished, the action fell back to the DEFAULT window, and it then reported
+  // success naming a cohort the operator never asked for. The empty-window
+  // guard never saw the pair either, so a reversed one could not be caught.
+  const numeric = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof numeric !== 'number' || !Number.isFinite(numeric) || numeric <= 0) return undefined;
+  return numeric;
 }
 
 function readSeverity(

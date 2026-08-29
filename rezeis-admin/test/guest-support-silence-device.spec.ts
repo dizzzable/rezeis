@@ -24,12 +24,22 @@ const REQ = { headers: {}, socket: {} } as never;
 
 function build(options: {
   readonly guest?: Record<string, unknown> | null;
-  readonly addResult?: { added: unknown[]; duplicates: string[]; rejected: unknown[] };
+  readonly addResult?: {
+    added: unknown[];
+    promoted?: unknown[];
+    duplicates: string[];
+    rejected: unknown[];
+  };
+  /** The ticket is archived, so the archive permission decides. */
+  readonly archived?: boolean;
+  /** Whether this operator holds `support_tickets:archive`. */
+  readonly mayReadArchived?: boolean;
 } = {}) {
   const added: Array<Record<string, unknown>> = [];
   const audits: Array<Record<string, unknown>> = [];
 
   const supportTicketsService = {
+    isArchived: async () => options.archived === true,
     getById: async () => ({
       id: 't-1',
       status: 'OPEN',
@@ -44,7 +54,14 @@ function build(options: {
   const blockedIdentityService = {
     addMany: async (input: Record<string, unknown>) => {
       added.push(input);
-      return options.addResult ?? { added: [{ id: 'b-1' }, { id: 'b-2' }], duplicates: [], rejected: [] };
+      return (
+        options.addResult ?? {
+          added: [{ id: 'b-1' }, { id: 'b-2' }],
+          promoted: [],
+          duplicates: [],
+          rejected: [],
+        }
+      );
     },
   };
 
@@ -67,7 +84,11 @@ function build(options: {
     {} as never,
     {} as never,
     prismaService as never,
-    {} as never,
+    // RBAC is the SIXTH parameter. `assertArchivePermission` asks it directly,
+    // so a `{}` here fails with "hasPermission is not a function" from inside
+    // the archive gate — which reads like a controller bug rather than a
+    // harness one.
+    { hasPermission: async () => options.mayReadArchived !== false } as never,
     {} as never,
   );
   return { controller, added, audits };
@@ -110,16 +131,68 @@ describe('silencing a guest device', () => {
     assert.match(metadata, /signalCount/);
   });
 
-  it('counts an already-listed device as silenced', async () => {
-    // A duplicate is the state the operator wanted. Reporting zero would read
-    // as a failure and invite them to try again.
+  it('counts a device already silenced BY HAND as silenced', async () => {
+    // A duplicate is the state the operator wanted — but only this kind of
+    // duplicate. The row is already `manual`, so it already refuses.
     const { controller } = build({
-      addResult: { added: [], duplicates: ['a1b2c3d4e5f6a7b8'], rejected: [] },
+      addResult: {
+        added: [],
+        promoted: [],
+        duplicates: ['a1b2c3d4e5f6a7b8'],
+        rejected: [],
+      },
     });
 
     const result = await controller.silenceDevice('t-1', ADMIN, REQ);
 
     assert.equal(result.silenced, 1);
+  });
+
+  it('counts a promoted cascade row, which is the ordinary case', async () => {
+    // ── The shape that made this button a guaranteed no-op ─────────────────
+    //
+    // The operator is usually silencing the device of somebody they already
+    // blocked, and the block itself wrote those fingerprints as `cascade`. The
+    // gate refuses on `manual` only, so the collision used to be reported as a
+    // plain duplicate: the operator read `silenced: 2`, both rows stayed
+    // `cascade`, and the device kept opening conversations for ever.
+    //
+    // A promotion is now its own outcome and counts here, because it is the one
+    // that actually changed what the gate does.
+    const { controller, audits } = build({
+      addResult: {
+        added: [],
+        promoted: [{ id: 'b-1' }, { id: 'b-2' }],
+        duplicates: [],
+        rejected: [],
+      },
+    });
+
+    const result = await controller.silenceDevice('t-1', ADMIN, REQ);
+
+    assert.equal(result.silenced, 2);
+    // Recorded apart from `added` in the audit: taking over a row a ban created
+    // automatically is a different act from listing somebody new, and it is the
+    // one worth being able to find later.
+    assert.match(JSON.stringify(audits[0].metadata), /promoted/);
+  });
+
+  it('reports nothing silenced when every value was rejected', async () => {
+    // The honest zero. A normaliser refusal is the only outcome that leaves no
+    // row behind, and saying "silenced" for it would tell the operator the pest
+    // is dealt with when nothing was written at all.
+    const { controller } = build({
+      addResult: {
+        added: [],
+        promoted: [],
+        duplicates: [],
+        rejected: [{ value: 'x', reason: 'BAD_CHARSET' }],
+      },
+    });
+
+    const result = await controller.silenceDevice('t-1', ADMIN, REQ);
+
+    assert.equal(result.silenced, 0);
   });
 });
 
@@ -148,5 +221,45 @@ describe('when there is nothing to silence', () => {
 
     await assert.rejects(() => controller.silenceDevice('t-1', ADMIN, REQ));
     assert.deepStrictEqual(audits, []);
+  });
+});
+
+describe('an archived conversation is gated the same way reading one is', () => {
+  /**
+   * This route calls the same `getById` that refuses an archived thread without
+   * `support_tickets:archive`, and then reads the guest's fingerprints off the
+   * result. Ungated, an operator denied a plain GET of an archived conversation
+   * could still reach into it and write those fingerprints to the blocklist as
+   * permanent rows that refuse that device for ever — the strongest thing this
+   * controller can do, reachable through the one door nobody was watching.
+   */
+  it('refuses when the operator cannot read archived threads', async () => {
+    const { controller, added } = build({ archived: true, mayReadArchived: false });
+
+    await assert.rejects(
+      () => controller.silenceDevice('t-1', ADMIN, REQ),
+      /archive/i,
+    );
+    assert.deepStrictEqual(added, [], 'refused, but the blocklist was written anyway');
+  });
+
+  it('allows it when the operator does hold that permission', async () => {
+    const { controller, added } = build({ archived: true, mayReadArchived: true });
+
+    const result = await controller.silenceDevice('t-1', ADMIN, REQ);
+
+    assert.equal(result.silenced, 2);
+    assert.equal(added.length, 1);
+  });
+
+  it('does not consult the archive permission for a live thread', async () => {
+    // The gate must not become a second permission on the ordinary path: an
+    // operator with `resolve` and no `archive` silences open conversations all
+    // day, and that is the case this button exists for.
+    const { controller } = build({ archived: false, mayReadArchived: false });
+
+    const result = await controller.silenceDevice('t-1', ADMIN, REQ);
+
+    assert.equal(result.silenced, 2);
   });
 });

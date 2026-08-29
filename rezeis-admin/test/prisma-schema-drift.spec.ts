@@ -228,3 +228,44 @@ describe('prisma schema/migration drift', () => {
     assert.ok(!entrypoint.includes(reconcileMigrationName));
   });
 });
+
+describe('the lock_timeout bound and its retry are one decision', () => {
+  /**
+   * A migration that sets `lock_timeout` has chosen to FAIL rather than queue
+   * behind a long-running reader. That choice is only safe if the next start
+   * retries it — Prisma is not transactional per file, so a bounded failure
+   * leaves earlier statements committed and the row `finished=false`, and
+   * `migrate deploy` then answers P3009 for ever.
+   *
+   * Membership in the entrypoint allowlist is what supplies the second half.
+   * Adopting the bound without it converts "this migration waited five seconds
+   * and gave up" into "the API will not boot until a human intervenes" — for a
+   * file that would have replayed cleanly on its own. That gap went unnoticed
+   * across three releases because the only tests naming the allowlist asserted
+   * that the shell function EXISTS, which is true of an empty list.
+   *
+   * Deliberately keyed on `SET lock_timeout` rather than on a hand-kept list:
+   * the next migration to adopt the bound has to make the same decision, and a
+   * test that has to be edited to add one is a test that will be edited to
+   * silence one.
+   */
+  it('lists every migration that sets lock_timeout as auto-recoverable', () => {
+    const bounded = readdirSync(migrationsDir)
+      .filter((entry) => /^\d{14}_/.test(entry))
+      .filter((entry) =>
+        readFileSync(join(migrationsDir, entry, 'migration.sql'), 'utf8').includes(
+          'SET lock_timeout',
+        ),
+      );
+
+    assert.ok(bounded.length > 0, 'no bounded migrations found — the filter is wrong');
+    const missing = bounded.filter((entry) => !entrypoint.includes(entry));
+    assert.deepEqual(
+      missing,
+      [],
+      `these bound their lock wait but cannot be retried, so a timeout leaves the panel ` +
+        `unbootable — add them to is_auto_recoverable_migration once you have applied each ` +
+        `twice against a real database: ${missing.join(', ')}`,
+    );
+  });
+});

@@ -186,3 +186,78 @@ describe('classifyCascadeIp — what may be listed', () => {
     );
   });
 });
+
+describe('the IPv4-mapped spelling, which bypassed every refusal in this file', () => {
+  /**
+   * `::ffff:1.2.3.4` is what a dual-stack listener hands Node when there is no
+   * `X-Forwarded-For`, and the cabinet forwards `req.ip` verbatim.
+   *
+   * Every refusal here is an IPv4 CIDR, and the range matcher compares families
+   * before addresses — so the mapped form matched NOTHING and was captured as an
+   * ordinary customer address. CGNAT, the private blocks, loopback and, worst of
+   * all, our own nodes' exit addresses.
+   *
+   * That is this file's entire purpose failing through the one spelling nobody
+   * checked, and it fails in the direction that hurts: two unrelated carrier
+   * subscribers filed under one address, linked to each other, and a ban on one
+   * marking the other. The mapped form is self-consistent on the write and the
+   * read path, so the false link fires cleanly and reads as evidence.
+   */
+  const NODES = [['203.0.113.10']];
+
+  it('refuses carrier NAT in the mapped spelling, as it does in the plain one', () => {
+    assert.deepStrictEqual(classifyCascadeIp({ address: '100.64.7.9', nodes: NODES }), {
+      capture: false,
+      reason: 'NOT_PUBLIC',
+    });
+    assert.deepStrictEqual(classifyCascadeIp({ address: '::ffff:100.64.7.9', nodes: NODES }), {
+      capture: false,
+      reason: 'NOT_PUBLIC',
+    });
+  });
+
+  it('refuses private and loopback ranges in the mapped spelling', () => {
+    for (const address of ['::ffff:192.168.1.5', '::ffff:10.0.0.4', '::ffff:127.0.0.1']) {
+      assert.deepStrictEqual(
+        classifyCascadeIp({ address, nodes: NODES }),
+        { capture: false, reason: 'NOT_PUBLIC' },
+        address,
+      );
+    }
+  });
+
+  it('still recognises OUR OWN node when the panel reports it mapped', () => {
+    // The worst of the set. Captured, this writes our node's exit address as a
+    // customer's — and every customer behind that node becomes the same person.
+    assert.deepStrictEqual(classifyCascadeIp({ address: '::ffff:203.0.113.10', nodes: NODES }), {
+      capture: false,
+      reason: 'OUR_NODE',
+    });
+  });
+
+  it('normalises a captured mapped address to one spelling', () => {
+    // Not cosmetic: the hourly collector and the cabinet write the same address
+    // through different paths. Two spellings would be two rows that never match
+    // each other, which makes the whole table silently inert.
+    assert.deepStrictEqual(classifyCascadeIp({ address: '::ffff:8.8.8.8', nodes: NODES }), {
+      capture: true,
+      value: '8.8.8.8',
+    });
+  });
+
+  it('refuses the unspecified address, which is what an unresolved peer looks like', () => {
+    // Without this, every visitor whose peer could not be resolved is filed
+    // under `::` — ten unknowns become ten accounts "seen in the same place".
+    assert.deepStrictEqual(classifyCascadeIp({ address: '::', nodes: NODES }), {
+      capture: false,
+      reason: 'NOT_PUBLIC',
+    });
+  });
+
+  it('leaves a genuine IPv6 address alone', () => {
+    assert.deepStrictEqual(classifyCascadeIp({ address: '2001:db8::1', nodes: NODES }), {
+      capture: true,
+      value: '2001:db8::1',
+    });
+  });
+});

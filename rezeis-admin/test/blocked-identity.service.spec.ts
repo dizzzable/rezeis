@@ -53,6 +53,19 @@ function fakePrisma(rows: Array<Record<string, unknown>> = []) {
         store.push(row);
         return row;
       },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Record<string, unknown>;
+      }) => {
+        calls.push(['update', where, data]);
+        const row = store.find((r) => r.id === where.id);
+        if (row === undefined) throw new Error(`no row ${where.id}`);
+        Object.assign(row, data);
+        return row;
+      },
       delete: async ({ where }: { where: { id: string } }) => {
         calls.push(['delete', where]);
         return null;
@@ -159,7 +172,17 @@ describe('adding to the blocklist', () => {
     // behaviour. Surfacing the unique-index violation as an error would make
     // the safe action look broken.
     const { service } = buildService([
-      { id: 'row-1', kind: BlockedIdentityKind.TELEGRAM_ID, value: '111', expiresAt: null },
+      {
+        id: 'row-1',
+        kind: BlockedIdentityKind.TELEGRAM_ID,
+        value: '111',
+        // Named explicitly because the column is `@default("manual")` — a
+        // stored row always carries one, and a fixture that omits it is a row
+        // the database cannot produce. Left off, this reads as a cascade row
+        // and the paste promotes it instead of passing over it.
+        source: 'manual',
+        expiresAt: null,
+      },
     ]);
     const result = await service.addMany({
       kind: BlockedIdentityKind.TELEGRAM_ID,
@@ -168,6 +191,98 @@ describe('adding to the blocklist', () => {
 
     assert.deepStrictEqual(result.added, []);
     assert.deepStrictEqual(result.duplicates, ['111']);
+  });
+
+  it('promotes a cascade row when an operator lists the same value by hand', async () => {
+    // ── The defect that made the silence button a guaranteed no-op ──────────
+    //
+    // `manual` and `cascade` are not two labels for one row: the guest support
+    // gate REFUSES on `manual` and only MARKS on `cascade`. So the single most
+    // likely press of that button — silencing the device of somebody the
+    // operator had already blocked — collided with the cascade rows the block
+    // itself had written, was counted as a duplicate, and left both rows
+    // marking instead of refusing. The operator was told `silenced: 2` and the
+    // device went on opening conversations for ever.
+    const { service } = buildService([
+      {
+        id: 'row-1',
+        kind: BlockedIdentityKind.DEVICE_FP,
+        value: 'abc123device',
+        source: 'cascade',
+        originUserId: 'u-1',
+        expiresAt: null,
+      },
+    ]);
+
+    const result = await service.addMany({
+      kind: BlockedIdentityKind.DEVICE_FP,
+      values: ['abc123device'],
+      source: 'manual',
+      createdById: 'admin-1',
+      reason: 'Guest support abuse',
+    });
+
+    assert.deepStrictEqual(result.added, []);
+    assert.deepStrictEqual(result.duplicates, [], 'still reported as a mere duplicate');
+    assert.equal(result.promoted.length, 1);
+    assert.equal(result.promoted[0]?.source, 'manual');
+    assert.equal(result.promoted[0]?.createdById, 'admin-1');
+    // Cleared so that unblocking the account this row came from cannot delete
+    // it: `releaseCascadeForUser` finds cascade rows by `originUserId`, and an
+    // operator's explicit silence must outlive the ban it started from.
+    assert.equal(result.promoted[0]?.originUserId, null);
+  });
+
+  it('never lets a cascade write downgrade a row an operator listed', async () => {
+    // The other direction, and it must not happen: a ban must not quietly undo
+    // a decision a person made. A later block touching the same device leaves
+    // the manual row exactly as it is.
+    const { service } = buildService([
+      {
+        id: 'row-1',
+        kind: BlockedIdentityKind.DEVICE_FP,
+        value: 'abc123device',
+        source: 'manual',
+        expiresAt: null,
+      },
+    ]);
+
+    const result = await service.addMany({
+      kind: BlockedIdentityKind.DEVICE_FP,
+      values: ['abc123device'],
+      source: 'cascade',
+      originUserId: 'u-2',
+    });
+
+    assert.deepStrictEqual(result.promoted, []);
+    assert.deepStrictEqual(result.duplicates, ['abc123device']);
+  });
+
+  it('leaves an already-manual row alone rather than rewriting its terms', async () => {
+    // Re-pasting an overlapping list is ordinary. Rewriting `reason` and
+    // `expiresAt` from the new paste would silently turn a thirty-day entry
+    // somebody chose into a permanent one.
+    const expires = new Date('2026-12-01T00:00:00.000Z');
+    const { service } = buildService([
+      {
+        id: 'row-1',
+        kind: BlockedIdentityKind.EMAIL,
+        value: 'abuser@example.com',
+        source: 'manual',
+        reason: 'spam wave',
+        expiresAt: expires,
+      },
+    ]);
+
+    const result = await service.addMany({
+      kind: BlockedIdentityKind.EMAIL,
+      values: ['abuser@example.com'],
+      source: 'manual',
+      reason: 'bulk re-paste',
+    });
+
+    assert.deepStrictEqual(result.promoted, []);
+    assert.deepStrictEqual(result.duplicates, ['abuser@example.com']);
   });
 
   it('stores the normalised value, not what was typed', async () => {

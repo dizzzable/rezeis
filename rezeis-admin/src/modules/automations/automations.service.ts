@@ -56,7 +56,7 @@ export class AutomationsService {
     dto: UpsertAutomationRuleDto,
     createdById: string | null,
   ): Promise<AutomationRuleInterface> {
-    this.assertActionsValid(dto.actions);
+    this.assertActionsValid(dto.actions, dto.triggerKind);
     this.assertTriggerSpecValid(dto.triggerKind, dto.triggerSpec);
 
     const created = await this.prismaService.automationRule.create({
@@ -80,7 +80,7 @@ export class AutomationsService {
   ): Promise<AutomationRuleInterface> {
     const existing = await this.prismaService.automationRule.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Rule not found');
-    this.assertActionsValid(dto.actions);
+    this.assertActionsValid(dto.actions, dto.triggerKind);
     this.assertTriggerSpecValid(dto.triggerKind, dto.triggerSpec);
 
     const updated = await this.prismaService.automationRule.update({
@@ -178,13 +178,44 @@ export class AutomationsService {
 
   // ── Validators ─────────────────────────────────────────────────────────
 
-  private assertActionsValid(actions: readonly { type: string }[]): void {
+  /**
+   * Actions that choose their own recipients, and so cannot ride an event.
+   *
+   * `show_hint_to_audience` resolves a cohort and raises a hint for each of up
+   * to five hundred people. On a schedule that is the point; on a realtime rule
+   * it would do all of it again on EVERY system event.
+   *
+   * The action refuses at execution time, which stops the queries — but by then
+   * the engine has already enqueued a job, inserted an `automation_executions`
+   * row and updated the rule. A `*` pattern under a payment burst is thousands
+   * of those a minute, in a table nothing sweeps. Refusing the SAVE is what
+   * actually costs nothing, and it tells the operator while they are still
+   * looking at the form rather than in a run log they may never open.
+   *
+   * The editor defaults a new rule to REALTIME, so this is not an exotic
+   * mistake — it is what happens if somebody picks the action and presses save.
+   */
+  private static readonly SCHEDULE_ONLY_ACTIONS: readonly string[] = ['show_hint_to_audience'];
+
+  private assertActionsValid(
+    actions: readonly { type: string }[],
+    triggerKind: AutomationTriggerKind,
+  ): void {
     if (actions.length === 0) {
       throw new BadRequestException('At least one action is required');
     }
     for (const action of actions) {
       if (!(AUTOMATION_ACTION_TYPES as readonly string[]).includes(action.type)) {
         throw new BadRequestException(`Unknown action type: ${action.type}`);
+      }
+      if (
+        triggerKind === AutomationTriggerKind.REALTIME &&
+        AutomationsService.SCHEDULE_ONLY_ACTIONS.includes(action.type)
+      ) {
+        throw new BadRequestException(
+          `Action "${action.type}" picks its own recipients, so it cannot run on an event. ` +
+            `Use a scheduled trigger.`,
+        );
       }
     }
   }

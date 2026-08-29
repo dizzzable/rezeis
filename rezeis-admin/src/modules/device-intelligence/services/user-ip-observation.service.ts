@@ -75,11 +75,25 @@ export class UserIpObservationService {
    * customer is on our VPN", which happens on most sessions of a working
    * product and is not worth a log line each time.
    */
-  public async record(userId: string, address: string | null | undefined): Promise<boolean> {
+  public async record(
+    userId: string,
+    address: string | null | undefined,
+    /**
+     * The node list, when the caller already holds one.
+     *
+     * A batch caller MUST pass it. `NodeAddressesService.read()` is an uncached
+     * panel call, and recording a few thousand addresses one at a time without
+     * this issued a few thousand sequential fetches of the identical answer —
+     * minutes of an hourly job spent re-asking one question, and a flood
+     * against the very panel whose failure makes the whole classification
+     * refuse.
+     */
+    nodes?: readonly (readonly string[])[] | null,
+  ): Promise<boolean> {
     if (typeof address !== 'string' || address.trim().length === 0) return false;
     const verdict = classifyCascadeIp({
       address,
-      nodes: await this.nodeAddresses.read(),
+      nodes: nodes !== undefined ? nodes : await this.nodeAddresses.read(),
     });
     if (!verdict.capture) return false;
 

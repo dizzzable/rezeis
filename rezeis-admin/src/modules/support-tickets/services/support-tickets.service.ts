@@ -170,6 +170,23 @@ export class SupportTicketsService {
           },
         },
         docRequests: { orderBy: { createdAt: 'asc' } },
+        // The guest, WITHOUT WHICH the whole anonymous-support feature is
+        // invisible and inoperable. `list()` fetched it; this method did not,
+        // so the detail response carried `guest: null` for every guest ticket
+        // — no contact, no flag, no device — and `silenceDevice` refused every
+        // call with "this ticket has no guest conversation" on tickets that
+        // plainly had one. The silence button, the only thing in the design
+        // allowed to refuse anybody, could never be pressed.
+        guest: {
+          select: {
+            id: true,
+            email: true,
+            displayName: true,
+            flaggedReason: true,
+            installId: true,
+            deviceHash: true,
+          },
+        },
         user: {
           select: {
             id: true,

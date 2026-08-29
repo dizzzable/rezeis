@@ -43,6 +43,22 @@ const CONTEXT = {
   triggerData: EVENT_PAYLOAD,
 };
 
+/**
+ * A scheduled rule's context.
+ *
+ * The audience action refuses an event trigger outright: it picks its own
+ * recipients, so bound to a realtime rule it would run a full audience resolve
+ * plus up to five hundred sequential raises on EVERY system event. One `*` rule
+ * saved while the editor still held its default trigger kind turned a payment
+ * burst into thousands of queries.
+ */
+const CRON_CONTEXT = {
+  ruleId: 'rule-2',
+  ruleName: 'Nightly nudge',
+  trigger: 'cron',
+  triggerData: {},
+};
+
 function buildRegistry(
   raiseImpl?: (input: Record<string, unknown>) => Promise<unknown>,
   audience?: unknown,
@@ -50,7 +66,7 @@ function buildRegistry(
   const raised: Array<Record<string, unknown>> = [];
   const registry = new AutomationActionRegistry(
     {} as never,
-    { user: { update: async () => ({}) } } as never,
+    { user: { findUnique: async () => ({ isBlocked: false }), update: async () => ({}) } } as never,
     { warn: () => undefined } as never,
     { block: async () => ({}) } as never,
     {
@@ -169,7 +185,7 @@ describe('block_user reads the customer the same way', () => {
     const blocked: Array<{ userId: string }> = [];
     const registry = new AutomationActionRegistry(
       {} as never,
-      { user: { update: async () => ({}) } } as never,
+      { user: { findUnique: async () => ({ isBlocked: false }), update: async () => ({}) } } as never,
       { warn: () => undefined } as never,
       {
         block: async (input: { userId: string }) => {
@@ -203,7 +219,7 @@ describe('the scheduled audience action', () => {
         type: 'show_hint_to_audience',
         params: { hintKey: 'connect', audience: 'paid-not-connected' },
       } as never,
-      CONTEXT as never,
+      CRON_CONTEXT as never,
     );
 
     assert.equal(result.status, 'success');
@@ -223,7 +239,7 @@ describe('the scheduled audience action', () => {
         type: 'show_hint_to_audience',
         params: { hintKey: 'connect', audience: 'paid-not-connected' },
       } as never,
-      CONTEXT as never,
+      CRON_CONTEXT as never,
     );
 
     assert.match(String(result.message), /0 of 2/);
@@ -244,7 +260,7 @@ describe('the scheduled audience action', () => {
         type: 'show_hint_to_audience',
         params: { hintKey: 'connect', audience: 'paid-not-connected' },
       } as never,
-      CONTEXT as never,
+      CRON_CONTEXT as never,
     );
 
     assert.equal(result.status, 'success');
@@ -258,7 +274,7 @@ describe('the scheduled audience action', () => {
     const result = await registry.execute(
       0,
       { type: 'show_hint_to_audience', params: { hintKey: 'x', audience: 'everybody' } } as never,
-      CONTEXT as never,
+      CRON_CONTEXT as never,
     );
 
     assert.equal(result.status, 'failed');
@@ -278,10 +294,94 @@ describe('the scheduled audience action', () => {
         type: 'show_hint_to_audience',
         params: { hintKey: 'connect', audience: 'paid-not-connected' },
       } as never,
-      CONTEXT as never,
+      CRON_CONTEXT as never,
     );
 
     assert.equal(result.status, 'success');
     assert.match(String(result.message), /nobody matched/);
+  });
+});
+
+describe('the guards this batch added, exercised rather than accommodated', () => {
+  /**
+   * These two tests exist because the specs above were edited to ACCOMMODATE
+   * the guards — the audience tests were moved off an event trigger so they
+   * would keep passing, and the prisma stub gained `findUnique` so the block
+   * action would not crash. Both changes were necessary and neither one
+   * exercises anything: delete both guards and every test above still passes.
+   *
+   * That is the failure mode this codebase has hit repeatedly — a decision made
+   * correctly in the code, with no test that reaches the branch.
+   */
+  it('refuses the audience action on an event trigger, and does not resolve first', async () => {
+    let resolveCalls = 0;
+    const registry = new AutomationActionRegistry(
+      {} as never,
+      { user: { findUnique: async () => ({ isBlocked: false }), update: async () => ({}) } } as never,
+      { warn: () => undefined } as never,
+      { block: async () => ({}) } as never,
+      { raise: async () => ({ id: 'del-1' }) } as never,
+      {
+        resolve: async () => {
+          resolveCalls += 1;
+          return { kind: 'ok', userIds: ['u-1'], truncated: false };
+        },
+      } as never,
+      { starsWebhookSecret: null } as never,
+    );
+
+    const result = await registry.execute(
+      0,
+      {
+        type: 'show_hint_to_audience',
+        params: { hintKey: 'connect', audience: 'paid-not-connected' },
+      } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'failed');
+    // The resolve must not have run. The whole point of refusing is that this
+    // action picks its own recipients: bound to a realtime rule it would run a
+    // full audience query plus up to five hundred sequential raises on EVERY
+    // system event, and a `*` pattern turns one payment burst into thousands.
+    assert.equal(resolveCalls, 0, 'refused, but only after doing the expensive thing');
+    assert.match(String(result.message), /trigger|schedule|event/i);
+  });
+
+  it('stands down when the customer is already blocked, which is what ends the loop', async () => {
+    let blockCalls = 0;
+    const registry = new AutomationActionRegistry(
+      {} as never,
+      {
+        // The state that matters. Blocking emits `user.blocked`; the bridge
+        // feeds every emitted event back into rule matching, so a rule keyed on
+        // `user.blocked` would block, emit, match and block again for ever.
+        // Reading this flag first is the only thing that ends it at lap two.
+        user: { findUnique: async () => ({ isBlocked: true }), update: async () => ({}) },
+      } as never,
+      { warn: () => undefined } as never,
+      {
+        block: async () => {
+          blockCalls += 1;
+          return {};
+        },
+      } as never,
+      { raise: async () => ({ id: 'del-1' }) } as never,
+      { resolve: async () => ({ kind: 'ok', userIds: [], truncated: false }) } as never,
+      { starsWebhookSecret: null } as never,
+    );
+
+    const result = await registry.execute(
+      0,
+      { type: 'block_user', params: {} } as never,
+      CONTEXT as never,
+    );
+
+    // A SUCCESS, not a failure: the customer is blocked, which is the state the
+    // rule wanted. Reporting failure would paint the operator's log red for a
+    // rule working exactly as configured.
+    assert.equal(result.status, 'success');
+    assert.equal(blockCalls, 0, 'blocked again — the feedback loop is still open');
+    assert.match(String(result.message), /already blocked/i);
   });
 });

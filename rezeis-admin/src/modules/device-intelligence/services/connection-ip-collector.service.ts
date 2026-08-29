@@ -1,9 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { SubscriptionStatus } from '@prisma/client';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { parsePanelId } from '../../anti-fraud/sharing-detection.util';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { PanelDevicesClient } from '../../remnawave/services/panel-devices.client';
+import { NodeAddressesService } from '../../remnawave/services/node-addresses.service';
 import { PanelInfraClient } from '../../remnawave/services/panel-infra.client';
 import { UserIpObservationService } from './user-ip-observation.service';
 
@@ -59,6 +62,7 @@ export class ConnectionIpCollectorService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly infraClient: PanelInfraClient,
+    private readonly nodeAddresses: NodeAddressesService,
     private readonly devicesClient: PanelDevicesClient,
     private readonly observations: UserIpObservationService,
   ) {}
@@ -100,16 +104,30 @@ export class ConnectionIpCollectorService {
       // counted as an empty node.
       if (rows === null) continue;
       for (const row of rows) {
-        const panelId = typeof row.userId === 'number' ? row.userId : Number(row.userId);
-        if (!Number.isSafeInteger(panelId)) continue;
+        // `parsePanelId`, not `Number()`. The field's runtime spelling varies by
+        // panel version — 2.x sends a string, 3.x a number — and the job reader
+        // casts rather than validates, so the coercing branch is live. `Number`
+        // turns `''`, `null`, `true`, `'42.0'` and `'0x2A'` into valid-looking
+        // ids belonging to somebody else; the shared parser refuses all of them.
+        const panelId = parsePanelId(row.userId);
+        if (panelId === null) continue;
         let addresses = byPanelId.get(panelId);
         if (addresses === undefined) {
           addresses = new Set<string>();
           byPanelId.set(panelId, addresses);
         }
+        // Guarded: `readJobRows` casts rather than validates, so a panel that
+        // omits `ips` would throw out of the whole run — taking every node not
+        // yet visited with it.
+        if (!Array.isArray(row.ips)) continue;
         for (const sample of row.ips) {
           if (typeof sample.ip === 'string' && sample.ip.length > 0) addresses.add(sample.ip);
         }
+        // Checked HERE, inside the row loop, not between nodes. Between nodes
+        // the cap could only ever overshoot: one busy node with fifty thousand
+        // connections put all fifty thousand into the `IN` list the constant
+        // exists to bound.
+        if (byPanelId.size >= MAX_USERS_PER_RUN) break;
       }
       if (byPanelId.size >= MAX_USERS_PER_RUN) break;
     }
@@ -121,12 +139,54 @@ export class ConnectionIpCollectorService {
     // rather than guessed at, because attributing an address to the wrong
     // account is worse than not recording it.
     const rows = await this.prismaService.subscription.findMany({
-      where: { remnawavePanelId: { in: [...byPanelId.keys()] } },
-      select: { remnawavePanelId: true, userId: true },
+      where: {
+        remnawavePanelId: { in: [...byPanelId.keys()] },
+        // DELETED rows keep their panel id, and a panel id is NOT unique in
+        // this schema. Without this filter a live subscription for customer B
+        // competed with a deleted one from customer A for the same id, the
+        // unordered read decided which won, and B's home address could be
+        // written onto A's account — where, if A is ever blocked, it comes back
+        // as evidence against B.
+        status: { not: SubscriptionStatus.DELETED },
+      },
+      select: { remnawavePanelId: true, userId: true, createdAt: true },
+      // Deterministic tie-break for the ids that still collide, matching what
+      // the sharing detector does with the same ambiguity.
+      orderBy: { createdAt: 'desc' },
     });
     const userIdByPanelId = new Map<number, string>();
+    const ambiguous: number[] = [];
     for (const row of rows) {
-      if (row.remnawavePanelId !== null) userIdByPanelId.set(row.remnawavePanelId, row.userId);
+      if (row.remnawavePanelId === null) continue;
+      const existing = userIdByPanelId.get(row.remnawavePanelId);
+      if (existing !== undefined) {
+        // Two LIVE subscriptions on one panel id is a state nobody can resolve
+        // from here, and guessing attributes a person's address to a stranger.
+        // Recorded for nobody, and said out loud.
+        if (existing !== row.userId) ambiguous.push(row.remnawavePanelId);
+        continue;
+      }
+      userIdByPanelId.set(row.remnawavePanelId, row.userId);
+    }
+    for (const panelId of ambiguous) userIdByPanelId.delete(panelId);
+    if (ambiguous.length > 0) {
+      this.logger.warn(
+        `Skipped ${ambiguous.length} panel id(s) claimed by more than one live subscription — ` +
+          'an address cannot be attributed without guessing whose it is',
+      );
+    }
+
+    // Read ONCE for the whole run and handed down. Per-address it was one
+    // uncached panel call each, thousands of them, sequentially.
+    const nodes = await this.nodeAddresses.read();
+    if (nodes === null || nodes.length === 0) {
+      // Refusing everything anyway, so say why rather than logging a run that
+      // recorded nothing and looked successful.
+      this.logger.warn(
+        'Connection address collection recorded nothing: the node list is unreadable, so no ' +
+          'address can be told from one of our own exits',
+      );
+      return { recorded: 0, seen: byPanelId.size };
     }
 
     let recorded = 0;
@@ -134,7 +194,7 @@ export class ConnectionIpCollectorService {
       const userId = userIdByPanelId.get(panelId);
       if (userId === undefined) continue;
       for (const address of addresses) {
-        if (await this.observations.record(userId, address)) recorded += 1;
+        if (await this.observations.record(userId, address, nodes)) recorded += 1;
       }
     }
     this.logger.log(
