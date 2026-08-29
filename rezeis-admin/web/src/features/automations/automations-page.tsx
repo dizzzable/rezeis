@@ -63,6 +63,7 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { listUserHints } from '@/features/user-hints/user-hints-api';
 import { useTabSync } from '@/lib/use-tab-sync';
 import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
@@ -93,6 +94,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   webhook_post: 'automationsPage.actionTypes.webhook_post',
   block_ip: 'automationsPage.actionTypes.block_ip',
   block_user: 'automationsPage.actionTypes.block_user',
+  show_hint: 'automationsPage.actionTypes.show_hint',
   system_event: 'automationsPage.actionTypes.system_event',
 };
 
@@ -312,7 +314,7 @@ function HelpAndTemplates({ onUseTemplate }: { onUseTemplate: (template: RuleTem
 
   const steps = ['trigger', 'condition', 'action'] as const;
   const triggerKinds = ['realtime', 'cron', 'manual'] as const;
-  const actionTypes: AutomationActionType[] = ['notify_telegram', 'webhook_post', 'block_ip', 'block_user', 'system_event'];
+  const actionTypes: AutomationActionType[] = ['notify_telegram', 'webhook_post', 'block_ip', 'block_user', 'show_hint', 'system_event'];
   const useCases = ['fraud', 'nodeDown', 'payment', 'daily'] as const;
 
   return (
@@ -817,6 +819,13 @@ function ActionsEditor({
   onChange: (actions: AutomationActionDef[]) => void;
 }) {
   const { t } = useTranslation();
+  // The hint library, for the picker below. Loaded here rather than passed in:
+  // only this editor needs it, and only when a `show_hint` action is present.
+  const hintsQuery = useQuery({
+    queryKey: ['admin', 'user-hints'],
+    queryFn: listUserHints,
+    staleTime: 5 * 60 * 1000,
+  });
   function update(idx: number, next: AutomationActionDef) {
     const copy = actions.slice();
     copy[idx] = next;
@@ -878,6 +887,34 @@ function ActionsEditor({
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </div>
+              {action.type === 'show_hint' ? (
+                /* CHOSEN, NOT TYPED. The parameter is a hint KEY, and an
+                   operator asked to remember one and retype it into JSON will
+                   sooner or later name a hint that does not exist — which the
+                   engine can only report by logging, run after run, while the
+                   rule quietly does nothing. */
+                <div className="space-y-1.5">
+                  <Select
+                    value={typeof action.params?.hintKey === 'string' ? action.params.hintKey : ''}
+                    onValueChange={(v) => update(idx, { ...action, params: { hintKey: v } })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={t('automationsPage.actions.pickHint')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(hintsQuery.data ?? []).map((hint) => (
+                        <SelectItem key={hint.id} value={hint.key}>
+                          {hint.titleRu}
+                          {!hint.isActive && ` — ${t('userHints.off')}`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {t('automationsPage.actions.hintNeedsCustomer')}
+                  </p>
+                </div>
+              ) : (
               <Textarea
                 value={JSON.stringify(action.params ?? {}, null, 2)}
                 onChange={(e) => {
@@ -892,6 +929,7 @@ function ActionsEditor({
                 className="font-mono text-xs"
                 placeholder='{ "text": "Hello" }'
               />
+              )}
             </CardContent>
           </Card>
         ))

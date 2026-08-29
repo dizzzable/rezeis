@@ -19,6 +19,7 @@ export const AUTOMATION_ACTION_TYPES = [
   'block_ip',
   'system_event',
   'block_user',
+  'show_hint',
 ] as const;
 
 export type AutomationActionType = (typeof AUTOMATION_ACTION_TYPES)[number];

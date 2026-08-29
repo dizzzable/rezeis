@@ -17,6 +17,7 @@ import {
   AutomationActionResult,
 } from '../interfaces/automation-action.interface';
 import { UserBlockService } from '../../users/services/user-block.service';
+import { UserHintDeliveryService } from '../../user-hints/services/user-hint-delivery.service';
 import { AUTOMATION_ACTION_TYPES, AutomationActionType } from '../automations.constants';
 
 /**
@@ -41,6 +42,7 @@ export class AutomationActionRegistry {
     private readonly prismaService: PrismaService,
     private readonly systemEventsService: SystemEventsService,
     private readonly userBlockService: UserBlockService,
+    private readonly userHintDeliveryService: UserHintDeliveryService,
     @Inject(paymentsConfig.KEY)
     private readonly paymentsConfiguration: ConfigType<typeof paymentsConfig>,
   ) {}
@@ -99,6 +101,8 @@ export class AutomationActionRegistry {
         return this.blockIp(action, context);
       case 'block_user':
         return this.blockUser(action, context);
+      case 'show_hint':
+        return this.showHint(action, context);
       case 'system_event':
         return this.systemEvent(action, context);
       default:
@@ -205,9 +209,7 @@ export class AutomationActionRegistry {
     action: AutomationActionDefinition,
     context: AutomationActionContext,
   ): Promise<string> {
-    const explicit = readString(action.params, 'userId');
-    const fromTrigger = readString(context.triggerData, 'userId');
-    const userId = explicit ?? fromTrigger;
+    const userId = resolveTriggerUserId(action.params, context.triggerData);
     if (!userId) throw new Error('block_user requires `userId` or trigger data with `userId`');
     // No admin id: a rule is not a person. The cascade records the origin
     // account on every row it writes, so an operator can still see where an
@@ -235,6 +237,52 @@ export class AutomationActionRegistry {
       },
     );
     return `blocked user ${userId}`;
+  }
+
+  /**
+   * Queues an in-cabinet hint for the customer this rule is about.
+   *
+   * ── Why this queues rather than shows ─────────────────────────────────
+   *
+   * Nothing here can show anything. A rule fires when its event arrives — a
+   * payment webhook at three in the morning, a crypto confirmation twenty
+   * minutes after the buyer closed the tab — and the customer is, as a rule,
+   * not looking. So the action writes a row the cabinet drains on their next
+   * visit, and every other property (once-only, expiry, supersession by group)
+   * belongs to the queue rather than to this handler.
+   *
+   * ── Why it is not an error when nothing is queued ─────────────────────
+   *
+   * `raise()` answers `null` for four ordinary reasons: the hint is switched
+   * off, the customer has already had it and it does not repeat, a newer hint
+   * in the same group superseded it, or nobody authored it. Only the last is a
+   * mistake, and the service logs that one loudly. Failing the action on the
+   * other three would fill the execution log with red for a rule behaving
+   * exactly as configured.
+   */
+  private async showHint(
+    action: AutomationActionDefinition,
+    context: AutomationActionContext,
+  ): Promise<string> {
+    const hintKey = readString(action.params, 'hintKey');
+    if (!hintKey) throw new Error('show_hint requires `hintKey`');
+    const userId = resolveTriggerUserId(action.params, context.triggerData);
+    if (!userId) {
+      // Named explicitly rather than swallowed: this is the one failure an
+      // operator can act on, and it means they bound the hint to an event that
+      // does not name a customer.
+      throw new Error(
+        'show_hint requires a trigger that names a customer — this event carries no userId',
+      );
+    }
+    const delivery = await this.userHintDeliveryService.raise({
+      userId,
+      hintKey,
+      source: `rule:${context.ruleId}`,
+    });
+    return delivery === null
+      ? `hint "${hintKey}" was not queued for ${userId} (inactive, already delivered, or superseded)`
+      : `queued hint "${hintKey}" for ${userId}`;
   }
 
   /**
@@ -272,6 +320,40 @@ export class AutomationActionRegistry {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * The customer a triggered rule is about.
+ *
+ * ── WHERE THE USER ID ACTUALLY IS, and why this function exists ───────────
+ *
+ * `AutomationEventBridgeService` builds the trigger payload as
+ * `{ type, category, severity, message, metadata, timestamp }` — the customer
+ * is named inside `metadata`, never at the top level. `SystemEventsService`
+ * knows this and reads `metadata.userId` for its own Telegram cards.
+ *
+ * The `block_user` action did not. It read the TOP level, found nothing on
+ * every realtime trigger, and threw "block_user requires `userId` or trigger
+ * data with `userId`" — so the action worked only when an operator pinned a
+ * specific user id into the rule's params, which is not a rule so much as a
+ * one-shot. A rule that fires on `fraud.signal_opened` and blocks whoever it
+ * names has never been able to work.
+ *
+ * Both places are read, in the order that lets an operator override: an
+ * explicit `params.userId` wins, then the payload's top level (which a manual
+ * trigger may set), then `metadata.userId`, which is where events put it.
+ */
+export function resolveTriggerUserId(
+  params: Readonly<Record<string, unknown>>,
+  triggerData: Readonly<Record<string, unknown>>,
+): string | null {
+  const explicit = readString(params, 'userId');
+  if (explicit !== null) return explicit;
+  const topLevel = readString(triggerData, 'userId');
+  if (topLevel !== null) return topLevel;
+  const metadata = triggerData['metadata'];
+  if (typeof metadata !== 'object' || metadata === null) return null;
+  return readString(metadata as Record<string, unknown>, 'userId');
+}
 
 function readString(params: Readonly<Record<string, unknown>>, key: string): string | null {
   const value = params[key];

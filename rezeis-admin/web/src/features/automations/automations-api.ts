@@ -8,7 +8,8 @@ export type AutomationActionType =
   | 'webhook_post'
   | 'block_ip'
   | 'system_event'
-  | 'block_user';
+  | 'block_user'
+  | 'show_hint';
 
 export interface AutomationActionDef {
   type: AutomationActionType | string;

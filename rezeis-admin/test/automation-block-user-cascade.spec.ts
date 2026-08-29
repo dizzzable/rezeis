@@ -77,6 +77,7 @@ function buildRegistry(blockImpl?: UserBlockService['block']) {
     prismaService,
     systemEventsService,
     userBlockService,
+    { raise: async () => null } as never,
     { starsWebhookSecret: null } as never,
   );
   return { registry, blockCalls, events, userUpdates };

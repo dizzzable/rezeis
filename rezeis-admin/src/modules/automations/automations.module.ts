@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 
 import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
+import { UserHintsModule } from '../user-hints/user-hints.module';
 import { UsersModule } from '../users/users.module';
 import { AutomationActionRegistry } from './actions/action-registry';
 import { AutomationEventBridgeService } from './automation-event-bridge.service';
@@ -35,6 +36,10 @@ import { AUTOMATION_QUEUE } from './automations.constants';
     // the three writers of that column it is the one that runs unattended,
     // which makes it the worst place for the flag to be the only effect.
     UsersModule,
+    // For `UserHintDeliveryService`: the `show_hint` action queues a hint
+    // rather than showing one, because a rule fires when its event arrives
+    // and the customer is, as a rule, not looking at that moment.
+    UserHintsModule,
     BullModule.registerQueue({ name: AUTOMATION_QUEUE }),
   ],
   controllers: [AutomationsController],

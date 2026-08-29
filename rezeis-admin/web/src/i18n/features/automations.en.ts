@@ -59,6 +59,8 @@ export const en = {
       manual: 'Manual only',
     },
     actions: {
+      pickHint: 'Pick a hint',
+      hintNeedsCustomer: 'A hint is addressed to somebody, so the trigger must name a customer. System events — a node going offline, a promo code running out — will not do.',
       heading: 'Actions',
       add: 'Add action',
       required: 'At least one action is required.',
@@ -69,6 +71,7 @@ export const en = {
       webhook_post: 'POST webhook',
       block_ip: 'Block IP',
       block_user: 'Block user',
+      show_hint: 'Show a hint in the cabinet',
       system_event: 'Emit system event',
     },
     executions: {
