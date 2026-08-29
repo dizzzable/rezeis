@@ -1091,6 +1091,14 @@ export class AdminUserSubscriptionsController {
     // watch, the audit log is what answers "who did this" months later, and
     // only one of the two is queried by admin. Both, then — this action is not
     // undoable and the customer feels it immediately.
+    // SINGULAR, and deliberately NOT the bulk toolbar's
+    // `user.subscription.devices_revoked`. The other two actions on this
+    // controller share a name with their bulk twin because they are the same
+    // act at a different scale — a traffic reset is a traffic reset. This one
+    // is not: bulk unbinds EVERY device on every profile the customer has,
+    // while this unbinds one named `hwid`. Collapsing them would make "all
+    // devices were cut off" and "one device was cut off" indistinguishable in
+    // the trail, which is the question the customer actually asks.
     await this.auditLog(admin, req, 'user.subscription.device_revoked', {
       subscriptionId,
       hwid,

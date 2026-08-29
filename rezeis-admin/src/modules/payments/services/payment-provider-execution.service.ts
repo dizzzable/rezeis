@@ -696,7 +696,29 @@ export class PaymentProviderExecutionService {
     if (input.transaction.currency !== Currency.XTR) {
       throw new ServiceUnavailableException('Telegram Stars payments require XTR pricing');
     }
+    const rawStars = Number(input.transaction.amount.toString());
+    if (!Number.isInteger(rawStars) || rawStars <= 0) {
+      throw new ServiceUnavailableException(
+        `Telegram Stars needs a whole positive number of Stars; this plan is priced at ` +
+          `${input.transaction.amount.toString()} XTR. Fix the plan price.`,
+      );
+    }
+    const starsAmount = rawStars;
     const payload = {
+      // ── STARS ARE WHOLE, AND A FRACTION IS AN OPERATOR MISTAKE ──────────
+      //
+      // `prices[].amount` for XTR is a COUNT of Stars, not a minor unit — there
+      // is no such thing as half a Star. The amount arrives from a plan price
+      // an operator typed, as a `Decimal` with two places like every other
+      // currency, and it was handed to `Number()` and sent as-is. Telegram then
+      // answered a generic `400 BAD_REQUEST`, which surfaces here as
+      // "Telegram Stars invoice creation failed" — a message that names the
+      // integration and not the price, so the operator has nothing to act on
+      // and the customer just sees a checkout that will not open.
+      //
+      // Refused BEFORE the call, naming the actual number. Rounding would be
+      // the wrong kindness: it silently charges something other than the price
+      // on the plan, in either direction.
       title: truncate(input.description, 32),
       description: truncate(input.description, 255),
       payload: input.transaction.paymentId,
@@ -704,7 +726,7 @@ export class PaymentProviderExecutionService {
       prices: [
         {
           label: 'Telegram Stars',
-          amount: Number(input.transaction.amount.toString()),
+          amount: starsAmount,
         },
       ],
     };

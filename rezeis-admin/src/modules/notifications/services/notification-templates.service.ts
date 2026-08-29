@@ -245,7 +245,7 @@ export class NotificationTemplatesService implements OnModuleInit {
         message: 'This template is not part of the shipped catalog',
       });
     }
-    return this.prismaService.notificationTemplate.update({
+    const restored = await this.prismaService.notificationTemplate.update({
       where: { id },
       data: {
         title: catalog.title,
@@ -255,6 +255,20 @@ export class NotificationTemplatesService implements OnModuleInit {
         buttons: (catalog.buttons ?? []) as never,
       },
     });
+    // ANNOUNCED, because this is the one write in this service that DESTROYS
+    // operator work and cannot be undone. An edit can be re-edited from what is
+    // on screen; a restore replaces copy somebody wrote — possibly months ago,
+    // possibly in two languages — with the shipped text, and nothing anywhere
+    // holds the old version. A colleague asking "who reset our renewal message"
+    // needs an answer, and the event stream is where the other template actions
+    // already leave theirs.
+    this.events.info(
+      EVENT_TYPES.NOTIFICATION_TEMPLATE_UPDATED,
+      'SYSTEM',
+      `Notification template restored to default: ${existing.type}`,
+      { templateId: id, type: existing.type, restoredToDefault: true },
+    );
+    return restored;
   }
 
   /**
