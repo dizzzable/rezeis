@@ -78,6 +78,7 @@ function buildRegistry(blockImpl?: UserBlockService['block']) {
     systemEventsService,
     userBlockService,
     { raise: async () => null } as never,
+    { resolve: async () => ({ kind: 'ok', userIds: [], truncated: false }) } as never,
     { starsWebhookSecret: null } as never,
   );
   return { registry, blockCalls, events, userUpdates };

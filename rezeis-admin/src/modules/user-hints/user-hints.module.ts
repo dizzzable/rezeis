@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { AdminUserHintsController } from './controllers/admin-user-hints.controller';
 import { InternalUserHintsController } from './controllers/internal-user-hints.controller';
+import { HintAudienceService } from './services/hint-audience.service';
 import { UserHintDeliveryService } from './services/user-hint-delivery.service';
 import { UserHintService } from './services/user-hint.service';
 
@@ -29,7 +30,7 @@ import { UserHintService } from './services/user-hint.service';
 @Module({
   imports: [AuthModule, RbacModule],
   controllers: [AdminUserHintsController, InternalUserHintsController],
-  providers: [UserHintService, UserHintDeliveryService],
-  exports: [UserHintDeliveryService],
+  providers: [UserHintService, UserHintDeliveryService, HintAudienceService],
+  exports: [UserHintDeliveryService, HintAudienceService],
 })
 export class UserHintsModule {}

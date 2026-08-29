@@ -17,6 +17,11 @@ import {
   AutomationActionResult,
 } from '../interfaces/automation-action.interface';
 import { UserBlockService } from '../../users/services/user-block.service';
+import {
+  HINT_AUDIENCES,
+  HintAudienceService,
+  type HintAudienceName,
+} from '../../user-hints/services/hint-audience.service';
 import { UserHintDeliveryService } from '../../user-hints/services/user-hint-delivery.service';
 import { AUTOMATION_ACTION_TYPES, AutomationActionType } from '../automations.constants';
 
@@ -43,6 +48,7 @@ export class AutomationActionRegistry {
     private readonly systemEventsService: SystemEventsService,
     private readonly userBlockService: UserBlockService,
     private readonly userHintDeliveryService: UserHintDeliveryService,
+    private readonly hintAudienceService: HintAudienceService,
     @Inject(paymentsConfig.KEY)
     private readonly paymentsConfiguration: ConfigType<typeof paymentsConfig>,
   ) {}
@@ -103,6 +109,8 @@ export class AutomationActionRegistry {
         return this.blockUser(action, context);
       case 'show_hint':
         return this.showHint(action, context);
+      case 'show_hint_to_audience':
+        return this.showHintToAudience(action, context);
       case 'system_event':
         return this.systemEvent(action, context);
       default:
@@ -286,6 +294,77 @@ export class AutomationActionRegistry {
   }
 
   /**
+   * Queues a hint for everybody a QUERY selects, rather than for whoever an
+   * event named.
+   *
+   * ── Why this action exists at all ─────────────────────────────────────
+   *
+   * Every other hint follows something that happened. The most useful one
+   * follows something that did NOT happen — the customer paid a day ago and
+   * has still never connected — and nothing emits an event for a thing not
+   * occurring. So it is a scheduled query, and it belongs on a CRON rule.
+   *
+   * ── Standing down is a success, not a failure ─────────────────────────
+   *
+   * `HintAudienceService` answers `blind` when it cannot tell "has never
+   * connected" from "we were never told" — which is the state of any install
+   * whose Remnawave webhooks are not arriving. Acting on that would hint the
+   * entire customer base, including people connected for months.
+   *
+   * The action reports that as a SUCCESS with the reason in its message,
+   * deliberately. A failed execution invites an operator to retry, and a retry
+   * cannot fix a missing webhook; the message is what tells them what to fix.
+   * The audience service logs it at warn level as well.
+   */
+  private async showHintToAudience(
+    action: AutomationActionDefinition,
+    _context: AutomationActionContext,
+  ): Promise<string> {
+    const hintKey = readString(action.params, 'hintKey');
+    if (!hintKey) throw new Error('show_hint_to_audience requires `hintKey`');
+    const audience = readString(action.params, 'audience');
+    if (audience === null || !(HINT_AUDIENCES as readonly string[]).includes(audience)) {
+      throw new Error(
+        `show_hint_to_audience requires \`audience\` to be one of: ${HINT_AUDIENCES.join(', ')}`,
+      );
+    }
+
+    const outcome = await this.hintAudienceService.resolve({
+      audience: audience as HintAudienceName,
+      afterHours: readNumber(action.params, 'afterHours'),
+      beforeHours: readNumber(action.params, 'beforeHours'),
+    });
+    if (outcome.kind === 'blind') {
+      return `stood down without hinting anybody: ${outcome.reason}`;
+    }
+    if (outcome.userIds.length === 0) {
+      return `nobody matched the "${audience}" audience`;
+    }
+
+    // Sequential, not parallel. This is a scheduled job with nowhere to be, and
+    // the supersession check inside `raise()` reads and deletes rows for the
+    // same customer — running the batch concurrently would race those against
+    // each other for a customer matched twice.
+    let queued = 0;
+    for (const userId of outcome.userIds) {
+      const delivery = await this.userHintDeliveryService.raise({
+        userId,
+        hintKey,
+        source: `audience:${audience}`,
+      });
+      if (delivery !== null) queued += 1;
+    }
+    // Both numbers, because they differ for an ordinary reason: the hint is
+    // once-only, so a daily rule matches the same people again and queues
+    // nothing for them. An operator seeing "matched 40, queued 3" is looking at
+    // a rule working exactly as intended.
+    return (
+      `queued "${hintKey}" for ${queued} of ${outcome.userIds.length} matched ` +
+      `${outcome.truncated ? '(capped) ' : ''}account(s)`
+    );
+  }
+
+  /**
    * Emit a custom event into the SystemEventsService stream.
    *
    * `type` stays free-form on purpose: rules emit domain-specific types that
@@ -360,6 +439,16 @@ function readString(params: Readonly<Record<string, unknown>>, key: string): str
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/** An optional positive number from the action's params. */
+function readNumber(
+  params: Readonly<Record<string, unknown>>,
+  key: string,
+): number | undefined {
+  const value = params[key];
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return value;
 }
 
 function readSeverity(

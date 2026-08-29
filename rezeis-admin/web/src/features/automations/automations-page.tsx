@@ -96,6 +96,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   block_ip: 'automationsPage.actionTypes.block_ip',
   block_user: 'automationsPage.actionTypes.block_user',
   show_hint: 'automationsPage.actionTypes.show_hint',
+  show_hint_to_audience: 'automationsPage.actionTypes.show_hint_to_audience',
   system_event: 'automationsPage.actionTypes.system_event',
 };
 
@@ -315,7 +316,7 @@ function HelpAndTemplates({ onUseTemplate }: { onUseTemplate: (template: RuleTem
 
   const steps = ['trigger', 'condition', 'action'] as const;
   const triggerKinds = ['realtime', 'cron', 'manual'] as const;
-  const actionTypes: AutomationActionType[] = ['notify_telegram', 'webhook_post', 'block_ip', 'block_user', 'show_hint', 'system_event'];
+  const actionTypes: AutomationActionType[] = ['notify_telegram', 'webhook_post', 'block_ip', 'block_user', 'show_hint', 'show_hint_to_audience', 'system_event'];
   const useCases = ['fraud', 'nodeDown', 'payment', 'daily'] as const;
 
   return (
@@ -968,7 +969,7 @@ function ActionsEditor({
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </div>
-              {action.type === 'show_hint' ? (
+              {action.type === 'show_hint' || action.type === 'show_hint_to_audience' ? (
                 /* CHOSEN, NOT TYPED. The parameter is a hint KEY, and an
                    operator asked to remember one and retype it into JSON will
                    sooner or later name a hint that does not exist — which the
@@ -977,7 +978,16 @@ function ActionsEditor({
                 <div className="space-y-1.5">
                   <Select
                     value={typeof action.params?.hintKey === 'string' ? action.params.hintKey : ''}
-                    onValueChange={(v) => update(idx, { ...action, params: { hintKey: v } })}
+                    onValueChange={(v) =>
+                      update(idx, {
+                        ...action,
+                        // The other params are KEPT. An audience action carries
+                        // its audience name and window alongside the hint, and
+                        // replacing the whole object on every pick would silently
+                        // reset them to defaults.
+                        params: { ...action.params, hintKey: v },
+                      })
+                    }
                   >
                     <SelectTrigger>
                       <SelectValue placeholder={t('automationsPage.actions.pickHint')} />
@@ -991,9 +1001,36 @@ function ActionsEditor({
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {t('automationsPage.actions.hintNeedsCustomer')}
-                  </p>
+                  {action.type === 'show_hint_to_audience' ? (
+                    <>
+                      <Select
+                        value={
+                          typeof action.params?.audience === 'string'
+                            ? action.params.audience
+                            : ''
+                        }
+                        onValueChange={(v) =>
+                          update(idx, { ...action, params: { ...action.params, audience: v } })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder={t('automationsPage.actions.pickAudience')} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="paid-not-connected">
+                            {t('automationsPage.audiences.paid-not-connected')}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        {t('automationsPage.actions.audienceNeedsCron')}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {t('automationsPage.actions.hintNeedsCustomer')}
+                    </p>
+                  )}
                 </div>
               ) : (
               <Textarea

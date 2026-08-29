@@ -9,7 +9,8 @@ export type AutomationActionType =
   | 'block_ip'
   | 'system_event'
   | 'block_user'
-  | 'show_hint';
+  | 'show_hint'
+  | 'show_hint_to_audience';
 
 export interface AutomationActionDef {
   type: AutomationActionType | string;

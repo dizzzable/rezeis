@@ -43,7 +43,10 @@ const CONTEXT = {
   triggerData: EVENT_PAYLOAD,
 };
 
-function buildRegistry(raiseImpl?: (input: Record<string, unknown>) => Promise<unknown>) {
+function buildRegistry(
+  raiseImpl?: (input: Record<string, unknown>) => Promise<unknown>,
+  audience?: unknown,
+) {
   const raised: Array<Record<string, unknown>> = [];
   const registry = new AutomationActionRegistry(
     {} as never,
@@ -55,6 +58,10 @@ function buildRegistry(raiseImpl?: (input: Record<string, unknown>) => Promise<u
         raised.push(input);
         return raiseImpl !== undefined ? await raiseImpl(input) : { id: 'del-1' };
       },
+    } as never,
+    {
+      resolve: async () =>
+        audience ?? { kind: 'ok', userIds: ['u-1', 'u-2'], truncated: false },
     } as never,
     { starsWebhookSecret: null } as never,
   );
@@ -171,6 +178,7 @@ describe('block_user reads the customer the same way', () => {
         },
       } as never,
       { raise: async () => null } as never,
+      { resolve: async () => ({ kind: 'ok', userIds: [], truncated: false }) } as never,
       { starsWebhookSecret: null } as never,
     );
 
@@ -182,5 +190,98 @@ describe('block_user reads the customer the same way', () => {
 
     assert.equal(result.status, 'success');
     assert.equal(blocked[0].userId, 'user-7');
+  });
+});
+
+describe('the scheduled audience action', () => {
+  it('queues the hint for everybody the query named', async () => {
+    const { registry, raised } = buildRegistry();
+
+    const result = await registry.execute(
+      0,
+      {
+        type: 'show_hint_to_audience',
+        params: { hintKey: 'connect', audience: 'paid-not-connected' },
+      } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'success');
+    assert.equal(raised.length, 2);
+    assert.equal(raised[0].source, 'audience:paid-not-connected');
+  });
+
+  it('reports both numbers, because they differ for an ordinary reason', async () => {
+    // The hint is once-only, so a daily rule matches the same people again and
+    // queues nothing for them. "matched 2, queued 0" is a rule working exactly
+    // as intended, and an operator needs to be able to see that.
+    const { registry } = buildRegistry(async () => null);
+
+    const result = await registry.execute(
+      0,
+      {
+        type: 'show_hint_to_audience',
+        params: { hintKey: 'connect', audience: 'paid-not-connected' },
+      } as never,
+      CONTEXT as never,
+    );
+
+    assert.match(String(result.message), /0 of 2/);
+  });
+
+  it('stands down as a SUCCESS when the signal is blind', async () => {
+    // Deliberately not a failure. A failed execution invites a retry, and a
+    // retry cannot fix a missing webhook; the message is what tells the
+    // operator what to fix.
+    const { registry, raised } = buildRegistry(undefined, {
+      kind: 'blind',
+      reason: 'no account has a first-traffic timestamp',
+    });
+
+    const result = await registry.execute(
+      0,
+      {
+        type: 'show_hint_to_audience',
+        params: { hintKey: 'connect', audience: 'paid-not-connected' },
+      } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'success');
+    assert.match(String(result.message), /stood down/);
+    assert.deepStrictEqual(raised, [], 'and above all: it hinted nobody');
+  });
+
+  it('refuses an audience nobody defined', async () => {
+    const { registry, raised } = buildRegistry();
+
+    const result = await registry.execute(
+      0,
+      { type: 'show_hint_to_audience', params: { hintKey: 'x', audience: 'everybody' } } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'failed');
+    assert.deepStrictEqual(raised, []);
+  });
+
+  it('says so when nobody matched', async () => {
+    const { registry } = buildRegistry(undefined, {
+      kind: 'ok',
+      userIds: [],
+      truncated: false,
+    });
+
+    const result = await registry.execute(
+      0,
+      {
+        type: 'show_hint_to_audience',
+        params: { hintKey: 'connect', audience: 'paid-not-connected' },
+      } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'success');
+    assert.match(String(result.message), /nobody matched/);
   });
 });

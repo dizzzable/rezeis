@@ -15,6 +15,9 @@ export const en = {
       body: '{{count}} other enabled rule shows a hint on an event that arrives alongside this one. A single purchase emits several events within seconds, and the customer gets window after window.',
       fix: 'If that is not deliberate, give both hints the same group — then only the newest is shown.',
     },
+    audiences: {
+      'paid-not-connected': 'Paid, but has never connected',
+    },
     tabs: {
       rules: 'Rules',
       hints: 'Hints',
@@ -65,6 +68,8 @@ export const en = {
     },
     actions: {
       pickHint: 'Pick a hint',
+      pickAudience: 'Whom to pick',
+      audienceNeedsCron: 'This action picks its own recipients, so the rule needs a scheduled trigger rather than an event one. Once a day is plenty: a hint is never delivered to the same person twice.',
       hintNeedsCustomer: 'A hint is addressed to somebody, so the trigger must name a customer. System events — a node going offline, a promo code running out — will not do.',
       heading: 'Actions',
       add: 'Add action',
@@ -77,6 +82,7 @@ export const en = {
       block_ip: 'Block IP',
       block_user: 'Block user',
       show_hint: 'Show a hint in the cabinet',
+      show_hint_to_audience: 'Show a hint on a schedule',
       system_event: 'Emit system event',
     },
     executions: {

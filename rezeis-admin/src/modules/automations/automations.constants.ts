@@ -20,6 +20,7 @@ export const AUTOMATION_ACTION_TYPES = [
   'system_event',
   'block_user',
   'show_hint',
+  'show_hint_to_audience',
 ] as const;
 
 export type AutomationActionType = (typeof AUTOMATION_ACTION_TYPES)[number];
