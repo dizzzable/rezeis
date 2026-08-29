@@ -5,7 +5,7 @@
 <h1 align="center">Rezeis Admin Panel</h1>
 
 <p align="center">
-  <strong>Полнофункциональная админ-панель для управления VPN-сервисом на базе Remnawave</strong>
+  <strong>Полнофункциональная админ-панель для управления VPN-сервисом с интеграцией Remnawave</strong>
 </p>
 
 <p align="center">
