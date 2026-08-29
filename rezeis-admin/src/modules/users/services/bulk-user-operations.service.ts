@@ -579,7 +579,19 @@ export class BulkUserOperationsService {
             },
             select: { id: true },
           });
-          await this.profileSyncQueue?.enqueue(job.id);
+          // A job row with nothing enqueued is picked up by the sweep minutes
+          // later, so a failure to enqueue is a DELAY and not a loss — which is
+          // exactly why it must not abort the loop and take the audit row with
+          // it. Without this the work still happened (the rows are durable) and
+          // the operator trail said nothing at all.
+          try {
+            await this.profileSyncQueue?.enqueue(job.id);
+          } catch (err) {
+            this.logger.warn(
+              `Bulk resync: job ${job.id} was written but not enqueued; the sweep will run it ` +
+                `(${(err as Error).message})`,
+            );
+          }
         }
         await this.recordOperatorRow(BULK_AUDIT_ACTION.resync_profiles, input, batchId, user, {
           profiles: subscriptions.length,

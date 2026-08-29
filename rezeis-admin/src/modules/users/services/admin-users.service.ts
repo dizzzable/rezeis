@@ -273,10 +273,11 @@ function buildUserListWhere(query: AdminUserListQueryDto): Prisma.UserWhereInput
  * than an empty object that would read as a filter.
  */
 function buildSearchTerm(search: string | undefined): Prisma.UserWhereInput | null {
-  const trimmed = search?.trim();
-  if (!trimmed) {
+  const raw = search?.trim();
+  if (!raw) {
     return null;
   }
+  const trimmed = escapeLikeWildcards(raw);
 
   const conditions: Prisma.UserWhereInput[] = [
     { id: { contains: trimmed, mode: 'insensitive' } },
@@ -407,3 +408,22 @@ function buildUserResolveLabel(user: ResolvedUserRow): string {
   return parts.length > 0 ? parts.join(' · ') : user.id;
 }
 
+/**
+ * Makes `%` and `_` mean themselves.
+ *
+ * Prisma's `contains` compiles to `LIKE '%' || term || '%'` and does NOT escape
+ * the term, so both SQL wildcards passed straight through from the operator's
+ * search box. That is not exotic input here: an underscore is ordinary in a
+ * login — `rz_one` is in this repository's own fixtures — and searching for it
+ * quietly also matched `rzXone`, `rz-one` and every other single character in
+ * that position. A lone `%` matched the entire install, which beside a bulk
+ * toolbar with a select-all is a genuinely bad way to be surprised.
+ *
+ * PostgreSQL's `LIKE` uses backslash as its escape character by default, so
+ * prefixing is enough and no `ESCAPE` clause — which Prisma could not emit
+ * here anyway — is needed. The backslash itself is escaped FIRST; doing it last
+ * would re-escape the backslashes this function had just added.
+ */
+function escapeLikeWildcards(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}

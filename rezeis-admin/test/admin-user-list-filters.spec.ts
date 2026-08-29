@@ -200,3 +200,40 @@ describe('account filters', () => {
     assert.ok(range.lte instanceof Date);
   });
 });
+
+describe('the search box does not hand SQL wildcards to the database', () => {
+  it('matches a literal underscore, not any character', async () => {
+    // Prisma's `contains` compiles to LIKE and does not escape the term, so an
+    // underscore — ordinary in a login, `rz_one` is in this repo's own
+    // fixtures — silently also matched `rzXone` and `rz-one`.
+    const term = searchTermOf(whereFor({ search: 'rz_one' }));
+    assert.ok(term !== null);
+    assert.equal(term, 'rz\\_one');
+  });
+
+  it('matches a literal percent, so a stray "%" does not select the install', async () => {
+    // Beside a bulk toolbar with a select-all, a search that quietly matches
+    // everybody is a genuinely bad way to be surprised.
+    assert.equal(searchTermOf(whereFor({ search: '%' })), '\\%');
+  });
+
+  it('escapes the backslash first, so the escapes it adds are not re-escaped', async () => {
+    assert.equal(searchTermOf(whereFor({ search: 'a\\b' })), 'a\\\\b');
+  });
+
+  it('leaves an ordinary term untouched — the control', async () => {
+    assert.equal(searchTermOf(whereFor({ search: 'ivan' })), 'ivan');
+  });
+
+  /** The `contains` value the search term compiled to, from the first OR arm. */
+  function searchTermOf(where: Record<string, unknown>): string | null {
+    const terms = andTerms(where);
+    for (const term of terms) {
+      const or = (term as { OR?: ReadonlyArray<Record<string, unknown>> }).OR;
+      if (or === undefined) continue;
+      const first = or[0] as { id?: { contains?: string } };
+      if (typeof first?.id?.contains === 'string') return first.id.contains;
+    }
+    return null;
+  }
+});
