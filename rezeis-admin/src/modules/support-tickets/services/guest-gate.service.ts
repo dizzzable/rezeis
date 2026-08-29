@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { BlockedIdentityKind, DeviceSignalKind } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { UserIpObservationService } from '../../device-intelligence/services/user-ip-observation.service';
 import { normaliseDeviceSignal } from '../../device-intelligence/utils/device-signal.util';
 
 /** What the gate decided about one attempt to open a guest conversation. */
@@ -65,11 +66,16 @@ const REPEAT_WINDOW_DAYS = 7;
 export class GuestGateService {
   private readonly logger = new Logger(GuestGateService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly ipObservations: UserIpObservationService,
+  ) {}
 
   public async evaluate(input: {
     readonly installId?: string | null;
     readonly deviceHash?: string | null;
+    /** The visitor's address, as the edge saw it. */
+    readonly clientIp?: string | null;
   }): Promise<GuestGateVerdict> {
     // Normalised through the SAME function the device-observation writer uses,
     // so a value stored by one side is findable by the other. A signal that
@@ -81,7 +87,7 @@ export class GuestGateService {
     ]
       .filter((outcome) => outcome.ok)
       .map((outcome) => (outcome as { value: string }).value);
-    if (signals.length === 0) return { kind: 'allow', flaggedReason: null };
+    if (signals.length === 0) return this.byAddress(input.clientIp);
 
     const entries = await this.prismaService.blockedIdentity.findMany({
       where: { kind: BlockedIdentityKind.DEVICE_FP, value: { in: signals } },
@@ -146,6 +152,34 @@ export class GuestGateService {
       };
     }
 
-    return { kind: 'allow', flaggedReason: null };
+    // Nothing on the device. The address is the other half — and on this
+    // product it is the stronger half, because it comes from the VPN
+    // connection itself rather than from a browser that can decline to answer.
+    return this.byAddress(input.clientIp);
+  }
+
+  /**
+   * The address half of the same question.
+   *
+   * Separate and last because it says LESS: a device is a machine, an address
+   * is a place, and households, offices and shared connections are ordinary.
+   * `UserIpObservationService` already refuses our own exit nodes and carrier
+   * NAT, so what survives is worth showing an operator — but it still marks and
+   * never refuses.
+   */
+  private async byAddress(clientIp: string | null | undefined): Promise<GuestGateVerdict> {
+    if (typeof clientIp !== 'string' || clientIp.trim().length === 0) {
+      return { kind: 'allow', flaggedReason: null };
+    }
+    const matches = await this.ipObservations.blockedMatches(clientIp);
+    if (matches.length === 0) return { kind: 'allow', flaggedReason: null };
+    return {
+      kind: 'allow',
+      flaggedReason:
+        `address was seen on ${matches.length} blocked account(s)` +
+        // The hit count is what separates a home connection from somewhere
+        // passed through once, and it is the first thing an operator weighs.
+        ` (strongest: ${matches[0].hits} sighting(s))`,
+    };
   }
 }

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { BlockedIdentitiesModule } from '../blocked-identities/blocked-identities.module';
+import { DeviceIntelligenceModule } from '../device-intelligence/device-intelligence.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SettingsModule } from '../settings/settings.module';
 import { AdminSupportTicketsController } from './controllers/admin-support-tickets.controller';
@@ -17,7 +18,7 @@ import { SupportTicketsService } from './services/support-tickets.service';
   // For `BlockedIdentityService`: silencing a guest device is a MANUAL
   // blocklist entry, and manual is what separates a refusal from the
   // cascade rows every block writes automatically.
-  imports: [AuthModule, BlockedIdentitiesModule, NotificationsModule, SettingsModule],
+  imports: [AuthModule, BlockedIdentitiesModule, DeviceIntelligenceModule, NotificationsModule, SettingsModule],
   controllers: [
     AdminSupportTicketsController,
     InternalUserSupportController,

@@ -81,6 +81,10 @@ export class InternalGuestSupportController {
     const verdict = await this.guestGate.evaluate({
       installId: body.installId ?? null,
       deviceHash: body.deviceHash ?? null,
+      // The address the edge saw. On this product it is the stronger of the
+      // two signals: it comes from the VPN connection itself rather than from
+      // a browser that can decline to answer.
+      clientIp: clientIp ?? null,
     });
     if (verdict.kind === 'silenced') {
       throw new NotFoundException('Conversation not found');

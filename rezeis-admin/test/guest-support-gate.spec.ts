@@ -35,6 +35,8 @@ function build(options: {
   readonly observedOnBlocked?: boolean;
   /** Prior guest conversations from the same machine, inside the window. */
   readonly priorConversations?: number;
+  /** Blocked accounts previously seen from the visitor's address. */
+  readonly ipMatches?: ReadonlyArray<{ userId: string; hits: number; lastSeenAt: Date }>;
 } = {}) {
   const queries: Array<Record<string, unknown>> = [];
   const prisma = {
@@ -54,7 +56,13 @@ function build(options: {
       },
     },
   };
-  return { service: new GuestGateService(prisma as never), queries };
+  const ipObservations = {
+    blockedMatches: async () => options.ipMatches ?? [],
+  };
+  return {
+    service: new GuestGateService(prisma as never, ipObservations as never),
+    queries,
+  };
 }
 
 describe('a device an operator silenced by hand', () => {
@@ -199,5 +207,65 @@ describe('the pest who never had an account', () => {
       String((verdict as { flaggedReason: string }).flaggedReason),
       /blocklist from a blocked account/,
     );
+  });
+});
+
+describe('the address, which on this product says more than the browser', () => {
+  it('marks a visitor whose address was seen on a blocked account', async () => {
+    // The stronger of the two signals here: it comes from the VPN connection
+    // itself — the tunnel is established FROM the customer's real address —
+    // rather than from a browser that can decline to answer.
+    const { service } = build({
+      entries: [],
+      ipMatches: [{ userId: 'banned-1', hits: 14, lastSeenAt: new Date() }],
+    });
+
+    const verdict = await service.evaluate({ clientIp: '198.51.100.7' });
+
+    assert.equal(verdict.kind, 'allow');
+    assert.match(String((verdict as { flaggedReason: string }).flaggedReason), /blocked account/);
+  });
+
+  it('carries the sighting count, which is what an operator weighs first', async () => {
+    // It separates a home connection from somewhere passed through once.
+    const { service } = build({
+      entries: [],
+      ipMatches: [{ userId: 'banned-1', hits: 14, lastSeenAt: new Date() }],
+    });
+
+    const verdict = await service.evaluate({ clientIp: '198.51.100.7' });
+
+    assert.match(String((verdict as { flaggedReason: string }).flaggedReason), /14 sighting/);
+  });
+
+  it('checks the address even when the browser reported nothing', async () => {
+    // The case the address exists for. Somebody who suppresses device signals
+    // still has to connect from somewhere.
+    const { service } = build({
+      entries: [],
+      ipMatches: [{ userId: 'banned-1', hits: 2, lastSeenAt: new Date() }],
+    });
+
+    const verdict = await service.evaluate({ clientIp: '198.51.100.7' });
+
+    assert.notEqual((verdict as { flaggedReason: string | null }).flaggedReason, null);
+  });
+
+  it('still lets a clean visitor through unmarked', async () => {
+    const { service } = build({ entries: [], ipMatches: [] });
+
+    const verdict = await service.evaluate({ clientIp: '198.51.100.7' });
+
+    assert.deepStrictEqual(verdict, { kind: 'allow', flaggedReason: null });
+  });
+
+  it('does not let an address override a hand-silenced device', async () => {
+    // The operator's explicit decision outranks every automatic signal.
+    const { service } = build({
+      entries: [{ source: 'manual' }],
+      ipMatches: [{ userId: 'banned-1', hits: 2, lastSeenAt: new Date() }],
+    });
+
+    assert.equal((await service.evaluate({ deviceHash: FP, clientIp: '198.51.100.7' })).kind, 'silenced');
   });
 });
