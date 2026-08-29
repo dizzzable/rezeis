@@ -12,6 +12,7 @@ import {
   Paperclip,
   FileText,
   UserX,
+  ShieldAlert,
   Download,
   Settings,
 } from 'lucide-react';
@@ -80,7 +81,24 @@ interface Ticket {
     login?: string | null;
     email?: string | null;
   } | null;
-  guest?: { id: string; email: string | null; displayName: string | null } | null;
+  guest?: {
+    id: string
+    email: string | null
+    displayName: string | null
+    /**
+     * Why this conversation looks like it came from a blocked account. Null for
+     * the overwhelming majority — the mark means something only because most
+     * visitors do not carry it.
+     */
+    flaggedReason?: string | null
+    /**
+     * Whether there is a device to silence. Deliberately not the fingerprint
+     * itself: the value identifies a machine, the endpoint reads it server-side
+     * from the ticket, and shipping it here would put a device identifier in
+     * every admin's console and page history for nothing.
+     */
+    hasDeviceSignal?: boolean
+  } | null;
   messages: TicketMessage[];
   docRequests?: TicketDocRequest[];
 }
@@ -167,6 +185,23 @@ export default function SupportTicketsPage() {
       invalidate();
       toast.success(t('supportTicketsPage.toast.reopened'));
     },
+  });
+
+  /**
+   * Stops this visitor's device opening further anonymous conversations.
+   *
+   * A device match only MARKS a conversation — guest support is where a ban is
+   * appealed, and refusing on a match would make a wrong ban unappealable. This
+   * is the refusal, and it costs an operator reading the conversation and
+   * deciding. Hence a button, and hence the confirmation.
+   */
+  const silenceMutation = useMutation({
+    mutationFn: () => api.post(`/admin/support-tickets/${selectedTicket}/silence-device`),
+    onSuccess: () => {
+      invalidate();
+      toast.success(t('supportTicketsPage.toast.deviceSilenced'));
+    },
+    onError: () => toast.error(t('supportTicketsPage.toast.deviceSilenceFailed')),
   });
 
   return (
@@ -279,6 +314,10 @@ export default function SupportTicketsPage() {
               replyPending={replyMutation.isPending}
               onClose={() => closeMutation.mutate()}
               onReopen={() => reopenMutation.mutate()}
+              onSilenceDevice={() => {
+                if (!window.confirm(t('supportTicketsPage.detail.silenceConfirm'))) return
+                silenceMutation.mutate()
+              }}
               onChanged={invalidate}
             />
           ) : null}
@@ -298,6 +337,7 @@ interface TicketDetailProps {
   replyPending: boolean;
   onClose: () => void;
   onReopen: () => void;
+  onSilenceDevice: () => void;
   onChanged: () => void;
 }
 
@@ -309,6 +349,7 @@ function TicketDetail({
   replyPending,
   onClose,
   onReopen,
+  onSilenceDevice,
   onChanged,
 }: TicketDetailProps) {
   const { t } = useTranslation();
@@ -331,9 +372,32 @@ function TicketDetail({
               )}
             </CardTitle>
             {guest ? (
-              <p className="text-xs text-muted-foreground mt-1 truncate">
-                {t('supportTicketsPage.detail.guestContact')}: {contact ?? t('supportTicketsPage.detail.noContact')}
-              </p>
+              <div className="mt-1 space-y-1">
+                <p className="text-xs text-muted-foreground truncate">
+                  {t('supportTicketsPage.detail.guestContact')}: {contact ?? t('supportTicketsPage.detail.noContact')}
+                </p>
+                {/* The mark, and the action it exists to inform. Shown only when
+                    there is something to judge — a badge on every anonymous
+                    conversation would say nothing. */}
+                {ticket.guest?.flaggedReason && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="gap-1 border-amber-500/50 text-amber-600 text-[10px]">
+                      <ShieldAlert className="h-3 w-3" />
+                      {t('supportTicketsPage.detail.flaggedDevice')}
+                    </Badge>
+                    {ticket.guest?.hasDeviceSignal && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-xs text-muted-foreground"
+                        onClick={onSilenceDevice}
+                      >
+                        {t('supportTicketsPage.detail.silenceDevice')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
                 <span className="font-medium text-foreground truncate">

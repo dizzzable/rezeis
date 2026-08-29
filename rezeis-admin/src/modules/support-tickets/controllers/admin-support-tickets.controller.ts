@@ -18,7 +18,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Prisma, SupportTicketStatus, SupportTicket, SupportTicketMessage, User } from '@prisma/client';
+import { BlockedIdentityKind, Prisma, SupportTicketStatus, SupportTicket, SupportTicketMessage, User } from '@prisma/client';
 import type { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -35,6 +35,7 @@ import { UploadAttachmentDto } from '../dto/attachment.dto';
 import { CreateDocumentRequestDto } from '../dto/document-request.dto';
 import { SupportAttachmentService } from '../services/support-attachment.service';
 import { SupportNotificationsService } from '../services/support-notifications.service';
+import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { SupportTicketsService } from '../services/support-tickets.service';
 import { AttachmentValidationError } from '../utils/support-attachment.util';
 
@@ -58,6 +59,7 @@ import { AttachmentValidationError } from '../utils/support-attachment.util';
 export class AdminSupportTicketsController {
   public constructor(
     private readonly supportTicketsService: SupportTicketsService,
+    private readonly blockedIdentityService: BlockedIdentityService,
     private readonly supportNotifications: SupportNotificationsService,
     private readonly supportAttachments: SupportAttachmentService,
     private readonly prismaService: PrismaService,
@@ -188,6 +190,78 @@ export class AdminSupportTicketsController {
     await this.supportTicketsService.close({ ticketId, closedBy: admin.id });
     await this.audit(admin, req, 'support_ticket.close', { ticketId });
     return serializeTicket(await this.supportTicketsService.getById(ticketId));
+  }
+
+  /**
+   * Stops this guest's device opening further anonymous conversations.
+   *
+   * ── Why this is a button and not a rule ───────────────────────────────
+   *
+   * Guest support is where somebody appeals a ban. A device match therefore
+   * MARKS a conversation and never refuses it — otherwise every ban would
+   * close the appeal door behind it, and a ban issued by mistake, or by a rule
+   * at three in the morning over a failed payment, would be unappealable.
+   *
+   * The refusal exists anyway, because a determined pest can fill the queue
+   * everybody else's real problems arrive in. It just costs an operator
+   * looking at one conversation and deciding. That is what this is.
+   *
+   * ── The fingerprint is read here, not sent by the caller ──────────────
+   *
+   * The request names a TICKET. Accepting a fingerprint in the body would let
+   * any support operator silence any device whose value they could guess or
+   * copy from elsewhere, with no conversation to justify it — and the audit
+   * row would name a device rather than a case.
+   *
+   * Written with `source: 'manual'`, which is precisely what separates it from
+   * the cascade rows every block produces: only manual entries refuse.
+   */
+  @Post(':ticketId/silence-device')
+  @RequirePermission('support_tickets', 'resolve')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Blocklist this guest conversation's device" })
+  public async silenceDevice(
+    @Param('ticketId') ticketId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ): Promise<{ readonly silenced: number }> {
+    const ticket = await this.supportTicketsService.getById(ticketId);
+    const guest = (ticket as TicketWithRelations).guest ?? null;
+    if (guest === null) {
+      throw new BadRequestException('This ticket has no guest conversation');
+    }
+    const signals = [guest.installId ?? null, guest.deviceHash ?? null].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0,
+    );
+    if (signals.length === 0) {
+      // Reachable and ordinary: the visitor blocked the signals, or opened the
+      // conversation before this was collected at all. Saying so beats a
+      // success that silences nothing.
+      throw new BadRequestException('No device signal was recorded for this conversation');
+    }
+
+    const outcome = await this.blockedIdentityService.addMany({
+      kind: BlockedIdentityKind.DEVICE_FP,
+      values: signals,
+      reason: `Guest support abuse (ticket ${ticketId})`,
+      // `manual` is the whole point — cascade rows mark, manual rows refuse.
+      source: 'manual',
+      createdById: admin.id,
+    });
+    await this.audit(admin, req, 'support_ticket.device_silenced', {
+      ticketId,
+      guestId: guest.id,
+      // How many signals were listed, never their values: an audit row is read
+      // far more often than it is written, and a device identifier in it is a
+      // copy nobody asked for.
+      signalCount: signals.length,
+      added: outcome.added.length,
+      alreadyListed: outcome.duplicates.length,
+    });
+    // A duplicate is a success: the device is already silenced, which is the
+    // state the operator wanted. Only a value the normaliser rejected leaves
+    // nothing behind, and that is the count worth answering with.
+    return { silenced: outcome.added.length + outcome.duplicates.length };
   }
 
   @Post(':ticketId/reopen')
@@ -371,7 +445,16 @@ type TicketWithRelations = SupportTicket & {
         readonly webAccount?: { readonly login: string | null; readonly email: string | null } | null;
       })
     | null;
-  readonly guest?: { readonly id: string; readonly email: string | null; readonly displayName: string | null } | null;
+  readonly guest?:
+    | {
+        readonly id: string;
+        readonly email: string | null;
+        readonly displayName: string | null;
+        readonly flaggedReason?: string | null;
+        readonly installId?: string | null;
+        readonly deviceHash?: string | null;
+      }
+    | null;
 };
 
 /**
@@ -393,7 +476,22 @@ function serializeTicket(ticket: TicketWithRelations): Record<string, unknown> {
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
     guest: ticket.guest
-      ? { id: ticket.guest.id, email: ticket.guest.email, displayName: ticket.guest.displayName }
+      ? {
+          id: ticket.guest.id,
+          email: ticket.guest.email,
+          displayName: ticket.guest.displayName,
+          // Why this conversation looks like it came from a blocked account.
+          // Null for the overwhelming majority — the mark means something only
+          // because most visitors do not carry it.
+          flaggedReason: ticket.guest.flaggedReason ?? null,
+          // WHETHER there is a device to silence, not the fingerprint itself.
+          // The value identifies a machine; an operator deciding "silence this
+          // one" needs to know it exists, and the endpoint reads it server-side
+          // from the ticket. Shipping it to a browser would put a device
+          // identifier into any admin's console and page history for nothing.
+          hasDeviceSignal:
+            (ticket.guest.installId ?? ticket.guest.deviceHash ?? null) !== null,
+        }
       : null,
     user: ticket.user
       ? {

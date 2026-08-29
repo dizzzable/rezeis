@@ -43,6 +43,10 @@ function controller(opts: { hasArchive: boolean }) {
   };
   const ctrl = new AdminSupportTicketsController(
     tickets as never,
+    // The blocklist service, second since the guest-device silence button was
+    // added. Unused here — this file is about the archive permission — but its
+    // position is what keeps `rbac` in the sixth slot below.
+    {} as never,
     {} as never,
     {} as never,
     {} as never,

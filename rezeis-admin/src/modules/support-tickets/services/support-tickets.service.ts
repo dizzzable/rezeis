@@ -99,7 +99,18 @@ export class SupportTicketsService {
               webAccount: { select: { login: true, email: true } },
             },
           },
-          guest: { select: { id: true, email: true, displayName: true } },
+          guest: {
+            select: {
+              id: true,
+              email: true,
+              displayName: true,
+              // What the operator judges before silencing a device, and what
+              // the silence button needs in order to name one.
+              flaggedReason: true,
+              installId: true,
+              deviceHash: true,
+            },
+          },
         },
         orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
         take: limit,
