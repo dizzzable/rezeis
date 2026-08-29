@@ -84,6 +84,7 @@ import { ThemePresetsModule } from './modules/theme-presets/theme-presets.module
 import { AdminIpAllowlistGuard } from './modules/two-factor/guards/admin-ip-allowlist.guard';
 import { TwoFactorModule } from './modules/two-factor/two-factor.module';
 import { UpdateCheckerModule } from './modules/update-checker/update-checker.module';
+import { UserHintsModule } from './modules/user-hints/user-hints.module';
 import { UsersModule } from './modules/users/users.module';
 import { WebAuthModule } from './modules/web-auth/web-auth.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
@@ -209,6 +210,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     LandingConfigModule,
     SettingsModule,
     SubpageConfigModule,
+    UserHintsModule,
     UsersModule,
     WebAuthModule,
     WebhooksModule,

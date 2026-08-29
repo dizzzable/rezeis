@@ -172,6 +172,9 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   /// the other. No `edit`: an entry is added or removed, never amended —
   /// changing which identity a row names would silently unblock somebody.
   blocked_identities: ['view', 'create', 'delete'],
+  // Hint copy is customer-facing text an operator changes without a deploy,
+  // so it carries the same four verbs as any other authored content.
+  user_hints: ['view', 'create', 'edit', 'delete'],
 
   // Realtime / events (future fraud signals + automations)
   fraud_signals: ['view', 'resolve', 'enforce'],

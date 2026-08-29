@@ -1,0 +1,122 @@
+import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { ApiExcludeController } from '@nestjs/swagger';
+import { IsIn, IsOptional, IsString, Length, Matches, MaxLength, MinLength } from 'class-validator';
+
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
+import {
+  UserHintDeliveryService,
+  type ResolvedHint,
+} from '../services/user-hint-delivery.service';
+
+/**
+ * The cabinet's half of the hint system.
+ *
+ * Three calls: what should I show this person, I have shown it, and here is how
+ * it ended. Everything about WHO is resolved from the reference reiwa sends —
+ * the same identity plumbing every other internal call uses — and never from a
+ * user id supplied in a body the browser could have shaped.
+ */
+class HintAudienceDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(64)
+  public readonly userId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{1,19}$/, { message: 'telegramId must be a positive numeric string' })
+  public readonly telegramId?: string;
+
+  @IsOptional()
+  @IsIn(['tma', 'pwa', 'browser'])
+  public readonly surface?: 'tma' | 'pwa' | 'browser';
+
+  @IsOptional()
+  @IsIn(['mobile', 'tablet', 'desktop'])
+  public readonly formFactor?: 'mobile' | 'tablet' | 'desktop';
+
+  @IsOptional()
+  @IsIn(['ru', 'en'])
+  public readonly locale?: 'ru' | 'en';
+}
+
+class HintOutcomeDto extends HintAudienceDto {
+  @IsString()
+  @Length(1, 64)
+  public readonly deliveryId!: string;
+
+  @IsOptional()
+  @IsIn(['acted', 'dismissed'])
+  public readonly outcome?: 'acted' | 'dismissed';
+}
+
+@ApiExcludeController()
+@Controller('internal/user-hints')
+@UseGuards(InternalAdminAuthGuard)
+export class InternalUserHintsController {
+  public constructor(
+    private readonly deliveries: UserHintDeliveryService,
+    private readonly prismaService: PrismaService,
+  ) {}
+
+  /**
+   * The next hint to show, or `{ hint: null }`.
+   *
+   * A POST rather than a GET because the audience travels in the body, and
+   * because a surface and a form factor in a query string end up in every
+   * access log between here and the cabinet. `null` is the overwhelmingly
+   * common answer and costs one indexed read.
+   */
+  @Post('next')
+  public async next(@Body() dto: HintAudienceDto): Promise<{ hint: ResolvedHint | null }> {
+    const userId = await this.resolveUserId(dto);
+    if (userId === null) return { hint: null };
+    const hint = await this.deliveries.nextFor({
+      userId,
+      locale: dto.locale ?? 'ru',
+      audience: {
+        surface: dto.surface ?? 'browser',
+        formFactor: dto.formFactor ?? 'mobile',
+      },
+    });
+    return { hint };
+  }
+
+  /** Stamped when it actually reaches the screen, not when it was fetched. */
+  @Post('shown')
+  public async shown(@Body() dto: HintOutcomeDto): Promise<{ ok: boolean }> {
+    const userId = await this.resolveUserId(dto);
+    if (userId === null) return { ok: false };
+    return { ok: await this.deliveries.markShown(dto.deliveryId, userId) };
+  }
+
+  /** How it ended — followed, or closed. Kept apart on purpose. */
+  @Post('closed')
+  public async closed(@Body() dto: HintOutcomeDto): Promise<{ ok: boolean }> {
+    const userId = await this.resolveUserId(dto);
+    if (userId === null) return { ok: false };
+    return {
+      ok: await this.deliveries.close(dto.deliveryId, userId, dto.outcome ?? 'dismissed'),
+    };
+  }
+
+  /**
+   * The account behind the reference reiwa sent.
+   *
+   * Answers `null` rather than throwing for an unknown reference: a hint is a
+   * convenience, and a cabinet whose session has drifted should lose its
+   * hints, not its page. Every caller treats `null` as "nothing to show".
+   */
+  private async resolveUserId(dto: HintAudienceDto): Promise<string | null> {
+    const reference = dto.userId ?? dto.telegramId ?? null;
+    if (reference === null) return null;
+    const user = await this.prismaService.user.findUnique({
+      where: buildUserReferenceWhere(reference),
+      select: { id: true },
+    });
+    return user?.id ?? null;
+  }
+}

@@ -726,21 +726,21 @@ enum BlockedIdentityKind {
 /// Mirrors `BlockedIp` on purpose — same `reason` / `source` / `createdById` /
 /// `expiresAt` shape, so the two blocklists read and behave alike.
 model BlockedIdentity {
-  id          String              @id @default(cuid()) @map("id")
-  kind        BlockedIdentityKind @map("kind")
+  id           String              @id @default(cuid()) @map("id")
+  kind         BlockedIdentityKind @map("kind")
   /// NORMALISED value — digits only for `TELEGRAM_ID`, lower-cased and trimmed
   /// for the rest. Normalising on write is what makes the unique index mean
   /// "this person", instead of letting `User@Example.com` slip past an entry
   /// for `user@example.com`.
-  value       String              @map("value")
+  value        String              @map("value")
   /// Operator- or rule-supplied reason. Free-form, shown in the admin list.
-  reason      String?             @map("reason")
+  reason       String?             @map("reason")
   /// `manual` for human entries, `automation` for rule-emitted ones, and
   /// `cascade` for the identities captured automatically when an existing user
   /// is blocked.
-  source      String              @default("manual") @map("source")
+  source       String              @default("manual") @map("source")
   /// Pointer to the admin who created the entry.
-  createdById String?             @map("created_by_id")
+  createdById  String?             @map("created_by_id")
   /// For `source: 'cascade'` rows — the user whose block created this entry.
   ///
   /// Unblocking has to undo exactly what blocking created, and `source` alone
@@ -752,13 +752,13 @@ model BlockedIdentity {
   ///
   /// NOT a relation, exactly like `createdById` above — the entry has to
   /// survive deletion of the account it came from.
-  originUserId String?            @map("origin_user_id")
+  originUserId String?             @map("origin_user_id")
   /// When the block expires. `null` means permanent — same convention as
   /// `BlockedIp`, and the readers must treat an EXPIRED row as absent rather
   /// than deleting it, so the history of a temporary ban survives it.
-  expiresAt   DateTime?           @map("expires_at") @db.Timestamptz(3)
-  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  expiresAt    DateTime?           @map("expires_at") @db.Timestamptz(3)
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   /// The lookup every registration path performs, and the guarantee that one
   /// identity cannot be listed twice with two different reasons.
@@ -882,6 +882,7 @@ model UserReviewFlag {
   @@index([clearedAt])
   @@map("user_review_flags")
 }
+
 // =============================================================================
 //  PHASE 6 — Webhook Subscriptions + Delivery History
 // =============================================================================
@@ -1454,6 +1455,7 @@ model User {
   legalConsents           UserLegalConsent[]       @relation("UserLegalConsents")
   deviceObservations      DeviceObservation[]      @relation("UserDeviceObservations")
   reviewFlags             UserReviewFlag[]         @relation("UserReviewFlags")
+  hintDeliveries          UserHintDelivery[]       @relation("UserHintDeliveries")
 
   @@index([telegramId])
   @@index([role])
@@ -4156,4 +4158,142 @@ model QuestIconAsset {
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@map("quest_icon_assets")
+}
+
+/// How a hint is presented in the cabinet.
+///
+/// MODAL is the only mode the first release renders. The others are already
+/// built as components (`drawer`, `sheet`, `sonner`, `tooltip`) and are listed
+/// here so adding one later is a guarded ALTER TYPE rather than a schema
+/// redesign — but an operator cannot select them until the cabinet renders
+/// them, and the DTO is what enforces that.
+enum UserHintMode {
+  MODAL
+  DRAWER
+  TOAST
+  INLINE
+  SPOTLIGHT
+}
+
+/// Colour register, matching the cabinet's existing `TipCard` tones one-to-one.
+enum UserHintTone {
+  INFO
+  SUCCESS
+  WARNING
+  DANGER
+}
+
+/// What the hint's primary button does.
+enum UserHintCtaKind {
+  /// No button but the dismiss — an announcement, not an instruction.
+  NONE
+  /// An in-cabinet route from the known list. The safe default.
+  ROUTE
+  /// An absolute URL. Opened through `openTelegramLink` inside a Mini App and
+  /// as a normal new tab elsewhere — the cabinet knows which surface it is on.
+  EXTERNAL
+}
+
+/// One authored hint. The LIBRARY entry, not a delivery.
+///
+/// ── Why the text lives here and not on the delivery ───────────────────────
+///
+/// A delivery points at this row and the copy is read when it is SHOWN, the
+/// same way a notification template is read when the message is sent. So an
+/// operator fixing a typo fixes it for the hundred people who have the hint
+/// queued and have not opened the cabinet yet. The cost is that a hint can
+/// change between being queued and being seen, which is the right trade: the
+/// alternative freezes every typo into every pending delivery.
+///
+/// ── Why disabling is not deleting ─────────────────────────────────────────
+///
+/// `isActive = false` simply stops it being shown; queued deliveries stay and
+/// expire on their own clock. Turning it back on resumes them for anyone whose
+/// delivery has not expired. That follows from reading the copy at show time —
+/// there is no second rule to remember.
+model UserHint {
+  id           String          @id @default(cuid()) @map("id")
+  /// Stable operator-facing identifier, e.g. `connect-after-purchase`.
+  key          String          @unique @map("key")
+  titleRu      String          @map("title_ru")
+  bodyRu       String          @map("body_ru")
+  /// Delivered to users whose `User.language` is EN. Null falls back to RU,
+  /// exactly like `NotificationTemplate`.
+  titleEn      String?         @map("title_en")
+  bodyEn       String?         @map("body_en")
+  mode         UserHintMode    @default(MODAL) @map("mode")
+  tone         UserHintTone    @default(INFO) @map("tone")
+  ctaKind      UserHintCtaKind @default(NONE) @map("cta_kind")
+  ctaLabelRu   String?         @map("cta_label_ru")
+  ctaLabelEn   String?         @map("cta_label_en")
+  /// A cabinet route (`/settings/faq`) for ROUTE, an absolute URL for EXTERNAL.
+  /// Validated against the known-route list at write time so a renamed route
+  /// cannot leave a button pointing nowhere.
+  ctaTarget    String?         @map("cta_target")
+  /// Surfaces this hint makes sense on: `tma`, `pwa`, `browser`. EMPTY MEANS
+  /// EVERYWHERE, which is the common case. It exists because several obvious
+  /// hints are actively wrong on the wrong surface — "install the app" to
+  /// somebody running the installed app, "open our bot" to somebody already
+  /// inside Telegram — and an operator who sends those teaches customers to
+  /// dismiss hints unread.
+  surfaces     String[]        @default([]) @map("surfaces")
+  /// `mobile`, `tablet`, `desktop`. Empty means every one.
+  formFactors  String[]        @default([]) @map("form_factors")
+  /// Hints sharing a group supersede each other: queuing a newer one cancels
+  /// an older UNSHOWN delivery in the same group. One purchase emits four
+  /// events, and without this the customer meets four modals in a row.
+  groupKey     String?         @map("group_key")
+  /// How long a delivery of this hint stays worth showing. A "your autopay
+  /// failed" hint found ten days later is noise, not help.
+  ttlHours     Int             @default(168) @map("ttl_hours")
+  /// False means one delivery per user, ever — the shape onboarding needs.
+  isRepeatable Boolean         @default(false) @map("is_repeatable")
+  isActive     Boolean         @default(true) @map("is_active")
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  deliveries UserHintDelivery[] @relation("UserHintDeliveries")
+
+  @@index([isActive])
+  @@index([groupKey])
+  @@map("user_hints")
+}
+
+/// One hint owed to one person.
+///
+/// Rows exist because a hint is raised when something HAPPENS and shown when
+/// the customer next appears, and those are not the same moment. A payment
+/// webhook lands while the tab is closed; a crypto payment confirms twenty
+/// minutes after the buyer gave up watching. Delivering at raise time would
+/// mean delivering to nobody.
+model UserHintDelivery {
+  id          String    @id @default(cuid()) @map("id")
+  userId      String    @map("user_id")
+  hintId      String    @map("hint_id")
+  /// What raised it: `moment:subscription_ready` for something the cabinet
+  /// detected itself, or `rule:<automationRuleId>` for an automation. Kept as
+  /// free text because the two namespaces have nothing else in common, and it
+  /// is read by operators rather than by code.
+  source      String    @map("source")
+  /// When this stops being worth showing. Computed from the hint's `ttlHours`
+  /// at insert, NOT read live — a later TTL change must not resurrect what has
+  /// already lapsed.
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// Set the moment the cabinet puts it on screen.
+  shownAt     DateTime? @map("shown_at") @db.Timestamptz(3)
+  /// Closed without following the button.
+  dismissedAt DateTime? @map("dismissed_at") @db.Timestamptz(3)
+  /// The button was pressed. Separate from `dismissedAt` on purpose: collapsing
+  /// them makes "this hint helps" indistinguishable from "people close it to
+  /// get rid of it", which is the only question worth asking of a hint.
+  actedAt     DateTime? @map("acted_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User     @relation("UserHintDeliveries", fields: [userId], references: [id], onDelete: Cascade)
+  hint UserHint @relation("UserHintDeliveries", fields: [hintId], references: [id], onDelete: Cascade)
+
+  /// The pending-for-me query: this user, not yet shown, not yet expired.
+  @@index([userId, shownAt, expiresAt])
+  @@index([hintId])
+  @@map("user_hint_deliveries")
 }
