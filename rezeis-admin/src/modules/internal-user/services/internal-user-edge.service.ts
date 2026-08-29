@@ -16,6 +16,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
+import { UserIpObservationService } from '../../device-intelligence/services/user-ip-observation.service';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
 import { InternalBootstrapUserInput } from '../interfaces/internal-user-bootstrap.interface';
@@ -67,6 +68,13 @@ export class InternalUserEdgeService {
      */
     @Optional()
     private readonly blockedIdentityService?: BlockedIdentityService,
+    /**
+     * Optional for the same reason as the list above: an absent one means the
+     * surface report simply records no address, which costs a signal and
+     * breaks nothing the customer was doing.
+     */
+    @Optional()
+    private readonly ipObservations?: UserIpObservationService,
   ) {}
 
   // ── Bootstrap / language ─────────────────────────────────────────────────
@@ -766,7 +774,7 @@ export class InternalUserEdgeService {
    */
   public async recordSurfaceSeen(
     reference: string,
-    input: { surface: string; formFactor: string; os: string },
+    input: { surface: string; formFactor: string; os: string; clientIp?: string | null },
   ): Promise<void> {
     const surface = normalizeSurface(input.surface);
     const formFactor = normalizeFormFactor(input.formFactor);
@@ -792,6 +800,28 @@ export class InternalUserEdgeService {
         throw new NotFoundException('User not found');
       }
       throw err;
+    }
+
+    // ── Where they were, when the address says anything ─────────────────
+    //
+    // Attached HERE rather than to every request, and that cadence is the
+    // point: the surface report fires once per cabinet session, so the table
+    // stays proportional to visits rather than to page views.
+    //
+    // Most sightings are refused, and on a VPN product that is correct: a
+    // customer browsing while connected arrives from one of our own exit
+    // nodes, and recording that would file a node's worth of customers under
+    // one address. `classifyCascadeIp` makes that call.
+    //
+    // Awaited but never allowed to fail the report: the surface snapshot above
+    // is the thing the caller asked for.
+    if (this.ipObservations !== undefined && typeof input.clientIp === 'string') {
+      const userId = await this.prismaService.user
+        .findUnique({ where: buildUserReferenceWhere(reference), select: { id: true } })
+        .catch(() => null);
+      if (userId !== null) {
+        await this.ipObservations.record(userId.id, input.clientIp).catch(() => false);
+      }
     }
   }
 

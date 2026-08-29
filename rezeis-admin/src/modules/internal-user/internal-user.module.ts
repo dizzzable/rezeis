@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { DeviceIntelligenceModule } from '../device-intelligence/device-intelligence.module';
 import { EmailModule } from '../email/email.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { PlansModule } from '../plans/plans.module';
@@ -21,6 +22,9 @@ import { ExactlyOneUserIdentifierValidator } from './validators/exactly-one-user
 @Module({
   imports: [
     AuthModule,
+    // For `UserIpObservationService` — the surface report is where an
+    // address is noted, once per cabinet session.
+    DeviceIntelligenceModule,
     EmailModule,
     PaymentsModule,
     PlansModule,

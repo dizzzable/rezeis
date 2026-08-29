@@ -31,4 +31,21 @@ export class InternalSurfaceSeenDto {
   @IsOptional()
   @IsIn(['ios', 'android', 'windows', 'macos', 'linux', 'other'])
   public readonly os?: 'ios' | 'android' | 'windows' | 'macos' | 'linux' | 'other';
+
+  /**
+   * The visitor's address, as reiwa saw it.
+   *
+   * Sent by the edge rather than read here, for the reason every customer-facing
+   * address on this panel is: on a split deployment the panel's own peer is the
+   * CABINET, so reading the socket would record one address for every customer
+   * in the world.
+   *
+   * Whether it is recorded at all is `classifyCascadeIp`'s decision — our own
+   * exit nodes and carrier NAT are refused, which on a VPN product is most of
+   * them.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  public readonly clientIp?: string;
 }

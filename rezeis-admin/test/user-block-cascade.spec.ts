@@ -135,6 +135,20 @@ function buildService(options: {
     identities as never,
     ips as never,
     remnawave as never,
+    // The shared node reader, which the cascade now delegates to instead of
+    // asking the panel itself. Built from the SAME stub above so the node list
+    // these cases configure still reaches the classifier — and so `null` still
+    // means "could not ask", which several cases below depend on.
+    {
+      read: async () => {
+        try {
+          const nodes = await remnawave.getAllNodes();
+          return nodes.map((node) => [node.address, ...node.ips.map((e: { ip: string }) => e.ip)]);
+        } catch {
+          return null;
+        }
+      },
+    } as never,
     queue as never,
   );
   return { service, recorded };

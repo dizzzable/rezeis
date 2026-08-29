@@ -7,6 +7,7 @@ import { BlockedIpService } from '../../blocked-ips/services/blocked-ip.service'
 import { parseAddressOrCidr } from '../../blocked-ips/utils/cidr-match';
 import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { NodeAddressesService } from '../../remnawave/services/node-addresses.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { classifyCascadeIp, CascadeIpRefusal } from '../utils/cascade-ip.util';
 
@@ -70,6 +71,7 @@ export class UserBlockService {
      */
     @Optional() private readonly blockedIpService?: BlockedIpService,
     @Optional() private readonly remnawaveApiService?: RemnawaveApiService,
+    @Optional() private readonly nodeAddresses?: NodeAddressesService,
     @Optional() private readonly profileSyncQueue?: ProfileSyncQueueService,
     @Optional() private readonly deviceIntelligenceService?: DeviceIntelligenceService,
   ) {}
@@ -353,14 +355,11 @@ export class UserBlockService {
    * the customer was connected through.
    */
   private async readNodeAddresses(): Promise<readonly (readonly string[])[] | null> {
-    if (this.remnawaveApiService === undefined) return null;
-    try {
-      const nodes = await this.remnawaveApiService.getAllNodes();
-      return nodes.map((node) => [node.address, ...node.ips.map((entry) => entry.ip)]);
-    } catch (err) {
-      this.logger.warn(`Block cascade: could not enumerate nodes: ${(err as Error).message}`);
-      return null;
-    }
+    // Delegated. This was a private method here until a third consumer
+    // appeared, and three copies of "what counts as our own address" is three
+    // places for the answer to drift. `null` still means "could not ask",
+    // which is the distinction everything downstream decides on.
+    return this.nodeAddresses?.read() ?? null;
   }
   /**
    * Pushes the VPN side of a block or an unblock.

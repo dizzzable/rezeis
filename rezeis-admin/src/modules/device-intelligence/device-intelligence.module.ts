@@ -1,5 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
+import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { UserIpObservationService } from './services/user-ip-observation.service';
 import { DeviceIntelligenceService } from './services/device-intelligence.service';
 
 /**
@@ -17,7 +19,11 @@ import { DeviceIntelligenceService } from './services/device-intelligence.servic
  */
 @Global()
 @Module({
-  providers: [DeviceIntelligenceService],
-  exports: [DeviceIntelligenceService],
+  // For `NodeAddressesService`: an address may only be attributed to a
+  // person once our own exit nodes are ruled out, and only the panel knows
+  // which those are.
+  imports: [RemnawaveModule],
+  providers: [DeviceIntelligenceService, UserIpObservationService],
+  exports: [DeviceIntelligenceService, UserIpObservationService],
 })
 export class DeviceIntelligenceModule {}

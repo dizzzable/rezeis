@@ -360,6 +360,7 @@ export class InternalUserController {
       surface: body.surface ?? 'browser',
       formFactor: body.formFactor ?? 'desktop',
       os: body.os ?? 'other',
+      clientIp: body.clientIp ?? null,
     });
     return { ok: true };
   }

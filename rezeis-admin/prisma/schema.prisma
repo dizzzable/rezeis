@@ -1456,6 +1456,7 @@ model User {
   deviceObservations      DeviceObservation[]      @relation("UserDeviceObservations")
   reviewFlags             UserReviewFlag[]         @relation("UserReviewFlags")
   hintDeliveries          UserHintDelivery[]       @relation("UserHintDeliveries")
+  ipObservations          UserIpObservation[]      @relation("UserIpObservations")
 
   @@index([telegramId])
   @@index([role])
@@ -4314,4 +4315,49 @@ model UserHintDelivery {
   @@index([userId, shownAt, expiresAt])
   @@index([hintId])
   @@map("user_hint_deliveries")
+}
+
+/// One address one account has been seen from.
+///
+/// ── Why this is not simply "log every IP" ─────────────────────────────────
+///
+/// This is a VPN product. A customer browsing the cabinet WHILE CONNECTED
+/// arrives from one of our own exit nodes, and every customer behind that node
+/// arrives from the same address. Logging those would build a map of who was on
+/// which node and call it a map of people — confident-looking, and mostly about
+/// us. Mobile carriers do the same thing to their subscribers through CGNAT.
+///
+/// So a row only exists for an address `classifyCascadeIp` was willing to
+/// attribute to a person: not one of our nodes, not carrier-grade NAT, not a
+/// private range. The same function that decides what a ban may capture decides
+/// what may be recorded here, because it is the same question.
+///
+/// ── What it answers ───────────────────────────────────────────────────────
+///
+/// One narrow question: has this address been seen on a blocked account? That
+/// MARKS a registration or a support conversation for an operator; it refuses
+/// nothing on its own. Households and offices share addresses, so a match says
+/// "same place", never "same person".
+model UserIpObservation {
+  id          String   @id @default(cuid()) @map("id")
+  userId      String   @map("user_id")
+  /// Canonical form — lower-cased, as `parseAddressOrCidr` produces. The same
+  /// normalisation the blocklist uses, so a value stored by one is findable by
+  /// the other.
+  address     String   @map("address")
+  firstSeenAt DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  /// How many sessions reported it. Separates a home connection from a coffee
+  /// shop somebody passed through once, which is the difference between a match
+  /// worth acting on and a coincidence.
+  hits        Int      @default(1) @map("hits")
+
+  user User @relation("UserIpObservations", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, address])
+  /// The lookup: who else has been seen from this address.
+  @@index([address])
+  /// Retention sweeps by age.
+  @@index([lastSeenAt])
+  @@map("user_ip_observations")
 }
