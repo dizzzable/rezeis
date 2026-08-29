@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
 import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { ConnectionIpCollectorService } from './services/connection-ip-collector.service';
 import { UserIpObservationService } from './services/user-ip-observation.service';
 import { DeviceIntelligenceService } from './services/device-intelligence.service';
 
@@ -23,7 +24,7 @@ import { DeviceIntelligenceService } from './services/device-intelligence.servic
   // person once our own exit nodes are ruled out, and only the panel knows
   // which those are.
   imports: [RemnawaveModule],
-  providers: [DeviceIntelligenceService, UserIpObservationService],
+  providers: [DeviceIntelligenceService, UserIpObservationService, ConnectionIpCollectorService],
   exports: [DeviceIntelligenceService, UserIpObservationService],
 })
 export class DeviceIntelligenceModule {}
