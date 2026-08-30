@@ -89,21 +89,30 @@ export interface RemnawaveCapabilities {
  * anybody has run; the banner is the only signal an operator gets before an
  * untested panel starts returning shapes rezeis does not parse.
  *
- * All four entries are measured against live panels: 2.7.4 (paying
- * production), 2.8 (testers), 3.2.x and 3.3.x — the last being the build this
- * operator actually runs, which is why it is here: while it was missing, every
- * visit to the Remnawave page rendered an untested-version banner about a panel
- * this integration is exercised against daily. A false warning teaches an
- * operator to ignore the true one.
+ * Every entry is measured against a live panel, and 3.4 earned its place the
+ * same way the others did: a throwaway 3.4.1 stack, an API token, and the
+ * calls this integration actually makes. `/api/system/stats/recap` and
+ * `/api/system/metadata` both reported `3.4.1`; `/api/users/{numericId}`
+ * answered; a missing user came back `A063`, which
+ * `PANEL_USER_NOT_FOUND_ERROR_CODES` already carries; both squad routes
+ * answered on their trailing slash; `/api/connections/drop` existed and
+ * `/api/ip-control/*` was gone, which is the 3.x shape this adapter expects.
+ *
+ * 2.7 AND 2.8 ARE GONE FROM THIS SET DELIBERATELY, and their absence is the
+ * first half of withdrawing 2.x support rather than an oversight. The branches
+ * that still address a 2.x panel are alive as this is written, so a 2.x
+ * operator currently gets the banner and a working panel; the second half —
+ * refusing 2.x out loud instead of letting it drift into silent 400s — is a
+ * separate change against the deletion path and has not been made yet. If you
+ * are here because a 2.x install broke, that is the expected direction of
+ * travel, not a regression to undo.
  *
  * Being in this set means "the operator gets no banner", not "every screen is
- * equally capable" — 2.7.4 still reports `liveIpControl: false`, because its
- * `ip-control/*` family had not matured enough to drive the Live tab. 3.x
- * reports true: it replaced that family with `connections/*`, and the adapter
- * speaks it.
+ * equally capable". 3.x reports `liveIpControl: true`: it replaced the
+ * `ip-control/*` family with `connections/*`, and the adapter speaks it.
  *
- * Membership is keyed on `major.minor`, so this set cannot tell 2.8.0 from
- * 2.8.1 and never has: both are the single `'2.8'` entry, and a patch-level
+ * Membership is keyed on `major.minor`, so this set cannot tell 3.4.1 from
+ * 3.4.2 and never has: both are the single `'3.4'` entry, and a patch-level
  * difference is not something this gate is able to warn about. 3.3.2 is
  * therefore covered by `'3.3'`.
  *
@@ -114,7 +123,7 @@ export interface RemnawaveCapabilities {
  * discovers this set through `supported` and fails if either language's prose
  * names a different one.
  */
-const TESTED_VERSIONS: ReadonlySet<string> = new Set(['2.7', '2.8', '3.2', '3.3']);
+const TESTED_VERSIONS: ReadonlySet<string> = new Set(['3.2', '3.3', '3.4']);
 
 // Both windows live in the util so the adapter's own shape cache uses the same
 // two numbers rather than a second opinion about how long a panel blip lasts.

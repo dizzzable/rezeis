@@ -73,13 +73,20 @@ function advance(ms: number): void {
 }
 
 describe('RemnawaveVersionService — pinned panel versions', () => {
-  it('2.7.4 (paying production) reports every version-gated flag off', async () => {
+  it('2.7.4 now warns, because 2.x support is being withdrawn', async () => {
+    // `supported` flipped deliberately on 30.08.2026. It is the FIRST half of
+    // withdrawing 2.x: the banner starts telling 2.x operators they are on a
+    // panel this integration no longer covers, while the 2.x branches below
+    // still answer. The second half — refusing 2.x out loud rather than letting
+    // it drift into silent 400s — is a separate change against the deletion
+    // path and is not made yet, which is why every other field here is
+    // unchanged.
     assert.deepEqual(await capabilitiesOf('2.7.4'), {
       version: '2.7.4',
       major: 2,
       minor: 7,
       patch: 4,
-      supported: true,
+      supported: false,
       reachable: true,
       liveIpControl: false,
       bandwidthNodesUsers: false,
@@ -89,13 +96,16 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('2.8.0 (testers) reports every version-gated flag on', async () => {
+  it('2.8.0 warns for the same reason, with its own flags untouched', async () => {
+    // The capability flags are NOT the banner. 2.8 still reports live
+    // ip-control and the bandwidth endpoint, because it still has them — what
+    // changed is only whether we claim to have tested it.
     assert.deepEqual(await capabilitiesOf('2.8.0'), {
       version: '2.8.0',
       major: 2,
       minor: 8,
       patch: 0,
-      supported: true,
+      supported: false,
       reachable: true,
       liveIpControl: true,
       bandwidthNodesUsers: true,
@@ -547,9 +557,21 @@ describe('the tested set and the banner that names it', () => {
   });
 
   it('still warns about the neighbours nobody has run', async () => {
-    // The set is deliberately not an ordered range: `>= 2.7` would silently
-    // stop warning on the versions between the tested ones.
-    for (const version of ['2.9.0', '3.0.0', '3.1.0', '3.4.0']) {
+    // The set is deliberately not an ordered range: `>= 3.2` would silently
+    // stop warning on the versions between and beyond the tested ones. `3.5.0`
+    // stands where `3.4.0` used to: the next release nobody has run, and the
+    // one this test exists to keep warning about.
+    for (const version of ['3.0.0', '3.1.0', '3.5.0', '4.0.0']) {
+      assert.equal((await capabilitiesOf(version)).supported, false, version);
+    }
+  });
+
+  it('warns on every 2.x, which is the withdrawal starting', async () => {
+    // Separate from the neighbours above, because these are not gaps in the
+    // range — they are versions that WERE tested and are being dropped on
+    // purpose. Kept as its own test so that a future edit restoring 2.x to the
+    // set has to delete a test that says why it was removed.
+    for (const version of ['2.7.4', '2.8.0', '2.8.35']) {
       assert.equal((await capabilitiesOf(version)).supported, false, version);
     }
   });

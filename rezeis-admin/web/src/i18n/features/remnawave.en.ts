@@ -18,10 +18,10 @@ export const en = {
       // The list here must match `TESTED_VERSIONS` in
       // `src/modules/remnawave/services/remnawave-version.service.ts` — it is
       // the only place an operator is told which panels are covered. Written
-      // out rather than as a range: 2.9 through 3.1 are not tested, so
-      // "2.7–3.3" would be a lie. `remnawave-version.service.spec.ts` reads
+      // out rather than as a range: 3.0 and 3.1 are not tested, so
+      // "3.0–3.4" would be a lie. `remnawave-version.service.spec.ts` reads
       // this sentence and fails if it names a different set than the code does.
-      description: 'Detected panel version {{version}}. This integration is tested against 2.7, 2.8, 3.2 and 3.3. Some features may misbehave — update rezeis or the panel.',
+      description: 'Detected panel version {{version}}. This integration is tested against 3.2, 3.3 and 3.4. Some features may misbehave — update rezeis or the panel.',
     },
     live: {
       subtitle: 'Active sessions and source IPs per node, read live from the panel.',

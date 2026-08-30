@@ -112,12 +112,17 @@ export default function RemnaWavePage() {
       </div>
 
       {/* Untested-version notice: the panel responded with a version outside
-          the SET rezeis has been verified against — 2.7, 2.8, 3.2 and 3.3,
-          which is not a range (2.9 through 3.1 are untested too). Membership is
-          decided backend-side by `supported`, so nothing here needs editing
-          when the set grows; only the warning's own prose names the versions,
-          and `remnawave-version.service.spec.ts` fails if that prose and the
-          backend set disagree. */}
+          the set rezeis has been verified against — an exact set, not a range,
+          because the versions between the tested ones are untested too.
+
+          THE VERSIONS ARE DELIBERATELY NOT NAMED HERE. This comment used to
+          list them and claimed in the same breath that "nothing here needs
+          editing when the set grows" — so when the set changed, the only copy
+          nobody checked was this one, and it sat here naming a set the product
+          no longer supported. `remnawave-version.service.spec.ts` reads the
+          backend set and both locales' prose and fails when they disagree; a
+          comment is not one of the three, so it must not hold a fourth copy.
+          Membership is decided backend-side by `supported`. */}
       {capabilities && capabilities.reachable && !capabilities.supported ? (
         <Alert>
           <AlertCircle className="h-4 w-4" />
