@@ -32,6 +32,8 @@ export default tseslint.config(
       // pressure someone into editing a file that must not be edited, and
       // reiwa's ruleset differs (e.g. it has eslint-plugin-react, we do not).
       'src/features/landing-builder/live/**',
+      // Same deal for the vendored media-viewer kit.
+      'src/components/media/kit/**',
     ],
   },
   js.configs.recommended,

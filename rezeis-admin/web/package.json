@@ -21,8 +21,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "doctor": "react-doctor",
-    "sync:landing-kit": "node scripts/sync-landing-kit.mjs",
-    "sync:landing-kit:check": "node scripts/sync-landing-kit.mjs --check",
+    "sync:kits": "node scripts/sync-landing-kit.mjs",
+    "sync:kits:check": "node scripts/sync-landing-kit.mjs --check",
+    "sync:landing-kit": "node scripts/sync-landing-kit.mjs --kit landing",
+    "sync:landing-kit:check": "node scripts/sync-landing-kit.mjs --check --kit landing",
     "gen:theme-presets": "node scripts/generate-theme-presets.mjs"
   },
   "dependencies": {

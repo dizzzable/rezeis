@@ -3098,6 +3098,12 @@ export const en = {
       validationFailed: 'Question and answer are required',
     },
   },
+  mediaViewer: {
+    counter: '{{current}} of {{total}}',
+    close: 'Close',
+    previous: 'Previous',
+    next: 'Next',
+  },
   supportTicketsPage: {
     title: 'Support Tickets',
     subtitle: 'Manage user support requests',

@@ -3160,6 +3160,12 @@ export const ru = {
       validationFailed: 'Заполните вопрос и ответ',
     },
   },
+  mediaViewer: {
+    counter: '{{current}} из {{total}}',
+    close: 'Закрыть',
+    previous: 'Предыдущее',
+    next: 'Следующее',
+  },
   supportTicketsPage: {
     title: 'Тикеты поддержки',
     subtitle: 'Управление обращениями пользователей',

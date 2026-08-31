@@ -1,0 +1,14 @@
+{
+  "comment": "DO NOT EDIT files in kit/ by hand — they are vendored from reiwa (web/src/features/media-viewer). Edit there, then: node scripts/sync-landing-kit.mjs",
+  "sourceRepo": "dizzzable/reiwa",
+  "sourcePath": "web/src/features/media-viewer",
+  "sourceCommit": "234c2045b5cb92f21aaedcc18188c979579e4f0e",
+  "syncedAt": "2026-08-31T17:35:15.433Z",
+  "files": {
+    "media-viewer-gestures.ts": "107ab21f6c1dfc2b8e8970abea9dae0164830acd4272bc7a315413959b3909d6",
+    "media-viewer-item.ts": "602533e6ebe56c914b16639640343a387d055efe1b3504861eb9841366f39c14",
+    "media-viewer-nav.ts": "dc02a1589013e4cd05bc59a83928c16f257791ca9aecc3137d516656407a222d",
+    "media-viewer-zoom.ts": "5479834cbd859a6cfed3b936260c8595608f8a76cb9b7554e2ed5e24c0458fcf",
+    "support-attachments.ts": "c7d0f811467133f1239689af78710ea74591433d032f7b1399f5c9b5e65d6954"
+  }
+}

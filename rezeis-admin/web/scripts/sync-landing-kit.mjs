@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /**
- * Vendor the landing kit from the sibling reiwa checkout into
- * `src/features/landing-builder/live/`.
+ * Vendor shared kits from the sibling reiwa checkout.
+ *
+ * The name is historical: this started as the landing kit alone and now carries
+ * a table of them. Renaming the file would ripple through the manifest, the
+ * drift test and half a dozen source comments for no behavioural gain, so the
+ * table moved in instead.
+ *
+ * ── The landing kit → `src/features/landing-builder/live/` ────────────────
  *
  * The kit (schema, sections, renderer, background, CSS — everything in reiwa's
  * `web/src/features/landing/` except the reiwa-only `landing-page.tsx`) is the
@@ -17,8 +23,19 @@
  * script, commit both repos — the same paired-release flow both projects
  * already use.
  *
- * Usage:  node scripts/sync-landing-kit.mjs [--check] [--source <reiwa-root>]
+ * ── The media-viewer kit → `src/components/media/kit/` ───────────────────
+ *
+ * The rules the full-screen viewer runs on: what a drag means, where a pinch
+ * anchors, how far a magnified image may travel, which attachments are worth
+ * showing. Pure functions with no UI in them. The COMPONENT is written once per
+ * app — the cabinet and the panel do not share a design system — but a viewer
+ * whose paging or pan limits differ between the two would be two viewers, and
+ * this workspace has already paid for that kind of drift more than once.
+ *
+ * Usage:  node scripts/sync-landing-kit.mjs [--check] [--kit <name>]
+ *                                           [--source <reiwa-root>]
  *   --check   verify only (exit 1 on drift), copy nothing
+ *   --kit     sync one kit by name instead of all of them
  *   --source  reiwa checkout root; defaults to ../../../reiwa relative to the
  *             rezeis repo root (the layout of this workspace), then
  *             REIWA_ROOT env var.
@@ -31,32 +48,56 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const webRoot = join(__dirname, '..')
-const dst = join(webRoot, 'src', 'features', 'landing-builder', 'live')
-const MANIFEST_NAME = 'landing-kit.manifest.json'
-const manifestPath = join(dst, MANIFEST_NAME)
-
-/** reiwa-only files that must never be vendored. */
-const EXCLUDE = new Set(['landing-page.tsx'])
 
 const args = process.argv.slice(2)
 const checkOnly = args.includes('--check')
 const sourceFlag = args.indexOf('--source')
+const kitFlag = args.indexOf('--kit')
+const onlyKit = kitFlag !== -1 ? args[kitFlag + 1] : null
 const reiwaRoot =
   sourceFlag !== -1
     ? args[sourceFlag + 1]
     : (process.env.REIWA_ROOT ?? join(webRoot, '..', '..', '..', 'reiwa'))
-const src = join(reiwaRoot, 'web', 'src', 'features', 'landing')
 
-async function listKitFiles(dir, base = dir) {
+/**
+ * Every kit vendored from reiwa.
+ *
+ * `exclude` lists files that live beside the kit in reiwa but belong only to
+ * reiwa — the page that mounts the landing renderer, the React components that
+ * render the viewer. They are the reason this is a file list and not a whole
+ * directory: the shared part is the part with no app in it.
+ */
+const KITS = [
+  {
+    name: 'landing',
+    sourcePath: 'web/src/features/landing',
+    dst: join(webRoot, 'src', 'features', 'landing-builder', 'live'),
+    manifest: 'landing-kit.manifest.json',
+    exclude: new Set(['landing-page.tsx']),
+    note: 'DO NOT EDIT files in live/ by hand — they are vendored from reiwa',
+  },
+  {
+    name: 'media-viewer',
+    sourcePath: 'web/src/features/media-viewer',
+    dst: join(webRoot, 'src', 'components', 'media', 'kit'),
+    manifest: 'media-viewer-kit.manifest.json',
+    // The two viewer components and the hook that opens them: same rules, two
+    // design systems, so each app writes its own and shares the arithmetic.
+    exclude: new Set(['media-viewer.tsx', 'use-media-viewer.tsx']),
+    note: 'DO NOT EDIT files in kit/ by hand — they are vendored from reiwa',
+  },
+]
+
+async function listKitFiles(dir, exclude, base = dir) {
   const out = []
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name)
     if (entry.isDirectory()) {
-      out.push(...(await listKitFiles(full, base)))
+      out.push(...(await listKitFiles(full, exclude, base)))
       continue
     }
     const rel = relative(base, full).split(sep).join('/')
-    if (EXCLUDE.has(rel)) continue
+    if (exclude.has(rel)) continue
     out.push(rel)
   }
   return out.sort()
@@ -76,13 +117,13 @@ const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
  */
 const canonical = (text) => text.replace(/\r\n/g, '\n')
 
-function sourceCommit() {
+function sourceCommit(sourcePath) {
   try {
     const head = execSync('git rev-parse HEAD', { cwd: reiwaRoot, encoding: 'utf8' }).trim()
     // A commit that does not contain the vendored bytes is worse than no
     // provenance at all: anyone re-deriving the copy from that SHA gets a
     // mismatch and no hint as to why.
-    const dirty = execSync('git status --porcelain -- web/src/features/landing', {
+    const dirty = execSync(`git status --porcelain -- ${sourcePath}`, {
       cwd: reiwaRoot,
       encoding: 'utf8',
     }).trim()
@@ -92,17 +133,23 @@ function sourceCommit() {
   }
 }
 
-async function main() {
+async function syncKit(kit) {
+  const tag = `[sync-kit ${kit.name}]`
+  const src = join(reiwaRoot, ...kit.sourcePath.split('/'))
+  const dst = kit.dst
+  const manifestPath = join(dst, kit.manifest)
+  const MANIFEST_NAME = kit.manifest
+
   let files
   try {
-    files = await listKitFiles(src)
+    files = await listKitFiles(src, kit.exclude)
   } catch (err) {
-    console.error(`[sync-landing-kit] cannot read kit source ${src}: ${err.message}`)
-    console.error('[sync-landing-kit] pass --source <reiwa-root> or set REIWA_ROOT')
+    console.error(`${tag} cannot read kit source ${src}: ${err.message}`)
+    console.error(`${tag} pass --source <reiwa-root> or set REIWA_ROOT`)
     process.exit(1)
   }
   if (files.length === 0) {
-    console.error(`[sync-landing-kit] kit source ${src} is empty — refusing to sync`)
+    console.error(`${tag} kit source ${src} is empty — refusing to sync`)
     process.exit(1)
   }
 
@@ -120,7 +167,7 @@ async function main() {
     try {
       manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
     } catch {
-      console.error('[sync-landing-kit] manifest missing — run the sync')
+      console.error(`${tag} manifest missing — run the sync`)
       process.exit(1)
     }
     const want = manifest.files ?? {}
@@ -133,7 +180,7 @@ async function main() {
     let vendoredFiles = []
     try {
       // The manifest itself lives in `dst` and has no counterpart in the source.
-      vendoredFiles = (await listKitFiles(dst)).filter((rel) => rel !== MANIFEST_NAME)
+      vendoredFiles = (await listKitFiles(dst, kit.exclude)).filter((rel) => rel !== MANIFEST_NAME)
     } catch {
       stale = true
     }
@@ -149,10 +196,10 @@ async function main() {
       if (sha256(vendored) !== entries[rel] || want[rel] !== entries[rel]) stale = true
     }
     if (stale) {
-      console.error('[sync-landing-kit] vendored kit differs from reiwa source — run the sync')
+      console.error(`${tag} vendored kit differs from reiwa source — run the sync`)
       process.exit(1)
     }
-    console.log(`[sync-landing-kit] check OK — ${files.length} files in lockstep`)
+    console.log(`${tag} check OK — ${files.length} files in lockstep`)
     return
   }
 
@@ -165,21 +212,30 @@ async function main() {
   }
   const manifest = {
     comment:
-      'DO NOT EDIT files in live/ by hand — they are vendored from reiwa ' +
-      '(web/src/features/landing). Edit there, then: node scripts/sync-landing-kit.mjs',
+      `${kit.note} (${kit.sourcePath}). ` +
+      'Edit there, then: node scripts/sync-landing-kit.mjs',
     sourceRepo: 'dizzzable/reiwa',
-    sourcePath: 'web/src/features/landing',
-    sourceCommit: sourceCommit(),
+    sourcePath: kit.sourcePath,
+    sourceCommit: sourceCommit(kit.sourcePath),
     syncedAt: new Date().toISOString(),
     files: entries,
   }
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
   console.log(
-    `[sync-landing-kit] vendored ${files.length} files from ${src} @ ${manifest.sourceCommit.slice(0, 10)}`,
+    `${tag} vendored ${files.length} files from ${src} @ ${manifest.sourceCommit.slice(0, 10)}`,
   )
 }
 
+async function main() {
+  const selected = onlyKit ? KITS.filter((kit) => kit.name === onlyKit) : KITS
+  if (selected.length === 0) {
+    console.error(`[sync-kit] no kit named ${onlyKit} — known: ${KITS.map((k) => k.name).join(', ')}`)
+    process.exit(1)
+  }
+  for (const kit of selected) await syncKit(kit)
+}
+
 main().catch((err) => {
-  console.error(`[sync-landing-kit] failed: ${err.stack ?? err.message}`)
+  console.error(`[sync-kit] failed: ${err.stack ?? err.message}`)
   process.exit(1)
 })

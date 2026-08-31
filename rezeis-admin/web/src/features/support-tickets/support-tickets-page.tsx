@@ -37,6 +37,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { useMediaViewer } from '@/components/media/use-media-viewer';
+import { useAttachmentBlobs } from '@/components/media/use-attachment-blobs';
+import {
+  collectViewableAttachments,
+  indexOfAttachment,
+  type ViewableAttachment,
+} from '@/components/media/kit/support-attachments';
 
 interface TicketAttachment {
   id: string;
@@ -374,6 +381,15 @@ function TicketDetail({
 }: TicketDetailProps) {
   const { t } = useTranslation();
   const guest = isGuest(ticket);
+  const viewer = useMediaViewer();
+  const blobUrls = useAttachmentBlobs(ticket.id, ticket.messages);
+
+  // Thread-wide, so paging reaches a screenshot from a later reply. Built
+  // from the fetched blobs, which is also what keeps the inline preview and
+  // the viewer showing the same bytes rather than two separate downloads.
+  const viewable = collectViewableAttachments(ticket.messages, (att) =>
+    blobUrls.get(att.id) ?? '',
+  ).filter((item) => item.url !== '');
   const contact = ticket.guest?.email ?? ticket.guest?.displayName ?? null;
   const isClosed = ticket.status === 'closed';
 
@@ -529,9 +545,17 @@ function TicketDetail({
 
       <CardContent className="flex-1 overflow-y-auto py-4 space-y-3 max-h-[400px]">
         {ticket.messages.map((msg) => (
-          <MessageBubble key={msg.id} ticketId={ticket.id} message={msg} />
+          <MessageBubble
+            key={msg.id}
+            ticketId={ticket.id}
+            message={msg}
+            blobUrls={blobUrls}
+            viewable={viewable}
+            onOpen={viewer.open}
+          />
         ))}
       </CardContent>
+      {viewer.element}
 
       {!isClosed && (
         <div className="border-t p-4 space-y-3">
@@ -568,7 +592,19 @@ function TicketDetail({
   );
 }
 
-function MessageBubble({ ticketId, message }: { ticketId: string; message: TicketMessage }) {
+function MessageBubble({
+  ticketId,
+  message,
+  blobUrls,
+  viewable,
+  onOpen,
+}: {
+  ticketId: string
+  message: TicketMessage
+  blobUrls: ReadonlyMap<string, string>
+  viewable: readonly ViewableAttachment[]
+  onOpen: (items: readonly ViewableAttachment[], index: number) => void
+}) {
   const { t } = useTranslation();
   if (message.authorType === 'system') {
     return (
@@ -595,9 +631,29 @@ function MessageBubble({ ticketId, message }: { ticketId: string; message: Ticke
         {message.content && <p className="text-sm whitespace-pre-wrap">{message.content}</p>}
         {message.attachments && message.attachments.length > 0 && (
           <div className="mt-2 space-y-1">
-            {message.attachments.map((att) => (
-              <AttachmentChip key={att.id} ticketId={ticketId} attachment={att} />
-            ))}
+            {message.attachments.map((att) => {
+              // A screenshot the customer just sent is the point of the whole
+              // reply; making the operator download it to see it was the bug.
+              const preview = blobUrls.get(att.id)
+              if (preview) {
+                const at = indexOfAttachment(viewable, att.id)
+                return (
+                  <button
+                    key={att.id}
+                    type="button"
+                    onClick={() => onOpen(viewable, at >= 0 ? at : 0)}
+                    className="block overflow-hidden rounded-lg"
+                  >
+                    <img
+                      src={preview}
+                      alt={att.filename}
+                      className="max-h-48 w-auto max-w-full cursor-zoom-in rounded-lg object-contain"
+                    />
+                  </button>
+                )
+              }
+              return <AttachmentChip key={att.id} ticketId={ticketId} attachment={att} />
+            })}
           </div>
         )}
         <p className={cn('text-[10px] mt-1', isAdmin ? 'text-primary-foreground/60' : 'text-muted-foreground')}>
