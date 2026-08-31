@@ -2146,6 +2146,30 @@ export const en = {
     tooMany: 'Maximum {{max}} icons',
     countHint: '{{count}} of {{max}} icons',
   },
+  unknownSquads: {
+    title: 'Subscriptions on squads the panel does not serve',
+    subtitle:
+      'A squad deleted or recreated in Remnawave keeps its old id on the subscription. The panel accepts it by shape and then fails the renewal with A039.',
+    check: 'Check',
+    clean: 'Every squad is accounted for — no subscription and no plan names a deleted one.',
+    unavailableTitle: 'The panel did not answer',
+    unavailableBody:
+      'The list was not built. An empty result here would read as "nothing is wrong", so nothing is shown instead.',
+    plansTitle: 'Start with the plans',
+    plansBody:
+      'These plans still hold a dead squad themselves. While they do, every new purchase recreates the problem — re-pick the squads and save the plan.',
+    summary: '{{affected}} of {{scanned}} scanned subscriptions affected.',
+    truncated: 'Showing the first page — the list is truncated.',
+    external: 'external squad',
+    howToFix:
+      'Each row is repaired by "Assign plan" on the subscription card: it rewrites the squads from the current values on the plan.',
+    columns: {
+      subscription: 'Subscription',
+      plan: 'Plan',
+      status: 'Status',
+      squads: 'Unknown squads',
+    },
+  },
   usersPage: {
     title: 'Users',
     subtitle: 'Search, manage profiles, and run bulk user operations.',

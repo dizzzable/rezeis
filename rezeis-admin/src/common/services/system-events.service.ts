@@ -1799,6 +1799,53 @@ export class SystemEventsService {
     }
   }
 
+  /**
+   * Whether a Telegram notification for this event type could be delivered.
+   *
+   * ── Why this is public, and what it is NOT ────────────────────────────────
+   *
+   * `warn()` is `void` and fire-and-forget on purpose: the event bus must never
+   * block or fail the caller that raised the event. That is right, and it left
+   * one caller telling a lie. The automations action "notify Telegram" called
+   * `warn()` and reported SUCCESS — so an operator whose notifications were
+   * switched off, or who had unticked this event type, watched their alerting
+   * rule report a clean run on every fire while nothing was ever delivered.
+   *
+   * This does not promise delivery — nothing can, short of awaiting the Bot
+   * API. It answers the narrower question that is actually knowable up front
+   * and that covers both silent-death cases: is delivery switched on at all,
+   * and does the operator's own event filter let this type through.
+   *
+   * `null` means "no reason it cannot be delivered", not "it was delivered".
+   */
+  public async describeTelegramDelivery(
+    eventType: string,
+  ): Promise<{ readonly deliverable: boolean; readonly reason: string | null }> {
+    try {
+      const config = await this.loadTelegramConfig();
+      if (!config.enabled) {
+        return { deliverable: false, reason: 'Telegram notifications are switched off' };
+      }
+      const allowed = isEventTelegramAllowed(eventType, {
+        events: config.events,
+        eventsMode: config.eventsMode,
+        knownTypes: REGISTERED_EVENT_TYPES,
+      });
+      if (!allowed) {
+        return {
+          deliverable: false,
+          reason: `"${eventType}" is not ticked in the Telegram notification settings`,
+        };
+      }
+      return { deliverable: true, reason: null };
+    } catch {
+      // A readiness probe must not be the thing that fails an action. Unknown
+      // reads as deliverable: refusing on a settings hiccup would turn a
+      // working rule red.
+      return { deliverable: true, reason: null };
+    }
+  }
+
   private async loadTelegramConfig(): Promise<{
     enabled: boolean;
     botToken: string | null;

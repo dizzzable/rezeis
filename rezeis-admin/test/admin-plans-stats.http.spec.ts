@@ -12,6 +12,7 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
 import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
 import { PlansModule } from '../src/modules/plans/plans.module';
+import { UnknownSquadAuditService } from '../src/modules/plans/services/unknown-squad-audit.service';
 import { PlanCatalogService } from '../src/modules/plans/services/plan-catalog.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import {
@@ -87,6 +88,11 @@ describe('GET admin/plans/stats routing', () => {
           },
         },
         { provide: PlanCatalogService, useValue: { getCatalogPlans: async () => [] } },
+        // Present because the controller now injects it, not because this spec
+        // exercises it: Nest resolves EVERY constructor argument before the
+        // module compiles, so a missing provider fails the whole file with a
+        // dependency error rather than the routing assertion below.
+        { provide: UnknownSquadAuditService, useValue: { audit: async () => null } },
         { provide: PrismaService, useValue: { user: { findFirst: async () => null } } },
       ],
     })

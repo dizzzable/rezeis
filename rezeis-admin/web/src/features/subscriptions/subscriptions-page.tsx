@@ -19,6 +19,7 @@ import { PageTitle } from '@/components/layout/page-title'
 import { AutoRenewPanel } from './auto-renew-panel'
 import { PanelLinkReconciliationPanel } from './panel-link-reconciliation-panel'
 import { DuplicateSubscriptionMergePanel } from './duplicate-subscription-merge-panel'
+import { UnknownSquadPanel } from './unknown-squad-panel'
 
 const STATUSES = ['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED', 'DELETED']
 
@@ -169,6 +170,14 @@ export default function SubscriptionsPage() {
           (subscriptions:edit) and the same rows — it finds its pairs by running
           that very sweep. Renders nothing without the permission. */}
       <DuplicateSubscriptionMergePanel />
+
+      {/* Read-only, and the only surface that answers for the WHOLE install:
+          which subscriptions still name a squad the panel no longer serves, and
+          which plans will keep recreating the problem. The other two notices
+          for this failure arrive too late (a sync that already failed) or only
+          once (a toast when a plan is saved). Asks for `plans:view`, renders
+          nothing without it. */}
+      <UnknownSquadPanel />
 
       {/* Filters */}
       <div className="flex items-center gap-4 flex-wrap">

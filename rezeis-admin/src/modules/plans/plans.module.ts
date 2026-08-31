@@ -12,6 +12,7 @@ import { PlanSquadPropagationService } from './services/plan-squad-propagation.s
 import { PlansAdminService } from './services/plans-admin.service';
 import { PlansAdminValidators } from './services/plans-admin.validators';
 import { RetiredPlanSweeperService } from './services/retired-plan-sweeper.service';
+import { UnknownSquadAuditService } from './services/unknown-squad-audit.service';
 import { PlansStatsService } from './services/plans-stats.service';
 import { PricingService } from './services/pricing.service';
 
@@ -49,6 +50,7 @@ import { PricingService } from './services/pricing.service';
     PlanSnapshotSyncService,
     PlansStatsService,
     RetiredPlanSweeperService,
+    UnknownSquadAuditService,
   ],
   // `PlansAdminService` is exported for ONE consumer: the plan-access toggle on
   // the user card (`AdminUserManagementController`), which used to write

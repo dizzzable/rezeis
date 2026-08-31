@@ -125,6 +125,27 @@ export class AutomationActionRegistry {
     context: AutomationActionContext,
   ): Promise<string> {
     const text = readString(action.params, 'text') ?? `Automation rule "${context.ruleName}" fired`;
+    // ── DO NOT REPORT A DELIVERY WE CANNOT SEE ───────────────────────────────
+    //
+    // `warn()` is `void` and fire-and-forget — correct for the event bus, which
+    // must never fail the caller that raised the event. But this action then
+    // answered `notify queued` and the rule was graded SUCCEEDED, so an operator
+    // whose Telegram notifications were switched off, or who had never ticked
+    // this event type, watched their alerting rule report a clean run on every
+    // single fire while nothing was ever delivered. A dead alert that looks
+    // healthy is worse than one that looks broken.
+    //
+    // The probe cannot promise delivery. It answers the two questions that are
+    // knowable up front and that cover both silent deaths, and a rule whose
+    // notification provably cannot arrive now FAILS with the reason.
+    const delivery = await this.systemEventsService.describeTelegramDelivery(
+      EVENT_TYPES.AUTOMATION_TELEGRAM_NOTIFY,
+    );
+    if (!delivery.deliverable) {
+      throw new Error(
+        `notification cannot be delivered: ${delivery.reason ?? 'Telegram delivery is unavailable'}`,
+      );
+    }
     this.systemEventsService.warn(
       EVENT_TYPES.AUTOMATION_TELEGRAM_NOTIFY,
       'SYSTEM',
@@ -135,7 +156,9 @@ export class AutomationActionRegistry {
         trigger: context.trigger,
       },
     );
-    return `notify queued: ${text.slice(0, 64)}`;
+    // "raised", not "queued": the event is on the bus, and what happens after
+    // that is the notification settings' business, not this action's to claim.
+    return `notification raised: ${text.slice(0, 64)}`;
   }
 
   /** POST a JSON payload to an arbitrary URL with optional auth header. */

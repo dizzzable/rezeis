@@ -60,7 +60,7 @@ describe('AdminPlansController', () => {
         listCallsCount += 1;
         return expectedPlans;
       },
-    } as never as PlansAdminService);
+    } as never as PlansAdminService, {} as never);
 
     const actualPlans = await controller.listPlans();
 
@@ -83,7 +83,7 @@ describe('AdminPlansController', () => {
         externalCallsCount += 1;
         return expectedExternal;
       },
-    } as never as PlansAdminService);
+    } as never as PlansAdminService, {} as never);
 
     const actualInternal = await controller.getInternalSquadOptions();
     const actualExternal = await controller.getExternalSquadOptions();

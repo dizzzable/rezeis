@@ -385,3 +385,84 @@ describe('the guards this batch added, exercised rather than accommodated', () =
     assert.match(String(result.message), /already blocked/i);
   });
 });
+
+describe('the notify action stops claiming a delivery it cannot see', () => {
+  /**
+   * `warn()` is `void` and fire-and-forget — right for the event bus, which
+   * must never fail the caller that raised the event. But the action answered
+   * `notify queued` and the rule was graded SUCCEEDED regardless, so an
+   * operator whose Telegram notifications were switched off, or who had never
+   * ticked this event type, watched their alerting rule report a clean run on
+   * every fire while nothing was delivered.
+   *
+   * A dead alert that looks healthy is worse than one that looks broken.
+   */
+  function registryWith(delivery: { deliverable: boolean; reason: string | null }) {
+    const raised: string[] = [];
+    const registry = new AutomationActionRegistry(
+      {} as never,
+      { user: { findUnique: async () => ({ isBlocked: false }), update: async () => ({}) } } as never,
+      {
+        describeTelegramDelivery: async () => delivery,
+        warn: (_t: string, _c: string, message: string) => {
+          raised.push(message);
+        },
+      } as never,
+      { block: async () => ({}) } as never,
+      { raise: async () => ({ id: 'del-1' }) } as never,
+      { resolve: async () => ({ kind: 'ok', userIds: [], truncated: false }) } as never,
+      { starsWebhookSecret: null } as never,
+    );
+    return { registry, raised };
+  }
+
+  it('FAILS when the operator has notifications switched off', async () => {
+    const { registry, raised } = registryWith({
+      deliverable: false,
+      reason: 'Telegram notifications are switched off',
+    });
+
+    const result = await registry.execute(
+      0,
+      { type: 'notify_telegram', params: { text: 'disk is full' } } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'failed');
+    assert.match(String(result.message), /switched off/i);
+    assert.deepStrictEqual(raised, [], 'raised an event it had just called undeliverable');
+  });
+
+  it('FAILS when this event type is not ticked', async () => {
+    const { registry } = registryWith({
+      deliverable: false,
+      reason: '"automation.telegram_notify" is not ticked in the Telegram notification settings',
+    });
+
+    const result = await registry.execute(
+      0,
+      { type: 'notify_telegram', params: {} } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'failed');
+    assert.match(String(result.message), /not ticked/i);
+  });
+
+  it('raises it when nothing is known to block delivery', async () => {
+    const { registry, raised } = registryWith({ deliverable: true, reason: null });
+
+    const result = await registry.execute(
+      0,
+      { type: 'notify_telegram', params: { text: 'disk is full' } } as never,
+      CONTEXT as never,
+    );
+
+    assert.equal(result.status, 'success');
+    assert.deepStrictEqual(raised, ['disk is full']);
+    // "raised", not "queued" or "sent": what happens after the bus is the
+    // notification settings' business, not this action's to claim.
+    assert.match(String(result.message), /raised/i);
+    assert.doesNotMatch(String(result.message), /sent|delivered/i);
+  });
+});

@@ -15,12 +15,36 @@ import { AdminPlanInterface } from '../interfaces/admin-plan.interface';
 import { PlanSquadPropagationStatus } from '../services/plan-squad-propagation.service';
 import { AdminPlanUpdateResultInterface, PlansAdminService } from '../services/plans-admin.service';
 import { RemnawaveSquadOptionInterface } from '../../remnawave/interfaces/remnawave-squad-option.interface';
+import {
+  UnknownSquadAuditService,
+  type UnknownSquadReport,
+} from '../services/unknown-squad-audit.service';
 
 @Controller('admin/plans')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @RequirePermission('plans', 'view')
 export class AdminPlansController {
-  public constructor(private readonly plansAdminService: PlansAdminService) {}
+  public constructor(
+    private readonly plansAdminService: PlansAdminService,
+    private readonly unknownSquadAudit: UnknownSquadAuditService,
+  ) {}
+
+  /**
+   * Subscriptions and plans still naming a squad the panel does not serve.
+   *
+   * MOUNTED BEFORE `@Get(':planId')`, and that is load-bearing. Nest registers
+   * routes in declaration order and Express answers from the first match, so a
+   * literal path declared after a `:param` route on the same prefix is
+   * unreachable — this controller's own module comment records the release
+   * where exactly that happened to `admin/plans/stats`.
+   *
+   * Read-only, and gated on `plans:view` like everything else here: it answers
+   * a question, it repairs nothing.
+   */
+  @Get('unknown-squads')
+  public async unknownSquads(): Promise<UnknownSquadReport> {
+    return this.unknownSquadAudit.audit();
+  }
 
   @Get()
   public async listPlans(): Promise<readonly AdminPlanInterface[]> {
