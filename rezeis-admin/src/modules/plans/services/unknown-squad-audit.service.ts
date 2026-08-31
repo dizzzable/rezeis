@@ -1,5 +1,5 @@
 import { Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
-import { SubscriptionStatus } from '@prisma/client';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PanelInfraClient } from '../../remnawave/services/panel-infra.client';
@@ -26,7 +26,11 @@ export interface UnknownSquadReport {
 }
 
 /** Never scan the whole table for a screen; an operator wants the first page. */
-const SCAN_LIMIT = 2000;
+/** Hard ceiling on rows EXAMINED, so one call cannot walk an unbounded table. */
+const SCAN_LIMIT = 20000;
+/** How many are read per round trip. */
+const SCAN_BATCH = 1000;
+/** How many offending rows are returned; the count above it is still true. */
 const ROW_LIMIT = 200;
 
 /**
@@ -70,42 +74,48 @@ export class UnknownSquadAuditService {
   public async audit(): Promise<UnknownSquadReport> {
     const known = await this.readKnownSquads();
 
-    const subscriptions = await this.prismaService.subscription.findMany({
-      where: {
-        status: { not: SubscriptionStatus.DELETED },
-        // A subscription with no squads at all cannot be pointing at a dead
-        // one, and on a big install those are most of the table.
-        OR: [{ NOT: { internalSquads: { isEmpty: true } } }, { NOT: { externalSquad: null } }],
-      },
-      select: {
-        id: true,
-        userId: true,
-        status: true,
-        internalSquads: true,
-        externalSquad: true,
-        planSnapshot: true,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: SCAN_LIMIT,
-    });
+    // ── EVERY candidate is examined; only the LIST is capped ────────────────
+    //
+    // This used to read the newest SCAN_LIMIT rows and stop. That is the wrong
+    // end of the table: a squad deleted a while ago is carried by the OLD
+    // subscriptions, so the cap systematically hid the very rows the screen
+    // exists to find, and reported `affected: 0` — "all clear" — while doing it.
+    // Paging through in batches keeps the memory bound that the cap was for and
+    // makes `scanned` and `affected` true.
+    const candidateWhere: Prisma.SubscriptionWhereInput = {
+      status: { not: SubscriptionStatus.DELETED },
+      // A subscription with no squads at all cannot be pointing at a dead
+      // one, and on a big install those are most of the table.
+      OR: [{ NOT: { internalSquads: { isEmpty: true } } }, { NOT: { externalSquad: null } }],
+    };
 
     const rows: UnknownSquadRow[] = [];
-    for (const subscription of subscriptions) {
-      const unknownInternal = subscription.internalSquads.filter((uuid) => !known.has(uuid));
-      const externalMissing =
-        subscription.externalSquad !== null && !known.has(subscription.externalSquad);
-      if (unknownInternal.length === 0 && !externalMissing) continue;
-      rows.push({
-        subscriptionId: subscription.id,
-        userId: subscription.userId,
-        status: subscription.status,
-        planName: readPlanName(subscription.planSnapshot),
-        unknownSquads: externalMissing
-          ? [...unknownInternal, subscription.externalSquad as string]
-          : unknownInternal,
-        externalSquadMissing: externalMissing,
+    let scanned = 0;
+    let cursor: string | undefined;
+    for (;;) {
+      const batch = await this.prismaService.subscription.findMany({
+        where: candidateWhere,
+        select: {
+          id: true,
+          userId: true,
+          status: true,
+          internalSquads: true,
+          externalSquad: true,
+          planSnapshot: true,
+        },
+        orderBy: { id: 'asc' },
+        take: SCAN_BATCH,
+        ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
       });
+      if (batch.length === 0) break;
+      scanned += batch.length;
+      this.collectUnknownRows(batch, known, rows);
+      cursor = batch[batch.length - 1]?.id;
+      if (batch.length < SCAN_BATCH) break;
+      if (scanned >= SCAN_LIMIT) break;
     }
+    const scanTruncated = scanned >= SCAN_LIMIT;
+
 
     // The plans as well as the subscriptions: fixing a subscription one at a
     // time while the plan still holds the dead uuid means the next purchase
@@ -122,12 +132,43 @@ export class UnknownSquadAuditService {
       .map((plan) => ({ id: plan.id, name: plan.name }));
 
     return {
-      scanned: subscriptions.length,
+      scanned,
       affected: rows.length,
-      truncated: subscriptions.length === SCAN_LIMIT || rows.length > ROW_LIMIT,
+      truncated: scanTruncated || rows.length > ROW_LIMIT,
       rows: rows.slice(0, ROW_LIMIT),
       affectedPlans,
     };
+  }
+
+  /** Appends every subscription in `batch` that names a squad the panel lacks. */
+  private collectUnknownRows(
+    batch: readonly {
+      readonly id: string;
+      readonly userId: string;
+      readonly status: SubscriptionStatus;
+      readonly internalSquads: readonly string[];
+      readonly externalSquad: string | null;
+      readonly planSnapshot: unknown;
+    }[],
+    known: ReadonlySet<string>,
+    rows: UnknownSquadRow[],
+  ): void {
+    for (const subscription of batch) {
+      const unknownInternal = subscription.internalSquads.filter((uuid) => !known.has(uuid));
+      const externalMissing =
+        subscription.externalSquad !== null && !known.has(subscription.externalSquad);
+      if (unknownInternal.length === 0 && !externalMissing) continue;
+      rows.push({
+        subscriptionId: subscription.id,
+        userId: subscription.userId,
+        status: subscription.status,
+        planName: readPlanName(subscription.planSnapshot),
+        unknownSquads: externalMissing
+          ? [...unknownInternal, subscription.externalSquad as string]
+          : unknownInternal,
+        externalSquadMissing: externalMissing,
+      });
+    }
   }
 
   /** Every squad uuid the panel serves, internal and external. */

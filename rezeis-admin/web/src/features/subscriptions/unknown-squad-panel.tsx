@@ -57,12 +57,28 @@ export function UnknownSquadPanel() {
     // its squads. The operator opens it when they are looking for this.
     enabled: false,
     retry: false,
+    // A verdict has no timestamp on screen, so a cached one shown on a later
+    // visit would read as current. `gcTime: 0` makes "Check" the only way a
+    // verdict ever appears, which is what the line above promises.
+    gcTime: 0,
   })
 
   if (!allowed) return null
 
   const report = query.data
-  const clean = report !== undefined && report.rows.length === 0 && report.affectedPlans.length === 0
+  // ── EVERY condition that makes an all-clear a lie ──────────────────────
+  //
+  //  - `isError`: TanStack keeps the previous data through a failed refetch, so
+  //    a panel that went down between two checks rendered the destructive "the
+  //    panel did not answer" alert AND the reassuring line, together.
+  //  - `truncated`: the scan stopped early, so "nothing found" means "nothing
+  //    found so far". Saying it plainly is the whole point of this screen.
+  const clean =
+    report !== undefined &&
+    !query.isError &&
+    !report.truncated &&
+    report.rows.length === 0 &&
+    report.affectedPlans.length === 0
 
   return (
     <Card>
@@ -100,6 +116,19 @@ export function UnknownSquadPanel() {
 
         {clean ? (
           <p className="text-xs text-muted-foreground">{t('unknownSquads.clean')}</p>
+        ) : null}
+
+        {/* Outside the "there are rows" branch, where it used to live: a scan
+            that stopped early having found nothing is exactly the case where
+            the operator most needs to be told it stopped early. */}
+        {report !== undefined && report.truncated && report.rows.length === 0 ? (
+          <Alert>
+            <AlertTitle>{t('unknownSquads.partialTitle')}</AlertTitle>
+            <AlertDescription className="text-xs">
+              {t('unknownSquads.summary', { affected: report.affected, scanned: report.scanned })}{' '}
+              {t('unknownSquads.truncated')}
+            </AlertDescription>
+          </Alert>
         ) : null}
 
         {report !== undefined && report.affectedPlans.length > 0 ? (

@@ -50,6 +50,7 @@ describe('GET admin/plans/stats routing', () => {
   let application: INestApplication;
   const statsCalls: PlansStatsQueryInput[] = [];
   const getPlanCalls: string[] = [];
+  const auditCalls: string[] = [];
 
   before(async () => {
     // The REAL registration order, read off the module rather than restated.
@@ -88,11 +89,19 @@ describe('GET admin/plans/stats routing', () => {
           },
         },
         { provide: PlanCatalogService, useValue: { getCatalogPlans: async () => [] } },
-        // Present because the controller now injects it, not because this spec
-        // exercises it: Nest resolves EVERY constructor argument before the
-        // module compiles, so a missing provider fails the whole file with a
-        // dependency error rather than the routing assertion below.
-        { provide: UnknownSquadAuditService, useValue: { audit: async () => null } },
+        // Records its calls, because the routing assertion below needs to know
+        // WHICH handler ran. A stub that only satisfied Nest's constructor
+        // resolution would leave the second literal route on this controller
+        // unguarded — and this file exists because exactly that shipped once.
+        {
+          provide: UnknownSquadAuditService,
+          useValue: {
+            audit: async () => {
+              auditCalls.push('called');
+              return { scanned: 0, affected: 0, truncated: false, rows: [], affectedPlans: [] };
+            },
+          },
+        },
         { provide: PrismaService, useValue: { user: { findFirst: async () => null } } },
       ],
     })
@@ -116,6 +125,25 @@ describe('GET admin/plans/stats routing', () => {
 
   after(async () => {
     await application.close();
+  });
+
+  it('answers unknown-squads from the audit, not from the :planId lookup', async () => {
+    auditCalls.length = 0;
+    getPlanCalls.length = 0;
+
+    const response = await request(application.getHttpServer()).get(
+      '/api/admin/plans/unknown-squads',
+    );
+
+    assert.deepStrictEqual(
+      getPlanCalls,
+      [],
+      'GET admin/plans/unknown-squads was routed to AdminPlansController.getPlan with ' +
+        'planId="unknown-squads" — the parameterised route is registered ahead of the ' +
+        'literal one, so the screen 404s for every operator',
+    );
+    assert.equal(auditCalls.length, 1, 'the audit handler never ran');
+    assert.equal(response.status, 200);
   });
 
   it('answers from the stats controller, not from the :planId lookup', async () => {

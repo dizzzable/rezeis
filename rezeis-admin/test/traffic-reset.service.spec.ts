@@ -15,23 +15,50 @@ import { TrafficResetService } from '../src/modules/add-ons/services/traffic-res
 
 function build(options: {
   readonly resets?: ReadonlyArray<{
+    id?: string;
     subscriptionId: string;
     termId: string | null;
+    addOnId?: string | null;
     transactionId?: string | null;
   }>;
+  readonly ownerUserId?: string;
   readonly subscription?: Record<string, unknown> | null;
   readonly panelAnswer?: 'ok' | 'refused';
   readonly noPanel?: boolean;
   readonly addOn?: Record<string, unknown> | null;
   readonly termId?: { id: string } | null;
 }) {
-  const rows: Array<{ subscriptionId: string; termId: string | null; transactionId?: string | null }> =
-    [...(options.resets ?? [])];
+  const rows: Array<{
+    id?: string;
+    subscriptionId: string;
+    termId: string | null;
+    addOnId?: string | null;
+    transactionId?: string | null;
+  }> = [...(options.resets ?? [])];
   const created: Array<Record<string, unknown>> = [];
   const resetCalls: number[] = [];
 
   const counts: Array<Record<string, unknown>> = []
-  const prisma = {
+  const deleted: string[] = [];
+  const rowsWhenPanelCalled: number[] = [];
+  const owner = options.ownerUserId ?? 'user-1';
+  let nextRowId = 1;
+  const prisma: Record<string, unknown> = {
+    // A FREE claim runs inside one of these. The fake hands the SAME object
+    // back, so every read and write the claim performs is the fake's own — a
+    // `$transaction` that ignored its callback would make the reservation
+    // invisible and the race test meaningless.
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+    // The `SELECT … FOR UPDATE` on the subscription row. Answers with the
+    // OWNER, because that is what the claim compares against: a fake that
+    // returned a row with no `user_id` would make the ownership check
+    // untestable and an IDOR invisible.
+    $queryRaw: async () =>
+      options.subscription === null ? [] : [{ id: 'sub-1', user_id: owner }],
+    user: {
+      findFirst: async ({ where }: { where: { telegramId: bigint } }) =>
+        String(where.telegramId) === '777' ? { id: owner } : null,
+    },
     subscriptionTrafficReset: {
       count: async ({ where }: { where: Record<string, unknown> }) => (
         counts.push(where),
@@ -39,6 +66,10 @@ function build(options: {
           (r) =>
             r.subscriptionId === where.subscriptionId &&
             (where.termId === undefined || r.termId === where.termId) &&
+            // Obeyed for the same reason: the pool is per add-on, so a stub
+            // that ignored this would let two reset options silently share one
+            // allowance with every test still green.
+            (where.addOnId === undefined || (r.addOnId ?? null) === where.addOnId) &&
             // Obeyed, not ignored: the allowance counts only the FREE ones, and
             // a stub that dropped this would let a purchase eat the free use
             // with every test still green.
@@ -47,13 +78,22 @@ function build(options: {
         ).length
       ),
       create: async ({ data }: { data: Record<string, unknown> }) => {
+        const id = `row-${nextRowId++}`;
         created.push(data);
         rows.push({
+          id,
           subscriptionId: String(data.subscriptionId),
           termId: (data.termId as string | null) ?? null,
+          addOnId: (data.addOnId as string | null) ?? null,
           transactionId: (data.transactionId as string | null) ?? null,
         });
-        return data;
+        return { ...data, id };
+      },
+      delete: async ({ where }: { where: { id: string } }) => {
+        deleted.push(where.id);
+        const at = rows.findIndex((r) => r.id === where.id);
+        if (at >= 0) rows.splice(at, 1);
+        return {};
       },
     },
     addOn: {
@@ -78,7 +118,13 @@ function build(options: {
     subscription: {
       findUnique: async () =>
         options.subscription === undefined
-          ? { id: 'sub-1', remnawaveId: '42', configUrl: null }
+          ? {
+              id: 'sub-1',
+              remnawaveId: '42',
+              remnawavePanelId: null,
+              remnawavePanelUsername: null,
+              configUrl: null,
+            }
           : options.subscription,
     },
   };
@@ -89,6 +135,10 @@ function build(options: {
       : {
           resetTraffic: async (userId: number) => {
             resetCalls.push(userId);
+            // How many rows existed AT THE MOMENT the panel was called. This is
+            // the whole ordering assertion: a reservation written first is
+            // visible here, and the count-then-reset order that shipped is not.
+            rowsWhenPanelCalled.push(rows.length);
             return options.panelAnswer === 'refused'
               ? { kind: 'rejected' as const, status: 500, code: null, detail: null }
               : { kind: 'ok' as const, data: {} };
@@ -100,6 +150,9 @@ function build(options: {
     created,
     resetCalls,
     counts,
+    deleted,
+    rows,
+    rowsWhenPanelCalled,
   };
 }
 
@@ -110,6 +163,7 @@ describe('the free allowance', () => {
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: 't-1',
+      addOnId: 'a-1',
       freeUsesPerTerm: 0,
     });
 
@@ -122,11 +176,12 @@ describe('the free allowance', () => {
   });
 
   it('is free while uses remain on this term', async () => {
-    const { service } = build({ resets: [{ subscriptionId: 'sub-1', termId: 't-1' }] });
+    const { service } = build({ resets: [{ subscriptionId: 'sub-1', termId: 't-1', addOnId: 'a-1' }] });
 
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: 't-1',
+      addOnId: 'a-1',
       freeUsesPerTerm: 2,
     });
 
@@ -138,14 +193,15 @@ describe('the free allowance', () => {
   it('stops being free once the allowance is spent', async () => {
     const { service } = build({
       resets: [
-        { subscriptionId: 'sub-1', termId: 't-1' },
-        { subscriptionId: 'sub-1', termId: 't-1' },
+        { subscriptionId: 'sub-1', termId: 't-1', addOnId: 'a-1' },
+        { subscriptionId: 'sub-1', termId: 't-1', addOnId: 'a-1' },
       ],
     });
 
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: 't-1',
+      addOnId: 'a-1',
       freeUsesPerTerm: 2,
     });
 
@@ -166,6 +222,7 @@ describe('the free allowance', () => {
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: 'new-term',
+      addOnId: 'a-1',
       freeUsesPerTerm: 1,
     });
 
@@ -178,12 +235,13 @@ describe('the free allowance', () => {
     // their free one would find it gone — having paid for the privilege of
     // losing it. Only spending the allowance spends it.
     const { service } = build({
-      resets: [{ subscriptionId: 'sub-1', termId: 't-1', transactionId: 'tx-9' }],
+      resets: [{ subscriptionId: 'sub-1', termId: 't-1', addOnId: 'a-1', transactionId: 'tx-9' }],
     });
 
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: 't-1',
+      addOnId: 'a-1',
       freeUsesPerTerm: 1,
     });
 
@@ -197,10 +255,31 @@ describe('the free allowance', () => {
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: 't-1',
+      addOnId: 'a-1',
       freeUsesPerTerm: 1,
     });
 
     assert.equal(allowance.usedThisTerm, 0);
+  });
+
+  it('treats the empty-string term the offer uses as no term at all', async () => {
+    // `AddOnEligibilityService` says `''` for "no term row" while the reset
+    // rows store `null`. Unnormalised, the offer counted `termId: ''`, matched
+    // nothing, and told every term-less subscription its next reset was free —
+    // which the claim, reading `null`, then refused.
+    const { service } = build({
+      resets: [{ subscriptionId: 'sub-1', termId: null, addOnId: 'a-1' }],
+    });
+
+    const allowance = await service.describeAllowance({
+      subscriptionId: 'sub-1',
+      termId: '',
+      addOnId: 'a-1',
+      freeUsesPerTerm: 1,
+    });
+
+    assert.equal(allowance.usedThisTerm, 1);
+    assert.equal(allowance.isFree, false, 'offered a free reset the claim would refuse');
   });
 
   it('counts every reset ever for a subscription with no term', async () => {
@@ -209,14 +288,15 @@ describe('the free allowance', () => {
     // operator configured, which is the safe direction to be wrong in.
     const { service } = build({
       resets: [
-        { subscriptionId: 'sub-1', termId: 'a' },
-        { subscriptionId: 'sub-1', termId: 'b' },
+        { subscriptionId: 'sub-1', termId: 'a', addOnId: 'a-1' },
+        { subscriptionId: 'sub-1', termId: 'b', addOnId: 'a-1' },
       ],
     });
 
     const allowance = await service.describeAllowance({
       subscriptionId: 'sub-1',
       termId: null,
+      addOnId: 'a-1',
       freeUsesPerTerm: 2,
     });
 
@@ -317,26 +397,37 @@ describe('performing the reset', () => {
   });
 });
 
+const OWNER = { userId: 'user-1' } as const;
+
 describe('claiming a FREE reset', () => {
   it('performs it and records it with no transaction', async () => {
     const { service, created, resetCalls } = build({});
 
-    const outcome = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' });
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
 
     assert.equal(outcome.ok, true);
     assert.deepStrictEqual(resetCalls, [42]);
     assert.equal(created[0]?.transactionId, null);
     assert.equal(created[0]?.termId, 't-1');
+    assert.equal(created[0]?.addOnId, 'a-1');
   });
 
   it('REFUSES once the allowance is spent — it does not fall through to charging', async () => {
     // Falling through to a paid purchase would take money from somebody who
     // pressed a button that said the word "free".
     const { service, created, resetCalls } = build({
-      resets: [{ subscriptionId: 'sub-1', termId: 't-1' }],
+      resets: [{ subscriptionId: 'sub-1', termId: 't-1', addOnId: 'a-1' }],
     });
 
-    const outcome = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' });
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
 
     assert.equal(outcome.ok, false);
     assert.match(String(outcome.reason), /used up/i);
@@ -349,12 +440,108 @@ describe('claiming a FREE reset', () => {
     // same stale offer. The second call must find the row the first one wrote.
     const { service, created } = build({});
 
-    const first = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' });
-    const second = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' });
+    const first = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1', owner: OWNER });
+    const second = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1', owner: OWNER });
 
     assert.equal(first.ok, true);
     assert.equal(second.ok, false, 'spent an allowance of one twice');
     assert.equal(created.length, 1);
+  });
+
+  it('RESERVES before calling the panel, so a second claim cannot read nought used', async () => {
+    // The defect this replaces: count, then a panel round trip, then insert.
+    // Two tabs both read nought inside that window and both reset.
+    const { service, created, rowsWhenPanelCalled } = build({});
+
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
+
+    assert.equal(outcome.ok, true);
+    assert.equal(created.length, 1);
+    assert.deepStrictEqual(
+      rowsWhenPanelCalled,
+      [1],
+      'the panel was called before the reservation existed — the window two tabs raced through',
+    );
+  });
+
+  it('gives the free use BACK when the panel refuses', async () => {
+    // A reservation is not a charge. The panel said no, so the customer must
+    // still have the free reset they started with.
+    const { service, deleted, rows } = build({ panelAnswer: 'refused' });
+
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(deleted.length, 1, 'kept a reservation for a reset that never happened');
+    assert.deepStrictEqual(rows, [], 'burned a free use on a refusal');
+  });
+
+  it('refuses a subscription that belongs to somebody else', async () => {
+    // The endpoint took a subscription id from the path and reset whatever it
+    // named. Anyone with a session could zero a stranger's traffic and spend
+    // their allowance.
+    const { service, resetCalls, created } = build({ ownerUserId: 'someone-else' });
+
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.match(String(outcome.reason), /not found/i, 'told the caller the id exists');
+    assert.deepStrictEqual(resetCalls, [], 'reset a stranger subscription');
+    assert.deepStrictEqual(created, []);
+  });
+
+  it('refuses when the caller has no identity at all', async () => {
+    const { service, resetCalls } = build({});
+
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: {},
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.deepStrictEqual(resetCalls, []);
+  });
+
+  it('accepts a telegram identity, resolved to the same owner', async () => {
+    const { service, resetCalls } = build({});
+
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: { telegramId: '777' },
+    });
+
+    assert.equal(outcome.ok, true);
+    assert.deepStrictEqual(resetCalls, [42]);
+  });
+
+  it('counts a DIFFERENT reset option separately', async () => {
+    // The setting lives on the add-on, so the pool does too. Shared, spending
+    // the allowance on one option would silently take the other one's.
+    const { service } = build({
+      resets: [{ subscriptionId: 'sub-1', termId: 't-1', addOnId: 'other-option' }],
+    });
+
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
+
+    assert.equal(outcome.ok, true, "another option's free use was counted against this one");
   });
 
   it('refuses an add-on that is not a reset', async () => {
@@ -362,7 +549,11 @@ describe('claiming a FREE reset', () => {
       addOn: { id: 'a-1', type: 'EXTRA_TRAFFIC', isActive: true, freeUsesPerTerm: 5 },
     });
 
-    const outcome = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' });
+    const outcome = await service.claimFree({
+      subscriptionId: 'sub-1',
+      addOnId: 'a-1',
+      owner: OWNER,
+    });
 
     assert.equal(outcome.ok, false);
     assert.deepStrictEqual(resetCalls, []);
@@ -373,7 +564,10 @@ describe('claiming a FREE reset', () => {
       addOn: { id: 'a-1', type: 'RESET_TRAFFIC', isActive: false, freeUsesPerTerm: 1 },
     });
 
-    assert.equal((await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' })).ok, false);
+    assert.equal(
+      (await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1', owner: OWNER })).ok,
+      false,
+    );
   });
 
   it('refuses when the operator configured no free uses', async () => {
@@ -381,6 +575,9 @@ describe('claiming a FREE reset', () => {
       addOn: { id: 'a-1', type: 'RESET_TRAFFIC', isActive: true, freeUsesPerTerm: 0 },
     });
 
-    assert.equal((await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1' })).ok, false);
+    assert.equal(
+      (await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1', owner: OWNER })).ok,
+      false,
+    );
   });
 });

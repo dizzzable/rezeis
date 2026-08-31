@@ -816,6 +816,16 @@ export class PaymentSubscriptionMutationService {
             } as Prisma.InputJsonObject,
           },
         });
+        // Stamped here, exactly as every other branch does before returning.
+        // Skipping it is not cosmetic: a ZERO-PRICE add-on never pre-claims
+        // `fulfilledAt` (the webhook paths do), so the recovery sweeper would
+        // find this row COMPLETED-but-unfulfilled a quarter of an hour later,
+        // claim it, and reset the customer's traffic a SECOND time. Linking the
+        // subscription is what puts the purchase in that subscription's history.
+        await tx.transaction.update({
+          where: { id: transaction.id },
+          data: { subscriptionId: subscription.id, fulfilledAt: new Date() },
+        });
         return { subscription, syncJob };
       }
 
@@ -1992,6 +2002,22 @@ function buildItemPlanSnapshot(input: {
   };
 }
 
+/**
+ * Exhaustive over `AddOnType` BY CONSTRUCTION: adding a member to the enum
+ * without adding it here fails to compile, because the record must have a key
+ * for every member. A boolean allow-list written as a chain of `!==` comparisons
+ * cannot do that, and its silence cost a whole payment path.
+ */
+const KNOWN_ADD_ON_TYPES: Readonly<Record<AddOnType, true>> = {
+  [AddOnType.EXTRA_TRAFFIC]: true,
+  [AddOnType.EXTRA_DEVICES]: true,
+  [AddOnType.RESET_TRAFFIC]: true,
+};
+
+function isKnownAddOnType(value: unknown): value is AddOnType {
+  return typeof value === 'string' && value in KNOWN_ADD_ON_TYPES;
+}
+
 interface AddOnMarker {
   readonly addOnId: string;
   readonly addOnType: AddOnType;
@@ -2026,7 +2052,13 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
     typeof addOnId !== 'string' ||
     typeof targetSubscriptionId !== 'string' ||
     typeof addOnValue !== 'number' ||
-    (addOnTypeRaw !== AddOnType.EXTRA_TRAFFIC && addOnTypeRaw !== AddOnType.EXTRA_DEVICES)
+    // EVERY add-on type belongs here. This allow-list is what decides whether a
+    // paid transaction is an add-on at all, and a type missing from it is not a
+    // disabled feature — it is a captured payment that falls through to the
+    // renewal path, throws "Purchased plan not found", and is retried by the
+    // webhook job forever while the recovery sweeper skips it for the same
+    // reason. RESET_TRAFFIC shipped missing from it; hence the exhaustive form.
+    !isKnownAddOnType(addOnTypeRaw)
   ) {
     return null;
   }

@@ -2,8 +2,8 @@
   "comment": "DO NOT EDIT files in live/ by hand — they are vendored from reiwa (web/src/features/landing). Edit there, then: node scripts/sync-landing-kit.mjs",
   "sourceRepo": "dizzzable/reiwa",
   "sourcePath": "web/src/features/landing",
-  "sourceCommit": "234c2045b5cb92f21aaedcc18188c979579e4f0e",
-  "syncedAt": "2026-08-31T17:35:15.090Z",
+  "sourceCommit": "e8fc235e5c64dfef633d5c24aa4e0ecc6157bb37",
+  "syncedAt": "2026-08-31T18:45:14.236Z",
   "files": {
     "landing-background.tsx": "0f69db85e48a99d6b5746614809bee5ee3868ad9343a45adda705f436d154efa",
     "landing-kit-context.tsx": "badc8042b5138f79db403881f8ad6c30eb05caec3147354628ca1e06016d9df5",

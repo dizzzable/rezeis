@@ -254,6 +254,7 @@ export class AddOnEligibilityService {
             ? await this.trafficResetService.describeAllowance({
                 subscriptionId,
                 termId: resolved.termId,
+                addOnId: addOn.id,
                 freeUsesPerTerm: addOn.freeUsesPerTerm,
               })
             : null,

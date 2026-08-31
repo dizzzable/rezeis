@@ -1812,9 +1812,19 @@ export class SystemEventsService {
    * rule report a clean run on every fire while nothing was ever delivered.
    *
    * This does not promise delivery — nothing can, short of awaiting the Bot
-   * API. It answers the narrower question that is actually knowable up front
-   * and that covers both silent-death cases: is delivery switched on at all,
-   * and does the operator's own event filter let this type through.
+   * API. It answers the one question that is knowable up front AND actually
+   * stops delivery: does the operator's own event filter let this type through.
+   *
+   * ── What is deliberately NOT checked, and why ────────────────────────────
+   *
+   * The master `enabled` toggle. It reads like the obvious first test and it is
+   * wrong: `deliverTelegram` never consults it. `enabled` only chooses between
+   * the operator's group and the dev DM, and when neither is configured the
+   * event still goes to the reiwa bot's dev id. There is no configuration in
+   * which switching notifications off stops delivery — the settings screen says
+   * so in as many words ("events still arrive here in the bot's DM"). Testing
+   * it here turned the false SUCCESS this method was written to fix into a
+   * false FAILURE: the card arrives and the rule reports it failed.
    *
    * `null` means "no reason it cannot be delivered", not "it was delivered".
    */
@@ -1823,9 +1833,6 @@ export class SystemEventsService {
   ): Promise<{ readonly deliverable: boolean; readonly reason: string | null }> {
     try {
       const config = await this.loadTelegramConfig();
-      if (!config.enabled) {
-        return { deliverable: false, reason: 'Telegram notifications are switched off' };
-      }
       const allowed = isEventTelegramAllowed(eventType, {
         events: config.events,
         eventsMode: config.eventsMode,

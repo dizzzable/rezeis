@@ -27,3 +27,22 @@ export interface RequiredPermission {
  */
 export const RequirePermission = (resource: string, action: RbacAction): MethodDecorator & ClassDecorator =>
   SetMetadata(REQUIRE_PERMISSION_KEY, [{ resource, action }] as readonly RequiredPermission[]);
+
+/**
+ * Requires ALL of the listed permissions.
+ *
+ * The guard reads this metadata with `getAllAndOverride`, so a method-level
+ * `RequirePermission` REPLACES the controller's rather than adding to it —
+ * which makes "this one route needs one more permission than its siblings"
+ * impossible to express with the single-permission form. It came up on a route
+ * that answers a plans question with a body full of subscription and user ids:
+ * gated on `plans:view` alone, a finance role could read identifiers it has no
+ * permission to list anywhere else in the panel.
+ */
+export const RequireAllPermissions = (
+  ...permissions: readonly (readonly [string, RbacAction])[]
+): MethodDecorator & ClassDecorator =>
+  SetMetadata(
+    REQUIRE_PERMISSION_KEY,
+    permissions.map(([resource, action]) => ({ resource, action })) as readonly RequiredPermission[],
+  );

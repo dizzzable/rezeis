@@ -3,7 +3,10 @@ import { Request } from 'express';
 
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
-import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import {
+  RequireAllPermissions,
+  RequirePermission,
+} from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
@@ -38,10 +41,15 @@ export class AdminPlansController {
    * unreachable — this controller's own module comment records the release
    * where exactly that happened to `admin/plans/stats`.
    *
-   * Read-only, and gated on `plans:view` like everything else here: it answers
-   * a question, it repairs nothing.
+   * Read-only: it answers a question, it repairs nothing.
+   *
+   * Gated on `subscriptions:view` AS WELL as the controller's `plans:view`,
+   * because the answer is a list of subscription and user identifiers. The
+   * seeded `finance` role holds `plans:view` and neither of the other two, so
+   * on the class gate alone it could read ids it cannot list anywhere else.
    */
   @Get('unknown-squads')
+  @RequireAllPermissions(['plans', 'view'], ['subscriptions', 'view'])
   public async unknownSquads(): Promise<UnknownSquadReport> {
     return this.unknownSquadAudit.audit();
   }

@@ -381,15 +381,20 @@ function TicketDetail({
 }: TicketDetailProps) {
   const { t } = useTranslation();
   const guest = isGuest(ticket);
-  const viewer = useMediaViewer();
   const blobUrls = useAttachmentBlobs(ticket.id, ticket.messages);
 
   // Thread-wide, so paging reaches a screenshot from a later reply. Built
   // from the fetched blobs, which is also what keeps the inline preview and
   // the viewer showing the same bytes rather than two separate downloads.
+  //
+  // Screenshots arrive one at a time, so this list GROWS while the thread
+  // loads — which is why the viewer takes it as a live prop. Frozen at the
+  // moment of opening, an operator who tapped the first thumbnail as it
+  // appeared got a one-item viewer with no counter and no way to page.
   const viewable = collectViewableAttachments(ticket.messages, (att) =>
     blobUrls.get(att.id) ?? '',
   ).filter((item) => item.url !== '');
+  const viewer = useMediaViewer(viewable);
   const contact = ticket.guest?.email ?? ticket.guest?.displayName ?? null;
   const isClosed = ticket.status === 'closed';
 
@@ -603,7 +608,7 @@ function MessageBubble({
   message: TicketMessage
   blobUrls: ReadonlyMap<string, string>
   viewable: readonly ViewableAttachment[]
-  onOpen: (items: readonly ViewableAttachment[], index: number) => void
+  onOpen: (index: number) => void
 }) {
   const { t } = useTranslation();
   if (message.authorType === 'system') {
@@ -641,7 +646,7 @@ function MessageBubble({
                   <button
                     key={att.id}
                     type="button"
-                    onClick={() => onOpen(viewable, at >= 0 ? at : 0)}
+                    onClick={() => onOpen(at >= 0 ? at : 0)}
                     className="block overflow-hidden rounded-lg"
                   >
                     <img

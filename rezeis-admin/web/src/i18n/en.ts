@@ -2157,9 +2157,10 @@ export const en = {
       'The list was not built. An empty result here would read as "nothing is wrong", so nothing is shown instead.',
     plansTitle: 'Start with the plans',
     plansBody:
-      'These plans still hold a dead squad themselves. While they do, every new purchase recreates the problem — re-pick the squads and save the plan.',
+      'These plans still hold a dead squad themselves. While they do, the problem comes back on every purchase and every renewal on that plan — re-pick the squads and save the plan.',
     summary: '{{affected}} of {{scanned}} scanned subscriptions affected.',
     truncated: 'Showing the first page — the list is truncated.',
+    partialTitle: 'The check is incomplete',
     external: 'external squad',
     howToFix:
       'Each row is repaired by "Assign plan" on the subscription card: it rewrites the squads from the current values on the plan.',

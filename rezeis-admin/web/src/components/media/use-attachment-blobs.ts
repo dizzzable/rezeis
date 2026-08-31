@@ -61,6 +61,9 @@ export function useAttachmentBlobs(
     return () => {
       for (const url of map.values()) URL.revokeObjectURL(url)
       map.clear()
+      // The returned map has to be emptied too, or the next ticket's first
+      // render hands every preview a url that was just revoked.
+      setUrls(new Map())
     }
   }, [ticketId])
 

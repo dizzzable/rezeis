@@ -1,5 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import { AddOnType } from '@prisma/client';
+import { AddOnType, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolvePanelUserId } from '../../profile-sync/profile-sync.processor';
@@ -46,6 +46,38 @@ export interface TrafficResetAllowance {
  * from what they paid for, and counting for all time would make the allowance a
  * one-off gift rather than part of the offer.
  */
+/**
+ * The empty string is a SENTINEL, not a term id.
+ *
+ * `AddOnEligibilityService` uses `''` for "this subscription has no term row"
+ * while the reset rows store `null` for the same thing. Left unnormalised the
+ * offer counted `termId: ''`, matched nothing, and told every term-less
+ * subscription its next reset was free — which the claim, reading `null`, then
+ * refused. One shape, converted once, here.
+ */
+function normalizeTermId(termId: string | null): string | null {
+  return typeof termId === 'string' && termId.length > 0 ? termId : null;
+}
+
+/**
+ * The rows that count against a free allowance.
+ *
+ * Three conditions, each load-bearing:
+ *  - `transactionId: null` — only a FREE reset spends the allowance. Counting
+ *    purchases too would let a customer who paid for a reset lose the free one
+ *    they had not used yet.
+ *  - `addOnId` — the allowance is configured per add-on, so the pool is per
+ *    add-on. Shared, two reset options would eat each other's free uses.
+ *  - `termId` — per term when there is one; for a subscription that predates
+ *    the term ledger this degrades to "all resets ever", which can only run the
+ *    allowance out sooner, never hand out more than was configured.
+ */
+function freeResetsWhere(subscriptionId: string, termId: string | null, addOnId: string) {
+  return termId === null
+    ? { subscriptionId, addOnId, transactionId: null }
+    : { subscriptionId, addOnId, termId, transactionId: null };
+}
+
 @Injectable()
 export class TrafficResetService {
   private readonly logger = new Logger(TrafficResetService.name);
@@ -67,12 +99,14 @@ export class TrafficResetService {
   public async describeAllowance(input: {
     readonly subscriptionId: string;
     readonly termId: string | null;
+    readonly addOnId: string;
     readonly freeUsesPerTerm: number;
   }): Promise<TrafficResetAllowance> {
     const free = Math.max(0, input.freeUsesPerTerm);
     if (free === 0) {
       return { freeUsesPerTerm: 0, usedThisTerm: 0, freeRemaining: 0, isFree: false };
     }
+    const termId = normalizeTermId(input.termId);
     // ── ONLY THE FREE ONES COUNT ──────────────────────────────────────────
     //
     // `transactionId: null` is what marks a reset as taken from the allowance.
@@ -81,10 +115,7 @@ export class TrafficResetService {
     // having been charged for the privilege of losing it. The allowance is a
     // gift the operator configured, and only spending it should spend it.
     const usedThisTerm = await this.prismaService.subscriptionTrafficReset.count({
-      where:
-        input.termId === null
-          ? { subscriptionId: input.subscriptionId, transactionId: null }
-          : { subscriptionId: input.subscriptionId, termId: input.termId, transactionId: null },
+      where: freeResetsWhere(input.subscriptionId, termId, input.addOnId),
     });
     const freeRemaining = Math.max(0, free - usedThisTerm);
     return {
@@ -103,17 +134,41 @@ export class TrafficResetService {
    * The listing says whether the next reset is free; this decides. A customer
    * with two tabs open, a double tap, or a replayed request would otherwise
    * each read "free" from a stale offer and spend an allowance of one twice.
-   * The count and the reset happen in one call, against the same rows.
+   *
+   * ── Reserve, then reset ───────────────────────────────────────────────────
+   *
+   * Counting and then resetting is not enough, and the first version of this
+   * claimed otherwise: between the count and the write sits a panel round trip,
+   * so two tabs both read nought used and both reset. The row is therefore
+   * INSERTED first, inside a transaction that locks the subscription row and
+   * re-counts under that lock — a reservation. Only then is the panel called,
+   * and a panel that refuses gives the reservation straight back.
+   *
+   * The residual failure is a process that dies between the commit and the
+   * panel call: the customer loses one free use without a reset. That is the
+   * direction to fail in. The other order hands out free resets that were never
+   * configured, and there is no way to take those back.
    *
    * ── It refuses rather than charging ───────────────────────────────────────
    *
    * When the allowance is spent this answers "not free" and does nothing. The
    * alternative — quietly falling through to a paid purchase — would take money
    * from somebody who pressed a button that said the word "free".
+   *
+   * ── The caller has already checked eligibility ────────────────────────────
+   *
+   * `owner` is mandatory, and the ownership check below is the LAST line rather
+   * than the only one: the controller resolves the offer through
+   * `AddOnEligibilityService` first, so plan applicability, the finite-traffic
+   * baseline and subscription status are all applied by the same code that
+   * decides what to display. This method re-checks ownership anyway, because a
+   * write that trusts its caller for that is one refactor away from being an
+   * open door.
    */
   public async claimFree(input: {
     readonly subscriptionId: string;
     readonly addOnId: string;
+    readonly owner: { readonly userId?: string; readonly telegramId?: string };
   }): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
     const addOn = await this.prismaService.addOn.findUnique({
       where: { id: input.addOnId },
@@ -126,22 +181,107 @@ export class TrafficResetService {
       return { ok: false, reason: 'this option is not a traffic reset' };
     }
 
-    const termId = await this.currentTermId(input.subscriptionId);
-    const allowance = await this.describeAllowance({
-      subscriptionId: input.subscriptionId,
-      termId,
-      freeUsesPerTerm: addOn.freeUsesPerTerm,
-    });
-    if (!allowance.isFree) {
-      return { ok: false, reason: 'the free allowance for this term is used up' };
+    const ownerUserId = await this.resolveOwnerUserId(input.owner);
+    if (ownerUserId === null) {
+      return { ok: false, reason: 'subscription not found' };
     }
 
-    return this.perform({
+    const reservation = await this.reserveFreeReset({
       subscriptionId: input.subscriptionId,
-      termId,
+      ownerUserId,
       addOnId: addOn.id,
-      transactionId: null,
+      freeUsesPerTerm: addOn.freeUsesPerTerm,
     });
+    if (reservation.kind !== 'reserved') {
+      return { ok: false, reason: reservation.reason };
+    }
+
+    const performed = await this.resetOnPanel(input.subscriptionId);
+    if (!performed.ok) {
+      // Hand the free use back. The reservation exists to stop two claims from
+      // racing, not to charge for a reset that never happened.
+      await this.prismaService.subscriptionTrafficReset
+        .delete({ where: { id: reservation.id } })
+        .catch(() => undefined);
+      return performed;
+    }
+    this.logger.log(
+      `Traffic reset performed for subscription ${input.subscriptionId} (free allowance)`,
+    );
+    return { ok: true, reason: null };
+  }
+
+  /**
+   * Locks the subscription, re-counts the allowance under that lock and writes
+   * the reservation row — all in one transaction, so two claims cannot both see
+   * the last free use.
+   *
+   * The ownership check is inside the same transaction and against the locked
+   * row: a subscription that does not belong to this caller is reported exactly
+   * as a missing one, so the endpoint cannot be used to discover which ids exist.
+   */
+  private async reserveFreeReset(input: {
+    readonly subscriptionId: string;
+    readonly ownerUserId: string;
+    readonly addOnId: string;
+    readonly freeUsesPerTerm: number;
+  }): Promise<{ readonly kind: 'reserved'; readonly id: string } | { readonly kind: 'refused'; readonly reason: string }> {
+    const free = Math.max(0, input.freeUsesPerTerm);
+    if (free === 0) {
+      return { kind: 'refused', reason: 'this option has no free resets' };
+    }
+    return this.prismaService.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ id: string; user_id: string }>>(Prisma.sql`
+        SELECT "id", "user_id"
+        FROM "subscriptions"
+        WHERE "id" = ${input.subscriptionId}
+        FOR UPDATE
+      `);
+      const row = locked[0];
+      if (row === undefined || row.user_id !== input.ownerUserId) {
+        return { kind: 'refused' as const, reason: 'subscription not found' };
+      }
+      const term = await tx.subscriptionTerm.findFirst({
+        where: { subscriptionId: input.subscriptionId, status: 'ACTIVE' },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      const termId = normalizeTermId(term?.id ?? null);
+      const used = await tx.subscriptionTrafficReset.count({
+        where: freeResetsWhere(input.subscriptionId, termId, input.addOnId),
+      });
+      if (used >= free) {
+        return { kind: 'refused' as const, reason: 'the free allowance for this term is used up' };
+      }
+      const created = await tx.subscriptionTrafficReset.create({
+        data: {
+          subscriptionId: input.subscriptionId,
+          termId,
+          addOnId: input.addOnId,
+          transactionId: null,
+        },
+        select: { id: true },
+      });
+      return { kind: 'reserved' as const, id: created.id };
+    });
+  }
+
+  /** `null` when the identity resolves to nobody — reported as "not found". */
+  private async resolveOwnerUserId(owner: {
+    readonly userId?: string;
+    readonly telegramId?: string;
+  }): Promise<string | null> {
+    if (typeof owner.userId === 'string' && owner.userId.length > 0) {
+      return owner.userId;
+    }
+    if (typeof owner.telegramId === 'string' && /^\d+$/.test(owner.telegramId)) {
+      const user = await this.prismaService.user.findFirst({
+        where: { telegramId: BigInt(owner.telegramId) },
+        select: { id: true },
+      });
+      return user?.id ?? null;
+    }
+    return null;
   }
 
   /**
@@ -180,9 +320,45 @@ export class TrafficResetService {
     readonly addOnId: string | null;
     readonly transactionId: string | null;
   }): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
+    const performed = await this.resetOnPanel(input.subscriptionId);
+    if (!performed.ok) return performed;
+
+    await this.prismaService.subscriptionTrafficReset.create({
+      data: {
+        subscriptionId: input.subscriptionId,
+        termId: normalizeTermId(input.termId),
+        addOnId: input.addOnId,
+        transactionId: input.transactionId,
+      },
+    });
+    this.logger.log(`Traffic reset performed for subscription ${input.subscriptionId}`);
+    return { ok: true, reason: null };
+  }
+
+  /**
+   * Zeroes the profile's counter on the panel. Records nothing.
+   *
+   * Shared by the paid path (which records afterwards) and the free path (which
+   * has already reserved). The SELECT carries all four identity columns on
+   * purpose: `storedIdentityOf` builds the address from `remnawaveId`,
+   * `remnawavePanelId`, `remnawavePanelUsername` and the short uuid in
+   * `configUrl`, and omitting the middle two collapses a four-step fallback to
+   * one. A profile provisioned on 2.x and now served by a 3.x panel is
+   * addressable only by the numeric id — the admin endpoint for this same action
+   * selects all four and says so.
+   */
+  private async resetOnPanel(
+    subscriptionId: string,
+  ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
     const subscription = await this.prismaService.subscription.findUnique({
-      where: { id: input.subscriptionId },
-      select: { id: true, remnawaveId: true, configUrl: true },
+      where: { id: subscriptionId },
+      select: {
+        id: true,
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+        configUrl: true,
+      },
     });
     if (subscription === null) {
       return { ok: false, reason: 'subscription not found' };
@@ -207,24 +383,9 @@ export class TrafficResetService {
 
     const outcome = await this.panelUsers.resetTraffic(address.userId);
     if (outcome.kind !== 'ok') {
-      this.logger.warn(
-        `Traffic reset refused by the panel for subscription ${input.subscriptionId}`,
-      );
+      this.logger.warn(`Traffic reset refused by the panel for subscription ${subscriptionId}`);
       return { ok: false, reason: 'the panel refused the reset' };
     }
-
-    await this.prismaService.subscriptionTrafficReset.create({
-      data: {
-        subscriptionId: input.subscriptionId,
-        termId: input.termId,
-        addOnId: input.addOnId,
-        transactionId: input.transactionId,
-      },
-    });
-    this.logger.log(
-      `Traffic reset performed for subscription ${input.subscriptionId}` +
-        `${input.transactionId === null ? ' (free allowance)' : ''}`,
-    );
     return { ok: true, reason: null };
   }
 }
