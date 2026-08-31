@@ -151,6 +151,13 @@ export interface PlanSquadPropagationSummary {
   /** `null` when the save did not change the plan's squads. */
   readonly propagationId: string | null
   readonly subscriptionsUpdated: number
+  /**
+   * Subscriptions on this plan left on their old squads because they had
+   * diverged from the plan's previous set. Deliberate — but the operator has to
+   * be told, or a rework that moved nothing looks exactly like one that had
+   * nothing to move.
+   */
+  readonly subscriptionsSkippedDiverged: number
   readonly syncJobsCreated: number
 }
 

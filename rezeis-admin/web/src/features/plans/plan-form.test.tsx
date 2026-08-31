@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
+import { remnawaveApi } from '@/features/remnawave/remnawave-api'
 import { PlanForm } from './plan-form'
 import type { Plan } from './plans-api'
 
@@ -518,3 +519,63 @@ function planOption(): Plan {
     upgradeToPlanIds: [],
   }
 }
+
+describe('a squad the panel no longer knows', () => {
+  /**
+   * Reproduced against a live Remnawave 3.3.2: a PATCH carrying a well-formed
+   * but non-existent squad uuid answers `HTTP 500 A039 Update user error`. The
+   * uuid gets there because a squad deleted or RECREATED in the panel keeps its
+   * old id in the plan — and recreating is the cruel one, since the name is
+   * unchanged and only the id moves.
+   *
+   * It used to render as a plain truncated uuid, which reads like a name that
+   * failed to load rather than a plan that is about to break every renewal.
+   */
+  const KNOWN = 'aaaaaaaa-0000-4000-8000-000000000001'
+  const GONE = 'bbbbbbbb-0000-4000-8000-000000000002'
+
+  function planWith(squads: string[]): Plan {
+    return {
+      id: 'plan-1',
+      name: 'Premium',
+      internalSquads: squads,
+      durations: [{ days: 30, prices: [{ currency: 'RUB', price: 100 }] }],
+    } as unknown as Plan
+  }
+
+  function mockSquads(available: string[]) {
+    vi.spyOn(remnawaveApi, 'getInternalSquads').mockResolvedValue(
+      available.map((uuid) => ({ uuid, name: `Squad ${uuid.slice(0, 4)}` })) as never,
+    )
+    vi.spyOn(remnawaveApi, 'getExternalSquads').mockResolvedValue([] as never)
+  }
+
+  it('calls out a squad the panel does not return', async () => {
+    mockSquads([KNOWN])
+
+    renderWithProviders(
+      <PlanForm onSubmit={vi.fn()} isLoading={false} plan={planWith([KNOWN, GONE])} />,
+    )
+
+    // The dead one is named as a problem…
+    expect(await screen.findByText(/Not in the panel/i)).toBeInTheDocument()
+    // …and the live one is not.
+    await waitFor(() => {
+      expect(screen.getByText('Squad aaaa')).toBeInTheDocument()
+    })
+  })
+
+  it('flags nothing while the squad list has not loaded', async () => {
+    // Every chip would be flagged, and that would be a lie: an unreachable
+    // panel is not evidence that a squad was deleted.
+    mockSquads([])
+
+    renderWithProviders(
+      <PlanForm onSubmit={vi.fn()} isLoading={false} plan={planWith([KNOWN])} />,
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Not in the panel/i)).toBeNull()
+    })
+  })
+})

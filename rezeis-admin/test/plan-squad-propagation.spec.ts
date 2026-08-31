@@ -125,6 +125,11 @@ describe('a plan squad edit reaches existing subscriptions', () => {
     assert.deepStrictEqual(result.squadPropagation, {
       propagationId: null,
       subscriptionsUpdated: 0,
+      // Zero, and it MEANS zero here: the squads did not change, so there was
+      // nothing to skip. The other zero — "every subscription diverged and none
+      // could be moved" — now reports a count instead, which is the whole point
+      // of the field.
+      subscriptionsSkippedDiverged: 0,
       syncJobsCreated: 0,
       syncJobsSkippedUnlinked: 0,
     });
@@ -155,7 +160,7 @@ describe('a plan squad edit reaches existing subscriptions', () => {
       ],
     });
 
-    await harness.updatePlan({ internalSquads: [SQUAD_B] });
+    const result = await harness.updatePlan({ internalSquads: [SQUAD_B] });
 
     assert.deepStrictEqual(harness.subscriptionUpdates, [
       propagatedWrite('sub-tracking', planSnapshotOf([SQUAD_A], null), [SQUAD_B], null),
@@ -164,6 +169,48 @@ describe('a plan squad edit reaches existing subscriptions', () => {
       harness.createdJobs.map((job) => job.subscriptionId),
       ['sub-tracking'],
     );
+    // …AND SAYS SO. Leaving it alone is right; saying nothing about it was the
+    // defect. Without this number the operator has no way to learn that a
+    // customer was left on the old squads by a plan edit that reported success.
+    assert.equal(result.squadPropagation.subscriptionsSkippedDiverged, 1);
+  });
+
+  it('reports the skipped count when NOT ONE subscription could be moved', async () => {
+    // The worst version, and the one that used to be invisible: every
+    // subscription on the plan had diverged, so the early return handed back
+    // the same empty summary as "the squads did not change at all". An operator
+    // who had just reworked their squads read `updated: 0` as "already correct"
+    // when it meant "not one was moved" — and if the old squads were deleted or
+    // recreated in Remnawave, every one of those renewals now fails with the
+    // panel's catch-all `A039 Update user error`.
+    const harness = createUpdateHarness({
+      previousInternalSquads: [SQUAD_A],
+      nextInternalSquads: [SQUAD_B],
+      subscriptions: [
+        activeSubscription('sub-one', [SQUAD_C]),
+        activeSubscription('sub-two', [SQUAD_C]),
+      ],
+    });
+
+    const result = await harness.updatePlan({ internalSquads: [SQUAD_B] });
+
+    assert.deepStrictEqual(harness.subscriptionUpdates, [], 'a diverged row was moved anyway');
+    assert.equal(result.squadPropagation.subscriptionsUpdated, 0);
+    assert.equal(result.squadPropagation.subscriptionsSkippedDiverged, 2);
+  });
+
+  it('reports nothing skipped when the squads did not change', async () => {
+    // The other reading of a zero, and it must stay distinguishable: a save
+    // that left the squads alone has nothing to skip and nothing to warn about.
+    const harness = createUpdateHarness({
+      previousInternalSquads: [SQUAD_A],
+      nextInternalSquads: [SQUAD_A],
+      subscriptions: [activeSubscription('sub-one', [SQUAD_C])],
+    });
+
+    const result = await harness.updatePlan({ internalSquads: [SQUAD_A] });
+
+    assert.equal(result.squadPropagation.subscriptionsSkippedDiverged, 0);
   });
 });
 

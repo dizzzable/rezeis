@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { AlertCircle, Network, Pencil, Plus, Shield, ShieldBan, ShieldCheck, Trash2, UserX, Webhook } from 'lucide-react'
+import { AlertCircle, Network, Pencil, Plus, Shield, ShieldBan, ShieldCheck, Trash2, Webhook } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -76,9 +76,10 @@ const RolesTab = lazy(() => import('@/features/rbac/roles-page'))
 const IpAllowlistTab = lazy(() => import('@/features/two-factor/admin-ip-allowlist-page'))
 const WebhooksTab = lazy(() => import('@/features/webhooks/webhooks-page'))
 const BlockedIpsTab = lazy(() => import('@/features/blocked-ips/blocked-ips-page'))
-const BlockedIdentitiesTab = lazy(
-  () => import('@/features/blocked-identities/blocked-identities-page'),
-)
+// Заблокированные личности переехали в «Пользователи»: они закрывают вход
+// КЛИЕНТУ (регистрация через Telegram, веб и бота) и к доступу в панель
+// отношения не имеют. На этой странице остаются списки, которые закрывают
+// доступ в саму панель, — в том числе бывшему администратору.
 
 const ALLOWED_TABS = HUB_TABS['/admins']
 type AdminsTab = (typeof ALLOWED_TABS)[number]
@@ -682,13 +683,6 @@ export default function AdminsPage() {
             <ShieldBan className="h-3.5 w-3.5" />
             {t('adminsPage.tabs.blockedIps')}
           </TabsTrigger>
-          {/* Beside the IP list on purpose: they are the same act on two
-              different axes, and an operator looking for one is looking for
-              the other. */}
-          <TabsTrigger value="blocked-identities" className="gap-1.5">
-            <UserX className="h-3.5 w-3.5" />
-            {t('adminsPage.tabs.blockedIdentities')}
-          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="admins" className="pt-2">
@@ -747,18 +741,6 @@ export default function AdminsPage() {
           </Suspense>
         </TabsContent>
 
-        <TabsContent value="blocked-identities" className="pt-2">
-          <Suspense
-            fallback={
-              <div className="space-y-3">
-                <Skeleton className="h-8 w-48" />
-                <Skeleton className="h-64 w-full" />
-              </div>
-            }
-          >
-            <BlockedIdentitiesTab embedded />
-          </Suspense>
-        </TabsContent>
       </Tabs>
     </div>
   )

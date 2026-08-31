@@ -22,13 +22,19 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Search, Users as UsersIcon, Plus, Loader2, ListChecks, ArrowLeft, Download, Flag } from 'lucide-react'
+import { Search, Users as UsersIcon, Plus, Loader2, ListChecks, ArrowLeft, Download, Flag, UserX } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { toast } from 'sonner'
 import { PermissionGate } from '@/features/rbac'
 import { downloadCsv } from '@/features/partners/csv-download'
 import { UsersFilterPanel } from './users-filter-panel'
+
+// Ленивый, как и на прежнем месте: вкладка со списком заблокированных
+// личностей тянет свой диалог и таблицу, а открывают её редко.
+const BlockedIdentitiesTab = lazy(
+  () => import('@/features/blocked-identities/blocked-identities-page'),
+)
 import {
   countActiveFilters,
   filtersFromParams,
@@ -180,10 +186,34 @@ export default function UsersPage() {
             <ListChecks className="h-3.5 w-3.5" />
             {t('usersPage.tabs.bulk')}
           </TabsTrigger>
+          {/* Здесь, а не в «Администраторах», где он лежал раньше. Этот список
+              закрывает вход КЛИЕНТУ — он проверяется на регистрации через
+              Telegram, через веб и через бота, и ни на что в самой панели не
+              влияет. Рядом с администраторами его искали те, кому он не нужен,
+              и не находили те, кому нужен. */}
+          <PermissionGate resource="blocked_identities" action="view">
+            <TabsTrigger value="blocked-identities" className="gap-1.5">
+              <UserX className="h-3.5 w-3.5" />
+              {t('usersPage.tabs.blockedIdentities')}
+            </TabsTrigger>
+          </PermissionGate>
         </TabsList>
 
         <TabsContent value="list" className="pt-2">
           <UsersListTab />
+        </TabsContent>
+
+        <TabsContent value="blocked-identities" className="pt-2">
+          <Suspense
+            fallback={
+              <div className="space-y-3">
+                <Skeleton className="h-8 w-48" />
+                <Skeleton className="h-64 w-full" />
+              </div>
+            }
+          >
+            <BlockedIdentitiesTab embedded />
+          </Suspense>
         </TabsContent>
 
         <TabsContent value="bulk" className="pt-2">

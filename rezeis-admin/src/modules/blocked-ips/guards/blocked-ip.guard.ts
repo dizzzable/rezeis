@@ -11,6 +11,7 @@ import { Request } from 'express';
 
 import { appConfig } from '../../../common/config/app.config';
 import { buildTrustedProxyValue } from '../../../common/http/trusted-proxy';
+import { normalizeIp, readString, resolveRequestIp } from '../utils/request-ip.util';
 import { BlockedIpService } from '../services/blocked-ip.service';
 
 /**
@@ -147,25 +148,8 @@ export class BlockedIpGuard implements CanActivate {
   }
 }
 
-function extractHttpIp(request: Request | undefined): string | null {
-  // `req.ip` already honours `app.set('trust proxy', ...)` if set.
-  const forwarded = readString(request?.ip);
-  if (forwarded !== null) {
-    // Strip IPv4-mapped IPv6 prefix that Node injects for v4 clients
-    // (`::ffff:1.2.3.4` → `1.2.3.4`).
-    return normalizeIp(forwarded);
-  }
-  // Optional-chained: an Express-shaped object without a live socket is not a
-  // reason to throw out of a guard.
-  const remote = readString(request?.socket?.remoteAddress);
-  return remote === null ? null : normalizeIp(remote);
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-function normalizeIp(value: string): string | null {
-  const normalized = value.replace(/^::ffff:/, '');
-  return normalized.length > 0 ? normalized : null;
-}
+// Address resolution lives in `../utils/request-ip.util` so that this guard and
+// the controller's self-lockout check cannot disagree about what the caller's
+// address is. A second opinion there would clear an entry this guard then
+// matches — locking the operator out with the call that said they were safe.
+const extractHttpIp = resolveRequestIp;

@@ -110,6 +110,20 @@ export default function PlansPage() {
         )
         setWatchedPropagationPlanId(variables.id)
       }
+      // Said out loud, and as a WARNING rather than an info line. These
+      // customers keep the plan's OLD squads — deliberately, because they had
+      // diverged — but nothing else in the panel would ever mention them. If
+      // the old squads were deleted or recreated in Remnawave, their renewals
+      // now fail with the panel's catch-all `A039`, and the operator's only
+      // clue would have been a plan edit that reported success.
+      if (propagation && propagation.subscriptionsSkippedDiverged > 0) {
+        toast.warning(
+          t('plansPage.squadPropagation.skippedDiverged', {
+            count: propagation.subscriptionsSkippedDiverged,
+          }),
+          { duration: 12_000 },
+        )
+      }
     },
     onError: (err) => toast.error(refusalMessage(err, t('plansPage.updateFailed'))),
   })

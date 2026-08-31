@@ -1,5 +1,5 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import {
   EffectiveProjectionState,
   Prisma,
@@ -23,6 +23,7 @@ import {
   storedIdentityOf as panelIdentityOf,
   type StoredPanelIdentity,
 } from '../remnawave/services/panel-user-address';
+import { PanelInfraClient } from '../remnawave/services/panel-infra.client';
 import {
   PanelUsersClient,
   type UpdatePanelUserBody,
@@ -78,6 +79,14 @@ export class ProfileSyncProcessor extends WorkerHost {
     private readonly namingService: RemnawaveProfileNamingService,
     private readonly events: SystemEventsService,
     private readonly profileSyncQueueService?: ProfileSyncQueueService,
+    /**
+     * Read-only, and used on the FAILURE path alone: it turns the panel's
+     * opaque `A039 Update user error` into the uuid that caused it.
+     *
+     * `@Optional()` on purpose — a diagnostic must never be the reason a sync
+     * cannot run. Absent, the error keeps the wording it has today.
+     */
+    @Optional() private readonly panelInfra?: PanelInfraClient,
   ) {
     super();
   }
@@ -392,6 +401,66 @@ export class ProfileSyncProcessor extends WorkerHost {
    * `throw this.panelFailure(…)` and TypeScript's own control-flow analysis —
    * not a convention — is what proves the code below is unreachable.
    */
+  /**
+   * Names the squad uuids the panel does not know about.
+   *
+   * ── Why this exists ──────────────────────────────────────────────────────
+   *
+   * `A039 Update user error` is the panel's catch-all: HTTP 500, no field, no
+   * value, no hint. The contract validates `activeInternalSquads` as an array
+   * of UUIDs — SHAPE only — so a well-formed uuid that names nothing passes
+   * validation and then throws inside the panel's own service. From the
+   * operator's side a renewal simply stops working and the message blames
+   * "limits, term, squads" collectively.
+   *
+   * That is the exact shape of the most likely cause: a squad deleted or
+   * RECREATED in Remnawave. Recreating is the cruel one — same name, new uuid —
+   * so the plan looks right on both screens while every renewal on it fails.
+   *
+   * Squads are checked when a plan is SAVED and never again, so nothing else in
+   * this system would ever notice.
+   *
+   * ── Rules it must obey ───────────────────────────────────────────────────
+   *
+   * It runs on the failure path, so it must not be able to make things worse:
+   * no throw, no second failure, and no opinion when it cannot get an answer.
+   * "We could not ask the panel" is reported as itself, never as "the squad is
+   * missing" — accusing a squad that exists would send an operator hunting
+   * through Remnawave for a problem that is not there.
+   */
+  private async describeUnknownSquads(
+    internalSquads: readonly string[],
+    externalSquad: string | null,
+  ): Promise<string> {
+    const wanted = [...internalSquads, ...(externalSquad === null ? [] : [externalSquad])];
+    if (wanted.length === 0 || this.panelInfra === undefined) return '';
+    try {
+      const [internal, external] = await Promise.all([
+        this.panelInfra.getInternalSquadOptions(),
+        this.panelInfra.getExternalSquadOptions(),
+      ]);
+      if (internal.kind !== 'ok' || external.kind !== 'ok') {
+        return ' (could not check whether these squads still exist: the panel did not answer)';
+      }
+      const known = new Set([
+        ...internal.data.map((squad) => squad.uuid),
+        ...external.data.map((squad) => squad.uuid),
+      ]);
+      const unknown = wanted.filter((uuid) => !known.has(uuid));
+      if (unknown.length === 0) return '';
+      return (
+        ` — the panel does not know ${unknown.length === 1 ? 'this squad' : 'these squads'}: ` +
+        `${unknown.join(', ')}. A squad deleted or recreated in Remnawave keeps its uuid in the ` +
+        `plan, and every renewal on that plan fails until the plan is re-saved with the squads ` +
+        `that exist now.`
+      );
+    } catch {
+      // A diagnostic that throws would replace a useful panel error with a
+      // useless one of ours.
+      return '';
+    }
+  }
+
   private panelFailure(failure: PanelFailure, context: string): Error {
     if (failure.kind === 'transient') {
       return new ServiceUnavailableException(`${context}: ${failure.detail}`);
@@ -1187,7 +1256,20 @@ export class ProfileSyncProcessor extends WorkerHost {
         if (failure.kind === 'missing') {
           return this.reprovisionThroughCreate(syncJob, subscription, failure.detail);
         }
-        throw this.panelFailure(failure, `Updating subscription ${subscription.id}`);
+        // Only when the panel ANSWERED. An unreachable panel cannot be asked
+        // which squads it knows, and asking a down panel twice on every retry
+        // is how a diagnostic becomes part of the outage.
+        const squadHint =
+          failure.kind === 'terminal'
+            ? await this.describeUnknownSquads(
+                subscription.internalSquads,
+                subscription.externalSquad,
+              )
+            : '';
+        throw this.panelFailure(
+          { ...failure, detail: `${failure.detail}${squadHint}` },
+          `Updating subscription ${subscription.id}`,
+        );
       }
       const panelUser = patched.data.response;
 

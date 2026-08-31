@@ -531,6 +531,10 @@ export const en = {
     squadPropagation: {
       queued_one: 'Squad change queued for {{count}} existing subscription',
       queued_other: 'Squad change queued for {{count}} existing subscriptions',
+      skippedDiverged_one:
+        '{{count}} subscription was left on its old squads: its set already differed from the plan, and a plan edit does not overwrite that. Check it separately — if the old squads were deleted in Remnawave, its renewal will fail.',
+      skippedDiverged_other:
+        '{{count}} subscriptions were left on their old squads: their sets already differed from the plan, and a plan edit does not overwrite that. Check them separately — if the old squads were deleted in Remnawave, their renewals will fail.',
       running: 'Applying the squad change on the panel — {{done}} of {{total}} done',
       remaining_one: '{{count}} subscription still waiting',
       remaining_other: '{{count}} subscriptions still waiting',
@@ -2196,6 +2200,7 @@ export const en = {
     tabs: {
       list: 'List',
       bulk: 'Bulk operations',
+      blockedIdentities: 'Blocklist',
     },
     create: {
       telegramId: 'Telegram ID',
@@ -2281,6 +2286,9 @@ export const en = {
     squads: 'Remnawave squads',
     internalSquads: 'Internal squads',
     internalSquadsPlaceholder: 'Select internal squads…',
+    squadUnknown: 'Not in the panel',
+    squadUnknownHint:
+      'Remnawave does not know squad {{uuid}}. It was usually deleted or recreated — a recreated squad keeps its name and gets a new id. While it stays here, renewals on this plan fail with A039. Re-pick the squads and save the plan.',
     internalSquadsCount_one: '{{count}} squad selected',
     internalSquadsCount_other: '{{count}} squads selected',
     externalSquad: 'External squad',
@@ -2693,7 +2701,6 @@ export const en = {
       ipAllowlist: 'IP allowlist',
       webhooks: 'Webhooks',
       blockedIps: 'Blocked IPs',
-      blockedIdentities: 'Blocklist',
     },
     add: 'Add administrator',
     tableTitle: 'Administrator accounts',

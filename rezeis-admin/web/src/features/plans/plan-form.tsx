@@ -1292,14 +1292,36 @@ function InternalSquadsPicker({
       </Popover>
 
       {/* Selected chip preview (read-only echo so the operator can see
-          which squads are picked without opening the dropdown). */}
+          which squads are picked without opening the dropdown).
+
+          A SQUAD THE PANEL NO LONGER KNOWS IS CALLED OUT, not quietly shown as
+          a truncated uuid. It used to render as one, which reads like a squad
+          whose name simply failed to load — and it is not: the plan is holding
+          a uuid Remnawave has forgotten, usually because the squad was deleted
+          or RECREATED (same name, new uuid). The panel validates squads only
+          when the plan is saved, so nothing else notices; every renewal on the
+          plan then fails with the panel's own catch-all, `A039 Update user
+          error`, which names neither the field nor the value. */}
       {value.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
-          {value.map((uuid) => (
-            <Badge key={uuid} variant="secondary" className="font-normal">
-              {byUuid.get(uuid) ?? truncate(uuid, 8)}
-            </Badge>
-          ))}
+          {value.map((uuid) => {
+            const name = byUuid.get(uuid)
+            // `squads` empty means the list has not loaded (or the panel is
+            // unreachable) — every chip would be flagged, which would be a lie.
+            const unknown = name === undefined && squads.length > 0
+            return (
+              <Badge
+                key={uuid}
+                variant={unknown ? 'destructive' : 'secondary'}
+                className="font-normal"
+                title={unknown ? t('planForm.squadUnknownHint', { uuid }) : undefined}
+              >
+                {unknown
+                  ? `${t('planForm.squadUnknown')}: ${truncate(uuid, 8)}`
+                  : (name ?? truncate(uuid, 8))}
+              </Badge>
+            )
+          })}
         </div>
       ) : null}
     </div>

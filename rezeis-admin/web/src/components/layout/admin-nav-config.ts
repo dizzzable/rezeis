@@ -201,16 +201,12 @@ export const navGroups: ReadonlyArray<NavGroup> = [
  * panel; a value the page renders but omits here is unreachable by deep link.
  */
 export const HUB_TABS = {
-  '/users': ['list', 'bulk'],
+  '/users': ['list', 'bulk', 'blocked-identities'],
   '/partners': ['partners', 'withdrawals', 'analytics', 'settings'],
-  '/admins': [
-    'admins',
-    'roles',
-    'ip-allowlist',
-    'webhooks',
-    'blocked-ips',
-    'blocked-identities',
-  ],
+  // `blocked-identities` здесь больше нет: он закрывает вход КЛИЕНТУ и живёт
+  // на странице пользователей. Здесь остаётся то, что закрывает доступ в саму
+  // панель, включая бывшего администратора.
+  '/admins': ['admins', 'roles', 'ip-allowlist', 'webhooks', 'blocked-ips'],
   '/audit': ['audit', 'system-events', 'user-events', 'system-logs'],
   '/settings/panel': [
     'api-tokens',
@@ -265,6 +261,17 @@ export const deepLinkNavItems: ReadonlyArray<NavItem & { readonly groupKey: stri
     groupKey: 'operations',
     requiredPermission: { resource: 'users', action: 'bulk_operations' },
   },
+  {
+    key: 'blockedIdentities',
+    // Рядом с `bulkUsers`: это вторая вкладка ТОЙ ЖЕ страницы, и группы здесь
+    // свои — `operations` / `catalog` / `growth` / `configuration` / `system`,
+    // без `users`. Список отказывает в РЕГИСТРАЦИИ клиенту и к доступу в саму
+    // панель отношения не имеет, поэтому он больше не живёт у администраторов.
+    path: '/users#blocked-identities',
+    icon: UserX,
+    groupKey: 'operations',
+    requiredPermission: { resource: 'blocked_identities', action: 'view' },
+  },
   // ── System ────────────────────────────────────────────────────────────────
   {
     key: 'roles',
@@ -295,13 +302,6 @@ export const deepLinkNavItems: ReadonlyArray<NavItem & { readonly groupKey: stri
     icon: ShieldBan,
     groupKey: 'system',
     requiredPermission: { resource: 'blocked_ips', action: 'view' },
-  },
-  {
-    key: 'blockedIdentities',
-    path: '/admins#blocked-identities',
-    icon: UserX,
-    groupKey: 'system',
-    requiredPermission: { resource: 'blocked_identities', action: 'view' },
   },
   {
     key: 'apiTokens',

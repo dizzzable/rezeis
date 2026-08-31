@@ -37,6 +37,23 @@ export interface PlanSquadPropagationSummary {
   /** `null` when the write did not change the plan's squads (nothing queued). */
   readonly propagationId: string | null;
   readonly subscriptionsUpdated: number;
+  /**
+   * Subscriptions sold on this plan that were LEFT ALONE because their squads
+   * no longer matched the plan's previous set.
+   *
+   * Skipping them is deliberate — an add-on grant, a manual panel fix or an
+   * import that read live membership has diverged on purpose, and a plan edit
+   * must not stomp it. Saying NOTHING about them was the defect.
+   *
+   * Without this number an operator who reworks squads is told "updated: 0" and
+   * reads it as "everything was already correct", when it can equally mean "not
+   * one subscription was moved". Those customers keep the old squad uuids; if
+   * the old squads were deleted or recreated in Remnawave, every renewal then
+   * fails with the panel's catch-all `A039 Update user error`, which names
+   * neither the field nor the value. That is a long way to travel from a plan
+   * edit that reported success.
+   */
+  readonly subscriptionsSkippedDiverged: number;
   readonly syncJobsCreated: number;
   /**
    * Subscriptions whose columns WERE rewritten but which got no push, because
@@ -182,7 +199,15 @@ export class PlanSquadPropagationService {
         sameSquadSet(candidate.internalSquads, input.previousInternalSquads),
     );
     if (tracking.length === 0) {
-      return { summary: EMPTY_SUMMARY, syncJobIds: [] };
+      // NOT `EMPTY_SUMMARY`. Every subscription on this plan diverged, so none
+      // moved — which is a different fact from "the squads did not change", and
+      // the two used to be reported identically. This is the case an operator
+      // most needs to hear about: they reworked the squads, nothing was
+      // propagated, and every one of these customers is still on the old set.
+      return {
+        summary: { ...EMPTY_SUMMARY, subscriptionsSkippedDiverged: candidates.length },
+        syncJobIds: [],
+      };
     }
 
     const propagationId = randomUUID();
@@ -288,6 +313,7 @@ export class PlanSquadPropagationService {
       summary: {
         propagationId,
         subscriptionsUpdated: tracking.length,
+        subscriptionsSkippedDiverged: candidates.length - tracking.length,
         syncJobsCreated: syncJobIds.length,
         syncJobsSkippedUnlinked: skippedUnlinked,
       },
@@ -395,6 +421,7 @@ export class PlanSquadPropagationService {
 const EMPTY_SUMMARY: PlanSquadPropagationSummary = {
   propagationId: null,
   subscriptionsUpdated: 0,
+  subscriptionsSkippedDiverged: 0,
   syncJobsCreated: 0,
   syncJobsSkippedUnlinked: 0,
 };
