@@ -1737,6 +1737,7 @@ model Subscription {
   addOnEntitlements       AddOnEntitlement[]               @relation("SubscriptionAddOnEntitlements")
   effectiveProjection     SubscriptionEffectiveProjection? @relation("SubscriptionEffectiveProjection")
   deviceReductionPlans    DeviceReductionPlan[]            @relation("SubscriptionDeviceReductionPlans")
+  trafficResets           SubscriptionTrafficReset[]       @relation("SubscriptionTrafficResets")
   entitlementIncidents    EntitlementIncident[]            @relation("SubscriptionEntitlementIncidents")
   trialClaim              TrialClaim?                      @relation("SubscriptionTrialClaim")
 
@@ -3536,6 +3537,34 @@ model FaqItem {
 enum AddOnType {
   EXTRA_TRAFFIC
   EXTRA_DEVICES
+  /// Zeroes the profile's CONSUMED traffic on the panel. An ACTION, not a
+  /// grant: it holds no value, expires never and cannot be revoked — the
+  /// traffic is already back. It deliberately does not touch reset epochs or
+  /// any entitlement's `expiresAt`, so previously bought extra gigabytes live
+  /// out the term they were sold for.
+  RESET_TRAFFIC
+}
+
+/// One performed traffic reset. Written whether the reset was paid for or
+/// taken from the free allowance, because it is BOTH the customer-visible
+/// history and the counter `freeUsesPerTerm` is measured against.
+///
+/// `transactionId` is null for a free one. There is no reversal: the counter is
+/// already back at zero by the time this row exists, which is why a purchased
+/// reset is sold as non-refundable.
+model SubscriptionTrafficReset {
+  id             String   @id @default(cuid()) @map("id")
+  subscriptionId String   @map("subscription_id")
+  termId         String?  @map("term_id")
+  addOnId        String?  @map("add_on_id")
+  transactionId  String?  @map("transaction_id")
+  performedAt    DateTime @default(now()) @map("performed_at") @db.Timestamptz(3)
+
+  subscription Subscription @relation("SubscriptionTrafficResets", fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId, performedAt])
+  @@index([subscriptionId, termId])
+  @@map("subscription_traffic_resets")
 }
 
 /// Purchasable add-on that extends an active subscription's limits.
@@ -3561,6 +3590,14 @@ model AddOn {
   /// Plan IDs this add-on applies to. Empty = available for all plans.
   applicablePlanIds String[]      @default([]) @map("applicable_plan_ids")
   lifetime          AddOnLifetime @default(UNTIL_SUBSCRIPTION_END) @map("lifetime")
+  /// How many times a customer may take this add-on for free before it starts
+  /// costing money, counted per subscription TERM. `0` means it is always paid.
+  ///
+  /// Only `RESET_TRAFFIC` reads it today, and it is what lets an operator say
+  /// "one reset a month is on us, the next one costs" without a second product.
+  /// It is on the catalogue row rather than the plan so the same allowance
+  /// travels with the offer wherever it is sold.
+  freeUsesPerTerm   Int           @default(0) @map("free_uses_per_term")
   revision          Int           @default(1) @map("revision")
   archivedAt        DateTime?     @map("archived_at") @db.Timestamptz(3)
   createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)

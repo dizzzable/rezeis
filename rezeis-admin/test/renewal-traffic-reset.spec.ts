@@ -80,6 +80,7 @@ async function runRenewal(remnawaveId: string | null): Promise<Record<string, un
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
   const renew = (
     service as unknown as {

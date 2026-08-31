@@ -365,6 +365,7 @@ function makeService(prisma: unknown, termCreated: { value: boolean }) {
         return { id: 'term-2', generation: 2, status: 'SCHEDULED' };
       },
     } as never,
+    {} as never,
   );
 }
 

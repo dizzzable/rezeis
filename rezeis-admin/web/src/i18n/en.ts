@@ -3692,6 +3692,7 @@ export const en = {
     types: {
       EXTRA_TRAFFIC: 'Extra traffic',
       EXTRA_DEVICES: 'Extra devices',
+      RESET_TRAFFIC: 'Traffic reset',
     },
     form: {
       name: 'Name',
@@ -3701,6 +3702,12 @@ export const en = {
       type: 'Type',
       value: 'Value',
       valueHintTraffic: 'Amount in GB',
+      freeUses: 'Free resets per term',
+      freeUsesHint:
+        '0 = always paid. 1 = the first reset of each subscription term is free, the rest cost the price below. The counter clears on renewal.',
+      resetInfoAria: 'How the traffic reset works',
+      resetInfo:
+        'Zeroes the profile CONSUMED traffic in Remnawave, immediately, without waiting for the scheduled reset. The limit does not change: extra gigabytes the customer bought stay, and live out the term they were paid for. No refund is possible — the traffic is already back by the time the payment settles. Offered only on plans with a finite limit; on unlimited there is nothing to reset.',
       valueHintDevices: 'Number of device slots',
       lifetime: 'Lifetime',
       lifetimeSubscriptionEnd: 'Until subscription ends',

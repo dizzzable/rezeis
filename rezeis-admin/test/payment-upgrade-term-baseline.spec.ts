@@ -242,6 +242,7 @@ function buildService(tx: unknown) {
     {} as never,
     new EffectiveProjectionService() as never,
     new SubscriptionTermService() as never,
+    {} as never,
   );
 }
 

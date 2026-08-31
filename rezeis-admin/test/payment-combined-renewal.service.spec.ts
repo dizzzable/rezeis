@@ -678,6 +678,7 @@ function createEnv(input: {
         return { id: `term-${termCreates.length + 1}`, generation: termCreates.length + 1, status: 'SCHEDULED' };
       },
     } as never,
+    {} as never,
   );
 
   const transaction = {

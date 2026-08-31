@@ -8,6 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -68,6 +69,20 @@ export class AdminAddOnCreateDto {
   @IsEnum(AddOnLifetime)
   public lifetime?: AddOnLifetime;
 
+  /**
+   * Free uses per subscription term, read only by `RESET_TRAFFIC`.
+   *
+   * Bounded rather than merely non-negative: this is the one field that hands
+   * out something for nothing, and a fat-fingered `1000` would make a paid
+   * add-on permanently free with no error to notice. The ceiling is generous
+   * enough for any real offer and low enough that the mistake is visible.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  public freeUsesPerTerm?: number;
+
   @IsOptional()
   @ValidateIf((_object: object, value: unknown): boolean => value !== null)
   @IsString()
@@ -114,6 +129,20 @@ export class AdminAddOnUpdateDto {
   @IsOptional()
   @IsEnum(AddOnLifetime)
   public lifetime?: AddOnLifetime;
+
+  /**
+   * Free uses per subscription term, read only by `RESET_TRAFFIC`.
+   *
+   * Bounded rather than merely non-negative: this is the one field that hands
+   * out something for nothing, and a fat-fingered `1000` would make a paid
+   * add-on permanently free with no error to notice. The ceiling is generous
+   * enough for any real offer and low enough that the mistake is visible.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  public freeUsesPerTerm?: number;
 
   @IsOptional()
   @ValidateIf((_object: object, value: unknown): boolean => value !== null)

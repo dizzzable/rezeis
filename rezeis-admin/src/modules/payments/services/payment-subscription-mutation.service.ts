@@ -20,6 +20,7 @@ import {
   TransactionStatus,
 } from '@prisma/client';
 
+import { TrafficResetService } from '../../add-ons/services/traffic-reset.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
@@ -127,6 +128,7 @@ export class PaymentSubscriptionMutationService {
     private readonly addOnEntitlementService: AddOnEntitlementService,
     private readonly effectiveProjectionService: EffectiveProjectionService,
     private readonly subscriptionTermService: SubscriptionTermService,
+    private readonly trafficResetService: TrafficResetService,
   ) {}
 
   public async applyCompletedTransaction(
@@ -762,6 +764,13 @@ export class PaymentSubscriptionMutationService {
 
     const flags = resolveAddOnRolloutFlags();
 
+    // Set inside the transaction, acted on after it commits. A local flag
+    // rather than a second return shape: this method's contract is read by the
+    // whole capture path, and widening it to carry an outcome that has no
+    // subscription-limit change would make every caller handle a case that
+    // does not concern them.
+    let resetTarget: { readonly subscriptionId: string; readonly addOnId: string } | null = null;
+
     const result = await this.prismaService.$transaction(async (tx) => {
       const subscription = await tx.subscription.findUnique({
         where: { id: marker.targetSubscriptionId },
@@ -771,6 +780,43 @@ export class PaymentSubscriptionMutationService {
       }
       if (subscription.status === SubscriptionStatus.DELETED) {
         throw new NotFoundException('Target subscription is deleted');
+      }
+
+      // ── A RESET IS NOT A GRANT, SO IT LEAVES BEFORE THE GRANT MACHINERY ──
+      //
+      // Everything below this point exists to record a value somebody now
+      // owns: an entitlement row, a projection recompute, a mirrored limit
+      // column. A reset owns nothing — it zeroes CONSUMED traffic and is over.
+      // Running it through the ledger would mint an entitlement whose value,
+      // expiry and revocation are all meaningless, and mirroring it into a
+      // limit column would ADD traffic the operator never sold.
+      //
+      // It also must not touch the reset epoch or any entitlement's expiry:
+      // extra gigabytes the customer already paid for live out their term. The
+      // customer who buys 50 GB and then a reset keeps both.
+      //
+      // The reset itself is performed AFTER this transaction commits, by the
+      // caller — a panel round trip inside a fulfilment transaction would hold
+      // a write lock open across the network.
+      if (marker.addOnType === AddOnType.RESET_TRAFFIC) {
+        resetTarget = { subscriptionId: subscription.id, addOnId: marker.addOnId };
+        // No limit changed, so nothing to push — but a sync job is still queued
+        // so the profile is re-read afterwards and the panel's own counter and
+        // ours cannot silently disagree about what just happened.
+        const syncJob = await tx.profileSyncJob.create({
+          data: {
+            subscriptionId: subscription.id,
+            action:
+              subscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+            status: SyncJobStatus.PENDING,
+            payload: {
+              source: 'ADDON_PURCHASE',
+              paymentId: transaction.paymentId,
+              addOnType: marker.addOnType,
+            } as Prisma.InputJsonObject,
+          },
+        });
+        return { subscription, syncJob };
       }
 
       // ── Durable entitlement-ledger path (flag-gated) ─────────────────────
@@ -877,6 +923,34 @@ export class PaymentSubscriptionMutationService {
 
       return { subscription: updatedSubscription, syncJob };
     });
+
+    // ── The reset happens HERE, after the transaction has committed ──────
+    //
+    // Deliberately outside it: a panel round trip inside a fulfilment
+    // transaction holds a write lock open across the network, and this is the
+    // most contended transaction in the system. The purchase is already
+    // recorded, so a panel that refuses leaves a paid-for reset the operator
+    // can re-drive — not a rollback of somebody's money.
+    if (resetTarget !== null) {
+      const target: { readonly subscriptionId: string; readonly addOnId: string } = resetTarget;
+      const termId = await this.trafficResetService.currentTermId(target.subscriptionId);
+      const performed = await this.trafficResetService.perform({
+        subscriptionId: target.subscriptionId,
+        termId,
+        addOnId: target.addOnId,
+        transactionId: transaction.id,
+      });
+      if (!performed.ok) {
+        // LOGGED, NOT THROWN. The money is captured and the purchase recorded;
+        // throwing here would roll nothing back and would make the webhook
+        // retry a capture that already succeeded. An operator can re-drive the
+        // reset; a customer cannot un-pay.
+        this.logger.error(
+          `Paid traffic reset for subscription ${target.subscriptionId} was not applied: ` +
+            `${performed.reason ?? 'unknown reason'}`,
+        );
+      }
+    }
 
     this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', 'Payment completed: ADD_ON', {
       userId: transaction.userId,

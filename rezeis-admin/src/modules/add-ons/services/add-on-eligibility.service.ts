@@ -7,6 +7,7 @@ import {
   TrafficLimitStrategy,
 } from '@prisma/client';
 
+import { TrafficResetService } from './traffic-reset.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { resolveIntakeResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
@@ -23,7 +24,15 @@ export type AddOnActivation = 'NOW' | 'TERM_START';
 export interface AddOnEligibilityInfo {
   readonly eligible: true;
   readonly activation: AddOnActivation;
-  readonly expiresAt: string;
+  /**
+   * When the grant stops applying — `null` for an add-on that grants nothing.
+   *
+   * Nullable because of `RESET_TRAFFIC`: it is delivered the instant it is
+   * bought and holds nothing afterwards, so any date here would be a claim
+   * about a lifetime it does not have. Stamping `now` instead would have kept
+   * the type simpler and shown the customer an offer that had already expired.
+   */
+  readonly expiresAt: string | null;
   readonly explanationCode: string;
 }
 
@@ -38,6 +47,19 @@ export interface EligibleAddOn {
   readonly lifetime: AddOnLifetime;
   readonly eligibility: AddOnEligibilityInfo;
   readonly prices: ReadonlyArray<{ readonly currency: string; readonly price: string }>;
+  /**
+   * `RESET_TRAFFIC` only, `null` on everything else.
+   *
+   * Present so the cabinet can render "free" instead of a price WITHOUT
+   * deciding anything: the count is the server's, and the server re-checks it
+   * again when the reset is actually claimed. A client that computed this
+   * itself would let two open tabs each believe they held the last free use.
+   */
+  readonly freeAllowance: {
+    readonly freeUsesPerTerm: number;
+    readonly freeRemaining: number;
+    readonly isFree: boolean;
+  } | null;
 }
 
 export interface AddOnEligibilityResult {
@@ -114,7 +136,10 @@ const EMPTY_RESULT = (): AddOnEligibilityResult => ({
  */
 @Injectable()
 export class AddOnEligibilityService {
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    private readonly trafficResetService: TrafficResetService,
+  ) {}
 
   public async listForSubscription(
     subscriptionId: string,
@@ -224,6 +249,14 @@ export class AddOnEligibilityService {
         value: addOn.value,
         lifetime: addOn.lifetime,
         eligibility,
+        freeAllowance:
+          addOn.type === AddOnType.RESET_TRAFFIC
+            ? await this.trafficResetService.describeAllowance({
+                subscriptionId,
+                termId: resolved.termId,
+                freeUsesPerTerm: addOn.freeUsesPerTerm,
+              })
+            : null,
         prices: addOn.prices.map((p) => ({ currency: p.currency, price: p.price.toString() })),
       });
     }
@@ -401,6 +434,28 @@ export class AddOnEligibilityService {
     //
     // Both arms activate NOW: an offer is a direct purchase, which the capture
     // path activates at the transaction's creation instant.
+    // ── A RESET HAS NO LIFETIME, AND THAT IS NOT AN OVERSIGHT ─────────────
+    //
+    // `resolveAddOnLifetimeGrant` answers "until when can this be delivered?".
+    // For a grant that is the whole question. A reset is delivered the instant
+    // it is bought — the counter is at zero and there is nothing left to hold,
+    // expire or revoke — so asking would either withhold the offer (no term
+    // end, `NO_RESET` strategy) or stamp an `expiresAt` on something that
+    // cannot outlive its own delivery.
+    //
+    // It also must not bind to a reset EPOCH. Epochs carry the expiry of extra
+    // gigabytes somebody paid for, and an out-of-cycle reset moving that
+    // boundary would shorten goods already sold. Those live out their term; a
+    // reset zeroes consumption and touches nothing else.
+    if (type === AddOnType.RESET_TRAFFIC) {
+      return {
+        eligible: true,
+        activation: 'NOW',
+        expiresAt: null,
+        explanationCode: 'RESET_TRAFFIC_IMMEDIATE',
+      };
+    }
+
     const grant = resolveAddOnLifetimeGrant({ lifetime, baseline, capabilities, now });
     if (grant === null) return null;
     return {

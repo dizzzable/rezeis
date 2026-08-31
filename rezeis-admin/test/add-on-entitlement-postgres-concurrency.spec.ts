@@ -768,7 +768,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     });
 
     const mutation = new PaymentSubscriptionMutationService(
-      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms,
+      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
     );
 
     const prev = process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
@@ -1002,7 +1002,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       },
     });
     const mutation = new PaymentSubscriptionMutationService(
-      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms,
+      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
     );
 
     // Renews a subscription that already has an ACTIVE durable term (cutover
@@ -1135,7 +1135,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         },
       });
       const mutation = new PaymentSubscriptionMutationService(
-        prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms,
+        prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
       );
       const prevDirect = process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
       const prevReset = process.env.ADDON_RESET_EXPIRY_MONTH;
@@ -1273,7 +1273,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     });
 
     const mutation = new PaymentSubscriptionMutationService(
-      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms,
+      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
     );
     const prev = process.env.ADDON_ENTITLEMENT_SHADOW;
     process.env.ADDON_ENTITLEMENT_SHADOW = 'true';
@@ -1412,7 +1412,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     });
 
     const mutation = new PaymentSubscriptionMutationService(
-      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms,
+      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
     );
     const prevShadow = process.env.ADDON_ENTITLEMENT_SHADOW;
     const prevRenewal = process.env.ADDON_RENEWAL_ADDONS;
@@ -1467,7 +1467,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         addOnLines: [{ addOnId, catalogRevision: 1, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START', sourceLineKey: `renew:${id}:${addOnId}`, unitAmount: '2.50', receiptName: 'x' }] as Prisma.InputJsonValue,
       },
     });
-    const mutation = new PaymentSubscriptionMutationService(prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms);
+    const mutation = new PaymentSubscriptionMutationService(prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never);
     // renewalAddOns OFF (default): the FLAG only gates intake (whether new lines
     // get persisted at checkout). A line that is ALREADY persisted means the
     // customer paid for it, so fulfillment must mint it regardless — otherwise a
@@ -1503,7 +1503,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       },
     });
     const mutation = new PaymentSubscriptionMutationService(
-      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms,
+      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
     );
     // directPurchase OFF (default) → legacy increment path. Must NOT do 0 + 2 = 2.
     await mutation.applyCompletedTransaction(txn);

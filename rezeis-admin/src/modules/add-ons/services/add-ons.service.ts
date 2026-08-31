@@ -15,6 +15,8 @@ export interface AddOnInterface {
   readonly description: string | null;
   readonly type: AddOnType;
   readonly lifetime: AddOnLifetime;
+  /** `RESET_TRAFFIC` only; `0` on every other type. */
+  readonly freeUsesPerTerm: number;
   readonly revision: number;
   readonly icon: string | null;
   readonly value: number;
@@ -64,6 +66,7 @@ export class AddOnsService {
     description?: string | null;
     type: AddOnType;
     lifetime?: AddOnLifetime;
+    freeUsesPerTerm?: number;
     icon?: string | null;
     value: number;
     isActive?: boolean;
@@ -95,6 +98,11 @@ export class AddOnsService {
         lifetime,
         icon: normalizeIcon(input.icon),
         value: input.value,
+        // Only `RESET_TRAFFIC` may carry a free allowance. Accepting it on a
+        // grant would be a second, undocumented way to give traffic away — one
+        // that no offer, price or entitlement would ever mention.
+        freeUsesPerTerm:
+          input.type === AddOnType.RESET_TRAFFIC ? Math.max(0, input.freeUsesPerTerm ?? 0) : 0,
         isActive: input.isActive ?? true,
         orderIndex: (lastRecord?.orderIndex ?? 0) + 1,
         applicablePlanIds,
@@ -122,6 +130,7 @@ export class AddOnsService {
       description: string | null;
       type: AddOnType;
       lifetime: AddOnLifetime;
+      freeUsesPerTerm: number;
       icon: string | null;
       value: number;
       isActive: boolean;
@@ -154,6 +163,18 @@ export class AddOnsService {
       if (input.value <= 0) throw new BadRequestException('Add-on value must be positive');
       updateData.value = input.value;
       if (input.value !== existing.value) commercialChanged = true;
+    }
+    if (input.freeUsesPerTerm !== undefined) {
+      // Kept to the reset, in both directions: setting it on a grant is
+      // refused, and switching an add-on AWAY from `RESET_TRAFFIC` clears it,
+      // so a stale allowance cannot sit on a row where nothing reads it and
+      // then come back to life if the type is switched again.
+      const nextType = input.type ?? existing.type;
+      updateData.freeUsesPerTerm =
+        nextType === AddOnType.RESET_TRAFFIC ? Math.max(0, input.freeUsesPerTerm) : 0;
+      if (updateData.freeUsesPerTerm !== existing.freeUsesPerTerm) commercialChanged = true;
+    } else if (input.type !== undefined && input.type !== AddOnType.RESET_TRAFFIC) {
+      updateData.freeUsesPerTerm = 0;
     }
     if (input.isActive !== undefined) updateData.isActive = input.isActive;
     if (input.applicablePlanIds !== undefined) {
@@ -241,6 +262,7 @@ function mapAddOn(record: AddOn & { prices?: readonly AddOnPrice[] }): AddOnInte
     description: record.description,
     type: record.type,
     lifetime: record.lifetime,
+    freeUsesPerTerm: record.freeUsesPerTerm,
     revision: record.revision,
     icon: record.icon,
     value: record.value,

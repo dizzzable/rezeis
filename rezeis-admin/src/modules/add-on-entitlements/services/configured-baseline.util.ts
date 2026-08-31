@@ -145,8 +145,23 @@ export function isBaselineExtendable(
     readonly baseDeviceLimit: number | null;
   },
 ): boolean {
-  if (type === AddOnType.EXTRA_TRAFFIC) {
+  // EVERY TYPE IS NAMED. The last line used to be a bare fallthrough to the
+  // device rule, so a type added later — `RESET_TRAFFIC` was the first — would
+  // have been silently judged against the DEVICE baseline: offered on an
+  // unlimited-traffic profile whenever the device limit happened to be finite,
+  // and withheld from a finite-traffic profile with unlimited devices. Both
+  // answers wrong, neither visible.
+  if (type === AddOnType.EXTRA_TRAFFIC || type === AddOnType.RESET_TRAFFIC) {
+    // A reset does not EXTEND the baseline — it zeroes what has been consumed
+    // against it. The question is the same one either way: is there a finite
+    // traffic allowance for the answer to mean anything? On an unlimited
+    // profile nothing is consumed and a reset is a no-op worth nobody's money.
     return baseline.baseTrafficLimitBytes !== null && baseline.baseTrafficLimitBytes >= 0n;
   }
-  return baseline.baseDeviceLimit !== null && baseline.baseDeviceLimit > 0;
+  if (type === AddOnType.EXTRA_DEVICES) {
+    return baseline.baseDeviceLimit !== null && baseline.baseDeviceLimit > 0;
+  }
+  // A type nobody taught this function about is not offered. Refusing to sell
+  // is recoverable; selling something the fulfilment path cannot deliver is not.
+  return false;
 }

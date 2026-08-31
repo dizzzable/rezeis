@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { OutboundHttpModule } from '../../common/http/outbound-http.module';
+import { AddOnsModule } from '../add-ons/add-ons.module';
 import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
 import { AuthModule } from '../auth/auth.module';
 import { PartnersModule } from '../partners/partners.module';
@@ -55,6 +56,11 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     AuthModule,
     OutboundHttpModule,
     AddOnEntitlementsModule,
+    // For `TrafficResetService`: a paid RESET_TRAFFIC add-on is performed on the
+    // panel after the fulfilment transaction commits. Neither module is
+    // `@Global()`, so without this the capture path would compile, run, and
+    // leave every purchased reset unapplied.
+    AddOnsModule,
     RemnawaveModule,
     SubscriptionsModule,
     PlansModule,

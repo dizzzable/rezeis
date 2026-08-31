@@ -212,6 +212,10 @@ function legacyTopUpEnv(input: {
     entitlements as never,
     projections as never,
     {} as never,
+    // `TrafficResetService` — the sixth dependency, unused here: a paid
+    // RESET_TRAFFIC add-on is performed after the fulfilment transaction
+    // commits, and nothing in these specs buys one.
+    {} as never,
   );
 
   const transaction = {
@@ -477,6 +481,10 @@ function renewalSnapshotEnv(planTrafficLimit: number | null) {
     { info: () => undefined } as never,
     {} as never,
     {} as never,
+    {} as never,
+    // `TrafficResetService` — the sixth dependency, unused here: a paid
+    // RESET_TRAFFIC add-on is performed after the fulfilment transaction
+    // commits, and nothing in these specs buys one.
     {} as never,
   );
 

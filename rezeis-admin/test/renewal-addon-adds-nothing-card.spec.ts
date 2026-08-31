@@ -263,6 +263,7 @@ function renewalEnv(input: {
       entitlements as never,
       {} as never,
       terms as never,
+      {} as never,
     );
 
   // A service handed in from a previous run keeps its cooldown window, but its

@@ -41,6 +41,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
         {} as never,
         {} as never,
         {} as never,
+        {} as never,
       );
       const renew = (
         service as unknown as {
@@ -110,6 +111,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     const service = new PaymentSubscriptionMutationService(
       prisma as never,
       { info: () => undefined } as never,
+      {} as never,
       {} as never,
       {} as never,
       {} as never,
@@ -200,6 +202,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       {} as never,
       {} as never,
       terms as never,
+      {} as never,
     );
     const append = (
       service as unknown as {
@@ -288,6 +291,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       {} as never,
       {} as never,
       terms as never,
+      {} as never,
     );
     const renew = (
       service as unknown as {
@@ -364,7 +368,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     };
     const prisma = { $transaction: async (fn: (client: unknown) => unknown) => fn(tx) };
     const terms = { createScheduledInTransaction: async () => ({ id: 'term-new', status: 'SCHEDULED', generation: 2 }) };
-    const service = new PaymentSubscriptionMutationService(prisma as never, { info: () => undefined } as never, {} as never, {} as never, terms as never);
+    const service = new PaymentSubscriptionMutationService(prisma as never, { info: () => undefined } as never, {} as never, {} as never, terms as never, {} as never);
     const renew = (service as unknown as { renewSubscriptionFromPayment(input: { transaction: unknown; purchasedPlan: unknown; selectedDurationDays: number }): Promise<unknown> }).renewSubscriptionFromPayment.bind(service);
     try {
       await renew({

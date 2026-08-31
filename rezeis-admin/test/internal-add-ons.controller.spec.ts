@@ -10,7 +10,7 @@ describe('InternalAddOnsController', () => {
       listForPlan: async (planId: string) => { calls.push(planId); return []; },
     };
     const eligibility = { listForSubscription: async () => ({}) };
-    const controller = new InternalAddOnsController(addOnsService as never, eligibility as never);
+    const controller = new InternalAddOnsController(addOnsService as never, eligibility as never, {} as never);
 
     await controller.listForPlan('plan-1');
     assert.deepEqual(calls, ['plan-1']);
@@ -25,7 +25,7 @@ describe('InternalAddOnsController', () => {
         return { contractVersion: 2 as const, availability: 'EMPTY' as const, target: null, addOns: [] };
       },
     };
-    const controller = new InternalAddOnsController(addOnsService as never, eligibility as never);
+    const controller = new InternalAddOnsController(addOnsService as never, eligibility as never, {} as never);
 
     const result = await controller.listForSubscription('sub-9', 'user-7', undefined);
     assert.equal(calls.length, 1);

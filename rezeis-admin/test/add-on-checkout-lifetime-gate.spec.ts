@@ -176,7 +176,7 @@ async function askBoth(world: {
       ],
     },
   };
-  const offer = await new AddOnEligibilityService(eligibilityPrisma as never).listForSubscription(
+  const offer = await new AddOnEligibilityService(eligibilityPrisma as never, {} as never).listForSubscription(
     'sub-1',
   );
 

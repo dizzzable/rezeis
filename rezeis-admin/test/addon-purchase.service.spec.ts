@@ -589,7 +589,7 @@ describe('AddOnPurchaseService — checkout agrees with the offer about "already
       user: { findFirst: async () => ({ id: 'user-1' }) },
       addOn: { findMany: async () => [catalogEntry] },
     };
-    const offer = await new AddOnEligibilityService(eligibilityPrisma as never).listForSubscription(
+    const offer = await new AddOnEligibilityService(eligibilityPrisma as never, {} as never).listForSubscription(
       'sub-1',
     );
 

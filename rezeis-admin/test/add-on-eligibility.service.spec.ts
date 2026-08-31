@@ -123,7 +123,7 @@ function build(options: {
     },
   };
   const Service = options.enabledMonth ? EnabledMonthEligibilityService : AddOnEligibilityService;
-  return { service: new Service(prisma as never), stats };
+  return { service: new Service(prisma as never, {} as never), stats };
 }
 
 const financeTerm: Term = {
@@ -399,8 +399,13 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     const reset = result.addOns[0]!;
     assert.equal(reset.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
     // MONTH strategy → epoch ends at the first of the next UTC month after now.
-    assert.ok(reset.eligibility.expiresAt.endsWith('T00:00:00.000Z'));
-    assert.match(reset.eligibility.expiresAt, /-01T00:00:00\.000Z$/);
+    // Asserted non-null first: `expiresAt` became nullable for `RESET_TRAFFIC`,
+    // which grants nothing and so has no lifetime — a GRANT must still carry
+    // one, and a null here would mean the lifetime resolver was skipped.
+    const expiresAt = reset.eligibility.expiresAt;
+    assert.ok(expiresAt !== null, 'a grant must carry an expiry');
+    assert.ok(expiresAt.endsWith('T00:00:00.000Z'));
+    assert.match(expiresAt, /-01T00:00:00\.000Z$/);
   });
 
   it('respects plan applicability (excludes add-ons scoped to other plans)', async () => {

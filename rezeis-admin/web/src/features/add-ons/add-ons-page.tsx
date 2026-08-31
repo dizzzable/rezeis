@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List, Activity } from 'lucide-react'
+import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List, Activity, Info } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Select,
   SelectContent,
@@ -39,7 +40,7 @@ import { AddOnsStatsTab } from './add-ons-stats-tab'
 import { AddOnEntitlementsTab } from './add-on-entitlements-tab'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
-const ADD_ON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES'] as const
+const ADD_ON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES', 'RESET_TRAFFIC'] as const
 
 interface AddOnPrice {
   id?: string
@@ -64,7 +65,7 @@ interface AddOn {
   id: string
   name: string
   description: string | null
-  type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'
+  type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC'
   lifetime: AddOnLifetime
   icon: string | null
   value: number
@@ -72,18 +73,21 @@ interface AddOn {
   orderIndex: number
   applicablePlanIds: string[]
   prices: AddOnPrice[]
+  /** `RESET_TRAFFIC` only: free uses per subscription term. 0 = always paid. */
+  freeUsesPerTerm?: number
 }
 
 interface AddOnFormData {
   name: string
   description?: string
-  type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'
+  type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC'
   lifetime: AddOnLifetime
   icon?: string | null
   value: number
   isActive: boolean
   applicablePlanIds: string[]
   prices: { currency: string; price: string }[]
+  freeUsesPerTerm?: number
 }
 
 export default function AddOnsPage() {
@@ -370,7 +374,10 @@ function AddOnDialog({
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [type, setType] = useState<'EXTRA_TRAFFIC' | 'EXTRA_DEVICES'>('EXTRA_TRAFFIC')
+  const [type, setType] = useState<'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC'>(
+    'EXTRA_TRAFFIC',
+  )
+  const [freeUsesPerTerm, setFreeUsesPerTerm] = useState('0')
   const [lifetime, setLifetime] = useState<AddOnLifetime>('UNTIL_SUBSCRIPTION_END')
   const [icon, setIcon] = useState<string | null>(null)
   const [value, setValue] = useState('1')
@@ -451,7 +458,16 @@ function AddOnDialog({
       type,
       lifetime,
       icon: icon ?? null,
-      value: parseInt(value, 10),
+      // A reset grants nothing, so `value` is meaningless for it. Sent as `1`
+      // rather than left to whatever the form last held: the column is NOT NULL
+      // and a stale "50" would read as "+50 GB" to anybody inspecting the row.
+      value: type === 'RESET_TRAFFIC' ? 1 : parseInt(value, 10),
+      // Only the reset reads this, and only the reset should be able to set it:
+      // a free allowance on a grant would be a second, undocumented way to give
+      // away traffic.
+      ...(type === 'RESET_TRAFFIC'
+        ? { freeUsesPerTerm: Math.max(0, parseInt(freeUsesPerTerm, 10) || 0) }
+        : {}),
       isActive,
       applicablePlanIds: selectedPlanIds,
       prices: prices
@@ -514,7 +530,31 @@ function AddOnDialog({
 
           <div className="grid gap-4 grid-cols-2">
             <div className="space-y-2">
-              <Label>{t('addOnsPage.form.type')}</Label>
+              <div className="flex items-center gap-1.5">
+                <Label>{t('addOnsPage.form.type')}</Label>
+                {/* The consequence is stated WHERE THE CHOICE IS MADE. A reset
+                    behaves unlike every other add-on — it grants nothing, it
+                    cannot be refunded, and it leaves bought gigabytes alone —
+                    and none of that is inferable from a name in a dropdown. */}
+                {type === 'RESET_TRAFFIC' ? (
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={t('addOnsPage.form.resetInfoAria')}
+                          className="inline-flex text-amber-500 transition-colors hover:text-amber-400"
+                        >
+                          <Info className="h-4 w-4" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-sm text-xs leading-snug">
+                        {t('addOnsPage.form.resetInfo')}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : null}
+              </div>
               <Select value={type} onValueChange={(v) => setType(v as typeof type)}>
                 <SelectTrigger aria-label={t('addOnsPage.form.type')}>
                   <SelectValue />
@@ -529,17 +569,27 @@ function AddOnDialog({
               </Select>
             </div>
             <div className="space-y-2">
-              <Label>{t('addOnsPage.form.value')}</Label>
+              <Label>
+                {type === 'RESET_TRAFFIC'
+                  ? t('addOnsPage.form.freeUses')
+                  : t('addOnsPage.form.value')}
+              </Label>
               <Input
                 type="number"
-                min="1"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
+                min={type === 'RESET_TRAFFIC' ? '0' : '1'}
+                value={type === 'RESET_TRAFFIC' ? freeUsesPerTerm : value}
+                onChange={(e) =>
+                  type === 'RESET_TRAFFIC'
+                    ? setFreeUsesPerTerm(e.target.value)
+                    : setValue(e.target.value)
+                }
               />
               <p className="text-[11px] text-muted-foreground">
-                {type === 'EXTRA_TRAFFIC'
-                  ? t('addOnsPage.form.valueHintTraffic')
-                  : t('addOnsPage.form.valueHintDevices')}
+                {type === 'RESET_TRAFFIC'
+                  ? t('addOnsPage.form.freeUsesHint')
+                  : type === 'EXTRA_TRAFFIC'
+                    ? t('addOnsPage.form.valueHintTraffic')
+                    : t('addOnsPage.form.valueHintDevices')}
               </p>
             </div>
           </div>

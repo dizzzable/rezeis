@@ -220,6 +220,10 @@ function renewalEnv(input: {
     entitlements as never,
     {} as never,
     terms as never,
+    // `TrafficResetService` — the sixth dependency. A paid RESET_TRAFFIC add-on
+    // is performed after the fulfilment transaction commits; these specs never
+    // buy one, but the constructor takes all six.
+    {} as never,
   );
 
   const transaction = {
@@ -485,6 +489,10 @@ function directPurchaseEnv(input: {
     { info: () => undefined } as never,
     entitlements as never,
     projections as never,
+    {} as never,
+    // `TrafficResetService` — the sixth dependency. A paid RESET_TRAFFIC add-on
+    // is performed after the fulfilment transaction commits; these specs never
+    // buy one, but the constructor takes all six.
     {} as never,
   );
 

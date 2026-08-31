@@ -363,6 +363,7 @@ function createLedgerWorld(input: { readonly maxClaims: number }) {
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
 
   const service = new PaymentReconciliationService(
