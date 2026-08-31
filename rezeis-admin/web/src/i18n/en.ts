@@ -2315,7 +2315,7 @@ export const en = {
       selfRenew: 'Self-renew',
       replaceOnRenew: 'Replace on renewal',
       renewModeHint:
-        '"Replace" — on renewal the user is automatically moved to one of the specified plans.',
+        '"Self-renew" — the plan stays with its customers for ever, at their price. "Replace" — on renewal the customer moves to one of the specified plans, and the plan itself is DELETED once no subscription is left on it. Deletion is permanent; purchase history is kept.',
       replacementPlans: 'Replacement plans',
       replacementHint: 'Select plans that users will be migrated to on renewal.',
       noPlans: 'No plans available for replacement',

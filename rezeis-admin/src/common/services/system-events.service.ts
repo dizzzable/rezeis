@@ -389,6 +389,15 @@ export const EVENT_TYPES = {
   IMPORT_COMPLETED: 'import.completed',
   IMPORT_FAILED: 'import.failed',
   IMPORT_PLAN_ASSIGNED: 'import.plan_assigned',
+  /**
+   * A plan taken out of sale was removed once the last customer left it.
+   *
+   * A WARNING rather than an info line, and deliberately so: it is the only
+   * notice an operator gets that a row disappeared without anybody pressing
+   * anything, and a plan vanishing on its own is otherwise indistinguishable
+   * from a bug.
+   */
+  PLAN_RETIRED_REMOVED: 'plan.retired_removed',
   IMPORT_SYNC_ENQUEUED: 'import.sync_enqueued',
   /** An automation rule's "notify Telegram" action fired. */
   AUTOMATION_TELEGRAM_NOTIFY: 'automation.telegram_notify',
@@ -2192,6 +2201,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'broadcast.channel_post_undelivered': { emoji: '📭', title: 'Пост в канал не доставлен' },
   'import.completed': { emoji: '📥', title: 'Импорт завершён' },
   'import.plan_assigned': { emoji: '🏷', title: 'Массовое назначение плана' },
+  'plan.retired_removed': { emoji: '🗑', title: 'Тариф удалён: на нём никого не осталось' },
   'import.sync_enqueued': { emoji: '🔄', title: 'Синхронизация после импорта поставлена в очередь' },
   'automation.telegram_notify': { emoji: '🤖', title: 'Автоматизация: уведомление' },
   // The DEFAULT type of the `system_event` action. A rule that names its own

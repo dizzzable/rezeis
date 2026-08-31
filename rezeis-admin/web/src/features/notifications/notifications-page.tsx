@@ -195,6 +195,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'system.restore_completed', 'system.bulk_users_executed', 'system.web_push_unconfigured',
     'broadcast.started', 'broadcast.batch_completed', 'broadcast.channel_post_undelivered',
     'import.completed', 'import.failed', 'import.plan_assigned', 'import.sync_enqueued',
+    'plan.retired_removed',
     'automation.telegram_notify', 'automation.custom', 'client.error', 'reiwa.error',
     'reiwa.relay_undelivered', 'telegram.direct_undelivered',
   ],

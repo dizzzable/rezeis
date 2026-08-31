@@ -601,6 +601,31 @@ export class SubscriptionQuoteService {
       include: PLAN_INCLUDE,
     });
     if (sourcePlan === null) {
+      // ── A PLAN THAT NO LONGER EXISTS IS NOT A DEAD END FOR A RENEWAL ──────
+      //
+      // The snapshot names a plan; the row is gone. That happens when an
+      // operator deletes a retired plan, and now happens on its own:
+      // `RetiredPlanSweeperService` removes a plan taken out of sale once the
+      // last customer has left it — and "left it" counts an EXPIRED
+      // subscription as gone, because its history lives in its own snapshot.
+      //
+      // The customer that describes is precisely the one this branch used to
+      // turn away: somebody whose subscription lapsed months ago, coming back
+      // to renew. They were offered NOTHING — not the replacements the retired
+      // plan names, not the catalogue — while the same method four lines above
+      // already hands the catalogue to a renewal whose snapshot has no plan id
+      // at all. The two cases are the same problem and now get the same answer.
+      //
+      // UPGRADE is deliberately left alone: it reprices against the source plan
+      // it is upgrading FROM, and there is nothing to reprice against.
+      if (input.purchaseType === 'RENEW' && input.userId !== undefined) {
+        const catalog = await this.getCatalogOptionPlans({
+          userId: input.userId,
+          channel: input.channel ?? PurchaseChannel.WEB,
+        });
+        const targets = catalog.filter((plan) => plan.availability !== PlanAvailability.TRIAL);
+        if (targets.length > 0) return { plans: targets, warnings: [ARCHIVED_PLAN_REPLACEMENT] };
+      }
       return { plans: [], warnings: [SOURCE_PLAN_MISSING] };
     }
     if (input.purchaseType === PurchaseType.UPGRADE) {
