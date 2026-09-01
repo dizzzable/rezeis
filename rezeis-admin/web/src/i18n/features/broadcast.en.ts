@@ -12,6 +12,7 @@ export const en = {
     newButton: 'New broadcast',
     refreshBroadcasts: 'Refresh broadcasts',
     empty: 'No broadcasts yet',
+    editDraft: 'Edit draft',
     cancelBroadcast: 'Cancel broadcast',
     retryFailed_one: 'Retry for {{count}} undelivered',
     retryFailed_few: 'Retry for {{count}} undelivered',

@@ -12,6 +12,7 @@ export const ru = {
     newButton: 'Новая рассылка',
     refreshBroadcasts: 'Обновить рассылки',
     empty: 'Рассылок пока нет',
+    editDraft: 'Изменить черновик',
     cancelBroadcast: 'Отменить рассылку',
     retryFailed_one: 'Повторить для {{count}} недоставленного',
     retryFailed_few: 'Повторить для {{count}} недоставленных',

@@ -112,8 +112,16 @@ export class BroadcastService {
     if (existing === null) {
       throw new NotFoundException('Broadcast not found');
     }
-    if (existing.status !== BroadcastStatus.DRAFT) {
-      throw new NotFoundException('Only draft broadcasts can be updated');
+    // A SCHEDULED broadcast is editable for the same reason a DRAFT is: it has
+    // not gone anywhere yet, and the job re-reads content and audience when it
+    // fires. Refusing it was a regression from giving a pending send its own
+    // status — before that it stayed DRAFT and could be corrected during the
+    // wait, which is exactly when an operator notices a typo.
+    if (
+      existing.status !== BroadcastStatus.DRAFT &&
+      existing.status !== BroadcastStatus.SCHEDULED
+    ) {
+      throw new NotFoundException('Only draft or scheduled broadcasts can be updated');
     }
     const data: Prisma.BroadcastUpdateInput = {
       audience: input.dto.audience,

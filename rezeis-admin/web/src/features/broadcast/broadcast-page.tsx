@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, RotateCcw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users } from 'lucide-react'
@@ -201,6 +201,28 @@ function pendingOf(row: {
   return Math.max(0, row.totalCount - row.successCount - row.failedCount)
 }
 
+/** A draft loaded back into the compose dialog for correction. */
+interface BroadcastDraftDetail {
+  readonly id: string
+  readonly audience: string
+  readonly promoCode: string | null
+  readonly audienceFilter: {
+    readonly subscription?: string[]
+    readonly planIds?: string[]
+    readonly platforms?: string[]
+    readonly contact?: string[]
+    readonly inactiveDays?: number
+  } | null
+  readonly payload: {
+    readonly title: string | null
+    readonly text: string | null
+    readonly mediaType: 'none' | 'photo' | 'video'
+    readonly mediaFileId: string | null
+    readonly emailEnabled: boolean
+    readonly telegramChannelChatId: string | null
+  }
+}
+
 interface BroadcastRow {
   readonly id: string
   readonly audience: string
@@ -218,6 +240,10 @@ export default function BroadcastPage() {
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
+  // A draft or a pending schedule reopened in the compose dialog. Separate
+  // from `editId`, which edits a broadcast that has ALREADY gone out (a
+  // Telegram message edit) — a different operation on a different object.
+  const [editDraftId, setEditDraftId] = useState<string | null>(null)
 
   const { data, isLoading, refetch } = useQuery<ReadonlyArray<BroadcastRow>>({
     queryKey: adminQueryKeys.broadcast.all,
@@ -379,6 +405,14 @@ export default function BroadcastPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
+                        {['DRAFT', 'SCHEDULED'].includes(b.status) && (
+                          <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
+                            aria-label={t('broadcastPage.editDraft')}
+                            title={t('broadcastPage.editDraft')}
+                            onClick={() => setEditDraftId(b.id)}>
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         {['PROCESSING', 'SCHEDULED'].includes(b.status) && (
                           <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
                             aria-label={t('broadcastPage.cancelBroadcast')}
@@ -403,7 +437,7 @@ export default function BroadcastPage() {
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
-                        {['COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
+                        {['DRAFT', 'COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
                               <Button
@@ -460,6 +494,30 @@ export default function BroadcastPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Correcting a draft or a pending schedule: the same compose dialog,
+          loaded with what is already there. Keyed by the id so reopening a
+          different draft mounts a fresh form rather than showing the last one. */}
+      <Dialog
+        open={editDraftId !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditDraftId(null)
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t('broadcastPage.editDraft')}</DialogTitle>
+            <DialogDescription>{t('broadcastPage.form.description')}</DialogDescription>
+          </DialogHeader>
+          {editDraftId !== null && (
+            <CreateBroadcastForm
+              key={editDraftId}
+              draftId={editDraftId}
+              onClose={() => setEditDraftId(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Edit Dialog */}
       <Dialog open={editId !== null} onOpenChange={(open) => { if (!open) setEditId(null) }}>
         <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
@@ -486,7 +544,21 @@ interface UploadedMedia {
   readonly sizeBytes: number
 }
 
-function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
+/**
+ * The compose dialog, used both to write a new broadcast and to correct one
+ * that has not gone out yet.
+ *
+ * `draftId` is what makes the second case possible. Without it a saved draft
+ * was unreachable: the list showed it, and offered no way to open, change,
+ * send or remove it, so drafts left behind by a test send simply accumulated.
+ */
+function CreateBroadcastForm({
+  onClose,
+  draftId = null,
+}: {
+  onClose: () => void
+  draftId?: string | null
+}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const validationMessages = useMemo<BroadcastFormValidationMessages>(() => ({
@@ -543,12 +615,15 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   // cache slot panel-wide, 5-minute staleTime) instead of a second reader
   // of /admin/plans; it only fetches while this dialog is mounted.
   const { data: plans = [], isLoading: plansLoading } = usePlans()
+
   // Audience preview. `GET /admin/broadcast/:id/audience-preview` counts a
   // SAVED broadcast, so a count needs a draft row to exist: the first check
   // creates one, later checks PATCH the same row, and the send / test send
   // reuse it. The row the operator previewed is therefore the row that gets
   // delivered, so the number and the recipients cannot drift apart.
-  const draftIdRef = useRef<string | null>(null)
+  // Seeded with the draft being edited, so `saveDraft` PATCHes it instead of
+  // creating a second row.
+  const draftIdRef = useRef<string | null>(draftId)
   const [previewCount, setPreviewCount] = useState<number | null>(null)
   const [previewedSignature, setPreviewedSignature] = useState<string | null>(null)
   // Additive delivery channels (on top of the always-on cabinet/web-push/TG-DM
@@ -564,6 +639,50 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [scheduledDate, setScheduledDate] = useState<Date | undefined>(undefined)
   const [scheduledTime, setScheduledTime] = useState('12:00')
+
+  /**
+   * Loads the draft being edited into the form, once.
+   *
+   * Guarded by `draftId` rather than by emptiness of the fields: a draft whose
+   * text is genuinely empty must still load, and re-seeding on every render
+   * would fight the operator's typing.
+   */
+  const { data: editing } = useQuery({
+    queryKey: [...adminQueryKeys.broadcast.all, 'draft', draftId],
+    queryFn: async () => {
+      const response = await api.get<BroadcastDraftDetail>(
+        `/admin/broadcast/${encodeURIComponent(draftId as string)}`,
+      )
+      return response.data
+    },
+    enabled: draftId !== null,
+    staleTime: 0,
+  })
+
+  const seededRef = useRef(false)
+  useEffect(() => {
+    if (editing === undefined || seededRef.current) return
+    seededRef.current = true
+    setAudience(editing.audience)
+    setTitle(editing.payload.title ?? '')
+    setText(editing.payload.text ?? '')
+    setPromoCode(editing.promoCode ?? '')
+    setMediaType(editing.payload.mediaType)
+    if (editing.payload.mediaFileId !== null) {
+      setMediaSourceMode('fileId')
+      setMediaValue(editing.payload.mediaFileId)
+    }
+    setEmailEnabled(editing.payload.emailEnabled)
+    setTelegramChannelChatId(editing.payload.telegramChannelChatId ?? '')
+    const filter = editing.audienceFilter
+    if (filter) {
+      setSubBuckets(filter.subscription ?? [])
+      setPlanFilters(filter.planIds ?? [])
+      setPlatformFilters(filter.platforms ?? [])
+      setContactFilters(filter.contact ?? [])
+      setInactiveDays(filter.inactiveDays === undefined ? '' : String(filter.inactiveDays))
+    }
+  }, [editing])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
   const titleRef = useRef<HTMLInputElement>(null)

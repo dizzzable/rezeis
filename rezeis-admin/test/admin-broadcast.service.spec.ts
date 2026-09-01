@@ -213,7 +213,9 @@ describe('BroadcastService', () => {
 
     await assert.rejects(
       () => service.updateDraft({ broadcastId: 'broadcast-1', dto: { payload: { text: 'New' } } }),
-      { name: 'NotFoundException', message: 'Only draft broadcasts can be updated' },
+      // A pending SCHEDULED send is editable too — that wait is exactly when an
+      // operator notices a typo, and the job re-reads content when it fires.
+      { name: 'NotFoundException', message: 'Only draft or scheduled broadcasts can be updated' },
     );
   });
 
