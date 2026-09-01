@@ -6,6 +6,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { runBullMqEnqueueWithTimeout } from '../../../common/queue/bullmq-enqueue-options';
 import {
   BROADCAST_BATCH_SIZE,
+  BROADCAST_BLOCKED_REASON,
   BROADCAST_DELIVERY_QUEUE,
   BROADCAST_JOBS,
 } from '../broadcast.constants';
@@ -46,6 +47,25 @@ export interface BroadcastDeleteJobData {
 export interface BroadcastRetryJobData {
   readonly broadcastId: string;
   readonly messageIds: string[];
+}
+
+/**
+ * A fan-out that failed partway, carrying the number of batches that DID reach
+ * the queue and are now running.
+ */
+export class PartialEnqueueError extends Error {
+  public constructor(
+    jobName: string,
+    public readonly batchesEnqueued: number,
+    public readonly cause: unknown,
+  ) {
+    super(
+      `Enqueue of ${jobName} failed after ${batchesEnqueued} batch(es): ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = 'PartialEnqueueError';
+  }
 }
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -212,6 +232,51 @@ export class BroadcastQueueService {
     }
   }
 
+  /**
+   * Remove every batch job for this broadcast that has not started yet.
+   *
+   * ── Why a resume has to do this ───────────────────────────────────────────
+   *
+   * `stageRecipients` resumes by handing back every recipient still PENDING,
+   * and the caller re-batches all of them from scratch. The batches from the
+   * interrupted attempt are still sitting in Redis, so without this the same
+   * recipient is in two queued jobs. Both read the row as PENDING and both
+   * send: a media broadcast delivers the photo TWICE (a direct Bot API call has
+   * no idempotency of any kind), and a text one has its second attempt
+   * deduplicated by the bot into an `unconfirmed` — which is not retryable, so
+   * it overwrites the SENT row the first attempt just wrote with FAILED.
+   *
+   * ACTIVE jobs cannot be removed and are not attempted; their recipients are
+   * being written right now, and the fresh batch re-reads status per row.
+   */
+  public async dropPendingBatches(broadcastId: string): Promise<number> {
+    const queued = await this.queue.getJobs(['waiting', 'delayed']);
+    let removed = 0;
+    for (const job of queued) {
+      // RETRY_FAILED counts too: it delivers to the same rows through the same
+      // path, so a start job resuming over a running retry would double every
+      // recipient the retry had queued.
+      if (
+        job.name !== BROADCAST_JOBS.DELIVER_BATCH &&
+        job.name !== BROADCAST_JOBS.RETRY_FAILED
+      ) {
+        continue;
+      }
+      if (job.data?.broadcastId !== broadcastId) continue;
+      try {
+        await job.remove();
+        removed++;
+      } catch {
+        // Promoted to active between the scan and the remove — its recipients
+        // are being settled now, which the fresh batch will see.
+      }
+    }
+    if (removed > 0) {
+      this.logger.warn(`Dropped ${removed} superseded batch job(s) for broadcast ${broadcastId}`);
+    }
+    return removed;
+  }
+
   /** Whether a start job for this broadcast is still queued or delayed. */
   public async hasPendingStart(broadcastId: string): Promise<boolean> {
     const job = await this.queue.getJob(startJobId(broadcastId));
@@ -260,10 +325,22 @@ export class BroadcastQueueService {
     return messages.map((m) => m.id);
   }
 
-  /** Get IDs of all failed messages (for retry). */
+  /**
+   * Messages a retry could actually change — failures EXCEPT blocked bots.
+   *
+   * A recipient who has blocked the bot cannot receive this broadcast, and the
+   * relay deduplicates the retry by the same event id anyway, so including them
+   * made "retry failed" a button whose count never moved. They keep their own
+   * reason and their own number on screen; this list is what pressing the
+   * button can still fix.
+   */
   public async getFailedMessageIds(broadcastId: string): Promise<string[]> {
     const messages = await this.prismaService.broadcastMessage.findMany({
-      where: { broadcastId, status: 'FAILED' },
+      where: {
+        broadcastId,
+        status: 'FAILED',
+        NOT: { errorMessage: BROADCAST_BLOCKED_REASON },
+      },
       select: { id: true },
       orderBy: { createdAt: 'asc' },
     });
@@ -278,15 +355,26 @@ export class BroadcastQueueService {
     buildData: (batch: string[]) => T,
   ): Promise<number> {
     let batchCount = 0;
-    for (let i = 0; i < messageIds.length; i += BROADCAST_BATCH_SIZE) {
-      const batch = messageIds.slice(i, i + BROADCAST_BATCH_SIZE);
-      await this.queue.add(jobName, buildData(batch), {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5_000 },
-        removeOnComplete: { age: 86_400 },
-        removeOnFail: { age: 604_800 },
-      });
-      batchCount++;
+    try {
+      for (let i = 0; i < messageIds.length; i += BROADCAST_BATCH_SIZE) {
+        const batch = messageIds.slice(i, i + BROADCAST_BATCH_SIZE);
+        await this.queue.add(jobName, buildData(batch), {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5_000 },
+          removeOnComplete: { age: 86_400 },
+          removeOnFail: { age: 604_800 },
+        });
+        batchCount++;
+      }
+    } catch (err: unknown) {
+      // ── HOW FAR IT GOT MATTERS TO THE CALLER ─────────────────────────────
+      //
+      // This is a LOOP of `queue.add` calls, so a Redis blip on batch 3 of 8
+      // leaves batches 1-2 queued and about to run. A caller that reads the
+      // throw as "nothing was enqueued" and rolls the broadcast's status back
+      // is then wrong: those batches flip rows to PENDING and re-deliver
+      // against a broadcast the panel says has finished.
+      throw new PartialEnqueueError(jobName, batchCount, err);
     }
     this.logger.log(`Enqueued ${batchCount} ${jobName} batches`);
     return batchCount;

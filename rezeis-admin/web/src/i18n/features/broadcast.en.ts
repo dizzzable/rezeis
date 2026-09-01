@@ -23,7 +23,28 @@ export const en = {
     editBroadcast: 'Edit broadcast',
     deleteDialogTitle: 'Delete broadcast?',
     deleteConfirm: 'Delete this broadcast?',
+    deleteConfirmSent_one:
+      'This deletes the RECORD, not the message. It has already been delivered to {{count}} recipient, and it stays in their chat — deleting the record also destroys the ids needed to recall it, so recall will no longer be possible. Recall first if that is what you want.',
+    deleteConfirmSent_other:
+      'This deletes the RECORD, not the messages. They have already been delivered to {{count}} recipients, and they stay in those chats — deleting the record also destroys the ids needed to recall them, so recall will no longer be possible. Recall first if that is what you want.',
     deleteDialogAction: 'Delete',
+    promoCodeMediaWarning:
+      'With a photo or video the button is NOT added — media goes out through a path that cannot carry it. Put the code in the text itself, or send this one without media.',
+    recallMessages: 'Recall from recipients',
+    recallDialogTitle: 'Recall this broadcast?',
+    recallConfirm_one:
+      'Deletes the message from {{count}} recipient chat. Telegram only allows this within 48 hours of sending; anything older stays where it is.',
+    recallConfirm_other:
+      'Deletes the message from {{count}} recipient chats. Telegram only allows this within 48 hours of sending; anything older stays where it is.',
+    recallChannelOnlyConfirm:
+      'No recipient message is left to delete — this removes the copy posted to your operator channel, the one anyone can still read.',
+    recallDialogAction: 'Recall',
+    recalledCount_one: '{{count}} recalled',
+    recalledCount_other: '{{count}} recalled',
+    canceledCount_one: '{{count}} cancelled',
+    canceledCount_other: '{{count}} cancelled',
+    blockedCount_one: '{{count}} blocked the bot',
+    blockedCount_other: '{{count}} blocked the bot',
     pendingCount_one: '{{count}} still delivering',
     pendingCount_other: '{{count}} still delivering',
     failedCount_one: '{{count}} failed',
@@ -103,6 +124,10 @@ export const en = {
     toast: {
       created: 'Broadcast started',
       draftSaved: 'Draft saved',
+      recallStarted: 'Recall queued — messages are being removed from chats',
+      recallChannelFailed:
+        'Recall queued for the recipients, but the channel post could not be deleted — remove it by hand.',
+      recallFailed: 'Could not start the recall',
       retryStarted: 'Retry of undelivered recipients started',
       retryFailed: 'Could not start the retry',
       scheduleNeedsFutureTime: 'Pick a date and time at least a minute out — otherwise the broadcast goes now',
@@ -129,6 +154,10 @@ export const en = {
       hint: 'HTML markup is supported, same as when creating.',
       save: 'Save changes',
       saved: 'Broadcast updated',
+      promoButtonLost:
+        'Saving removes the “{{code}}” button from every message that carries it, including the copy on your operator channel — Telegram drops the keyboard on an edit and it cannot be put back from here. The code itself keeps working.',
+      channelFailed:
+        'Recipients updated, but the channel post still shows the old text — edit it by hand.',
       saveFailed: 'Failed to update broadcast',
     },
     emoji: {
@@ -190,6 +219,8 @@ export const en = {
         titleTooLong: 'Title must be 128 characters or less.',
         textRequired: 'Enter message text or attach media.',
         textTooLong: 'Message text must be 4096 characters or less.',
+        captionTooLong:
+          'With a photo or video the text is a caption, and Telegram allows 1024 characters. This one is {{count}} — shorten it, or send it without media.',
         promoCodeTooLong: 'Promo code must be 64 characters or less.',
         promoCodeInvalid: 'Promo code may contain only letters, digits and . _ -',
         mediaTypeInvalid: 'Choose photo, video, or no media.',

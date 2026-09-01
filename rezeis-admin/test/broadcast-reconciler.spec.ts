@@ -20,19 +20,34 @@ function build(options: {
   readonly scheduled?: ReadonlyArray<{ id: string; scheduledAt: Date }>;
   readonly processing?: ReadonlyArray<{ id: string }>;
   readonly pendingCount?: number;
+  /** Rows of ANY status. Defaults to the pending count — i.e. staging ran. */
+  readonly totalCount?: number;
   readonly pendingStart?: ReadonlySet<string>;
 }) {
   const enqueued: string[] = [];
-  const events: Array<{ severity: string; type: string }> = [];
+  const events: Array<{ severity: string; type: string; message: string }> = [];
+  const statusWrites: Array<Record<string, unknown>> = [];
+  const finalized: string[] = [];
   const prisma = {
     broadcast: {
       findMany: async ({ where }: { where: { status: BroadcastStatus } }) =>
         where.status === BroadcastStatus.SCHEDULED
           ? [...(options.scheduled ?? [])]
           : [...(options.processing ?? [])],
+      updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+        statusWrites.push(data);
+        return { count: 1 };
+      },
     },
     broadcastMessage: {
-      count: async () => options.pendingCount ?? 0,
+      // OBEYS which question it is asked. A fake that answered the same number
+      // for "how many are pending" and "how many rows exist at all" would make
+      // the two dead ends indistinguishable — and telling them apart is the
+      // whole of the fix.
+      count: async (args?: { where?: { status?: string } }) =>
+        args?.where?.status === undefined
+          ? (options.totalCount ?? options.pendingCount ?? 0)
+          : (options.pendingCount ?? 0),
     },
   };
   const queue = {
@@ -43,17 +58,25 @@ function build(options: {
     },
   };
   const systemEvents = {
-    info: (type: string) => events.push({ severity: 'info', type }),
-    warn: (type: string) => events.push({ severity: 'warn', type }),
-    error: (type: string) => events.push({ severity: 'error', type }),
+    info: (type: string, _s: string, message = '') => events.push({ severity: 'info', type, message }),
+    warn: (type: string, _s: string, message = '') => events.push({ severity: 'warn', type, message }),
+    error: (type: string, _s: string, message = '') => events.push({ severity: 'error', type, message }),
+  };
+  const delivery = {
+    checkAndFinalize: async (id: string) => {
+      finalized.push(id);
+    },
   };
   return {
     enqueued,
     events,
+    statusWrites,
+    finalized,
     service: new BroadcastReconcilerService(
       prisma as never,
       queue as never,
       systemEvents as never,
+      delivery as never,
     ),
   };
 }
@@ -76,14 +99,47 @@ describe('the reconciler leaves healthy sends alone', () => {
 
   it('does not revive a broadcast whose recipients are all settled', async () => {
     // Nothing left to send: it is waiting for its finaliser, not for a job.
-    const { service, enqueued } = build({
+    const { service, enqueued, finalized } = build({
       processing: [{ id: 'b-2' }],
       pendingCount: 0,
+      totalCount: 400,
     });
 
     await service.reconcile();
 
     assert.deepStrictEqual(enqueued, []);
+    // And it ASKS for the finalise instead of walking away. Left as a bare
+    // `continue`, a broadcast whose last batch settled without finalising sat
+    // at 0/400 PROCESSING for ever with no work anywhere left to move it.
+    assert.deepStrictEqual(finalized, ['b-2']);
+  });
+});
+
+describe('a broadcast that was claimed but never staged is not left in limbo', () => {
+  it('fails it loudly instead of skipping it for ever', async () => {
+    // THE DEAD END. Staging claims DRAFT -> PROCESSING before it resolves the
+    // audience, so a container killed in that window leaves PROCESSING with no
+    // recipient rows at all — not a throw, so nothing caught it. The start
+    // job's retry then resumes, finds nothing pending, and completes green.
+    // This loop skipped it as "waiting for its finaliser": nobody was ever
+    // messaged, and no alert existed anywhere.
+    const { service, statusWrites, events, enqueued, finalized } = build({
+      processing: [{ id: 'b-7' }],
+      pendingCount: 0,
+      totalCount: 0,
+    });
+
+    await service.reconcile();
+
+    assert.equal(statusWrites[0]?.status, BroadcastStatus.FAILED);
+    assert.equal(enqueued.length, 0, 'a claimed broadcast cannot be staged again');
+    assert.deepStrictEqual(finalized, [], 'there is nothing to finalise');
+    const reported = events.find((event) => event.severity === 'error');
+    assert.ok(reported, 'it failed silently, which is what made it invisible');
+    assert.ok(
+      /channel/i.test(reported.message),
+      'the operator is not warned that the public channel may already carry it',
+    );
   });
 });
 

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
+import { usePermissionStore } from '@/features/rbac'
 import { api } from '@/lib/api'
 import { loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
@@ -10,6 +11,20 @@ import BroadcastPage from './broadcast-page'
 describe('BroadcastPage create form validation', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    // Recall and Delete are gated on `broadcasts:delete`, which the default
+    // operator role does not hold. These tests drive those buttons, so they
+    // run as a role that does.
+    usePermissionStore.setState({
+      loaded: true,
+      loading: false,
+      granted: new Set([
+        'broadcasts:view',
+        'broadcasts:create',
+        'broadcasts:edit',
+        'broadcasts:run',
+        'broadcasts:delete',
+      ]),
+    })
   })
 
   it('blocks malformed media URLs before creating a broadcast draft', async () => {
@@ -207,7 +222,13 @@ describe('BroadcastPage create form validation', () => {
     await user.click(await screen.findByRole('button', { name: 'Delete broadcast' }))
 
     const dialog = await screen.findByRole('alertdialog', { name: 'Delete broadcast?' })
-    expect(within(dialog).getByText('Delete this broadcast?')).toBeInTheDocument()
+    // On a broadcast that HAS been sent, this dialog used to ask the same
+    // bland "Delete this broadcast?" as on an untouched draft. It is not the
+    // same act: the messages stay in all eight chats, and deleting the record
+    // destroys the ids that could recall them, so the recall button beside it
+    // stops working for ever. The dialog has to say so.
+    expect(within(dialog).getByText(/stays in their chat|stay in those chats/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/recall will no longer be possible/)).toBeInTheDocument()
     expect(deleteSpy).not.toHaveBeenCalled()
 
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }))

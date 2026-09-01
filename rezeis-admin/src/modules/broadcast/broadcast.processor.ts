@@ -66,6 +66,13 @@ export class BroadcastProcessor extends WorkerHost {
       return { batches: 0 };
     }
 
+    // The fan-out below covers EVERY recipient handed back, and on a resume
+    // that includes ones an interrupted attempt had already queued. Clear those
+    // first or the same person sits in two jobs — which for a media broadcast
+    // means the photo arrives twice, and for a text one means the second
+    // attempt's deduplicated `unconfirmed` overwrites a SENT row with FAILED.
+    await this.broadcastQueueService.dropPendingBatches(broadcastId);
+
     const BATCH_SIZE = 50;
     let batchCount = 0;
     for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {

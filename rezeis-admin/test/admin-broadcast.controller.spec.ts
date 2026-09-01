@@ -299,6 +299,10 @@ describe('AdminBroadcastController', () => {
 
       assert.deepStrictEqual(await controller.sendTestBroadcast('someone-elses-draft', admin), {
         ok: true,
+        // SAID OUT LOUD. The panel used to forget the draft id after every test
+        // send, so this caller — who keeps the shell by design — got a second
+        // row on the next save and could delete neither.
+        draftRemoved: false,
         message: 'Test preview sent to developer',
       });
 
@@ -399,6 +403,16 @@ describe('AdminBroadcastController', () => {
         updateStatus: async (broadcastId: string, status: BroadcastStatus) => {
           calls.push(['status', broadcastId, status]);
         },
+        // Answers the status the broadcast HAD, which is what the controller
+        // needs to put it back if the enqueue never happens.
+        beginRetry: async (broadcastId: string) => {
+          calls.push(['beginRetry', broadcastId]);
+          return BroadcastStatus.FAILED;
+        },
+        markForRetry: async (broadcastId: string, messageIds: readonly string[]) => {
+          calls.push(['markForRetry', broadcastId, [...messageIds]]);
+          return messageIds.length;
+        },
         updateBroadcastContent: async (input: unknown) => {
           calls.push(['updateContent', input]);
         },
@@ -446,7 +460,28 @@ describe('AdminBroadcastController', () => {
           return 1;
         },
       } as never,
-      {} as never,
+      // Position 4: the delivery service, which now also owns the ONE public
+      // copy of a broadcast — the post on the operator channel. It is not a
+      // recipient and never appeared in `sentIds`, so corrections and recalls
+      // used to stop at the private messages and leave the original text up on
+      // the channel.
+      {
+        syncChannelPost: async (broadcastId: string) => {
+          calls.push(['syncChannelPost', broadcastId]);
+          return 'edited';
+        },
+        deleteChannelPost: async (broadcastId: string) => {
+          calls.push(['deleteChannelPost', broadcastId]);
+          return 'deleted';
+        },
+        // A recall is allowed to be about the CHANNEL alone: a broadcast
+        // delivered only to web-only users has no Telegram message ids, and its
+        // public copy had no route in the panel at all.
+        channelPostState: async (broadcastId: string) => {
+          calls.push(['channelPostState', broadcastId]);
+          return 'addressable';
+        },
+      } as never,
       {} as never,
     );
     const admin = currentAdmin();
@@ -463,11 +498,13 @@ describe('AdminBroadcastController', () => {
     assert.deepStrictEqual(await controller.editBroadcast('completed-1', editDto, admin), {
       batches: 1,
       totalMessages: 2,
+      channel: 'edited',
       message: 'Broadcast updated',
     });
     assert.deepStrictEqual(await controller.deleteBroadcastMessages('completed-1', admin), {
       batches: 1,
       totalMessages: 2,
+      channel: 'deleted',
       message: 'Delete enqueued',
     });
     assert.deepStrictEqual(await controller.retryFailed('failed-1', admin), {
@@ -497,13 +534,26 @@ describe('AdminBroadcastController', () => {
           messageIds: ['message-1', 'message-2'],
         },
       ],
+      ['syncChannelPost', 'completed-1'],
       ['get', 'completed-1'],
       ['sentIds', 'completed-1'],
+      ['channelPostState', 'completed-1'],
       ['enqueueDelete', { broadcastId: 'completed-1', messageIds: ['message-1', 'message-2'] }],
+      ['deleteChannelPost', 'completed-1'],
       ['get', 'failed-1'],
       ['failedIds', 'failed-1'],
+      // The PROCESSING claim comes BEFORE the enqueue now. Written after it, a
+      // short retry could finish and finalize back to COMPLETED before the
+      // write landed — which then stamped PROCESSING over a finished send and
+      // stranded it there, invisible to the reconciler.
+      ['beginRetry', 'failed-1'],
+      // EVERY message the retry will touch goes back to PENDING before any
+      // batch runs. Left to the batches, a multi-batch retry could finalize the
+      // broadcast as COMPLETED while most of it had not started — the
+      // finaliser's guard counts PENDING rows and the not-yet-reset ones were
+      // still FAILED.
+      ['markForRetry', 'failed-1', ['failed-message-1']],
       ['enqueueRetry', { broadcastId: 'failed-1', messageIds: ['failed-message-1'] }],
-      ['status', 'failed-1', BroadcastStatus.PROCESSING],
     ]);
   });
 

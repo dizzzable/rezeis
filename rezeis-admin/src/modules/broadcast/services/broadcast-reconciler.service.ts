@@ -6,6 +6,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { BroadcastQueueService } from './broadcast-queue.service';
+import { BroadcastDeliveryService } from './broadcast-delivery.service';
 
 /**
  * The counterpart to `checkAndFinalize`: what to do about a broadcast that will
@@ -51,6 +52,10 @@ export class BroadcastReconcilerService {
     private readonly prismaService: PrismaService,
     private readonly queueService: BroadcastQueueService,
     private readonly systemEvents: SystemEventsService,
+    // Required, not `@Optional()`: without it the "waiting for its finaliser"
+    // branch below would go back to being a silent `continue`, which is the
+    // dead end this class exists to remove.
+    private readonly deliveryService: BroadcastDeliveryService,
   ) {}
 
   @Cron(CronExpression.EVERY_10_MINUTES)
@@ -96,15 +101,60 @@ export class BroadcastReconcilerService {
     });
 
     for (const broadcast of stalled) {
-      const pending = await this.prismaService.broadcastMessage.count({
-        where: { broadcastId: broadcast.id, status: BroadcastMessageStatus.PENDING },
-      });
-      // No pending rows means it is merely waiting for its finaliser; ask for
-      // that rather than re-enqueueing a send with nothing left to send.
-      if (pending === 0) continue;
+      const [pending, total] = await Promise.all([
+        this.prismaService.broadcastMessage.count({
+          where: { broadcastId: broadcast.id, status: BroadcastMessageStatus.PENDING },
+        }),
+        this.prismaService.broadcastMessage.count({ where: { broadcastId: broadcast.id } }),
+      ]);
+
+      if (pending === 0) {
+        // ── "NOTHING PENDING" HAD TWO MEANINGS AND ONE ANSWER ─────────────
+        //
+        // `continue` was right for only one of them, and the other was a dead
+        // end nothing else could reach. Staging CLAIMS the broadcast
+        // (DRAFT → PROCESSING) before it resolves the audience, so a container
+        // that dies in that window — a deploy, an OOM kill; not a throw, so the
+        // catch never runs — leaves PROCESSING with no recipient rows at all.
+        // The start job's retry then takes the resume path, finds nothing
+        // pending, and completes green. This loop skipped it as "waiting for
+        // its finaliser". Nobody was ever messaged, the panel showed 0/0
+        // in-flight for ever, and no alert was raised anywhere — while the
+        // channel post, queued inside the same claim, had already announced it
+        // publicly.
+        await (total === 0
+          ? this.reportStagingNeverRan(broadcast.id)
+          : this.deliveryService.checkAndFinalize(broadcast.id));
+        continue;
+      }
+
       if (await this.queueService.hasPendingStart(broadcast.id)) continue;
       await this.revive(broadcast.id, `${pending} recipients still undispatched`);
     }
+  }
+
+  /**
+   * A broadcast that owns no recipients at all cannot be resumed or finished.
+   *
+   * Not revived: the claim already happened, so staging will refuse to run
+   * again, and re-opening it would risk a second channel post. FAILED is the
+   * truthful terminal state — nobody was reached — and it is the one that puts
+   * the row somewhere the operator can see and act on.
+   */
+  private async reportStagingNeverRan(broadcastId: string): Promise<void> {
+    const { count } = await this.prismaService.broadcast.updateMany({
+      where: { id: broadcastId, status: BroadcastStatus.PROCESSING },
+      data: { status: BroadcastStatus.FAILED, completedAt: new Date() },
+    });
+    if (count === 0) return;
+    this.logger.error(`Broadcast ${broadcastId} was claimed but never staged a single recipient`);
+    this.systemEvents.error(
+      EVENT_TYPES.BROADCAST_STARTED,
+      'SYSTEM',
+      `Broadcast ${broadcastId} reached NOBODY: it was claimed for sending but no recipients were ever staged. ` +
+        'Compose it again — and check the operator channel, which may already carry the announcement.',
+      { broadcastId },
+    );
   }
 
   private async revive(broadcastId: string, why: string): Promise<void> {

@@ -20,13 +20,20 @@ import {
   BROADCAST_FEED_NOTIFICATION_TYPE,
   BROADCAST_PROMO_BUTTON_LABEL,
   RELAY_CIRCUIT_BREAKER_THRESHOLD,
+  TELEGRAM_CAPTION_LIMIT,
+  BROADCAST_CHANNEL_EVENT_PREFIX,
+  BROADCAST_BLOCKED_REASON,
 } from '../broadcast.constants';
 import { buildPromoButton } from '../utils/broadcast-promo.util';
+import { captionOverflowOf, isMediaPayload } from '../utils/broadcast-caption.util';
+import { BroadcastService } from './broadcast.service';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../utils/broadcast-audience.util';
 // THE allow-list renderer. This module used to carry its own escape-everything
 // copy under the same name, so adding the util beside it changed nothing: both
 // call sites kept resolving to the local one, and the reported "HTML does not
 // work in the email" stayed live while its unit tests went green.
+import { resolvePublicSiteUrl } from '../../../common/config/public-site-url.util';
+import type { EmailEmojiInterface } from '../utils/broadcast-email-html.util';
 import {
   renderBroadcastEmailHtml,
   renderBroadcastEmailText,
@@ -51,6 +58,11 @@ export class BroadcastDeliveryService {
     private readonly settingsService: SettingsService,
     private readonly botNotifier: BotNotifierClient,
     private readonly relayQueue: ReiwaRelayQueueService,
+    // REQUIRED, deliberately. As an `@Optional()` dependency the promo re-check
+    // below would simply not run wherever DI failed to supply it, and a guard
+    // that silently does nothing is worse than no guard — nothing would ever
+    // point at it. Nest fails to start instead.
+    private readonly broadcastService: BroadcastService,
     @Optional()
     private readonly customEmojiService?: CustomEmojiService,
     @Optional()
@@ -202,6 +214,14 @@ export class BroadcastDeliveryService {
         select: { email: true, webAccount: { select: { email: true } } },
       });
       const address = devWithEmail?.email ?? devWithEmail?.webAccount?.email ?? null;
+      const previewBody = this.customEmojiService
+        ? await this.customEmojiService.substituteFallbacks(text)
+        : text;
+      const rawPreviewTitle = title || null;
+      const previewTitle =
+        rawPreviewTitle !== null && this.customEmojiService
+          ? await this.customEmojiService.substituteFallbacks(rawPreviewTitle)
+          : rawPreviewTitle;
       if (address !== null) {
         try {
           await this.emailDeliveryService.send({
@@ -209,8 +229,11 @@ export class BroadcastDeliveryService {
             subject: title || 'Уведомление',
             templateType: '__broadcast__',
             variables: {},
-            rawHtml: renderBroadcastEmailHtml(title || null, text),
-            text: renderBroadcastEmailText(title || null, text),
+            // Substituted the same way the real send substitutes it — a
+            // preview that renders differently from the thing it previews is
+            // worse than no preview.
+            rawHtml: renderBroadcastEmailHtml(title || null, text, await this.emailEmojiMap()),
+            text: renderBroadcastEmailText(previewTitle, previewBody),
           });
           emailPreviewed = true;
         } catch (err: unknown) {
@@ -283,6 +306,61 @@ export class BroadcastDeliveryService {
         return outstanding.map((m) => m.id);
       }
       this.logger.warn(`Broadcast ${broadcastId} not DRAFT (current: ${broadcast.status})`);
+      return [];
+    }
+
+    // ── A CAPTION THAT CANNOT BE SENT IS REFUSED ONCE, NOT PER RECIPIENT ──
+    //
+    // Telegram allows a quarter as many characters on a photo or video as on a
+    // plain message, and rejects the overflow per call. Composing now refuses
+    // it up front, but a draft written before that check existed can still be
+    // sitting on a schedule — and staging it would spend one rejection per
+    // recipient, which reads in the panel as hundreds of unrelated delivery
+    // failures rather than one fixable mistake.
+    //
+    // Put back to DRAFT rather than FAILED: the content is fine, only too long,
+    // and DRAFT is the one status the operator can still edit. It also leaves
+    // the reconciler's overdue-schedule query, so this stops rather than being
+    // revived every ten minutes.
+    const captionOverflow = captionOverflowOf(broadcast.payload);
+    if (captionOverflow !== null) {
+      await this.prismaService.broadcast.updateMany({
+        where: { id: broadcastId, status: { in: [BroadcastStatus.DRAFT, BroadcastStatus.SCHEDULED] } },
+        data: { status: BroadcastStatus.DRAFT, scheduledAt: null, queueJobId: null },
+      });
+      this.systemEventsService.error(
+        EVENT_TYPES.BROADCAST_STARTED,
+        'SYSTEM',
+        `Broadcast not sent: a photo/video caption may be at most ${TELEGRAM_CAPTION_LIMIT} characters, this one is ${captionOverflow}. Shorten it and send again.`,
+        { broadcastId, captionLength: captionOverflow, limit: TELEGRAM_CAPTION_LIMIT },
+      );
+      return [];
+    }
+
+    // ── THE PROMO IS RE-CHECKED AT THE MOMENT IT FIRES, NOT WHEN IT WAS SET ─
+    //
+    // The gate on `POST /send` runs when the operator presses the button. On a
+    // scheduled send that is hours before dispatch, and a code can expire or be
+    // used up in between — the send then reached the whole audience carrying a
+    // button that opens a dead code, which cannot be taken back. A revival by
+    // the reconciler has the same gap, only wider.
+    //
+    // Refused rather than sent without the button: the button is what a
+    // promo-tagged broadcast is FOR, and its text almost always names the
+    // offer. A late announcement is recoverable; four hundred people holding a
+    // code that does not work is not.
+    const promoVerdict = await this.broadcastService.checkPromoCodeDispatchable(broadcastId);
+    if (!promoVerdict.ok) {
+      await this.prismaService.broadcast.updateMany({
+        where: { id: broadcastId, status: { in: [BroadcastStatus.DRAFT, BroadcastStatus.SCHEDULED] } },
+        data: { status: BroadcastStatus.DRAFT, scheduledAt: null, queueJobId: null },
+      });
+      this.systemEventsService.error(
+        EVENT_TYPES.BROADCAST_STARTED,
+        'SYSTEM',
+        `Broadcast not sent: ${promoVerdict.reason}. Clear or replace the promo tag and send again.`,
+        { broadcastId, reason: promoVerdict.reason },
+      );
       return [];
     }
 
@@ -501,7 +579,11 @@ export class BroadcastDeliveryService {
       };
     }
 
-    const hasMedia = mediaFileId !== null && (mediaType === 'photo' || mediaType === 'video');
+    // THE shared test, so the caption guard and delivery cannot disagree about
+    // what counts as media. `mediaFileId !== null` alone let an empty string
+    // through: the caption gate skipped the payload as "not media" while this
+    // line called it media and sent `sendPhoto` with an empty `photo`.
+    const hasMedia = isMediaPayload(payload);
 
     // Telegram-bound text. Custom-emoji `:slug:` shortcodes become Telegram
     // premium custom-emoji via `<tg-emoji>` HTML tags when sent with parse_mode
@@ -521,6 +603,35 @@ export class BroadcastDeliveryService {
     // the title show up in Telegram too (not just the cabinet).
     const useHtmlEmoji = hasMedia ? parseMode === 'HTML' : true;
     const telegramText = await this.composeTelegram(title, text, useHtmlEmoji);
+
+    // ── EMAIL GETS THE GLYPH, NEVER THE CUSTOM EMOJI ──────────────────────
+    //
+    // A premium Telegram custom emoji is a lottie animation addressed by id and
+    // rendered by Telegram's own client. No mail client can draw one — there is
+    // no format to send — so the only correct output for email is the fallback
+    // GLYPH the operator picked for that emoji, which is an ordinary unicode
+    // character every inbox shows.
+    //
+    // The email leg used to be handed the RAW payload text, which is neither:
+    // it still carries the `:slug:` shortcodes, so a broadcast that reached
+    // Telegram with the operator's emoji reached the inbox with `:party:`
+    // written out in the middle of a sentence. Same source, two renderings, and
+    // the email was the one that looked broken — exactly like the raw `<b>`
+    // tags did before the allow-list renderer.
+    //
+    // Computed once per batch, not per recipient: it is the same text for
+    // everyone and the substitution reads the emoji packs.
+    // The HTML part gets the PICTURES (with the glyph as their alt, so a
+    // blocked or unreachable image degrades to exactly the glyph); the plain
+    // text alternative has nowhere to put an image and gets the glyph itself.
+    const emailEmoji = await this.emailEmojiMap();
+    const emailBody = this.customEmojiService
+      ? await this.customEmojiService.substituteFallbacks(text)
+      : text;
+    const emailTitle =
+      title !== null && this.customEmojiService
+        ? await this.customEmojiService.substituteFallbacks(title)
+        : title;
 
     // Promo-tagged broadcast → append a Mini App "activate promo" button to
     // each delivered message (text path). The reiwa bot resolves the
@@ -604,8 +715,10 @@ export class BroadcastDeliveryService {
             subject: title?.trim() || 'Уведомление',
             templateType: '__broadcast__',
             variables: {},
-            rawHtml: renderBroadcastEmailHtml(title, text),
-            text: renderBroadcastEmailText(title, text),
+            // RAW text for the HTML part: the shortcodes have to survive as far
+            // as the image substitution, which runs after the sanitiser.
+            rawHtml: renderBroadcastEmailHtml(title, text, emailEmoji),
+            text: renderBroadcastEmailText(emailTitle, emailBody),
             // One letter per recipient per broadcast, whatever happens to the
             // batch job. The message row id is stable across every retry,
             // resume and "retry failed" press — the same property the relay
@@ -749,17 +862,44 @@ export class BroadcastDeliveryService {
       }
 
       if (!telegramAttempted) {
-        // No Telegram leg. The cabinet feed row + web-push ARE the delivery,
-        // and `feedOk` is honest evidence of them. The reason the Telegram leg
-        // was skipped is still written down when the recipient could have had
-        // one, so a misconfigured relay does not hide behind a green row.
+        // ── A MEDIA BROADCAST HAS ONLY ONE ROUTE ───────────────────────────
+        //
+        // The cabinet feed row carries the text and nothing else — there is no
+        // image in it, and none in the email either. So for a media broadcast
+        // the Telegram leg IS the delivery, and a recipient it could not reach
+        // did not get what the operator sent.
+        //
+        // This was recorded as SENT. On a deployment with no bot token that
+        // meant a photo announcement reporting `400/400` in green with not one
+        // image delivered, and the reason parked in a column no screen renders.
+        // Marking it failed is noisier and true: the finaliser now reports a
+        // partial delivery as a warning, which is exactly the news that a media
+        // broadcast reaches Telegram users only.
+        if (hasMedia) {
+          await this.markFailed(
+            message.id,
+            mediaError ??
+              (telegramAddressable
+                ? 'BOT_TOKEN not configured for media delivery'
+                : 'no Telegram account: media cannot be delivered'),
+          );
+          failed++;
+          continue;
+        }
+
+        // No Telegram leg for a TEXT broadcast. The cabinet feed row +
+        // web-push ARE the delivery, and `feedOk` is honest evidence of them.
+        // The reason the Telegram leg was skipped is still written down when
+        // the recipient could have had one, so a misconfigured relay does not
+        // hide behind a green row.
         if (feedOk) {
+          // Only the relay arm is reachable here: a media broadcast that could
+          // not be delivered fails the recipient outright further up and never
+          // reaches this branch.
           const skipReason =
             telegramAddressable && relayOutcome !== null
               ? `telegram_skipped_${relayOutcome.status}`
-              : telegramAddressable && hasMedia
-                ? (mediaError ?? 'BOT_TOKEN not configured for media delivery')
-                : null;
+              : null;
           await this.prismaService.broadcastMessage.update({
             where: { id: message.id },
             data: {
@@ -799,13 +939,42 @@ export class BroadcastDeliveryService {
         continue;
       }
 
+      // ── "BLOCKED THE BOT" IS A KNOWN ANSWER, NOT AN UNKNOWN FAILURE ─────
+      //
+      // The bot answers a bodiless 204 for a blocked recipient on purpose — the
+      // delivery decision is final — which the relay reads as `unconfirmed`,
+      // the same shape a transient hiccup produces. Written down as one, the
+      // most common reason a broadcast does not arrive became "N ошибок" and a
+      // retry button that could never clear them: the relay deduplicates the
+      // retry by the same event id, it returns `unconfirmed` again, the number
+      // does not move.
+      //
+      // Re-read rather than selected with the recipient, because the bot sets
+      // the flag DURING this delivery — a value read before the send is by
+      // definition stale for exactly the recipients this is about. One extra
+      // query, only on the path that already failed.
+      const blocked =
+        !hasMedia && relayOutcome?.status === 'unconfirmed'
+          ? ((
+              await this.prismaService.user.findUnique({
+                where: { id: message.userId },
+                select: { isBotBlocked: true },
+              })
+            )?.isBotBlocked ?? false)
+          : false;
+
       // Attempted, not proven. Retryable failures stay PENDING so a re-run of
       // this batch picks them up (it re-reads PENDING rows, so a proven row is
       // never re-sent); everything else is final now.
-      const reason = hasMedia
-        ? (mediaError ?? 'Media delivery failed')
-        : `telegram_relay_${relayOutcome?.status ?? 'failed'}`;
-      const retryable = !hasMedia && relayOutcome !== null && isRetryableRelayOutcome(relayOutcome);
+      const reason = blocked
+        ? BROADCAST_BLOCKED_REASON
+        : hasMedia
+          ? (mediaError ?? 'Media delivery failed')
+          : `telegram_relay_${relayOutcome?.status ?? 'failed'}`;
+      // A blocked recipient is never retryable. Retrying is what made this
+      // class invisible in the first place.
+      const retryable =
+        !blocked && !hasMedia && relayOutcome !== null && isRetryableRelayOutcome(relayOutcome);
       if (retryable && options?.isFinalAttempt !== true) {
         await this.prismaService.broadcastMessage.update({
           where: { id: message.id },
@@ -858,6 +1027,273 @@ export class BroadcastDeliveryService {
    * Edit already-sent messages. Uses editMessageText for text-only broadcasts,
    * editMessageCaption for photo/video broadcasts.
    */
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  THE OPERATOR-CHANNEL COPY
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Bring the channel post in line with an edited broadcast.
+   *
+   * ── Why this is not optional ──────────────────────────────────────────────
+   *
+   * The channel copy is the PUBLIC one. Correcting a broadcast used to rewrite
+   * every private message and leave the channel showing the original — so the
+   * wrong price, the wrong date, the wrong link stayed up in the one place
+   * anyone could still read it, and nothing in the panel said so.
+   *
+   * Once, not per batch: there is a single post no matter how many recipients.
+   *
+   * Never throws. A channel that cannot be edited must not fail the edit of the
+   * recipients' messages, which is the larger part of the correction.
+   */
+  /**
+   * ── "NO POST" AND "CANNOT ADDRESS THE POST" ARE NOT THE SAME ANSWER ───────
+   *
+   * A broadcast that configured no channel has nothing to keep in step, and
+   * that is a success. A broadcast that DID post to a channel whose message id
+   * was never stored has a public copy that this code cannot touch — and
+   * reporting that as a success is the exact failure the channel work exists to
+   * remove: the operator recalls a mistaken broadcast from four hundred private
+   * chats, the public copy stays up, and the panel says "recall started".
+   *
+   * The id can genuinely be missing on a working system: an older reiwa bot
+   * answers a bodiless 204, which the relay policy counts as delivered but
+   * carries no id, and the relay's direct fallback (used when Redis refuses the
+   * job) never runs the processor that stores it. So this is not a rare
+   * corner — it is the normal state of any deployment whose bot predates the
+   * id echo, and it has to be visible.
+   *
+   * `payload.telegramChannelChatId` is what separates the two: it is the
+   * operator's intent, written at compose time, independent of what delivery
+   * managed to record.
+   */
+  private async channelPostAddress(
+    broadcastId: string,
+  ): Promise<
+    | { readonly kind: 'addressable'; readonly chatId: string; readonly messageId: bigint }
+    | { readonly kind: 'no-post' }
+    | { readonly kind: 'unaddressable' }
+  > {
+    const broadcast = await this.prismaService.broadcast.findUnique({
+      where: { id: broadcastId },
+      select: { channelChatId: true, channelMessageId: true, payload: true },
+    });
+    const chatId = broadcast?.channelChatId ?? null;
+    const messageId = broadcast?.channelMessageId ?? null;
+    if (chatId !== null && messageId !== null) {
+      return { kind: 'addressable', chatId, messageId };
+    }
+    // A stored chat with no message id means we HAD the address and used it —
+    // a successful recall clears the id and keeps the chat. Reporting that as
+    // unaddressable made a second recall (reachable whenever the first left
+    // some messages behind, e.g. one past Telegram's 48-hour window) warn about
+    // a post that had already been taken down.
+    if (chatId !== null) return { kind: 'no-post' };
+
+    const payload = broadcast?.payload as Record<string, unknown> | null;
+    const configured =
+      typeof payload?.telegramChannelChatId === 'string' &&
+      payload.telegramChannelChatId.trim().length > 0;
+    return configured ? { kind: 'unaddressable' } : { kind: 'no-post' };
+  }
+
+  /**
+   * Whether this broadcast still has a public copy, and whether it is reachable.
+   *
+   * Public because two callers outside delivery need it: the recall route, which
+   * must not refuse just because no recipient message is left (a broadcast
+   * delivered only to web-only users has no Telegram message ids at all, and
+   * its channel post had no route in the panel), and the list, so the button
+   * appears for exactly those broadcasts.
+   */
+  public async channelPostState(
+    broadcastId: string,
+  ): Promise<'addressable' | 'no-post' | 'unaddressable'> {
+    return (await this.channelPostAddress(broadcastId)).kind;
+  }
+
+
+  /**
+   * The operator's custom emoji, addressed the way a mail client can fetch them.
+   *
+   * ── Why the URL has to be rebuilt ─────────────────────────────────────────
+   *
+   * The panel stores each imported emoji's picture as `/uploads/emoji/<file>` —
+   * root-relative, which is meaningless to an inbox with no origin to resolve
+   * it against. The cabinet already proxies that exact path publicly (the same
+   * route its own SPA uses for these assets), so joining it to the operator's
+   * public site gives an address a reader's mail client can actually reach.
+   *
+   * Returns an EMPTY map when there is no public site configured, and the
+   * caller then falls back to the plain glyph — which is what every one of
+   * these emoji renders as today.
+   */
+  private async emailEmojiMap(): Promise<ReadonlyMap<string, EmailEmojiInterface>> {
+    const map = new Map<string, EmailEmojiInterface>();
+    if (this.customEmojiService === undefined) return map;
+    const site = resolvePublicSiteUrl();
+    let packs;
+    try {
+      packs = await this.customEmojiService.listPacks();
+    } catch {
+      // The emoji packs live in settings; a read failure must not stop a
+      // broadcast. The glyph path needs none of this.
+      return map;
+    }
+    for (const pack of packs) {
+      for (const emoji of pack.emojis) {
+        const glyph = emoji.fallback?.trim() ?? '';
+        const relative = emoji.imageUrl?.trim() ?? '';
+        // An absolute url stored by some other importer is used as-is; a
+        // root-relative one needs the public site, and without one there is
+        // nothing a mail client could fetch.
+        const imageUrl =
+          relative.length === 0
+            ? null
+            : /^https?:\/\//i.test(relative)
+              ? relative
+              : site === null
+                ? null
+                : `${site}${relative.startsWith('/') ? '' : '/'}${relative}`;
+        if (glyph.length === 0 && imageUrl === null) continue;
+        map.set(emoji.slug, { imageUrl, fallback: glyph });
+      }
+    }
+    return map;
+  }
+
+  public async syncChannelPost(
+    broadcastId: string,
+    newText: string,
+    parseMode: string | null,
+  ): Promise<'edited' | 'no-post' | 'unaddressable' | 'failed'> {
+    const address = await this.channelPostAddress(broadcastId);
+    if (address.kind !== 'addressable') return address.kind;
+    const { chatId, messageId } = address;
+
+    const botToken = await this.getBotToken();
+    if (!botToken) return 'failed';
+
+    // ── THE CHANNEL COPY IS ALWAYS A PLAIN TEXT MESSAGE ───────────────────
+    //
+    // `postToChannelIfConfigured` hands the relay `{ chatId, text, parseMode,
+    // buttons }` and the relay contract has no media field at all — the bot
+    // answers it with `sendMessage`. So even a photo broadcast's public copy is
+    // text, and deciding the edit endpoint from `payload.mediaType` sent
+    // `editMessageCaption` at a message that has no caption: Telegram refuses
+    // it every time, for exactly the broadcasts this sync matters most for.
+    // ── COMPOSED THE WAY THE POST WAS COMPOSED ────────────────────────────
+    //
+    // `postToChannelIfConfigured` creates this post with
+    // `composeTelegram(title, text, true)` — a bold headline, a blank line, the
+    // body — always under parse mode HTML. Editing it with the body alone
+    // silently deleted the headline from the one copy anyone can read, while
+    // the handler reported `edited` and the panel showed a plain success. Same
+    // defect that was fixed inside `editBatch`, left standing one method away.
+    const broadcastPayload = await this.prismaService.broadcast.findUnique({
+      where: { id: broadcastId },
+      select: { payload: true },
+    });
+    const channelPayload = broadcastPayload?.payload as Record<string, unknown> | null;
+    const channelTitle = typeof channelPayload?.title === 'string' ? channelPayload.title : null;
+    const telegramText = await this.composeTelegram(channelTitle, newText, true);
+
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+        method: 'POST',
+        // BOUNDED, because unlike every other Telegram call in this file this
+        // one runs inside the admin's HTTP request. Unbounded, a hung
+        // api.telegram.org holds the panel's "save" spinning until undici's own
+        // default gives up.
+        signal: AbortSignal.timeout(CHANNEL_EDIT_TIMEOUT_MS),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: Number(messageId),
+          text: telegramText,
+          parse_mode: parseMode ?? undefined,
+          // No `reply_markup`, same reason as the per-recipient edit.
+        }),
+      });
+      if (response.ok) return 'edited';
+      this.logger.warn(
+        `Broadcast ${broadcastId}: channel post edit refused: ${sanitizeTelegramDiagnostic(
+          await response.text(),
+          botToken,
+          chatId,
+          200,
+        )}`,
+      );
+      return 'failed';
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Broadcast ${broadcastId}: channel post edit threw: ${sanitizeTelegramDiagnostic(
+          err instanceof Error ? err.message : String(err),
+          botToken,
+          chatId,
+          200,
+        )}`,
+      );
+      return 'failed';
+    }
+  }
+
+  /**
+   * Take the channel post down with a recalled broadcast.
+   *
+   * Recalling used to delete the message from every private chat and leave the
+   * public copy in place — the one that is hardest to explain away, and the one
+   * a recall is usually FOR. Clears the stored address on success so a second
+   * recall does not report a failure for a post that is already gone.
+   */
+  public async deleteChannelPost(
+    broadcastId: string,
+  ): Promise<'deleted' | 'no-post' | 'unaddressable' | 'failed'> {
+    const address = await this.channelPostAddress(broadcastId);
+    if (address.kind !== 'addressable') return address.kind;
+    const { chatId, messageId } = address;
+
+    const botToken = await this.getBotToken();
+    if (!botToken) return 'failed';
+
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/deleteMessage`, {
+        method: 'POST',
+        // Bounded for the same reason as the channel edit: this one runs inside
+        // the admin's request too.
+        signal: AbortSignal.timeout(CHANNEL_EDIT_TIMEOUT_MS),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: Number(messageId) }),
+      });
+      if (response.ok) {
+        await this.prismaService.broadcast.update({
+          where: { id: broadcastId },
+          data: { channelMessageId: null },
+        });
+        return 'deleted';
+      }
+      this.logger.warn(
+        `Broadcast ${broadcastId}: channel post delete refused: ${sanitizeTelegramDiagnostic(
+          await response.text(),
+          botToken,
+          chatId,
+          200,
+        )}`,
+      );
+      return 'failed';
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Broadcast ${broadcastId}: channel post delete threw: ${sanitizeTelegramDiagnostic(
+          err instanceof Error ? err.message : String(err),
+          botToken,
+          chatId,
+          200,
+        )}`,
+      );
+      return 'failed';
+    }
+  }
+
   public async editBatch(
     broadcastId: string,
     messageIds: string[],
@@ -872,17 +1308,33 @@ export class BroadcastDeliveryService {
       select: { payload: true },
     });
     const payload = broadcast?.payload as Record<string, unknown> | null;
-    const isMedia = payload?.mediaType === 'photo' || payload?.mediaType === 'video';
+    // The SAME test delivery used when it chose sendPhoto over sendMessage. A
+    // separate `mediaType`-only reading would aim `editMessageCaption` at a
+    // message that was sent as plain text, and Telegram refuses that.
+    const isMedia = isMediaPayload(payload);
+    const title = typeof payload?.title === 'string' ? payload.title : null;
 
     // Telegram can't render our custom-emoji images — substitute `:slug:` just
     // like the initial delivery: `<tg-emoji>` tags under parse_mode HTML,
     // otherwise the plain fallback glyph. The premium gate that decides whether
     // a tag may be built at all lives inside the substitution, not here.
-    const telegramText = this.customEmojiService
-      ? parseMode === 'HTML'
-        ? await this.customEmojiService.substituteTelegramHtml(newText)
-        : await this.customEmojiService.substituteFallbacks(newText)
-      : newText;
+    // ── AN EDIT MUST PRODUCE WHAT A RESEND WOULD PRODUCE ──────────────────
+    //
+    // Composed through the same function delivery uses, title included. Sending
+    // the body alone made the two disagree in two visible ways: the edit
+    // silently stripped the title from every message that had one, and a later
+    // "retry failed" — which goes through `deliverBatch` and DOES compose the
+    // title — sent the stragglers a longer caption than everyone else. On a
+    // media broadcast that second one is not cosmetic: a correction sized to
+    // exactly the caption limit became limit-plus-title on the retry, and
+    // Telegram refused every retried recipient, for ever, with the reason only
+    // in a column no screen renders.
+    //
+    // A text broadcast is always sent as HTML, so its edit renders custom emoji
+    // as `<tg-emoji>` tags too; a media caption follows whatever the operator
+    // chose. Same split as `deliverBatch`.
+    const rendersHtml = isMedia ? parseMode === 'HTML' : true;
+    const telegramText = await this.composeTelegram(title, newText, rendersHtml);
 
     const messages = await this.prismaService.broadcastMessage.findMany({
       where: { id: { in: messageIds }, broadcastId, status: 'SENT', telegramMessageId: { not: null } },
@@ -907,13 +1359,24 @@ export class BroadcastDeliveryService {
       const body: Record<string, unknown> = {
         chat_id: user.telegramId.toString(),
         message_id: Number(message.telegramMessageId),
+        // NO `reply_markup` — see `sendTelegramMessage`'s note on why the promo
+        // button cannot be built here.
+        // Telegram reads its absence as "remove the keyboard", so this edit
+        // does drop the promo button. That is stated on the compose screen
+        // rather than papered over: the alternative attempt — sending the relay
+        // DTO as an inline keyboard — is refused by Telegram with a 400 per
+        // recipient, so the whole correction lands nowhere.
       };
+      // THE WIRE VALUE, derived exactly as delivery derives it: a text
+      // broadcast always goes out as HTML, a media caption only when the
+      // operator asked for it. Reading the caller's value for both is what let
+      // a transport default leak into the stored payload.
       if (isMedia) {
         body.caption = telegramText;
         if (parseMode) body.parse_mode = parseMode;
       } else {
         body.text = telegramText;
-        if (parseMode) body.parse_mode = parseMode;
+        body.parse_mode = 'HTML';
       }
 
       try {
@@ -955,7 +1418,20 @@ export class BroadcastDeliveryService {
       const existing = (broadcast?.payload as Record<string, unknown>) ?? {};
       await this.prismaService.broadcast.update({
         where: { id: broadcastId },
-        data: { payload: { ...existing, text: newText, parseMode: parseMode ?? null } },
+        // KEEP the stored parse mode when the caller supplied none. Writing
+        // `parseMode ?? null` looked equivalent and was not: the controller
+        // hands the worker 'HTML' as a transport default while storing null, so
+        // this line promoted that default into the payload. A later "retry
+        // failed" then re-sent to the remaining recipients WITH parse_mode
+        // HTML, where everyone before them got plain text — and a bare < or &
+        // in the operator's copy made Telegram refuse them.
+        data: {
+          payload: {
+            ...existing,
+            text: newText,
+            ...(parseMode === null ? {} : { parseMode }),
+          },
+        },
       });
     }
 
@@ -975,7 +1451,22 @@ export class BroadcastDeliveryService {
     messageIds: string[],
   ): Promise<{ deleted: number; failed: number }> {
     const botToken = await this.getBotToken();
-    if (!botToken) return { deleted: 0, failed: messageIds.length };
+    if (!botToken) {
+      // NOT a silent return. A deployment with no BOT_TOKEN is supported — text
+      // broadcasts go out through the reiwa bot — but a recall cannot: every
+      // message stays in every chat and every row stays SENT, so the button
+      // stays lit and the panel's toast still said the messages were being
+      // removed. This early return sat in front of the report at the end of the
+      // method, so the one configuration where a recall can do nothing at all
+      // was the one that said nothing at all.
+      this.systemEventsService.error(
+        EVENT_TYPES.BROADCAST_STARTED,
+        'SYSTEM',
+        `Recall removed nothing: no bot token is configured, so these ${messageIds.length} messages cannot be deleted from Telegram`,
+        { broadcastId, deleted: 0, failed: messageIds.length },
+      );
+      return { deleted: 0, failed: messageIds.length };
+    }
 
     const messages = await this.prismaService.broadcastMessage.findMany({
       where: { id: { in: messageIds }, broadcastId, status: 'SENT', telegramMessageId: { not: null } },
@@ -1012,7 +1503,12 @@ export class BroadcastDeliveryService {
         if (response.ok) {
           await this.prismaService.broadcastMessage.update({
             where: { id: message.id },
-            data: { status: BroadcastMessageStatus.CANCELED, telegramMessageId: null },
+            // The id STAYS. It is the only thing that distinguishes a message
+            // that was delivered and then withdrawn from one cancelled before
+            // it was ever sent — and `checkAndFinalize` needs that distinction
+            // to keep reporting how many people the broadcast reached. Nothing
+            // re-sends off this row: `getSentMessageIds` filters on SENT.
+            data: { status: BroadcastMessageStatus.CANCELED },
           });
           deleted++;
         } else {
@@ -1042,12 +1538,49 @@ export class BroadcastDeliveryService {
       await sleep(TELEGRAM_RATE_LIMIT_MS);
     }
 
-    // Update broadcast counters
-    if (deleted > 0) {
-      await this.prismaService.broadcast.update({
-        where: { id: broadcastId },
-        data: { successCount: { decrement: deleted } },
-      });
+    // ── THE RECALL IS NOT AN UNDO OF THE SEND ─────────────────────────────
+    //
+    // `successCount` is how many recipients the broadcast reached, and it did
+    // reach them — recalling the message afterwards does not change that. The
+    // withdrawal is its own fact, and it is visible as `canceledCount`, counted
+    // from the message rows this loop has just moved to CANCELED.
+    //
+    // Decrementing here was also actively wrong, because the panel derived
+    // "still delivering" as `total - success - failed`: every recalled message
+    // silently added one to that, so a finished broadcast claimed for ever that
+    // it was mid-flight to people whose message had just been deleted. The
+    // panel counts that state directly now, and this counter is left alone.
+
+    // ── A RECALL THAT DELETED NOTHING IS NOT A QUIET EVENT ────────────────
+    //
+    // The panel's toast fires the moment the batches are QUEUED, so it can only
+    // ever report that the work started. What actually happened is decided
+    // here, and it used to end in a `logger.warn` into an in-memory ring
+    // buffer. Recall a broadcast past Telegram's 48-hour window and every
+    // delete is refused: all rows stay SENT, the row still reads 400/400, and
+    // the operator was told the messages were being removed. Nothing anywhere
+    // contradicted it.
+    if (failed > 0) {
+      const nothingRemoved = deleted === 0;
+      // "in this batch", because a recall is fanned out fifty at a time and
+      // this fires per job. Worded as a whole-broadcast claim it would report
+      // that nothing was removed while other batches were succeeding.
+      const message = nothingRemoved
+        ? `Recall removed nothing in this batch: Telegram refused all ${failed} deletions (a message older than 48 hours cannot be deleted)`
+        : `Recall removed ${deleted} of ${deleted + failed} messages in this batch; ${failed} could not be deleted`;
+      if (nothingRemoved) {
+        this.systemEventsService.error(EVENT_TYPES.BROADCAST_STARTED, 'SYSTEM', message, {
+          broadcastId,
+          deleted,
+          failed,
+        });
+      } else {
+        this.systemEventsService.warn(EVENT_TYPES.BROADCAST_STARTED, 'SYSTEM', message, {
+          broadcastId,
+          deleted,
+          failed,
+        });
+      }
     }
 
     return { deleted, failed };
@@ -1100,10 +1633,29 @@ export class BroadcastDeliveryService {
     // Don't overwrite CANCELED status
     if (broadcast?.status === BroadcastStatus.CANCELED) return;
 
-    const [sentCount, failedCount] = await Promise.all([
+    // ── "REACHED" INCLUDES THE ONES SINCE RECALLED ────────────────────────
+    //
+    // `successCount` means "this broadcast reached N people", and a recall does
+    // not change that — it happened. Recalling moves a row to CANCELED, so
+    // counting SENT alone re-derived the number DOWNWARD the next time this
+    // ran: recall 400, then press "retry failed" for the 20 stragglers, and
+    // this line rewrote 400 to ~20 with nothing on screen to explain it.
+    //
+    // A recalled row is told apart from one cancelled before it ever went out
+    // by its Telegram message id — only a delivered message has one. That is
+    // also why `deleteBatch` no longer clears it.
+    const [sentCount, recalledCount, failedCount] = await Promise.all([
       this.prismaService.broadcastMessage.count({ where: { broadcastId, status: BroadcastMessageStatus.SENT } }),
+      this.prismaService.broadcastMessage.count({
+        where: {
+          broadcastId,
+          status: BroadcastMessageStatus.CANCELED,
+          telegramMessageId: { not: null },
+        },
+      }),
       this.prismaService.broadcastMessage.count({ where: { broadcastId, status: BroadcastMessageStatus.FAILED } }),
     ]);
+    const reachedCount = sentCount + recalledCount;
 
     // ── THE STATUS FOLLOWS THE OUTCOME ──────────────────────────────────
     //
@@ -1113,18 +1665,20 @@ export class BroadcastDeliveryService {
     // all of them, and announced itself with an INFO card titled "Рассылка
     // отправлена". That is why nobody was told: there was no path that could
     // tell them.
-    const nothingArrived = sentCount === 0 && failedCount > 0;
+    const nothingArrived = reachedCount === 0 && failedCount > 0;
     await this.prismaService.broadcast.update({
       where: { id: broadcastId },
       data: {
         status: nothingArrived ? BroadcastStatus.FAILED : BroadcastStatus.COMPLETED,
-        successCount: sentCount,
+        successCount: reachedCount,
         failedCount,
         completedAt: new Date(),
       },
     });
 
-    this.logger.log(`Broadcast ${broadcastId} completed: ${sentCount} sent, ${failedCount} failed`);
+    this.logger.log(
+      `Broadcast ${broadcastId} completed: ${reachedCount} reached (${recalledCount} since recalled), ${failedCount} failed`,
+    );
 
     // And the announcement follows it. A partial delivery is a WARNING the
     // operator's Telegram actually surfaces, not an INFO card that reads as
@@ -1134,7 +1688,7 @@ export class BroadcastDeliveryService {
         EVENT_TYPES.SYSTEM_BROADCAST_SENT,
         'SYSTEM',
         `Broadcast delivered to NOBODY: ${failedCount} recipients failed`,
-        { broadcastId, sentCount, failedCount },
+        { broadcastId, sentCount: reachedCount, failedCount },
       );
     } else if (failedCount > 0) {
       this.systemEventsService.warn(
@@ -1291,6 +1845,28 @@ export class BroadcastDeliveryService {
       mediaType: string;
       mediaFileId: string | null;
       parseMode: string | undefined;
+      // ── NO `replyMarkup` PARAMETER, DELIBERATELY ────────────────────────
+      //
+      // The obvious missing feature here is the promo button: a promo-tagged
+      // PHOTO arrives with no way to activate the code, while the channel copy
+      // of the same broadcast does carry one — so the operator sees a button on
+      // their own screen and assumes everyone got it.
+      //
+      // It cannot be added from this side. `buildPromoButton` does not return a
+      // Telegram button; it returns a `NotifyButton` — `{ text, webAppPath }` —
+      // which is an instruction to the reiwa BOT, the only party that knows the
+      // Mini App url to join that path to. Passed to Telegram as an inline
+      // keyboard it is a button with a label and no action, and Telegram
+      // refuses the entire call with a 400 — once per recipient. A change that
+      // did exactly that turned "photo without a button" into "photo delivered
+      // to nobody, broadcast FAILED", and made every edit of a promo-tagged
+      // broadcast fail as well.
+      //
+      // Closing it for real means routing media through the relay
+      // (`reiwa.user.notify` already supports `sendPhoto`) so the bot renders
+      // the button, not synthesising one here.
+      /** Set on the one retry after a 429 pause, so it cannot recurse. */
+      isRetryAfterWait?: boolean;
     },
   ): Promise<{ ok: boolean; messageId?: number; error?: string }> {
     try {
@@ -1333,6 +1909,27 @@ export class BroadcastDeliveryService {
         return { ok: true, messageId: data.result?.message_id };
       }
       const errorBody = await response.text();
+      // ── 429 IS "TOO FAST", NOT "UNDELIVERABLE" ──────────────────────────
+      //
+      // Telegram throttles a bot that outruns its limit and says exactly how
+      // long to wait. Treating that as a delivery failure marked the recipient
+      // FAILED and moved on — so the faster the send, the more recipients were
+      // recorded as permanently undeliverable, when every one of them was
+      // reachable a second later. It also snowballs: the loop keeps hammering
+      // at the same rate and every subsequent recipient in the batch collects
+      // the same refusal.
+      //
+      // Waiting the interval Telegram asked for and trying once more turns the
+      // whole class into a pause. `retryAfter` is capped so a hostile or
+      // mistaken value cannot park a worker for an hour.
+      const retryAfter = retryAfterSecondsOf(errorBody);
+      if (retryAfter !== null && !input.isRetryAfterWait) {
+        this.logger.warn(
+          `Telegram asked for a ${retryAfter}s pause (429) — waiting, then retrying once`,
+        );
+        await sleep(retryAfter * 1000);
+        return this.sendTelegramMessage(botToken, { ...input, isRetryAfterWait: true });
+      }
       return {
         ok: false,
         error: sanitizeTelegramDiagnostic(errorBody, botToken, input.chatId),
@@ -1419,7 +2016,7 @@ export class BroadcastDeliveryService {
       // payload), so the optional button list is spread in rather than passed
       // as an explicit `undefined`.
       const queued = await this.relayQueue.enqueue('reiwa.channel.broadcast', {
-        eventId: `broadcast-channel:${broadcastId}`,
+        eventId: `${BROADCAST_CHANNEL_EVENT_PREFIX}${broadcastId}`,
         chatId,
         text: composed || ' ',
         parseMode: 'HTML',
@@ -1495,4 +2092,58 @@ function escapeRegExp(value: string): string {
 
 function escapeHtml(input: string): string {
   return input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * How long the two channel-post calls made inside an admin request may take.
+ *
+ * The per-recipient calls run in a worker and can afford to wait; these two do
+ * not — they are awaited by the panel's own "save" and "recall". Ten seconds is
+ * far beyond a healthy Telegram round trip and far short of a spinner an
+ * operator would sit through.
+ */
+const CHANNEL_EDIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Longest pause honoured from a Telegram 429 before giving up on the recipient.
+ *
+ * Telegram's own back-offs are seconds; a minute already means the bot is far
+ * over its limit. Uncapped, one malformed or hostile `retry_after` would park a
+ * delivery worker for as long as it said — and the batch behind it with it.
+ */
+const MAX_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * The `retry_after` a Telegram 429 carries, or `null` for any other refusal.
+ *
+ * Reads the documented `parameters.retry_after`, and falls back to the number
+ * in `description` ("Too Many Requests: retry after 17"), which is what older
+ * Bot API versions send on some endpoints.
+ */
+export function retryAfterSecondsOf(errorBody: string): number | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errorBody);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const body = parsed as { error_code?: unknown; parameters?: unknown; description?: unknown };
+  if (body.error_code !== 429) return null;
+
+  const parameters = body.parameters as { retry_after?: unknown } | undefined;
+  const declared = parameters?.retry_after;
+  if (typeof declared === 'number' && Number.isFinite(declared) && declared >= 0) {
+    return Math.min(Math.ceil(declared), MAX_RETRY_AFTER_SECONDS);
+  }
+
+  if (typeof body.description === 'string') {
+    const match = /retry after (\d+)/i.exec(body.description);
+    if (match !== null) {
+      return Math.min(Number(match[1]), MAX_RETRY_AFTER_SECONDS);
+    }
+  }
+  // A 429 with no interval at all: still a throttle, so still worth a pause —
+  // one second, which is what Telegram's smallest back-off is in practice.
+  return 1;
 }

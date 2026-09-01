@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, RotateCcw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users } from 'lucide-react'
+import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, RotateCcw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users, Undo2 } from 'lucide-react'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { toast } from 'sonner'
 
+import { useHasPermission } from '@/features/rbac'
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
@@ -193,11 +194,69 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
  * settled than staged. A negative "still delivering" would be worse than not
  * showing it.
  */
+/**
+ * How many delivered messages a recall could still take out of a chat.
+ *
+ * ── Why this is neither `successCount` nor `success - canceled` ────────────
+ *
+ * `successCount` is how many people the broadcast REACHED, and a recall
+ * deliberately leaves it alone — the send did happen. Gating the button on it
+ * kept the button lit after everything had been recalled, and pressing it hit
+ * "No sent messages found to delete": a red error for an action this screen had
+ * just offered.
+ *
+ * Subtracting the recalled ones is closer and still wrong, because a broadcast
+ * also reaches WEB-ONLY users through the cabinet feed. Those rows are SENT
+ * with no Telegram message id, so no `deleteMessage` can touch them — with 40
+ * web-only recipients out of 100, the dialog offered to pull the message from
+ * 100 chats when 60 existed, and the button stayed lit over the 40 for ever.
+ *
+ * The API counts them with the recall's own predicate now, so the number on
+ * screen and the work the endpoint finds cannot disagree. The subtraction
+ * survives only as a fallback for a panel talking to an API that predates the
+ * field.
+ */
+function stillStandingOf(row: {
+  readonly successCount: number
+  readonly canceledCount?: number
+  readonly recallableCount?: number
+}): number {
+  if (typeof row.recallableCount === 'number') return Math.max(0, row.recallableCount)
+  return Math.max(0, row.successCount - (row.canceledCount ?? 0))
+}
+
+/**
+ * Failures a retry could still fix.
+ *
+ * A recipient who blocked the bot is not one of them: they cannot receive this
+ * broadcast until they unblock it, and the relay deduplicates the retry by the
+ * same event id, so pressing the button never moved the number. Counting them
+ * together made "retry failed" look broken on every mature audience.
+ */
+function realFailuresOf(row: {
+  readonly failedCount: number
+  readonly blockedCount?: number
+}): number {
+  return Math.max(0, row.failedCount - (row.blockedCount ?? 0))
+}
+
 function pendingOf(row: {
   readonly totalCount: number
   readonly successCount: number
   readonly failedCount: number
+  readonly pendingCount?: number
 }): number {
+  // ── COUNTED, NOT DERIVED ────────────────────────────────────────────────
+  //
+  // The arithmetic below assumes every recipient is delivered, failed, or still
+  // going. Cancelling a send and recalling one both produce a fourth state, and
+  // each of those recipients added one to this subtraction — so a recalled
+  // broadcast reported "still delivering" to people whose message had just been
+  // withdrawn, permanently, with no work left anywhere to clear it.
+  //
+  // The API counts the PENDING rows now. The subtraction stays only as a
+  // fallback for a panel talking to an API that predates that field.
+  if (typeof row.pendingCount === 'number') return Math.max(0, row.pendingCount)
   return Math.max(0, row.totalCount - row.successCount - row.failedCount)
 }
 
@@ -233,6 +292,18 @@ interface BroadcastRow {
   readonly successCount: number
   readonly totalCount: number
   readonly failedCount: number
+  /** Counted, not derived — see `pendingOf`. Absent on an older API. */
+  readonly pendingCount?: number
+  /** Cancelled before dispatch, or recalled after it. */
+  readonly canceledCount?: number
+  /** Messages a recall could still remove. Absent on an older API. */
+  readonly recallableCount?: number
+  /** What the public channel copy is, if any. Absent on an older API. */
+  readonly channelPost?: 'none' | 'addressable' | 'unaddressable'
+  /** Recipients who have blocked the bot. Absent on an older API. */
+  readonly blockedCount?: number
+  /** Delivered so far, counted live. Absent on an older API. */
+  readonly deliveredCount?: number
   /** Due time of a scheduled send; `null` for an immediate one. */
   readonly scheduledAt: string | null
   readonly createdAt: string
@@ -247,6 +318,16 @@ export default function BroadcastPage() {
   // from `editId`, which edits a broadcast that has ALREADY gone out (a
   // Telegram message edit) — a different operation on a different object.
   const [editDraftId, setEditDraftId] = useState<string | null>(null)
+
+  // ── AFFORDANCES THE CALLER ACTUALLY HAS ─────────────────────────────────
+  //
+  // The default `operator` role holds broadcasts view/create/edit/run and NOT
+  // delete, and this screen gated nothing — so that role was shown Recall and
+  // Delete, and both answered 403. Recall is the worse of the two: it is the
+  // action bounded by Telegram's 48-hour window, so it is reached for exactly
+  // when a broadcast has gone out wrong and there is no time to find out that
+  // the button was never going to work.
+  const canDeleteBroadcasts = useHasPermission('broadcasts', 'delete')
 
   const { data, isLoading, refetch } = useQuery<ReadonlyArray<BroadcastRow>>({
     queryKey: adminQueryKeys.broadcast.all,
@@ -282,6 +363,40 @@ export default function BroadcastPage() {
     },
     onError: (err) =>
       toast.error(getErrorMessage(err, t('broadcastPage.toast.retryFailed'))),
+  })
+
+  // ── RECALL: take the messages back out of Telegram ────────────────────
+  //
+  // The endpoint existed from the start and nothing on this page called it, so
+  // a broadcast sent by mistake could only be deleted — which removes the
+  // RECORD and leaves every message sitting in every recipient's chat, now with
+  // no stored message ids, so it can never be recalled at all. The remedy was
+  // reachable only by hand-crafting a DELETE.
+  const recallMutation = useMutation({
+    mutationFn: (id: string) =>
+      api.delete<{ channel?: 'deleted' | 'no-post' | 'unaddressable' | 'failed' }>(
+        `/admin/broadcast/${id}/messages`,
+      ),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
+      // A recall that left the PUBLIC copy up is the one outcome the operator
+      // has to act on by hand, so it does not get to look like a success.
+      //
+      // `unaddressable` belongs here too, and it is the likelier of the two: it
+      // means the channel post went out but its message id was never recorded
+      // (an older bot answers a bodiless 204, and the relay's direct fallback
+      // never records one at all). Folded into "no post", it produced the exact
+      // outcome this feature exists to stop — recalled from four hundred
+      // private chats, still up in public, reported as success.
+      const channel = response?.data?.channel
+      if (channel === 'failed' || channel === 'unaddressable') {
+        toast.warning(t('broadcastPage.toast.recallChannelFailed'))
+        return
+      }
+      toast.success(t('broadcastPage.toast.recallStarted'))
+    },
+    onError: (err: unknown) =>
+      toast.error(getErrorMessage(err, t('broadcastPage.toast.recallFailed'))),
   })
 
   const deleteMutation = useMutation({
@@ -378,9 +493,31 @@ export default function BroadcastPage() {
                       <Badge variant={STATUS_VARIANT[b.status] ?? 'secondary'}>{String(t(`broadcastPage.statuses.${b.status}`, b.status))}</Badge>
                     </TableCell>
                     <TableCell className="tabular-nums text-sm">
-                      <span className="text-emerald-600">{b.successCount}</span>
+                      {/*
+                        THE LIVE COUNT, not the finaliser's. `successCount` is
+                        written once, at the end, so this cell showed a green 0
+                        for the entire run — a send half-way through 400 people
+                        read "0/400 (200 still delivering)", with 200 delivered
+                        and nowhere on screen saying so. This is the number an
+                        operator watches to decide whether a send is going well.
+                      */}
+                      <span className="text-emerald-600">{b.deliveredCount ?? b.successCount}</span>
                       <span className="text-muted-foreground">/{b.totalCount}</span>
-                      {b.failedCount > 0 && <span className="text-destructive ml-1">({t('broadcastPage.failedCount', { count: b.failedCount })})</span>}
+                      {/* Failures MINUS the blocked ones, which get their own
+                          number. Together they were "N ошибок" beside a retry
+                          button that could not move the count — on a mature
+                          audience most of that N is people who blocked the bot,
+                          which no retry can change. */}
+                      {realFailuresOf(b) > 0 && (
+                        <span className="text-destructive ml-1">
+                          ({t('broadcastPage.failedCount', { count: realFailuresOf(b) })})
+                        </span>
+                      )}
+                      {(b.blockedCount ?? 0) > 0 && (
+                        <span className="text-muted-foreground ml-1">
+                          ({t('broadcastPage.blockedCount', { count: b.blockedCount ?? 0 })})
+                        </span>
+                      )}
                       {/*
                         The third number. `SENT` now means a delivery the relay
                         proved, so between the two counters there is a real
@@ -393,6 +530,20 @@ export default function BroadcastPage() {
                       {pendingOf(b) > 0 && (
                         <span className="text-muted-foreground ml-1">
                           ({t('broadcastPage.pendingCount', { count: pendingOf(b) })})
+                        </span>
+                      )}
+                      {/* A recall is not a failed delivery and not a pending
+                          one; without its own number it had nowhere to show,
+                          and the withdrawal was invisible on the row it
+                          happened to. */}
+                      {(b.canceledCount ?? 0) > 0 && (
+                        <span className="text-muted-foreground ml-1">
+                          ({t(
+                            b.status === 'COMPLETED'
+                              ? 'broadcastPage.recalledCount'
+                              : 'broadcastPage.canceledCount',
+                            { count: b.canceledCount ?? 0 },
+                          )})
                         </span>
                       )}
                     </TableCell>
@@ -424,10 +575,10 @@ export default function BroadcastPage() {
                           </Button>
                         )}
                         {/* Only worth offering when there is something to retry. */}
-                        {['COMPLETED', 'FAILED'].includes(b.status) && b.failedCount > 0 && (
+                        {['COMPLETED', 'FAILED'].includes(b.status) && realFailuresOf(b) > 0 && (
                           <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
-                            aria-label={t('broadcastPage.retryFailed', { count: b.failedCount })}
-                            title={t('broadcastPage.retryFailed', { count: b.failedCount })}
+                            aria-label={t('broadcastPage.retryFailed', { count: realFailuresOf(b) })}
+                            title={t('broadcastPage.retryFailed', { count: realFailuresOf(b) })}
                             disabled={retryMutation.isPending}
                             onClick={() => retryMutation.mutate(b.id)}>
                             <RotateCcw className="h-3.5 w-3.5" />
@@ -440,7 +591,53 @@ export default function BroadcastPage() {
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
-                        {['DRAFT', 'SCHEDULED', 'COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
+                        {/* Recall stands BEFORE delete, because delete destroys
+                            the message ids recall needs and there is no way
+                            back from that. */}
+                        {/* Also offered when only the CHANNEL copy is left: a
+                            broadcast delivered to web-only users has no
+                            Telegram message ids at all, so every recipient
+                            count is zero while the post anyone can read is
+                            still up. `unaddressable` counts too — pressing it
+                            is how the operator learns the post exists and has
+                            to be removed by hand, and hiding the button made
+                            that warning unreachable. */}
+                        {canDeleteBroadcasts &&
+                          b.status === 'COMPLETED' &&
+                          (stillStandingOf(b) > 0 || (b.channelPost ?? 'none') !== 'none') && (
+                          <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                              <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
+                                aria-label={t('broadcastPage.recallMessages')}
+                                title={t('broadcastPage.recallMessages')}
+                                disabled={recallMutation.isPending}>
+                                <Undo2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>{t('broadcastPage.recallDialogTitle')}</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  {stillStandingOf(b) === 0
+                                    ? t('broadcastPage.recallChannelOnlyConfirm')
+                                    : t('broadcastPage.recallConfirm', { count: stillStandingOf(b) })}
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel disabled={recallMutation.isPending}>
+                                  {t('common.cancel')}
+                                </AlertDialogCancel>
+                                <AlertDialogAction
+                                  disabled={recallMutation.isPending}
+                                  onClick={() => recallMutation.mutate(b.id)}>
+                                  {t('broadcastPage.recallDialogAction')}
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
+                        )}
+                        {canDeleteBroadcasts &&
+                          ['DRAFT', 'SCHEDULED', 'COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
                               <Button
@@ -458,7 +655,16 @@ export default function BroadcastPage() {
                                   {t('broadcastPage.deleteDialogTitle')}
                                 </AlertDialogTitle>
                                 <AlertDialogDescription>
-                                  {t('broadcastPage.deleteConfirm')}
+                                  {/* On a SENT broadcast this is not "undo": the
+                                      messages stay in every chat and the ids
+                                      that could recall them are destroyed. The
+                                      dialog used to describe both cases with
+                                      the same sentence. */}
+                                  {b.status === 'COMPLETED' && stillStandingOf(b) > 0
+                                    ? t('broadcastPage.deleteConfirmSent', {
+                                        count: stillStandingOf(b),
+                                      })
+                                    : t('broadcastPage.deleteConfirm')}
                                 </AlertDialogDescription>
                               </AlertDialogHeader>
                               <AlertDialogFooter>
@@ -569,6 +775,7 @@ function CreateBroadcastForm({
     titleTooLong: t('broadcastPage.form.validation.titleTooLong'),
     textRequired: t('broadcastPage.form.validation.textRequired'),
     textTooLong: t('broadcastPage.form.validation.textTooLong'),
+    captionTooLong: t('broadcastPage.form.validation.captionTooLong'),
     promoCodeTooLong: t('broadcastPage.form.validation.promoCodeTooLong'),
     promoCodeInvalid: t('broadcastPage.form.validation.promoCodeInvalid'),
     mediaTypeInvalid: t('broadcastPage.form.validation.mediaTypeInvalid'),
@@ -918,14 +1125,20 @@ function CreateBroadcastForm({
   const testMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
       const draftId = await saveDraft(payload)
-      return api.post(`/admin/broadcast/${encodeURIComponent(draftId)}/test`, {})
+      return api.post<{ draftRemoved?: boolean }>(
+        `/admin/broadcast/${encodeURIComponent(draftId)}/test`,
+        {},
+      )
     },
-    onSuccess: () => {
-      // The endpoint destroys the preview shell when the caller also holds
-      // `broadcasts:delete`, so the id we are holding may no longer exist.
-      // Drop it: the next save creates a fresh draft instead of PATCHing a
-      // row that is gone.
-      draftIdRef.current = null
+    onSuccess: (response) => {
+      // The endpoint destroys the preview shell only when the caller ALSO holds
+      // `broadcasts:delete`, and it now says which happened. Forgetting the id
+      // unconditionally was wrong for everyone else: the row was still there,
+      // the next save created a second one, and a caller without delete could
+      // remove neither — one stray draft per press of "test send".
+      if (response?.data?.draftRemoved !== false) {
+        draftIdRef.current = null
+      }
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
       toast.success(t('broadcastPage.toast.testSent'))
     },
@@ -1368,6 +1581,20 @@ function CreateBroadcastForm({
           aria-invalid={!!formErrors.promoCode}
         />
         <p className="text-xs text-muted-foreground">{t('broadcastPage.form.promoCodeHint')}</p>
+        {/*
+          The hint above says the button is added to every message, and for a
+          PHOTO or VIDEO broadcast that is not true: media is delivered straight
+          through the Bot API, which cannot render this button — only the bot
+          can, and only on the relay path. The recipient gets an image whose
+          caption names an offer with no way to act on it, while the operator's
+          own channel copy DOES carry a button, so nothing on their screen
+          contradicts the promise.
+        */}
+        {promoCode.trim().length > 0 && mediaType !== 'none' && (
+          <p className="text-xs text-amber-600 dark:text-amber-500">
+            {t('broadcastPage.form.promoCodeMediaWarning')}
+          </p>
+        )}
         {promoCode.trim().length > 0 && (
           <Badge variant="secondary" className="font-normal">
             {t('broadcastPage.form.promoCodePreview', {
@@ -1500,6 +1727,8 @@ function computeDelayMinutes(target: Date | null): number | undefined {
 
 interface BroadcastDetail {
   readonly id: string
+  /** Needed only to warn that this edit removes the promo button. */
+  readonly promoCode: string | null
   readonly payload: {
     readonly text: string | null
     readonly parseMode: 'HTML' | 'MarkdownV2' | null
@@ -1542,13 +1771,22 @@ function EditBroadcastForm({ broadcastId, onClose }: { broadcastId: string; onCl
 
   const editMutation = useMutation({
     mutationFn: () =>
-      api.post(`/admin/broadcast/${encodeURIComponent(broadcastId)}/edit`, {
-        text,
-        parseMode: data?.payload.parseMode ?? null,
-      }),
-    onSuccess: () => {
+      api.post<{ channel?: 'edited' | 'no-post' | 'unaddressable' | 'failed' }>(
+        `/admin/broadcast/${encodeURIComponent(broadcastId)}/edit`,
+        { text, parseMode: data?.payload.parseMode ?? null },
+      ),
+    onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
-      toast.success(t('broadcastPage.edit.saved'))
+      // The channel copy is the public one. A correction that reached every
+      // private message and not that one leaves the ORIGINAL text up where
+      // anyone can read it, so it cannot report as a plain success — including
+      // when the reason is that its message id was never recorded.
+      const channel = response?.data?.channel
+      if (channel === 'failed' || channel === 'unaddressable') {
+        toast.warning(t('broadcastPage.edit.channelFailed'))
+      } else {
+        toast.success(t('broadcastPage.edit.saved'))
+      }
       onClose()
     },
     onError: (err) => toast.error(getErrorMessage(err, t('broadcastPage.edit.saveFailed'))),
@@ -1584,6 +1822,24 @@ function EditBroadcastForm({ broadcastId, onClose }: { broadcastId: string; onCl
           </EmojiFieldOverlay>
         )}
         <p className="text-xs text-muted-foreground">{t('broadcastPage.edit.hint')}</p>
+        {/*
+          A LOSS THE PANEL CANNOT PREVENT, SO IT SAYS SO.
+
+          Telegram reads an edit with no `reply_markup` as "remove the
+          keyboard", and the panel cannot supply one: the promo button is
+          resolved by the bot against a Mini App url that lives only in the
+          bot's config. Sending the panel's own version of that button instead
+          is what a previous attempt did — Telegram refused every call with a
+          400, so the correction reached nobody at all.
+
+          Between losing the button and losing the correction, the operator
+          should get to choose, which means knowing before they press save.
+        */}
+        {(data?.promoCode ?? null) !== null && (
+          <p className="text-xs text-amber-600 dark:text-amber-500">
+            {t('broadcastPage.edit.promoButtonLost', { code: data?.promoCode ?? '' })}
+          </p>
+        )}
         {text.trim().length > 0 && (
           <div className="space-y-1">
             <p className="text-[11px] font-medium text-muted-foreground">{t('broadcastPage.form.preview')}</p>

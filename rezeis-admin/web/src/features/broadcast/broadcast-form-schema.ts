@@ -42,7 +42,16 @@ export interface BroadcastFormValidationMessages {
   readonly mediaUrlInvalid: string
   readonly mediaFileIdInvalid: string
   readonly telegramChannelChatIdInvalid: string
+  readonly captionTooLong: string
 }
+
+/**
+ * Telegram's caption limit for a photo or video — a quarter of what a plain
+ * message allows. Mirrors `TELEGRAM_CAPTION_LIMIT` on the API, which refuses
+ * the same payload; this copy is only so the operator hears it while typing
+ * rather than after pressing send.
+ */
+export const TELEGRAM_CAPTION_LIMIT = 1024
 
 const PROMO_CODE_PATTERN = /^[A-Z0-9._-]+$/
 // Telegram chat ids: numeric (incl. negative supergroup/channel ids like
@@ -84,6 +93,20 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
           ctx.addIssue({ code: 'custom', path: ['text'], message: messages.textRequired })
         }
         return
+      }
+
+      // Attached to media the text is a CAPTION, and Telegram takes a quarter
+      // as much. Over the limit it refuses the send once per recipient, so the
+      // panel filled with hundreds of delivery failures that were really one
+      // caption that was too long.
+      const title = values.title.trim()
+      const captionLength = (title.length > 0 ? title.length + 2 : 0) + values.text.length
+      if (captionLength > TELEGRAM_CAPTION_LIMIT) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['text'],
+          message: messages.captionTooLong.replace('{{count}}', String(captionLength)),
+        })
       }
 
       const mediaValue = values.mediaValue.trim()

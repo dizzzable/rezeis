@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { wrapInBrandedEmailLayout } from '../utils/email-branded-layout.util';
+import { emailThemeFromBranding } from '../utils/email-theme.util';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import type { EmailBrandingInterface } from '../interfaces/email.interface';
 
@@ -84,50 +86,14 @@ export class EmailTemplateRendererService {
   }
 
   /**
-   * Wrap content in a branded HTML email layout.
+   * Wrap content in the branded HTML email layout.
+   *
+   * The layout itself lives in `wrapInBrandedEmailLayout` so the broadcast
+   * module can send the same shell — it did not go through this service at all,
+   * which is why one email out of the whole system arrived unbranded.
    */
   private wrapInLayout(content: string, branding: EmailBrandingInterface): string {
-    const { serviceName, logoUrl, primaryColor, supportEmail, websiteUrl } = branding;
-
-    return `<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${serviceName}</title>
-</head>
-<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;padding:32px 16px;">
-    <tr>
-      <td align="center">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-          <!-- Header -->
-          <tr>
-            <td style="background-color:${primaryColor};padding:24px 32px;text-align:center;">
-              ${logoUrl ? `<img src="${logoUrl}" alt="${serviceName}" style="max-height:40px;margin-bottom:8px;">` : ''}
-              <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">${serviceName}</h1>
-            </td>
-          </tr>
-          <!-- Content -->
-          <tr>
-            <td style="padding:32px;font-size:15px;line-height:1.6;color:#1f2937;">
-              ${content}
-            </td>
-          </tr>
-          <!-- Footer -->
-          <tr>
-            <td style="padding:16px 32px;background-color:#f9fafb;border-top:1px solid #e5e7eb;text-align:center;font-size:12px;color:#6b7280;">
-              <p style="margin:0 0 4px 0;">${serviceName}</p>
-              ${websiteUrl ? `<p style="margin:0 0 4px 0;"><a href="${websiteUrl}" style="color:${primaryColor};text-decoration:none;">${websiteUrl}</a></p>` : ''}
-              ${supportEmail ? `<p style="margin:0;"><a href="mailto:${supportEmail}" style="color:${primaryColor};text-decoration:none;">${supportEmail}</a></p>` : ''}
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
+    return wrapInBrandedEmailLayout(content, branding);
   }
 
   /**
@@ -169,6 +135,15 @@ export class EmailTemplateRendererService {
       primaryColor: branding.primary,
       supportEmail,
       websiteUrl,
+      // ── THE OPERATOR'S THEME, NOT A GENERIC LIGHT CARD ──────────────────
+      //
+      // Every email carried the brand's name, logo and accent and then framed
+      // them in a fixed light-grey shell, so a cabinet themed dark still sent
+      // mail that looked like it came from somewhere else. The variant the
+      // operator set as their DEFAULT mode is the one a reader should
+      // recognise; `themeVariants` is null on a custom/legacy theme, and then
+      // the root-level colours are the theme.
+      theme: emailThemeFromBranding(branding),
     };
   }
 }

@@ -43,6 +43,60 @@ describe('BroadcastService', () => {
           ];
         },
       },
+      // The list COUNTS the states the stored counters cannot describe. It used
+      // to derive "still delivering" as `total - success - failed`, which
+      // assumes every recipient is one of those three — cancelling and
+      // recalling both make a fourth, so a recalled broadcast claimed for ever
+      // that it was still delivering to people whose message had been withdrawn.
+      broadcastMessage: {
+        // TWO questions, and the fake answers each on its own terms. The second
+        // is not a status tally: a recall can only touch a message that exists
+        // in Telegram, and a broadcast also reaches web-only users through the
+        // cabinet feed — SENT rows with no message id. Deriving the recallable
+        // count from the others offered to recall messages that never existed.
+        groupBy: async (args: {
+          by: string[];
+          where: {
+            broadcastId: { in: string[] };
+            status?: unknown;
+            telegramMessageId?: unknown;
+            errorMessage?: unknown;
+          };
+        }) => {
+          assert.deepStrictEqual(args.where.broadcastId.in, ['broadcast-1']);
+          if (args.by.includes('status')) {
+            return [
+              { broadcastId: 'broadcast-1', status: 'PENDING', _count: { _all: 2 } },
+              { broadcastId: 'broadcast-1', status: 'CANCELED', _count: { _all: 3 } },
+              // SENT is counted live so a running send is not reported as zero
+              // delivered while it works through four hundred people.
+              { broadcastId: 'broadcast-1', status: 'SENT', _count: { _all: 7 } },
+            ];
+          }
+          // Recipients who blocked the bot: counted apart from `failedCount`
+          // because no retry can change them, and folded together they were the
+          // bulk of "N ошибок" beside a button that never moved the number. The
+          // reason string is the whole predicate — it must be the one the
+          // delivery path writes and the one `getFailedMessageIds` excludes.
+          if (args.where.status === 'FAILED') {
+            assert.equal(args.where.errorMessage, 'telegram_blocked_by_user');
+            return [{ broadcastId: 'broadcast-1', _count: { _all: 2 } }];
+          }
+          // THE OTHER HALF of the predicate, and the half that makes the two
+          // message counts mean anything: a broadcast also reaches web-only
+          // users through the cabinet feed, and those rows are SENT with NO
+          // Telegram message id. Without this filter the panel would offer to
+          // recall messages that do not exist — the defect this count replaced.
+          assert.deepStrictEqual(args.where.telegramMessageId, { not: null });
+          // Two groupBys share that shape and differ only by status: what a
+          // recall could still remove (SENT), and what one already did
+          // (CANCELED, which still counts as REACHED — the send happened).
+          if (args.where.status === 'CANCELED') {
+            return [{ broadcastId: 'broadcast-1', _count: { _all: 1 } }];
+          }
+          return [{ broadcastId: 'broadcast-1', _count: { _all: 4 } }];
+        },
+      },
     } as never);
 
     assert.deepStrictEqual(await service.listDrafts(), [
@@ -65,6 +119,21 @@ describe('BroadcastService', () => {
         totalCount: 5,
         successCount: 2,
         failedCount: 1,
+        // COUNTED, not `5 - 2 - 1`. The subtraction would say 2 here by
+        // coincidence; it says the wrong thing the moment anything is
+        // cancelled or recalled.
+        pendingCount: 2,
+        canceledCount: 3,
+        // COUNTED with the recall's own predicate, not `success - canceled`.
+        recallableCount: 4,
+        blockedCount: 2,
+        // Counted live, so mid-flight the panel shows real progress instead of
+        // the finaliser's zero.
+        // 7 SENT plus the 1 since recalled: "reached" counted the same way
+        // `checkAndFinalize` counts it, so the row cannot say 0 delivered while
+        // its own stored `successCount` says 400.
+        deliveredCount: 8,
+        channelPost: 'none',
         createdBy: 'admin-1',
         scheduledAt: null,
         startedAt: '2026-04-24T12:05:00.000Z',
@@ -357,6 +426,12 @@ function broadcastRecord(overrides: Record<string, unknown> = {}): Record<string
     successCount: 0,
     failedCount: 0,
     createdBy: 'admin-1',
+    // The address of the one public copy on the operator channel. Present in
+    // the fixture because their ABSENCE is what the mapper answers about — an
+    // `undefined` that read as "there is a post" would put a recall button on
+    // every broadcast.
+    channelChatId: null,
+    channelMessageId: null,
     startedAt: null,
     completedAt: null,
     createdAt: new Date('2026-04-24T12:00:00.000Z'),

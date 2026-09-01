@@ -19,6 +19,8 @@ import {
 } from './reiwa-relay.constants';
 import { isRelayDelivered, shouldAlertOperator } from './reiwa-relay.policy';
 import { BotNotifierClient, type NotifyDeliveryResult } from './services/bot-notifier.client';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { BROADCAST_CHANNEL_EVENT_PREFIX } from '../broadcast/broadcast.constants';
 
 /**
  * Five at a time. The relay is one HTTP hop into a single cabinet process
@@ -65,8 +67,54 @@ export class ReiwaRelayProcessor extends WorkerHost {
   public constructor(
     private readonly botNotifier: BotNotifierClient,
     private readonly systemEventsService: SystemEventsService,
+    private readonly prismaService: PrismaService,
   ) {
     super();
+  }
+
+  /**
+   * Keep the address of a broadcast's operator-channel post.
+   *
+   * ── Why a generic processor knows this one event ──────────────────────────
+   *
+   * The message id exists for exactly one instant: in the bot's reply to this
+   * delivery. Nothing downstream can ask for it afterwards — Telegram has no
+   * "what did I post" call — so if it is not written here it is gone, and with
+   * it every way to edit or recall that post. Editing a sent broadcast then
+   * rewrote every private message and left the public copy showing the original
+   * text.
+   *
+   * Recognised by the event id the producer chose, not by inspecting content,
+   * and it fails quietly: a broadcast whose id could not be stored simply keeps
+   * a channel post that cannot be corrected — the same as before — and must
+   * never turn a delivered post into a failed job.
+   */
+  private async rememberChannelPost(
+    data: ReiwaRelayJobData,
+    outcome: NotifyDeliveryResult,
+  ): Promise<void> {
+    if (data.event !== 'reiwa.channel.broadcast') return;
+    const eventId = typeof data.metadata?.eventId === 'string' ? data.metadata.eventId : '';
+    if (!eventId.startsWith(BROADCAST_CHANNEL_EVENT_PREFIX)) return;
+    const broadcastId = eventId.slice(BROADCAST_CHANNEL_EVENT_PREFIX.length);
+    // An `unconfirmed` delivery (an older bot answering 204) carries no id.
+    // There is nothing to write, and writing the chat alone would claim an
+    // address that cannot be used.
+    if (broadcastId.length === 0 || outcome.messageId === null) return;
+    const chatId = typeof data.metadata?.chatId === 'string' ? data.metadata.chatId : null;
+    if (chatId === null) return;
+    try {
+      await this.prismaService.broadcast.updateMany({
+        where: { id: broadcastId },
+        data: { channelChatId: chatId, channelMessageId: BigInt(outcome.messageId) },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Could not record the channel post id for broadcast ${broadcastId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   public async process(job: Job<ReiwaRelayJobData>): Promise<{
@@ -78,6 +126,7 @@ export class ReiwaRelayProcessor extends WorkerHost {
     const outcome = await this.botNotifier.deliverRelayEvent(event, metadata);
 
     if (isRelayDelivered(event, outcome)) {
+      await this.rememberChannelPost(job.data, outcome);
       return { event, status: outcome.status, delivered: true };
     }
 

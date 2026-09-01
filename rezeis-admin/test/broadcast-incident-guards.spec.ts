@@ -81,6 +81,9 @@ function service(prisma: unknown): BroadcastDeliveryService {
     { getSettings: async () => ({}) } as never,
     { isEnabled: false } as never,
     { isEnabled: false } as never,
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
   );
 }
 

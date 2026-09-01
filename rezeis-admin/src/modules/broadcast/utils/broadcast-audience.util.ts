@@ -123,7 +123,11 @@ function buildFromFilter(filter: BroadcastAudienceFilter, now: Date): Prisma.Use
   }
   if (typeof filter.inactiveDays === 'number' && filter.inactiveDays > 0) {
     const cutoff = new Date(now.getTime() - filter.inactiveDays * 86_400_000);
-    and.push({ lastSeenAt: { lt: cutoff } });
+    // `lastSeenAt` is nullable, and SQL `<` never matches NULL — so "inactive
+    // for 60+ days" silently skipped everyone who signed up and never came
+    // back. That is the MOST lapsed segment, and a win-back campaign was
+    // missing exactly the people it was for, with a preview count that agreed.
+    and.push({ OR: [{ lastSeenAt: { lt: cutoff } }, { lastSeenAt: null }] });
   }
   if (filter.platforms && filter.platforms.length > 0) {
     and.push({ OR: filter.platforms.map(platformWhere) });
@@ -176,7 +180,15 @@ function contactWhere(contact: AudienceContact): Prisma.UserWhereInput {
     case 'hasTelegram':
       return { telegramId: { not: null } };
     case 'hasEmail':
-      return { email: { not: null } };
+      // The address may live on either row. Delivery resolves
+      // `User.email ?? WebAccount.email`, and every OAuth sign-up deliberately
+      // leaves `User.email` unset while AltShop imports write to the web
+      // account only — so this chip, meant to NARROW a send to mailable users,
+      // was dropping most of them from the broadcast entirely: not just from
+      // the email leg but from Telegram and the cabinet feed too.
+      return {
+        OR: [{ email: { not: null } }, { webAccount: { email: { not: null } } }],
+      };
     case 'hasWebPush':
       return { webPushSubscriptions: { some: {} } };
   }

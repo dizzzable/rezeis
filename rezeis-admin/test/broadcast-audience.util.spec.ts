@@ -96,9 +96,26 @@ describe('buildAudienceWhere — structured filter supersedes the enum', () => {
             some: { OR: [{ planSnapshot: { path: ['id'], equals: 'plan-1' } }] },
           },
         },
-        { lastSeenAt: { lt: new Date('2026-06-09T00:00:00.000Z') } },
+        // "Inactive for 30 days" has to include the users who have NEVER been
+        // seen: `lastSeenAt < cutoff` is false for NULL in SQL, so the plainest
+        // reading of "inactive" excluded exactly the most inactive people on
+        // the platform — a re-engagement broadcast reached everyone except the
+        // ones who never came back at all.
+        {
+          OR: [
+            { lastSeenAt: { lt: new Date('2026-06-09T00:00:00.000Z') } },
+            { lastSeenAt: null },
+          ],
+        },
         { OR: [{ lastSurface: { in: ['pwa', 'browser'] } }] },
-        { OR: [{ email: { not: null } }] },
+        // An address on the linked web account counts as "has email" too. Only
+        // `user.email` was checked, so an email-targeted broadcast skipped
+        // every user whose address lives on their cabinet account.
+        {
+          OR: [
+            { OR: [{ email: { not: null } }, { webAccount: { email: { not: null } } }] },
+          ],
+        },
       ],
     });
   });

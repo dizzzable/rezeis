@@ -45,10 +45,25 @@ COMMENT ON COLUMN "broadcasts"."scheduled_at" IS
 COMMENT ON COLUMN "broadcasts"."queue_job_id" IS
   'BullMQ job id of the pending start job, so cancel and reschedule address it directly instead of scanning the queue.';
 
--- The reconciler looks for schedules whose time has passed. Partial, because
--- the overwhelming majority of rows have no schedule at all.
+-- The reconciler looks for schedules whose time has passed.
+--
+-- A PARTIAL index (`WHERE scheduled_at IS NOT NULL`) is the better shape for
+-- the query — almost no row has a schedule — but Prisma cannot express one, so
+-- `schema.prisma` declares a plain `@@index([scheduledAt])` under this same
+-- name and the two would not match. That is drift: the next `migrate dev` on a
+-- developer's machine sees an index it did not ask for and writes a migration
+-- to replace it, which is how an unrelated change starts carrying DDL nobody
+-- reviewed. The table holds hundreds of rows, so the partial form bought
+-- nothing measurable; matching the schema exactly is worth more.
+--
+-- This file was still unreleased when it was corrected — the commit that added
+-- it has never left local `main`, so no deployed database has applied it and no
+-- checksum anywhere refers to the earlier text. A machine that DID apply the
+-- partial version (a developer's own) will not pick the correction up, because
+-- `migrate deploy` skips a migration that already has a `_prisma_migrations`
+-- row; that database needs a reset, not a re-run. Nothing here can reach it,
+-- so nothing here pretends to.
 CREATE INDEX IF NOT EXISTS "broadcasts_scheduled_at_idx"
-  ON "broadcasts" ("scheduled_at")
-  WHERE "scheduled_at" IS NOT NULL;
+  ON "broadcasts" ("scheduled_at");
 
 RESET lock_timeout;

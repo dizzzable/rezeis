@@ -23,6 +23,36 @@ export interface EmailBrandingInterface {
   readonly primaryColor: string;
   readonly supportEmail: string | null;
   readonly websiteUrl: string | null;
+  /**
+   * The operator's own surface colours, so an email looks like the cabinet it
+   * came from rather than a generic light card with one accent borrowed from it.
+   *
+   * Optional because an older stored settings blob may not carry a theme; the
+   * layout falls back to the light palette it always used, which is what those
+   * deployments already see.
+   */
+  readonly theme?: EmailThemeColorsInterface;
+}
+
+/**
+ * The four colours an email actually needs out of a cabinet theme.
+ *
+ * Deliberately not the whole `BrandingThemeVariant`: an inbox cannot do card
+ * effects, background shaders, corner-radius scales or webfonts, and pretending
+ * otherwise would mean a template that claims to mirror the cabinet and
+ * silently drops most of it.
+ */
+export interface EmailThemeColorsInterface {
+  /** The page ground behind the card. */
+  readonly background: string;
+  /** The card itself. */
+  readonly surface: string;
+  /** Body text, chosen for contrast against `surface`. */
+  readonly text: string;
+  /** Secondary text (the footer), chosen for contrast against `surface`. */
+  readonly mutedText: string;
+  /** Text on the accent header, chosen for contrast against `primaryColor`. */
+  readonly onPrimary: string;
 }
 
 /**

@@ -11,6 +11,7 @@ const messages = {
   titleTooLong: 'title too long',
   textRequired: 'text required',
   textTooLong: 'text too long',
+  captionTooLong: 'caption too long ({{count}})',
   promoCodeTooLong: 'promo too long',
   promoCodeInvalid: 'promo invalid',
   mediaTypeInvalid: 'media type invalid',

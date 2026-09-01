@@ -211,6 +211,11 @@ describe('the panel stamps a dedup key on both dev relays', () => {
         },
       } as never,
       { warn: () => undefined } as never,
+          // The channel-post recorder's Prisma. These events are never
+      // `reiwa.channel.broadcast`, so it returns before touching it — but the
+      // dependency is real and `tsc -p tsconfig.test.json` (which CI runs, and
+      // `npm test` does not) is what noticed.
+      { broadcast: { updateMany: async () => ({ count: 0 }) } } as never,
     );
 
     // BullMQ re-runs the processor over the SAME `job.data` on every attempt.

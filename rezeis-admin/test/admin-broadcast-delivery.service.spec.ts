@@ -157,6 +157,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), ['message-1', 'message-2']);
@@ -219,6 +222,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: true, broadcastCalls }),
       relayQueue({ enqueued }),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await service.stageRecipients('broadcast-1');
@@ -274,6 +280,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: true }),
       relayQueue({ accepted: false }),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await service.stageRecipients('broadcast-1');
@@ -338,6 +347,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: false, broadcastCalls }),
       relayQueue({ enqueued, isEnabled: false }),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await service.stageRecipients('broadcast-1');
@@ -389,6 +401,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: true, broadcastCalls }),
       relayQueue({ enqueued }),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), []);
@@ -435,6 +450,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null, undefined, { isEnabled: false }),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     assert.deepStrictEqual(await service.stageRecipients('broadcast-1'), []);
@@ -498,6 +516,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(777, notifyCalls),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await withFetch(async (input, init) => {
@@ -575,6 +596,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(888),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await withFetch(async (input, init) => {
@@ -639,6 +663,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
       undefined,
       {
         send: async (input: unknown) => {
@@ -700,6 +727,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
       undefined,
       {
         send: async (input: unknown) => {
@@ -751,6 +781,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await withFetch(async () => {
@@ -811,6 +844,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(null),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     // Media Telegram send fails.
@@ -894,6 +930,9 @@ describe('BroadcastDeliveryService', () => {
       { getDecryptedBotToken: async () => null } as never,
       botNotifier(999, notifyCalls),
       relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
     );
 
     await withFetch(
@@ -1029,6 +1068,9 @@ function testSendService(input: {
       devRelayStatus: input.notifier?.devRelayStatus,
     }),
     relayQueue(),
+      // Promo gate dependency (position 8). Answers "usable" so these tests
+      // exercise what they are about; the gate itself is covered separately.
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
   );
 }
 

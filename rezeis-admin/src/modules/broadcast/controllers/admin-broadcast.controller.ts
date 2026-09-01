@@ -32,7 +32,10 @@ import {
 } from '../interfaces/broadcast.interface';
 import { BroadcastService } from '../services/broadcast.service';
 import { BroadcastDeliveryService } from '../services/broadcast-delivery.service';
-import { BroadcastQueueService } from '../services/broadcast-queue.service';
+import {
+  BroadcastQueueService,
+  PartialEnqueueError,
+} from '../services/broadcast-queue.service';
 import {
   BroadcastMediaUploadService,
   UploadedMediaInterface,
@@ -154,12 +157,36 @@ export class AdminBroadcastController {
     // pending send used to render as an ordinary draft with no actions on it.
     const recorded = await this.broadcastService.recordSchedule(broadcastId, scheduledFor, jobId);
     if (!recorded) {
-      // The broadcast started (or was cancelled) between the status read above
-      // and this write. Do not report a schedule that does not exist — and
-      // take back the job we just queued, or it would stage the whole
-      // audience a second time when it fires.
-      await this.broadcastQueueService.dropPendingStart(broadcastId);
-      throw new BadRequestException('Broadcast is no longer draft or scheduled');
+      // ── LOSING THIS WRITE IS NOT AUTOMATICALLY AN ERROR ──────────────────
+      //
+      // The precondition failed, which means the status moved between the read
+      // above and this write. There are two ways that happens and they deserve
+      // opposite answers:
+      //
+      //  - The job we just queued was picked up and WON THE CLAIM. For an
+      //    immediate send the in-process worker can do that in the few
+      //    milliseconds before this line runs. The send is proceeding exactly
+      //    as asked, and answering 400 told the operator their perfectly
+      //    successful send had failed — after which the natural move is to
+      //    press send again.
+      //  - It was cancelled or had already finished. Then there is nothing to
+      //    schedule, and the queued job has to be taken back or it would stage
+      //    the whole audience a second time when it fires.
+      const current = await this.broadcastService.getBroadcast(broadcastId);
+      // Only an IMMEDIATE send may read this as success. A RESCHEDULE that lost
+      // the claim has really failed: the broadcast is already going out at the
+      // old time and the new one cannot be honoured, so answering 200 would
+      // discard the operator's correction while telling them it worked.
+      if (current.status !== 'PROCESSING' || scheduledFor !== null) {
+        await this.broadcastQueueService.dropPendingStart(broadcastId);
+        throw new BadRequestException(
+          current.status === 'PROCESSING'
+            ? 'This broadcast has already started sending — it can no longer be rescheduled'
+            : 'Broadcast is no longer draft or scheduled',
+        );
+      }
+      // Under way already, which is exactly what was asked for.
+      return { jobId, message: 'Broadcast delivery enqueued' };
     }
 
     const result: { jobId: string; message: string; scheduledFor?: string } = {
@@ -180,7 +207,7 @@ export class AdminBroadcastController {
   public async sendTestBroadcast(
     @Param('broadcastId') broadcastId: string,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
-  ): Promise<{ ok: true; message: string }> {
+  ): Promise<{ ok: true; draftRemoved: boolean; message: string }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
     // Same widening as cancel and updateDraft: a pending send is still a send
     // that has not happened, and previewing it is exactly what an operator does
@@ -221,14 +248,20 @@ export class AdminBroadcastController {
     // A run-only caller therefore leaves the shell behind. That is a stray row
     // in a list, undone by anyone with delete — the failure it replaces was
     // silent, permanent loss of somebody else's work.
+    let draftRemoved = false;
     if (await this.canDeleteBroadcasts(currentAdmin)) {
       try {
         await this.broadcastService.deleteBroadcast(broadcastId);
+        draftRemoved = true;
       } catch {
         // Non-fatal: the preview already reached the developer.
       }
     }
-    return { ok: true, message: 'Test preview sent to developer' };
+    // SAID OUT LOUD, because the panel has to know. It forgot the draft id
+    // unconditionally after a test send, so a run-only caller — who leaves the
+    // shell behind by design — got a second row on the next save, and could
+    // delete neither of them.
+    return { ok: true, draftRemoved, message: 'Test preview sent to developer' };
   }
 
   // ── CANCEL ──────────────────────────────────────────────────────────────
@@ -271,17 +304,30 @@ export class AdminBroadcastController {
     @Param('broadcastId') broadcastId: string,
     @Body() dto: EditBroadcastDto,
     @CurrentAdmin() _currentAdmin: CurrentAdminInterface,
-  ): Promise<{ batches: number; totalMessages: number; message: string }> {
+  ): Promise<{
+    batches: number;
+    totalMessages: number;
+    /**
+     * What happened to the ONE public copy on the operator channel. Narrowed to
+     * what this handler can actually answer, so the API description does not
+     * advertise an outcome it never emits.
+     */
+    channel: 'edited' | 'no-post' | 'unaddressable' | 'failed';
+    message: string;
+  }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
     if (broadcast.status !== 'COMPLETED') {
       throw new BadRequestException('Only completed broadcasts can be edited');
     }
     // Always update the stored payload + cabinet-feed events so web-only and
     // Telegram users see the corrected text in their in-app feed.
+    // `dto.parseMode` STRAIGHT THROUGH: omitted stays `undefined`, which leaves
+    // the stored value alone. `?? null` collapsed "the caller said nothing"
+    // into "strip the formatting".
     await this.broadcastService.updateBroadcastContent({
       broadcastId,
       text: dto.text,
-      parseMode: dto.parseMode ?? null,
+      parseMode: dto.parseMode,
     });
     // Telegram message edits now apply to BOTH direct media sends and text
     // broadcasts (the reiwa-bot fanout returns the message id, which we persist
@@ -293,11 +339,49 @@ export class AdminBroadcastController {
       batches = await this.broadcastQueueService.enqueueEdit({
         broadcastId,
         newText: dto.text,
-        parseMode: dto.parseMode ?? 'HTML',
+        // THE EFFECTIVE STORED VALUE, not a transport default. Passing
+        // `?? 'HTML'` here is what made the worker write HTML back into the
+        // payload: a later "retry failed" then read that and re-sent the tail
+        // of the audience with parse_mode HTML, where the head had got none —
+        // so a bare `<` or `&` in the operator's text made Telegram refuse
+        // exactly the recipients the retry existed to reach. The worker picks
+        // the wire value itself, the same way delivery does.
+        // `!== undefined`, NOT `??`. An explicit `null` is the operator asking
+        // to strip the formatting, and `??` treated it the same as an omitted
+        // key — so the strip landed in the payload and the worker then wrote
+        // the resurrected value straight back over it, while the wire still
+        // carried the old parse mode.
+        parseMode:
+          dto.parseMode !== undefined ? dto.parseMode : (broadcast.payload.parseMode ?? null),
         messageIds: sentMessages,
       });
     }
-    return { batches, totalMessages: sentMessages.length, message: 'Broadcast updated' };
+    // THE PUBLIC COPY, once. The channel post is not a recipient and is not in
+    // `sentMessages`, so it used to be the one message a correction never
+    // reached — leaving the original text up in the only place anyone else can
+    // read it. Reported rather than thrown: the recipients' edit is already
+    // under way and is the larger half of the correction.
+    // ALWAYS 'HTML' for the channel: `postToChannelIfConfigured` creates that
+    // post with HTML and nothing else, so re-parsing the edit as anything the
+    // operator chose for the per-recipient copies would have Telegram refuse
+    // it — and the public copy would keep the old text with only a warning to
+    // show for it.
+    const channel = await this.broadcastDeliveryService.syncChannelPost(
+      broadcastId,
+      dto.text,
+      'HTML',
+    );
+    return {
+      batches,
+      totalMessages: sentMessages.length,
+      channel,
+      // `unaddressable` counts as a failure to report, not a success: the post
+      // exists, it still shows the old text, and nothing here can reach it.
+      message:
+        channel === 'failed' || channel === 'unaddressable'
+          ? 'Broadcast updated, but the channel post could not be edited — check it by hand'
+          : 'Broadcast updated',
+    };
   }
 
   // ── DELETE (whole broadcast) ────────────────────────────────────────────
@@ -321,20 +405,55 @@ export class AdminBroadcastController {
   public async deleteBroadcastMessages(
     @Param('broadcastId') broadcastId: string,
     @CurrentAdmin() _currentAdmin: CurrentAdminInterface,
-  ): Promise<{ batches: number; totalMessages: number; message: string }> {
+  ): Promise<{
+    batches: number;
+    totalMessages: number;
+    /** See the edit handler: narrowed to what a recall can actually answer. */
+    channel: 'deleted' | 'no-post' | 'unaddressable' | 'failed';
+    message: string;
+  }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
     if (broadcast.status !== 'COMPLETED') {
       throw new BadRequestException('Only completed broadcasts can have messages deleted');
     }
     const sentMessages = await this.broadcastQueueService.getSentMessageIds(broadcastId);
-    if (sentMessages.length === 0) {
+    // ── THE PUBLIC COPY IS A REASON TO PROCEED ON ITS OWN ─────────────────
+    //
+    // Refusing here whenever no recipient message is left took the channel post
+    // down with it: a broadcast delivered only to web-only users has no
+    // Telegram message ids at all, and one already recalled has none either —
+    // so the copy anyone can still read had no route left in the panel. The
+    // recall now refuses only when there is nothing ANYWHERE to remove.
+    const channelPost = await this.broadcastDeliveryService.channelPostState(broadcastId);
+    if (sentMessages.length === 0 && channelPost === 'no-post') {
       throw new BadRequestException('No sent messages found to delete');
     }
-    const batches = await this.broadcastQueueService.enqueueDelete({
-      broadcastId,
-      messageIds: sentMessages,
-    });
-    return { batches, totalMessages: sentMessages.length, message: 'Delete enqueued' };
+    const batches =
+      sentMessages.length === 0
+        ? 0
+        : await this.broadcastQueueService.enqueueDelete({
+            broadcastId,
+            messageIds: sentMessages,
+          });
+    // The channel copy goes too. Recalling from four hundred private chats and
+    // leaving the post up on the channel is the version of this that is hardest
+    // to explain — and the channel is usually the reason a recall is wanted.
+    const channel = await this.broadcastDeliveryService.deleteChannelPost(broadcastId);
+    return {
+      batches,
+      totalMessages: sentMessages.length,
+      channel,
+      // `batches === 0` is a real outcome now: a broadcast whose only remaining
+      // copy is the channel one has no recipient messages to enqueue.
+      message:
+        channel === 'failed' || channel === 'unaddressable'
+          ? batches === 0
+            ? 'Nothing was recalled: the channel post could not be deleted — remove it by hand'
+            : 'Recall enqueued, but the channel post could not be deleted — remove it by hand'
+          : batches === 0
+            ? 'Channel post deleted'
+            : 'Delete enqueued',
+    };
   }
 
   // ── RETRY FAILED ────────────────────────────────────────────────────────
@@ -354,13 +473,41 @@ export class AdminBroadcastController {
     if (failedMessages.length === 0) {
       throw new BadRequestException('No failed messages to retry');
     }
-    const batches = await this.broadcastQueueService.enqueueRetry({
-      broadcastId,
-      messageIds: failedMessages,
-    });
+    // Claim FIRST — see `beginRetry`. Writing the status afterwards let a fast
+    // retry finish and finalize before the write landed, which then stamped
+    // PROCESSING over a completed send and stranded it there permanently.
+    const previous = await this.broadcastService.beginRetry(broadcastId);
+    if (previous === null) {
+      throw new BadRequestException('This broadcast is already running — wait for it to finish');
+    }
 
-    // Set status back to PROCESSING
-    await this.broadcastService.updateStatus(broadcastId, 'PROCESSING');
+    let batches: number;
+    try {
+      // ALL of them to PENDING first — see `markForRetry`. Left to the batches,
+      // a multi-batch retry could finalize the broadcast as COMPLETED while
+      // most of it had not started, because the finaliser's guard counts
+      // PENDING rows and the not-yet-reset ones were still FAILED.
+      await this.broadcastService.markForRetry(broadcastId, failedMessages);
+      batches = await this.broadcastQueueService.enqueueRetry({
+        broadcastId,
+        messageIds: failedMessages,
+      });
+    } catch (err: unknown) {
+      // Roll back ONLY if the fan-out placed nothing at all. It is a loop of
+      // queue writes, so a failure halfway leaves earlier batches queued and
+      // running — restoring the status then tells the panel the broadcast has
+      // finished while it is actively re-delivering. When some batches did land
+      // the broadcast stays PROCESSING and its own finaliser settles it, which
+      // is the truthful state.
+      const enqueued = err instanceof PartialEnqueueError ? err.batchesEnqueued : 0;
+      if (enqueued === 0) {
+        // The message ids too: `markForRetry` has already put them back to
+        // PENDING, and a PENDING row under a settled broadcast is reachable by
+        // nothing at all.
+        await this.broadcastService.abortRetry(broadcastId, previous, failedMessages);
+      }
+      throw err;
+    }
 
     return { batches, totalMessages: failedMessages.length, message: 'Retry enqueued' };
   }

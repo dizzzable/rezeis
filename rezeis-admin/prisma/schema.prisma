@@ -2457,38 +2457,46 @@ model PartnerWithdrawal {
 // =============================================================================
 
 model Broadcast {
-  id             String            @id @default(cuid()) @map("id")
-  status         BroadcastStatus   @default(DRAFT) @map("status")
-  audience       BroadcastAudience @default(ALL) @map("audience")
+  id               String            @id @default(cuid()) @map("id")
+  status           BroadcastStatus   @default(DRAFT) @map("status")
+  audience         BroadcastAudience @default(ALL) @map("audience")
   /// Optional plan id used by audience filters that need a plan reference.
-  audiencePlanId String?           @map("audience_plan_id")
+  audiencePlanId   String?           @map("audience_plan_id")
   /// Optional structured, multi-select audience filter. When present it
   /// SUPERSEDES the `audience` enum preset. Shape: BroadcastAudienceFilter
   /// ({ subscription[], planIds[], inactiveDays, platforms[], contact[] }).
   /// Additive — legacy drafts (null) keep using the enum preset.
-  audienceFilter Json?             @map("audience_filter")
+  audienceFilter   Json?             @map("audience_filter")
   /// Optional promo-code tag (uppercased). When set, the dispatcher appends a
   /// Mini App button deep-linking the cabinet `/promo?code=<code>` page to
   /// every delivered message. Validated (exists + usable) at compose AND
   /// dispatch time; never a foreign key so a deleted promo simply stops
   /// resolving without orphaning historical broadcasts.
-  promoCode      String?           @map("promo_code")
+  promoCode        String?           @map("promo_code")
   /// JSON: { text, mediaType, mediaFileId, parseMode, ... }
-  payload        Json              @default("{}") @map("payload")
-  totalCount     Int               @default(0) @map("total_count")
-  successCount   Int               @default(0) @map("success_count")
-  failedCount    Int               @default(0) @map("failed_count")
+  payload          Json              @default("{}") @map("payload")
+  totalCount       Int               @default(0) @map("total_count")
+  successCount     Int               @default(0) @map("success_count")
+  failedCount      Int               @default(0) @map("failed_count")
   /// Admin user id (cuid) who created the draft.
-  createdBy      String?           @map("created_by")
+  createdBy        String?           @map("created_by")
   /// When a scheduled send is due; null for an immediate one.
-  scheduledAt    DateTime?         @map("scheduled_at") @db.Timestamptz(3)
+  scheduledAt      DateTime?         @map("scheduled_at") @db.Timestamptz(3)
   /// BullMQ job id of the pending start job, so cancel and reschedule address
   /// it directly instead of scanning the queue.
-  queueJobId     String?           @map("queue_job_id")
-  startedAt      DateTime?         @map("started_at") @db.Timestamptz(3)
-  completedAt    DateTime?         @map("completed_at") @db.Timestamptz(3)
-  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  queueJobId       String?           @map("queue_job_id")
+  /// Chat the one-shot operator-channel copy went to, and the message it
+  /// became. Together they are that post's address, so editing or recalling a
+  /// broadcast can keep the public copy in step with the private ones instead
+  /// of leaving the original text on the channel. Null when no channel was
+  /// configured, when the bot never confirmed the post, or for a broadcast
+  /// sent before these columns existed.
+  channelChatId    String?           @map("channel_chat_id")
+  channelMessageId BigInt?           @map("channel_message_id") @db.BigInt
+  startedAt        DateTime?         @map("started_at") @db.Timestamptz(3)
+  completedAt      DateTime?         @map("completed_at") @db.Timestamptz(3)
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   messages BroadcastMessage[]
 
@@ -2516,6 +2524,12 @@ model BroadcastMessage {
   @@index([broadcastId])
   @@index([userId])
   @@index([status])
+  /// The broadcast list counts PENDING and CANCELED rows per broadcast on every
+  /// poll (every 10s while the screen is open, over the 200 most recent
+  /// broadcasts). On the single-column indexes alone that grouped count has to
+  /// visit heap rows, and CANCELED rows are permanent — so every recall added
+  /// its whole recipient count to a scan that repeats for ever.
+  @@index([broadcastId, status])
   @@map("broadcast_messages")
 }
 

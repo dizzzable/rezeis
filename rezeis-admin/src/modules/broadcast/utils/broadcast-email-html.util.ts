@@ -132,14 +132,87 @@ export function renderOperatorHtml(raw: string): string {
  * Telegram composer escapes it too — and it is also the email subject, where
  * markup has nowhere to render.
  */
-export function renderBroadcastEmailHtml(title: string | null, text: string): string {
+/**
+ * One custom emoji, as an email can show it.
+ *
+ * `imageUrl` is ABSOLUTE — resolved by the caller against the operator's public
+ * site, because a stored `/uploads/emoji/x.webp` means nothing to a mail client
+ * with no origin to resolve it against.
+ */
+export interface EmailEmojiInterface {
+  readonly imageUrl: string | null;
+  readonly fallback: string;
+}
+
+/**
+ * Replace the operator's `:slug:` shortcodes with something an inbox can draw.
+ *
+ * ── Why an image and not just the glyph ───────────────────────────────────
+ *
+ * A premium Telegram custom emoji is a lottie animation, addressed by id and
+ * drawn by Telegram's own client: there is no format to put in an email and no
+ * public url either. But these emoji were imported INTO the panel, and the
+ * import stores a static picture of each one — which every mail client can
+ * render, and which is what the reader actually recognises.
+ *
+ * ── Why the glyph is still the alt ────────────────────────────────────────
+ *
+ * Most clients block remote images until the reader allows them, and some
+ * deployments will not serve the asset at all. `alt` makes both of those
+ * degrade to exactly the previous behaviour — the plain glyph — instead of a
+ * broken-image box.
+ *
+ * ── Why this runs AFTER the sanitiser ─────────────────────────────────────
+ *
+ * `<img>` is deliberately not on the allow-list: an operator-authored image tag
+ * is a tracking pixel with extra steps. These tags are not operator input —
+ * they are built here from the panel's own emoji records, on text that has
+ * already been escaped — so the allow-list stays closed and the pictures still
+ * get through.
+ */
+export function substituteEmailEmoji(
+  safeHtml: string,
+  emoji: ReadonlyMap<string, EmailEmojiInterface>,
+): string {
+  if (emoji.size === 0) return safeHtml;
+  return safeHtml.replace(/:([a-z0-9_]+):/g, (whole, slug: string) => {
+    const entry = emoji.get(slug);
+    if (entry === undefined) return whole;
+    const glyph = escapeHtml(entry.fallback);
+    if (entry.imageUrl === null) return glyph.length > 0 ? glyph : whole;
+    return (
+      `<img src="${escapeAttribute(entry.imageUrl)}" alt="${escapeAttribute(entry.fallback)}"` +
+      ' width="20" height="20" style="vertical-align:-4px;display:inline-block;">'
+    );
+  });
+}
+
+export function renderBroadcastEmailHtml(
+  title: string | null,
+  text: string,
+  emoji?: ReadonlyMap<string, EmailEmojiInterface>,
+): string {
   const trimmedTitle = title?.trim() ?? '';
+  // ── NO COLOURS OF ITS OWN ─────────────────────────────────────────────
+  //
+  // The heading and body used to pin `#111827` and `#374151`. That was
+  // invisible the moment the surrounding card stopped being white — which is
+  // exactly what happens now that the layout follows the operator's cabinet
+  // theme: a dark card would have carried near-black text on near-black.
+  // Inheriting means one place decides the ink, and it is the place that knows
+  // what the card is.
+  const escapedTitle = escapeHtml(trimmedTitle);
   const headingHtml =
     trimmedTitle.length > 0
-      ? `<h2 style="margin:0 0 16px 0;color:#111827;font-size:20px;">${escapeHtml(trimmedTitle)}</h2>`
+      ? `<h2 style="margin:0 0 16px 0;font-size:20px;">${
+          emoji === undefined ? escapedTitle : substituteEmailEmoji(escapedTitle, emoji)
+        }</h2>`
       : '';
-  const bodyHtml = renderOperatorHtml(text);
-  return `${headingHtml}<div style="color:#374151;font-size:15px;line-height:1.6;">${bodyHtml}</div>`;
+  const bodyHtml =
+    emoji === undefined
+      ? renderOperatorHtml(text)
+      : substituteEmailEmoji(renderOperatorHtml(text), emoji);
+  return `${headingHtml}<div style="font-size:15px;line-height:1.6;">${bodyHtml}</div>`;
 }
 
 /**

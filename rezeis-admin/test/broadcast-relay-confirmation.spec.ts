@@ -186,6 +186,9 @@ function harness(input: {
         throw new Error(`deliverBatch must not enqueue relay events (got ${event})`);
       },
     } as never,
+    // Promo gate dependency. Answers "usable" so these tests exercise what they
+    // are about; the gate itself is covered separately.
+    { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
   );
 
   if (input.startFailed === true) for (const id of ids) settled.add(id);

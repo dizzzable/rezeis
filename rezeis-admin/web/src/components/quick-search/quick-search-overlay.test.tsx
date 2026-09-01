@@ -111,7 +111,11 @@ describe('QuickSearchOverlay states', () => {
 
     typeQuery('vp')
 
-    expect(await screen.findByText('VP')).toBeInTheDocument()
+    // Real timers and a debounced query: the default one-second wait is enough
+    // on an idle machine and not enough inside the full suite, where 235 files
+    // run in parallel. It failed roughly one run in three — a red build for a
+    // timer, not for a defect.
+    expect(await screen.findByText('VP', undefined, { timeout: 5000 })).toBeInTheDocument()
     expect(get).toHaveBeenCalledWith('/admin/quick-search', { params: { q: 'vp', limit: 12 } })
   })
 
