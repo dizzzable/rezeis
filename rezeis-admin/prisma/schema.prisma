@@ -301,6 +301,10 @@ enum EntitlementIncidentState {
 
 enum BroadcastStatus {
   DRAFT
+  /// Enqueued with a delay and waiting to fire. A real state, so the panel can
+  /// show it, offer to cancel it, and a reconciler can find one whose job is
+  /// gone — none of which was possible when a schedule lived only in Redis.
+  SCHEDULED
   PROCESSING
   COMPLETED
   CANCELED
@@ -2476,6 +2480,11 @@ model Broadcast {
   failedCount    Int               @default(0) @map("failed_count")
   /// Admin user id (cuid) who created the draft.
   createdBy      String?           @map("created_by")
+  /// When a scheduled send is due; null for an immediate one.
+  scheduledAt    DateTime?         @map("scheduled_at") @db.Timestamptz(3)
+  /// BullMQ job id of the pending start job, so cancel and reschedule address
+  /// it directly instead of scanning the queue.
+  queueJobId     String?           @map("queue_job_id")
   startedAt      DateTime?         @map("started_at") @db.Timestamptz(3)
   completedAt    DateTime?         @map("completed_at") @db.Timestamptz(3)
   createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -2486,6 +2495,7 @@ model Broadcast {
   @@index([status])
   @@index([audience])
   @@index([createdAt])
+  @@index([scheduledAt])
   @@map("broadcasts")
 }
 

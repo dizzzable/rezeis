@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users } from 'lucide-react'
+import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, RotateCcw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users } from 'lucide-react'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { toast } from 'sonner'
@@ -175,6 +175,10 @@ function MediaPreview({
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   COMPLETED: 'default',
   PROCESSING: 'secondary',
+  // A pending scheduled send used to render as a plain draft with no actions on
+  // it: the operator could not see that it existed, when it would fire, or stop
+  // it — even though the backend has always accepted the cancel.
+  SCHEDULED: 'secondary',
   FAILED: 'destructive',
   CANCELED: 'outline',
   DELETED: 'outline',
@@ -204,6 +208,8 @@ interface BroadcastRow {
   readonly successCount: number
   readonly totalCount: number
   readonly failedCount: number
+  /** Due time of a scheduled send; `null` for an immediate one. */
+  readonly scheduledAt: string | null
   readonly createdAt: string
 }
 
@@ -229,6 +235,24 @@ export default function BroadcastPage() {
     },
     onError: (err) =>
       toast.error(getErrorMessage(err, t('broadcastPage.toast.cancelFailed'))),
+  })
+
+  /**
+   * Re-delivers only the recipients a broadcast failed to reach.
+   *
+   * The endpoint has always existed and has always been correct — it resets
+   * FAILED rows to PENDING, and delivery reads only PENDING ones, so nobody who
+   * already received the broadcast is written to twice. It simply had no button,
+   * which is why a half-delivered broadcast was re-composed by hand.
+   */
+  const retryMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/admin/broadcast/${id}/retry`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
+      toast.success(t('broadcastPage.toast.retryStarted'))
+    },
+    onError: (err) =>
+      toast.error(getErrorMessage(err, t('broadcastPage.toast.retryFailed'))),
   })
 
   const deleteMutation = useMutation({
@@ -344,15 +368,32 @@ export default function BroadcastPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {new Date(b.createdAt).toLocaleString('ru-RU')}
+                      {/* A scheduled send shows WHEN, not when it was composed:
+                          the due time is the only thing an operator wants from
+                          this row, and it was nowhere on screen at all. */}
+                      {b.status === 'SCHEDULED' && b.scheduledAt
+                        ? t('broadcastPage.scheduledFor', {
+                            when: new Date(b.scheduledAt).toLocaleString('ru-RU'),
+                          })
+                        : new Date(b.createdAt).toLocaleString('ru-RU')}
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        {b.status === 'PROCESSING' && (
+                        {['PROCESSING', 'SCHEDULED'].includes(b.status) && (
                           <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
                             aria-label={t('broadcastPage.cancelBroadcast')}
                             onClick={() => cancelMutation.mutate(b.id)}>
                             <XCircle className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                        {/* Only worth offering when there is something to retry. */}
+                        {['COMPLETED', 'FAILED'].includes(b.status) && b.failedCount > 0 && (
+                          <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
+                            aria-label={t('broadcastPage.retryFailed', { count: b.failedCount })}
+                            title={t('broadcastPage.retryFailed', { count: b.failedCount })}
+                            disabled={retryMutation.isPending}
+                            onClick={() => retryMutation.mutate(b.id)}>
+                            <RotateCcw className="h-3.5 w-3.5" />
                           </Button>
                         )}
                         {b.status === 'COMPLETED' && (
@@ -686,10 +727,22 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
 
   const createMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
-      const draftId = await saveDraft(payload)
       const delayMinutes = scheduleEnabled
         ? computeDelayMinutes(combineDateTime(scheduledDate, scheduledTime))
         : undefined
+
+      // ── "Schedule" must never quietly mean "send now" ──────────────────
+      //
+      // With the toggle on and no usable date — none picked, or one less than a
+      // minute away — this used to post an empty body, which is an IMMEDIATE
+      // send to the whole audience, while the button still read "Запланировать".
+      // A slip of the date was a blast. Refuse instead, before the draft is even
+      // saved.
+      if (scheduleEnabled && delayMinutes === undefined) {
+        throw new Error(t('broadcastPage.toast.scheduleNeedsFutureTime'))
+      }
+
+      const draftId = await saveDraft(payload)
       return api.post(
         `/admin/broadcast/${encodeURIComponent(draftId)}/send`,
         delayMinutes !== undefined ? { delayMinutes } : {},
@@ -703,8 +756,10 @@ function CreateBroadcastForm({ onClose }: { onClose: () => void }) {
       toast.success(scheduled ? t('broadcastPage.toast.scheduled') : t('broadcastPage.toast.created'))
       onClose()
     },
-    onError: (err: { response?: { data?: { message?: string } } }) =>
-      toast.error(err.response?.data?.message ?? t('broadcastPage.toast.createFailed')),
+    onError: (err: { response?: { data?: { message?: string } }; message?: string }) =>
+      toast.error(
+        err.response?.data?.message ?? err.message ?? t('broadcastPage.toast.createFailed'),
+      ),
   })
 
   const testMutation = useMutation({

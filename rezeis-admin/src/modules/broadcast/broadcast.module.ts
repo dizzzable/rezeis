@@ -13,6 +13,7 @@ import { AdminBroadcastController } from './controllers/admin-broadcast.controll
 import { BroadcastDeliveryService } from './services/broadcast-delivery.service';
 import { BroadcastMediaUploadService } from './services/broadcast-media-upload.service';
 import { BroadcastQueueService } from './services/broadcast-queue.service';
+import { BroadcastReconcilerService } from './services/broadcast-reconciler.service';
 import { BroadcastService } from './services/broadcast.service';
 
 @Module({
@@ -37,6 +38,7 @@ import { BroadcastService } from './services/broadcast.service';
     BroadcastMediaUploadService,
     BroadcastQueueService,
     BroadcastProcessor,
+    BroadcastReconcilerService,
   ],
   exports: [BroadcastService, BroadcastDeliveryService, BroadcastQueueService],
 })

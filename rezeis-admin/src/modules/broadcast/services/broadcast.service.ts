@@ -35,6 +35,33 @@ import {
 export class BroadcastService {
   public constructor(private readonly prismaService: PrismaService) {}
 
+  /**
+   * Writes down that a send is pending, and when.
+   *
+   * `scheduledFor === null` is an immediate send: the row stays DRAFT and the
+   * job is already on its way, so there is nothing to remember. A scheduled one
+   * becomes SCHEDULED with its due time and its job id — the three facts the
+   * panel needs to show it, the operator needs to cancel it, and the reconciler
+   * needs to notice a schedule whose job never fired.
+   */
+  public async recordSchedule(
+    broadcastId: string,
+    scheduledFor: Date | null,
+    queueJobId: string,
+  ): Promise<void> {
+    if (scheduledFor === null) {
+      await this.prismaService.broadcast.update({
+        where: { id: broadcastId },
+        data: { queueJobId, scheduledAt: null },
+      });
+      return;
+    }
+    await this.prismaService.broadcast.update({
+      where: { id: broadcastId },
+      data: { status: BroadcastStatus.SCHEDULED, scheduledAt: scheduledFor, queueJobId },
+    });
+  }
+
   public async listDrafts(): Promise<readonly BroadcastInterface[]> {
     const broadcasts = await this.prismaService.broadcast.findMany({
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -375,6 +402,7 @@ function mapBroadcast(record: Broadcast): BroadcastInterface {
     successCount: record.successCount,
     failedCount: record.failedCount,
     createdBy: record.createdBy,
+    scheduledAt: record.scheduledAt?.toISOString() ?? null,
     startedAt: record.startedAt?.toISOString() ?? null,
     completedAt: record.completedAt?.toISOString() ?? null,
     createdAt: record.createdAt.toISOString(),

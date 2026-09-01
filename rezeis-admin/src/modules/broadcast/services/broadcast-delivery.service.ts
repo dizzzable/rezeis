@@ -89,7 +89,9 @@ export class BroadcastDeliveryService {
    * Returns `{ ok: false }` with a reason when the draft has no content, or
    * when neither surface delivered.
    */
-  public async sendTestToDev(broadcastId: string): Promise<{ ok: boolean; reason?: string }> {
+  public async sendTestToDev(
+    broadcastId: string,
+  ): Promise<{ ok: boolean; reason?: string; emailPreviewed?: boolean }> {
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
       select: { payload: true },
@@ -173,12 +175,52 @@ export class BroadcastDeliveryService {
             : 'relay-disabled';
       return { ok: false, reason };
     }
+    // ── The EMAIL leg of the preview ─────────────────────────────────────
+    //
+    // The test send used to cover exactly two surfaces — the dev DM and the DEV
+    // cabinet feed — and neither of them is email. So the one button an
+    // operator presses to check a broadcast before sending it was structurally
+    // blind to the email body, which is where the formatting broke. A preview
+    // that cannot show the thing that breaks is not a preview.
+    //
+    // Sent only when the draft actually has the email channel switched on, and
+    // only to a DEV user who has an address — resolved the same way delivery
+    // resolves it, `User.email ?? WebAccount.email`.
+    let emailPreviewed = false;
+    const emailEnabled = payload?.emailEnabled === true;
+    if (emailEnabled && this.emailDeliveryService) {
+      const devWithEmail = await this.prismaService.user.findFirst({
+        where: { role: 'DEV', isBlocked: false },
+        select: { email: true, webAccount: { select: { email: true } } },
+      });
+      const address = devWithEmail?.email ?? devWithEmail?.webAccount?.email ?? null;
+      if (address !== null) {
+        try {
+          await this.emailDeliveryService.send({
+            to: address,
+            subject: title || 'Уведомление',
+            templateType: '__broadcast__',
+            variables: {},
+            rawHtml: renderBroadcastEmailHtml(title || null, text),
+          });
+          emailPreviewed = true;
+        } catch (err: unknown) {
+          this.logger.warn(
+            `Broadcast ${broadcastId} test preview: email leg failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    }
+
     this.logger.log(
       `Broadcast ${broadcastId} test preview: telegram=${relayed}` +
         `${relayStatus === null ? '' : ` (${relayStatus})`}` +
-        ` devCabinet=${cabinetDelivered}/${devUsers.length}`,
+        ` devCabinet=${cabinetDelivered}/${devUsers.length}` +
+        `${emailEnabled ? ` email=${emailPreviewed}` : ''}`,
     );
-    return { ok: true };
+    return { ok: true, ...(emailEnabled ? { emailPreviewed } : {}) };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -205,7 +247,7 @@ export class BroadcastDeliveryService {
       this.logger.warn(`Broadcast ${broadcastId} not found`);
       return [];
     }
-    if (broadcast.status !== BroadcastStatus.DRAFT) {
+    if (broadcast.status !== BroadcastStatus.DRAFT && broadcast.status !== BroadcastStatus.SCHEDULED) {
       // ── NOT AN EMPTY ANSWER: RESUME ────────────────────────────────────
       //
       // Staging is claim-once on purpose — a retry must not create a second set
@@ -242,7 +284,13 @@ export class BroadcastDeliveryService {
     // duplicate recipient rows. Winning the claim (count === 1) guarantees this
     // body runs at most once; a retry sees PROCESSING and no-ops.
     const claim = await this.prismaService.broadcast.updateMany({
-      where: { id: broadcastId, status: BroadcastStatus.DRAFT },
+      // SCHEDULED is claimable for the same reason DRAFT is: it is a send that
+      // has not started. The delayed job that fires for it transitions the row
+      // exactly as an immediate one does.
+      where: {
+        id: broadcastId,
+        status: { in: [BroadcastStatus.DRAFT, BroadcastStatus.SCHEDULED] },
+      },
       data: { status: BroadcastStatus.PROCESSING, startedAt: new Date() },
     });
     if (claim.count === 0) {

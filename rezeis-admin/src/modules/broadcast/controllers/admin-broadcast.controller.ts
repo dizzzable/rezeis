@@ -126,8 +126,10 @@ export class AdminBroadcastController {
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
   ): Promise<{ jobId: string; message: string; scheduledFor?: string }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
-    if (broadcast.status !== 'DRAFT') {
-      throw new BadRequestException('Only draft broadcasts can be sent');
+    // A SCHEDULED broadcast is re-sendable: that is how an operator moves the
+    // time, and the enqueue below refuses a duplicate job id rather than racing.
+    if (broadcast.status !== 'DRAFT' && broadcast.status !== 'SCHEDULED') {
+      throw new BadRequestException('Only draft or scheduled broadcasts can be sent');
     }
 
     // Dispatch-time promo gate: block the send if the tagged promo drifted
@@ -135,17 +137,34 @@ export class AdminBroadcastController {
     await this.broadcastService.assertPromoCodeDispatchable(broadcastId);
 
     const delayMs = dto.delayMinutes ? dto.delayMinutes * 60_000 : undefined;
+    // Computed BEFORE the enqueue. A `delayMinutes` big enough to overflow the
+    // date would otherwise throw here with the job already in the queue.
+    const scheduledFor = delayMs === undefined ? null : new Date(Date.now() + delayMs);
+
+    // Rescheduling: drop the pending job first, so the deterministic id is free
+    // and the new time is the one that fires. Without this the earlier job kept
+    // its place and the operator's correction was discarded.
+    if (broadcast.status === 'SCHEDULED') {
+      await this.broadcastQueueService.dropPendingStart(broadcastId);
+    }
+
     const jobId = await this.broadcastQueueService.enqueueStart(
       { broadcastId, adminId: currentAdmin.id },
       { delayMs },
     );
 
+    // THE RECORD OF INTENT, written in the same request that enqueues the job.
+    // A schedule that exists only as a delayed job in Redis cannot be shown,
+    // cannot be cancelled and cannot be reconciled — which is exactly how a
+    // pending send used to render as an ordinary draft with no actions on it.
+    await this.broadcastService.recordSchedule(broadcastId, scheduledFor, jobId);
+
     const result: { jobId: string; message: string; scheduledFor?: string } = {
       jobId,
-      message: delayMs ? 'Broadcast scheduled' : 'Broadcast delivery enqueued',
+      message: scheduledFor ? 'Broadcast scheduled' : 'Broadcast delivery enqueued',
     };
-    if (delayMs) {
-      result.scheduledFor = new Date(Date.now() + delayMs).toISOString();
+    if (scheduledFor) {
+      result.scheduledFor = scheduledFor.toISOString();
     }
     return result;
   }

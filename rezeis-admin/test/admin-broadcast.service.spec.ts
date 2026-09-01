@@ -37,6 +37,7 @@ describe('BroadcastService', () => {
               totalCount: 5,
               successCount: 2,
               failedCount: 1,
+              scheduledAt: null,
               startedAt: new Date('2026-04-24T12:05:00.000Z'),
             }),
           ];
@@ -65,6 +66,7 @@ describe('BroadcastService', () => {
         successCount: 2,
         failedCount: 1,
         createdBy: 'admin-1',
+        scheduledAt: null,
         startedAt: '2026-04-24T12:05:00.000Z',
         completedAt: null,
         createdAt: '2026-04-24T12:00:00.000Z',

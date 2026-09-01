@@ -27,6 +27,8 @@ export interface BroadcastInterface {
   readonly successCount: number;
   readonly failedCount: number;
   readonly createdBy: string | null;
+  /** When a scheduled send is due; `null` for an immediate one. */
+  readonly scheduledAt: string | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly createdAt: string;

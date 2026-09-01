@@ -14,7 +14,8 @@ import {
 
 export interface BroadcastStartJobData {
   readonly broadcastId: string;
-  readonly adminId: string;
+  /** The admin who pressed send; `null` when the reconciler put it back. */
+  readonly adminId: string | null;
 }
 
 export interface BroadcastBatchJobData {
@@ -162,10 +163,40 @@ export class BroadcastQueueService {
    * Cancel all pending jobs for a broadcast.
    * Removes waiting/delayed jobs from the queue and marks pending messages as CANCELED.
    */
+  /**
+   * Removes the pending start job for this broadcast, if there is one.
+   *
+   * Addressed by id rather than found by scanning: the id is deterministic, and
+   * a scan of `waiting`/`delayed` is O(queue) on a queue that also carries every
+   * batch job. Returns whether anything was removed.
+   */
+  public async dropPendingStart(broadcastId: string): Promise<boolean> {
+    const job = await this.queue.getJob(`broadcast-start:${broadcastId}`);
+    if (job === undefined) return false;
+    try {
+      await job.remove();
+      return true;
+    } catch {
+      // Already active or already gone — either way there is nothing pending
+      // left to drop, and a reschedule on top of a job that is already running
+      // is refused by the status check in the caller.
+      return false;
+    }
+  }
+
+  /** Whether a start job for this broadcast is still queued or delayed. */
+  public async hasPendingStart(broadcastId: string): Promise<boolean> {
+    const job = await this.queue.getJob(`broadcast-start:${broadcastId}`);
+    if (job === undefined) return false;
+    const state = await job.getState();
+    return state === 'waiting' || state === 'delayed' || state === 'active';
+  }
+
   public async cancelBroadcast(broadcastId: string): Promise<number> {
-    // Remove waiting jobs that match this broadcast
+    // The start job first, by its deterministic id.
+    let removed = (await this.dropPendingStart(broadcastId)) ? 1 : 0;
+    // Then any batch jobs, which have no such id and must still be scanned.
     const waiting = await this.queue.getJobs(['waiting', 'delayed']);
-    let removed = 0;
     for (const job of waiting) {
       if (job.data?.broadcastId === broadcastId) {
         await job.remove();

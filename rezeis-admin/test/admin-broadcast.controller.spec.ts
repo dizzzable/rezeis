@@ -405,6 +405,11 @@ describe('AdminBroadcastController', () => {
         assertPromoCodeDispatchable: async (broadcastId: string) => {
           calls.push(['assertPromo', broadcastId]);
         },
+        // The send endpoint writes the schedule down now: an intent kept
+        // only as a delayed Redis job cannot be shown or cancelled.
+        recordSchedule: async (id: string, at: Date | null, jobId: string) => {
+          calls.push(['recordSchedule', id, at?.toISOString() ?? null, jobId]);
+        },
       } as never,
       {} as never,
       {
@@ -470,6 +475,9 @@ describe('AdminBroadcastController', () => {
       ['get', 'draft-1'],
       ['assertPromo', 'draft-1'],
       ['enqueueStart', { broadcastId: 'draft-1', adminId: 'admin-1' }, { delayMs: undefined }],
+      // Written down even for an immediate send: the job id is what cancel
+      // and reschedule address, instead of scanning the whole queue.
+      ['recordSchedule', 'draft-1', null, 'job-1'],
       ['get', 'processing-1'],
       ['cancelQueue', 'processing-1'],
       ['status', 'processing-1', BroadcastStatus.CANCELED],
