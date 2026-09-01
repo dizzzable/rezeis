@@ -13,6 +13,18 @@ function createRecord(overrides: Record<string, unknown> = {}) {
     isActive: true,
     availability: PromocodeAvailability.ALL,
     rewardType: PromocodeRewardType.DURATION,
+    // Mirrors the legacy reward, which is exactly what the mapper produces
+    // for a code with no rows in `promocode_actions` — every code written by
+    // an older panel, and everything a donor import writes.
+    actions: [
+      {
+        type: PromocodeRewardType.DURATION,
+        value: null,
+        plan: null,
+        discountAllowedPlanIds: [],
+        discountValidForDays: null,
+      },
+    ],
     reward: 7,
     plan: null,
     lifetime: null,
@@ -36,6 +48,15 @@ function createPromocode(overrides: Partial<PromocodeInterface> = {}): Promocode
     rewardType: PromocodeRewardType.DURATION,
     reward: 7,
     plan: null,
+    actions: [
+      {
+        type: PromocodeRewardType.DURATION,
+        value: 7,
+        plan: null,
+        discountAllowedPlanIds: [],
+        discountValidForDays: null,
+      },
+    ],
     lifetime: null,
     expiresAt: null,
     maxActivations: null,
@@ -84,7 +105,13 @@ describe('PromocodeValidationService', () => {
     }
     assert.deepStrictEqual(findFirstArgs, {
       where: { code: 'PROMO', archivedAt: null },
-      include: { _count: { select: { activations: true } } },
+      include: {
+        _count: { select: { activations: true } },
+        // ORDERED: the activation result pairs the mirror's TYPE with the
+        // first action's VALUE, so a reordering between two reads would make
+        // those describe two different actions.
+        actions: { orderBy: { createdAt: 'asc' } },
+      },
     });
     assert.deepStrictEqual(activationCountArgs, {
       where: { promocodeId: 'promo-1', userId: 'user-1' },

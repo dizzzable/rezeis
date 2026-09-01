@@ -49,10 +49,36 @@ export interface PromocodePlanSnapshot {
   description?: string | null
 }
 
+/**
+ * One extra thing the code does, beside the main action above it.
+ *
+ * ── Why "extra" and not a flat list ───────────────────────────────────────
+ *
+ * The main action keeps the form it always had — a type, a value, and for
+ * SUBSCRIPTION a plan and duration picker. Folding that into a generic row
+ * would put a plan picker inside a list item and make the common case (one
+ * action, which is most codes) heavier than it is today, to serve the rarer
+ * one. So the list starts where the form used to end.
+ */
+export interface PromocodeActionInput {
+  type: string
+  value?: number | null
+  /** PURCHASE_DISCOUNT only: plans the granted discount may be spent on. */
+  discountAllowedPlanIds?: string[]
+  /** PURCHASE_DISCOUNT only: how long the grant stays spendable. */
+  discountValidForDays?: number | null
+}
+
 export interface PromocodeFormData {
   code: string
   rewardType: string
   reward?: number
+  /**
+   * Everything the code does, main action first. Sent alongside the legacy
+   * fields, which the API rewrites from this list's first entry — so a panel
+   * and an API on different versions cannot describe different offers.
+   */
+  actions?: PromocodeActionInput[]
   availability: string
   isActive: boolean
   lifetime?: number
@@ -66,6 +92,12 @@ export interface PromocodeFormData {
 
 interface ExistingPromocode {
   readonly code?: string
+  readonly actions?: readonly {
+    readonly type: string
+    readonly value: number | null
+    readonly discountAllowedPlanIds?: readonly string[]
+    readonly discountValidForDays?: number | null
+  }[]
   readonly rewardType?: string
   readonly reward?: number | string
   readonly availability?: string
@@ -85,6 +117,27 @@ interface Props {
 export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
   const { t } = useTranslation()
   const [code, setCode] = useState(promo?.code ?? '')
+  // Everything past the main action. Seeded by dropping the first stored
+  // action, which the fields above already represent — keeping it would render
+  // the main action twice.
+  // The restrictions the MAIN action's discount carries, when it is one.
+  // Distinct from `allowedPlanIds` below, which says where the CODE may be
+  // activated: this says where the granted discount may be SPENT, weeks later
+  // and possibly on a different plan.
+  const [mainDiscountPlanIds, setMainDiscountPlanIds] = useState<string[]>(() => [
+    ...(promo?.actions?.[0]?.discountAllowedPlanIds ?? []),
+  ])
+  const [mainDiscountDays, setMainDiscountDays] = useState(
+    promo?.actions?.[0]?.discountValidForDays?.toString() ?? '',
+  )
+  const [extraActions, setExtraActions] = useState<PromocodeActionInput[]>(() =>
+    (promo?.actions ?? []).slice(1).map((action) => ({
+      type: action.type,
+      value: action.value,
+      discountAllowedPlanIds: [...(action.discountAllowedPlanIds ?? [])],
+      discountValidForDays: action.discountValidForDays ?? null,
+    })),
+  )
   const [rewardType, setRewardType] = useState(promo?.rewardType ?? 'DURATION')
   const [reward, setReward] = useState(promo?.reward?.toString() ?? '7')
   const [availability, setAvailability] = useState(promo?.availability ?? 'ALL')
@@ -104,7 +157,15 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
 
   // Load plans for SUBSCRIPTION reward (the reward itself) and for the
   // plan-scoped reward types (eligibility filter). Fetch once either is active.
-  const needsPlans = rewardType === 'SUBSCRIPTION' || PLAN_SCOPED_REWARDS.includes(rewardType)
+  // A PURCHASE_DISCOUNT now picks plans too — the ones its granted discount may
+  // be spent on — so the plan list is needed for it as well.
+  const usesDiscountPlans =
+    rewardType === 'PURCHASE_DISCOUNT' ||
+    extraActions.some((action) => action.type === 'PURCHASE_DISCOUNT')
+  const needsPlans =
+    rewardType === 'SUBSCRIPTION' ||
+    PLAN_SCOPED_REWARDS.includes(rewardType) ||
+    usesDiscountPlans
   const { data: plans } = usePlans(undefined, { enabled: needsPlans })
   const [selectedPlanId, setSelectedPlanId] = useState('')
   const [selectedDuration, setSelectedDuration] = useState('')
@@ -128,6 +189,22 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
     for (let i = 0; i < 8; i++) result += chars[Math.floor(Math.random() * chars.length)]
     setCode(result)
   }
+
+  /**
+   * A type may appear once. The database enforces the same thing, and the API
+   * refuses a duplicate before it gets there — offering one here would only be
+   * a way to reach that error.
+   *
+   * SUBSCRIPTION is excluded from the extras entirely: it replaces the
+   * subscription every other action mutates, so it always runs first, and the
+   * main block above is where that is set.
+   */
+  const isTypeAvailable = (type: string, exceptIndex: number): boolean => {
+    if (type === 'SUBSCRIPTION') return false
+    if (type === rewardType) return false
+    return !extraActions.some((action, i) => i !== exceptIndex && action.type === type)
+  }
+  const availableExtraTypes = REWARD_TYPES.filter((rt) => isTypeAvailable(rt, -1))
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -159,10 +236,38 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
       PLAN_SCOPED_REWARDS.includes(rewardType) && allowedPlanIds.length > 0
         ? allowedPlanIds
         : []
+    const mainValue = rewardType !== 'SUBSCRIPTION' ? parseInt(reward, 10) : undefined
+    const actions: PromocodeActionInput[] = [
+      {
+        type: rewardType,
+        value: mainValue ?? null,
+        ...(rewardType === 'PURCHASE_DISCOUNT'
+          ? {
+              discountAllowedPlanIds: [...mainDiscountPlanIds],
+              discountValidForDays: mainDiscountDays.trim().length > 0
+                ? Number.parseInt(mainDiscountDays, 10)
+                : null,
+            }
+          : {}),
+      },
+      ...extraActions
+        .filter((action) => action.type.length > 0)
+        .map((action) => ({
+          type: action.type,
+          value: action.value ?? null,
+          ...(action.type === 'PURCHASE_DISCOUNT'
+            ? {
+                discountAllowedPlanIds: [...(action.discountAllowedPlanIds ?? [])],
+                discountValidForDays: action.discountValidForDays ?? null,
+              }
+            : {}),
+        })),
+    ]
     onSubmit({
       code: code.toUpperCase(),
+      actions,
       rewardType,
-      reward: rewardType !== 'SUBSCRIPTION' ? parseInt(reward, 10) : undefined,
+      reward: mainValue,
       availability,
       isActive,
       lifetime: parseInt(lifetime, 10),
@@ -224,6 +329,212 @@ export function PromocodeForm({ promo, onSubmit, isLoading }: Props) {
           </div>
         ) : null}
       </div>
+
+      {/* Where the MAIN action's discount may be spent */}
+      {rewardType === 'PURCHASE_DISCOUNT' ? (
+        <div className="space-y-3 rounded-md border border-border/60 p-3">
+          <p className="text-xs text-muted-foreground">
+            {t('promocodeForm.discountScopeHint')}
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>{t('promocodeForm.discountPlans')}</Label>
+              <div className="flex flex-wrap gap-2">
+                {(plans ?? [])
+                  .filter((p) => !p.isArchived)
+                  .map((p) => (
+                    <Button
+                      key={p.id}
+                      type="button"
+                      size="sm"
+                      variant={mainDiscountPlanIds.includes(p.id) ? 'default' : 'outline'}
+                      onClick={() =>
+                        setMainDiscountPlanIds((prev) =>
+                          prev.includes(p.id)
+                            ? prev.filter((id) => id !== p.id)
+                            : [...prev, p.id],
+                        )
+                      }
+                    >
+                      {p.name}
+                    </Button>
+                  ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t('promocodeForm.discountPlansEmpty')}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label>{t('promocodeForm.discountValidForDays')}</Label>
+              <Input
+                type="number"
+                min="1"
+                value={mainDiscountDays}
+                onChange={(e) => setMainDiscountDays(e.target.value)}
+                placeholder={t('promocodeForm.discountValidForDaysPlaceholder')}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Everything else the code does */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <Label>{t('promocodeForm.extraActions')}</Label>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={availableExtraTypes.length === 0}
+            onClick={() =>
+              setExtraActions((prev) => [
+                ...prev,
+                { type: availableExtraTypes[0] ?? '', value: null },
+              ])
+            }
+          >
+            {t('promocodeForm.addAction')}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">{t('promocodeForm.extraActionsHint')}</p>
+        {extraActions.map((action, index) => (
+          <div key={index} className="space-y-3 rounded-md border border-border/60 p-3">
+            <div className="grid gap-4 md:grid-cols-[1fr_1fr_auto]">
+              <div className="space-y-2">
+                <Label>{t('promocodeForm.rewardType')}</Label>
+                <Select
+                  value={action.type}
+                  onValueChange={(value) =>
+                    setExtraActions((prev) =>
+                      prev.map((item, i) => (i === index ? { ...item, type: value } : item)),
+                    )
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {REWARD_TYPES.filter(
+                      (rt) => rt === action.type || isTypeAvailable(rt, index),
+                    ).map((rt) => (
+                      <SelectItem key={rt} value={rt}>
+                        {t(`promocodeForm.rewardTypes.${rt}`)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {action.type === 'SUBSCRIPTION' ? (
+                <p className="self-end text-xs text-muted-foreground">
+                  {t('promocodeForm.subscriptionMainOnly')}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <Label>{t(`promocodeForm.rewardLabels.${action.type}`)}</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={action.value?.toString() ?? ''}
+                    onChange={(e) =>
+                      setExtraActions((prev) =>
+                        prev.map((item, i) =>
+                          i === index
+                            ? {
+                                ...item,
+                                value:
+                                  e.target.value.trim().length > 0
+                                    ? Number.parseInt(e.target.value, 10)
+                                    : null,
+                              }
+                            : item,
+                        ),
+                      )
+                    }
+                  />
+                </div>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="self-end text-destructive"
+                aria-label={t('promocodeForm.removeAction')}
+                onClick={() =>
+                  setExtraActions((prev) => prev.filter((_, i) => i !== index))
+                }
+              >
+                {t('promocodeForm.removeAction')}
+              </Button>
+            </div>
+            {action.type === 'PURCHASE_DISCOUNT' ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>{t('promocodeForm.discountPlans')}</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {(plans ?? [])
+                      .filter((p) => !p.isArchived)
+                      .map((p) => (
+                        <Button
+                          key={p.id}
+                          type="button"
+                          size="sm"
+                          variant={
+                            (action.discountAllowedPlanIds ?? []).includes(p.id)
+                              ? 'default'
+                              : 'outline'
+                          }
+                          onClick={() =>
+                            setExtraActions((prev) =>
+                              prev.map((item, i) => {
+                                if (i !== index) return item
+                                const current = item.discountAllowedPlanIds ?? []
+                                return {
+                                  ...item,
+                                  discountAllowedPlanIds: current.includes(p.id)
+                                    ? current.filter((id) => id !== p.id)
+                                    : [...current, p.id],
+                                }
+                              }),
+                            )
+                          }
+                        >
+                          {p.name}
+                        </Button>
+                      ))}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t('promocodeForm.discountValidForDays')}</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={action.discountValidForDays?.toString() ?? ''}
+                    onChange={(e) =>
+                      setExtraActions((prev) =>
+                        prev.map((item, i) =>
+                          i === index
+                            ? {
+                                ...item,
+                                discountValidForDays:
+                                  e.target.value.trim().length > 0
+                                    ? Number.parseInt(e.target.value, 10)
+                                    : null,
+                              }
+                            : item,
+                        ),
+                      )
+                    }
+                    placeholder={t('promocodeForm.discountValidForDaysPlaceholder')}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+
+      <Separator />
 
       {/* Plan + duration selector for SUBSCRIPTION reward */}
       {rewardType === 'SUBSCRIPTION' ? (

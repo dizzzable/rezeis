@@ -13,6 +13,18 @@ function buildPromocode(overrides: Partial<PromocodeInterface> = {}): PromocodeI
     isActive: true,
     availability: PromocodeAvailability.ALL,
     rewardType: PromocodeRewardType.DURATION,
+    // Mirrors the legacy reward, which is exactly what the mapper produces
+    // for a code with no rows in `promocode_actions` — every code written by
+    // an older panel, and everything a donor import writes.
+    actions: [
+      {
+        type: PromocodeRewardType.DURATION,
+        value: null,
+        plan: null,
+        discountAllowedPlanIds: [],
+        discountValidForDays: null,
+      },
+    ],
     reward: 7,
     plan: null,
     lifetime: null,
@@ -45,9 +57,14 @@ describe('PromocodeRewardsService', () => {
       targetSubscriptionId: null,
     });
 
-    assert.deepStrictEqual(result, { applied: true, rewardValue: 100 });
+    // 90, not 100. A full discount is a free order that still travels through
+    // a payment provider, and that shape is bad in every direction: a
+    // zero-amount invoice some gateways refuse outright and others accept and
+    // never call back. Anything given away entirely belongs in a SUBSCRIPTION
+    // action, which grants access without an order at all.
+    assert.deepStrictEqual(result, { applied: true, rewardValue: 90 });
     assert.deepStrictEqual(updateCalls, [
-      { where: { id: 'user-1' }, data: { personalDiscount: 100 } },
+      { where: { id: 'user-1' }, data: { personalDiscount: 90 } },
     ]);
   });
 
@@ -128,7 +145,16 @@ describe('PromocodeRewardsService', () => {
       targetSubscriptionId: null,
     });
 
-    assert.deepStrictEqual(result, { applied: true, rewardValue: 30, syncJobId: 'sync-1' });
+    // `createdSubscriptionId` travels back so every LATER action of the same
+    // activation lands on the subscription just created. Without it, a code
+    // granting a subscription AND extra days failed on the days — and rolled
+    // the new subscription back with it.
+    assert.deepStrictEqual(result, {
+      applied: true,
+      rewardValue: 30,
+      syncJobId: 'sync-1',
+      createdSubscriptionId: 'new-sub-1',
+    });
     assert.equal(createCalls.length, 1);
     assert.equal((createCalls[0] as { data: { userId: string } }).data.userId, 'user-1');
     assert.equal(

@@ -7,6 +7,7 @@ import {
 } from '@prisma/client';
 
 import {
+  PromocodeActionInterface,
   PromocodeActivationInterface,
   PromocodeInterface,
   PromocodePlanSnapshotInterface,
@@ -31,6 +32,7 @@ export function mapPromocode(record: PromocodeWithCount): PromocodeInterface {
     rewardType: record.rewardType,
     reward: record.reward,
     plan: parsePromocodePlanSnapshot(record.plan),
+    actions: mapPromocodeActions(record),
     lifetime: record.lifetime,
     expiresAt: record.expiresAt ? record.expiresAt.toISOString() : null,
     maxActivations: record.maxActivations,
@@ -201,4 +203,86 @@ export function isRewardType(value: unknown): value is PromocodeRewardType {
 /** Common Prisma include used everywhere we need the activation count. */
 export const PROMOCODE_INCLUDE_ACTIVATIONS_COUNT = {
   _count: { select: { activations: true } },
+  // Loaded with the code everywhere it is read, because the actions ARE what
+  // the code does. Fetching them separately would leave a path that resolves a
+  // promocode and then applies only its legacy first reward — which is the
+  // whole defect this replaces.
+  // ORDERED, because the rest of the system pairs an action with a value by
+  // position. `mapPromocodeActions` only pins SUBSCRIPTION first; without an
+  // order for the others, Postgres could hand them back differently between two
+  // reads of the same code — and the activation result pairs the mirror's TYPE
+  // with the first action's VALUE, so a reordering makes those describe two
+  // different actions.
+  actions: { orderBy: { createdAt: 'asc' } },
 } as const;
+
+/**
+ * The promocode's actions, in the order they must be applied.
+ *
+ * ── Why the order is computed and not stored ──────────────────────────────
+ *
+ * `SUBSCRIPTION` creates or replaces a subscription, so anything that mutates
+ * one — days, traffic, devices — has to run after it or it lands on a
+ * subscription that is then replaced. The rest do not interact: three of them
+ * change one row, and the two discounts change different columns.
+ *
+ * That makes the order a function of the type, and a stored position column
+ * would be a field an operator can set and the rules then override.
+ *
+ * ── Why a code with no action rows still yields one ───────────────────────
+ *
+ * A promocode written by an older version of the panel — or by anything that
+ * writes the legacy columns directly, such as a donor import — has no rows in
+ * `promocode_actions`. Falling back to `rewardType` / `reward` / `plan` keeps
+ * those codes working exactly as before, instead of activating to nothing.
+ */
+function mapPromocodeActions(record: PromocodeWithCount): PromocodeActionInterface[] {
+  const rows = 'actions' in record && Array.isArray(record.actions) ? record.actions : [];
+  const actions: PromocodeActionInterface[] =
+    rows.length > 0
+      ? rows.map((row) => ({
+          type: row.type,
+          value: row.value,
+          plan: parsePromocodePlanSnapshot(readActionPlan(row.payload)),
+          discountAllowedPlanIds: readActionPlanIds(row.payload),
+          discountValidForDays: readActionValidForDays(row.payload),
+        }))
+      : [
+          {
+            type: record.rewardType,
+            value: record.reward,
+            plan: parsePromocodePlanSnapshot(record.plan),
+            discountAllowedPlanIds: [],
+            discountValidForDays: null,
+          },
+        ];
+  return actions.sort((a, b) => actionRank(a.type) - actionRank(b.type));
+}
+
+/** SUBSCRIPTION first; everything else keeps a stable, arbitrary order. */
+function actionRank(type: PromocodeRewardType): number {
+  return type === PromocodeRewardType.SUBSCRIPTION ? 0 : 1;
+}
+
+function readActionPlan(payload: Prisma.JsonValue | null): Prisma.JsonValue | null {
+  const object = readJsonObject(payload);
+  return object === null ? null : ((object.plan as Prisma.JsonValue | undefined) ?? null);
+}
+
+function readActionPlanIds(payload: Prisma.JsonValue | null): readonly string[] {
+  const object = readJsonObject(payload);
+  const raw = object?.allowedPlanIds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+function readActionValidForDays(payload: Prisma.JsonValue | null): number | null {
+  const object = readJsonObject(payload);
+  const raw = object?.validForDays;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : null;
+}
+
+function readJsonObject(value: Prisma.JsonValue | null): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}

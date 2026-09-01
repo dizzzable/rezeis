@@ -206,6 +206,9 @@ function createMergeWorld() {
     },
     transaction: { updateMany: noopUpdateMany('transaction') },
     referralReward: { updateMany: noopUpdateMany('referralReward') },
+    // Unspent discount grants move with the customer: the source user is
+    // deleted and the FK cascades, so a restricted grant would be destroyed.
+    userPendingDiscount: { updateMany: noopUpdateMany('userPendingDiscount') },
     referralInvite: { updateMany: noopUpdateMany('referralInvite') },
     userNotificationEvent: { updateMany: noopUpdateMany('userNotificationEvent') },
     webPushSubscription: { updateMany: noopUpdateMany('webPushSubscription') },

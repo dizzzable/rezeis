@@ -2467,6 +2467,19 @@ export const en = {
   },
   promocodeForm: {
     code: 'Promocode',
+    extraActions: 'Additional actions',
+    extraActionsHint:
+      'One promocode can do several things at once — a discount on the next purchase and extra days, say. That used to take two separate codes.',
+    addAction: 'Add action',
+    removeAction: 'Remove',
+    subscriptionMainOnly:
+      'Granting a subscription is set in the main action above: it replaces the subscription the other actions apply to, so it always runs first.',
+    discountScopeHint:
+      'The discount is not spent now but at the next purchase, possibly weeks later. These restrictions travel with it and are checked when it is spent — unlike "Plans" below, which decides where the promocode may be activated.',
+    discountPlans: 'Discount applies to plans',
+    discountPlansEmpty: 'Nothing selected — the discount works on any plan.',
+    discountValidForDays: 'Discount expires after (days)',
+    discountValidForDaysPlaceholder: 'never expires',
     generate: 'Generate',
     rewardType: 'Reward type',
     plan: 'Plan',

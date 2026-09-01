@@ -1446,6 +1446,7 @@ model User {
   partner                 Partner?                 @relation("UserPartner")
   referralInvites         ReferralInvite[]         @relation("InviterUser")
   promocodeActivations    PromocodeActivation[]    @relation("UserPromocodeActivations")
+  pendingDiscounts        UserPendingDiscount[]    @relation("UserPendingDiscounts")
   referralPointsExchanges ReferralPointsExchange[] @relation("UserReferralPointsExchanges")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
@@ -2837,6 +2838,13 @@ model Promocode {
   updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
   archivedAt         DateTime?             @map("archived_at") @db.Timestamptz(3)
 
+  /// What the code DOES, as a list. One promocode may carry several actions —
+  /// "-10% on the next purchase AND +7 days" is one code, not two.
+  ///
+  /// `rewardType` / `reward` / `plan` above are NOT replaced: they keep
+  /// mirroring the FIRST action, because the panel and the cabinet ship as
+  /// separate images and the older half has to keep reading this row.
+  actions                     PromocodeAction[]
   activations                 PromocodeActivation[]
   giftIssuedForPointsExchange ReferralPointsExchange? @relation("GiftPromocodeReferralPointsExchange")
 
@@ -2864,6 +2872,11 @@ model PromocodeActivation {
   targetSubscriptionId String?             @map("target_subscription_id")
   activatedAt          DateTime            @default(now()) @map("activated_at") @db.Timestamptz(3)
 
+  /// One row per action that actually fired. `rewardType` / `rewardValue`
+  /// above stay filled from the FIRST effect so every existing report,
+  /// export and statistic keeps working unchanged.
+  effects PromocodeActivationEffect[]
+
   promocode          Promocode     @relation(fields: [promocodeId], references: [id], onDelete: Restrict)
   user               User          @relation("UserPromocodeActivations", fields: [userId], references: [id], onDelete: Restrict)
   targetSubscription Subscription? @relation("SubscriptionPromocodeActivations", fields: [targetSubscriptionId], references: [id], onDelete: SetNull)
@@ -2874,6 +2887,105 @@ model PromocodeActivation {
   @@index([rewardType])
   @@index([activatedAt])
   @@map("promocode_activations")
+}
+
+/// One thing a promocode DOES when it is activated.
+///
+/// ── Why a list and not a single `rewardType` ──────────────────────────────
+///
+/// A promocode could do exactly one thing, so "-10% on the next purchase AND
+/// +7 days" needed two codes and an instruction telling the customer to enter
+/// both. Every new marketing shape meant either a new reward type in code or a
+/// workaround in the copy.
+///
+/// ORDER IS NOT STORED, it is derived from `type`. `SUBSCRIPTION` creates or
+/// replaces a subscription, so it must run first or the days and traffic
+/// granted beside it land on a subscription that is then replaced; the other
+/// types all mutate one subscription and do not interact. A position column
+/// would let an operator set an order that the rules then override, which is
+/// how a decorative column starts lying.
+model PromocodeAction {
+  id          String              @id @default(cuid()) @map("id")
+  promocodeId String              @map("promocode_id")
+  type        PromocodeRewardType @map("type")
+  /// Magnitude, read exactly as `Promocode.reward` was: days / GB / device
+  /// slots / percent. Null only for SUBSCRIPTION, which carries `payload`.
+  value       Int?                @map("value")
+  /// Action-specific extras. SUBSCRIPTION: the plan snapshot it grants.
+  /// PURCHASE_DISCOUNT: `{ allowedPlanIds, validForDays }` — the restrictions
+  /// the resulting discount CARRIES to the checkout it is finally spent at.
+  payload     Json?               @map("payload")
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  promocode Promocode @relation(fields: [promocodeId], references: [id], onDelete: Cascade)
+
+  /// One action per type. "+7 days and another +3 days" is one action for ten.
+  @@unique([promocodeId, type])
+  @@map("promocode_actions")
+}
+
+/// What one action actually did, for one activation.
+///
+/// `PromocodeActivation` records a single `rewardType` + `rewardValue`, and
+/// partner reports, CSV export, code statistics and quick search all read
+/// those. Rather than rewrite thirty files, the activation keeps them (filled
+/// from the first effect) and the detail lives here.
+///
+/// `appliedValue` is what REALLY happened, which already differs from the
+/// configured value today: a SUBSCRIPTION action takes its duration from the
+/// plan snapshot, not from `value`.
+model PromocodeActivationEffect {
+  id           String              @id @default(cuid()) @map("id")
+  activationId String              @map("activation_id")
+  type         PromocodeRewardType @map("type")
+  appliedValue Int                 @default(0) @map("applied_value")
+  payload      Json?               @map("payload")
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  activation PromocodeActivation @relation(fields: [activationId], references: [id], onDelete: Cascade)
+
+  @@index([activationId])
+  @@map("promocode_activation_effects")
+}
+
+/// A discount that has been granted and not yet spent — with the conditions it
+/// has to survive until it IS spent.
+///
+/// ── Why `User.purchaseDiscount` was not enough ────────────────────────────
+///
+/// That column is a bare percentage. The promocode's own restrictions —
+/// which plans, until when — are checked when the CODE is activated, and the
+/// discount is spent at whatever purchase happens next, possibly weeks later
+/// and on a different plan. So "-20%, but only on the six-month plan" could not
+/// be expressed: the plan check had already happened and passed, against an
+/// entirely different decision.
+///
+/// The restrictions travel with the discount now and are re-checked at
+/// checkout. `User.purchaseDiscount` stays in place and keeps working — an
+/// older half of the system, and every import from a donor panel, still writes
+/// and reads it.
+model UserPendingDiscount {
+  id                String    @id @default(cuid()) @map("id")
+  userId            String    @map("user_id")
+  /// 1..90. The ceiling is shared with every other discount path.
+  percent           Int       @map("percent")
+  /// Plans this discount may be spent on. EMPTY = any plan.
+  allowedPlanIds    String[]  @default([]) @map("allowed_plan_ids")
+  /// When the discount itself expires — separate from the promocode's own
+  /// expiry, which stops new activations rather than unspent grants.
+  expiresAt         DateTime? @map("expires_at") @db.Timestamptz(3)
+  /// Which promocode granted it. Not a foreign key: a deleted promocode must
+  /// not orphan or revoke a discount somebody already holds.
+  sourcePromocodeId String?   @map("source_promocode_id")
+  consumedAt        DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation("UserPendingDiscounts", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The checkout looks for a user's unspent grants and picks the best one
+  /// that applies.
+  @@index([userId, consumedAt])
+  @@map("user_pending_discounts")
 }
 
 /// Durable record of a user spending referral points. The snapshots capture

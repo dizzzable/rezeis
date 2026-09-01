@@ -17,6 +17,10 @@ import {
   PromocodeActivationResultInterface,
   PromocodeInterface,
 } from '../interfaces/promocode.interface';
+import {
+  buildActionPayload,
+  resolvePromocodeActions,
+} from '../utils/promocode-action-input.util';
 import { isValidCode, normalizeCode } from '../utils/code-normalizer.util';
 import {
   PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
@@ -102,7 +106,16 @@ export class PromocodeLifecycleService {
       throw new BadRequestException('Promocode code is invalid');
     }
 
-    this.assertPlanSnapshotConsistency(dto.rewardType, dto.plan);
+    // ── ONE SOURCE FOR WHAT THE CODE DOES ────────────────────────────────
+    //
+    // A request may send `actions`, or the legacy `rewardType`/`reward`/`plan`,
+    // or both — an older panel sends only the second, and the second is what
+    // every donor import writes. Resolving to a single list here means the rest
+    // of this method has one thing to write, and the legacy columns are then
+    // filled FROM that list rather than beside it, so the two cannot disagree.
+    const actions = resolvePromocodeActions(dto);
+    const primary = actions[0];
+    this.assertPlanSnapshotConsistency(primary.type, primary.plan ?? null);
 
     try {
       const record = await this.prismaService.promocode.create({
@@ -110,12 +123,21 @@ export class PromocodeLifecycleService {
           code: normalizedCode,
           isActive: dto.isActive ?? true,
           availability: dto.availability,
-          rewardType: dto.rewardType,
-          reward: dto.reward ?? null,
+          // Mirrors of the FIRST action, kept so an older cabinet and every
+          // existing report keep reading something true.
+          rewardType: primary.type,
+          reward: primary.value ?? null,
           plan:
-            dto.plan === null || dto.plan === undefined
+            primary.plan === null || primary.plan === undefined
               ? Prisma.JsonNull
-              : (dto.plan as unknown as Prisma.InputJsonValue),
+              : (primary.plan as unknown as Prisma.InputJsonValue),
+          actions: {
+            create: actions.map((action) => ({
+              type: action.type,
+              value: action.value ?? null,
+              payload: buildActionPayload(action),
+            })),
+          },
           lifetime: dto.lifetime ?? null,
           expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
           maxActivations: dto.maxActivations ?? null,
@@ -167,6 +189,81 @@ export class PromocodeLifecycleService {
     }
     if (dto.allowedPlanIds !== undefined) {
       updateData.allowedPlanIds = dto.allowedPlanIds;
+    }
+
+    // ── THE ACTION LIST IS REPLACED WHOLE, OR LEFT ALONE ──────────────────
+    //
+    // A PATCH that omits `actions` must not silently drop them — an older panel
+    // sends only the legacy fields and would otherwise wipe the list every time
+    // an operator toggled "active". So the list is rewritten only when the
+    // request actually carries one, and then it is rewritten ENTIRELY: a
+    // partial merge would need per-action identity that nothing in the form
+    // gives it, and "remove this action" has to be expressible.
+    //
+    // The legacy mirrors move with it, so they never describe an action that
+    // is no longer there.
+    // A legacy PATCH that moves `rewardType` / `reward` / `plan` rewrites the
+    // list too. Without this the mirror and the list drift apart — the mirror
+    // says TRAFFIC while the only action row still says DURATION — and the code
+    // then does one thing while every report claims another. It also broke the
+    // migration's own backfill on a replay, because the deterministic id it
+    // writes is keyed on the promocode and the row it collided with had a
+    // different type.
+    const legacyRewardTouched =
+      dto.rewardType !== undefined || dto.reward !== undefined || dto.plan !== undefined;
+    //
+    // But a legacy PATCH must not DELETE the other actions either. An older
+    // panel's edit form always sends `rewardType` + `reward`, so rebuilding the
+    // whole list from them would silently halve a two-action offer every time
+    // somebody saved it. So the legacy fields rewrite only the FIRST action —
+    // the one they mirror — and the rest are carried through untouched.
+    const existingActions = mapPromocode(existing).actions;
+    const nextActions =
+      dto.actions !== undefined
+        ? resolvePromocodeActions(dto)
+        : legacyRewardTouched
+          ? resolvePromocodeActions({
+              actions: [
+                {
+                  type: dto.rewardType ?? existingActions[0].type,
+                  value: dto.reward !== undefined ? dto.reward : existingActions[0].value,
+                  plan: (dto.plan !== undefined
+                    ? dto.plan
+                    : existingActions[0].plan) as never,
+                  discountAllowedPlanIds: [...existingActions[0].discountAllowedPlanIds],
+                  discountValidForDays: existingActions[0].discountValidForDays,
+                },
+                ...existingActions.slice(1).map((action) => ({
+                  type: action.type,
+                  value: action.value,
+                  plan: action.plan as never,
+                  discountAllowedPlanIds: [...action.discountAllowedPlanIds],
+                  discountValidForDays: action.discountValidForDays,
+                })),
+              ],
+            })
+          : null;
+    if (nextActions !== null) {
+      const primary = nextActions[0];
+      // The SAME check `create` makes. Without it a PATCH could store
+      // `rewardType: SUBSCRIPTION` with `plan: JsonNull` — wiping the snapshot
+      // of a live promocode and leaving every later activation to fail on
+      // "requires a plan snapshot", with a 200 on the way out.
+      this.assertPlanSnapshotConsistency(primary.type, primary.plan ?? null);
+      updateData.rewardType = primary.type;
+      updateData.reward = primary.value ?? null;
+      updateData.plan =
+        primary.plan === null || primary.plan === undefined
+          ? Prisma.JsonNull
+          : (primary.plan as unknown as Prisma.InputJsonValue);
+      updateData.actions = {
+        deleteMany: {},
+        create: nextActions.map((action) => ({
+          type: action.type,
+          value: action.value ?? null,
+          payload: buildActionPayload(action),
+        })),
+      };
     }
 
     try {
@@ -347,19 +444,52 @@ export class PromocodeLifecycleService {
             targetSubscriptionId: targetResolution.subscriptionId,
           },
         });
-        const application = await this.rewardsService.applyReward({
-          transactionClient,
-          promocode,
-          userId: input.userId,
-          targetSubscriptionId: targetResolution.subscriptionId,
-        });
-        if (!application.applied) {
-          throw new RewardNotAppliedError();
+        // ── EVERY ACTION, OR NONE ─────────────────────────────────────────
+        //
+        // A promocode may carry several actions ("-10% on the next purchase AND
+        // +7 days"), applied in the order the mapper resolved — SUBSCRIPTION
+        // first, because it replaces the subscription the others would mutate.
+        //
+        // A soft failure anywhere throws, which rolls the whole activation back
+        // including the row created above. That is deliberate: the user gets
+        // ONE activation of a code, so half an offer would consume it and leave
+        // no way to try again.
+        let firstEffect: { rewardValue: number; syncJobId?: string } | null = null;
+        let syncJobId: string | undefined;
+        // Moves when a SUBSCRIPTION action creates one. Every later action has
+        // to land on THAT subscription — passing the pre-transaction target
+        // meant a code granting a subscription and extra days failed on the
+        // days, and rolled the new subscription back with it.
+        let effectiveTargetId = targetResolution.subscriptionId;
+        for (const action of promocode.actions) {
+          const application = await this.rewardsService.applyAction({
+            transactionClient,
+            promocode,
+            userId: input.userId,
+            targetSubscriptionId: effectiveTargetId,
+            action,
+          });
+          effectiveTargetId = application.createdSubscriptionId ?? effectiveTargetId;
+          if (!application.applied) {
+            throw new RewardNotAppliedError();
+          }
+          await transactionClient.promocodeActivationEffect.create({
+            data: {
+              activationId: activation.id,
+              type: action.type,
+              appliedValue: application.rewardValue,
+            },
+          });
+          firstEffect ??= application;
+          // ONE sync for the whole activation. Days, traffic and devices all
+          // change the same subscription, so a job per action would push the
+          // same profile to Remnawave three times.
+          syncJobId ??= application.syncJobId;
         }
         return {
           activation,
-          rewardValue: application.rewardValue,
-          syncJobId: application.syncJobId,
+          rewardValue: firstEffect?.rewardValue ?? 0,
+          syncJobId,
         };
       });
       // Push the Remnawave sync to BullMQ immediately (the job row was

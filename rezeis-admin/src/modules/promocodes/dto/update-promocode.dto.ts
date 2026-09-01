@@ -15,6 +15,7 @@ import {
 } from 'class-validator';
 import { PromocodeAvailability, PromocodeRewardType } from '@prisma/client';
 
+import { PromocodeActionDto } from './promocode-action.dto';
 import { PromocodePlanSnapshotDto } from './promocode-plan-snapshot.dto';
 
 /**
@@ -43,6 +44,23 @@ export class UpdatePromocodeDto {
   @ValidateNested()
   @Type((): typeof PromocodePlanSnapshotDto => PromocodePlanSnapshotDto)
   public plan?: PromocodePlanSnapshotDto | null;
+
+  /**
+   * What the code DOES, as a list — "-10% on the next purchase AND +7 days" is
+   * one code now, not two with a line of copy telling the customer to enter
+   * both.
+   *
+   * OPTIONAL, and `rewardType` / `reward` / `plan` above stay accepted: an
+   * older panel still sends only those, and a request that omits actions is
+   * read as one action built from them. Sending both is fine — the list wins,
+   * and the legacy fields are rewritten from its first entry so anything that
+   * still reads them sees something true.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type((): typeof PromocodeActionDto => PromocodeActionDto)
+  public actions?: PromocodeActionDto[];
 
   @IsOptional()
   @IsInt()

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Currency } from '@prisma/client';
 
+import { clampDiscountPercent } from '../../../common/utils/discount.util';
 import { CatalogDiscountSource } from '../interfaces/plan-catalog.interface';
 
 interface PricingInput {
@@ -29,8 +30,11 @@ export class PricingService {
         discountSource: 'NONE',
       };
     }
-    const purchaseDiscount = clampDiscount(input.purchaseDiscount);
-    const personalDiscount = clampDiscount(input.personalDiscount);
+    // Bounded HERE as well as where the grant was written: a row that predates
+    // the ceiling, or one a donor import wrote, must not be able to spend more
+    // than the ceiling either.
+    const purchaseDiscount = clampDiscountPercent(input.purchaseDiscount);
+    const personalDiscount = clampDiscountPercent(input.personalDiscount);
     let discountPercent = 0;
     let discountSource: CatalogDiscountSource = 'NONE';
     if (purchaseDiscount > 0) {
@@ -113,6 +117,3 @@ export class PricingService {
   }
 }
 
-function clampDiscount(discount: number): number {
-  return Math.min(Math.max(discount, 0), 100);
-}

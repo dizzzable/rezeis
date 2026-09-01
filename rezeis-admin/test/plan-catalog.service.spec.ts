@@ -30,6 +30,10 @@ describe('PlanCatalogService', () => {
       user: { findUnique: async () => null },
       subscription: { findFirst: async () => null },
       referral: { findFirst: async () => null },
+      // Unspent discount GRANTS. A grant may be restricted to certain plans,
+      // so the discount is a property of the pair (user, plan) now, and the
+      // catalog prices every plan — it loads them once per request.
+      userPendingDiscount: { findMany: async () => [] },
     };
 
     const service = new PlanCatalogService(prismaService as never, new PricingService());
@@ -98,6 +102,7 @@ describe('PlanCatalogService', () => {
       },
       transaction: { findFirst: async () => null },
       referral: { findFirst: async () => ({ id: 'ref-1' }) },
+      userPendingDiscount: { findMany: async () => [] },
       partnerReferral: { findFirst: async () => null },
     };
 
@@ -196,6 +201,10 @@ describe('PlanCatalogService', () => {
         },
         transaction: { findFirst: async () => scenario.pendingTransaction },
         referral: { findFirst: async () => null },
+        // Unspent discount GRANTS. A grant may be restricted to certain plans,
+        // so the discount is a property of the pair (user, plan) now, and the
+        // catalog prices every plan — it loads them once per request.
+        userPendingDiscount: { findMany: async () => [] },
         partnerReferral: { findFirst: async () => null },
       };
 

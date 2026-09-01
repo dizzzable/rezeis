@@ -39,6 +39,8 @@ export interface PromocodeInterface {
   readonly rewardType: PromocodeRewardType;
   readonly reward: number | null;
   readonly plan: PromocodePlanSnapshotInterface | null;
+  /** What the code DOES, ordered for application. Never empty. */
+  readonly actions: readonly PromocodeActionInterface[];
   readonly lifetime: number | null;
   readonly expiresAt: string | null;
   readonly maxActivations: number | null;
@@ -115,4 +117,37 @@ export interface PromocodeActivationResultInterface {
   readonly reward: PromocodeActivationRewardSnapshotInterface | null;
   readonly availableSubscriptionIds: readonly string[];
   readonly activation: PromocodeActivationInterface | null;
+}
+
+/**
+ * One action of a promocode, as the reward service needs it.
+ *
+ * Flattened rather than passed as the stored row: the legacy single-reward
+ * entry point builds one of these out of `rewardType` / `reward` / `plan`, so
+ * both paths reach the same code and cannot drift apart.
+ */
+/** One action as it is stored on a promocode and read back. */
+export interface PromocodeActionInterface {
+  readonly type: PromocodeRewardType;
+  readonly value: number | null;
+  readonly plan: PromocodePlanSnapshotInterface | null;
+  readonly discountAllowedPlanIds: readonly string[];
+  readonly discountValidForDays: number | null;
+}
+
+export interface PromocodeActionInput {
+  readonly type: PromocodeRewardType;
+  readonly value: number | null;
+  /** SUBSCRIPTION only: the plan snapshot to grant. */
+  readonly plan: PromocodePlanSnapshotInterface | null;
+  /**
+   * PURCHASE_DISCOUNT only: the plans the GRANTED discount may be spent on.
+   * Empty = any plan. Distinct from the promocode's `allowedPlanIds`, which
+   * says where the CODE may be activated — the two answer different questions
+   * at different moments, and conflating them is why a plan-restricted discount
+   * used to apply to any purchase.
+   */
+  readonly discountAllowedPlanIds: readonly string[];
+  /** PURCHASE_DISCOUNT only: how long the grant stays spendable. */
+  readonly discountValidForDays: number | null;
 }

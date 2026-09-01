@@ -67,16 +67,30 @@ describe('PromocodeLifecycleService', () => {
         code: 'PROMO-1',
         isActive: true,
         availability: PromocodeAvailability.ALLOWED,
+        // Mirrors of the FIRST action, written FROM the resolved list rather
+        // than beside it — the only arrangement where the two cannot end up
+        // describing different offers.
         rewardType: PromocodeRewardType.DURATION,
         reward: 14,
         plan: Prisma.JsonNull,
+        // A request that sends only the legacy fields is read as one action.
+        // An older panel sends exactly this, and so does every donor import.
+        actions: {
+          create: [{ type: PromocodeRewardType.DURATION, value: 14, payload: undefined }],
+        },
         lifetime: null,
         expiresAt: null,
         maxActivations: null,
         allowedTelegramIds: [BigInt('123456789')],
         allowedPlanIds: ['plan-1'],
       },
-      include: { _count: { select: { activations: true } } },
+      include: {
+        _count: { select: { activations: true } },
+        // ORDERED: the activation result pairs the mirror's TYPE with the
+        // first action's VALUE, so a reordering between two reads would make
+        // those describe two different actions.
+        actions: { orderBy: { createdAt: 'asc' } },
+      },
     });
     assert.equal(result.code, 'PROMO-1');
     assert.deepStrictEqual(result.allowedTelegramIds, ['123456789']);
@@ -183,7 +197,13 @@ describe('PromocodeLifecycleService', () => {
     assert.equal((await service.list())[0]?.id, 'promo-a');
     assert.deepStrictEqual(findManyArgs, {
       where: { archivedAt: null },
-      include: { _count: { select: { activations: true } } },
+      include: {
+        _count: { select: { activations: true } },
+        // ORDERED: the activation result pairs the mirror's TYPE with the
+        // first action's VALUE, so a reordering between two reads would make
+        // those describe two different actions.
+        actions: { orderBy: { createdAt: 'asc' } },
+      },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
   });
@@ -202,7 +222,13 @@ describe('PromocodeLifecycleService', () => {
     assert.equal(await service.getByCode(' promo '), null);
     assert.deepStrictEqual(findFirstArgs, {
       where: { code: 'PROMO', archivedAt: null },
-      include: { _count: { select: { activations: true } } },
+      include: {
+        _count: { select: { activations: true } },
+        // ORDERED: the activation result pairs the mirror's TYPE with the
+        // first action's VALUE, so a reordering between two reads would make
+        // those describe two different actions.
+        actions: { orderBy: { createdAt: 'asc' } },
+      },
     });
   });
 
@@ -228,7 +254,13 @@ describe('PromocodeLifecycleService', () => {
     await assert.rejects(service.getById('missing-promo'), NotFoundException);
     assert.deepStrictEqual(findFirstArgs, {
       where: { id: 'missing-promo', archivedAt: null },
-      include: { _count: { select: { activations: true } } },
+      include: {
+        _count: { select: { activations: true } },
+        // ORDERED: the activation result pairs the mirror's TYPE with the
+        // first action's VALUE, so a reordering between two reads would make
+        // those describe two different actions.
+        actions: { orderBy: { createdAt: 'asc' } },
+      },
     });
   });
 });

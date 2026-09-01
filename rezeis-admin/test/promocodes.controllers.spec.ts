@@ -22,6 +22,18 @@ function promo(): PromocodeInterface {
     isActive: true,
     availability: PromocodeAvailability.ALL,
     rewardType: PromocodeRewardType.DURATION,
+    // Mirrors the legacy reward, which is exactly what the mapper produces
+    // for a code with no rows in `promocode_actions` — every code written by
+    // an older panel, and everything a donor import writes.
+    actions: [
+      {
+        type: PromocodeRewardType.DURATION,
+        value: null,
+        plan: null,
+        discountAllowedPlanIds: [],
+        discountValidForDays: null,
+      },
+    ],
     reward: 7,
     plan: null,
     lifetime: null,

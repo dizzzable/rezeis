@@ -7,8 +7,13 @@ import {
   SyncJobStatus,
 } from '@prisma/client';
 
+import { clampDiscountPercent } from '../../../common/utils/discount.util';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
-import { PromocodeInterface } from '../interfaces/promocode.interface';
+import {
+  PromocodeActionInput,
+  PromocodeInterface,
+  PromocodePlanSnapshotInterface,
+} from '../interfaces/promocode.interface';
 import { isUnmintableSnapshotTrafficLimit } from '../utils/promocode-mappers.util';
 
 /**
@@ -46,22 +51,76 @@ export class PromocodeRewardsService {
     readonly syncJobId?: string;
   }> {
     const { promocode } = input;
-    const reward = promocode.reward ?? 0;
+    // The legacy single-reward entry point. It now describes the promocode's
+    // FIRST action and delegates, so nothing that still calls it has to change
+    // while the panel and the cabinet are on different versions.
+    return this.applyAction({
+      ...input,
+      action: {
+        type: promocode.rewardType,
+        value: promocode.reward,
+        plan: promocode.plan,
+        discountAllowedPlanIds: [],
+        discountValidForDays: null,
+      },
+    });
+  }
 
-    switch (promocode.rewardType) {
+  /**
+   * Applies ONE action of a promocode.
+   *
+   * ── Why the switch moved here unchanged ───────────────────────────────────
+   *
+   * A promocode used to do exactly one thing, and this switch was reached once
+   * per activation. Now it is reached once per action, and everything else
+   * about it is the same: it runs inside the caller's transaction, it returns
+   * `applied: false` for a soft failure that must roll the activation back, and
+   * it never decides on its own what to do about that.
+   *
+   * The conditions still come from the PROMOCODE — which subscription may be
+   * targeted is a property of the code, not of one of its actions. Only the
+   * magnitude and the action-specific extras come from the action.
+   */
+  public async applyAction(input: {
+    readonly transactionClient: Prisma.TransactionClient;
+    readonly promocode: PromocodeInterface;
+    readonly userId: string;
+    readonly targetSubscriptionId: string | null;
+    readonly action: PromocodeActionInput;
+  }): Promise<{
+    readonly applied: boolean;
+    readonly rewardValue: number;
+    readonly syncJobId?: string;
+    /**
+     * The subscription this action ended up working on, when it CREATED one.
+     *
+     * A SUBSCRIPTION action with no target creates a subscription, and every
+     * action after it in the same activation has to land on that one. Without
+     * this the loop kept passing the pre-transaction target — `null` — so a
+     * code granting a subscription AND extra days failed on the days and rolled
+     * the new subscription back with it.
+     */
+    readonly createdSubscriptionId?: string;
+  }> {
+    const { promocode, action } = input;
+    const reward = action.value ?? 0;
+
+    switch (action.type) {
       case PromocodeRewardType.PERSONAL_DISCOUNT:
         return this.applyDiscount({
           transactionClient: input.transactionClient,
           userId: input.userId,
           field: 'personalDiscount',
-          value: clampDiscount(reward),
+          value: clampDiscountPercent(reward),
         });
       case PromocodeRewardType.PURCHASE_DISCOUNT:
-        return this.applyDiscount({
+        return this.applyPurchaseDiscount({
           transactionClient: input.transactionClient,
           userId: input.userId,
-          field: 'purchaseDiscount',
-          value: clampDiscount(reward),
+          value: clampDiscountPercent(reward),
+          allowedPlanIds: action.discountAllowedPlanIds,
+          validForDays: action.discountValidForDays,
+          sourcePromocodeId: promocode.id,
         });
       case PromocodeRewardType.DURATION:
         return this.applyDurationReward({
@@ -93,6 +152,7 @@ export class PromocodeRewardsService {
           promocode,
           userId: input.userId,
           targetSubscriptionId: input.targetSubscriptionId,
+          plan: action.plan,
         });
       default:
         return { applied: false, rewardValue: 0 };
@@ -196,6 +256,65 @@ export class PromocodeRewardsService {
       return promocode.plan.duration;
     }
     return 0;
+  }
+
+  /**
+   * Grants a one-time purchase discount.
+   *
+   * ── Why this writes in two places ─────────────────────────────────────────
+   *
+   * `user.purchaseDiscount` is the original bare percentage, and it is still
+   * read by an older half of the system and still written by donor imports. It
+   * keeps being set so nothing that reads it starts seeing zero.
+   *
+   * The GRANT beside it is what makes "-20%, but only on the six-month plan"
+   * expressible at all. The promocode's own plan restriction is checked when
+   * the CODE is activated, and the discount is spent at whatever purchase comes
+   * next — possibly weeks later, on a different plan — so a restriction that
+   * does not travel with the discount has no bearing on where it is spent.
+   *
+   * Both are settled together at checkout; see `consumePurchaseDiscount`.
+   */
+  private async applyPurchaseDiscount(input: {
+    readonly transactionClient: Prisma.TransactionClient;
+    readonly userId: string;
+    readonly value: number;
+    readonly allowedPlanIds: readonly string[];
+    readonly validForDays: number | null;
+    readonly sourcePromocodeId: string;
+  }): Promise<{ readonly applied: boolean; readonly rewardValue: number }> {
+    // ── THE COLUMN MIRRORS ONLY AN UNRESTRICTED GRANT ────────────────────
+    //
+    // `user.purchaseDiscount` is a bare percentage with nowhere to put a plan
+    // list or an expiry. Mirroring a RESTRICTED grant into it hands every
+    // reader a way around the restriction: the column applies to any purchase,
+    // so "-20% only on six months" came off a one-month order through the
+    // fallback path, which is the exact thing grants exist to prevent.
+    //
+    // An unrestricted grant is still mirrored, because an older half of the
+    // system reads only the column and would otherwise see no discount at all.
+    const restricted =
+      input.allowedPlanIds.length > 0 ||
+      (input.validForDays !== null && input.validForDays > 0);
+    if (!restricted) {
+      await input.transactionClient.user.update({
+        where: { id: input.userId },
+        data: { purchaseDiscount: input.value },
+      });
+    }
+    await input.transactionClient.userPendingDiscount.create({
+      data: {
+        userId: input.userId,
+        percent: input.value,
+        allowedPlanIds: [...input.allowedPlanIds],
+        expiresAt:
+          input.validForDays === null || input.validForDays <= 0
+            ? null
+            : new Date(Date.now() + input.validForDays * 24 * 60 * 60 * 1000),
+        sourcePromocodeId: input.sourcePromocodeId,
+      },
+    });
+    return { applied: true, rewardValue: input.value };
   }
 
   private async applyDiscount(input: {
@@ -371,12 +490,17 @@ export class PromocodeRewardsService {
     readonly promocode: PromocodeInterface;
     readonly userId: string;
     readonly targetSubscriptionId: string | null;
+    readonly plan: PromocodePlanSnapshotInterface | null;
   }): Promise<{
     readonly applied: boolean;
     readonly rewardValue: number;
     readonly syncJobId?: string;
+    readonly createdSubscriptionId?: string;
   }> {
-    const plan = input.promocode.plan;
+    // The ACTION's plan first: with a list, the mirror column describes only
+    // the first action, so a SUBSCRIPTION action that is not first would have
+    // read somebody else's plan — or none.
+    const plan = input.plan ?? input.promocode.plan;
     if (plan === null) {
       this.logger.warn(
         `Promocode ${input.promocode.code} has rewardType=SUBSCRIPTION but no plan snapshot`,
@@ -493,7 +617,15 @@ export class PromocodeRewardsService {
       remnawaveId: null,
       promocode: input.promocode,
     });
-    return { applied: true, rewardValue: days, syncJobId };
+    // The id travels back so every later action in this activation lands on
+    // the subscription that was just created, instead of the `null` target the
+    // activation started with.
+    return {
+      applied: true,
+      rewardValue: days,
+      syncJobId,
+      createdSubscriptionId: createdSubscription.id,
+    };
   }
 }
 
@@ -503,12 +635,6 @@ function readPlanId(snapshot: Prisma.JsonValue): string | null {
   return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
-function clampDiscount(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-  return Math.max(0, Math.min(100, Math.trunc(value)));
-}
 
 // `patchSnapshotNumeric` used to be defined here. It now lives beside the
 // reader that gives it meaning — `resolveInheritedPlanLimitUpdate` in

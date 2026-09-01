@@ -55,12 +55,24 @@ export class PromocodePortalService {
     }
 
     const targetSubscriptionId = context.dto.subscriptionId ?? null;
-    const isResourceReward =
-      promocode.rewardType === PromocodeRewardType.DURATION ||
-      promocode.rewardType === PromocodeRewardType.TRAFFIC ||
-      promocode.rewardType === PromocodeRewardType.DEVICES;
-    const isSubscriptionReward =
-      promocode.rewardType === PromocodeRewardType.SUBSCRIPTION;
+    // ── ASK THE WHOLE ACTION LIST, NOT THE MIRROR ─────────────────────────
+    //
+    // `promocode.rewardType` is a mirror of the FIRST action, and it used to be
+    // everything a code did. With a list it answers for one of them, and this
+    // decides whether the customer is asked which subscription to apply the
+    // code to — so a code whose first action is a discount and whose second is
+    // "+7 days" was never asked, ran with no target, and the days action then
+    // failed and rolled the WHOLE activation back. That is the feature's own
+    // headline example ("-10% on the next purchase AND +7 days"), and it could
+    // not be redeemed by anyone.
+    const needsSubscription = (type: PromocodeRewardType): boolean =>
+      type === PromocodeRewardType.DURATION ||
+      type === PromocodeRewardType.TRAFFIC ||
+      type === PromocodeRewardType.DEVICES;
+    const isResourceReward = promocode.actions.some((action) => needsSubscription(action.type));
+    const isSubscriptionReward = promocode.actions.some(
+      (action) => action.type === PromocodeRewardType.SUBSCRIPTION,
+    );
 
     if (targetSubscriptionId === null && (isResourceReward || isSubscriptionReward)) {
       const eligibleIds = await this.validationService.getEligibleSubscriptionIds({

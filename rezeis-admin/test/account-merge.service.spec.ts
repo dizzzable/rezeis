@@ -75,6 +75,7 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
       updateMany: async (a: Record<string, unknown>) => { rec('referralPointsExchange', 'updateMany', a); return { count: 0 }; },
     },
     referralReward: { updateMany: async (a: Record<string, unknown>) => { rec('referralReward', 'updateMany', a); return { count: 0 }; } },
+    userPendingDiscount: { updateMany: async (a: Record<string, unknown>) => { rec('userPendingDiscount', 'updateMany', a); return { count: 0 }; } },
     referralInvite: { updateMany: async (a: Record<string, unknown>) => { rec('referralInvite', 'updateMany', a); return { count: 0 }; } },
     userNotificationEvent: { updateMany: async (a: Record<string, unknown>) => { rec('userNotificationEvent', 'updateMany', a); return { count: 0 }; } },
     webPushSubscription: { updateMany: async (a: Record<string, unknown>) => { rec('webPushSubscription', 'updateMany', a); return { count: 0 }; } },

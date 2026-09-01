@@ -29,9 +29,29 @@ import {
   SubscriptionQuotePriceInterface,
   SubscriptionQuoteWarningInterface,
 } from '../interfaces/subscription-quote.interface';
+import {
+  pickBestDiscount,
+  type PendingDiscountGrant,
+} from '../../../common/utils/pending-discount.util';
 import { countCommittedTrialClaimUnits, findResumablePaidTrialClaim } from './trial-claim-ledger.util';
 
-type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'personalDiscount'>;
+type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'personalDiscount'> & {
+  /**
+   * Unspent discount grants.
+   *
+   * ── Why the quote needs them and the column is not enough ────────────────
+   *
+   * THIS is the price the customer is charged. A grant may be restricted to
+   * certain plans, so the discount is a property of the pair (user, plan) — and
+   * `user.purchaseDiscount` is a single number that remembers only the most
+   * recent grant, with none of its restrictions.
+   *
+   * Pricing the catalog one way and the quote another is how a screen shows
+   * one number and the invoice carries a different one. Both call the same
+   * `pickBestDiscount`.
+   */
+  readonly pendingDiscounts: readonly PendingDiscountGrant[];
+};
 type SubscriptionRecord = Pick<
   Subscription,
   'id' | 'userId' | 'status' | 'isTrial' | 'planSnapshot' | 'createdAt'
@@ -349,6 +369,16 @@ export class SubscriptionQuoteService {
         maxSubscriptions: true,
         purchaseDiscount: true,
         personalDiscount: true,
+        pendingDiscounts: {
+          where: { consumedAt: null },
+          select: {
+            id: true,
+            percent: true,
+            allowedPlanIds: true,
+            expiresAt: true,
+            consumedAt: true,
+          },
+        },
       },
     });
     if (user === null) {
@@ -727,7 +757,17 @@ export class SubscriptionQuoteService {
       const snapshot = this.pricingService.buildSnapshot({
         amount: price.price.toString(),
         currency: price.currency as Currency,
-        purchaseDiscount: input.user.purchaseDiscount,
+        // The discount for THIS plan, chosen by the SAME function the catalog
+        // quoted with. Reading `user.purchaseDiscount` alone charged whatever
+        // the most recent grant happened to be, ignoring the plans it was
+        // restricted to — so a six-month-only discount came off a one-month
+        // order, and the amount charged differed from the price displayed.
+        purchaseDiscount: pickBestDiscount({
+          grants: input.user.pendingDiscounts,
+          planId: input.plan.id,
+          legacyPercent: input.user.purchaseDiscount,
+          now: new Date(),
+        }).percent,
         personalDiscount: input.user.personalDiscount,
       });
       return {
@@ -758,7 +798,17 @@ export class SubscriptionQuoteService {
       const snapshot = this.pricingService.buildSnapshot({
         amount: price.price.toString(),
         currency: price.currency as Currency,
-        purchaseDiscount: input.user.purchaseDiscount,
+        // The discount for THIS plan, chosen by the SAME function the catalog
+        // quoted with. Reading `user.purchaseDiscount` alone charged whatever
+        // the most recent grant happened to be, ignoring the plans it was
+        // restricted to — so a six-month-only discount came off a one-month
+        // order, and the amount charged differed from the price displayed.
+        purchaseDiscount: pickBestDiscount({
+          grants: input.user.pendingDiscounts,
+          planId: input.plan.id,
+          legacyPercent: input.user.purchaseDiscount,
+          now: new Date(),
+        }).percent,
         personalDiscount: input.user.personalDiscount,
       });
       return {

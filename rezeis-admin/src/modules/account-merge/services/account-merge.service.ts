@@ -252,6 +252,20 @@ export class AccountMergeService {
         },
       });
 
+      // 8b. Unspent discount grants move with the customer.
+      //
+      // `purchaseDiscount` above is a bare percentage and is merged by taking
+      // the larger; a GRANT carries the plans it may be spent on and when it
+      // expires, and neither survives that column. The delete below cascades
+      // (`UserPendingDiscount.user` is `onDelete: Cascade`), so without this
+      // every restricted discount the source account held is destroyed
+      // silently — the customer merges two accounts and loses the offer they
+      // merged them to keep.
+      await tx.userPendingDiscount.updateMany({
+        where: { userId: source.id, consumedAt: null },
+        data: { userId: target.id },
+      });
+
       // 9. Delete the now-drained source.
       await tx.user.delete({ where: { id: source.id } });
 

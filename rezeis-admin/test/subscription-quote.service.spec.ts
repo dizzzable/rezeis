@@ -716,6 +716,11 @@ function createUser(input: {
     maxSubscriptions: input.maxSubscriptions,
     purchaseDiscount: input.purchaseDiscount ?? 0,
     personalDiscount: input.personalDiscount ?? 0,
+    // Unspent discount GRANTS. The quote prices with the SAME choice the
+    // catalog displays, so it needs the same input — reading the bare column
+    // alone charged whatever the most recent grant happened to be, ignoring the
+    // plans it was restricted to.
+    pendingDiscounts: [],
   };
 }
 

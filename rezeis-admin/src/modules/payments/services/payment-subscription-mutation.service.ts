@@ -21,6 +21,7 @@ import {
 } from '@prisma/client';
 
 import { TrafficResetService } from '../../add-ons/services/traffic-reset.service';
+import { pickBestDiscount } from '../../../common/utils/pending-discount.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
@@ -150,7 +151,12 @@ export class PaymentSubscriptionMutationService {
       const combined = await this.applyCombinedRenewal(transaction, items);
       // A multi-subscription renewal is a plan purchase — consume the
       // one-time "next purchase" discount once it completes.
-      await this.consumePurchaseDiscount(transaction.userId);
+      //
+      // Every plan this renewal priced. A combined renewal has no single plan,
+      // but each LINE was priced with its own — so a grant restricted to one of
+      // them was applied and has to be settled. Passing `null` alone said
+      // nothing applied, and the grant survived every combined renewal.
+      await this.consumePurchaseDiscount(transaction.userId, null, items);
       return combined;
     }
 
@@ -259,23 +265,128 @@ export class PaymentSubscriptionMutationService {
     // Consume the one-time "next purchase" discount (PURCHASE_DISCOUNT promo
     // reward) now that a plan purchase has completed. Without this it kept
     // applying to every future purchase. The permanent personalDiscount stays.
-    await this.consumePurchaseDiscount(transaction.userId);
+    await this.consumePurchaseDiscount(transaction.userId, purchasedPlan.id);
 
     return { syncJobs: [result.syncJob] };
   }
 
   /**
-   * Resets `user.purchaseDiscount` to 0, but only when it is currently > 0
-   * (guarded `updateMany` → no write / no throw otherwise). The PURCHASE
-   * discount is a one-time "discount on next purchase"; the permanent
-   * PERSONAL discount is never touched here.
+   * The plans a combined renewal actually priced.
+   *
+   * Read from each item's own subscription snapshot, because that is what
+   * `priceRenewalItems` used when it built the amount.
    */
-  private async consumePurchaseDiscount(userId: string): Promise<void> {
+  private async resolveCombinedRenewalPlanIds(
+    items: readonly { readonly subscriptionId: string | null }[],
+  ): Promise<string[]> {
+    const ids = items
+      .map((item) => item.subscriptionId)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    if (ids.length === 0) return [];
+    const subscriptions = await this.prismaService.subscription.findMany({
+      where: { id: { in: ids } },
+      select: { planSnapshot: true },
+    });
+    const planIds = new Set<string>();
+    for (const subscription of subscriptions) {
+      const snapshot = subscription.planSnapshot as Record<string, unknown> | null;
+      const planId = typeof snapshot?.id === 'string' ? snapshot.id : null;
+      if (planId !== null) planIds.add(planId);
+    }
+    return [...planIds];
+  }
+
+  /**
+   * Spends the one-time purchase discount now that a plan purchase completed.
+   *
+   * TWO PLACES hold one, and both have to be settled or the customer keeps it:
+   *
+   *  - `user.purchaseDiscount`, the original bare percentage. Donor imports and
+   *    an older half of the system still write it, so it is still reset.
+   *  - a `UserPendingDiscount` GRANT, which carries the restrictions the
+   *    promocode attached — which plans it may be spent on, and until when.
+   *    Only the grant the catalog actually quoted is marked spent: a customer
+   *    holding a general 10% and a six-month-only 20% who buys one month must
+   *    keep the 20%, because it was never applied.
+   *
+   * The choice is made by the SAME function the catalog priced with. Two
+   * different rules would mean a price on screen that differs from the amount
+   * charged — and here the difference would be permanent, because the wrong
+   * grant would be burned.
+   *
+   * The PERSONAL discount is permanent and never touched here.
+   */
+  private async consumePurchaseDiscount(
+    userId: string,
+    planId: string | null,
+    /**
+     * Plans of every line of a COMBINED renewal. Each line was priced with its
+     * own plan, so a grant restricted to one of them WAS applied — asking with
+     * a single `null` plan said it was not, and the grant was never marked
+     * spent. The customer could take the same one-time discount off every
+     * combined renewal, indefinitely.
+     */
+    combinedItems: readonly { readonly subscriptionId: string | null }[] = [],
+  ): Promise<void> {
     // Best-effort: this runs AFTER the subscription has been committed. It must
     // never throw out of `applyCompletedTransaction`, otherwise the reconciler's
     // fulfilment claim would be released and the (already-provisioned) payment
     // re-provisioned on retry. A missed discount reset is harmless vs a double.
     try {
+      const grants = await this.prismaService.userPendingDiscount.findMany({
+        where: { userId, consumedAt: null },
+        select: {
+          id: true,
+          percent: true,
+          allowedPlanIds: true,
+          expiresAt: true,
+          consumedAt: true,
+        },
+      });
+      // ── THE SAME INPUTS THE PRICE WAS BUILT FROM ──────────────────────
+      //
+      // `legacyPercent: 0` used to be passed here while both pricing paths
+      // passed the real column. Same function, different inputs — which is the
+      // same defect as two different functions, only harder to see. With a
+      // legacy column larger than every grant, the customer was CHARGED at the
+      // column and a grant that had never reduced anything was burned.
+      const user = await this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { purchaseDiscount: true },
+      });
+      const now = new Date();
+      // Resolved INSIDE the guard. Called as an argument it ran before the
+      // try block, so a failure here could throw out of
+      // `applyCompletedTransaction` — which releases the fulfilment claim and
+      // re-provisions an already-provisioned payment on retry. A missed
+      // discount settlement is harmless next to that.
+      const candidatePlans =
+        planId === null ? await this.resolveCombinedRenewalPlanIds(combinedItems) : [planId];
+      // A combined renewal prices each line separately, so the grant to settle
+      // is the best one that applied to ANY of them.
+      let chosen = pickBestDiscount({
+        grants,
+        planId: null,
+        legacyPercent: user?.purchaseDiscount ?? 0,
+        now,
+      });
+      for (const candidate of candidatePlans) {
+        const forPlan = pickBestDiscount({
+          grants,
+          planId: candidate,
+          legacyPercent: user?.purchaseDiscount ?? 0,
+          now,
+        });
+        if (forPlan.percent > chosen.percent || (chosen.grantId === null && forPlan.grantId !== null)) {
+          chosen = forPlan;
+        }
+      }
+      if (chosen.grantId !== null) {
+        await this.prismaService.userPendingDiscount.updateMany({
+          where: { id: chosen.grantId, consumedAt: null },
+          data: { consumedAt: new Date() },
+        });
+      }
       await this.prismaService.user.updateMany({
         where: { id: userId, purchaseDiscount: { gt: 0 } },
         data: { purchaseDiscount: 0 },

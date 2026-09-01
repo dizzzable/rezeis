@@ -22,10 +22,22 @@ import {
   countCommittedTrialClaimUnits,
   findResumablePaidTrialClaim,
 } from '../../subscriptions/services/trial-claim-ledger.util';
+import {
+  pickBestDiscount,
+  type PendingDiscountGrant,
+} from '../../../common/utils/pending-discount.util';
 import { PricingService } from './pricing.service';
 
 interface CatalogUserContext {
   readonly user: Pick<User, 'id' | 'purchaseDiscount' | 'personalDiscount'>;
+  /**
+   * Unspent discount grants, loaded ONCE for the whole catalog.
+   *
+   * A grant may be restricted to certain plans, so the discount is no longer a
+   * property of the user — it is a property of the pair (user, plan), and the
+   * catalog prices every plan. Loading them per plan would be a query per row.
+   */
+  readonly pendingDiscounts: readonly PendingDiscountGrant[];
   readonly hasAnySubscription: boolean;
   readonly isInvitedUser: boolean;
   /** Trials the user has already claimed (free or paid), counted by their
@@ -86,6 +98,16 @@ export class PlanCatalogService {
     if (user === null) {
       throw new NotFoundException('User not found');
     }
+    const pendingDiscounts = await this.prismaService.userPendingDiscount.findMany({
+      where: { userId, consumedAt: null },
+      select: {
+        id: true,
+        percent: true,
+        allowedPlanIds: true,
+        expiresAt: true,
+        consumedAt: true,
+      },
+    });
     const [subscription, referral] = await Promise.all([
       this.prismaService.subscription.findFirst({
         where: {
@@ -131,6 +153,7 @@ export class PlanCatalogService {
     );
     return {
       user,
+      pendingDiscounts,
       hasAnySubscription: subscription !== null,
       isInvitedUser: referral !== null || partnerReferral !== null,
       trialClaims,
@@ -216,6 +239,7 @@ export class PlanCatalogService {
                   gateway,
                   durationPrices: duration.prices,
                   userContext,
+                  planId: plan.id,
                 }),
               )
               .filter((value): value is PlanCatalogPriceInterface => value !== null),
@@ -240,6 +264,8 @@ export class PlanCatalogService {
     readonly gateway: PaymentGateway;
     readonly durationPrices: PlanRecord['durations'][number]['prices'];
     readonly userContext: CatalogUserContext | null;
+    /** Which plan is being priced — a discount grant may be restricted to some. */
+    readonly planId: string;
   }): PlanCatalogPriceInterface | null {
     const matchingPrice = input.durationPrices.find(
       (price) => price.currency === input.gateway.currency,
@@ -250,7 +276,16 @@ export class PlanCatalogService {
     const pricingSnapshot = this.pricingService.buildSnapshot({
       amount: matchingPrice.price.toString(),
       currency: matchingPrice.currency as Currency,
-      purchaseDiscount: input.userContext?.user.purchaseDiscount ?? 0,
+      // The discount for THIS plan. A grant may be restricted to certain
+      // plans, so it is not a property of the user alone — and a catalog that
+      // showed a restricted discount on every plan would quote a price the
+      // checkout then refuses to honour.
+      purchaseDiscount: pickBestDiscount({
+        grants: input.userContext?.pendingDiscounts ?? [],
+        planId: input.planId,
+        legacyPercent: input.userContext?.user.purchaseDiscount ?? 0,
+        now: new Date(),
+      }).percent,
       personalDiscount: input.userContext?.user.personalDiscount ?? 0,
     });
     return {

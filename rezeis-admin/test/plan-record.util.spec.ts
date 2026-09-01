@@ -50,6 +50,19 @@ describe('promocode mappers', () => {
       rewardType: PromocodeRewardType.SUBSCRIPTION,
       reward: 30,
       plan: null,
+      // A record with no rows in `promocode_actions` still yields ONE action,
+      // built from the legacy columns. Codes written by an older panel and by
+      // donor imports have no rows, and they have to keep working exactly as
+      // they did rather than activating to nothing.
+      actions: [
+        {
+          type: 'SUBSCRIPTION',
+          value: 30,
+          plan: null,
+          discountAllowedPlanIds: [],
+          discountValidForDays: null,
+        },
+      ],
       lifetime: null,
       expiresAt: null,
       maxActivations: 100,
