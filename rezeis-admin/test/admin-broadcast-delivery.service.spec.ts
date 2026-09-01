@@ -176,7 +176,11 @@ describe('BroadcastDeliveryService', () => {
     const staging = eventCalls.find((args) =>
       JSON.stringify(args).includes('recipientCount'),
     ) as readonly unknown[] | undefined;
-    assert.equal(staging?.[0], EVENT_TYPES.SYSTEM_BROADCAST_SENT);
+    // Staging raises BROADCAST_STARTED. It used to raise the very card the
+    // finaliser raises — 📢 «Рассылка отправлена» — before a single message
+    // had gone anywhere, so the operator was told a broadcast was sent twice
+    // per broadcast and the first one was a lie.
+    assert.equal(staging?.[0], EVENT_TYPES.BROADCAST_STARTED);
   });
 
   it('hands the channel post to the durable relay queue, never to a one-shot notifier call', async () => {
@@ -504,6 +508,8 @@ describe('BroadcastDeliveryService', () => {
         sent: 1,
         failed: 0,
         unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
       });
     });
 
@@ -579,6 +585,8 @@ describe('BroadcastDeliveryService', () => {
         sent: 1,
         failed: 0,
         unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
       });
     });
 
@@ -639,10 +647,15 @@ describe('BroadcastDeliveryService', () => {
       } as never,
     );
 
+    // The tally is the point: the channel had no counter of any kind, so an
+    // operator could not tell one letter sent from none, and a broadcast with
+    // SMTP switched off still reported completion.
     assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
       sent: 1,
       failed: 0,
       unresolved: 0,
+      emailAttempted: 1,
+      emailSent: 1,
     });
     assert.equal(emailCalls.length, 1);
     const email = emailCalls[0] as { readonly to: string; readonly subject: string };
@@ -747,6 +760,8 @@ describe('BroadcastDeliveryService', () => {
         sent: 0,
         failed: 1,
         unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
       });
     });
 
@@ -813,6 +828,8 @@ describe('BroadcastDeliveryService', () => {
         sent: 0,
         failed: 1,
         unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
       });
     });
 
@@ -889,6 +906,8 @@ describe('BroadcastDeliveryService', () => {
           sent: 1,
           failed: 0,
           unresolved: 0,
+          emailAttempted: 0,
+          emailSent: 0,
         });
       },
     );

@@ -206,6 +206,31 @@ export class BroadcastDeliveryService {
       return [];
     }
     if (broadcast.status !== BroadcastStatus.DRAFT) {
+      // ── NOT AN EMPTY ANSWER: RESUME ────────────────────────────────────
+      //
+      // Staging is claim-once on purpose — a retry must not create a second set
+      // of recipient rows or post to the channel twice. But the caller uses
+      // this return value to decide WHICH BATCHES TO ENQUEUE, and that loop
+      // lives outside the claim. So a throw partway through it (a Redis blip, a
+      // container restart mid-deploy) used to end like this: the retry found
+      // PROCESSING, returned nothing, and the start job reported success while
+      // every batch it had not yet enqueued was lost for good. That is how a
+      // 400-recipient broadcast reached 40 people with no error anywhere.
+      //
+      // Handing back the rows still PENDING makes the retry a RESUME: the ones
+      // already dispatched are SENT or FAILED and are not in this list, so
+      // nobody is written to twice.
+      if (broadcast.status === BroadcastStatus.PROCESSING) {
+        const outstanding = await this.prismaService.broadcastMessage.findMany({
+          where: { broadcastId, status: BroadcastMessageStatus.PENDING },
+          select: { id: true },
+          orderBy: { createdAt: 'asc' },
+        });
+        this.logger.warn(
+          `Broadcast ${broadcastId} already claimed — resuming ${outstanding.length} undispatched recipients`,
+        );
+        return outstanding.map((m) => m.id);
+      }
       this.logger.warn(`Broadcast ${broadcastId} not DRAFT (current: ${broadcast.status})`);
       return [];
     }
@@ -298,8 +323,12 @@ export class BroadcastDeliveryService {
         data: { totalCount: recipientUserIds.length },
       });
 
+      // NOT `SYSTEM_BROADCAST_SENT`. This fires before a single message has
+      // gone anywhere, and it used to raise the same 📢 "Рассылка отправлена"
+      // card as the finaliser — so the operator got "sent" twice per broadcast,
+      // the first time before delivery had started.
       this.systemEventsService.info(
-        EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+        EVENT_TYPES.BROADCAST_STARTED,
         'SYSTEM',
         `Broadcast staging: ${messages.length} recipients`,
         { broadcastId, recipientCount: messages.length, channelPost },
@@ -364,7 +393,15 @@ export class BroadcastDeliveryService {
     broadcastId: string,
     messageIds: string[],
     options?: { readonly isFinalAttempt?: boolean },
-  ): Promise<{ sent: number; failed: number; unresolved: number }> {
+  ): Promise<{
+    sent: number;
+    failed: number;
+    unresolved: number;
+    /** Recipients this batch had an address for; `0` means nobody was mailed. */
+    emailAttempted: number;
+    /** Of those, the ones SMTP accepted. */
+    emailSent: number;
+  }> {
     // BOT_TOKEN is only needed for DIRECT media delivery (sendPhoto/sendVideo).
     // Text broadcasts are delivered via the reiwa bot (notification path), so a
     // missing token must NOT fail the whole batch — web-push + cabinet feed +
@@ -376,7 +413,7 @@ export class BroadcastDeliveryService {
       where: { id: broadcastId },
       select: { id: true, status: true, payload: true, promoCode: true },
     });
-    if (!broadcast) return { sent: 0, failed: 0, unresolved: 0 };
+    if (!broadcast) return { sent: 0, failed: 0, unresolved: 0, emailAttempted: 0, emailSent: 0 };
 
     // If broadcast was canceled mid-flight, skip remaining
     if (broadcast.status === BroadcastStatus.CANCELED) {
@@ -384,7 +421,7 @@ export class BroadcastDeliveryService {
         where: { id: { in: messageIds }, status: BroadcastMessageStatus.PENDING },
         data: { status: BroadcastMessageStatus.CANCELED },
       });
-      return { sent: 0, failed: 0, unresolved: 0 };
+      return { sent: 0, failed: 0, unresolved: 0, emailAttempted: 0, emailSent: 0 };
     }
 
     const payload = broadcast.payload as Record<string, unknown> | null;
@@ -398,7 +435,13 @@ export class BroadcastDeliveryService {
     if (!text && !mediaFileId) {
       await this.failBatch(messageIds, 'Empty broadcast: no text and no media');
       await this.checkAndFinalize(broadcastId);
-      return { sent: 0, failed: messageIds.length, unresolved: 0 };
+      return {
+        sent: 0,
+        failed: messageIds.length,
+        unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
+      };
     }
 
     const hasMedia = mediaFileId !== null && (mediaType === 'photo' || mediaType === 'video');
@@ -443,6 +486,11 @@ export class BroadcastDeliveryService {
 
     let sent = 0;
     let failed = 0;
+    // Counted per batch and reported with it. The email channel had NO tally
+    // of any kind: an operator could not tell fifty letters sent from zero,
+    // and with SMTP switched off the panel still said the broadcast completed.
+    let emailAttempted = 0;
+    let emailSent = 0;
     let unresolved = 0;
     /**
      * Circuit breaker.
@@ -463,10 +511,16 @@ export class BroadcastDeliveryService {
     let circuitOpen = false;
 
     for (const message of messages) {
-      if (circuitOpen) break;
       const user = await this.prismaService.user.findUnique({
         where: { id: message.userId },
-        select: { telegramId: true, email: true },
+        // `webAccount.email` comes along because `User.email` alone is NOT where
+        // this codebase keeps an address. Every OAuth sign-up deliberately
+        // leaves `User.email` unset (see `external-auth.service.ts`) and every
+        // AltShop import writes to the web account only — so reading one column
+        // silently skipped all of them, with no log line and no counter. The
+        // canonical resolution is `User.email ?? WebAccount.email`, used by the
+        // email bridge, support and the block flow alike.
+        select: { telegramId: true, email: true, webAccount: { select: { email: true } } },
       });
       if (!user) {
         await this.markFailed(message.id, 'User not found');
@@ -474,19 +528,28 @@ export class BroadcastDeliveryService {
         continue;
       }
 
-      // Additive channel: email. Best-effort, fire-and-forget — never
-      // affects the SENT/FAILED outcome of the message (the app fanout below
-      // is the channel that decides that). Skips silently when the user has
-      // no email on file or SMTP delivery isn't wired.
-      if (emailEnabled && user.email && this.emailDeliveryService) {
+      // ── Additive channel: email ──────────────────────────────────────
+      //
+      // Attempted BEFORE the Telegram circuit breaker is honoured, and outside
+      // it. The breaker exists because the Telegram relay is unwell; SMTP is a
+      // different transport with a different failure, and cutting it along with
+      // Telegram left healthy mail unsent for the rest of every batch.
+      //
+      // Still best-effort for the message's own SENT/FAILED verdict — the app
+      // fanout below decides that — but the attempt is now COUNTED, so an
+      // operator can tell "no mail was sent" from "mail was sent".
+      const emailAddress = user.email ?? user.webAccount?.email ?? null;
+      if (emailEnabled && emailAddress && this.emailDeliveryService) {
+        emailAttempted++;
         try {
           await this.emailDeliveryService.send({
-            to: user.email,
+            to: emailAddress,
             subject: title?.trim() || 'Уведомление',
             templateType: '__broadcast__',
             variables: {},
             rawHtml: renderBroadcastEmailHtml(title, text),
           });
+          emailSent++;
         } catch (err: unknown) {
           this.logger.warn(
             `Broadcast email failed for ${message.userId}: ${
@@ -495,6 +558,10 @@ export class BroadcastDeliveryService {
           );
         }
       }
+
+      // The Telegram breaker is honoured HERE — after the email attempt above,
+      // so a sick relay stops the Telegram fan-out and nothing else.
+      if (circuitOpen) break;
 
       // Deliver via the notification fanout: cabinet feed (always) + web-push
       // (always). The fanout's Telegram leg is skipped here — for TEXT we send
@@ -717,7 +784,7 @@ export class BroadcastDeliveryService {
     }
 
     await this.checkAndFinalize(broadcastId);
-    return { sent, failed, unresolved };
+    return { sent, failed, unresolved, emailAttempted, emailSent };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -975,18 +1042,52 @@ export class BroadcastDeliveryService {
       this.prismaService.broadcastMessage.count({ where: { broadcastId, status: BroadcastMessageStatus.FAILED } }),
     ]);
 
+    // ── THE STATUS FOLLOWS THE OUTCOME ──────────────────────────────────
+    //
+    // COMPLETED used to be written unconditionally, and `FAILED` was reachable
+    // only when audience resolution itself threw. So a broadcast that reached
+    // 40 of 400 people showed the same green "Завершено" as one that reached
+    // all of them, and announced itself with an INFO card titled "Рассылка
+    // отправлена". That is why nobody was told: there was no path that could
+    // tell them.
+    const nothingArrived = sentCount === 0 && failedCount > 0;
     await this.prismaService.broadcast.update({
       where: { id: broadcastId },
-      data: { status: BroadcastStatus.COMPLETED, successCount: sentCount, failedCount, completedAt: new Date() },
+      data: {
+        status: nothingArrived ? BroadcastStatus.FAILED : BroadcastStatus.COMPLETED,
+        successCount: sentCount,
+        failedCount,
+        completedAt: new Date(),
+      },
     });
 
     this.logger.log(`Broadcast ${broadcastId} completed: ${sentCount} sent, ${failedCount} failed`);
-    this.systemEventsService.info(
-      EVENT_TYPES.SYSTEM_BROADCAST_SENT,
-      'SYSTEM',
-      `Broadcast completed: ${sentCount} sent, ${failedCount} failed`,
-      { broadcastId, sentCount, failedCount },
-    );
+
+    // And the announcement follows it. A partial delivery is a WARNING the
+    // operator's Telegram actually surfaces, not an INFO card that reads as
+    // success — the whole point of the report is to be seen without asking.
+    if (nothingArrived) {
+      this.systemEventsService.error(
+        EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+        'SYSTEM',
+        `Broadcast delivered to NOBODY: ${failedCount} recipients failed`,
+        { broadcastId, sentCount, failedCount },
+      );
+    } else if (failedCount > 0) {
+      this.systemEventsService.warn(
+        EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+        'SYSTEM',
+        `Broadcast partially delivered: ${sentCount} sent, ${failedCount} failed`,
+        { broadcastId, sentCount, failedCount },
+      );
+    } else {
+      this.systemEventsService.info(
+        EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+        'SYSTEM',
+        `Broadcast completed: ${sentCount} sent`,
+        { broadcastId, sentCount, failedCount },
+      );
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

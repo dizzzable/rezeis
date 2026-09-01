@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { runBullMqEnqueueWithTimeout } from '../../../common/queue/bullmq-enqueue-options';
 import {
   BROADCAST_BATCH_SIZE,
   BROADCAST_DELIVERY_QUEUE,
@@ -79,14 +80,25 @@ export class BroadcastQueueService {
     return job.id ?? data.broadcastId;
   }
 
-  /** Enqueue a batch delivery job. Called by the processor after staging. */
+  /**
+   * Enqueue a batch delivery job. Called by the processor after staging.
+   *
+   * Wrapped in the shared enqueue timeout like every other producer in this
+   * repository (relay, telegram-direct, automations). It was the one that was
+   * not, and an unbounded `queue.add` here is the likeliest way the start job's
+   * fan-out loop ever died halfway — which used to lose every batch it had not
+   * reached. The loop resumes now, but a hang that outlives the stall timeout
+   * is still worth failing fast on.
+   */
   public async enqueueBatch(data: BroadcastBatchJobData): Promise<void> {
-    await this.queue.add(BROADCAST_JOBS.DELIVER_BATCH, data, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 10_000 },
-      removeOnComplete: { age: 86_400 },
-      removeOnFail: { age: 604_800 },
-    });
+    await runBullMqEnqueueWithTimeout(() =>
+      this.queue.add(BROADCAST_JOBS.DELIVER_BATCH, data, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 10_000 },
+        removeOnComplete: { age: 86_400 },
+        removeOnFail: { age: 604_800 },
+      }),
+    );
   }
 
   // ── Edit ────────────────────────────────────────────────────────────────

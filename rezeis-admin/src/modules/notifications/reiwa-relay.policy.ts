@@ -127,6 +127,22 @@ export const RELAY_EVENT_POLICY: Readonly<Record<ReiwaRelayEvent, RelayEventPoli
  *    for them, and demanding more would be demanding evidence that does not
  *    exist.
  */
+/**
+ * ── Why `reiwa.channel.broadcast` is NOT held to `confirmed` ──────────────
+ *
+ * It was, briefly, while fixing a channel post that reported success after
+ * Telegram refused it. That refusal is fixed where it belongs: the bot used to
+ * answer 204 on a Telegram 4xx, and a 204 means `unconfirmed`, which this
+ * function counts as delivered. The bot now answers 422 for a refusal — a
+ * non-2xx, so `rejected`, so undelivered and alerted — and echoes Telegram's
+ * message id on success.
+ *
+ * Raising the bar HERE as well would have added nothing and cost something:
+ * the panel and the bot ship as separate images, so a panel that demands a
+ * message id while an older bot still answers a bodiless 204 would retry every
+ * channel post to exhaustion and then report each one undelivered. The fix
+ * belongs on the side that knows what happened.
+ */
 export function isRelayDelivered(event: ReiwaRelayEvent, outcome: NotifyDeliveryResult): boolean {
   if (event === 'reiwa.user.notify') return outcome.status === 'confirmed';
   return outcome.status === 'confirmed' || outcome.status === 'unconfirmed';

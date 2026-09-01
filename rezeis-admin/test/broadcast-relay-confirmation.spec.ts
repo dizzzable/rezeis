@@ -202,7 +202,7 @@ describe('a broadcast row only claims what the relay proved', () => {
 
     const result = await h.service.deliverBatch('broadcast-1', h.ids);
 
-    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0, emailAttempted: 0, emailSent: 0 });
     assert.equal(h.updates[0]?.data['status'], BroadcastMessageStatus.SENT);
     assert.equal(h.updates[0]?.data['telegramMessageId'], 777n);
   });
@@ -216,7 +216,7 @@ describe('a broadcast row only claims what the relay proved', () => {
 
     const result = await h.service.deliverBatch('broadcast-1', h.ids);
 
-    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0, emailAttempted: 0, emailSent: 0 });
     assert.deepStrictEqual(statusesWritten(h.updates), [BroadcastMessageStatus.FAILED]);
   });
 
@@ -228,7 +228,7 @@ describe('a broadcast row only claims what the relay proved', () => {
 
     const result = await h.service.deliverBatch('broadcast-1', h.ids);
 
-    assert.deepStrictEqual(result, { sent: 0, failed: 0, unresolved: 1 });
+    assert.deepStrictEqual(result, { sent: 0, failed: 0, unresolved: 1, emailAttempted: 0, emailSent: 0 });
     assert.deepStrictEqual(statusesWritten(h.updates), [], 'no status may be written yet');
     // The attempt is still recorded on the row so an operator looking at a
     // stuck broadcast can see why.
@@ -243,7 +243,7 @@ describe('a broadcast row only claims what the relay proved', () => {
 
     const result = await h.service.deliverBatch('broadcast-1', h.ids, { isFinalAttempt: true });
 
-    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0, emailAttempted: 0, emailSent: 0 });
     assert.deepStrictEqual(statusesWritten(h.updates), [BroadcastMessageStatus.FAILED]);
   });
 
@@ -256,7 +256,7 @@ describe('a broadcast row only claims what the relay proved', () => {
 
     const result = await h.service.deliverBatch('broadcast-1', h.ids);
 
-    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0, emailAttempted: 0, emailSent: 0 });
     assert.equal(h.updates[0]?.data['status'], BroadcastMessageStatus.SENT);
     assert.equal(h.updates[0]?.data['telegramMessageId'], null);
     // The green row still says the Telegram leg did not happen.
@@ -301,7 +301,7 @@ describe('re-running a batch does not re-deliver what it already delivered', () 
     assert.deepStrictEqual(h.feedCreates, [], 'the feed row already exists');
     // The Telegram leg still runs — that is the leg that failed last time.
     assert.equal(h.relayCalls.length, 1);
-    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0, emailAttempted: 0, emailSent: 0 });
   });
 
   it('still writes the feed row on a first attempt', async () => {
@@ -346,7 +346,7 @@ describe('re-running a batch does not re-deliver what it already delivered', () 
     assert.equal(h.feedRows.length, 1, 'exactly one feed row survives the retry');
     // The retry still ATTEMPTS the leg that failed; it just cannot prove one.
     assert.equal(h.relayCalls.length, 1);
-    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0, emailAttempted: 0, emailSent: 0 });
   });
 
   it('does write the feed row on a retry of a recipient who never got one', async () => {
@@ -361,7 +361,7 @@ describe('re-running a batch does not re-deliver what it already delivered', () 
     const result = await h.service.retryBatch('broadcast-1', h.ids);
 
     assert.equal(h.feedCreates.length, 1, 'nothing was ever written for this recipient');
-    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0 });
+    assert.deepStrictEqual(result, { sent: 1, failed: 0, unresolved: 0, emailAttempted: 0, emailSent: 0 });
   });
 });
 
@@ -383,7 +383,13 @@ describe('the delivery circuit breaker', () => {
     );
     // Everything is still owed: the five that timed out plus the seven never
     // attempted. None of them is SENT and none is written off.
-    assert.deepStrictEqual(result, { sent: 0, failed: 0, unresolved: recipients });
+    assert.deepStrictEqual(result, {
+      sent: 0,
+      failed: 0,
+      unresolved: recipients,
+      emailAttempted: 0,
+      emailSent: 0,
+    });
     assert.deepStrictEqual(statusesWritten(h.updates), []);
   });
 
@@ -410,6 +416,12 @@ describe('the delivery circuit breaker', () => {
     const result = await h.service.deliverBatch('broadcast-1', h.ids);
 
     assert.equal(h.relayCalls.length, recipients, 'every recipient must still be attempted');
-    assert.deepStrictEqual(result, { sent: 0, failed: recipients, unresolved: 0 });
+    assert.deepStrictEqual(result, {
+      sent: 0,
+      failed: recipients,
+      unresolved: 0,
+      emailAttempted: 0,
+      emailSent: 0,
+    });
   });
 });
