@@ -95,23 +95,31 @@ export function renderOperatorHtml(raw: string): string {
     return name === 'br' && slash === '' ? '<br>' : `<${slash}${name}>`;
   });
 
-  // Anchors, one attribute only, and only when the scheme is one we allow.
-  // The href is re-escaped rather than passed through: it arrives here already
-  // escaped once, and `&amp;` inside a query string is what an href should
-  // contain anyway.
+  // ── Anchors, PAIRED IN ORDER ────────────────────────────────────────
+  //
+  // Openers and closers are matched in one pass so a closer belongs to the
+  // opener it follows. Counting them separately — accept N openers, then
+  // un-escape the first N closers wherever they fall — gets this wrong the
+  // moment a refused anchor precedes an accepted one: the refused anchor's
+  // closer becomes real markup and the accepted anchor's stays escaped, so the
+  // surviving link is never closed and swallows the entire rest of the email.
+  // A root-relative `<a href="/promo">` before a good link is enough to do it.
+  let openAnchors = 0;
   out = out.replace(
-    /&lt;a\s+href\s*=\s*(?:"|&quot;|')([^"'&<>]*(?:&amp;[^"'&<>]*)*)(?:"|&quot;|')\s*&gt;/gi,
-    (whole, href: string) => {
+    /&lt;a\s+href\s*=\s*(?:"|&quot;|')([^"'&<>]*(?:&amp;[^"'&<>]*)*)(?:"|&quot;|')\s*&gt;|&lt;\/a&gt;/gi,
+    (whole, href?: string) => {
+      if (href === undefined) {
+        // A closer with no accepted opener stays text; otherwise it closes one.
+        if (openAnchors === 0) return whole;
+        openAnchors -= 1;
+        return '</a>';
+      }
       const plainHref = href.replace(/&amp;/g, '&');
       if (!SAFE_HREF.test(plainHref) || hrefHasSeparator(plainHref)) return whole;
+      openAnchors += 1;
       return `<a href="${escapeAttribute(plainHref)}" target="_blank" rel="noopener noreferrer">`;
     },
   );
-  // Only close anchors that were actually opened. A refused opener with a
-  // surviving `</a>` would leave a stray closing tag in the body.
-  const opened = (out.match(/<a href=/g) ?? []).length;
-  let closed = 0;
-  out = out.replace(/&lt;\/a&gt;/gi, (whole) => (closed++ < opened ? '</a>' : whole));
 
   // Line breaks last, so a `\n` inside markup the operator wrote still shows.
   return out.replace(/\r\n|\r|\n/g, '<br>');

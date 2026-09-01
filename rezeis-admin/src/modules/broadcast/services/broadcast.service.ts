@@ -48,18 +48,35 @@ export class BroadcastService {
     broadcastId: string,
     scheduledFor: Date | null,
     queueJobId: string,
-  ): Promise<void> {
-    if (scheduledFor === null) {
-      await this.prismaService.broadcast.update({
-        where: { id: broadcastId },
-        data: { queueJobId, scheduledAt: null },
-      });
-      return;
-    }
-    await this.prismaService.broadcast.update({
-      where: { id: broadcastId },
-      data: { status: BroadcastStatus.SCHEDULED, scheduledAt: scheduledFor, queueJobId },
+  ): Promise<boolean> {
+    // ── GUARDED BY STATUS, and that is the whole point ────────────────────
+    //
+    // Unguarded, this was a way to write SCHEDULED over PROCESSING. The window
+    // is small and entirely reachable: a send fires at 10:00, the operator
+    // reschedules at 10:00:01, and between the controller reading the status
+    // and calling this there are two Redis round trips. The claim lands in
+    // that gap, PROCESSING is overwritten, the running send becomes invisible
+    // to the reconciler — and the second job later finds the row SCHEDULED,
+    // wins the claim, and stages the ENTIRE audience a second time. New
+    // message rows mean new relay ids, so nothing dedups it: every recipient
+    // gets the broadcast twice, plus a second channel post and a second email.
+    //
+    // `updateMany` with the precondition makes the write lose that race
+    // instead of winning it. `false` means the broadcast moved on and the
+    // caller must not pretend it scheduled anything.
+    const data =
+      scheduledFor === null
+        ? { queueJobId, scheduledAt: null, status: BroadcastStatus.DRAFT }
+        : { status: BroadcastStatus.SCHEDULED, scheduledAt: scheduledFor, queueJobId };
+
+    const { count } = await this.prismaService.broadcast.updateMany({
+      where: {
+        id: broadcastId,
+        status: { in: [BroadcastStatus.DRAFT, BroadcastStatus.SCHEDULED] },
+      },
+      data,
     });
+    return count === 1;
   }
 
   public async listDrafts(): Promise<readonly BroadcastInterface[]> {

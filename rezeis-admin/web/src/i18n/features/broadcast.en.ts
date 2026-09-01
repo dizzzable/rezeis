@@ -102,6 +102,7 @@ export const en = {
     },
     toast: {
       created: 'Broadcast started',
+      draftSaved: 'Draft saved',
       retryStarted: 'Retry of undelivered recipients started',
       retryFailed: 'Could not start the retry',
       scheduleNeedsFutureTime: 'Pick a date and time at least a minute out — otherwise the broadcast goes now',
@@ -119,7 +120,7 @@ export const en = {
       off: 'Now',
       datePlaceholder: 'Pick a date',
       timeLabel: 'Send time',
-      hint: 'Pick a date and time to send (in your timezone). If the time has already passed, it sends immediately.',
+      hint: 'Pick a date and time to send (in your timezone). The time must be at least a minute out, otherwise the send is refused.',
       willSendIn: 'Will send in about {{minutes}} min.',
     },
     edit: {
@@ -199,6 +200,7 @@ export const en = {
         telegramChannelChatIdInvalid: 'Enter a chat id (e.g. -1001234567890) or a channel @username.',
       },
       sendNow: 'Create and send',
+      saveDraft: 'Save',
       testSend: 'Test (dev)',
       scheduleSend: 'Schedule',
       send_one: 'Send to {{count}} user',

@@ -34,12 +34,20 @@ describe('broadcast form schema', () => {
 
     expect(result.success).toBe(true)
     if (!result.success) return
+    // EVERY key, including the empty ones. This body is also the PATCH body,
+    // and the update merges only the keys it receives — so an omitted empty
+    // field meant "keep what is stored", and switching the email channel off or
+    // clearing the promo tag silently kept the old value.
     expect(result.data).toEqual({
       audience: 'ACTIVE_SUBSCRIBERS',
+      promoCode: '',
       payload: {
+        title: '',
         text: 'Hello subscribers',
         mediaType: 'photo',
         mediaFileId: 'https://cdn.example.com/banner.jpg?version=1',
+        emailEnabled: false,
+        telegramChannelChatId: '',
       },
     })
   })
@@ -57,9 +65,14 @@ describe('broadcast form schema', () => {
     if (!result.success) return
     expect(result.data).toEqual({
       audience: 'ALL',
+      promoCode: '',
       payload: {
+        title: '',
+        text: '',
         mediaType: 'video',
         mediaFileId: 'BAACAgIAAxkBAAIB12345',
+        emailEnabled: false,
+        telegramChannelChatId: '',
       },
     })
   })
@@ -97,12 +110,16 @@ describe('broadcast form schema', () => {
     expect(result.data.promoCode).toBe('SUMMER-25')
   })
 
-  it('omits the promo code field when left blank', () => {
+  it('sends an EMPTY promo code rather than omitting it', () => {
+    // The update DTO documents `promoCode: ''` as the way to clear the tag.
+    // Omitting the key instead is indistinguishable from "leave it alone", so
+    // removing a promo from a draft used to report success and ship the button
+    // anyway.
     const result = createBroadcastFormSchema(messages).safeParse(validDraft())
 
     expect(result.success).toBe(true)
     if (!result.success) return
-    expect('promoCode' in result.data).toBe(false)
+    expect(result.data.promoCode).toBe('')
   })
 
   it('rejects promo codes with illegal characters', () => {
@@ -166,8 +183,11 @@ describe('broadcast form schema', () => {
     const unset = createBroadcastFormSchema(messages).safeParse(validDraft())
     expect(unset.success).toBe(true)
     if (unset.success) {
-      expect('emailEnabled' in unset.data.payload).toBe(false)
-      expect('telegramChannelChatId' in unset.data.payload).toBe(false)
+      // Present and explicitly off, not absent: an absent key on the PATCH
+      // path means "keep the stored value", so switching the channel off
+      // would never take effect.
+      expect(unset.data.payload.emailEnabled).toBe(false)
+      expect(unset.data.payload.telegramChannelChatId).toBe('')
     }
   })
 

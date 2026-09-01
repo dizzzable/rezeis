@@ -407,8 +407,12 @@ describe('AdminBroadcastController', () => {
         },
         // The send endpoint writes the schedule down now: an intent kept
         // only as a delayed Redis job cannot be shown or cancelled.
+        // Returns whether the conditional write took. `false` means the
+        // broadcast moved on between the status read and the write, and the
+        // controller must then refuse rather than report a schedule.
         recordSchedule: async (id: string, at: Date | null, jobId: string) => {
           calls.push(['recordSchedule', id, at?.toISOString() ?? null, jobId]);
+          return true;
         },
       } as never,
       {} as never,

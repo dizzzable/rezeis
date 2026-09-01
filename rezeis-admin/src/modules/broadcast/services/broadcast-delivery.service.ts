@@ -23,6 +23,14 @@ import {
 } from '../broadcast.constants';
 import { buildPromoButton } from '../utils/broadcast-promo.util';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../utils/broadcast-audience.util';
+// THE allow-list renderer. This module used to carry its own escape-everything
+// copy under the same name, so adding the util beside it changed nothing: both
+// call sites kept resolving to the local one, and the reported "HTML does not
+// work in the email" stayed live while its unit tests went green.
+import {
+  renderBroadcastEmailHtml,
+  renderBroadcastEmailText,
+} from '../utils/broadcast-email-html.util';
 
 /**
  * Broadcast delivery service — handles staging, sending, editing, deleting,
@@ -202,6 +210,7 @@ export class BroadcastDeliveryService {
             templateType: '__broadcast__',
             variables: {},
             rawHtml: renderBroadcastEmailHtml(title || null, text),
+            text: renderBroadcastEmailText(title || null, text),
           });
           emailPreviewed = true;
         } catch (err: unknown) {
@@ -596,6 +605,12 @@ export class BroadcastDeliveryService {
             templateType: '__broadcast__',
             variables: {},
             rawHtml: renderBroadcastEmailHtml(title, text),
+            text: renderBroadcastEmailText(title, text),
+            // One letter per recipient per broadcast, whatever happens to the
+            // batch job. The message row id is stable across every retry,
+            // resume and "retry failed" press — the same property the relay
+            // key relies on for the Telegram leg.
+            dedupeKey: `broadcast:${message.id}`,
           });
           emailSent++;
         } catch (err: unknown) {
@@ -1451,25 +1466,6 @@ export class BroadcastDeliveryService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Render the raw HTML body for a broadcast email. Plain text: the operator
- * composes for Telegram (HTML tags / custom-emoji shortcodes), so the email
- * body escapes the text and only preserves line breaks — no `:slug:` or
- * Telegram-only markup leaks into the inbox. Wrapped in the branded layout by
- * `EmailTemplateRendererService` when `rawHtml` is passed to `send()`.
- */
-function renderBroadcastEmailHtml(title: string | null, text: string): string {
-  const escape = (value: string): string =>
-    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const trimmedTitle = title?.trim() ?? '';
-  const bodyHtml = escape(text).replace(/\n/g, '<br>');
-  const headingHtml =
-    trimmedTitle.length > 0
-      ? `<h2 style="margin:0 0 16px 0;color:#111827;font-size:20px;">${escape(trimmedTitle)}</h2>`
-      : '';
-  return `${headingHtml}<div style="color:#374151;font-size:15px;line-height:1.6;">${bodyHtml}</div>`;
 }
 
 function sanitizeTelegramDiagnostic(

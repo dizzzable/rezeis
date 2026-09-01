@@ -103,10 +103,14 @@ describe('BroadcastPage create form validation', () => {
     await waitFor(() => {
       expect(postSpy).toHaveBeenCalledWith('/admin/broadcast/drafts', {
         audience: 'ALL',
+        promoCode: '',
         payload: {
+          title: '',
           text: 'Hello subscribers',
           mediaType: 'photo',
           mediaFileId: 'https://cdn.example.com/banner.jpg',
+          emailEnabled: false,
+          telegramChannelChatId: '',
         },
       })
     })

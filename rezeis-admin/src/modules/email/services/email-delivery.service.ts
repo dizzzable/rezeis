@@ -66,6 +66,11 @@ export class EmailDeliveryService {
     }
 
     await this.emailQueue.add(EMAIL_JOBS.SEND, payload, {
+      // A caller-supplied key becomes the job id, so a second enqueue for the
+      // same recipient and the same reason is collapsed by BullMQ instead of
+      // producing a second letter. Retained for a day, which comfortably
+      // outlives a broadcast's retries.
+      ...(payload.dedupeKey === undefined ? {} : { jobId: `email:${payload.dedupeKey}` }),
       attempts: 3,
       backoff: { type: 'exponential', delay: 30_000 },
       removeOnComplete: { age: 86_400 },
@@ -105,6 +110,10 @@ export class EmailDeliveryService {
         to: payload.to,
         subject: rendered.subject,
         html: rendered.html,
+        // Only when the caller supplied one: nodemailer would otherwise derive a
+        // text part from the HTML, and its derivation of a branded layout is
+        // worse than the caller's own rendering of the body.
+        ...(payload.text === undefined ? {} : { text: payload.text }),
       });
       this.logger.log(`Email sent: to=${payload.to} template=${payload.templateType}`);
       return { success: true };

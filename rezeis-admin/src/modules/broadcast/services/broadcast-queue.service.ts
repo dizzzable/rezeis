@@ -12,6 +12,14 @@ import {
 
 // ── Job Data Interfaces ─────────────────────────────────────────────────────
 
+/**
+ * The one start job a broadcast may have queued at a time.
+ *
+ * Exported so the producer and the two lookups cannot drift apart — they
+ * did, and both lookups spent a release finding nothing.
+ */
+export const startJobId = (broadcastId: string): string => `broadcast-start:${broadcastId}`;
+
 export interface BroadcastStartJobData {
   readonly broadcastId: string;
   /** The admin who pressed send; `null` when the reconciler put it back. */
@@ -67,7 +75,27 @@ export class BroadcastQueueService {
     data: BroadcastStartJobData,
     options?: { delayMs?: number },
   ): Promise<string> {
+    // ── ONE START JOB PER BROADCAST, addressable by name ──────────────────
+    //
+    // `dropPendingStart` and `hasPendingStart` both look the job up by this
+    // exact id. Without it BullMQ assigns a number, both helpers find nothing
+    // for every broadcast that ever existed, and two things break silently:
+    // rescheduling never removes the earlier job (so the old time still fires
+    // and the operator's correction is discarded), and the reconciler's "is a
+    // job already pending" guard is always false, so it piles a second start
+    // job onto a broadcast that is running perfectly well.
+    //
+    // A FINISHED job keeps its id for as long as it is retained (a day, per
+    // `removeOnComplete` below), and BullMQ refuses to add a second job under
+    // an id it still holds — it hands the old one back instead. That would
+    // make the reconciler's re-enqueue a silent no-op on exactly the
+    // broadcasts it exists to rescue, since their start job has already
+    // completed. So the slot is cleared first. `dropPendingStart` declines to
+    // remove an ACTIVE job and answers `false`; the add below then returns the
+    // running job, which is the right outcome — one is already under way.
+    await this.dropPendingStart(data.broadcastId);
     const job = await this.queue.add(BROADCAST_JOBS.START, data, {
+      jobId: startJobId(data.broadcastId),
       attempts: 3,
       backoff: { type: 'exponential', delay: 5_000 },
       removeOnComplete: { age: 86_400 },
@@ -171,7 +199,7 @@ export class BroadcastQueueService {
    * batch job. Returns whether anything was removed.
    */
   public async dropPendingStart(broadcastId: string): Promise<boolean> {
-    const job = await this.queue.getJob(`broadcast-start:${broadcastId}`);
+    const job = await this.queue.getJob(startJobId(broadcastId));
     if (job === undefined) return false;
     try {
       await job.remove();
@@ -186,7 +214,7 @@ export class BroadcastQueueService {
 
   /** Whether a start job for this broadcast is still queued or delayed. */
   public async hasPendingStart(broadcastId: string): Promise<boolean> {
-    const job = await this.queue.getJob(`broadcast-start:${broadcastId}`);
+    const job = await this.queue.getJob(startJobId(broadcastId));
     if (job === undefined) return false;
     const state = await job.getState();
     return state === 'waiting' || state === 'delayed' || state === 'active';

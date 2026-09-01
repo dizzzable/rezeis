@@ -213,6 +213,9 @@ interface BroadcastDraftDetail {
     readonly contact?: string[]
     readonly inactiveDays?: number
   } | null
+  readonly status: string
+  /** Due time of a pending schedule; `null` for a plain draft. */
+  readonly scheduledAt: string | null
   readonly payload: {
     readonly title: string | null
     readonly text: string | null
@@ -437,7 +440,7 @@ export default function BroadcastPage() {
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
-                        {['DRAFT', 'COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
+                        {['DRAFT', 'SCHEDULED', 'COMPLETED', 'CANCELED', 'FAILED'].includes(b.status) && (
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
                               <Button
@@ -682,6 +685,21 @@ function CreateBroadcastForm({
       setContactFilters(filter.contact ?? [])
       setInactiveDays(filter.inactiveDays === undefined ? '' : String(filter.inactiveDays))
     }
+    // ── THE SCHEDULE COMES BACK TOO ──────────────────────────────────────
+    //
+    // Without this the dialog opened with the toggle off, so the one submit
+    // button read "send now" and pressing it mailed the whole audience
+    // immediately while nulling the stored time — the very thing the schedule
+    // guard was added to prevent, reached from the other direction. Opening a
+    // pending send to fix a typo must not be a way to fire it.
+    if (editing.scheduledAt !== null) {
+      const due = new Date(editing.scheduledAt)
+      setScheduleEnabled(true)
+      setScheduledDate(due)
+      setScheduledTime(
+        `${String(due.getHours()).padStart(2, '0')}:${String(due.getMinutes()).padStart(2, '0')}`,
+      )
+    }
   }, [editing])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
@@ -881,6 +899,22 @@ function CreateBroadcastForm({
       ),
   })
 
+  /** Persists the edits and leaves the broadcast where it is. */
+  const saveMutation = useMutation({
+    mutationFn: async (payload: BroadcastCreateRequest) => {
+      await saveDraft(payload)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
+      toast.success(t('broadcastPage.toast.draftSaved'))
+      onClose()
+    },
+    onError: (err: { response?: { data?: { message?: string } }; message?: string }) =>
+      toast.error(
+        err.response?.data?.message ?? err.message ?? t('broadcastPage.toast.createFailed'),
+      ),
+  })
+
   const testMutation = useMutation({
     mutationFn: async (payload: BroadcastCreateRequest) => {
       const draftId = await saveDraft(payload)
@@ -927,6 +961,10 @@ function CreateBroadcastForm({
 
   function handleTest(): void {
     void validateThen((payload) => testMutation.mutate(payload))()
+  }
+
+  function handleSave(): void {
+    void validateThen((payload) => saveMutation.mutate(payload))()
   }
 
   function formatBytes(bytes: number): string {
@@ -1385,15 +1423,35 @@ function CreateBroadcastForm({
 
       <div className="flex flex-wrap gap-3 justify-end">
         <Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
-        <Button
-          type="button"
-          variant="secondary"
-          onClick={handleTest}
-          disabled={createMutation.isPending || testMutation.isPending || uploadMutation.isPending}
-        >
-          {testMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FlaskConical className="h-4 w-4 mr-2" />}
-          {t('broadcastPage.form.testSend')}
-        </Button>
+        {/* SAVE, without sending. Editing a draft had no such button — the
+            footer was Cancel / Test / Send — so closing the dialog threw the
+            corrections away and the only way to keep them was to send. */}
+        {draftId !== null && (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={handleSave}
+            disabled={saveMutation.isPending || createMutation.isPending || uploadMutation.isPending}
+          >
+            {saveMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            {t('broadcastPage.form.saveDraft')}
+          </Button>
+        )}
+        {/* Test send is offered only while composing. On a saved draft it
+            DELETES the row it previewed (the endpoint cleans up after itself),
+            which for an existing broadcast means the operator's work vanishes
+            from under the open dialog. */}
+        {draftId === null && (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={handleTest}
+            disabled={createMutation.isPending || testMutation.isPending || uploadMutation.isPending}
+          >
+            {testMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FlaskConical className="h-4 w-4 mr-2" />}
+            {t('broadcastPage.form.testSend')}
+          </Button>
+        )}
         <Button
           type="submit"
           disabled={createMutation.isPending || testMutation.isPending || uploadMutation.isPending}

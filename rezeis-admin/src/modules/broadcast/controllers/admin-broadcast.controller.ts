@@ -127,7 +127,9 @@ export class AdminBroadcastController {
   ): Promise<{ jobId: string; message: string; scheduledFor?: string }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
     // A SCHEDULED broadcast is re-sendable: that is how an operator moves the
-    // time, and the enqueue below refuses a duplicate job id rather than racing.
+    // time. The enqueue below REPLACES any pending start job for this
+    // broadcast, so the new time is the one that fires and the old job cannot
+    // go out behind it.
     if (broadcast.status !== 'DRAFT' && broadcast.status !== 'SCHEDULED') {
       throw new BadRequestException('Only draft or scheduled broadcasts can be sent');
     }
@@ -141,13 +143,6 @@ export class AdminBroadcastController {
     // date would otherwise throw here with the job already in the queue.
     const scheduledFor = delayMs === undefined ? null : new Date(Date.now() + delayMs);
 
-    // Rescheduling: drop the pending job first, so the deterministic id is free
-    // and the new time is the one that fires. Without this the earlier job kept
-    // its place and the operator's correction was discarded.
-    if (broadcast.status === 'SCHEDULED') {
-      await this.broadcastQueueService.dropPendingStart(broadcastId);
-    }
-
     const jobId = await this.broadcastQueueService.enqueueStart(
       { broadcastId, adminId: currentAdmin.id },
       { delayMs },
@@ -157,7 +152,15 @@ export class AdminBroadcastController {
     // A schedule that exists only as a delayed job in Redis cannot be shown,
     // cannot be cancelled and cannot be reconciled — which is exactly how a
     // pending send used to render as an ordinary draft with no actions on it.
-    await this.broadcastService.recordSchedule(broadcastId, scheduledFor, jobId);
+    const recorded = await this.broadcastService.recordSchedule(broadcastId, scheduledFor, jobId);
+    if (!recorded) {
+      // The broadcast started (or was cancelled) between the status read above
+      // and this write. Do not report a schedule that does not exist — and
+      // take back the job we just queued, or it would stage the whole
+      // audience a second time when it fires.
+      await this.broadcastQueueService.dropPendingStart(broadcastId);
+      throw new BadRequestException('Broadcast is no longer draft or scheduled');
+    }
 
     const result: { jobId: string; message: string; scheduledFor?: string } = {
       jobId,
@@ -179,7 +182,10 @@ export class AdminBroadcastController {
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
   ): Promise<{ ok: true; message: string }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
-    if (broadcast.status !== 'DRAFT') {
+    // Same widening as cancel and updateDraft: a pending send is still a send
+    // that has not happened, and previewing it is exactly what an operator does
+    // while deciding whether to let it go out.
+    if (broadcast.status !== 'DRAFT' && broadcast.status !== 'SCHEDULED') {
       throw new BadRequestException('Only draft broadcasts can be test-sent');
     }
     const result = await this.broadcastDeliveryService.sendTestToDev(broadcastId);
@@ -235,8 +241,17 @@ export class AdminBroadcastController {
     @CurrentAdmin() _currentAdmin: CurrentAdminInterface,
   ): Promise<{ canceledMessages: number; message: string }> {
     const broadcast = await this.broadcastService.getBroadcast(broadcastId);
-    if (broadcast.status !== 'PROCESSING' && broadcast.status !== 'DRAFT') {
-      throw new BadRequestException('Only DRAFT or PROCESSING broadcasts can be canceled');
+    // SCHEDULED belongs here, and its absence was a regression: a pending send
+    // used to be a DRAFT and cancellable, then it got its own status and this
+    // guard was not widened with it. The panel offered the button anyway, so
+    // stopping a scheduled broadcast answered 400 — and a scheduled row has no
+    // delete button either, which left it with no way to be stopped at all.
+    if (
+      broadcast.status !== 'PROCESSING' &&
+      broadcast.status !== 'DRAFT' &&
+      broadcast.status !== 'SCHEDULED'
+    ) {
+      throw new BadRequestException('Only DRAFT, SCHEDULED or PROCESSING broadcasts can be canceled');
     }
 
     const canceledMessages = await this.broadcastQueueService.cancelBroadcast(broadcastId);

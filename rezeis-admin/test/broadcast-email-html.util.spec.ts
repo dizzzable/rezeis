@@ -55,6 +55,11 @@ describe('nothing else becomes markup', () => {
 
   it('escapes an image, a style block and an event handler', () => {
     for (const raw of [
+      // BARE, deliberately. `<img src=x onerror=…>` carries attributes, and the
+      // allow-list only ever matched attribute-free tags — so that payload was
+      // refused by the attribute rule and proved nothing about the list itself.
+      // Adding `img` to the list left the whole suite green.
+      '<img>',
       '<img src=x onerror=alert(1)>',
       '<style>body{display:none}</style>',
       '<b onclick="steal()">x</b>',
@@ -75,8 +80,33 @@ describe('nothing else becomes markup', () => {
   });
 
   it('refuses a data: href', () => {
-    const out = renderOperatorHtml('<a href="data:text/html,<script>alert(1)</script>">x</a>');
+    // No angle brackets in the href: with them the anchor pattern rejects the
+    // shape before the scheme is ever consulted, and the test would pass with
+    // the scheme check deleted.
+    const out = renderOperatorHtml('<a href="data:text/html,hi">x</a>');
     assert.ok(!out.includes('<a href'), 'a data href became a link');
+  });
+
+  it('refuses a root-relative and a protocol-relative href', () => {
+    for (const href of ['/promo', '//evil.example/x']) {
+      const out = renderOperatorHtml(`<a href="${href}">x</a>`);
+      assert.ok(!out.includes('<a href'), `${href} became a link`);
+    }
+  });
+
+  it('gives each closing tag to the anchor it follows, not to a counter', () => {
+    // A refused anchor before an accepted one used to hand its closer to the
+    // accepted link and leave the good one open — so the rest of the email
+    // became part of that hyperlink.
+    const out = renderOperatorHtml('<a href="/promo">bad</a><a href="https://ok.example">good</a>');
+    const opened = (out.match(/<a href=/g) ?? []).length;
+    const closed = (out.match(/<\/a>/g) ?? []).length;
+    assert.equal(opened, 1, 'the refused anchor became a link');
+    assert.equal(closed, 1, 'the surviving link was left unclosed');
+  });
+
+  it('leaves an orphan closing tag as text', () => {
+    assert.ok(!renderOperatorHtml('text</a>more').includes('</a>'));
   });
 
   it('allows mailto, because a broadcast asking people to write in is ordinary', () => {

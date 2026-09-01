@@ -109,18 +109,30 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
       const promoCode = values.promoCode.trim().toUpperCase()
       const mediaValue = values.mediaValue.trim()
       const channelChatId = values.telegramChannelChatId.trim()
+      // ── EVERY KEY, ALWAYS ────────────────────────────────────────────
+      //
+      // This body is used for CREATE and for PATCH, and the update merges only
+      // the keys it is given. Omitting an empty field therefore meant "keep
+      // whatever is stored", so switching the email channel OFF, clearing the
+      // channel id, removing the promo tag or blanking the title all reported
+      // success and shipped the old value — the operator turned email off and
+      // every recipient with an address was still mailed.
+      //
+      // An explicit empty value is how each of these is cleared: the update DTO
+      // documents `promoCode: ''` for exactly that, and `mergePayload` writes
+      // whatever key it receives.
       const payload: BroadcastCreateRequest['payload'] = {
         mediaType: values.mediaType,
-        ...(title ? { title } : {}),
-        ...(text ? { text } : {}),
-        ...(values.mediaType !== 'none' ? { mediaFileId: mediaValue } : {}),
-        ...(values.emailEnabled ? { emailEnabled: true } : {}),
-        ...(channelChatId ? { telegramChannelChatId: channelChatId } : {}),
+        title,
+        text,
+        mediaFileId: values.mediaType !== 'none' ? mediaValue : '',
+        emailEnabled: values.emailEnabled,
+        telegramChannelChatId: channelChatId,
       }
 
       return {
         audience: values.audience,
-        ...(promoCode ? { promoCode } : {}),
+        promoCode,
         payload,
       }
     })

@@ -37,7 +37,7 @@ export class BroadcastReconcilerService {
   private readonly logger = new Logger(BroadcastReconcilerService.name);
 
   /** How long a broadcast may sit in PROCESSING before it is treated as stuck. */
-  private static readonly STALE_PROCESSING_MINUTES = 30;
+  private static readonly STALE_PROCESSING_MINUTES = 180;
 
   /** How late a schedule may be before its missing job is treated as lost. */
   private static readonly OVERDUE_SCHEDULE_MINUTES = 5;
@@ -77,7 +77,16 @@ export class BroadcastReconcilerService {
     }
   }
 
-  /** A broadcast that has been mid-flight far too long with work still owed. */
+  /**
+   * A broadcast that has been mid-flight far too long with work still owed.
+   *
+   * "Far too long" has to outlast a legitimately slow send, not just a stalled
+   * one: a large audience against an unwell relay spends ten seconds per
+   * recipient, so a batch alone can run for minutes. Reviving one of those adds
+   * a second full set of batch jobs on top of the ones still working — and with
+   * the email leg deduplicated but the feed leg only read-then-written, that is
+   * how a rescue becomes a duplicate.
+   */
   private async reviveStalledDeliveries(): Promise<void> {
     const cutoff = new Date(Date.now() - BroadcastReconcilerService.STALE_PROCESSING_MINUTES * 60_000);
     const stalled = await this.prismaService.broadcast.findMany({
@@ -105,8 +114,12 @@ export class BroadcastReconcilerService {
     if (attempts > BroadcastReconcilerService.MAX_REVIVALS) {
       // Putting it back is not working. Say so once, plainly, and stop — an
       // endless revival loop is how a broken broadcast becomes background noise.
+      // NOT `SYSTEM_BROADCAST_SENT`: that type renders as 📢 «Рассылка
+      // отправлена», so a rescue notice arrived titled as a successful send and
+      // fired the broadcast-sent webhook to every automation subscriber. Exactly
+      // the mislabelling the finaliser was fixed for one commit earlier.
       this.systemEvents.error(
-        EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+        EVENT_TYPES.BROADCAST_STARTED,
         'SYSTEM',
         `Broadcast ${broadcastId} could not be resumed after ${BroadcastReconcilerService.MAX_REVIVALS} attempts (${why})`,
         { broadcastId, attempts, why },
@@ -117,7 +130,7 @@ export class BroadcastReconcilerService {
     this.logger.warn(`Reviving broadcast ${broadcastId}: ${why}`);
     await this.queueService.enqueueStart({ broadcastId, adminId: null });
     this.systemEvents.warn(
-      EVENT_TYPES.SYSTEM_BROADCAST_SENT,
+      EVENT_TYPES.BROADCAST_STARTED,
       'SYSTEM',
       `Broadcast ${broadcastId} was picked up again: ${why}`,
       { broadcastId, attempts, why },
