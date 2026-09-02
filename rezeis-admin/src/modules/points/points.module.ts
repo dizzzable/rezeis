@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { PointsCashbackService } from './services/points-cashback.service';
+import { PointsLedgerService } from './services/points-ledger.service';
 import { PointsWalletService } from './services/points-wallet.service';
 
 /**
@@ -19,7 +20,7 @@ import { PointsWalletService } from './services/points-wallet.service';
  * spec, not a lint rule, is what catches it.
  */
 @Module({
-  providers: [PointsWalletService, PointsCashbackService],
-  exports: [PointsWalletService, PointsCashbackService],
+  providers: [PointsWalletService, PointsCashbackService, PointsLedgerService],
+  exports: [PointsWalletService, PointsCashbackService, PointsLedgerService],
 })
 export class PointsModule {}

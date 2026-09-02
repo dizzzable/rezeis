@@ -1,5 +1,13 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { AddOn, AddOnLifetime, AddOnPrice, AddOnType, Currency, Prisma } from '@prisma/client';
+import {
+  AddOn,
+  AddOnLifetime,
+  AddOnPrice,
+  AddOnType,
+  Currency,
+  PointsCashbackMode,
+  Prisma,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 
@@ -17,6 +25,16 @@ export interface AddOnInterface {
   readonly lifetime: AddOnLifetime;
   /** `RESET_TRAFFIC` only; `0` on every other type. */
   readonly freeUsesPerTerm: number;
+  /**
+   * Points cashback for a purchase of this add-on: `INHERIT` follows the
+   * global percent, `NONE` excludes it, `PERCENT` / `FIXED` read the one
+   * field below that belongs to them. The other one is always `null`.
+   */
+  readonly cashbackMode: PointsCashbackMode;
+  /** Whole percent of the paid amount; set only under `PERCENT`. */
+  readonly cashbackPercent: number | null;
+  /** Whole points per purchase; set only under `FIXED`. */
+  readonly cashbackPoints: number | null;
   readonly revision: number;
   readonly icon: string | null;
   readonly value: number;
@@ -72,6 +90,9 @@ export class AddOnsService {
     isActive?: boolean;
     applicablePlanIds?: string[];
     prices: Array<{ currency: Currency; price: string }>;
+    cashbackMode?: PointsCashbackMode;
+    cashbackPercent?: number | null;
+    cashbackPoints?: number | null;
   }): Promise<AddOnInterface> {
     if (input.value <= 0) {
       throw new BadRequestException('Add-on value must be positive');
@@ -86,6 +107,11 @@ export class AddOnsService {
     const lifetime = input.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END;
     const applicablePlanIds = normalizePlanIds(input.applicablePlanIds);
     await this.assertPlansExist(applicablePlanIds);
+    const cashback = resolveCashback(
+      input.cashbackMode ?? PointsCashbackMode.INHERIT,
+      input.cashbackPercent,
+      input.cashbackPoints,
+    );
     const lastRecord = await this.prismaService.addOn.findFirst({
       orderBy: { orderIndex: 'desc' },
       select: { orderIndex: true },
@@ -104,6 +130,9 @@ export class AddOnsService {
         freeUsesPerTerm:
           input.type === AddOnType.RESET_TRAFFIC ? Math.max(0, input.freeUsesPerTerm ?? 0) : 0,
         isActive: input.isActive ?? true,
+        cashbackMode: cashback.mode,
+        cashbackPercent: cashback.percent,
+        cashbackPoints: cashback.points,
         orderIndex: (lastRecord?.orderIndex ?? 0) + 1,
         applicablePlanIds,
         prices: {
@@ -122,6 +151,8 @@ export class AddOnsService {
    * Update an existing add-on. Commercial changes (name, type, value, lifetime,
    * prices, applicable plans) bump `revision` so entitlement snapshots and
    * checkout fingerprints can pin the exact catalog version they were sold at.
+   * The points-cashback rule is not commercial and leaves `revision` alone —
+   * see the branch below.
    */
   public async update(
     id: string,
@@ -136,6 +167,9 @@ export class AddOnsService {
       isActive: boolean;
       applicablePlanIds: string[];
       prices: Array<{ currency: Currency; price: string }>;
+      cashbackMode: PointsCashbackMode;
+      cashbackPercent: number | null;
+      cashbackPoints: number | null;
     }>,
   ): Promise<AddOnInterface> {
     const existing = await this.prismaService.addOn.findUnique({ where: { id } });
@@ -189,6 +223,31 @@ export class AddOnsService {
         create: input.prices.map((p) => ({ currency: p.currency, price: p.price })),
       };
       commercialChanged = true;
+    }
+    if (
+      input.cashbackMode !== undefined ||
+      input.cashbackPercent !== undefined ||
+      input.cashbackPoints !== undefined
+    ) {
+      // Deliberately NOT a commercial change: `commercialChanged` is left as
+      // it is. `revision` pins what the buyer is SOLD — name, type, value,
+      // lifetime, prices, plans — and a bump makes a checkout pinned to the
+      // previous revision fail with `ADDON_REVISION_CONFLICT` in
+      // `addon-purchase.service.ts`. Cashback changes what the buyer EARNS on
+      // top of an unchanged offer, and the credit hook reads the live row at
+      // credit time rather than a snapshot, so nothing goes stale and nothing
+      // is mis-sold.
+      //
+      // The mode comes from the request or, failing that, the row, so a
+      // number sent on its own lands under the mode the row already has.
+      const cashback = resolveCashback(
+        input.cashbackMode ?? existing.cashbackMode,
+        input.cashbackPercent !== undefined ? input.cashbackPercent : existing.cashbackPercent,
+        input.cashbackPoints !== undefined ? input.cashbackPoints : existing.cashbackPoints,
+      );
+      updateData.cashbackMode = cashback.mode;
+      updateData.cashbackPercent = cashback.percent;
+      updateData.cashbackPoints = cashback.points;
     }
 
     if (commercialChanged) {
@@ -263,6 +322,9 @@ function mapAddOn(record: AddOn & { prices?: readonly AddOnPrice[] }): AddOnInte
     type: record.type,
     lifetime: record.lifetime,
     freeUsesPerTerm: record.freeUsesPerTerm,
+    cashbackMode: record.cashbackMode,
+    cashbackPercent: record.cashbackPercent,
+    cashbackPoints: record.cashbackPoints,
     revision: record.revision,
     icon: record.icon,
     value: record.value,
@@ -278,6 +340,36 @@ function mapAddOn(record: AddOn & { prices?: readonly AddOnPrice[] }): AddOnInte
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
   };
+}
+
+/**
+ * The stored cashback triple for a mode. Only the number the mode reads is
+ * kept: a percent left under `FIXED`, or points under `INHERIT`, would be
+ * dead data that comes back to life on the next mode switch — the same trap
+ * `freeUsesPerTerm` guards against when the type leaves `RESET_TRAFFIC`.
+ *
+ * A mode without its number is refused rather than stored: `PERCENT` with no
+ * percent would be read by `computeCashbackLine` as "0% of the amount", a
+ * silent nothing dressed as a rule. `NONE` is the way to say nothing.
+ */
+function resolveCashback(
+  mode: PointsCashbackMode,
+  percent: number | null | undefined,
+  points: number | null | undefined,
+): { mode: PointsCashbackMode; percent: number | null; points: number | null } {
+  if (mode === PointsCashbackMode.PERCENT) {
+    if (percent === null || percent === undefined) {
+      throw new BadRequestException('cashbackPercent is required when cashbackMode is PERCENT');
+    }
+    return { mode, percent, points: null };
+  }
+  if (mode === PointsCashbackMode.FIXED) {
+    if (points === null || points === undefined) {
+      throw new BadRequestException('cashbackPoints is required when cashbackMode is FIXED');
+    }
+    return { mode, percent: null, points };
+  }
+  return { mode, percent: null, points: null };
 }
 
 /** Trims an icon key; empty/blank → null so it falls back to the default. */

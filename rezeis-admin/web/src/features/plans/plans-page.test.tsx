@@ -154,5 +154,49 @@ function listedPlan(): Plan {
     durations: [],
     replacementPlanIds: [],
     upgradeToPlanIds: [],
+    cashbackMode: 'INHERIT',
+    cashbackPercent: null,
   }
 }
+
+// The card says when a plan departs from the global cashback rule — and ONLY
+// then. INHERIT is the default every plan carried before the columns existed,
+// and a badge on every card would make the one that matters invisible. The
+// percent is printed because "own percent" without the number sends the
+// operator into the editor to find out what it is.
+describe('PlansPage cashback badge', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  it('marks the plans with their own rule and leaves the inherited one alone', async () => {
+    vi.mocked(api.get).mockImplementation((async (path: string) => {
+      if (path === '/admin/plans') {
+        return {
+          data: [
+            {
+              ...listedPlan(),
+              id: 'plan-percent',
+              name: 'Own rule',
+              cashbackMode: 'PERCENT',
+              cashbackPercent: 15,
+            },
+            { ...listedPlan(), id: 'plan-none', name: 'Excluded', cashbackMode: 'NONE' },
+            { ...listedPlan(), id: 'plan-fixed', name: 'Per duration', cashbackMode: 'FIXED' },
+            listedPlan(),
+          ],
+        }
+      }
+      return { data: [] }
+    }) as never)
+
+    renderWithProviders(<PlansPage />)
+
+    expect(await screen.findByText('cashback 15%')).toBeInTheDocument()
+    expect(screen.getByText('no cashback')).toBeInTheDocument()
+    expect(screen.getByText('fixed cashback')).toBeInTheDocument()
+    // Four cards, three badges: the inherited plan gets none.
+    expect(screen.getAllByText(/cashback/)).toHaveLength(3)
+  })
+})

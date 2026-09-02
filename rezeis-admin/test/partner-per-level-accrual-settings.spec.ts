@@ -161,6 +161,7 @@ function buildController(db: ReturnType<typeof makeDb>): AdminUserManagementCont
     undefined as never,
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
     new PointsWalletService(),
+    { listForUser: async () => ({ items: [], nextCursor: null }) } as never,
   );
 }
 

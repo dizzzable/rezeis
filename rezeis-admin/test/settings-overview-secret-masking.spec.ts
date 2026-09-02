@@ -78,6 +78,7 @@ function buildSettingsRecord(overrides: Record<string, unknown> = {}): Record<st
     brandingSettings: null,
     referralSettings: null,
     partnerSettings: null,
+    pointsSettings: null,
     multiSubscriptionSettings: null,
     customIcons: null,
     updatedAt: new Date('2026-04-16T15:00:00.000Z'),

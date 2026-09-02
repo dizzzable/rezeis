@@ -21,6 +21,8 @@ const ACTIVE_PLAN: Plan = {
   durations: [],
   replacementPlanIds: [],
   upgradeToPlanIds: [],
+  cashbackMode: 'INHERIT',
+  cashbackPercent: null,
 }
 
 const INACTIVE_PLAN: Plan = {

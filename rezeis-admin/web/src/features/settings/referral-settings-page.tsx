@@ -8,12 +8,8 @@ import {
   Save,
   Share2,
   Loader2,
-  CalendarDays,
-  Coins,
-  Gift,
-  Percent,
-  Wifi,
 } from 'lucide-react'
+import { Link } from 'react-router'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -58,13 +54,6 @@ interface ReferralSettings {
     slotsEnabled?: boolean
     initialSlots?: number | null
   }
-  pointsExchange?: {
-    exchangeEnabled?: boolean
-    subscriptionDays?: { enabled?: boolean; pointsCost?: number | string }
-    giftSubscription?: { enabled?: boolean; pointsCost?: number | string; giftDurationDays?: number | string; giftPlanId?: string | null }
-    discount?: { enabled?: boolean; pointsCost?: number | string; maxDiscountPercent?: number | string }
-    traffic?: { enabled?: boolean; pointsCost?: number | string; maxTrafficGb?: number | string }
-  }
 }
 
 export default function ReferralSettingsPage() {
@@ -95,9 +84,9 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
   const queryClient = useQueryClient()
   // The FULL catalog. `/admin/plans` returns every row including archived ones
   // (`PlansAdminService.listPlans` issues no `where`), and `plansListOptions`
-  // only filters when `active` is passed. This page has two pickers asking two
-  // different questions, so neither policy lives on the shared query any more
-  // — see `eligiblePlanOptions` / `giftPlanOptions` below.
+  // only filters when `active` is passed. The qualifying-plan picker below
+  // applies its own policy — see `eligiblePlanOptions`. (The gift-plan picker
+  // moved to Settings → Points with the exchange card.)
   const { data: plans } = usePlans()
 
   const numString = z.string().trim()
@@ -114,25 +103,11 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
     inviteSlots: numString,
     inviteSlotsEnabled: z.boolean(),
     linkTtlEnabled: z.boolean(),
-    exchangeEnabled: z.boolean(),
-    daysEnabled: z.boolean(),
-    daysPointsCost: numString,
-    giftEnabled: z.boolean(),
-    giftPointsCost: numString,
-    giftDurationDays: numString,
-    giftPlanId: numString,
-    discountEnabled: z.boolean(),
-    discountPointsCost: numString,
-    discountMaxPercent: numString,
-    trafficEnabled: z.boolean(),
-    trafficPointsCost: numString,
-    trafficMaxGb: numString,
   })
 
   type FormValues = z.infer<typeof schema>
 
   const inviteLimits = referral.inviteLimits ?? {}
-  const pe = referral.pointsExchange ?? {}
 
   // Which plans count towards a referral. Kept outside the form schema (like
   // the promocode plan scope) because it is a chip multi-select, not an input.
@@ -163,19 +138,6 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
       inviteSlots: String(referral.inviteSlots ?? inviteLimits.initialSlots ?? ''),
       inviteSlotsEnabled: inviteLimits.slotsEnabled ?? false,
       linkTtlEnabled: inviteLimits.linkTtlEnabled ?? false,
-      exchangeEnabled: pe.exchangeEnabled ?? false,
-      daysEnabled: pe.subscriptionDays?.enabled ?? true,
-      daysPointsCost: String(pe.subscriptionDays?.pointsCost ?? '1'),
-      giftEnabled: pe.giftSubscription?.enabled ?? false,
-      giftPointsCost: String(pe.giftSubscription?.pointsCost ?? '30'),
-      giftDurationDays: String(pe.giftSubscription?.giftDurationDays ?? '30'),
-      giftPlanId: pe.giftSubscription?.giftPlanId ?? '',
-      discountEnabled: pe.discount?.enabled ?? false,
-      discountPointsCost: String(pe.discount?.pointsCost ?? '10'),
-      discountMaxPercent: String(pe.discount?.maxDiscountPercent ?? '50'),
-      trafficEnabled: pe.traffic?.enabled ?? false,
-      trafficPointsCost: String(pe.traffic?.pointsCost ?? '5'),
-      trafficMaxGb: String(pe.traffic?.maxTrafficGb ?? '100'),
     },
   })
 
@@ -184,14 +146,8 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
   const rewardType = form.watch('rewardType')
   const linkTtlEnabled = form.watch('linkTtlEnabled')
   const inviteSlotsEnabled = form.watch('inviteSlotsEnabled')
-  const exchangeEnabled = form.watch('exchangeEnabled')
-  const daysEnabled = form.watch('daysEnabled')
-  const giftEnabled = form.watch('giftEnabled')
-  const discountEnabled = form.watch('discountEnabled')
-  const trafficEnabled = form.watch('trafficEnabled')
   const inviteLinkTtlDays = form.watch('inviteLinkTtlDays')
   const inviteSlots = form.watch('inviteSlots')
-  const giftPlanId = form.watch('giftPlanId')
 
   // ── Two pickers, two questions, two filters ───────────────────────────────
   //
@@ -234,19 +190,6 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
     plans === undefined
       ? []
       : eligiblePlanIds.filter((id) => !allPlans.some((plan) => plan.id === id))
-
-  /**
-   * GIFT plan — the subscription a user receives NOW for their points.
-   *
-   * Strictly what is on sale: this mints a NEW subscription, so a retired plan
-   * should not be handed out. That is a real tightening — `active: true` let
-   * archived-but-active plans through, and the deployment that prompted this
-   * has three of them. The stored choice is kept in the list regardless: a
-   * value the form submits has to be a value the operator can see.
-   */
-  const giftPlanOptions = allPlans.filter(
-    (plan) => sellable(plan) || plan.id === giftPlanId,
-  )
 
   // ── Invite-limit bounds ───────────────────────────────────────────────────
   //
@@ -339,29 +282,6 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
           })(),
           slotsEnabled: values.inviteSlotsEnabled,
           initialSlots: parseBoundedInt(values.inviteSlots, MIN_INITIAL_SLOTS),
-        },
-        pointsExchange: {
-          exchangeEnabled: values.exchangeEnabled,
-          subscriptionDays: {
-            enabled: values.daysEnabled,
-            pointsCost: parseInt(values.daysPointsCost, 10) || 1,
-          },
-          giftSubscription: {
-            enabled: values.giftEnabled,
-            pointsCost: parseInt(values.giftPointsCost, 10) || 30,
-            giftDurationDays: parseInt(values.giftDurationDays, 10) || 30,
-            giftPlanId: values.giftPlanId || null,
-          },
-          discount: {
-            enabled: values.discountEnabled,
-            pointsCost: parseInt(values.discountPointsCost, 10) || 10,
-            maxDiscountPercent: parseInt(values.discountMaxPercent, 10) || 50,
-          },
-          traffic: {
-            enabled: values.trafficEnabled,
-            pointsCost: parseInt(values.trafficPointsCost, 10) || 5,
-            maxTrafficGb: parseInt(values.trafficMaxGb, 10) || 100,
-          },
         },
       }),
     onSuccess: () => {
@@ -734,273 +654,20 @@ function ReferralSettingsForm({ referral }: ReferralSettingsFormProps) {
           </Card>
         </div>
 
-        {/* Points Exchange — full-width with 4 sub-cards in 2x2 grid */}
+        {/* The points exchange lives on Settings → Points now; the referral
+            program only earns the points, it no longer decides what they buy. */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <CardTitle className="flex items-center gap-2">
-                  <Coins className="h-5 w-5 text-muted-foreground" />
-                  {t('referralSettingsPage.pointsExchange.title')}
-                </CardTitle>
-                <CardDescription>
-                  {t('referralSettingsPage.pointsExchange.description')}
-                </CardDescription>
-              </div>
-              <FormField
-                control={form.control}
-                name="exchangeEnabled"
-                render={({ field }) => (
-                  <FormItem className="flex items-center gap-3 space-y-0">
-                    <FormLabel className="text-xs text-muted-foreground">
-                      {t('referralSettingsPage.pointsExchange.enable')}
-                    </FormLabel>
-                    <FormControl>
-                      <Switch checked={field.value} onCheckedChange={field.onChange} />
-                    </FormControl>
-                  </FormItem>
-                )}
-              />
-            </div>
+            <CardTitle className="text-base">{t('referralSettingsPage.pointsExchangeMoved.title')}</CardTitle>
+            <CardDescription>{t('referralSettingsPage.pointsExchangeMoved.description')}</CardDescription>
           </CardHeader>
           <CardContent>
-            {!exchangeEnabled ? (
-              <p className="text-sm text-muted-foreground py-4 text-center">
-                {t('referralSettingsPage.pointsExchange.enableHint')}
-              </p>
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                {/* Subscription Days */}
-                <ExchangeOptionCard
-                  icon={<CalendarDays className="h-4 w-4 text-blue-500" />}
-                  title={t('referralSettingsPage.pointsExchange.subscriptionDays')}
-                  enabledFieldName="daysEnabled"
-                  enabled={daysEnabled}
-                  control={form.control}
-                >
-                  <FormField
-                    control={form.control}
-                    name="daysPointsCost"
-                    render={({ field }) => (
-                      <FormItem className="space-y-1">
-                        <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                          {t('referralSettingsPage.pointsExchange.pointsPerDay')}
-                        </FormLabel>
-                        <FormControl>
-                          <Input type="number" min="1" className="h-8 text-sm" {...field} />
-                        </FormControl>
-                      </FormItem>
-                    )}
-                  />
-                </ExchangeOptionCard>
-
-                {/* Gift Subscription */}
-                <ExchangeOptionCard
-                  icon={<Gift className="h-4 w-4 text-purple-500" />}
-                  title={t('referralSettingsPage.pointsExchange.giftSubscription')}
-                  enabledFieldName="giftEnabled"
-                  enabled={giftEnabled}
-                  control={form.control}
-                >
-                  <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
-                    <FormField
-                      control={form.control}
-                      name="giftPointsCost"
-                      render={({ field }) => (
-                        <FormItem className="space-y-1">
-                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {t('referralSettingsPage.pointsExchange.pointsCost')}
-                          </FormLabel>
-                          <FormControl>
-                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name="giftDurationDays"
-                      render={({ field }) => (
-                        <FormItem className="space-y-1">
-                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {t('referralSettingsPage.pointsExchange.giftDuration')}
-                          </FormLabel>
-                          <FormControl>
-                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                  <FormField
-                    control={form.control}
-                    name="giftPlanId"
-                    render={({ field }) => (
-                      <FormItem className="space-y-1 mt-2">
-                        <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                          {t('referralSettingsPage.pointsExchange.giftPlan')}
-                        </FormLabel>
-                        <Select value={field.value || ''} onValueChange={field.onChange}>
-                          <FormControl>
-                            <SelectTrigger className="h-8 text-sm">
-                              <SelectValue placeholder={t('referralSettingsPage.pointsExchange.giftPlanPlaceholder')} />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {giftPlanOptions.map((plan) => (
-                              <SelectItem key={plan.id} value={plan.id}>
-                                {plan.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormDescription className="text-[10px]">
-                          {t('referralSettingsPage.pointsExchange.giftPlanHint')}
-                        </FormDescription>
-                      </FormItem>
-                    )}
-                  />
-                </ExchangeOptionCard>
-
-                {/* Personal Discount */}
-                <ExchangeOptionCard
-                  icon={<Percent className="h-4 w-4 text-emerald-500" />}
-                  title={t('referralSettingsPage.pointsExchange.personalDiscount')}
-                  enabledFieldName="discountEnabled"
-                  enabled={discountEnabled}
-                  control={form.control}
-                >
-                  <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
-                    <FormField
-                      control={form.control}
-                      name="discountPointsCost"
-                      render={({ field }) => (
-                        <FormItem className="space-y-1">
-                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {t('referralSettingsPage.pointsExchange.pointsPerPercent')}
-                          </FormLabel>
-                          <FormControl>
-                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name="discountMaxPercent"
-                      render={({ field }) => (
-                        <FormItem className="space-y-1">
-                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {t('referralSettingsPage.pointsExchange.maxDiscount')}
-                          </FormLabel>
-                          <FormControl>
-                            <Input
-                              type="number"
-                              min="1"
-                              max="100"
-                              className="h-8 text-sm"
-                              {...field}
-                            />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                </ExchangeOptionCard>
-
-                {/* Extra Traffic */}
-                <ExchangeOptionCard
-                  icon={<Wifi className="h-4 w-4 text-amber-500" />}
-                  title={t('referralSettingsPage.pointsExchange.extraTraffic')}
-                  enabledFieldName="trafficEnabled"
-                  enabled={trafficEnabled}
-                  control={form.control}
-                >
-                  <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
-                    <FormField
-                      control={form.control}
-                      name="trafficPointsCost"
-                      render={({ field }) => (
-                        <FormItem className="space-y-1">
-                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {t('referralSettingsPage.pointsExchange.pointsPerGb')}
-                          </FormLabel>
-                          <FormControl>
-                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                    <FormField
-                      control={form.control}
-                      name="trafficMaxGb"
-                      render={({ field }) => (
-                        <FormItem className="space-y-1">
-                          <FormLabel className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {t('referralSettingsPage.pointsExchange.maxTraffic')}
-                          </FormLabel>
-                          <FormControl>
-                            <Input type="number" min="1" className="h-8 text-sm" {...field} />
-                          </FormControl>
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                </ExchangeOptionCard>
-              </div>
-            )}
+            <Button asChild type="button" variant="outline" size="sm">
+              <Link to="/settings/points">{t('referralSettingsPage.pointsExchangeMoved.open')}</Link>
+            </Button>
           </CardContent>
         </Card>
       </form>
     </Form>
-  )
-}
-
-/**
- * Compact tile for one points-exchange option. The header carries the
- * icon + title + per-option enable Switch; the body is rendered only
- * when the option itself is on, so disabled tiles stay quiet.
- */
-function ExchangeOptionCard({
-  icon,
-  title,
-  enabledFieldName,
-  enabled,
-  control,
-  children,
-}: {
-  readonly icon: React.ReactNode
-  readonly title: string
-  readonly enabledFieldName:
-    | 'daysEnabled'
-    | 'giftEnabled'
-    | 'discountEnabled'
-    | 'trafficEnabled'
-  readonly enabled: boolean
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic form control passthrough
-  readonly control: any
-  readonly children: React.ReactNode
-}) {
-  return (
-    <div
-      className={`rounded-md border p-3 space-y-3 transition-opacity ${enabled ? 'bg-card' : 'bg-muted/30 opacity-70'}`}
-    >
-      <FormField
-        control={control}
-        name={enabledFieldName}
-        render={({ field }) => (
-          <FormItem className="flex items-center justify-between gap-2 space-y-0">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              {icon}
-              <span>{title}</span>
-            </div>
-            <FormControl>
-              <Switch checked={field.value} onCheckedChange={field.onChange} />
-            </FormControl>
-          </FormItem>
-        )}
-      />
-      {enabled && children}
-    </div>
   )
 }

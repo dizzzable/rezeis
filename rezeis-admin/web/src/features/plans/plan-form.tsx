@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Plus, Trash2, Archive, ArrowUpRight, Users, Check, ChevronDown, Info } from 'lucide-react'
+import { Plus, Trash2, Archive, ArrowUpRight, Users, Check, ChevronDown, Coins, Info } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -46,6 +46,7 @@ import {
 } from './plan-transition-targets'
 import {
   PLAN_AVAILABILITIES,
+  PLAN_CASHBACK_MODES,
   PLAN_CURRENCIES,
   PLAN_TRAFFIC_STRATEGIES,
   PLAN_TYPES,
@@ -99,6 +100,8 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
     paidTrialPriceRequired: t('planForm.validation.paidTrialPriceRequired'),
     replacementRequired: t('planForm.validation.replacementRequired'),
     allowedUsersRequired: t('planForm.validation.allowedUsersRequired'),
+    cashbackPercentRange: t('planForm.validation.cashbackPercentRange'),
+    cashbackPointsRange: t('planForm.validation.cashbackPointsRange'),
   }), [t])
   const planFormSchema = useMemo(() => createPlanFormSchema(validationMessages), [validationMessages])
   const initialDraft = useMemo(() => createInitialPlanDraft(plan), [plan])
@@ -146,10 +149,17 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   const [trialScope, setTrialScope] = useState<'ALL' | 'INVITED'>(initialDraft.trialSettings.availabilityScope)
   const [trialRequireTelegram, setTrialRequireTelegram] = useState(initialDraft.trialSettings.requireTelegramLink)
 
+  // Points cashback: the plan's own rule, or INHERIT for the global one. The
+  // percent is read under PERCENT only and each duration's points under FIXED
+  // only — the schema nulls whichever the mode does not read on submit.
+  const [cashbackMode, setCashbackMode] = useState(initialDraft.cashbackMode)
+  const [cashbackPercent, setCashbackPercent] = useState(initialDraft.cashbackPercent)
+
   const [durations, setDurations] = useState<
-    { days: string; prices: { currency: string; price: string }[] }[]
+    { days: string; cashbackPoints: string; prices: { currency: string; price: string }[] }[]
   >(initialDraft.durations.map((d) => ({
     days: d.days,
+    cashbackPoints: d.cashbackPoints,
     prices: d.prices.map((p) => ({ currency: p.currency, price: p.price })),
   })))
 
@@ -236,7 +246,10 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
   }, [strandedUpgrades, strandedReplacements, t])
 
   const addDuration = () => {
-    setDurations([...durations, { days: '30', prices: [{ currency: 'RUB', price: '0' }] }])
+    setDurations([
+      ...durations,
+      { days: '30', cashbackPoints: '', prices: [{ currency: 'RUB', price: '0' }] },
+    ])
   }
 
   const removeDuration = (idx: number) => {
@@ -340,6 +353,8 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
       upgradeToPlanIds,
       replacementPlanIds,
       allowedUserIds,
+      cashbackMode,
+      cashbackPercent,
       trialSettings: {
         maxClaims: trialMaxClaims,
         free: trialFree,
@@ -704,6 +719,27 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
                   />
                   <FieldError message={formErrors[`durations.${dIdx}.days`]} />
                 </div>
+                {/* Under FIXED the points belong to the DURATION, not to the
+                    plan: a year may pay more than a month. Not rendered under
+                    any other mode — an input whose value the save then drops
+                    would be a promise the row cannot keep. */}
+                {cashbackMode === 'FIXED' && (
+                  <div className="space-y-1">
+                    <Label className="text-xs">{t('planForm.cashback.points')}</Label>
+                    <Input
+                      type="number"
+                      className="w-28"
+                      value={duration.cashbackPoints}
+                      onChange={(e) => updateDuration(dIdx, 'cashbackPoints', e.target.value)}
+                      min="0"
+                      step="1"
+                      placeholder="0"
+                      aria-label={t('planForm.cashback.pointsAria', { index: dIdx + 1 })}
+                      aria-invalid={!!formErrors[`durations.${dIdx}.cashbackPoints`]}
+                    />
+                    <FieldError message={formErrors[`durations.${dIdx}.cashbackPoints`]} />
+                  </div>
+                )}
               </div>
               {durations.length > 1 ? (
                 <Button
@@ -799,6 +835,57 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             </div>
           </div>
         ))}
+      </div>
+
+      <Separator />
+
+      {/* Points cashback — the plan's own rule, or the global one from
+          Settings → Points. Sits right under the durations because FIXED is
+          per DURATION (a year may pay more than a month): under it the number
+          lives on each duration row above, and this block only says so. */}
+      <div className="space-y-4 rounded-lg border border-dashed p-4">
+        <div className="flex items-center gap-2">
+          <Coins className="h-4 w-4 text-muted-foreground" />
+          <Label className="text-base font-medium">{t('planForm.cashback.title')}</Label>
+        </div>
+        <p className="text-xs text-muted-foreground">{t('planForm.cashback.hint')}</p>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label className="text-sm">{t('planForm.cashback.mode')}</Label>
+            <Select value={cashbackMode} onValueChange={setCashbackMode}>
+              <SelectTrigger aria-label={t('planForm.cashback.mode')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PLAN_CASHBACK_MODES.map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {t(`planForm.cashback.modes.${mode}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {t(`planForm.cashback.hints.${cashbackMode}`)}
+            </p>
+          </div>
+          {cashbackMode === 'PERCENT' && (
+            <div className="space-y-2">
+              <Label className="text-sm">{t('planForm.cashback.percent')}</Label>
+              <Input
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                value={cashbackPercent}
+                onChange={(e) => setCashbackPercent(e.target.value)}
+                aria-label={t('planForm.cashback.percent')}
+                aria-invalid={!!formErrors.cashbackPercent}
+              />
+              <p className="text-xs text-muted-foreground">{t('planForm.cashback.percentHint')}</p>
+              <FieldError message={formErrors.cashbackPercent} />
+            </div>
+          )}
+        </div>
       </div>
 
       <Separator />
@@ -1148,14 +1235,26 @@ function createInitialPlanDraft(plan?: PlanInput): PlanFormDraft {
       availabilityScope: plan?.trialSettings?.availabilityScope ?? 'ALL',
       requireTelegramLink: plan?.trialSettings?.requireTelegramLink ?? false,
     },
+    cashbackMode: plan?.cashbackMode ?? 'INHERIT',
+    cashbackPercent: integerFieldValue(plan?.cashbackPercent),
     durations: plan?.durations?.map((duration) => ({
       days: duration.days.toString(),
+      cashbackPoints: integerFieldValue(duration.cashbackPoints),
       prices: duration.prices.map((price) => ({
         currency: price.currency,
         price: price.price.toString(),
       })),
-    })) ?? [{ days: '30', prices: [{ currency: 'RUB', price: '299' }] }],
+    })) ?? [{ days: '30', cashbackPoints: '', prices: [{ currency: 'RUB', price: '299' }] }],
   }
+}
+
+/**
+ * A nullable integer column as the text an input holds. `null` is the empty
+ * box — under FIXED that reads as zero, and the operator must not have to
+ * delete a `0` from every row — and so is a field an older API never sent.
+ */
+function integerFieldValue(value: number | null | undefined): string {
+  return value === null || value === undefined ? '' : String(value)
 }
 
 function flattenHookFormErrors(errors: FieldErrors<PlanFormDraft>): Record<string, string> {

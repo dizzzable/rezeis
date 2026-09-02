@@ -53,6 +53,7 @@ describe('AdminUserManagementController operations history', () => {
       undefined as never, // UserBlockService
       { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
       new PointsWalletService(),
+      { listForUser: async () => ({ items: [], nextCursor: null }) } as never,
     );
 
     const result = await controller.listUserOperations('123', '1', '25');

@@ -220,6 +220,7 @@ function buildUserCard(db: Db): AdminUserManagementController {
     buildBlockService(db),
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
     new PointsWalletService(),
+    { listForUser: async () => ({ items: [], nextCursor: null }) } as never,
   );
 }
 

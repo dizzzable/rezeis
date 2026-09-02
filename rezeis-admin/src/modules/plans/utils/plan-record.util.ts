@@ -44,10 +44,13 @@ export function mapAdminPlan(plan: PlanRecord): AdminPlanInterface {
     replacementPlanIds: [...plan.replacementPlanIds],
     allowedUserIds: [...plan.allowedUserIds],
     trialSettings: readTrialSettings(plan.trialSettings),
+    cashbackMode: plan.cashbackMode,
+    cashbackPercent: plan.cashbackPercent,
     durations: plan.durations.map((duration) => ({
       id: duration.id,
       days: duration.days,
       isActive: duration.isActive,
+      cashbackPoints: duration.cashbackPoints,
       prices: duration.prices.map((price) => ({
         id: price.id,
         currency: price.currency,

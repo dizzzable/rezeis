@@ -99,19 +99,6 @@ function patchSpy(): ReturnType<typeof vi.fn> {
   return api.patch as unknown as ReturnType<typeof vi.fn>
 }
 
-/**
- * Radix's Select reads two DOM methods jsdom does not implement, and throws
- * out of the pointer handler rather than opening. Same shim the branding specs
- * use.
- */
-function enableRadixSelectInJsdom(): void {
-  const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>
-  proto['hasPointerCapture'] ??= () => false
-  proto['releasePointerCapture'] ??= () => {}
-  proto['setPointerCapture'] ??= () => {}
-  proto['scrollIntoView'] ??= () => {}
-}
-
 /** The qualifying-plan chips. Nothing else on the page carries `aria-pressed`. */
 function planChips(): HTMLElement[] {
   return Array.from(document.querySelectorAll('button[aria-pressed]'))
@@ -317,48 +304,5 @@ describe('Referral qualifying-plan picker', () => {
 
     const body = await saveAndReadBody(user)
     expect(body.eligiblePlanIds).toEqual([])
-  })
-})
-
-describe('Referral gift-plan picker', () => {
-  beforeAll(async () => {
-    await i18nReady
-  })
-
-  beforeEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  /**
-   * A gift MINTS a new subscription, so it must be a plan the catalog would
-   * sell — `PlanCatalogService` requires `isActive && !isArchived`. This is a
-   * tightening: the old shared `active: true` filter let archived-but-active
-   * plans through, and the reported deployment has three of them.
-   */
-  it('offers only plans that are on sale', async () => {
-    enableRadixSelectInJsdom()
-    const user = mountWith({})
-    await chipsReady()
-
-    await user.click(screen.getByRole('combobox', { name: /Gift Plan/i }))
-    const options = await screen.findAllByRole('option')
-
-    expect(options.map((o) => (o.textContent ?? '').trim())).toEqual(SELLABLE_NAMES)
-  })
-
-  /**
-   * Same rule as the other picker: a value the form submits has to be a value
-   * the operator can see. Filtering the stored choice out of the list would
-   * leave the trigger showing a placeholder while the id kept being saved.
-   */
-  it('keeps a stored archived choice in the list so it stays visible', async () => {
-    const user = mountWith({ giftPlanId: 'plan-oldmoney' })
-    await chipsReady()
-
-    expect(screen.getByRole('combobox', { name: /Gift Plan/i })).toHaveTextContent('OldMoney')
-
-    const body = await saveAndReadBody(user)
-    const exchange = body.pointsExchange as Record<string, Record<string, unknown>>
-    expect(exchange.giftSubscription.giftPlanId).toBe('plan-oldmoney')
   })
 })

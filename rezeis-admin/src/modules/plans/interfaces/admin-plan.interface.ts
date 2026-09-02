@@ -1,4 +1,4 @@
-import { Currency, PlanAvailability, PlanType } from '@prisma/client';
+import { Currency, PlanAvailability, PlanType, PointsCashbackMode } from '@prisma/client';
 
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
 import { TrafficLimitStrategyValue } from '../dto/traffic-limit-strategy.dto';
@@ -14,6 +14,11 @@ export interface AdminPlanDurationInterface {
   readonly id: string;
   readonly days: number;
   readonly isActive: boolean;
+  /**
+   * Points for a purchase of this duration under `cashbackMode: FIXED`;
+   * `null` under every other mode, and under FIXED `null` reads as zero.
+   */
+  readonly cashbackPoints: number | null;
   readonly prices: readonly AdminPlanPriceInterface[];
 }
 
@@ -38,6 +43,14 @@ export interface AdminPlanInterface {
   readonly replacementPlanIds: readonly string[];
   readonly allowedUserIds: readonly string[];
   readonly trialSettings: TrialSettings;
+  /**
+   * How a purchase of this plan earns points — see `points-cashback.util.ts`.
+   * Read live from the catalogue by every surface, never from a subscription's
+   * plan snapshot, so it is deliberately absent from `plan-snapshot-sync`.
+   */
+  readonly cashbackMode: PointsCashbackMode;
+  /** The plan's own percent, set under PERCENT only; `null` otherwise. */
+  readonly cashbackPercent: number | null;
   readonly durations: readonly AdminPlanDurationInterface[];
   readonly createdAt: string;
   readonly updatedAt: string;

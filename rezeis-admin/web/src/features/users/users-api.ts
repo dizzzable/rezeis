@@ -172,8 +172,63 @@ async function mergeAccounts(input: {
   return accountMergeResultSchema.parse(unwrapPayload(response.data))
 }
 
+/**
+ * One row of the points journal, as `GET /admin/users/:telegramId/points/ledger`
+ * (`admin-user-management.controller.ts`) returns it for the user card's
+ * "Points history" sheet. `details` is whatever the writer recorded — the
+ * sheet reads it by `source` and never trusts a shape it does not know.
+ */
+export const POINTS_LEDGER_SOURCES = [
+  'CASHBACK',
+  'CASHBACK_REVERSED',
+  'REFERRAL_REWARD',
+  'REFERRAL_REWARD_REVOKED',
+  'QUEST_REWARD',
+  'EXCHANGE',
+  'MANUAL_ADJUSTMENT',
+  'ACCOUNT_MERGE',
+  'IMPORT',
+  'OPENING_BALANCE',
+] as const
+
+const pointsLedgerEntrySchema = z.object({
+  id: z.string(),
+  delta: z.number().int(),
+  balanceAfter: z.number().int(),
+  source: z.enum(POINTS_LEDGER_SOURCES),
+  referenceKey: z.string().nullable(),
+  details: z.unknown(),
+  createdAt: z.string(),
+})
+
+const pointsLedgerPageSchema = z.object({
+  items: z.array(pointsLedgerEntrySchema),
+  nextCursor: z.string().nullable(),
+})
+
+export type PointsLedgerEntry = z.infer<typeof pointsLedgerEntrySchema>
+export type PointsLedgerPage = z.infer<typeof pointsLedgerPageSchema>
+
+/**
+ * Keyset-paged: pass back `nextCursor` to continue, `null`/absent for the
+ * first page. The id travels in the PATH, encoded; the cursor and the page
+ * size in the query, which is where the backend reads them.
+ */
+async function listPointsLedger(input: {
+  readonly userId: string
+  readonly cursor?: string | null
+  readonly limit?: number
+}): Promise<PointsLedgerPage> {
+  const response = await api.get(
+    `/admin/users/${encodeURIComponent(input.userId)}/points/ledger`,
+    { params: { cursor: input.cursor ?? undefined, limit: input.limit } },
+  )
+  return pointsLedgerPageSchema.parse(unwrapPayload(response.data))
+}
+
 export const usersApi = {
   getAccountMergePreview,
+  listPointsLedger,
   listUserOperations,
   mergeAccounts,
 }

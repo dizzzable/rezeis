@@ -11,6 +11,9 @@ type AddOnRecord = {
   description: string | null;
   type: string;
   lifetime: string;
+  cashbackMode: string;
+  cashbackPercent: number | null;
+  cashbackPoints: number | null;
   revision: number;
   icon: string | null;
   value: number;
@@ -30,6 +33,9 @@ function record(overrides: Partial<AddOnRecord> = {}): AddOnRecord {
     description: null,
     type: 'EXTRA_TRAFFIC',
     lifetime: 'UNTIL_NEXT_RESET',
+    cashbackMode: 'INHERIT',
+    cashbackPercent: null,
+    cashbackPoints: null,
     revision: 1,
     icon: null,
     value: 50,
@@ -67,6 +73,9 @@ function build(options: {
           type: data['type'] as string,
           lifetime: data['lifetime'] as string,
           value: data['value'] as number,
+          cashbackMode: data['cashbackMode'] as string,
+          cashbackPercent: (data['cashbackPercent'] as number | null) ?? null,
+          cashbackPoints: (data['cashbackPoints'] as number | null) ?? null,
           applicablePlanIds: (data['applicablePlanIds'] as string[]) ?? [],
           prices: (prices?.create ?? []).map((p, i) => ({ id: `price-${i}`, currency: p.currency, price: p.price })),
         });
@@ -202,6 +211,127 @@ describe('AddOnsService catalog (T-006)', () => {
     const { service, updates } = build({ existing: record({ applicablePlanIds: ['plan-a'] }), existingPlans: ['plan-a', 'plan-b'] });
     await service.update('addon-1', { applicablePlanIds: ['plan-a', 'plan-b'] });
     assert.deepEqual((updates[0]!.data as { revision: unknown }).revision, { increment: 1 });
+  });
+
+  // ── Points cashback ────────────────────────────────────────────────────────
+
+  it('stores the cashback rule on create, and defaults it to INHERIT with both numbers null', async () => {
+    const explicit = build();
+    const result = await explicit.service.create({
+      name: 'Extra 50GB', type: 'EXTRA_TRAFFIC' as never, value: 50,
+      prices: [{ currency: 'USD' as never, price: '1.00' }],
+      cashbackMode: 'PERCENT' as never, cashbackPercent: 10,
+    });
+    const data = explicit.creates[0]!.data;
+    assert.equal(data['cashbackMode'], 'PERCENT');
+    assert.equal(data['cashbackPercent'], 10);
+    assert.equal(data['cashbackPoints'], null);
+    // The read mapper carries the rule back out, so the editor can show it.
+    assert.equal(result.cashbackMode, 'PERCENT');
+    assert.equal(result.cashbackPercent, 10);
+    assert.equal(result.cashbackPoints, null);
+
+    const omitted = build();
+    const defaulted = await omitted.service.create({
+      name: 'Extra 50GB', type: 'EXTRA_TRAFFIC' as never, value: 50,
+      prices: [{ currency: 'USD' as never, price: '1.00' }],
+    });
+    assert.equal(omitted.creates[0]!.data['cashbackMode'], 'INHERIT');
+    assert.equal(omitted.creates[0]!.data['cashbackPercent'], null);
+    assert.equal(omitted.creates[0]!.data['cashbackPoints'], null);
+    assert.equal(defaulted.cashbackMode, 'INHERIT');
+  });
+
+  it('PERCENT on update stores the percent and nulls the points', async () => {
+    const { service, updates } = build({
+      existing: record({ cashbackMode: 'FIXED', cashbackPercent: null, cashbackPoints: 20 }),
+    });
+    const result = await service.update('addon-1', { cashbackMode: 'PERCENT' as never, cashbackPercent: 15 });
+    const data = updates[0]!.data;
+    assert.equal(data['cashbackMode'], 'PERCENT');
+    assert.equal(data['cashbackPercent'], 15);
+    assert.equal(data['cashbackPoints'], null);
+    assert.equal(result.cashbackMode, 'PERCENT');
+    assert.equal(result.cashbackPercent, 15);
+    assert.equal(result.cashbackPoints, null);
+  });
+
+  it('FIXED on update stores the points and nulls the percent', async () => {
+    const { service, updates } = build({
+      existing: record({ cashbackMode: 'PERCENT', cashbackPercent: 15, cashbackPoints: null }),
+    });
+    await service.update('addon-1', { cashbackMode: 'FIXED' as never, cashbackPoints: 30 });
+    const data = updates[0]!.data;
+    assert.equal(data['cashbackMode'], 'FIXED');
+    assert.equal(data['cashbackPoints'], 30);
+    assert.equal(data['cashbackPercent'], null);
+  });
+
+  it('NONE and INHERIT on update null both numbers', async () => {
+    for (const mode of ['NONE', 'INHERIT']) {
+      const { service, updates } = build({
+        existing: record({ cashbackMode: 'PERCENT', cashbackPercent: 15, cashbackPoints: null }),
+      });
+      await service.update('addon-1', { cashbackMode: mode as never });
+      const data = updates[0]!.data;
+      assert.equal(data['cashbackMode'], mode);
+      assert.equal(data['cashbackPercent'], null, mode);
+      assert.equal(data['cashbackPoints'], null, mode);
+    }
+  });
+
+  it('a number sent on its own lands under the mode the row already has', async () => {
+    const percentRow = build({
+      existing: record({ cashbackMode: 'PERCENT', cashbackPercent: 10, cashbackPoints: null }),
+    });
+    await percentRow.service.update('addon-1', { cashbackPercent: 25 });
+    assert.equal(percentRow.updates[0]!.data['cashbackMode'], 'PERCENT');
+    assert.equal(percentRow.updates[0]!.data['cashbackPercent'], 25);
+
+    // Under INHERIT nothing reads a percent, so none is stored: a stale number
+    // must not come back to life on a later switch to PERCENT.
+    const inheritRow = build({ existing: record() });
+    await inheritRow.service.update('addon-1', { cashbackPercent: 25 });
+    assert.equal(inheritRow.updates[0]!.data['cashbackMode'], 'INHERIT');
+    assert.equal(inheritRow.updates[0]!.data['cashbackPercent'], null);
+  });
+
+  it('refuses PERCENT without a percent and FIXED without points', async () => {
+    const create = build();
+    await assert.rejects(
+      () => create.service.create({
+        name: 'x', type: 'EXTRA_TRAFFIC' as never, value: 10,
+        prices: [{ currency: 'USD' as never, price: '1' }],
+        cashbackMode: 'PERCENT' as never,
+      }),
+      (e: unknown) => e instanceof BadRequestException,
+    );
+    assert.equal(create.creates.length, 0);
+
+    const update = build({ existing: record() });
+    await assert.rejects(
+      () => update.service.update('addon-1', { cashbackMode: 'FIXED' as never, cashbackPoints: null }),
+      (e: unknown) => e instanceof BadRequestException,
+    );
+    assert.equal(update.updates.length, 0);
+  });
+
+  it('does NOT bump revision on a cashback-only change (it changes what is earned, not what is sold)', async () => {
+    const { service, updates } = build({ existing: record({ revision: 3 }) });
+    await service.update('addon-1', { cashbackMode: 'FIXED' as never, cashbackPoints: 30 });
+    assert.equal(updates.length, 1);
+    assert.equal((updates[0]!.data as { revision?: unknown }).revision, undefined);
+  });
+
+  it('leaves the cashback columns alone when the update does not mention them', async () => {
+    const { service, updates } = build({
+      existing: record({ cashbackMode: 'FIXED', cashbackPercent: null, cashbackPoints: 20 }),
+    });
+    await service.update('addon-1', { isActive: false });
+    const data = updates[0]!.data;
+    assert.equal('cashbackMode' in data, false);
+    assert.equal('cashbackPercent' in data, false);
+    assert.equal('cashbackPoints' in data, false);
   });
 
   it('archives (sets archivedAt + isActive false) and is idempotent', async () => {

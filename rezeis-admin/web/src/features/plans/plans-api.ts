@@ -41,6 +41,13 @@ export interface PlanDuration {
   readonly id: string
   readonly days: number
   readonly isActive: boolean
+  /**
+   * Points a purchase of THIS duration earns when the plan's `cashbackMode`
+   * is FIXED — a year and a month may differ. `null` under every other mode,
+   * and under FIXED it reads as zero. Optional for the reason `cashbackMode`
+   * on `Plan` gives.
+   */
+  readonly cashbackPoints?: number | null
   readonly prices: ReadonlyArray<{
     readonly id: string
     readonly currency: string
@@ -105,6 +112,22 @@ export interface Plan {
   readonly durations: ReadonlyArray<PlanDuration>
   readonly replacementPlanIds: ReadonlyArray<string>
   readonly upgradeToPlanIds: ReadonlyArray<string>
+  /**
+   * How a purchase of this plan earns points. INHERIT follows the global
+   * percent from Settings → Points; NONE excludes the plan; PERCENT reads
+   * `cashbackPercent`; FIXED reads each duration's `cashbackPoints`.
+   *
+   * The server sends it on every plan. It is optional here for the reason
+   * `trafficLimit` is `number | null` above: `fetchPlans` casts the response
+   * and checks nothing, so absence is a state this code CAN see (a response
+   * cached before the columns shipped, a panel mid-deploy talking to an API
+   * that predates them), and every reader has to decide what it means rather
+   * than have tsc pretend it cannot happen. It means INHERIT — the column's
+   * own default — and the plan list and the editor both fold it that way.
+   */
+  readonly cashbackMode?: 'INHERIT' | 'NONE' | 'PERCENT' | 'FIXED'
+  /** The plan's own percent, set under PERCENT only; `null` otherwise. */
+  readonly cashbackPercent?: number | null
   /**
    * Per-plan allow-list when `availability === 'ALLOWED'`. Only present
    * on plans that opt into the explicit-grants flow; absent for the

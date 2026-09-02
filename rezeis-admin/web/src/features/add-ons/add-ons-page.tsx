@@ -41,6 +41,12 @@ import { AddOnEntitlementsTab } from './add-on-entitlements-tab'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
 const ADD_ON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES', 'RESET_TRAFFIC'] as const
+/**
+ * Points cashback for a purchase of the add-on, in the order the operator
+ * reads them: follow the global rule, opt out, own percent, own points.
+ */
+const ADD_ON_CASHBACK_MODES = ['INHERIT', 'NONE', 'PERCENT', 'FIXED'] as const
+type AddOnCashbackMode = (typeof ADD_ON_CASHBACK_MODES)[number]
 
 interface AddOnPrice {
   id?: string
@@ -75,6 +81,12 @@ interface AddOn {
   prices: AddOnPrice[]
   /** `RESET_TRAFFIC` only: free uses per subscription term. 0 = always paid. */
   freeUsesPerTerm?: number
+  /** Points cashback rule; `INHERIT` follows Settings → Points. */
+  cashbackMode?: AddOnCashbackMode
+  /** Whole percent of the paid amount; set only under `PERCENT`. */
+  cashbackPercent?: number | null
+  /** Points per purchase; set only under `FIXED`. */
+  cashbackPoints?: number | null
 }
 
 interface AddOnFormData {
@@ -88,6 +100,11 @@ interface AddOnFormData {
   applicablePlanIds: string[]
   prices: { currency: string; price: string }[]
   freeUsesPerTerm?: number
+  cashbackMode: AddOnCashbackMode
+  /** Sent only under `PERCENT`; the API nulls it under every other mode. */
+  cashbackPercent?: number
+  /** Sent only under `FIXED`; the API nulls it under every other mode. */
+  cashbackPoints?: number
 }
 
 export default function AddOnsPage() {
@@ -386,6 +403,9 @@ function AddOnDialog({
   const [prices, setPrices] = useState<{ currency: string; price: string }[]>([
     { currency: 'RUB', price: '' },
   ])
+  const [cashbackMode, setCashbackMode] = useState<AddOnCashbackMode>('INHERIT')
+  const [cashbackPercent, setCashbackPercent] = useState('')
+  const [cashbackPoints, setCashbackPoints] = useState('')
 
   // Reset/populate form when dialog opens
   // TODO: refactor — initialize state from `addOn` via key prop instead of mirroring in an effect.
@@ -409,6 +429,9 @@ function AddOnDialog({
             }))
           : [{ currency: 'RUB', price: '' }],
       )
+      setCashbackMode(addOn.cashbackMode ?? 'INHERIT')
+      setCashbackPercent(addOn.cashbackPercent?.toString() ?? '')
+      setCashbackPoints(addOn.cashbackPoints?.toString() ?? '')
     } else {
       setName('')
       setDescription('')
@@ -419,6 +442,9 @@ function AddOnDialog({
       setIsActive(true)
       setSelectedPlanIds([])
       setPrices([{ currency: 'RUB', price: '' }])
+      setCashbackMode('INHERIT')
+      setCashbackPercent('')
+      setCashbackPoints('')
     }
   }, [open, addOn])
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -473,6 +499,16 @@ function AddOnDialog({
       prices: prices
         .filter((p) => p.price.trim() !== '' && parseFloat(p.price) >= 0)
         .map((p) => ({ currency: p.currency, price: p.price.trim() })),
+      cashbackMode,
+      // Only the number the mode reads is sent. The API nulls the other one,
+      // so a percent typed and then abandoned for FIXED cannot come back to
+      // life on the next switch — the same discipline as `freeUsesPerTerm`.
+      ...(cashbackMode === 'PERCENT'
+        ? { cashbackPercent: Math.min(100, Math.max(0, parseInt(cashbackPercent, 10) || 0)) }
+        : {}),
+      ...(cashbackMode === 'FIXED'
+        ? { cashbackPoints: Math.max(0, parseInt(cashbackPoints, 10) || 0) }
+        : {}),
     }
     if (addOn) {
       updateMutation.mutate(formData)
@@ -732,6 +768,53 @@ function AddOnDialog({
                 </div>
               ))}
             </div>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-2">
+            <Label>{t('addOnsPage.form.cashback')}</Label>
+            <Select
+              value={cashbackMode}
+              onValueChange={(v) => setCashbackMode(v as AddOnCashbackMode)}
+            >
+              <SelectTrigger aria-label={t('addOnsPage.form.cashback')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {ADD_ON_CASHBACK_MODES.map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {t(`addOnsPage.form.cashbackModes.${mode}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {cashbackMode === 'PERCENT' && (
+              <Input
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                required
+                value={cashbackPercent}
+                onChange={(e) => setCashbackPercent(e.target.value)}
+                aria-label={t('addOnsPage.form.cashbackPercentAria')}
+              />
+            )}
+            {cashbackMode === 'FIXED' && (
+              <Input
+                type="number"
+                min="0"
+                step="1"
+                required
+                value={cashbackPoints}
+                onChange={(e) => setCashbackPoints(e.target.value)}
+                aria-label={t('addOnsPage.form.cashbackPointsAria')}
+              />
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {t(`addOnsPage.form.cashbackHints.${cashbackMode}`)}
+            </p>
           </div>
 
           <Separator />

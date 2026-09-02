@@ -18,6 +18,7 @@ import {
   Megaphone,
   Trophy,
   Settings,
+  Coins,
   Shield,
   Bell,
   Upload,
@@ -252,6 +253,16 @@ export const deepLinkNavItems: ReadonlyArray<NavItem & { readonly groupKey: stri
     icon: Banknote,
     groupKey: 'growth',
     requiredPermission: { resource: 'withdrawals', action: 'view' },
+  },
+  // ── Configuration ─────────────────────────────────────────────────────────
+  {
+    // Settings → Points: the global cashback rule and what points buy. Reached
+    // from the platform settings grid; listed here so ⌘K finds it by name.
+    key: 'pointsSettings',
+    path: '/settings/points',
+    icon: Coins,
+    groupKey: 'configuration',
+    requiredPermission: { resource: 'settings', action: 'view' },
   },
   // ── Operations ────────────────────────────────────────────────────────────
   {

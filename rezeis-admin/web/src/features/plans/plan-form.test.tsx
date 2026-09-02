@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -486,6 +486,7 @@ function editedPlan(overrides: Partial<Plan> = {}): Plan {
         id: 'duration-1',
         days: 30,
         isActive: true,
+        cashbackPoints: null,
         // A decimal STRING, which is what `/admin/plans` actually sends
         // (`Decimal(20, 8)` through `.toString()`). The number here was the
         // old wire type's fiction; the draft builder calls `.toString()` on
@@ -517,6 +518,8 @@ function planOption(): Plan {
     durations: [],
     replacementPlanIds: [],
     upgradeToPlanIds: [],
+    cashbackMode: 'INHERIT',
+    cashbackPercent: null,
   }
 }
 
@@ -577,5 +580,127 @@ describe('a squad the panel no longer knows', () => {
     await waitFor(() => {
       expect(screen.queryByText(/Not in the panel/i)).toBeNull()
     })
+  })
+})
+
+// ── Points cashback ──────────────────────────────────────────────────────────
+//
+// The rule has two shapes and the form must never show both: a PERCENT plan
+// owns one number, a FIXED plan owns one number PER DURATION (a year may pay
+// more than a month), and INHERIT / NONE own nothing. An input on screen under
+// the wrong mode is a value the operator can type and the save then silently
+// drops — so "not rendered" is what is asserted, not merely "empty".
+describe('PlanForm points cashback', () => {
+  it('names the rule control and shows no number input under INHERIT', () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(<PlanForm onSubmit={vi.fn()} isLoading={false} />)
+
+    expect(screen.getByRole('combobox', { name: 'Cashback rule' })).toBeInTheDocument()
+    expect(screen.getByText('The global rule from Settings → Points applies.')).toBeInTheDocument()
+    expect(screen.queryByRole('spinbutton', { name: 'Cashback percent' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('spinbutton', { name: 'Duration 1 cashback points' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('reveals the percent input under PERCENT and moves the number onto the duration rows under FIXED', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(<PlanForm onSubmit={vi.fn()} isLoading={false} />)
+
+    await user.click(screen.getByRole('combobox', { name: 'Cashback rule' }))
+    await user.click(await screen.findByRole('option', { name: 'Own percent' }))
+
+    expect(await screen.findByRole('spinbutton', { name: 'Cashback percent' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('spinbutton', { name: 'Duration 1 cashback points' }),
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Cashback rule' }))
+    await user.click(await screen.findByRole('option', { name: 'Fixed points' }))
+
+    expect(
+      await screen.findByRole('spinbutton', { name: 'Duration 1 cashback points' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('spinbutton', { name: 'Cashback percent' })).not.toBeInTheDocument()
+  })
+
+  it('opens a PERCENT plan with its saved percent in the input', () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm
+        plan={editedPlan({ cashbackMode: 'PERCENT', cashbackPercent: 15 })}
+        onSubmit={vi.fn()}
+        isLoading={false}
+      />,
+    )
+
+    expect(screen.getByRole('spinbutton', { name: 'Cashback percent' })).toHaveValue(15)
+    expect(
+      screen.queryByRole('spinbutton', { name: 'Duration 1 cashback points' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('submits the points of each duration under FIXED with the percent cleared', async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm
+        plan={editedPlan({ cashbackMode: 'FIXED', cashbackPercent: 15 })}
+        onSubmit={onSubmit}
+        isLoading={false}
+      />,
+    )
+
+    expect(screen.queryByRole('spinbutton', { name: 'Cashback percent' })).not.toBeInTheDocument()
+    const points = screen.getByRole('spinbutton', { name: 'Duration 1 cashback points' })
+    // `null` on the wire is the empty box, not a zero the operator has to delete.
+    expect(points).toHaveValue(null)
+
+    await user.type(points, '40')
+    await user.click(screen.getByRole('button', { name: 'Update plan' }))
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cashbackMode: 'FIXED',
+          // The percent saved under an earlier PERCENT rule does not ride along.
+          cashbackPercent: null,
+          durations: [expect.objectContaining({ days: 30, cashbackPoints: 40 })],
+        }),
+      )
+    })
+  })
+
+  it('refuses points past the column before submit, and says so under the duration', async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm plan={editedPlan({ cashbackMode: 'FIXED' })} onSubmit={onSubmit} isLoading={false} />,
+    )
+
+    // Past PostgreSQL `integer`, which is what the API refuses. A negative or
+    // fractional value is deliberately NOT what is typed here: the input's
+    // `min="0"` / `step="1"` make the browser — and jsdom, which runs
+    // `reportValidity()` before it dispatches `submit` — refuse the save on
+    // its own, so the schema never sees those. This is the shape only the
+    // schema can catch, and it has to be reported on the duration's own row.
+    const points = screen.getByRole('spinbutton', { name: 'Duration 1 cashback points' })
+    await user.type(points, '2147483648')
+    await user.click(screen.getByRole('button', { name: 'Update plan' }))
+
+    expect(
+      await within(points.parentElement as HTMLElement).findByText(
+        'Cashback points must be a whole number of 0 or more.',
+      ),
+    ).toBeInTheDocument()
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 })

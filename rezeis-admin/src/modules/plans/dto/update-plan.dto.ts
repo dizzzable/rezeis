@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { PlanAvailability, PlanType } from '@prisma/client';
+import { PlanAvailability, PlanType, PointsCashbackMode } from '@prisma/client';
 import {
   ArrayUnique,
   IsArray,
@@ -9,6 +9,7 @@ import {
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -127,6 +128,24 @@ export class UpdatePlanDto {
   @ValidateNested()
   @Type((): typeof TrialSettingsDto => TrialSettingsDto)
   public trialSettings?: TrialSettingsDto;
+
+  /**
+   * Points cashback rule. A patch that omits it keeps the persisted mode —
+   * NOT INHERIT — so the active toggle on the list page, which sends only
+   * `isActive`, cannot reset what an operator configured.
+   */
+  @IsOptional()
+  @IsEnum(PointsCashbackMode)
+  public cashbackMode?: PointsCashbackMode;
+
+  /** Read under PERCENT only; the normaliser stores NULL under every other mode. */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  public cashbackPercent?: number | null;
 
   @IsOptional()
   @IsArray()

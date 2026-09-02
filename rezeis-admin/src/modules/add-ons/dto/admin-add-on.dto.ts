@@ -1,4 +1,4 @@
-import { AddOnLifetime, AddOnType, Currency } from '@prisma/client';
+import { AddOnLifetime, AddOnType, Currency, PointsCashbackMode } from '@prisma/client';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -15,6 +15,8 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+
+import { INT4_MAX } from '../../points/points-cashback.util';
 
 /**
  * How many units this add-on adds — whole GIGABYTES for `EXTRA_TRAFFIC`, whole
@@ -109,6 +111,36 @@ export class AdminAddOnCreateDto {
   @ValidateNested({ each: true })
   @Type(() => AddOnPriceDto)
   public prices!: AddOnPriceDto[];
+
+  /**
+   * Points cashback for a purchase of this add-on, resolved by
+   * `computeCashbackLine` in `points-cashback.util.ts`: `INHERIT` follows the
+   * global percent from Settings → Points, `NONE` excludes the add-on,
+   * `PERCENT` pays `cashbackPercent` of the paid amount and `FIXED` pays
+   * `cashbackPoints` whatever the amount. Defaults to `INHERIT`.
+   */
+  @IsOptional()
+  @IsEnum(PointsCashbackMode)
+  public cashbackMode?: PointsCashbackMode;
+
+  /** Whole percent, read only under `PERCENT`; `null` clears it. */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  public cashbackPercent?: number | null;
+
+  /**
+   * Whole points, read only under `FIXED`; `null` clears it. Bounded by the
+   * column type — a rule past `integer` is a misconfiguration, not a payout.
+   */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsInt()
+  @Min(0)
+  @Max(INT4_MAX)
+  public cashbackPoints?: number | null;
 }
 
 export class AdminAddOnUpdateDto {
@@ -171,4 +203,25 @@ export class AdminAddOnUpdateDto {
   @ValidateNested({ each: true })
   @Type(() => AddOnPriceDto)
   public prices?: AddOnPriceDto[];
+
+  /** See {@link AdminAddOnCreateDto.cashbackMode}. */
+  @IsOptional()
+  @IsEnum(PointsCashbackMode)
+  public cashbackMode?: PointsCashbackMode;
+
+  /** Whole percent, read only under `PERCENT`; `null` clears it. */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  public cashbackPercent?: number | null;
+
+  /** Whole points, read only under `FIXED`; `null` clears it. */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsInt()
+  @Min(0)
+  @Max(INT4_MAX)
+  public cashbackPoints?: number | null;
 }

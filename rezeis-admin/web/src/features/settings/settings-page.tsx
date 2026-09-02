@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Save, Loader2 } from 'lucide-react'
+import { Save, Loader2, Coins } from 'lucide-react'
+import { Link } from 'react-router'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -55,6 +56,9 @@ interface AdminSettings {
     readonly configured: boolean
     readonly publicKey: string
   }
+  readonly pointsSettings?: {
+    readonly cashback?: { readonly enabled?: boolean; readonly percent?: number }
+  }
 }
 
 export default function SettingsPage() {
@@ -81,10 +85,43 @@ export default function SettingsPage() {
         <div className="space-y-6">
           <BotTokenSection settings={settings} />
           <WebPushSection settings={settings} />
+          <PointsSection settings={settings} />
         </div>
         <BrandingTab settings={settings} />
       </div>
     </div>
+  )
+}
+
+/**
+ * The way into Settings → Points from the platform settings grid: what the
+ * cashback rule is right now, and one button to the page that owns it.
+ */
+export function PointsSection({ settings }: { settings: AdminSettings | undefined }) {
+  const { t } = useTranslation()
+  const cashback = settings?.pointsSettings?.cashback
+  const enabled = cashback?.enabled === true
+  const percent = typeof cashback?.percent === 'number' ? cashback.percent : 0
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Coins className="h-5 w-5 text-muted-foreground" />
+          {t('pointsSettingsPage.hub.title')}
+        </CardTitle>
+        <CardDescription>{t('pointsSettingsPage.hub.description')}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          {enabled
+            ? t('pointsSettingsPage.hub.cashbackOn', { percent })
+            : t('pointsSettingsPage.hub.cashbackOff')}
+        </p>
+        <Button asChild type="button" variant="outline" size="sm">
+          <Link to="/settings/points">{t('pointsSettingsPage.hub.open')}</Link>
+        </Button>
+      </CardContent>
+    </Card>
   )
 }
 

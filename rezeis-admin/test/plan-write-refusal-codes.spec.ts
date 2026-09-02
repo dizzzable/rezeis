@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { ArgumentsHost, HttpException } from '@nestjs/common';
-import { Currency, PlanAvailability, PlanType } from '@prisma/client';
+import { Currency, PlanAvailability, PlanType, PointsCashbackMode } from '@prisma/client';
 
 import {
   AdminSafeExceptionFilter,
@@ -86,6 +86,8 @@ const BASE_WRITE: NormalizedPlanWriteInput = {
   replacementPlanIds: [],
   allowedUserIds: [],
   trialSettings: { maxClaims: 1, free: true, availabilityScope: 'ALL', requireTelegramLink: false },
+  cashbackMode: PointsCashbackMode.INHERIT,
+  cashbackPercent: null,
   durations: [{ days: 30, prices: [{ currency: Currency.USD, price: '9.99' }] }],
 };
 

@@ -14,6 +14,7 @@ import { UpdateCustomIconsDto } from '../dto/custom-icons.dto';
 import { GenerateWebPushKeysDto } from '../dto/generate-web-push-keys.dto';
 import { UpdateNotificationsTogglesDto } from '../dto/update-notifications-toggles.dto';
 import { UpdatePlatformSettingsDto } from '../dto/update-platform-settings.dto';
+import { UpdatePointsSettingsDto } from '../dto/update-points-settings.dto';
 import { UpdateReferralSettingsDto } from '../dto/update-referral-settings.dto';
 import { UpdateRemnawaveCleanupSettingsDto } from '../dto/update-remnawave-cleanup-settings.dto';
 import { UpdateAntiFraudSettingsDto } from '../dto/update-anti-fraud-settings.dto';
@@ -294,6 +295,32 @@ export class SettingsController {
   @Get('branding')
   public async getBrandingSettings(): Promise<BrandingSettingsInterface> {
     return this.settingsService.getBrandingSettings();
+  }
+
+  /** The raw `pointsSettings` JSON — the global points-cashback rule. */
+  @Get('points')
+  public async getPointsSettings(): Promise<Record<string, unknown>> {
+    return this.settingsService.getPointsSettings();
+  }
+
+  /**
+   * Partial-update of `pointsSettings`. `cashback` is merged one level deep,
+   * so the page can send the switch without the percent and back. A DTO body
+   * for the same reason as the referral one: a metatype of `Object` would
+   * skip the validation pipe entirely.
+   */
+  @Patch('points')
+  @RequirePermission('settings', 'edit')
+  public async updatePointsSettings(
+    @Body() body: UpdatePointsSettingsDto,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<Record<string, unknown>> {
+    return this.settingsService.updatePointsSettings({
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+      patch: toPlainPatch(body),
+    });
   }
 
   /**

@@ -150,6 +150,13 @@ interface UpdateReferralSettingsInput {
   readonly patch: Record<string, unknown>;
 }
 
+interface UpdatePointsSettingsInput {
+  readonly currentAdmin: CurrentAdminInterface;
+  readonly requestMetadata: RequestMetadataInterface;
+  /** Partial update of the `pointsSettings` JSON; `cashback` is spread one level deeper. */
+  readonly patch: Record<string, unknown>;
+}
+
 interface UpdatePartnerSettingsInput {
   readonly currentAdmin: CurrentAdminInterface;
   readonly requestMetadata: RequestMetadataInterface;
@@ -580,6 +587,7 @@ export class SettingsService {
     readonly multiSubscriptionSettings: Record<string, unknown>;
     readonly referralSettings: Record<string, unknown>;
     readonly partnerSettings: Record<string, unknown>;
+    readonly pointsSettings: Record<string, unknown>;
     readonly botTokenConfigured: boolean;
     readonly emailConfigured: boolean;
     readonly emailPasswordSet: boolean;
@@ -613,6 +621,9 @@ export class SettingsService {
       // save (the PATCH persists fine), which reads as "settings don't save".
       referralSettings: readJsonObject(settings.referralSettings),
       partnerSettings: readJsonObject(settings.partnerSettings),
+      // The points page hydrates from here the same way; the cashback switch
+      // and percent are not secret-bearing.
+      pointsSettings: readJsonObject(settings.pointsSettings),
       // Presence flags only — the masked secrets never reach the SPA, so the
       // UI still gets to render "configured" without holding the value.
       botTokenConfigured: secretFlags.botTokenConfigured,
@@ -1149,6 +1160,44 @@ export class SettingsService {
     const settings = await this.getSettingsRecord(this.prismaService);
     if (!settings) return {};
     return readJsonObject(settings.referralSettings);
+  }
+
+  /**
+   * Partial-update the `pointsSettings` JSON column — the global points
+   * cashback rule. Same shape as the referral update: one transaction, a
+   * one-level-deep merge of `cashback`, an audit row naming the keys touched.
+   * The cashback hook reads the column directly on every payment, so a save
+   * is live at once; nothing else caches it.
+   */
+  public async updatePointsSettings(input: UpdatePointsSettingsInput): Promise<Record<string, unknown>> {
+    return this.prismaService.$transaction(async (tx) => {
+      const settings = await this.getOrCreateSettingsRecord(tx);
+      const previous = readJsonObject(settings.pointsSettings);
+      const next = mergePointsSettings(previous, input.patch);
+      await tx.settings.update({
+        where: { id: settings.id },
+        data: { pointsSettings: next as unknown as Prisma.InputJsonValue },
+      });
+      await tx.adminAuditLog.create({
+        data: buildAdminAuditLogData({
+          action: 'settings.pointsSettings.update',
+          actorId: input.currentAdmin.id,
+          requestMetadata: input.requestMetadata,
+          metadata: {
+            requestId: input.requestMetadata.requestId,
+            patchKeys: Object.keys(input.patch),
+            cashback: isPlainObject(next['cashback']) ? next['cashback'] : null,
+          },
+        }),
+      });
+      return next;
+    });
+  }
+
+  public async getPointsSettings(): Promise<Record<string, unknown>> {
+    const settings = await this.getSettingsRecord(this.prismaService);
+    if (!settings) return {};
+    return readJsonObject(settings.pointsSettings);
   }
 
   /**
@@ -1964,6 +2013,25 @@ function mergeReferralSettings(
   const next = { ...previous };
   for (const [key, value] of Object.entries(patch)) {
     if ((key === 'pointsExchange' || key === 'inviteLimits') && isPlainObject(value)) {
+      next[key] = { ...readJsonObject(previous[key]), ...value };
+    } else {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
+/**
+ * Same shape for `pointsSettings`: `cashback` is spread one level deeper so
+ * the switch can be saved without re-sending the percent, and back.
+ */
+function mergePointsSettings(
+  previous: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...previous };
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'cashback' && isPlainObject(value)) {
       next[key] = { ...readJsonObject(previous[key]), ...value };
     } else {
       next[key] = value;

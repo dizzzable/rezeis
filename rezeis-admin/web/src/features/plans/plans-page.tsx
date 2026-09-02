@@ -478,6 +478,26 @@ function SortablePlanCard({
           <Badge variant="outline" className="text-[10px] px-1.5 py-0">
             {plan.availability}
           </Badge>
+          {/* Only a plan that departs from the global cashback rule gets a
+              badge: INHERIT is the default, and what an API without the column
+              reads as, so a badge on every card would hide the one that
+              matters. The percent is printed — "own percent" without the
+              number sends the operator into the editor to find out what it is. */}
+          {plan.cashbackMode === 'NONE' && (
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              {t('plansPage.cashback.none')}
+            </Badge>
+          )}
+          {plan.cashbackMode === 'PERCENT' && (
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              {t('plansPage.cashback.percent', { percent: plan.cashbackPercent ?? 0 })}
+            </Badge>
+          )}
+          {plan.cashbackMode === 'FIXED' && (
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              {t('plansPage.cashback.fixed')}
+            </Badge>
+          )}
           {plan.isArchived && (
             <Badge variant="destructive" className="text-[10px] px-1.5 py-0">
               {t('plansPage.status.archived')}

@@ -114,13 +114,14 @@ function accountSummary(overrides: Record<string, unknown>) {
 }
 
 describe('usersApi — the surface itself', () => {
-  it('exports the three functions the panel imports, and nothing else', () => {
+  it('exports the four functions the panel imports, and nothing else', () => {
     // THE anti-shadow assertion. `users-api.ts` once exported forty functions
     // and `user-detail-panel.tsx` imported three; the other thirty-seven were
     // a second client for routes this backend never declared. Names, not a
     // count: the failure has to say WHICH function grew back.
     expect(Object.keys(usersApi).sort()).toEqual([
       'getAccountMergePreview',
+      'listPointsLedger',
       'listUserOperations',
       'mergeAccounts',
     ])
@@ -133,6 +134,65 @@ describe('usersApi — the surface itself', () => {
     // implementation.
     expect(usersApi).not.toHaveProperty('setUserBlockedState')
     expect(usersApi).not.toHaveProperty('listUserModerationHistory')
+  })
+})
+
+describe('usersApi.listPointsLedger', () => {
+  // GET /admin/users/:telegramId/points/ledger (admin-user-management.controller.ts)
+  beforeEach(() => {
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.patch).mockReset()
+  })
+
+  it('GETs /admin/users/:telegramId/points/ledger with the cursor and page size in the query', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: 'ledger-2',
+            delta: 13,
+            balanceAfter: 18,
+            source: 'CASHBACK',
+            referenceKey: 'tx-1',
+            details: { lines: [] },
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: 'ledger-2',
+      },
+    })
+
+    const page = await usersApi.listPointsLedger({ userId: '12345', cursor: 'ledger-9', limit: 25 })
+
+    expect(api.get).toHaveBeenCalledWith('/admin/users/12345/points/ledger', {
+      params: { cursor: 'ledger-9', limit: 25 },
+    })
+    expect(api.post).not.toHaveBeenCalled()
+    expect(api.patch).not.toHaveBeenCalled()
+    expect(page.nextCursor).toBe('ledger-2')
+    expect(page.items[0]).toMatchObject({ id: 'ledger-2', delta: 13, source: 'CASHBACK' })
+  })
+
+  it('sends no cursor for the first page and encodes the identifier in the path', async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: { items: [], nextCursor: null } })
+
+    await usersApi.listPointsLedger({ userId: 'cm/odd id', cursor: null })
+
+    expect(api.get).toHaveBeenCalledWith('/admin/users/cm%2Fodd%20id/points/ledger', {
+      params: { cursor: undefined, limit: undefined },
+    })
+  })
+
+  it('refuses a row whose source the panel does not know', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: {
+        items: [{ id: 'x', delta: 1, balanceAfter: 1, source: 'LOTTERY', referenceKey: null, details: null, createdAt: new Date().toISOString() }],
+        nextCursor: null,
+      },
+    })
+
+    await expect(usersApi.listPointsLedger({ userId: '12345' })).rejects.toThrow()
   })
 })
 

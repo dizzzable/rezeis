@@ -100,5 +100,32 @@ describe('UserDetailPanel accessibility', () => {
     expect(screen.getByRole('spinbutton', { name: 'Personal discount %' })).toBeInTheDocument()
     expect(screen.getByRole('spinbutton', { name: 'Purchase discount %' })).toBeInTheDocument()
     expect(screen.getByRole('spinbutton', { name: 'Points' })).toBeInTheDocument()
+    // The adjustment carries a reason the subscriber sees and a note that
+    // stays in the panel; both are controls with names of their own.
+    expect(screen.getByRole('combobox', { name: 'Points adjustment reason' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Note for the points adjustment' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Points history' })).toBeInTheDocument()
+  })
+
+  it('sends the reason and the note with the adjustment, and no note key when the note is empty', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { ...BASE_USER, points: 7 } })
+    const postSpy = vi.spyOn(api, 'post').mockResolvedValue({ data: { points: 257 } })
+    const user = userEvent.setup()
+
+    renderWithProviders(<UserDetailPanel telegramId="12345" />)
+
+    const delta = await screen.findByRole('spinbutton', { name: 'Points' })
+    await user.type(delta, '250')
+    await user.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(postSpy).toHaveBeenCalledWith('/admin/users/12345/points', { delta: 250, reason: 'OTHER' })
+
+    await user.type(screen.getByRole('spinbutton', { name: 'Points' }), '-5')
+    await user.type(screen.getByRole('textbox', { name: 'Note for the points adjustment' }), 'shared account')
+    await user.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(postSpy).toHaveBeenLastCalledWith('/admin/users/12345/points', {
+      delta: -5,
+      reason: 'OTHER',
+      note: 'shared account',
+    })
   })
 })

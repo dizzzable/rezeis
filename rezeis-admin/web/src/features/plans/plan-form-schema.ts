@@ -3,6 +3,15 @@ import { z } from 'zod'
 export const PLAN_TYPES = ['TRAFFIC', 'DEVICES', 'BOTH', 'UNLIMITED'] as const
 export const PLAN_AVAILABILITIES = ['ALL', 'NEW', 'EXISTING', 'INVITED', 'ALLOWED', 'TRIAL'] as const
 export const PLAN_TRAFFIC_STRATEGIES = ['MONTH', 'MONTH_ROLLING', 'NO_RESET', 'DAY', 'WEEK'] as const
+/**
+ * How a purchase of the plan earns points — `Plan.cashbackMode` on the server.
+ * INHERIT follows the global percent from Settings → Points; NONE excludes the
+ * plan; PERCENT reads the plan's own `cashbackPercent`; FIXED pays the
+ * purchased DURATION's `cashbackPoints` (a year may pay more than a month) and
+ * ignores the amount paid.
+ */
+export const PLAN_CASHBACK_MODES = ['INHERIT', 'NONE', 'PERCENT', 'FIXED'] as const
+export type PlanCashbackMode = (typeof PLAN_CASHBACK_MODES)[number]
 export const PLAN_CURRENCIES = [
   'USD',
   'RUB',
@@ -25,6 +34,8 @@ export const TAG_SANITIZE = /[^A-Z0-9_]/g
 
 const PRICE_PATTERN = /^\d+(?:\.\d{1,8})?$/
 const INTEGER_PATTERN = /^\d+$/
+/** PostgreSQL `integer`, the type of `cashback_points`; the API refuses anything past it. */
+const INT4_MAX = 2_147_483_647
 
 export interface PlanFormDraft {
   readonly name: string
@@ -49,8 +60,13 @@ export interface PlanFormDraft {
     readonly availabilityScope: 'ALL' | 'INVITED'
     readonly requireTelegramLink: boolean
   }
+  readonly cashbackMode: string
+  /** Read under PERCENT only; whatever is left here under another mode is dropped on submit. */
+  readonly cashbackPercent: string
   readonly durations: {
     readonly days: string
+    /** Read under FIXED only, where empty means 0; dropped on submit under any other mode. */
+    readonly cashbackPoints: string
     readonly prices: {
       readonly currency: string
       readonly price: string
@@ -76,7 +92,15 @@ export interface PlanFormData {
   readonly replacementPlanIds?: string[]
   readonly allowedUserIds?: string[]
   readonly trialSettings?: { maxClaims: number; free: boolean; availabilityScope: 'ALL' | 'INVITED'; requireTelegramLink: boolean }
-  readonly durations: { days: number; prices: { currency: string; price: string }[] }[]
+  readonly cashbackMode: PlanCashbackMode
+  /** Set under PERCENT only — `null` otherwise, so a stale percent is never written back. */
+  readonly cashbackPercent: number | null
+  readonly durations: {
+    days: number
+    /** Set under FIXED only — `null` otherwise. */
+    cashbackPoints: number | null
+    prices: { currency: string; price: string }[]
+  }[]
 }
 
 export interface PlanFormValidationMessages {
@@ -102,6 +126,8 @@ export interface PlanFormValidationMessages {
   readonly paidTrialPriceRequired: string
   readonly replacementRequired: string
   readonly allowedUsersRequired: string
+  readonly cashbackPercentRange: string
+  readonly cashbackPointsRange: string
 }
 
 export function createPlanFormSchema(messages: PlanFormValidationMessages) {
@@ -117,8 +143,18 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
 
   const durationSchema = z.object({
     days: integerString({ min: 1, message: messages.durationDaysInvalid }),
+    cashbackPoints: z.string().trim(),
     prices: z.array(priceSchema).min(1, messages.priceRequired),
   })
+
+  // Both cashback numbers are read only under one mode, so they are checked
+  // in `superRefine` rather than on the field: a percent typed under PERCENT
+  // and then abandoned for INHERIT must not block a save it no longer takes
+  // part in.
+  const cashbackRules = {
+    percent: integerString({ min: 0, max: 100, message: messages.cashbackPercentRange }),
+    points: integerString({ min: 0, max: INT4_MAX, message: messages.cashbackPointsRange }),
+  }
 
   return z
     .object({
@@ -144,11 +180,14 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
         availabilityScope: z.enum(['ALL', 'INVITED']),
         requireTelegramLink: z.boolean(),
       }),
+      cashbackMode: z.enum(PLAN_CASHBACK_MODES),
+      cashbackPercent: z.string().trim(),
       durations: z.array(durationSchema).min(1, messages.durationRequired),
     })
     .superRefine((values, ctx) => {
       addDuplicateDurationIssues(values.durations, ctx, messages)
       addDuplicateCurrencyIssues(values.durations, ctx, messages)
+      addCashbackIssues(values, ctx, cashbackRules, messages)
 
       if (
         values.isArchived &&
@@ -203,8 +242,16 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
                 requireTelegramLink: values.trialSettings.requireTelegramLink,
               }
             : undefined,
+        // Only the number the mode reads is submitted. The server nulls the
+        // other one as well, but a stale value must not even leave the form:
+        // an operator reading the request in devtools would see a percent on
+        // a FIXED plan and go looking for where it applies.
+        cashbackMode: values.cashbackMode,
+        cashbackPercent: values.cashbackMode === 'PERCENT' ? parseInteger(values.cashbackPercent) : null,
         durations: values.durations.map((duration) => ({
           days: parseInteger(duration.days),
+          cashbackPoints:
+            values.cashbackMode === 'FIXED' ? parseCashbackPoints(duration.cashbackPoints) : null,
           prices: duration.prices.map((price) => ({
             currency: price.currency,
             price: price.price,
@@ -276,6 +323,42 @@ function addDuplicateCurrencyIssues(
   })
 }
 
+/**
+ * Validates the cashback number the mode reads, and only that one. INHERIT
+ * and NONE read nothing, so under them neither input is checked — and the
+ * transform drops whatever they hold.
+ */
+function addCashbackIssues(
+  values: {
+    readonly cashbackMode: PlanCashbackMode
+    readonly cashbackPercent: string
+    readonly durations: ReadonlyArray<{ readonly cashbackPoints: string }>
+  },
+  ctx: z.RefinementCtx,
+  rules: {
+    readonly percent: ReturnType<typeof integerString>
+    readonly points: ReturnType<typeof integerString>
+  },
+  messages: PlanFormValidationMessages,
+): void {
+  if (values.cashbackMode === 'PERCENT' && !rules.percent.safeParse(values.cashbackPercent).success) {
+    ctx.addIssue({ code: 'custom', path: ['cashbackPercent'], message: messages.cashbackPercentRange })
+  }
+  if (values.cashbackMode !== 'FIXED') return
+  values.durations.forEach((duration, index) => {
+    // Empty is 0 under FIXED: "no points for this duration" is a rule of its
+    // own, and the operator must not have to type a zero into every row.
+    if (duration.cashbackPoints.length === 0) return
+    if (!rules.points.safeParse(duration.cashbackPoints).success) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['durations', index, 'cashbackPoints'],
+        message: messages.cashbackPointsRange,
+      })
+    }
+  })
+}
+
 function hasPositivePrice(durations: PlanFormDraft['durations']): boolean {
   return durations.some((duration) =>
     duration.prices.some((price) => PRICE_PATTERN.test(price.price.trim()) && Number(price.price) > 0),
@@ -302,4 +385,10 @@ function optionalExternalSquad(value: string): string | undefined {
 
 function parseInteger(value: string): number {
   return Number(value.trim())
+}
+
+/** Under FIXED an empty box is zero points — see `addCashbackIssues`. */
+function parseCashbackPoints(value: string): number {
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? 0 : parseInteger(trimmed)
 }

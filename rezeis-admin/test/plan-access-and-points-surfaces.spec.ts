@@ -493,6 +493,7 @@ function buildController(db: ReturnType<typeof makeDb>): AdminUserManagementCont
     undefined as never,
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
     new PointsWalletService(),
+    { listForUser: async () => ({ items: [], nextCursor: null }) } as never,
   );
 }
 
@@ -1132,6 +1133,29 @@ describe('the points adjustment leaves a trail', () => {
     assert.equal(metadata['adjustment'], -250);
     assert.equal(metadata['previousPoints'], OPENING_POINTS);
     assert.equal(metadata['newPoints'], OPENING_POINTS - 250);
+  });
+
+  it('records the reason the operator chose and keeps the internal note out of nothing but the panel', async () => {
+    const db = seedAccess();
+
+    await buildController(db).adjustPoints(
+      SUBJECT_TELEGRAM_ID,
+      { delta: -250, reason: 'VIOLATION', note: 'shared the account with three flats' },
+      ADMIN,
+      REQ,
+    );
+
+    const row = db.writes.find((write) => write.op === 'pointsLedgerEntry.create')!.data;
+    const details = row['details'] as Record<string, unknown>;
+    assert.equal(details['reason'], 'VIOLATION', 'the code the subscriber will see');
+    assert.equal(details['note'], 'shared the account with three flats', 'the note rides on the row for the panel');
+    assert.equal(auditMetadata(db)['reason'], 'VIOLATION');
+    assert.equal(auditMetadata(db)['note'], 'shared the account with three flats');
+    assert.equal(
+      (db.emitted[0]!.metadata as Record<string, unknown>)['reason'],
+      'VIOLATION',
+      'the operator feed names the reason too',
+    );
   });
 
   it('leaves one ledger row naming the audit row, the reason and the operator', async () => {

@@ -126,6 +126,7 @@ const LegalDocumentsPage = lazy(
   withFeatureBundle('legalDocuments', () => import('@/features/legal-documents/legal-documents-page')),
 );
 const ReferralSettingsPage = lazy(() => import('@/features/settings/referral-settings-page'));
+const PointsSettingsPage = lazy(() => import('@/features/settings/points-settings-page'));
 const QuestsPage = lazy(() => import('@/features/quests/quests-page'));
 const PartnerSettingsPage = lazy(() => import('@/features/settings/partner-settings-page'));
 // Backup UI is now embedded as a tab in /settings/panel; old route redirects.
@@ -224,6 +225,7 @@ export const router = createBrowserRouter([
           { path: 'payments/gateways', element: withSuspense(<GatewaySettingsPage />) },
           { path: 'external-auth', element: withSuspense(<ExternalAuthPage />) },
           { path: 'settings/referral', element: withSuspense(<ReferralSettingsPage />) },
+          { path: 'settings/points', element: withSuspense(<PointsSettingsPage />) },
           { path: 'settings/partner', element: withSuspense(<PartnerSettingsPage />) },
           { path: 'backup', element: <Navigate to="/settings/panel#backups" replace /> },
           { path: 'imports', element: withSuspense(<ImportsPage />) },

@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { PlanAvailability, PlanType } from '@prisma/client';
+import { PlanAvailability, PlanType, PointsCashbackMode } from '@prisma/client';
 import {
   ArrayUnique,
   IsArray,
@@ -164,6 +164,24 @@ export class CreatePlanDto {
   @ValidateNested()
   @Type((): typeof TrialSettingsDto => TrialSettingsDto)
   public trialSettings?: TrialSettingsDto;
+
+  /**
+   * Points cashback for a purchase of this plan. Omitted means INHERIT — the
+   * global rule from Settings → Points — so a client that predates the field
+   * creates plans that behave exactly as before.
+   */
+  @IsOptional()
+  @IsEnum(PointsCashbackMode)
+  public cashbackMode?: PointsCashbackMode;
+
+  /** Read under PERCENT only; the normaliser stores NULL under every other mode. */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  public cashbackPercent?: number | null;
 
   @IsArray()
   @ValidateNested({ each: true })

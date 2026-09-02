@@ -1,4 +1,4 @@
-import { PlanAvailability, Prisma } from '@prisma/client';
+import { PlanAvailability, PointsCashbackMode, Prisma } from '@prisma/client';
 
 import { AdminPlanDurationDto } from '../dto/admin-plan-duration.dto';
 import { CreatePlanDto } from '../dto/create-plan.dto';
@@ -33,6 +33,14 @@ export interface NormalizedPlanWriteInput {
   readonly replacementPlanIds: readonly string[];
   readonly allowedUserIds: readonly string[];
   readonly trialSettings: TrialSettings;
+  /**
+   * Points cashback for a purchase of the plan (`points-cashback.util.ts`).
+   * After `normalizePlanWriteInput` only the field the mode reads is set: the
+   * percent under PERCENT, each duration's `cashbackPoints` under FIXED,
+   * neither under INHERIT and NONE.
+   */
+  readonly cashbackMode: PointsCashbackMode;
+  readonly cashbackPercent: number | null;
   readonly durations: readonly AdminPlanDurationDto[];
 }
 
@@ -86,6 +94,10 @@ export function normalizeCreatePlanInput(input: CreatePlanDto): NormalizedPlanWr
     replacementPlanIds: normalizeUuidArray(input.replacementPlanIds ?? []),
     allowedUserIds: normalizeUuidArray(input.allowedUserIds ?? []),
     trialSettings: normalizeTrialSettings(input.trialSettings, DEFAULT_TRIAL_SETTINGS),
+    // INHERIT is the column default: a client that predates the field creates
+    // plans that follow the global rule, exactly as every plan did before it.
+    cashbackMode: input.cashbackMode ?? PointsCashbackMode.INHERIT,
+    cashbackPercent: input.cashbackPercent ?? null,
     durations: input.durations,
   });
 }
@@ -137,10 +149,20 @@ export function normalizeUpdatePlanInput(
       input.trialSettings,
       readTrialSettings(currentPlan.trialSettings),
     ),
+    // The persisted rule, not INHERIT: a patch that touches only one field
+    // (the active toggle on the list page sends `isActive` and nothing else)
+    // must not reset the cashback an operator configured.
+    cashbackMode: input.cashbackMode ?? currentPlan.cashbackMode,
+    cashbackPercent:
+      input.cashbackPercent === undefined ? currentPlan.cashbackPercent : input.cashbackPercent,
+    // Durations are delete-and-recreate on update, so this fallback has to
+    // carry every column of the current rows: a FIXED plan saved without its
+    // durations would otherwise come back paying zero points everywhere.
     durations:
       input.durations ??
       currentPlan.durations.map((duration) => ({
         days: duration.days,
+        cashbackPoints: duration.cashbackPoints,
         prices: duration.prices.map((price) => ({
           currency: price.currency,
           price: price.price.toString(),
@@ -169,6 +191,8 @@ export function buildPlanWriteData(input: NormalizedPlanWriteInput): Prisma.Plan
     replacementPlanIds: [...input.replacementPlanIds],
     allowedUserIds: [...input.allowedUserIds],
     trialSettings: serializeTrialSettings(input.trialSettings),
+    cashbackMode: input.cashbackMode,
+    cashbackPercent: input.cashbackPercent,
   };
 }
 
@@ -177,6 +201,7 @@ export function buildPlanDurationCreateInput(
 ): Prisma.PlanDurationUncheckedCreateWithoutPlanInput[] {
   return durations.map((duration) => ({
     days: duration.days,
+    cashbackPoints: duration.cashbackPoints ?? null,
     prices: {
       create: duration.prices.map((price) => ({
         currency: price.currency,
@@ -205,7 +230,8 @@ function normalizeUuidArray(values: readonly string[]): readonly string[] {
 /**
  * Final pass that enforces the type-driven invariants for traffic and
  * device limits — `DEVICES` plans force traffic to null, `TRAFFIC` plans
- * force device limit to -1 (unlimited), `UNLIMITED` plans clear both.
+ * force device limit to -1 (unlimited), `UNLIMITED` plans clear both — and
+ * the cashback invariant: only the field the mode reads is stored.
  */
 function normalizePlanWriteInput(input: NormalizedPlanWriteInput): NormalizedPlanWriteInput {
   let trafficLimit = input.trafficLimit;
@@ -228,6 +254,17 @@ function normalizePlanWriteInput(input: NormalizedPlanWriteInput): NormalizedPla
   if (input.availability !== PlanAvailability.ALLOWED) {
     allowedUserIds = [];
   }
+  // A percent typed under PERCENT and then switched to NONE, or points entered
+  // under FIXED and then abandoned for INHERIT, would otherwise sit in the row
+  // until the next mode switch resurrected them. The catalogue reads these
+  // columns live, so a stale value is a promise the operator never made.
+  const cashbackPercent =
+    input.cashbackMode === PointsCashbackMode.PERCENT ? input.cashbackPercent : null;
+  const durations = input.durations.map((duration) => ({
+    ...duration,
+    cashbackPoints:
+      input.cashbackMode === PointsCashbackMode.FIXED ? (duration.cashbackPoints ?? null) : null,
+  }));
   return {
     ...input,
     archivedRenewMode,
@@ -235,5 +272,7 @@ function normalizePlanWriteInput(input: NormalizedPlanWriteInput): NormalizedPla
     deviceLimit,
     replacementPlanIds,
     allowedUserIds,
+    cashbackPercent,
+    durations,
   };
 }

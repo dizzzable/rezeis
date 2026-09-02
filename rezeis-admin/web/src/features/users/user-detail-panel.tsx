@@ -42,6 +42,7 @@ import {
   Wifi,
   Wrench,
   ClipboardList,
+  History,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -70,6 +71,7 @@ import {
 } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -102,6 +104,11 @@ import {
 } from '@/components/ui/dialog'
 import { PermissionGate, useHasPermission } from '@/features/rbac'
 import { usersApi, type AccountMergePreview, type AccountMergeChoices, type UserOperation } from './users-api'
+import { PointsLedgerSheet } from './points-ledger-sheet'
+
+/** The reason codes the backend accepts for a manual points adjustment; the subscriber sees the label. */
+const POINTS_ADJUSTMENT_REASONS = ['COMPENSATION', 'PROMOTION', 'CORRECTION', 'VIOLATION', 'OTHER'] as const
+type PointsAdjustmentReason = (typeof POINTS_ADJUSTMENT_REASONS)[number]
 import {
   SYNC_REFUSAL_BY_CODE,
   SYNC_REFUSAL_BY_MESSAGE,
@@ -398,6 +405,9 @@ function ProfileTab({
     user.partnerBalanceCurrencyOverride ?? '__none__',
   )
   const [pointsDelta, setPointsDelta] = useState('')
+  const [pointsReason, setPointsReason] = useState<PointsAdjustmentReason>('OTHER')
+  const [pointsNote, setPointsNote] = useState('')
+  const [ledgerOpen, setLedgerOpen] = useState(false)
   const [dirty, setDirty] = useState(false)
 
   const saveMutation = useMutation({
@@ -412,14 +422,30 @@ function ProfileTab({
   })
 
   const pointsMutation = useMutation({
-    mutationFn: (delta: number) =>
-      api.post(`/admin/users/${telegramId}/points`, { delta }),
+    // The reason is a code the subscriber sees in their own history; the note
+    // is free text that stays in the panel. An empty note is not sent at all —
+    // the DTO whitelists fields, and "no note" is the absence of the key.
+    mutationFn: (input: { delta: number; reason: PointsAdjustmentReason; note: string }) =>
+      api.post(`/admin/users/${telegramId}/points`, {
+        delta: input.delta,
+        reason: input.reason,
+        ...(input.note.trim().length > 0 ? { note: input.note.trim() } : {}),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey })
+      setPointsNote('')
+      setPointsReason('OTHER')
       toast.success(t('userDetailPanel.toasts.pointsUpdated'))
     },
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.profileFailed'))),
   })
+  const submitPointsAdjustment = () => {
+    const delta = parseInt(pointsDelta, 10)
+    if (Number.isFinite(delta) && delta !== 0) {
+      pointsMutation.mutate({ delta, reason: pointsReason, note: pointsNote })
+      setPointsDelta('')
+    }
+  }
 
   const createPartnerMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/create-partner`),
@@ -485,7 +511,28 @@ function ProfileTab({
               <InfoRow icon={<UserCheck className="h-3 w-3" />} label={t('userDetailPanel.profile.nameLabel')} value={user.name || '—'} />
               <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.profile.role')} value={user.role} />
               <InfoRow icon={<Globe className="h-3 w-3" />} label={t('userDetailPanel.profile.language')} value={user.language} />
-              <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.profile.points')} value={String(user.points ?? 0)} mono />
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <InfoRow icon={<Wallet className="h-3 w-3" />} label={t('userDetailPanel.profile.points')} value={String(user.points ?? 0)} mono />
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  aria-label={t('userDetailPanel.pointsLedger.open')}
+                  onClick={() => setLedgerOpen(true)}
+                >
+                  <History className="mr-1 h-3 w-3" />
+                  {t('userDetailPanel.pointsLedger.open')}
+                </Button>
+              </div>
+              <PointsLedgerSheet
+                telegramId={telegramId}
+                balance={Number(user.points ?? 0)}
+                open={ledgerOpen}
+                onOpenChange={setLedgerOpen}
+              />
             </div>
           </div>
 
@@ -636,29 +683,64 @@ function ProfileTab({
             </Select>
           </div>
 
-          {/* Points */}
-          <div className="flex items-center justify-between gap-3">
-            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <Wallet className="h-3 w-3 text-muted-foreground/60" />
-              {t('userDetailPanel.profile.points')} ({user.points ?? 0})
-            </span>
-            <Input
-              type="number"
-              className="h-7 w-40 text-xs text-right px-2"
-              placeholder="±"
-              aria-label={t('userDetailPanel.profile.points')}
-              value={pointsDelta}
-              onChange={(e) => setPointsDelta(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const delta = parseInt(pointsDelta, 10)
-                  if (Number.isFinite(delta) && delta !== 0) {
-                    pointsMutation.mutate(delta)
-                    setPointsDelta('')
+          {/* Points: the delta, WHY (a code the subscriber sees), and a note that stays here. */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Wallet className="h-3 w-3 text-muted-foreground/60" />
+                {t('userDetailPanel.profile.points')} ({user.points ?? 0})
+              </span>
+              <Input
+                type="number"
+                className="h-7 w-40 text-xs text-right px-2"
+                placeholder="±"
+                aria-label={t('userDetailPanel.profile.points')}
+                value={pointsDelta}
+                onChange={(e) => setPointsDelta(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    submitPointsAdjustment()
                   }
-                }
-              }}
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-muted-foreground">{t('userDetailPanel.pointsLedger.reason')}</span>
+              <Select value={pointsReason} onValueChange={(value) => setPointsReason(value as PointsAdjustmentReason)}>
+                <SelectTrigger className="h-7 w-40 text-xs" aria-label={t('userDetailPanel.pointsLedger.reasonAria')}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {POINTS_ADJUSTMENT_REASONS.map((reason) => (
+                    <SelectItem key={reason} value={reason} className="text-xs">
+                      {t(`userDetailPanel.pointsLedger.reasons.${reason}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Textarea
+              className="min-h-[3rem] text-xs"
+              rows={2}
+              maxLength={500}
+              placeholder={t('userDetailPanel.pointsLedger.notePlaceholder')}
+              aria-label={t('userDetailPanel.pointsLedger.noteAria')}
+              value={pointsNote}
+              onChange={(e) => setPointsNote(e.target.value)}
             />
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                disabled={pointsMutation.isPending || !Number.isFinite(parseInt(pointsDelta, 10)) || parseInt(pointsDelta, 10) === 0}
+                onClick={submitPointsAdjustment}
+              >
+                {t('userDetailPanel.profile.applyPoints')}
+              </Button>
+            </div>
           </div>
 
           {/*

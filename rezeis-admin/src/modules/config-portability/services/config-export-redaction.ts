@@ -145,6 +145,7 @@ export const SECTION_FIELD_ALLOWLIST: Readonly<
     'customIcons',
     'aiSupportSettings',
     'antiFraudSettings',
+    'pointsSettings',
     'updatedAt',
   ],
   blockedIps: [

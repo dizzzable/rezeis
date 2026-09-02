@@ -47,6 +47,7 @@ import {
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsLedgerService } from '../../points/services/points-ledger.service';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { parsePostgresBigInt, parseTelegramId } from '../../../common/utils/postgres-bigint.util';
@@ -116,6 +117,8 @@ export class AdminUserManagementController {
      * refuses to build this controller without it, which is the point.
      */
     private readonly pointsWallet: PointsWalletService,
+    /** The read half of the wallet: the journal the user card shows. */
+    private readonly pointsLedger: PointsLedgerService,
     /**
      * Optional, like every dependency this controller gained after its first
      * dozen: an absent one means the card simply carries no addresses, which is
@@ -172,6 +175,26 @@ export class AdminUserManagementController {
    * promocode activations and referral point exchanges keep their own domain
    * semantics instead of being forged into zero-value transactions.
    */
+  /**
+   * The points journal, newest first. Keyset-paged on the row id — an offset
+   * would drift while cashback rows land on top of the list — so the client
+   * passes back `nextCursor` to continue. `users:view`, inherited from the
+   * controller: the journal is the balance explained, nothing more.
+   */
+  @Get(':telegramId/points/ledger')
+  public async listPointsLedger(
+    @Param('telegramId') telegramId: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limitInput?: string,
+  ) {
+    const user = await this.findUserByTelegramId(telegramId);
+    return this.pointsLedger.listForUser({
+      userId: user.id,
+      cursor: cursor === undefined || cursor.length === 0 ? null : cursor,
+      limit: limitInput === undefined ? null : Number(limitInput),
+    });
+  }
+
   @Get(':telegramId/operations')
   public async listUserOperations(
     @Param('telegramId') telegramId: string,
