@@ -17,6 +17,7 @@ import {
   Handshake,
   Megaphone,
   Trophy,
+  CircleDot,
   Gift,
   KeyRound,
   Settings,
@@ -127,6 +128,12 @@ export const navGroups: ReadonlyArray<NavGroup> = [
         path: '/quests',
         icon: Trophy,
         requiredPermission: { resource: 'quests', action: 'view' },
+      },
+      {
+        key: 'wheel',
+        path: '/wheel',
+        icon: CircleDot,
+        requiredPermission: { resource: 'wheel', action: 'view' },
       },
       {
         key: 'wheelPrizes',

@@ -44,6 +44,7 @@ import { BroadcastModule } from './modules/broadcast/broadcast.module';
 import { QuestsModule } from './modules/quests/quests.module';
 import { WheelModule } from './modules/wheel/wheel.module';
 import { WheelPrizesModule } from './modules/wheel-prizes/wheel-prizes.module';
+import { WheelConfigModule } from './modules/wheel-config/wheel-config.module';
 import { BusinessAnalyticsModule } from './modules/business-analytics/business-analytics.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
 import { ConfigPortabilityModule } from './modules/config-portability/config-portability.module';
@@ -166,6 +167,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     QuestsModule,
     WheelModule,
     WheelPrizesModule,
+    WheelConfigModule,
     ClientErrorsModule,
     ConfigPortabilityModule,
     CustomEmojiModule,

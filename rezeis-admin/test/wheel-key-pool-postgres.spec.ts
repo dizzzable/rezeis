@@ -4,6 +4,7 @@ import { after, before, describe, it } from 'node:test';
 import { WheelSectorKind, WheelSpinStatus } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { lockWheel, unlockWheel } from './helpers/wheel-exclusive';
 import {
   KEY_LOAD_MAX,
   WheelKeyPoolService,
@@ -55,6 +56,7 @@ run('wheel key pools on PostgreSQL', () => {
     process.env.DATABASE_POOL_SIZE = '8';
     prisma = new PrismaService();
     await prisma.$connect();
+    await lockWheel(prisma);
     service = new WheelKeyPoolService(prisma);
   });
 
@@ -69,6 +71,7 @@ run('wheel key pools on PostgreSQL', () => {
     for (const id of createdPools) {
       await prisma.wheelKeyPool.delete({ where: { id } }).catch(() => undefined);
     }
+    await unlockWheel(prisma);
     await prisma.$disconnect();
   });
 

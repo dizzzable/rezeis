@@ -4,6 +4,7 @@ import { after, before, describe, it } from 'node:test';
 import { Prisma, WheelSectorKind, WheelSpinStatus } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { lockWheel, unlockWheel } from './helpers/wheel-exclusive';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
 import { SpinWalletService } from '../src/modules/wheel/services/spin-wallet.service';
@@ -105,6 +106,7 @@ run('WheelSpinService on PostgreSQL', () => {
     process.env.DATABASE_POOL_SIZE = '8';
     prisma = new PrismaService();
     await prisma.$connect();
+    await lockWheel(prisma);
     service = new WheelSpinService(
       prisma,
       new SpinWalletService(),
@@ -123,6 +125,7 @@ run('WheelSpinService on PostgreSQL', () => {
     for (const id of createdPools) {
       await prisma.wheelKeyPool.delete({ where: { id } }).catch(() => undefined);
     }
+    await unlockWheel(prisma);
     await prisma.$disconnect();
   });
 
