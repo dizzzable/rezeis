@@ -73,7 +73,7 @@ interface PostCommit {
   readonly manualSpinId: string | null;
 }
 
-const SECTOR_SELECT = {
+export const SECTOR_SELECT = {
   id: true,
   kind: true,
   enabled: true,
@@ -95,7 +95,13 @@ const SECTOR_SELECT = {
   wonCount: true,
 } as const;
 
-type SectorRow = Prisma.WheelSectorGetPayload<{ select: typeof SECTOR_SELECT }>;
+export type SectorRow = Prisma.WheelSectorGetPayload<{ select: typeof SECTOR_SELECT }>;
+
+/**
+ * The slice of Prisma the sector read needs. A transaction client satisfies
+ * it, and so does the pool — which is what lets the cabinet reuse the read.
+ */
+export type WheelReadClient = Pick<Prisma.TransactionClient, 'wheelSector' | 'wheelSpin' | 'wheelKey'>;
 
 /**
  * One spin, from the payment to the prize.
@@ -308,9 +314,15 @@ export class WheelSpinService {
   /**
    * The sectors as the draw needs to see them: how often THIS person has won
    * each, and how many keys are left in the pools behind the key sectors.
+   *
+   * Public, and typed against the delegates rather than against a transaction,
+   * because the CABINET asks the same question outside one: which sectors can
+   * this person still win. Both answers must come from here — a second reading
+   * of the ceilings would be a second place for them to be got wrong, and the
+   * screen would then promise a prize the draw refuses to offer.
    */
-  private async describeForDraw(
-    tx: Prisma.TransactionClient,
+  public async describeForDraw(
+    tx: WheelReadClient,
     userId: string,
     sectors: readonly SectorRow[],
   ): Promise<{ readonly sectors: readonly SectorForDraw[]; readonly userWins: Map<string, number> }> {
