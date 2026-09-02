@@ -6,7 +6,9 @@ import { Test } from '@nestjs/testing';
 import { AccountMergeService } from '../src/modules/account-merge/services/account-merge.service';
 import { AltshopImporterService } from '../src/modules/imports/services/altshop-importer.service';
 import { StealthnetImporterService } from '../src/modules/imports/services/stealthnet-importer.service';
+import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 import { PointsModule } from '../src/modules/points/points.module';
+import { PointsCashbackService } from '../src/modules/points/services/points-cashback.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { QuestRewardService } from '../src/modules/quests/services/quest-reward.service';
 import { AdminRewardsService } from '../src/modules/referrals/services/admin-rewards.service';
@@ -60,6 +62,42 @@ describe('every points writer can be constructed by the injector with the wallet
       await moduleRef.close();
     });
   }
+});
+
+describe('the payment reconciliation resolves the cashback service', () => {
+  it('gets the real PointsCashbackService, itself built on the real wallet', async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [PointsModule],
+      providers: [PaymentReconciliationService],
+    })
+      .useMocker(() => ({}))
+      .compile();
+
+    const reconciliation = moduleRef.get(PaymentReconciliationService) as unknown as {
+      pointsCashbackService?: unknown;
+    };
+    const cashback = reconciliation.pointsCashbackService;
+    assert.ok(
+      cashback instanceof PointsCashbackService,
+      'the cashback hook did not resolve to the real service',
+    );
+    assert.ok(
+      (cashback as unknown as { pointsWallet?: unknown }).pointsWallet instanceof PointsWalletService,
+      'and the cashback service did not get the real wallet',
+    );
+
+    await moduleRef.close();
+  });
+
+  it('Nest refuses to build the reconciliation without the cashback service', async () => {
+    await assert.rejects(
+      () =>
+        Test.createTestingModule({ providers: [PaymentReconciliationService] })
+          .useMocker((token) => (token === PointsCashbackService ? undefined : {}))
+          .compile(),
+      /PointsCashbackService|Nest can't resolve dependencies/,
+    );
+  });
 });
 
 describe('no points writer comes up without the wallet', () => {

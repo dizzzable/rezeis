@@ -324,6 +324,7 @@ function createReconciliation(input: {
     // The real verifier over a fake transport: the verdicts these specs turn on
     // are HTTP-shaped, and a stubbed one would pin none of them.
     new YookassaPaymentVerificationService(prismaService as never, httpService as never),
+    { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
   );
 
   return {

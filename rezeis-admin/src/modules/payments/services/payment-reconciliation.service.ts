@@ -19,6 +19,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { PointsCashbackService } from '../../points/services/points-cashback.service';
 import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
 import {
   PAYMENT_WEBHOOK_STATUS_FAILED,
@@ -59,6 +60,7 @@ export class PaymentReconciliationService {
     private readonly adConversionService: AdConversionService,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly yookassaPaymentVerificationService: YookassaPaymentVerificationService,
+    private readonly pointsCashbackService: PointsCashbackService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -449,6 +451,10 @@ export class PaymentReconciliationService {
       await this.persistSavedPaymentMethodBestEffort(transaction, rawPayload);
     }
     await this.runReferralAndPartnerHooks(transaction);
+    // After the referral and partner hooks on purpose: the partner check
+    // inside the cashback reads the same `partner.isActive` those two just
+    // consulted, and a payer who earns money must not also earn points.
+    await this.pointsCashbackService.creditForTransactionBestEffort(transaction);
     await this.enqueueMoyNalogIncomeBestEffort(transaction);
     await this.recordAdConversionBestEffort(transaction);
   }
@@ -461,7 +467,8 @@ export class PaymentReconciliationService {
    * this is the belt for anything thrown between them.
    *
    * Safe to call more than once for the same transaction: partner accrual is
-   * keyed on (partnerId, sourceTransactionId), the МойНалог job id is derived
+   * keyed on (partnerId, sourceTransactionId), the points cashback on
+   * (CASHBACK, transactionId) in the ledger, the МойНалог job id is derived
    * from the transaction id, and the ad conversion is unique per user.
    */
   public async runPostFulfillmentHooksBestEffort(transaction: Transaction): Promise<void> {
@@ -481,6 +488,7 @@ export class PaymentReconciliationService {
    * chargeback. Symmetric counterpart to {@link runPostFulfillmentHooks}:
    *   - partner accruals debited + ledger rows removed,
    *   - referral qualification + rewards reversed,
+   *   - points cashback taken back (floored at zero),
    *   - МойНалог income cancellation enqueued,
    *   - ad conversion reverted.
    *
@@ -996,6 +1004,11 @@ export class PaymentReconciliationService {
         }`,
       );
     }
+
+    // Points cashback: what this purchase credited is taken back, floored at
+    // zero — the balance stops there and the shortfall goes on the ledger row.
+    // Keyed on the transaction, so a replayed refund webhook is a no-op.
+    await this.pointsCashbackService.reverseForTransactionBestEffort(transaction.id);
 
     // МойНалог income cancellation (async — needs the tax API).
     try {

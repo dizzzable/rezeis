@@ -118,6 +118,14 @@ export const EVENT_TYPES = {
    * a customer spending their own points.
    */
   USER_POINTS_ADJUSTED: 'user.points_adjusted',
+  /**
+   * Points cashback for a paid purchase: credited after fulfilment, taken
+   * back on a refund, or skipped for a reason the operator can fix (a plan
+   * with no price in the default currency, a catalogue row that is gone).
+   */
+  POINTS_CASHBACK_CREDITED: 'points.cashback_credited',
+  POINTS_CASHBACK_REVERSED: 'points.cashback_reversed',
+  POINTS_CASHBACK_SKIPPED: 'points.cashback_skipped',
 
   // Auth
   AUTH_WEB_LOGIN: 'auth.web_login',
@@ -2142,6 +2150,9 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'user.email_linked': { emoji: '📧', title: 'Привязан Email' },
   'user.accounts_merged': { emoji: '🧬', title: 'Аккаунты объединены' },
   'user.points_adjusted': { emoji: '🎯', title: 'Изменён баланс баллов' },
+  'points.cashback_credited': { emoji: '🪙', title: 'Начислен кэшбэк баллами' },
+  'points.cashback_reversed': { emoji: '↩️', title: 'Кэшбэк баллами отменён после возврата' },
+  'points.cashback_skipped': { emoji: '⚠️', title: 'Кэшбэк баллами не начислен' },
   user_hwid_revoked: { emoji: '📱', title: 'Сброшено устройство (HWID)' },
 
   // Auth

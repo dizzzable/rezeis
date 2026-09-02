@@ -9,6 +9,7 @@ import { PartnersModule } from '../partners/partners.module';
 import { AdvertisingModule } from '../advertising/advertising.module';
 import { PlansModule } from '../plans/plans.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
+import { PointsModule } from '../points/points.module';
 import { ReferralsModule } from '../referrals/referrals.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
@@ -67,6 +68,9 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     PartnersModule,
     AdvertisingModule,
     ReferralsModule,
+    // For `PointsCashbackService`: the post-fulfilment cashback hook and its
+    // refund reversal in `PaymentReconciliationService`.
+    PointsModule,
     SettingsModule,
     ProfileSyncModule,
     BullModule.registerQueue({

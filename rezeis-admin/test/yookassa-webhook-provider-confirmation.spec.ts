@@ -498,6 +498,7 @@ function createHarness(input: {
     // The real verifier over a fake transport — the point of these specs is the
     // HTTP-shaped detail, which a stubbed verdict would hide.
     new YookassaPaymentVerificationService(prismaService as never, httpService as never),
+    { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
   );
 
   return {

@@ -378,6 +378,7 @@ function createReconciliation(input: {
         throw new Error('no provider verification on a non-YooKassa gateway');
       },
     } as never,
+    { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
   );
 
   return { service, updates, events, processed, failed, opsAlerts, fulfillments, trialReleases };

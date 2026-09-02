@@ -164,7 +164,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
         sourceTransactionId: 'tx-1',
       },
     ]);
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'referral-qualification', 'partner-earnings']);
+    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'referral-qualification', 'partner-earnings', 'cashback-credit']);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
@@ -190,7 +190,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
         sourceTransactionId: 'tx-1',
       },
     ]);
-    assert.deepStrictEqual(state.callOrder, ['update', 'referral-qualification', 'partner-earnings']);
+    assert.deepStrictEqual(state.callOrder, ['update', 'referral-qualification', 'partner-earnings', 'cashback-credit']);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
@@ -1077,6 +1077,17 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     // applied; this suite is about what happens once they are confirmed.
     {
       verifyCompletion: async () => ({ outcome: 'CONFIRMED', providerStatus: 'succeeded' }),
+    } as never,
+    // The points cashback hook and its reversal, recorded in the same order
+    // list as the referral and partner hooks: the cashback runs AFTER those
+    // two on purpose (its partner check reads what they just consulted).
+    {
+      creditForTransactionBestEffort: async () => {
+        state.callOrder.push('cashback-credit');
+      },
+      reverseForTransactionBestEffort: async () => {
+        state.callOrder.push('cashback-reverse');
+      },
     } as never,
   );
 }
