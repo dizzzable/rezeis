@@ -1022,6 +1022,7 @@ function resolveNotificationPushUrl(type: string): string {
   const t = type.toLowerCase();
   if (t.includes('support')) return '/support';
   if (t.includes('expir') || t.includes('limited')) return '/renew';
+  if (t.includes('points') || t.includes('cashback')) return '/referrals';
   if (t.includes('referral') || t.includes('partner')) return '/referrals';
   if (t.includes('broadcast') || t.includes('news')) return '/settings/notifications/feed';
   return '/dashboard';

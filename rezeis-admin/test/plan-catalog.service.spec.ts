@@ -30,13 +30,16 @@ describe('PlanCatalogService', () => {
       user: { findUnique: async () => null },
       subscription: { findFirst: async () => null },
       referral: { findFirst: async () => null },
+      // An active partner earns money, not points, so the catalog asks
+      // before it advertises a cashback badge. No partner here.
+      partner: { findUnique: async () => null },
       // Unspent discount GRANTS. A grant may be restricted to certain plans,
       // so the discount is a property of the pair (user, plan) now, and the
       // catalog prices every plan — it loads them once per request.
       userPendingDiscount: { findMany: async () => [] },
     };
 
-    const service = new PlanCatalogService(prismaService as never, new PricingService());
+    const service = new PlanCatalogService(prismaService as never, new PricingService(), { loadConfig: async () => ({ enabled: false, percent: 0, defaultCurrency: 'RUB' }) } as never);
     const actual = await service.getCatalogPlans({ channel: PurchaseChannel.WEB });
 
     assert.deepStrictEqual(actualPlanWhere, {
@@ -102,11 +105,14 @@ describe('PlanCatalogService', () => {
       },
       transaction: { findFirst: async () => null },
       referral: { findFirst: async () => ({ id: 'ref-1' }) },
+      // An active partner earns money, not points, so the catalog asks before
+      // it advertises a cashback badge. No partner here.
+      partner: { findUnique: async () => null },
       userPendingDiscount: { findMany: async () => [] },
       partnerReferral: { findFirst: async () => null },
     };
 
-    const service = new PlanCatalogService(prismaService as never, new PricingService());
+    const service = new PlanCatalogService(prismaService as never, new PricingService(), { loadConfig: async () => ({ enabled: false, percent: 0, defaultCurrency: 'RUB' }) } as never);
     const actual = await service.getCatalogPlans({
       channel: PurchaseChannel.WEB,
       userId: 'user-1',
@@ -201,6 +207,9 @@ describe('PlanCatalogService', () => {
         },
         transaction: { findFirst: async () => scenario.pendingTransaction },
         referral: { findFirst: async () => null },
+        // An active partner earns money, not points, so the catalog asks
+        // before it advertises a cashback badge. No partner here.
+        partner: { findUnique: async () => null },
         // Unspent discount GRANTS. A grant may be restricted to certain plans,
         // so the discount is a property of the pair (user, plan) now, and the
         // catalog prices every plan — it loads them once per request.
@@ -208,7 +217,7 @@ describe('PlanCatalogService', () => {
         partnerReferral: { findFirst: async () => null },
       };
 
-      const service = new PlanCatalogService(prismaService as never, new PricingService());
+      const service = new PlanCatalogService(prismaService as never, new PricingService(), { loadConfig: async () => ({ enabled: false, percent: 0, defaultCurrency: 'RUB' }) } as never);
       const actual = await service.getCatalogPlans({
         channel: PurchaseChannel.WEB,
         userId: 'user-1',

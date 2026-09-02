@@ -4,6 +4,8 @@ import { AccessMode } from '@prisma/client';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
+import { readCashbackSettings } from '../../points/points-cashback.util';
+import { PointsLedgerService } from '../../points/services/points-ledger.service';
 import { ReferralInviteLimitsService } from '../services/referral-invite-limits.service';
 import {
   ReferralPointsExchangeService,
@@ -29,7 +31,29 @@ export class InternalReferralsController {
     private readonly referralsService: ReferralsService,
     private readonly inviteLimitsService: ReferralInviteLimitsService,
     private readonly pointsExchangeService: ReferralPointsExchangeService,
+    private readonly pointsLedger: PointsLedgerService,
   ) {}
+
+  /**
+   * The subscriber's own points journal, newest first, keyset-paged on the
+   * row id: the cabinet passes `nextCursor` back to continue. The same rows
+   * the operator sees on the user card; the cabinet decides what to show of
+   * `details` (never the operator's internal note).
+   */
+  @Get('points/ledger')
+  public async getPointsLedger(
+    @Param('userRef') userRef: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const user = await this.resolveUser(userRef);
+    if (!user) return { items: [], nextCursor: null };
+    return this.pointsLedger.listForUser({
+      userId: user.id,
+      cursor: cursor === undefined || cursor.length === 0 ? null : cursor,
+      limit: limit === undefined ? null : Number(limit),
+    });
+  }
 
   /**
    * Returns the referral summary for the user (total, qualified, points balance).
@@ -44,6 +68,7 @@ export class InternalReferralsController {
         pointsBalance: 0,
         programAvailable: false,
         referralCode: null,
+        cashbackEnabled: false,
         // Present even on this arm. A client that reads `program` to decide
         // whether to advertise the program at all must be able to tell "off"
         // from "this panel is too old to say" — and it can only do that if the
@@ -59,9 +84,9 @@ export class InternalReferralsController {
       this.isReferralProgramAvailable(user.id),
       this.prismaService.settings.findUnique({
         where: { id: 1 },
-        // `referralSettings` rides along on the row this handler already
-        // fetched for `accessMode` — no second round trip.
-        select: { accessMode: true, referralSettings: true },
+        // `referralSettings` and `pointsSettings` ride along on the row this
+        // handler already fetched for `accessMode` — no second round trip.
+        select: { accessMode: true, referralSettings: true, pointsSettings: true },
       }),
     ]);
 
@@ -94,6 +119,10 @@ export class InternalReferralsController {
       // client must share a minted token rather than this permanent code —
       // otherwise the friend who taps the link is turned away at registration.
       admissionRequiresInvite: policy?.accessMode === AccessMode.INVITED,
+      // Whether purchases earn points right now. The cabinet words the points
+      // card by it: "for purchases and invited friends" only when it is true.
+      // Always present, so an older panel (no key) and "off" stay different.
+      cashbackEnabled: readCashbackSettings(policy?.pointsSettings).enabled,
       // Operator-facing state of the program itself, as opposed to
       // `programAvailable`, which answers "may THIS user take part" (the
       // invited-only gate). A client needs both: the first decides whether to

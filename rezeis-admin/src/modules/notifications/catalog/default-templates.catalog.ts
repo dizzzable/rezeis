@@ -52,6 +52,15 @@ const REFERRAL_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
 ];
 
+/**
+ * Points rows land on the exchange, not the referrals page: a subscriber told
+ * they just earned points wants to see what those points buy.
+ */
+const POINTS_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
+  { labelRu: '🪙 Обменять баллы', labelEn: '🪙 Exchange points', kind: 'webApp', target: '/referrals/exchange' },
+  { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
+];
+
 /** Partner-program rows deep-link to the partner cabinet. */
 const PARTNER_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🤝 Партнёрский кабинет', labelEn: '🤝 Partner dashboard', kind: 'webApp', target: '/partner' },
@@ -185,6 +194,17 @@ const REFERRAL_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     body: 'Ваш реферал {{referralName}} оплатил подписку — бонусы начислены.',
     bodyEn: 'Your referral {{referralName}} paid for a subscription — rewards credited.',
     buttons: REFERRAL_BUTTONS,
+  },
+];
+
+const POINTS_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: 'points_cashback_credited',
+    title: '🪙 Начислен кэшбэк',
+    titleEn: '🪙 Cashback credited',
+    body: 'За покупку начислено <b>{{points}}</b> баллов. Ваш баланс: <b>{{balance}}</b>.',
+    bodyEn: 'Your purchase earned <b>{{points}}</b> points. Your balance: <b>{{balance}}</b>.',
+    buttons: POINTS_BUTTONS,
   },
 ];
 
@@ -395,6 +415,7 @@ const SUPPORT_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
 export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   ...DURATION_TEMPLATES,
   ...REFERRAL_TEMPLATES,
+  ...POINTS_TEMPLATES,
   ...PARTNER_TEMPLATES,
   ...SYSTEM_TEMPLATES,
   ...SUPPORT_TEMPLATES,

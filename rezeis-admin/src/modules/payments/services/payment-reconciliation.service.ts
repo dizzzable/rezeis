@@ -19,6 +19,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { PointsCashbackService } from '../../points/services/points-cashback.service';
 import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
 import {
@@ -61,6 +62,8 @@ export class PaymentReconciliationService {
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly yookassaPaymentVerificationService: YookassaPaymentVerificationService,
     private readonly pointsCashbackService: PointsCashbackService,
+    /** Composes the "cashback credited" message; see {@link creditCashbackAndTellTheBuyer}. */
+    private readonly userNotifications: UserNotificationsService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -454,7 +457,7 @@ export class PaymentReconciliationService {
     // After the referral and partner hooks on purpose: the partner check
     // inside the cashback reads the same `partner.isActive` those two just
     // consulted, and a payer who earns money must not also earn points.
-    await this.pointsCashbackService.creditForTransactionBestEffort(transaction);
+    await this.creditCashbackAndTellTheBuyer(transaction);
     await this.enqueueMoyNalogIncomeBestEffort(transaction);
     await this.recordAdConversionBestEffort(transaction);
   }
@@ -1343,6 +1346,45 @@ export class PaymentReconciliationService {
     } catch (error: unknown) {
       this.logger.error(
         `Partner earnings hook failed for transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Credits the points a purchase earned and tells the buyer.
+   *
+   * The message is composed HERE and not inside `PointsCashbackService` for a
+   * module-shaped reason: emitting it there would make `PointsModule` import
+   * the whole notification stack — auth, web push, custom emoji and two Bull
+   * queues — into the seven modules that import it merely to move a balance.
+   * Telling a buyer what their payment earned belongs to the payment
+   * pipeline, which already holds that stack.
+   *
+   * Both halves are best-effort and independent: the credit is durable on the
+   * ledger before the message is attempted, so an undelivered message is an
+   * undelivered message and never reads as a failed credit.
+   */
+  private async creditCashbackAndTellTheBuyer(transaction: Transaction): Promise<void> {
+    const outcome = await this.pointsCashbackService.creditForTransactionBestEffort(transaction);
+    // `?.` and not `=== null`: everything except a credit that actually
+    // happened means there is nothing to announce, and this hook must not be
+    // the thing that throws on the way out of a settled payment.
+    if (outcome?.credited !== true) return;
+    try {
+      await this.userNotifications.create({
+        userId: transaction.userId,
+        type: 'points_cashback_credited',
+        payload: {
+          points: outcome.points,
+          balance: outcome.balanceAfter,
+          transactionId: transaction.id,
+        },
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Cashback credited for transaction ${transaction.id} but the notification failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

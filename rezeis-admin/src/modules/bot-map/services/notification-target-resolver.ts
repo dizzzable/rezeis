@@ -33,6 +33,10 @@ export function resolveTerminalRouteFor(type: string): MiniAppRoute {
   if (t.includes('support')) return '/support';
   if (t.includes('expir') || t.includes('limited')) return '/renew';
   if (t.includes('partner')) return '/partner';
+  // Points before referrals: a points row belongs on the exchange, and
+  // `points_cashback_*` carries neither word, so it would otherwise land on
+  // the dashboard. Kept in step with `resolveNotificationPushUrl`.
+  if (t.includes('points') || t.includes('cashback')) return '/referrals';
   if (t.includes('referral')) return '/referrals';
   if (t.includes('promocode')) return '/promo';
   if (t.includes('broadcast') || t.includes('news')) return '/dashboard';

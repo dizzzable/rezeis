@@ -24,6 +24,7 @@ export const en = {
       referral_attached: 'Referral attached',
       referral_reward: 'Referral reward',
       referral_qualified: 'Referral qualified',
+      points_cashback_credited: 'Points cashback credited',
       partner_referral_registered: 'Partner referral registered',
       partner_earning: 'Partner earning',
       partner_withdrawal_request_created: 'Withdrawal request created',

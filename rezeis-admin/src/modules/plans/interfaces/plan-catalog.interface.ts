@@ -17,6 +17,13 @@ export interface PlanCatalogDurationInterface {
   readonly id: string;
   readonly days: number;
   readonly prices: readonly PlanCatalogPriceInterface[];
+  /**
+   * Points a purchase of this duration earns at the price shown, computed by
+   * the same function the post-payment hook credits with. `0` when the rule
+   * yields nothing (cashback off, plan excluded, no price in the default
+   * currency); `null` when the buyer cannot earn at all (an active partner).
+   */
+  readonly cashbackPoints: number | null;
 }
 
 /**

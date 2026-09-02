@@ -27,6 +27,11 @@ import {
   type PendingDiscountGrant,
 } from '../../../common/utils/pending-discount.util';
 import { PricingService } from './pricing.service';
+import {
+  computeCashbackLine,
+  type CashbackConfig,
+} from '../../points/points-cashback.util';
+import { PointsCashbackService } from '../../points/services/points-cashback.service';
 
 interface CatalogUserContext {
   readonly user: Pick<User, 'id' | 'purchaseDiscount' | 'personalDiscount'>;
@@ -40,6 +45,8 @@ interface CatalogUserContext {
   readonly pendingDiscounts: readonly PendingDiscountGrant[];
   readonly hasAnySubscription: boolean;
   readonly isInvitedUser: boolean;
+  /** Earns money from the partner program, so earns no points from a purchase. */
+  readonly isActivePartner: boolean;
   /** Trials the user has already claimed (free or paid), counted by their
    *  `isTrial` subscriptions including deleted ones. */
   readonly trialClaims: number;
@@ -50,14 +57,23 @@ export class PlanCatalogService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly pricingService: PricingService,
+    /**
+     * Read only for `loadConfig()` — the global cashback rule and the default
+     * currency. The catalogue must not compute those itself: the badge it
+     * shows and the points the post-payment hook credits have to come from
+     * one source, or the card promises what the purchase does not pay.
+     */
+    private readonly pointsCashbackService: PointsCashbackService,
   ) {}
 
   public async getCatalogPlans(
     query: PlanCatalogQueryContextInterface,
   ): Promise<readonly PlanCatalogPlanInterface[]> {
     const channel = query.channel;
-    const userContext =
-      query.userId === undefined ? null : await this.getCatalogUserContext(query.userId);
+    const [userContext, cashback] = await Promise.all([
+      query.userId === undefined ? Promise.resolve(null) : this.getCatalogUserContext(query.userId),
+      this.pointsCashbackService.loadConfig(),
+    ]);
     const gateways = (await this.prismaService.paymentGateway.findMany({
       where: {
         isActive: true,
@@ -81,7 +97,7 @@ export class PlanCatalogService {
     });
     return candidatePlans
       .filter((plan) => this.isPlanAvailableForContext({ plan, userContext }))
-      .map((plan) => this.mapCatalogPlan({ plan, gateways, userContext, channel }));
+      .map((plan) => this.mapCatalogPlan({ plan, gateways, userContext, channel, cashback }));
   }
 
   private async getCatalogUserContext(userId: string): Promise<CatalogUserContext> {
@@ -129,7 +145,14 @@ export class PlanCatalogService {
         },
       }),
     ]);
-    const [partnerReferral, resumableTrialClaim] = await Promise.all([
+    const [partner, partnerReferral, resumableTrialClaim] = await Promise.all([
+      // An active partner earns money, not points — the same exclusion the
+      // cashback hook applies at payment time. Read here so the card does not
+      // advertise points this buyer will never be credited.
+      this.prismaService.partner.findUnique({
+        where: { userId },
+        select: { isActive: true },
+      }),
       // Partner-invited users count as "invited" for trial scoping too;
       // the partner program keeps its own edge table separate from referrals.
       referral === null
@@ -156,6 +179,7 @@ export class PlanCatalogService {
       pendingDiscounts,
       hasAnySubscription: subscription !== null,
       isInvitedUser: referral !== null || partnerReferral !== null,
+      isActivePartner: partner?.isActive === true,
       trialClaims,
     };
   }
@@ -205,6 +229,7 @@ export class PlanCatalogService {
     readonly gateways: readonly PaymentGateway[];
     readonly userContext: CatalogUserContext | null;
     readonly channel: PurchaseChannel;
+    readonly cashback: CashbackConfig;
   }): PlanCatalogPlanInterface {
     const { plan, gateways, userContext } = input;
     // A free trial is claimed (not bought), so it must carry NO price in the
@@ -228,10 +253,8 @@ export class PlanCatalogService {
       externalSquad: plan.externalSquad,
       isTrial: plan.availability === PlanAvailability.TRIAL,
       trialFree: readTrialSettings(plan.trialSettings).free,
-      durations: plan.durations.map((duration) => ({
-        id: duration.id,
-        days: duration.days,
-        prices: isFreeTrial
+      durations: plan.durations.map((duration) => {
+        const prices = isFreeTrial
           ? []
           : gateways
               .map((gateway) =>
@@ -242,8 +265,20 @@ export class PlanCatalogService {
                   planId: plan.id,
                 }),
               )
-              .filter((value): value is PlanCatalogPriceInterface => value !== null),
-      })),
+              .filter((value): value is PlanCatalogPriceInterface => value !== null);
+        return {
+          id: duration.id,
+          days: duration.days,
+          prices,
+          cashbackPoints: this.resolveCashbackPoints({
+            plan,
+            duration,
+            prices,
+            userContext,
+            cashback: input.cashback,
+          }),
+        };
+      }),
       // Gateway-independent display prices: every configured duration price,
       // so the catalog card shows "от X" even with no active gateway. Checkout
       // still relies on the gateway-aware `durations[].prices` above. Free
@@ -258,6 +293,60 @@ export class PlanCatalogService {
             })),
           ),
     };
+  }
+
+  /**
+   * The points a purchase of this duration would earn, at the price the card
+   * is showing.
+   *
+   * ── Why it is computed here and not guessed ──────────────────────────────
+   *
+   * `computeCashbackLine` is the same function the post-fulfilment hook
+   * credits with, given the same rule (the plan's mode/percent and the
+   * duration's fixed points), the same price list (the duration's own rows,
+   * which is the exchange rate to the default currency) and the DISCOUNTED
+   * amount — so the badge and the payment agree by construction rather than
+   * by two implementations happening to match.
+   *
+   * `null` means "this buyer earns nothing whatever the rule says": an
+   * active partner, who is paid in money. `0` means the rule yields nothing —
+   * cashback off, the plan excluded, or no price in the default currency.
+   * A free trial has no price, so it earns nothing either.
+   */
+  private resolveCashbackPoints(input: {
+    readonly plan: PlanRecord;
+    readonly duration: PlanRecord['durations'][number];
+    readonly prices: readonly PlanCatalogPriceInterface[];
+    readonly userContext: CatalogUserContext | null;
+    readonly cashback: CashbackConfig;
+  }): number | null {
+    if (input.userContext?.isActivePartner === true) return null;
+    if (input.prices.length === 0) return 0;
+    // The price the buyer would actually pay. Prefer the default currency —
+    // the percent is taken of that amount directly, with no conversion — and
+    // fall back to the first gateway price, which `computeCashbackLine`
+    // converts through the duration's own price list.
+    const priced =
+      input.prices.find((price) => price.currency === input.cashback.defaultCurrency) ??
+      input.prices[0];
+    if (priced === undefined) return 0;
+    return computeCashbackLine(
+      {
+        kind: 'PLAN',
+        id: input.plan.id,
+        name: input.plan.name,
+        durationDays: input.duration.days,
+        amount: priced.price,
+        currency: priced.currency,
+        rule: {
+          mode: input.plan.cashbackMode,
+          percent: input.plan.cashbackPercent,
+          fixedPoints: input.duration.cashbackPoints,
+        },
+        prices: input.duration.prices,
+      },
+      input.cashback,
+    ).points;
   }
 
   private mapCatalogPrice(input: {

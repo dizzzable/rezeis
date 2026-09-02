@@ -166,6 +166,67 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     ]);
     assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1', 'referral-qualification', 'partner-earnings', 'cashback-credit']);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+    assert.deepStrictEqual(state.notifications, [], 'nothing was credited, so nothing was announced');
+  });
+
+  it('tells the buyer what the payment earned, with the points and the new balance', async () => {
+    // The message is composed HERE and not in the points module: emitting it
+    // there would drag the whole notification stack into every module that
+    // moves a balance. This is the seam that proves it still gets sent.
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.PENDING,
+      refreshedSubscriptionId: null,
+      cashbackOutcome: { credited: true, points: 15, balanceAfter: 20 },
+    });
+
+    await createService(state).reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.notifications, [
+      {
+        userId: 'user-1',
+        type: 'points_cashback_credited',
+        payload: { points: 15, balance: 20, transactionId: 'tx-1' },
+      },
+    ]);
+    assert.deepStrictEqual(
+      state.callOrder.slice(-2),
+      ['cashback-credit', 'cashback-notify'],
+      'the points are on the ledger before the message is attempted',
+    );
+  });
+
+  it('keeps the payment settled when the message cannot be sent', async () => {
+    // The credit is already durable by then. An undelivered message must read
+    // as an undelivered message, not as a failed webhook to be retried.
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.PENDING,
+      refreshedSubscriptionId: null,
+      cashbackOutcome: { credited: true, points: 15, balanceAfter: 20 },
+      notifyError: new Error('relay is down'),
+    });
+
+    await createService(state).reconcileWebhookEvent('event-1');
+
+    assert.equal(state.notifications.length, 1);
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+    assert.deepStrictEqual(state.markFailedCalls, []);
+  });
+
+  it('announces nothing for a payment that earned nothing, and nothing when the hook itself failed', async () => {
+    for (const outcome of [{ credited: false }, null]) {
+      const state = createState({
+        eventStatus: 'succeeded',
+        initialTransactionStatus: TransactionStatus.PENDING,
+        refreshedSubscriptionId: null,
+        cashbackOutcome: outcome,
+      });
+
+      await createService(state).reconcileWebhookEvent('event-1');
+
+      assert.deepStrictEqual(state.notifications, [], JSON.stringify(outcome));
+    }
   });
 
   it('skips duplicate subscription mutation when the refreshed transaction is already fulfilled', async () => {
@@ -1084,9 +1145,20 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     {
       creditForTransactionBestEffort: async () => {
         state.callOrder.push('cashback-credit');
+        return state.cashbackOutcome;
       },
       reverseForTransactionBestEffort: async () => {
         state.callOrder.push('cashback-reverse');
+      },
+    } as never,
+    // The "cashback credited" message. Composed by the reconciliation and not
+    // by the points module, so this is where it is asserted.
+    {
+      create: async (input: Record<string, unknown>) => {
+        state.callOrder.push('cashback-notify');
+        state.notifications.push(input);
+        if (state.notifyError !== undefined) throw state.notifyError;
+        return 'event-1';
       },
     } as never,
   );
@@ -1100,6 +1172,14 @@ function createState(input: {
   readonly mutationShouldThrow?: boolean;
   readonly mutationError?: Error;
   readonly enqueueError?: Error;
+  /** What the points cashback hook answers for this payment. */
+  readonly cashbackOutcome?: {
+    readonly credited: boolean;
+    readonly points?: number;
+    readonly balanceAfter?: number;
+  } | null;
+  /** Makes the "cashback credited" message fail, to prove the credit survives. */
+  readonly notifyError?: Error;
   readonly gatewayDataOverride?: Record<string, unknown> | null;
   /** Raw webhook payload override — used to model partial refunds. */
   readonly rawPayload?: Record<string, unknown>;
@@ -1160,6 +1240,12 @@ function createState(input: {
     mutationError: input.mutationError ?? null,
     enqueueError: input.enqueueError ?? null,
     callOrder: [] as string[],
+    /** What the cashback hook answers; `null` = the attempt itself failed. */
+    cashbackOutcome: (input.cashbackOutcome ?? null) as
+      | { readonly credited: boolean; readonly points?: number; readonly balanceAfter?: number }
+      | null,
+    notifications: [] as Record<string, unknown>[],
+    notifyError: input.notifyError,
     alertCalls: [] as NotifyWebhookFailedArgs[],
     referralQualificationCalls: [] as string[],
     partnerEarningCalls: [] as ProcessPartnerEarningArg[],

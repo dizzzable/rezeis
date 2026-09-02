@@ -499,6 +499,7 @@ function createHarness(input: {
     // HTTP-shaped detail, which a stubbed verdict would hide.
     new YookassaPaymentVerificationService(prismaService as never, httpService as never),
     { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
+    { create: async () => 'event-1' } as never,
   );
 
   return {

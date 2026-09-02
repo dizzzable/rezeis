@@ -335,6 +335,43 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.subscriptionQueries.length, 0)
   })
 
+  it('reports the points a completed payment earned, read from the ledger row keyed on it', async () => {
+    // The cabinet polls this endpoint on the way back from the provider and
+    // renders "+13 points" from it, so the number has to be the credited one
+    // rather than a second computation of the rule.
+    const { service, state } = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      purchaseType: PurchaseType.ADDITIONAL,
+      cashbackLedgerRow: { delta: 13 },
+    })
+
+    const status = await service.getPaymentStatus({ paymentId: 'payment-1', userId: 'user-1' })
+
+    assert.equal(status.cashbackPoints, 13)
+    assert.equal(state.cashbackLedgerQueries.length, 1)
+    assert.deepStrictEqual(
+      (state.cashbackLedgerQueries[0] as { where: unknown }).where,
+      { source_referenceKey: { source: 'CASHBACK', referenceKey: 'transaction-1' } },
+      'keyed on the transaction, so a replayed hook cannot show twice',
+    )
+  })
+
+  it('answers null for a payment that earned nothing, and asks nothing at all while it is pending', async () => {
+    const credited = createService({
+      initialStatus: TransactionStatus.COMPLETED,
+      purchaseType: PurchaseType.ADDITIONAL,
+    })
+    const settled = await credited.service.getPaymentStatus({ paymentId: 'payment-1', userId: 'user-1' })
+    assert.equal(settled.cashbackPoints, null, 'no ledger row: nothing was earned')
+
+    // A pending payment cannot have earned, so the read is skipped entirely —
+    // this endpoint is polled every second while the buyer waits.
+    const pending = createService({ purchaseType: PurchaseType.ADDITIONAL })
+    const waiting = await pending.service.getPaymentStatus({ paymentId: 'payment-1', userId: 'user-1' })
+    assert.equal(waiting.cashbackPoints, null)
+    assert.equal(pending.state.cashbackLedgerQueries.length, 0)
+  })
+
   it('reports FULFILLING while a completed creation payment has no subscription id', async () => {
     const { service, state } = createService({
       initialStatus: TransactionStatus.COMPLETED,
@@ -620,6 +657,8 @@ function createService(input: {
   readonly fulfilledAt?: Date | null
   /** Optional starting status for race fixtures (default PENDING). */
   readonly initialStatus?: TransactionStatus
+  /** The cashback ledger row keyed on this transaction, when one exists. */
+  readonly cashbackLedgerRow?: { readonly delta: number } | null
   readonly purchaseType?: PurchaseType
   readonly subscriptionId?: string | null
   readonly subscription?: null | {
@@ -654,6 +693,7 @@ function createService(input: {
     enqueueCalls: 0,
     postFulfillmentHookCalls: [] as string[],
     subscriptionQueries: [] as unknown[],
+    cashbackLedgerQueries: [] as unknown[],
   }
   const paymentId = 'payment-1'
   const gatewayType = input.gatewayType ?? PaymentGatewayType.YOOKASSA
@@ -695,6 +735,15 @@ function createService(input: {
         isActive: true,
         settings: input.gatewaySettings ?? { shopId: 'shop-1', apiKey: 'secret-1' },
       }),
+    },
+    // The cashback ledger row `getPaymentStatus` reads for a COMPLETED
+    // payment. `null` = this payment earned nothing, which is what every
+    // fixture here means unless it says otherwise.
+    pointsLedgerEntry: {
+      findUnique: async (args: unknown) => {
+        state.cashbackLedgerQueries.push(args)
+        return input.cashbackLedgerRow ?? null
+      },
     },
     transaction: {
       findUnique: async () => transaction,

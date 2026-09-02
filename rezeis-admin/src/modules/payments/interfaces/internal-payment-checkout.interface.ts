@@ -33,5 +33,12 @@ export interface InternalPaymentStatusInterface {
   readonly subscriptionId: string | null;
   readonly subscriptionProvisioningStatus: SubscriptionProvisioningStatus;
   readonly subscriptionProvisioningFailureCode: SubscriptionProvisioningFailureCode | null;
+  /**
+   * Points the purchase credited, read from the ledger row keyed on this
+   * transaction; `null` until the cashback hook has run, or when the payment
+   * earned nothing. Always present, so a cabinet can tell "no cashback" from
+   * "a panel too old to say".
+   */
+  readonly cashbackPoints: number | null;
   readonly updatedAt: string;
 }

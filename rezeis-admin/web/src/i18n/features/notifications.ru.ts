@@ -24,6 +24,7 @@ export const ru = {
       referral_attached: 'Реферал привязан',
       referral_reward: 'Реферальное вознаграждение',
       referral_qualified: 'Реферал квалифицирован',
+      points_cashback_credited: 'Начислен кэшбэк баллами',
       partner_referral_registered: 'Партнёрский реферал зарегистрирован',
       partner_earning: 'Партнёрское начисление',
       partner_withdrawal_request_created: 'Запрос на вывод создан',

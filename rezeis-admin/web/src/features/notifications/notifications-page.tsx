@@ -85,6 +85,7 @@ const USER_NOTIFICATION_KEYS = [
   'referral_attached',
   'referral_reward',
   'referral_qualified',
+  'points_cashback_credited',
   'partner_referral_registered',
   'partner_earning',
   'partner_withdrawal_request_created',

@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import {
   PaymentGatewayType,
+  PointsLedgerSource,
   Prisma,
   PurchaseChannel,
   PurchaseType,
@@ -539,6 +540,7 @@ export class PaymentsCheckoutService {
     const subscriptionProvisioning = await this.resolveSubscriptionProvisioning(transaction);
     return {
       paymentId: transaction.paymentId,
+      cashbackPoints: await this.resolveCashbackPoints(transaction),
       status: transaction.status,
       gatewayType: transaction.gatewayType,
       purchaseType: transaction.purchaseType,
@@ -551,6 +553,30 @@ export class PaymentsCheckoutService {
       subscriptionProvisioningFailureCode: subscriptionProvisioning.failureCode,
       updatedAt: transaction.updatedAt.toISOString(),
     };
+  }
+
+  /**
+   * The points this payment credited, read from the ledger row the cashback
+   * hook writes keyed on the transaction. The cabinet polls this endpoint
+   * right after the return from the provider, so `null` here is the ordinary
+   * answer for the first poll or two — the hook runs after fulfilment — and
+   * stays `null` for a payment that earned nothing.
+   *
+   * Only asked for a completed payment: nothing else can have earned.
+   */
+  private async resolveCashbackPoints(transaction: Transaction): Promise<number | null> {
+    if (transaction.status !== TransactionStatus.COMPLETED) return null;
+    const credited = await this.prismaService.pointsLedgerEntry.findUnique({
+      where: {
+        source_referenceKey: {
+          source: PointsLedgerSource.CASHBACK,
+          referenceKey: transaction.id,
+        },
+      },
+      select: { delta: true },
+    });
+    if (credited === null || credited.delta <= 0) return null;
+    return credited.delta;
   }
 
   private async resolveSubscriptionProvisioning(

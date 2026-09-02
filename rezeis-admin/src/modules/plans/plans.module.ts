@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { PointsModule } from '../points/points.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { PlanSnapshotSyncService } from '../subscriptions/services/plan-snapshot-sync.service';
@@ -19,7 +20,10 @@ import { PricingService } from './services/pricing.service';
 @Module({
   // `ProfileSyncModule` supplies the queue a plan squad edit fans out onto —
   // see `PlanSquadPropagationService`.
-  imports: [AuthModule, ProfileSyncModule, RemnawaveModule],
+  // `PointsModule` supplies `PointsCashbackService` to the catalog: the "+N
+  // points" a card shows must be computed by the same function that credits
+  // after the payment, not by a second implementation beside it.
+  imports: [AuthModule, ProfileSyncModule, RemnawaveModule, PointsModule],
   // ORDER IS LOAD-BEARING. `AdminPlansStatsController` is mounted on
   // `admin/plans/stats`; `AdminPlansController` is mounted on `admin/plans` and
   // declares `@Get(':planId')`. Nest registers controllers in this array's

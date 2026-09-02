@@ -8,6 +8,7 @@ import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/
 import { UserRole } from '@prisma/client';
 
 import { AdminJwtAuthGuard } from '../src/modules/auth/guards/admin-jwt-auth.guard';
+import { PointsLedgerService } from '../src/modules/points/services/points-ledger.service';
 import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
 import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
@@ -82,7 +83,7 @@ function createAdminController(overrides: {
 describe('Referral controllers', () => {
   it('exposes current admin and internal referral route contracts', () => {
     const admin = createAdminController();
-    const internal = new InternalReferralsController({} as never, {} as never, {} as never, {} as never);
+    const internal = new InternalReferralsController({} as never, {} as never, {} as never, {} as never, new PointsLedgerService({ pointsLedgerEntry: { findMany: async () => [] } } as never));
 
     assert.equal(Reflect.getMetadata(PATH_METADATA, AdminReferralsController), 'admin/referrals');
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, AdminReferralsController), [AdminJwtAuthGuard, RbacGuard]);
@@ -110,6 +111,7 @@ describe('Referral controllers', () => {
     assert.equal(Reflect.getMetadata(PATH_METADATA, InternalReferralsController), 'internal/user/:userRef/referrals');
     assert.deepStrictEqual(Reflect.getMetadata(GUARDS_METADATA, InternalReferralsController), [InternalAdminAuthGuard]);
     assert.deepStrictEqual(route(internal, 'getSummary'), { path: 'summary', method: RequestMethod.GET });
+    assert.deepStrictEqual(route(internal, 'getPointsLedger'), { path: 'points/ledger', method: RequestMethod.GET });
     assert.deepStrictEqual(route(internal, 'getInvitedUsers'), { path: 'invited', method: RequestMethod.GET });
     assert.deepStrictEqual(route(internal, 'createInvite'), { path: 'invite', method: RequestMethod.POST });
     assert.deepStrictEqual(route(internal, 'getInviteCapacity'), { path: 'invite-capacity', method: RequestMethod.GET });
@@ -205,6 +207,7 @@ describe('Referral controllers', () => {
       {} as never,
       {} as never,
       {} as never,
+      new PointsLedgerService({ pointsLedgerEntry: { findMany: async () => [] } } as never),
     );
 
     assert.deepStrictEqual(await controller.getSummary('cmphfcr6i007v01jg0lcu653h'), {
@@ -217,6 +220,9 @@ describe('Referral controllers', () => {
       referralCode: 'user-1',
       // PUBLIC platform: the permanent code admits sign-ups, so no token needed.
       admissionRequiresInvite: false,
+      // Empty `pointsSettings`: cashback is OFF unless explicitly enabled, so
+      // the cabinet must not word the points card as "for purchases".
+      cashbackEnabled: false,
       // Empty `referralSettings`: the engine treats an ABSENT `enabled` as on
       // (only an explicit `false` disables), and configures no reward, so there
       // is a program to advertise but nothing to promise for taking part.
@@ -252,6 +258,7 @@ describe('Referral controllers', () => {
         {} as never,
         {} as never,
         {} as never,
+        new PointsLedgerService({ pointsLedgerEntry: { findMany: async () => [] } } as never),
       );
       const summary = await controller.getSummary('cmphfcr6i007v01jg0lcu653h');
       return summary.program;
@@ -302,6 +309,7 @@ describe('Referral controllers', () => {
       {} as never,
       {} as never,
       {} as never,
+      new PointsLedgerService({ pointsLedgerEntry: { findMany: async () => [] } } as never),
     );
     assert.deepStrictEqual(
       (await unknownUser.getSummary('cmphfcr6i007v01jg0lcu000z')).program,

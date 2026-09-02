@@ -20,6 +20,14 @@ import { PointsWalletService } from './services/points-wallet.service';
  * spec, not a lint rule, is what catches it.
  */
 @Module({
+  // NOTHING is imported here on purpose, and the "cashback credited" message
+  // is why it is worth saying out loud. Emitting it from this module would
+  // mean importing `NotificationsModule`, which brings auth, web push, custom
+  // emoji and two Bull queues along — into the seven modules that import this
+  // one merely to move a balance. Telling the buyer what a payment earned is
+  // the payment pipeline's business, so the message is sent from the
+  // post-fulfilment hook in `PaymentReconciliationService`, where that stack
+  // already lives, and this module stays a leaf.
   providers: [PointsWalletService, PointsCashbackService, PointsLedgerService],
   exports: [PointsWalletService, PointsCashbackService, PointsLedgerService],
 })

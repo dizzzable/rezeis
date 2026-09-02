@@ -398,6 +398,7 @@ function createReconciliation(input: {
       },
     } as never,
     { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
+    { create: async () => 'event-1' } as never,
   );
 
   return {

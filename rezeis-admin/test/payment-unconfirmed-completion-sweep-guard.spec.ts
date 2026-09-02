@@ -325,6 +325,7 @@ function createReconciliation(input: {
     // are HTTP-shaped, and a stubbed one would pin none of them.
     new YookassaPaymentVerificationService(prismaService as never, httpService as never),
     { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
+    { create: async () => 'event-1' } as never,
   );
 
   return {

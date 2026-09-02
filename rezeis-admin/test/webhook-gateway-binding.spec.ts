@@ -139,6 +139,7 @@ function createHarness(input: {
       verifyCompletion: async () => ({ outcome: 'CONFIRMED', providerStatus: 'succeeded' }),
     } as never,
     { creditForTransactionBestEffort: async () => undefined, reverseForTransactionBestEffort: async () => undefined } as never,
+    { create: async () => 'event-1' } as never,
   );
 
   return { service, state };

@@ -9,6 +9,7 @@ import { PartnersModule } from '../partners/partners.module';
 import { AdvertisingModule } from '../advertising/advertising.module';
 import { PlansModule } from '../plans/plans.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { ReferralsModule } from '../referrals/referrals.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
@@ -71,6 +72,10 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     // For `PointsCashbackService`: the post-fulfilment cashback hook and its
     // refund reversal in `PaymentReconciliationService`.
     PointsModule,
+    // For the "cashback credited" message the same hook sends. It lives here
+    // rather than in `PointsModule` so a module that only moves a balance
+    // does not drag the whole notification stack along.
+    NotificationsModule,
     SettingsModule,
     ProfileSyncModule,
     BullModule.registerQueue({

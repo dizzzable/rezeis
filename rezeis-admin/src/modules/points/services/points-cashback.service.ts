@@ -72,16 +72,25 @@ export class PointsCashbackService {
     private readonly events: SystemEventsService,
   ) {}
 
-  /** The hook. Never throws. */
-  public async creditForTransactionBestEffort(transaction: CashbackTransaction): Promise<void> {
+  /**
+   * The hook. Never throws.
+   *
+   * Answers with the outcome so the caller can tell the buyer what they
+   * earned — the message is sent from the payment pipeline, not from here.
+   * `null` means the attempt itself failed and was logged.
+   */
+  public async creditForTransactionBestEffort(
+    transaction: CashbackTransaction,
+  ): Promise<CashbackCreditOutcome | null> {
     try {
-      await this.creditForTransaction(transaction);
+      return await this.creditForTransaction(transaction);
     } catch (error: unknown) {
       this.logger.error(
         `Points cashback hook failed for transaction ${transaction.id}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return null;
     }
   }
 
