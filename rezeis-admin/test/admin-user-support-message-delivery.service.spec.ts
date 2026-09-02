@@ -7,6 +7,7 @@ import { RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 
 /**
  * The admin support-message route, pinned at the CONTROLLER boundary.
@@ -303,6 +304,7 @@ function createHarness(input: { readonly outcomes: readonly Outcome[] }) {
     {} as never, // PlansAdminService
     undefined as never, // UserBlockService
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 
   return { controller, state };

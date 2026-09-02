@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { AltshopImporterService } from '../src/modules/imports/services/altshop-importer.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { parseAltshopBackup } from '../src/modules/imports/utils/altshop-backup-parser';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 
@@ -33,7 +34,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
   it('creates a claim-pending web account for a migrated web-only user', async () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = buildPrisma({ created, existingWebAccount: null });
-    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never, new PointsWalletService());
 
     await service.run({
       mode: 'import',
@@ -55,7 +56,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
   it('skips when the user already has a web account', async () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = buildPrisma({ created, existingWebAccount: { id: 'wa-existing' } });
-    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never, new PointsWalletService());
 
     await service.run({
       mode: 'import',
@@ -71,7 +72,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
   it('creates no web account in sync mode', async () => {
     const created: Array<Record<string, unknown>> = [];
     const prisma = buildPrisma({ created, existingWebAccount: null, telegramMatch: true });
-    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never, new PointsWalletService());
 
     await service.run({
       mode: 'sync',
@@ -93,7 +94,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
       existingWebAccount: { id: 'wa-existing' },
       webAccountOwnerId: 'existing-web-user',
     });
-    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never, new PointsWalletService());
     await service.run({
       mode: 'import', createdBy: null,
       users: [{ id: 1, telegram_id: -5, username: 'weblogin', name: 'Web', role: 1 } as never],
@@ -113,7 +114,7 @@ describe('AltshopImporterService — claim-pending web account', () => {
       existingWebAccount: null,
       webAccountOwners: { login: 'user-by-login', email: 'user-by-email' },
     });
-    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never);
+    const service = new AltshopImporterService(prisma as never, { strictGetAllPanelUsers: async () => strictOk({ users: [], total: 0 }) } as never, new PointsWalletService());
     const result = await service.run({
       mode: 'import', createdBy: null,
       users: [{ id: 1, telegram_id: -5, username: 'weblogin', name: 'Web', role: 1 } as never],
@@ -139,7 +140,11 @@ function buildPrisma(opts: {
   webAccountOwners?: { login?: string; email?: string };
   createdUsers?: unknown[];
 }): Record<string, unknown> {
-  return {
+  const prisma: Record<string, unknown> = {
+    // The importer creates a user inside a transaction now (the donor balance
+    // is credited through the wallet in the same one); the fake hands itself
+    // in as the transaction client, the way every other fake in `test/` does.
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma),
     user: {
       findUnique: async (args: { where: { telegramId?: bigint; id?: string }; select?: unknown }) => {
         if (args.where.id !== undefined) return { id: args.where.id, createdAt: new Date(), currentSubscriptionId: null };
@@ -173,4 +178,5 @@ function buildPrisma(opts: {
       update: async (args: { data: Record<string, unknown> }) => ({ id: 'import-1', ...args.data }),
     },
   };
+  return prisma;
 }

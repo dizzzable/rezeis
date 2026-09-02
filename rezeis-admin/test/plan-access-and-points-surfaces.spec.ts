@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import {
   PLAN_UPDATE_SOURCES,
   PlansAdminService,
@@ -414,6 +415,27 @@ function makeDb(seed: { users?: UserRow[]; plans?: PlanRow[] }) {
         return { count: matched.length };
       },
     },
+    /**
+     * The ledger row the wallet writes beside the balance update. Recorded as
+     * a write so a test can see it shared the transaction; it carries no
+     * `points` key, so `pointsWrites` keeps counting balance writes only.
+     */
+    pointsLedgerEntry: {
+      findUnique: async () => {
+        record('pointsLedgerEntry.findUnique');
+        return null;
+      },
+      create: async (args: { data: Record<string, unknown> }) => {
+        record('pointsLedgerEntry.create');
+        writes.push({
+          op: 'pointsLedgerEntry.create',
+          where: {},
+          data: snapshotArgs(args.data),
+          tx: currentTx,
+        });
+        return { id: `ledger-${writes.length}` };
+      },
+    },
     adminAuditLog: {
       create: async (args: { data: Record<string, unknown> }) => {
         record('adminAuditLog.create');
@@ -470,6 +492,7 @@ function buildController(db: ReturnType<typeof makeDb>): AdminUserManagementCont
     plansAdminService,
     undefined as never,
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 }
 
@@ -941,7 +964,7 @@ describe('the points floor rides in the where of the write', () => {
       const write = solePointsWrite(db);
       assert.deepEqual(
         write.data['points'],
-        { increment: delta },
+        delta > 0 ? { increment: delta } : { decrement: -delta },
         `the database is told the delta ${delta} and computes the total itself`,
       );
       assert.notEqual(
@@ -982,14 +1005,17 @@ describe('the points floor rides in the where of the write', () => {
     assert.deepEqual(inside.slice(0, writeAt), ['$transaction.begin'], 'nothing is read before it');
   });
 
-  it('never blocks a credit: the floor for a positive delta is negative', async () => {
+  it('never blocks a credit: a positive delta carries no floor at all', async () => {
+    // The wallet writes a credit with no `points` clause in its `where` — the
+    // old `points >= -delta` was a floor every non-negative balance cleared,
+    // which is the same thing said with one fewer predicate.
     const db = makeDb({ users: [makeUser(SUBJECT_ID, BigInt(SUBJECT_TELEGRAM_ID), 0)] });
 
     await adjustPoints(db, 250);
 
-    const floor = pointsFloor(solePointsWrite(db));
-    assert.equal(floor, -250, 'the predicate is points >= -delta');
-    assert.ok(floor !== undefined && floor <= 0, 'a floor no non-negative balance can fail');
+    const write = solePointsWrite(db);
+    assert.equal(pointsFloor(write), undefined, 'a credit asks the row for nothing');
+    assert.equal('points' in write.where, false, 'and carries no balance clause of any kind');
     assert.equal(db.state.users[0]?.points, 250, 'an empty balance still takes a credit');
     assert.equal(auditMetadata(db)['previousPoints'], 0);
     assert.equal(auditMetadata(db)['newPoints'], 250);
@@ -1108,6 +1134,31 @@ describe('the points adjustment leaves a trail', () => {
     assert.equal(metadata['newPoints'], OPENING_POINTS - 250);
   });
 
+  it('leaves one ledger row naming the audit row, the reason and the operator', async () => {
+    const db = seedAccess();
+
+    await adjustPoints(db, -250);
+
+    const rows = db.writes.filter((write) => write.op === 'pointsLedgerEntry.create');
+    assert.equal(rows.length, 1, 'exactly one ledger row per adjustment');
+    const row = rows[0]!.data;
+    assert.equal(row['userId'], SUBJECT_ID);
+    assert.equal(row['delta'], -250);
+    assert.equal(row['balanceAfter'], OPENING_POINTS - 250);
+    assert.equal(row['source'], 'MANUAL_ADJUSTMENT');
+    assert.equal(row['referenceKey'], null, 'an operator typing a number twice means two adjustments');
+    const details = row['details'] as Record<string, unknown>;
+    assert.equal(details['adminId'], 'admin-1');
+    assert.equal(details['reason'], 'OTHER', 'no reason sent is recorded as OTHER');
+    assert.equal(details['auditLogId'], auditRow(db)['id'], 'the ledger row names the audit row written beside it');
+    assert.match(
+      String(auditMetadata(db)['ledgerEntryId']),
+      /^ledger-\d+$/,
+      'and the audit row names the ledger row back, with the id the fake handed out',
+    );
+    assert.equal(rows[0]!.tx, db.writes.find((write) => write.op === 'user.updateMany')?.tx, 'in the same transaction as the write');
+  });
+
   it('emits one user.points_adjusted event carrying the same figures', async () => {
     const db = seedAccess();
 
@@ -1125,6 +1176,9 @@ describe('the points adjustment leaves a trail', () => {
           previousPoints: OPENING_POINTS,
           newPoints: OPENING_POINTS - 250,
           adminId: 'admin-1',
+          // An adjustment sent without a reason is recorded as OTHER, the way
+          // the panel that predates the field sends it.
+          reason: 'OTHER',
         },
       },
     ]);
@@ -1173,7 +1227,7 @@ describe('the points adjustment leaves a trail', () => {
 
     assert.deepEqual(
       pointsWrites(db).map((write) => write.data['points']),
-      [{ increment: 250 }, { increment: -100 }],
+      [{ increment: 250 }, { decrement: 100 }],
       'neither write carries the total the other left behind',
     );
     assert.equal(db.state.users[0]?.points, OPENING_POINTS + 150);

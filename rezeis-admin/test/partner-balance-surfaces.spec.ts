@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 import { AdminPartnersController } from '../src/modules/partners/controllers/admin-partners.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { PartnersService } from '../src/modules/partners/services/partners.service';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
 
@@ -425,6 +426,7 @@ function buildUserPanel(db: ReturnType<typeof makeDb>) {
     {} as never, // PlansAdminService
     undefined as never,
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 }
 

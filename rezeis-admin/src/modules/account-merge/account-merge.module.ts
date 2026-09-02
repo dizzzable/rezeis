@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { PointsModule } from '../points/points.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { AdminAccountMergeController } from './controllers/admin-account-merge.controller';
 import { AccountMergeService } from './services/account-merge.service';
@@ -14,7 +15,7 @@ import { AccountMergePreviewService } from './services/account-merge-preview.ser
  * provides the queue used to re-sync moved subscriptions' Remnawave profiles.
  */
 @Module({
-  imports: [AuthModule, ProfileSyncModule],
+  imports: [AuthModule, ProfileSyncModule, PointsModule],
   controllers: [AdminAccountMergeController],
   providers: [AccountMergeService, AccountMergePreviewService],
   exports: [AccountMergeService],

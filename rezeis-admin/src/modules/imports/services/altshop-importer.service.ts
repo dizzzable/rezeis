@@ -6,6 +6,7 @@ import {
   PartnerAccrualStrategy,
   PartnerRewardType,
   PaymentGatewayType,
+  PointsLedgerSource,
   Prisma,
   PurchaseChannel,
   PurchaseType,
@@ -17,6 +18,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
@@ -207,6 +209,7 @@ export class AltshopImporterService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   public async run(input: RunInput): Promise<ImportSummary> {
@@ -450,24 +453,46 @@ export class AltshopImporterService {
     }
 
     if (mode === 'sync') return null;
-    const created = await this.prismaService.user.create({
-      data: {
-        telegramId: isPositiveTelegramId(source.telegram_id) ? BigInt(source.telegram_id) : null,
-        username: nonEmpty(source.username),
-        name: nonEmpty(source.name) ?? nonEmpty(source.username) ?? `altshop-${source.id}`,
-        language: this.mapLocale(source.language),
-        personalDiscount: nonNegativeInt(source.personal_discount),
-        purchaseDiscount: nonNegativeInt(source.purchase_discount),
-        points: nonNegativeInt(source.points),
-        isBlocked: source.is_blocked === true,
-        isBotBlocked: source.is_bot_blocked === true,
-        isRulesAccepted: source.is_rules_accepted !== false,
-        maxSubscriptions: normaliseMaxSubscriptions(source.max_subscriptions),
-        partnerBalanceCurrencyOverride: this.mapCurrency(source.partner_balance_currency_override ?? ''),
-        referralInviteSettings: source.referral_invite_settings
-          ? jsonInput(source.referral_invite_settings)
-          : undefined,
-      },
+    // The row is created holding zero and the donor balance is credited
+    // through the wallet in the same transaction, so the imported user starts
+    // with a ledger that sums to the column like everybody else's.
+    const points = nonNegativeInt(source.points);
+    const created = await this.prismaService.$transaction(async (tx) => {
+      const row = await tx.user.create({
+        data: {
+          telegramId: isPositiveTelegramId(source.telegram_id) ? BigInt(source.telegram_id) : null,
+          username: nonEmpty(source.username),
+          name: nonEmpty(source.name) ?? nonEmpty(source.username) ?? `altshop-${source.id}`,
+          language: this.mapLocale(source.language),
+          personalDiscount: nonNegativeInt(source.personal_discount),
+          purchaseDiscount: nonNegativeInt(source.purchase_discount),
+          points: 0,
+          isBlocked: source.is_blocked === true,
+          isBotBlocked: source.is_bot_blocked === true,
+          isRulesAccepted: source.is_rules_accepted !== false,
+          maxSubscriptions: normaliseMaxSubscriptions(source.max_subscriptions),
+          partnerBalanceCurrencyOverride: this.mapCurrency(source.partner_balance_currency_override ?? ''),
+          referralInviteSettings: source.referral_invite_settings
+            ? jsonInput(source.referral_invite_settings)
+            : undefined,
+        },
+        select: { id: true },
+      });
+      if (points > 0) {
+        const credited = await this.pointsWallet.apply(tx, {
+          userId: row.id,
+          delta: points,
+          source: PointsLedgerSource.IMPORT,
+          referenceKey: `altshop-user:${row.id}`,
+          details: { importer: 'altshop', altshopUserId: String(source.id) },
+        });
+        if (!credited.applied) {
+          throw new Error(
+            `Altshop import: donor points of user ${String(source.id)} were not credited (${credited.reason})`,
+          );
+        }
+      }
+      return row;
     });
     return { id: created.id, created: true };
   }

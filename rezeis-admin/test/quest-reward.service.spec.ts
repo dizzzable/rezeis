@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { QuestRewardService } from '../src/modules/quests/services/quest-reward.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 
 /** Build a QuestRewardService over a configurable in-memory prisma double. */
@@ -22,6 +23,7 @@ function makeService(cfg: {
 } {
   const calls: Record<string, unknown[]> = {
     userUpdate: [],
+    ledgerCreate: [],
     subUpdate: [],
     promocodeCreate: [],
     completionUpdate: [],
@@ -33,10 +35,24 @@ function makeService(cfg: {
 
   const tx = {
     user: {
-      findUnique: async () => cfg.user ?? { personalDiscount: 0 },
+      findUnique: async () => cfg.user ?? { personalDiscount: 0, points: 0 },
       update: async (a: unknown) => {
         calls.userUpdate.push(a);
         return {};
+      },
+      // The POINTS payout goes through the wallet, whose balance write is a
+      // conditional `updateMany`. Recorded in the same list as the other user
+      // writes: "one write to the user row" is what the POINTS case asserts.
+      updateMany: async (a: unknown) => {
+        calls.userUpdate.push(a);
+        return { count: 1 };
+      },
+    },
+    pointsLedgerEntry: {
+      findUnique: async () => null,
+      create: async (a: unknown) => {
+        calls.ledgerCreate.push(a);
+        return { id: 'ledger-1' };
       },
     },
     subscription: {
@@ -117,6 +133,7 @@ function makeService(cfg: {
     prisma as never,
     profileSync as never,
     subMutations as never,
+    new PointsWalletService(),
   );
   return { service, calls };
 }
@@ -138,6 +155,14 @@ describe('QuestRewardService', () => {
     const result = await service.claim({ userId: 'u1', questId: 'q1' });
     assert.equal(result.points, 3);
     assert.equal(calls.userUpdate.length, 1);
+    // The credit went through the wallet: one ledger row, keyed on the
+    // completion so a re-driven claim cannot journal it twice.
+    assert.deepEqual(
+      (calls.ledgerCreate as Array<{ data: Record<string, unknown> }>).map((c) => [
+        c.data.userId, c.data.delta, c.data.source, c.data.referenceKey,
+      ]),
+      [['u1', 3, 'QUEST_REWARD', 'c1']],
+    );
     // Reward slot was claimed atomically: rewardIssuedAt is stamped via the
     // conditional updateMany (single-winner), not the final snapshot update.
     const stamped = (calls.completionUpdateMany as Array<{ data?: { rewardIssuedAt?: unknown } }>).some(

@@ -29,6 +29,7 @@ import { of, throwError } from 'rxjs';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AltshopImporterService } from '../src/modules/imports/services/altshop-importer.service';
 import { RemnashopImporterService } from '../src/modules/imports/services/remnashop-importer.service';
 import { StealthnetImporterService } from '../src/modules/imports/services/stealthnet-importer.service';
@@ -334,6 +335,7 @@ describe('StealthnetImporterService — the importer that expires unconditionall
           creditsSkipped: 0,
         }),
       } as never,
+      new PointsWalletService(),
     );
     const run = importer.run({
       mode: 'import',
@@ -508,6 +510,7 @@ describe('AltshopImporterService — the third caller of the same seam', () => {
         importRecord: { create: async () => ({ id: 'import-1' }) },
       } as never,
       service as never,
+      new PointsWalletService(),
     );
     const run = importer.run({
       mode: 'import',

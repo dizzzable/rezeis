@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { PurchaseChannel, PurchaseType, ReferralRewardType } from '@prisma/client';
 
 import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 
 // The service now runs its critical section inside prisma.$transaction with a
 // FOR UPDATE row lock. In unit tests we pass the same mock client through as
@@ -55,6 +56,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: () => undefined } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-1');
@@ -94,6 +96,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: () => undefined } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-1');
@@ -144,6 +147,7 @@ describe('ReferralQualificationService', () => {
       {
         info: (...args: unknown[]) => events.push(args),
       } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-1');
@@ -227,6 +231,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: () => undefined } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-1');
@@ -286,6 +291,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: () => undefined } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-1');
@@ -327,6 +333,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: () => undefined } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-1');
@@ -371,6 +378,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: (...args: unknown[]) => events.push(args) } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-upgrade');
@@ -416,6 +424,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: (...args: unknown[]) => events.push(args) } as never,
+      new PointsWalletService(),
     );
 
     await service.qualifyReferralAfterPurchase('tx-upgrade2');
@@ -447,6 +456,7 @@ describe('ReferralQualificationService', () => {
         referralReward: { create: async (args: unknown) => rewardCreates.push(args) },
       }) as never,
       { info: (...args: unknown[]) => events.push(args) } as never,
+      new PointsWalletService(),
     );
 
     const result = await service.qualifyReferralManually({
@@ -500,6 +510,7 @@ describe('ReferralQualificationService no longer carries a second reward issuer'
     const service = new ReferralQualificationService(
       withTx({}) as never,
       { info: () => undefined } as never,
+      new PointsWalletService(),
     );
     const holder = service as unknown as Record<string, unknown>;
 

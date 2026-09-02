@@ -7,6 +7,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { PurchaseChannel, PurchaseType, ReferralRewardType } from '@prisma/client';
 
 import { AdminReferralsController } from '../src/modules/referrals/controllers/admin-referrals.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { ReferralManualAttachService } from '../src/modules/referrals/services/referral-manual-attach.service';
 import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
@@ -368,7 +369,7 @@ function makeDb(
   };
   const qualification =
     seed.realQualification === true
-      ? new ReferralQualificationService(client as never, events as never)
+      ? new ReferralQualificationService(client as never, events as never, new PointsWalletService())
       : { qualifyReferralAfterPurchase: async () => undefined };
 
   return {
@@ -423,6 +424,7 @@ function buildUserCard(db: Db): AdminUserManagementController {
     {} as never, // PlansAdminService
     undefined as never,
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 }
 

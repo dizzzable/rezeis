@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  PointsLedgerSource,
   Prisma,
   ReferralPointsExchangeType,
   SubscriptionStatus,
@@ -8,6 +11,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
@@ -85,6 +89,7 @@ export class ReferralPointsExchangeService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   public async getExchangeOptions(userId: string): Promise<ExchangeOptionsResponse> {
@@ -166,6 +171,10 @@ export class ReferralPointsExchangeService {
             )
             : null;
 
+        // Minted before the spend so the ledger row the wallet writes can name
+        // the exchange record that is created right after it, in the same
+        // transaction. An explicit id on `create` is what makes that possible.
+        const exchangeId = randomUUID();
         const applied = await this.applyExchange({
           tx,
           input,
@@ -173,9 +182,11 @@ export class ReferralPointsExchangeService {
           computedValue,
           pointsToCharge,
           targetSubscriptionId,
+          exchangeId,
         });
         const ledger = await tx.referralPointsExchange.create({
           data: {
+            id: exchangeId,
             userId: input.userId,
             targetSubscriptionId: applied.targetSubscriptionId,
             type: input.type as ReferralPointsExchangeType,
@@ -236,6 +247,7 @@ export class ReferralPointsExchangeService {
     readonly computedValue: number;
     readonly pointsToCharge: number;
     readonly targetSubscriptionId: string | null;
+    readonly exchangeId: string;
   }): Promise<AppliedExchange> {
     const empty = (): Omit<AppliedExchange, 'targetSubscriptionId' | 'rewardValue'> => ({
       giftCode: null,
@@ -265,7 +277,7 @@ export class ReferralPointsExchangeService {
             'Subscription needs a Remnawave profile repair before points can be exchanged',
           );
         }
-        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge, input.exchangeId, input.input.type);
         const base = new Date(Math.max(subscription.expiresAt.getTime(), Date.now()));
         const expiresAtAfter = new Date(base.getTime() + input.computedValue * MS_PER_DAY);
         await input.tx.subscription.update({
@@ -303,7 +315,7 @@ export class ReferralPointsExchangeService {
         }
         const trafficGb = Math.min(input.computedValue, input.config.traffic.maxTrafficGb);
         if (trafficGb <= 0) throw new BadRequestException('Traffic exchange has no reward');
-        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge, input.exchangeId, input.input.type);
         const trafficLimitAfter = subscription.trafficLimit + trafficGb;
         // The snapshot moves with the column, exactly as the promocode
         // EXTRA_TRAFFIC reward does. That leaves the two in step, so
@@ -342,7 +354,7 @@ export class ReferralPointsExchangeService {
       }
 
       case 'DISCOUNT': {
-        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge, input.exchangeId, input.input.type);
         const current = await input.tx.user.findUnique({
           where: { id: input.input.userId },
           select: { personalDiscount: true },
@@ -391,7 +403,7 @@ export class ReferralPointsExchangeService {
           },
         });
         if (plan === null) throw new BadRequestException('Gift subscription plan not found');
-        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge);
+        await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge, input.exchangeId, input.input.type);
         const giftCode = generateExchangePromoCode();
         const gift = await input.tx.promocode.create({
           data: {
@@ -423,12 +435,21 @@ export class ReferralPointsExchangeService {
     tx: Prisma.TransactionClient,
     userId: string,
     points: number,
+    exchangeId: string,
+    type: PointsExchangeType,
   ): Promise<void> {
-    const updated = await tx.user.updateMany({
-      where: { id: userId, points: { gte: points } },
-      data: { points: { decrement: points } },
+    // Through the wallet: the floor still rides in the `WHERE` of the write,
+    // and the ledger row it leaves behind is keyed on the exchange record
+    // created right after — "−N for 3 days of subscription" in the history.
+    const moved = await this.pointsWallet.apply(tx, {
+      userId,
+      delta: -points,
+      source: PointsLedgerSource.EXCHANGE,
+      referenceKey: exchangeId,
+      details: { exchangeType: type },
     });
-    if (updated.count !== 1) {
+    if (!moved.applied) {
+      if (moved.reason === 'USER_NOT_FOUND') throw new NotFoundException('User not found');
       throw new BadRequestException('Insufficient points balance');
     }
   }

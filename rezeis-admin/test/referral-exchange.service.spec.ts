@@ -5,6 +5,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { ReferralPointsExchangeService } from '../src/modules/referrals/services/referral-points-exchange.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 
 const referralSettings = {
   points_exchange: {
@@ -19,7 +20,7 @@ describe('ReferralPointsExchangeService', () => {
     const service = new ReferralPointsExchangeService({
       user: { findUnique: async () => ({ points: 250 }) },
       settings: { findFirst: async () => ({ referralSettings }) },
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     const result = await service.getExchangeOptions('user-1');
 
@@ -53,7 +54,7 @@ describe('ReferralPointsExchangeService', () => {
     const service = new ReferralPointsExchangeService({
       user: { findUnique: async () => ({ points: 25 }) },
       settings: { findFirst: async () => ({ referralSettings: camelSettings }) },
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     const result = await service.getExchangeOptions('user-1');
 
@@ -74,7 +75,7 @@ describe('ReferralPointsExchangeService', () => {
     const service = new ReferralPointsExchangeService({
       user: { findUnique: async () => null },
       settings: { findFirst: async () => ({ referralSettings }) },
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     await assert.rejects(service.getExchangeOptions('missing-user'), NotFoundException);
   });
@@ -106,16 +107,38 @@ describe('ReferralPointsExchangeService', () => {
         },
         promocode: { create: async (args: unknown) => txCalls.push(['promocode.create', args]) },
         profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
-        referralPointsExchange: { create: async () => ({ id: 'exchange-1' }) },
+        referralPointsExchange: {
+          create: async (args: unknown) => {
+            txCalls.push(['referralPointsExchange.create', args]);
+            return { id: 'exchange-1' };
+          },
+        },
+        pointsLedgerEntry: {
+          findUnique: async () => null,
+          create: async (args: unknown) => {
+            txCalls.push(['pointsLedgerEntry.create', args]);
+            return { id: 'ledger-1' };
+          },
+        },
       }),
     } as never, {
       enqueue: async (jobId: string) => queueCalls.push(jobId),
-    } as never);
+    } as never, new PointsWalletService());
 
     const result = await service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200, subscriptionId: 'sub-1' });
 
     assert.deepStrictEqual(result, { success: true, message: 'Exchanged 200 points', value: 2, code: undefined, syncPending: true });
     assert.deepStrictEqual(txCalls[0], ['user.updateMany', { where: { id: 'user-1', points: { gte: 200 } }, data: { points: { decrement: 200 } } }]);
+    // The spend went through the wallet: one ledger row keyed on the exchange
+    // record, and the record is created with THAT id so the two agree.
+    const ledgerRow = txCalls.find((c) => Array.isArray(c) && c[0] === 'pointsLedgerEntry.create') as [string, { data: Record<string, unknown> }];
+    const exchangeRow = txCalls.find((c) => Array.isArray(c) && c[0] === 'referralPointsExchange.create') as [string, { data: Record<string, unknown> }];
+    assert.ok(ledgerRow, 'the spend left a ledger row');
+    assert.equal(ledgerRow[1].data.delta, -200);
+    assert.equal(ledgerRow[1].data.source, 'EXCHANGE');
+    assert.deepStrictEqual(ledgerRow[1].data.details, { exchangeType: 'SUBSCRIPTION_DAYS' });
+    assert.equal(typeof ledgerRow[1].data.referenceKey, 'string');
+    assert.equal(exchangeRow[1].data.id, ledgerRow[1].data.referenceKey, 'the ledger names the exchange record it paid for');
     const extension = txCalls.find((call) => Array.isArray(call) && call[0] === 'subscription.update') as [string, { data: { expiresAt: Date } }];
     assert.ok(extension[1].data.expiresAt.getTime() >= Date.now() + 2 * 24 * 60 * 60 * 1000 - 1_000);
     assert.deepStrictEqual(queueCalls, ['sync-1']);
@@ -156,7 +179,7 @@ describe('ReferralPointsExchangeService', () => {
       }),
     } as never, {
       enqueue: async (jobId: string) => queueCalls.push(jobId),
-    } as never);
+    } as never, new PointsWalletService());
 
     await assert.rejects(
       service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200 }),
@@ -193,7 +216,7 @@ describe('ReferralPointsExchangeService', () => {
           }),
         },
       }),
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     await assert.rejects(
       service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 100, subscriptionId: 'legacy-sub' }),
@@ -249,8 +272,9 @@ describe('ReferralPointsExchangeService', () => {
           },
         },
         referralPointsExchange: { create: async () => ({ id: 'exchange-gift-1' }) },
+        pointsLedgerEntry: { findUnique: async () => null, create: async () => ({ id: 'ledger-1' }) },
       }),
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     // User typed 1000 points, but a gift is a fixed-price item: charge exactly
     // points_cost (500) and mint one code.
@@ -304,8 +328,9 @@ describe('ReferralPointsExchangeService', () => {
           findUnique: async () => ({ id: 'user-1', personalDiscount: 45 }),
         },
         referralPointsExchange: { create: async () => ({ id: 'exchange-discount-1' }) },
+        pointsLedgerEntry: { findUnique: async () => null, create: async () => ({ id: 'ledger-1' }) },
       }),
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     // 200 points / 10 = 20%, but capped: 45 + 20 → clamp to 50 (not 65).
     await service.executeExchange({ userId: 'user-1', type: 'DISCOUNT', points: 200 });
@@ -319,7 +344,7 @@ describe('ReferralPointsExchangeService', () => {
   it('rejects disabled exchange configurations', async () => {
     const service = new ReferralPointsExchangeService({
       settings: { findFirst: async () => ({ referralSettings: { points_exchange: { exchange_enabled: false } } }) },
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     await assert.rejects(service.executeExchange({ userId: 'user-1', type: 'TRAFFIC', points: 50 }), BadRequestException);
   });
@@ -341,7 +366,7 @@ describe('ReferralPointsExchangeService', () => {
           return { referralSettings: { points_exchange: { exchange_enabled: false } } };
         },
       },
-    } as never, {} as never);
+    } as never, {} as never, new PointsWalletService());
 
     const result = await service.executeExchange({
       userId: 'user-1',

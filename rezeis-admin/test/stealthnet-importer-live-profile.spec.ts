@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { StealthnetImporterService } from '../src/modules/imports/services/stealthnet-importer.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 
 describe('StealthnetImporterService live panel overlay', () => {
@@ -38,6 +39,7 @@ describe('StealthnetImporterService live panel overlay', () => {
         mappings: [], created: 0, existing: 0, skipped: 0,
         creditsCreated: 0, creditsExisting: 0, creditsSkipped: 0,
       }) } as never,
+      new PointsWalletService(),
     );
 
     await service.run({

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { UserNotificationsService } from '../src/modules/notifications/services/user-notifications.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
 
 /**
@@ -385,5 +386,6 @@ function createController(harness: ReturnType<typeof createHarness>) {
     {} as never, // PlansAdminService
     undefined as never, // UserBlockService
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 }

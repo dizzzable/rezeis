@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { PointsModule } from '../points/points.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { SettingsModule } from '../settings/settings.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
@@ -37,7 +38,7 @@ import { QuestService } from './services/quest.service';
  * env fallback) and nonce replay protection.
  */
 @Module({
-  imports: [AuthModule, ProfileSyncModule, SubscriptionsModule, SettingsModule],
+  imports: [AuthModule, ProfileSyncModule, SubscriptionsModule, SettingsModule, PointsModule],
   controllers: [
     AdminQuestController,
     InternalQuestController,

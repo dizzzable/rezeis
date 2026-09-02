@@ -5,6 +5,7 @@ import { BadRequestException } from '@nestjs/common';
 import { PlanAvailability, TrialClaimSource, TrialClaimStatus } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AccountMergeService } from '../src/modules/account-merge/services/account-merge.service';
 import { TRIAL_CLAIM_LIMIT_MESSAGE } from '../src/modules/plans/utils/trial-settings.util';
 import { SubscriptionMutationsService } from '../src/modules/subscriptions/services/subscription-mutations.service';
@@ -293,6 +294,7 @@ function createMergeWorld() {
     prisma as unknown as PrismaService,
     { info: () => undefined, warn: () => undefined, error: () => undefined, emit: () => undefined } as never,
     { enqueue: async () => undefined } as never,
+    new PointsWalletService(),
   );
   const mutationsService = new SubscriptionMutationsService(prisma as never, {
     enqueue: async () => undefined,

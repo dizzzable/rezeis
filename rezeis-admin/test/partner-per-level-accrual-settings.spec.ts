@@ -7,6 +7,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { PartnerAccrualStrategy } from '@prisma/client';
 
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { UpdatePartnerSettingsDto } from '../src/modules/users/dto/update-partner-settings.dto';
 
 /**
@@ -159,6 +160,7 @@ function buildController(db: ReturnType<typeof makeDb>): AdminUserManagementCont
     {} as never, // PlansAdminService
     undefined as never,
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 }
 

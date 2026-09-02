@@ -391,6 +391,33 @@ enum ReferralPointsExchangeType {
   TRAFFIC
 }
 
+/// Which points-cashback rule a plan or an add-on follows. INHERIT reads the
+/// global `Settings.pointsSettings.cashback`; NONE excludes the line (the way
+/// an operator steers buyers towards another plan); PERCENT and FIXED carry
+/// their own value in the columns beside the mode.
+enum PointsCashbackMode {
+  INHERIT
+  NONE
+  PERCENT
+  FIXED
+}
+
+/// Why `User.points` moved. One `points_ledger` row per movement, written by
+/// `PointsWalletService` and nobody else: the balance column is the running
+/// sum of these rows, and a writer that bypasses the service breaks that.
+enum PointsLedgerSource {
+  CASHBACK
+  CASHBACK_REVERSED
+  REFERRAL_REWARD
+  REFERRAL_REWARD_REVOKED
+  QUEST_REWARD
+  EXCHANGE
+  MANUAL_ADJUSTMENT
+  ACCOUNT_MERGE
+  IMPORT
+  OPENING_BALANCE
+}
+
 /// Partner accrual level — donor stores 1/2/3 in plain int columns; we mirror
 /// the named enum for type safety.
 enum PartnerLevel {
@@ -1448,6 +1475,7 @@ model User {
   promocodeActivations    PromocodeActivation[]    @relation("UserPromocodeActivations")
   pendingDiscounts        UserPendingDiscount[]    @relation("UserPendingDiscounts")
   referralPointsExchanges ReferralPointsExchange[] @relation("UserReferralPointsExchanges")
+  pointsLedger            PointsLedgerEntry[]      @relation("UserPointsLedger")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
   partnerReferrals        PartnerReferral[]        @relation("PartnerReferralUser")
@@ -2046,6 +2074,11 @@ model Plan {
   trialSettings        Json                  @default("{}") @map("trial_settings")
   internalSquads       String[]              @default([]) @map("internal_squads")
   externalSquad        String?               @map("external_squad")
+  /// Points cashback for a purchase of this plan. INHERIT follows the global
+  /// rule; PERCENT reads `cashbackPercent`; FIXED reads the purchased
+  /// duration's `PlanDuration.cashbackPoints` (a year and a month differ).
+  cashbackMode         PointsCashbackMode    @default(INHERIT) @map("cashback_mode")
+  cashbackPercent      Int?                  @map("cashback_percent")
   createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -2059,10 +2092,13 @@ model Plan {
 }
 
 model PlanDuration {
-  id       String  @id @default(cuid()) @map("id")
-  planId   String  @map("plan_id")
-  days     Int     @map("days")
-  isActive Boolean @default(true) @map("is_active")
+  id             String  @id @default(cuid()) @map("id")
+  planId         String  @map("plan_id")
+  days           Int     @map("days")
+  isActive       Boolean @default(true) @map("is_active")
+  /// Points for a purchase of THIS duration when the plan's `cashbackMode` is
+  /// FIXED. NULL under FIXED means zero, and the form says so.
+  cashbackPoints Int?    @map("cashback_points")
 
   plan   Plan        @relation(fields: [planId], references: [id], onDelete: Cascade)
   prices PlanPrice[]
@@ -2682,6 +2718,10 @@ model Settings {
   /// the env fallback out permanently. Read by the three detectors through
   /// `AntiFraudTunablesService`; ranges live in the anti-fraud config files.
   antiFraudSettings         Json       @default("{}") @map("anti_fraud_settings")
+  /// Points programme. Shape: `{ cashback?: { enabled?: boolean, percent?: number } }`.
+  /// Absent or empty means OFF: an update must not start handing out points
+  /// behind the operator's back. Plans and add-ons in INHERIT mode read this.
+  pointsSettings            Json       @default("{}") @map("points_settings")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")
@@ -3019,6 +3059,38 @@ model ReferralPointsExchange {
   @@index([targetSubscriptionId, createdAt])
   @@index([type, createdAt])
   @@map("referral_points_exchanges")
+}
+
+/// One movement of `User.points`. The balance column is the running sum of
+/// these rows for the user, and `PointsWalletService` is the only writer of
+/// both — the conditional balance write and this row commit together, so
+/// `balanceAfter` is the balance the database held the moment the row was
+/// written, not a number computed from a stale read.
+///
+/// `referenceKey` is the idempotency handle, unique per `source`: the
+/// transaction id for a cashback and its reversal, the reward id for a
+/// referral payout, the exchange id for a spend. Movements that are not
+/// idempotent by nature (an operator typing a number) carry NULL, and NULLs
+/// never collide in the unique index.
+model PointsLedgerEntry {
+  id           String             @id @default(cuid()) @map("id")
+  userId       String             @map("user_id")
+  delta        Int                @map("delta")
+  balanceAfter Int                @map("balance_after")
+  source       PointsLedgerSource @map("source")
+  referenceKey String?            @map("reference_key")
+  /// What the subscriber and the operator are shown for this row: plan, term
+  /// and price for a cashback; type and value for an exchange; reason and
+  /// operator for an adjustment; requested / applied / shortfall for a
+  /// floored reversal.
+  details      Json?              @map("details")
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation("UserPointsLedger", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([source, referenceKey])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("points_ledger")
 }
 
 // =============================================================================
@@ -3709,23 +3781,23 @@ model SubscriptionTrafficReset {
 /// Example: "+50 GB Traffic" (EXTRA_TRAFFIC, value=50, price per currency).
 /// When no `applicablePlanIds` are set, the add-on is available for ALL plans.
 model AddOn {
-  id                String        @id @default(cuid()) @map("id")
-  name              String        @map("name")
-  description       String?       @map("description")
-  type              AddOnType     @map("type")
+  id                String             @id @default(cuid()) @map("id")
+  name              String             @map("name")
+  description       String?            @map("description")
+  type              AddOnType          @map("type")
   /// Optional icon shown on the add-on card in the reiwa cabinet. Either a
   /// built-in lucide glyph key or `custom:<id>` referencing the operator's
   /// custom icon library. `null` falls back to a type-derived default icon.
-  icon              String?       @map("icon")
+  icon              String?            @map("icon")
   /// Magnitude of the add-on:
   ///   - EXTRA_TRAFFIC → GB to add
   ///   - EXTRA_DEVICES → device slots to add
-  value             Int           @map("value")
-  isActive          Boolean       @default(true) @map("is_active")
-  orderIndex        Int           @default(0) @map("order_index")
+  value             Int                @map("value")
+  isActive          Boolean            @default(true) @map("is_active")
+  orderIndex        Int                @default(0) @map("order_index")
   /// Plan IDs this add-on applies to. Empty = available for all plans.
-  applicablePlanIds String[]      @default([]) @map("applicable_plan_ids")
-  lifetime          AddOnLifetime @default(UNTIL_SUBSCRIPTION_END) @map("lifetime")
+  applicablePlanIds String[]           @default([]) @map("applicable_plan_ids")
+  lifetime          AddOnLifetime      @default(UNTIL_SUBSCRIPTION_END) @map("lifetime")
   /// How many times a customer may take this add-on for free before it starts
   /// costing money, counted per subscription TERM. `0` means it is always paid.
   ///
@@ -3733,11 +3805,16 @@ model AddOn {
   /// "one reset a month is on us, the next one costs" without a second product.
   /// It is on the catalogue row rather than the plan so the same allowance
   /// travels with the offer wherever it is sold.
-  freeUsesPerTerm   Int           @default(0) @map("free_uses_per_term")
-  revision          Int           @default(1) @map("revision")
-  archivedAt        DateTime?     @map("archived_at") @db.Timestamptz(3)
-  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  freeUsesPerTerm   Int                @default(0) @map("free_uses_per_term")
+  /// Points cashback for a purchase of this add-on; same modes as `Plan`, but
+  /// an add-on has no durations, so FIXED reads `cashbackPoints` right here.
+  cashbackMode      PointsCashbackMode @default(INHERIT) @map("cashback_mode")
+  cashbackPercent   Int?               @map("cashback_percent")
+  cashbackPoints    Int?               @map("cashback_points")
+  revision          Int                @default(1) @map("revision")
+  archivedAt        DateTime?          @map("archived_at") @db.Timestamptz(3)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   prices       AddOnPrice[]
   entitlements AddOnEntitlement[] @relation("CatalogAddOnEntitlements")

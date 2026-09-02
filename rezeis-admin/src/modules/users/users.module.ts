@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { PointsModule } from '../points/points.module';
 import { InternalUserModule } from '../internal-user/internal-user.module';
 import { ImportsModule } from '../imports/imports.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -32,6 +33,7 @@ import { UserDeletionService } from './services/user-deletion.service';
 @Module({
   imports: [
     AuthModule,
+    PointsModule,
     InternalUserModule,
     ImportsModule,
     NotificationsModule,

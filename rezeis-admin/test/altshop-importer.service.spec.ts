@@ -16,6 +16,7 @@ import type {
 } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AltshopImporterService } from '../src/modules/imports/services/altshop-importer.service';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import {
@@ -338,7 +339,7 @@ function createService(
   prisma: PrismaImporterStub,
   panel: PanelReaderStub = panelReader(),
 ): AltshopImporterService {
-  return new AltshopImporterService(prisma as PrismaService, panel as RemnawaveApiService);
+  return new AltshopImporterService(prisma as PrismaService, panel as RemnawaveApiService, new PointsWalletService());
 }
 
 function trialClaimTx(tx: TrialClaimTxStub): Prisma.TransactionClient {

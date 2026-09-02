@@ -1,8 +1,15 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma, PurchaseType, ReferralRewardType, TransactionStatus } from '@prisma/client';
+import {
+  PointsLedgerSource,
+  Prisma,
+  PurchaseType,
+  ReferralRewardType,
+  TransactionStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 
 /**
  * Shape of `Settings.referralSettings` JSON (donor: altshop referral_settings).
@@ -29,6 +36,7 @@ export class ReferralQualificationService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   /**
@@ -284,9 +292,24 @@ export class ReferralQualificationService {
           if (reward.isIssued) {
             // Reverse the applied effect before revoking.
             if (reward.type === ReferralRewardType.POINTS) {
-              await tx.user.update({
-                where: { id: reward.userId },
-                data: { points: { decrement: reward.amount } },
+              // Floored, through the wallet. This used to be a bare
+              // `decrement` with no floor — the only writer of the balance
+              // without one — and a referrer who had already spent the payout
+              // was driven negative. The money has gone back to the payer;
+              // what the referrer still holds is taken, the rest is recorded
+              // as shortfall on the ledger row, and the balance stops at zero.
+              //
+              // The result is not inspected on purpose: DUPLICATE means this
+              // reward was already reversed by an earlier replay, and
+              // USER_NOT_FOUND means the referrer is gone. Neither is a reason
+              // to abort the rest of the reversal.
+              await this.pointsWallet.apply(tx, {
+                userId: reward.userId,
+                delta: -reward.amount,
+                source: PointsLedgerSource.REFERRAL_REWARD_REVOKED,
+                referenceKey: reward.id,
+                shortfall: 'floor',
+                details: { rewardId: reward.id, referralId: referral.id, transactionId },
               });
             } else if (reward.type === ReferralRewardType.EXTRA_DAYS) {
               const user = await tx.user.findUnique({

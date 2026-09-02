@@ -16,6 +16,7 @@ import { describe, it } from 'node:test';
 import { SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 
@@ -94,6 +95,7 @@ function buildController(
     {} as never, // PlansAdminService
     undefined as never, // UserBlockService
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
   return { controller, panelLookups, profileSyncJobCalls };
 }

@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { SystemEventsService } from '../src/common/services/system-events.service';
 import { AccountMergeService } from '../src/modules/account-merge/services/account-merge.service';
 
@@ -39,17 +40,49 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
     calls.push({ model, op, args });
   };
 
+  const rowById = (id: string): { points: number } | null => {
+    if (id === (fx.source as { id?: string } | null)?.id) return fx.source as unknown as { points: number };
+    if (id === (fx.target as { id?: string } | null)?.id) return fx.target as unknown as { points: number };
+    return null;
+  };
+
   const tx = {
     $queryRaw: async () => [{ id: 'locked-user' }],
     user: {
+      // A COPY, the way a Prisma result is a copy of the row: the service keeps
+      // the object it read at the top of the merge while the wallet's balance
+      // write moves the fixture underneath, and the wallet's own read-back
+      // must see the moved balance without the service's snapshot moving too.
       findUnique: async (a: { where: { id: string } }) => {
-        if (a.where.id === (fx.source as { id?: string } | null)?.id) return fx.source ?? null;
-        if (a.where.id === (fx.target as { id?: string } | null)?.id) return fx.target ?? null;
+        if (a.where.id === (fx.source as { id?: string } | null)?.id) return fx.source ? { ...fx.source } : null;
+        if (a.where.id === (fx.target as { id?: string } | null)?.id) return fx.target ? { ...fx.target } : null;
         return null;
       },
       update: async (a: Record<string, unknown>) => {
         rec('user', 'update', a);
         return { id: 'u' };
+      },
+      /**
+       * The wallet's conditional balance write. Applies every clause of
+       * `where` as the filter that selects the row, mutates the fixture so the
+       * read-back sees the new balance, and answers with `count` — the only
+       * signal the wallet gets from Postgres.
+       */
+      updateMany: async (a: {
+        where: { id: string; points?: number | { gte?: number; equals?: number } };
+        data: { points?: { increment?: number; decrement?: number } };
+      }) => {
+        rec('user', 'updateMany', a as unknown as Record<string, unknown>);
+        const row = rowById(a.where.id);
+        if (row === null) return { count: 0 };
+        const cond = a.where.points;
+        if (typeof cond === 'number' && row.points !== cond) return { count: 0 };
+        if (typeof cond === 'object' && cond !== null) {
+          if (cond.equals !== undefined && row.points !== cond.equals) return { count: 0 };
+          if (cond.gte !== undefined && row.points < cond.gte) return { count: 0 };
+        }
+        row.points += (a.data.points?.increment ?? 0) - (a.data.points?.decrement ?? 0);
+        return { count: 1 };
       },
       delete: async (a: Record<string, unknown>) => {
         rec('user', 'delete', a);
@@ -75,6 +108,10 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
       updateMany: async (a: Record<string, unknown>) => { rec('referralPointsExchange', 'updateMany', a); return { count: 0 }; },
     },
     referralReward: { updateMany: async (a: Record<string, unknown>) => { rec('referralReward', 'updateMany', a); return { count: 0 }; } },
+    pointsLedgerEntry: {
+      findUnique: async () => null,
+      create: async (a: Record<string, unknown>) => { rec('pointsLedgerEntry', 'create', a); return { id: `ledger-${calls.length}` }; },
+    },
     userPendingDiscount: { updateMany: async (a: Record<string, unknown>) => { rec('userPendingDiscount', 'updateMany', a); return { count: 0 }; } },
     referralInvite: { updateMany: async (a: Record<string, unknown>) => { rec('referralInvite', 'updateMany', a); return { count: 0 }; } },
     userNotificationEvent: { updateMany: async (a: Record<string, unknown>) => { rec('userNotificationEvent', 'updateMany', a); return { count: 0 }; } },
@@ -173,7 +210,7 @@ function service(prisma: PrismaService): AccountMergeService {
     info: () => undefined,
   } as unknown as SystemEventsService);
   const queue = { enqueue: async () => undefined } as unknown as import('../src/modules/profile-sync/profile-sync-queue.service').ProfileSyncQueueService;
-  return new AccountMergeService(prisma, eventsService, queue);
+  return new AccountMergeService(prisma, eventsService, queue, new PointsWalletService());
 }
 
 const baseSource = {
@@ -453,15 +490,30 @@ describe('AccountMergeService', () => {
       actorAdminId: 'a',
     });
 
-    // The LAST user.update targets TGT with the survivors + summed points.
+    // The LAST user.update targets TGT with the survivors. The points are NOT
+    // in it: the balance moves through the wallet, which leaves two ledger
+    // rows behind — the source emptied, the target credited by the same
+    // amount — and the summed balance is what the fixture rows now hold.
     const targetUpdate = [...calls].reverse().find(
       (c) => c.model === 'user' && c.op === 'update' && (c.args as { where: { id: string } }).where.id === 'TGT',
     );
     const data = (targetUpdate?.args as { data: Record<string, unknown> }).data;
     assert.equal(data.telegramId, BigInt(111));
     assert.equal(data.email, 'src@example.com');
-    assert.equal(data.points, 8); // 3 + 5
+    assert.equal('points' in data, false, 'the merge update must not write the balance by hand');
     assert.equal(data.maxSubscriptions, 2); // max(2,1)
+
+    const ledgerRows = calls
+      .filter((c) => c.model === 'pointsLedgerEntry' && c.op === 'create')
+      .map((c) => (c.args as { data: Record<string, unknown> }).data);
+    assert.deepEqual(
+      ledgerRows.map((row) => [row.userId, row.delta, row.balanceAfter, row.source, row.referenceKey]),
+      [
+        ['SRC', -5, 0, 'ACCOUNT_MERGE', 'merge:SRC:out'],
+        ['TGT', 5, 8, 'ACCOUNT_MERGE', 'merge:SRC:in'],
+      ],
+      'one row empties the source, one credits the survivor, and the survivor lands on 3 + 5',
+    );
   });
 
   it('keeps the target login by default and deletes the source web account', async () => {

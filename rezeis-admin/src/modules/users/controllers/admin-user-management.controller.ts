@@ -15,6 +15,8 @@
  * All endpoints require AdminJwtAuthGuard.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import {
   BadRequestException,
   Body,
@@ -33,10 +35,19 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Currency, Prisma, ReferralInviteSource, SubscriptionStatus, SyncJobStatus, UserRole } from '@prisma/client';
+import {
+  Currency,
+  PointsLedgerSource,
+  Prisma,
+  ReferralInviteSource,
+  SubscriptionStatus,
+  SyncJobStatus,
+  UserRole,
+} from '@prisma/client';
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { parsePostgresBigInt, parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
@@ -98,6 +109,13 @@ export class AdminUserManagementController {
     private readonly plansAdminService: PlansAdminService,
     private readonly userBlockService: UserBlockService,
     private readonly deviceIntelligenceService: DeviceIntelligenceService,
+    /**
+     * NOT optional, unlike the one below it: the wallet is the only writer of
+     * `User.points`, and an adjustment that could run without it would either
+     * crash or, worse, be tempted back into writing the column by hand. Nest
+     * refuses to build this controller without it, which is the point.
+     */
+    private readonly pointsWallet: PointsWalletService,
     /**
      * Optional, like every dependency this controller gained after its first
      * dozen: an absent one means the card simply carries no addresses, which is
@@ -559,40 +577,24 @@ export class AdminUserManagementController {
   /**
    * Add/subtract points — the only operator-facing write to `User.points`.
    *
-   * ── THE FLOOR RIDES IN THE `WHERE` OF THE WRITE ─────────────────────────────
+   * ── THE WRITE LIVES IN THE WALLET ──────────────────────────────────────────
    *
    * This used to read the row, compute `(user.points ?? 0) + delta` in JS,
-   * refuse a negative result, and then issue an UNCONDITIONAL
-   * `{ points: { increment: delta } }`. `points` is a SHARED wallet — the
-   * referral points exchange spends it and quests credit it — so between the
-   * read and the write a subscriber could spend the balance this check was
-   * evaluated against, and the debit then drove the column negative. The guard
-   * was real and its subject was a number from the past.
-   *
-   * `points >= -delta` is "the resulting balance must not be negative"
-   * rearranged so the only column in it is the one the database is already
-   * locking. Postgres evaluates it against the row it locks, so `count === 0`
-   * IS the refusal and no read-then-check window exists. It is the shape
-   * `referral-points-exchange.service.ts` (`spendPoints`) and
-   * `partners.service.ts` (`applyBalanceAdjustment`) already use for the same
-   * invariant; three writers of one wallet disagreeing about how to guard it is
-   * how a wallet goes negative.
-   *
-   * `gte`, not `gt`: a debit landing exactly on zero still matches, the same
-   * boundary the replaced `newPoints < 0` had. The floor cannot block a credit —
-   * for a positive `delta` the predicate is `points >= -delta`, which every
-   * non-negative balance clears. `delta` is validated non-zero by the DTO.
+   * refuse a negative result, and then issue an UNCONDITIONAL increment; later
+   * the floor moved into the `WHERE` of the write. Both the floor and the write
+   * now live in `PointsWalletService`, THE one writer of the balance, together
+   * with the ledger row that records who moved what and why. The refusal it
+   * reports maps onto the same two errors as before: no such user, or the
+   * balance would go below zero.
    *
    * ── AND IT LEAVES A TRAIL ───────────────────────────────────────────────────
    *
-   * It wrote no audit row and emitted no system event, while its money sibling
-   * four routes away is transactional, audited and evented. One action name
-   * carrying the amounts before and after, following `partner.balance.adjusted`.
-   * `previousPoints` is derived by SUBTRACTING the delta from the value read
-   * back after the write — this transaction holds the row lock until it commits,
-   * so the row it reads back is this adjustment's own result. Pre-reading would
-   * put the stale number back into the audit row after taking it out of the
-   * arithmetic.
+   * Two rows, in the same transaction as the write: the audit row (who, from
+   * what, to what) and the ledger row (the movement the subscriber sees, with
+   * the reason code and the operator's internal note). The audit id is minted
+   * here so the ledger row can name it before it exists; rolled back together,
+   * the three cannot disagree. `previousPoints` is derived by SUBTRACTING the
+   * delta from the balance the wallet read back under the row lock.
    *
    * The response body is unchanged: `{ points }`.
    */
@@ -607,35 +609,32 @@ export class AdminUserManagementController {
   ) {
     const user = await this.findUserByTelegramId(telegramId);
     const requestMetadata = extractRequestMetadata(req);
+    const auditLogId = randomUUID();
+    const reason = body.reason ?? 'OTHER';
     const result = await this.prismaService.$transaction(async (tx) => {
-      const written = await tx.user.updateMany({
-        where: { id: user.id, points: { gte: -body.delta } },
-        data: { points: { increment: body.delta } },
+      const moved = await this.pointsWallet.apply(tx, {
+        userId: user.id,
+        delta: body.delta,
+        source: PointsLedgerSource.MANUAL_ADJUSTMENT,
+        // Not idempotent by nature: an operator typing the same number twice
+        // means two adjustments. The audit row is the handle instead.
+        referenceKey: null,
+        details: {
+          adminId: admin.id,
+          auditLogId,
+          reason,
+          ...(body.note === undefined ? {} : { note: body.note }),
+        },
       });
-      if (written.count === 0) {
-        // Zero rows is either "no such user" or "the floor refused it", and the
-        // count cannot say which. Only this branch pays for telling them apart;
-        // the path that succeeds never reads the balance before writing it.
-        const existing = await tx.user.findUnique({
-          where: { id: user.id },
-          select: { id: true },
-        });
-        if (existing === null) throw new NotFoundException('User not found');
+      if (!moved.applied) {
+        if (moved.reason === 'USER_NOT_FOUND') throw new NotFoundException('User not found');
         throw new BadRequestException('Resulting points would be below zero. Cannot go below zero.');
       }
-      const updated = await tx.user.findUnique({
-        where: { id: user.id },
-        select: { points: true },
-      });
-      if (updated === null) {
-        // Unreachable: this transaction holds the lock on the row it has just
-        // written. Kept so the type stays honest without a non-null assertion.
-        throw new NotFoundException('User not found');
-      }
-      const newPoints = updated.points;
+      const newPoints = moved.balanceAfter;
       const previousPoints = newPoints - body.delta;
       await tx.adminAuditLog.create({
         data: {
+          id: auditLogId,
           action: 'user.points.adjusted',
           ipAddress: requestMetadata.remoteAddress,
           userAgent: requestMetadata.userAgent,
@@ -645,6 +644,9 @@ export class AdminUserManagementController {
             adjustment: body.delta,
             previousPoints,
             newPoints,
+            reason,
+            note: body.note ?? null,
+            ledgerEntryId: moved.entryId,
           } as Prisma.InputJsonObject,
           adminUser: { connect: { id: admin.id } },
         },
@@ -662,6 +664,7 @@ export class AdminUserManagementController {
         previousPoints: result.previousPoints,
         newPoints: result.newPoints,
         adminId: admin.id,
+        reason,
       },
     );
     return { points: result.newPoints };

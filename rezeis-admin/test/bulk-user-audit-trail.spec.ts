@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { AdminBulkUsersController } from '../src/modules/users/controllers/admin-bulk-users.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
 import { BulkUserOperationsService } from '../src/modules/users/services/bulk-user-operations.service';
 import { UserBlockService } from '../src/modules/users/services/user-block.service';
@@ -218,6 +219,7 @@ function buildUserCard(db: Db): AdminUserManagementController {
     {} as never, // PlansAdminService
     buildBlockService(db),
     { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+    new PointsWalletService(),
   );
 }
 

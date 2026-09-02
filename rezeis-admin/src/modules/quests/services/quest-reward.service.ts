@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  PointsLedgerSource,
   Prisma,
   Quest,
   QuestCompletionStatus,
@@ -15,6 +16,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
@@ -46,6 +48,7 @@ export class QuestRewardService {
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly subscriptionMutationsService: SubscriptionMutationsService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   /**
@@ -192,10 +195,28 @@ export class QuestRewardService {
       }
       switch (quest.rewardType) {
         case 'POINTS': {
-          await tx.user.update({
-            where: { id: userId },
-            data: { points: { increment: quest.rewardAmount } },
-          });
+          // Through the wallet, keyed on the completion: the single-winner
+          // stamp above already makes this exactly-once, and the key makes the
+          // ledger agree with it. A zero-point quest credits nothing and writes
+          // no row — the wallet refuses a movement of zero.
+          if (quest.rewardAmount > 0) {
+            const moved = await this.pointsWallet.apply(tx, {
+              userId,
+              delta: quest.rewardAmount,
+              source: PointsLedgerSource.QUEST_REWARD,
+              referenceKey: completionId,
+              details: {
+                questId: quest.id,
+                questType: quest.type,
+                questTitle: quest.title as Prisma.InputJsonValue,
+              },
+            });
+            if (!moved.applied) {
+              throw new Error(
+                `Quest ${quest.id}: points for completion ${completionId} were not credited (${moved.reason})`,
+              );
+            }
+          }
           result = { ...result, points: quest.rewardAmount };
           break;
         }

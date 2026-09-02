@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { REQUIRE_PERMISSION_KEY } from '../src/modules/rbac/decorators/require-permission.decorator';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
 
 describe('AdminUserManagementController referral repair actions', () => {
@@ -52,6 +53,7 @@ describe('AdminUserManagementController referral repair actions', () => {
       {} as never, // PlansAdminService
       undefined as never, // UserBlockService
       { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+      new PointsWalletService(),
     );
     const admin = { id: 'admin-1' } as never;
     const request = { headers: {}, ip: null, socket: { remoteAddress: null } } as never;

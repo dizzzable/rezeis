@@ -10,6 +10,7 @@ import {
 } from '@prisma/client';
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AdminRewardsService } from '../src/modules/referrals/services/admin-rewards.service';
 
 /**
@@ -302,6 +303,7 @@ interface Recorded {
   readonly rewardFindManyArgs: unknown[];
   readonly rewardCountArgs: unknown[];
   readonly userUpdates: unknown[];
+  readonly ledgerCreates: unknown[];
   readonly subscriptionUpdates: unknown[];
   readonly subscriptionFindFirstArgs: unknown[];
   readonly syncJobCreates: unknown[];
@@ -338,6 +340,7 @@ function makeWorld(input: WorldInput = {}): World {
     rewardFindManyArgs: [],
     rewardCountArgs: [],
     userUpdates: [],
+    ledgerCreates: [],
     subscriptionUpdates: [],
     subscriptionFindFirstArgs: [],
     syncJobCreates: [],
@@ -426,6 +429,36 @@ function makeWorld(input: WorldInput = {}): World {
         recorded.steps.push('user.update');
         recorded.userUpdates.push(args);
         return { id: args.where?.['id'] };
+      },
+      /**
+       * The POINTS payout goes through the wallet, whose balance write is a
+       * conditional `updateMany`. Recorded in `userUpdates` like the `update`
+       * it replaced — the assertions read "the one write to the user row" —
+       * and applied to the fixture so the wallet's read-back sees the result.
+       */
+      updateMany: async (args: PrismaArgs): Promise<unknown> => {
+        recorded.steps.push('user.updateMany');
+        recorded.userUpdates.push(args);
+        if (user === null || args.where?.['id'] !== user.id) return { count: 0 };
+        const cond = args.where?.['points'] as number | { gte?: number } | undefined;
+        if (typeof cond === 'number' && user.points !== cond) return { count: 0 };
+        if (typeof cond === 'object' && cond?.gte !== undefined && user.points < cond.gte) {
+          return { count: 0 };
+        }
+        const points = args.data?.['points'] as { increment?: number; decrement?: number } | undefined;
+        (user as { points: number }).points += (points?.increment ?? 0) - (points?.decrement ?? 0);
+        return { count: 1 };
+      },
+    },
+    pointsLedgerEntry: {
+      findUnique: async (): Promise<unknown> => {
+        recorded.steps.push('pointsLedgerEntry.findUnique');
+        return null;
+      },
+      create: async (args: PrismaArgs): Promise<unknown> => {
+        recorded.steps.push('pointsLedgerEntry.create');
+        recorded.ledgerCreates.push(args);
+        return { id: `ledger-${recorded.ledgerCreates.length}` };
       },
     },
     subscription: {
@@ -516,7 +549,7 @@ function makeWorld(input: WorldInput = {}): World {
     },
   };
 
-  const service = new AdminRewardsService(client as never, queue as never, events as never);
+  const service = new AdminRewardsService(client as never, queue as never, events as never, new PointsWalletService());
   // Silence (and capture) the Nest logger: the enqueue-failure path warns, and
   // «logs and does not throw» is half of what that case asserts.
   (service as unknown as { logger: unknown }).logger = {
@@ -869,6 +902,14 @@ describe('AdminRewardsService.issue — POINTS', () => {
       { where: { id: 'earner-1' }, data: { points: { increment: 250 } } },
     ]);
     assert.deepStrictEqual(world.recorded.subscriptionUpdates, [], 'POINTS touches no subscription');
+    // The credit went through the wallet: one ledger row keyed on the reward,
+    // carrying the balance the fixture holds after the write (10 + 250).
+    assert.deepStrictEqual(
+      (world.recorded.ledgerCreates as Array<{ data: Record<string, unknown> }>).map((c) => [
+        c.data['userId'], c.data['delta'], c.data['balanceAfter'], c.data['source'], c.data['referenceKey'],
+      ]),
+      [['earner-1', 250, 260, 'REFERRAL_REWARD', 'reward-points']],
+    );
     assert.deepStrictEqual(world.recorded.syncJobCreates, [], 'POINTS needs no panel sync');
     assert.deepStrictEqual(world.recorded.enqueued, []);
 

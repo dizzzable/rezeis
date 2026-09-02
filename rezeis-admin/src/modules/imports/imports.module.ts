@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { PointsModule } from '../points/points.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { ImportProcessor } from './import.processor';
@@ -21,6 +22,7 @@ import { ThreeXuiImporterService } from './services/threexui-importer.service';
 @Module({
   imports: [
     AuthModule,
+    PointsModule,
     RemnawaveModule,
     ProfileSyncModule,
     BullModule.registerQueue({ name: IMPORT_QUEUE }),

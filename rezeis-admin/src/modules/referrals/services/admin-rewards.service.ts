@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  PointsLedgerSource,
   Prisma,
   SubscriptionStatus,
   ReferralRewardType,
@@ -8,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
@@ -94,6 +96,7 @@ export class AdminRewardsService {
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueue: ProfileSyncQueueService,
     private readonly events: SystemEventsService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   // ── Read ────────────────────────────────────────────────────────────────
@@ -211,7 +214,9 @@ export class AdminRewardsService {
           return { updated: reward, syncJobId: null, effectApplied: false };
         }
 
-        const effect = await applyRewardEffect(tx, {
+        const effect = await applyRewardEffect(tx, this.pointsWallet, {
+          id: reward.id,
+          referralId: reward.referralId,
           userId: reward.userId,
           type: reward.type,
           amount: reward.amount,
@@ -570,13 +575,38 @@ async function resolveActiveFiniteSubscription(
  */
 async function applyRewardEffect(
   tx: Prisma.TransactionClient,
-  reward: { userId: string; type: ReferralRewardType; amount: number },
+  wallet: PointsWalletService,
+  reward: {
+    id: string;
+    referralId: string;
+    userId: string;
+    type: ReferralRewardType;
+    amount: number;
+  },
 ): Promise<{ readonly syncJobId: string | null }> {
   if (reward.type === ReferralRewardType.POINTS) {
-    await tx.user.update({
-      where: { id: reward.userId },
-      data: { points: { increment: reward.amount } },
+    // Through the wallet, keyed on the reward: the ledger row is what the
+    // earner sees as "+N for an invited friend", and the key is what makes a
+    // re-driven issue a no-op instead of a second credit.
+    const moved = await wallet.apply(tx, {
+      userId: reward.userId,
+      delta: reward.amount,
+      source: PointsLedgerSource.REFERRAL_REWARD,
+      referenceKey: reward.id,
+      details: { rewardId: reward.id, referralId: reward.referralId },
     });
+    if (!moved.applied) {
+      if (moved.reason === 'USER_NOT_FOUND') {
+        throw new NotFoundException('Cannot issue POINTS reward: the earner no longer exists');
+      }
+      // DUPLICATE: a ledger row for this reward exists while the reward is not
+      // marked issued. That state cannot be produced by this code — the row
+      // and the mark commit together — so it is refused rather than papered
+      // over with a second credit or a silent mark.
+      throw new BadRequestException(
+        `Cannot issue POINTS reward ${reward.id}: the points were already credited (${moved.reason})`,
+      );
+    }
     return { syncJobId: null };
   }
   if (reward.type === ReferralRewardType.EXTRA_DAYS) {

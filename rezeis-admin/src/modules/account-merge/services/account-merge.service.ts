@@ -4,13 +4,14 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, SyncAction, SyncJobStatus } from '@prisma/client';
+import { PointsLedgerSource, Prisma, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   EVENT_TYPES,
   SystemEventsService,
 } from '../../../common/services/system-events.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccountMergeInput, AccountMergeResult } from '../interfaces/account-merge.interface';
 import { lockTrialClaimUser } from '../../subscriptions/services/trial-claim-ledger.util';
@@ -37,6 +38,7 @@ export class AccountMergeService {
     private readonly prismaService: PrismaService,
     private readonly systemEventsService: SystemEventsService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   public async merge(input: AccountMergeInput): Promise<AccountMergeResult> {
@@ -225,12 +227,53 @@ export class AccountMergeService {
             : input.choices.keepEmail === 'source'
               ? source.email
               : undefined;
+      // The balance moves through the wallet, not through the update below, so
+      // the merge leaves two ACCOUNT_MERGE rows behind: the source emptied and
+      // the survivor credited by the same amount. The source's own ledger rows
+      // go with it when it is deleted further down; they are not re-pointed,
+      // because every `balance_after` in them was relative to a wallet that
+      // will no longer exist, and the survivor's own rows would stop summing
+      // to its balance.
+      //
+      // Both rows were locked FOR UPDATE at the top of this transaction, so
+      // `source.points` is the balance the debit finds. A legacy negative
+      // balance (the unfloored referral reversal could produce one) is
+      // credited up to zero on the source and floored on the survivor: the
+      // old arithmetic would have pushed the survivor's balance down by a
+      // debt nobody was ever going to collect.
+      const movedPoints = source.points;
+      if (movedPoints !== 0) {
+        const emptied = await this.pointsWallet.apply(tx, {
+          userId: source.id,
+          delta: -movedPoints,
+          source: PointsLedgerSource.ACCOUNT_MERGE,
+          referenceKey: `merge:${source.id}:out`,
+          details: { mergedInto: target.id },
+        });
+        if (!emptied.applied) {
+          throw new BadRequestException(
+            `Account merge could not move the points of ${source.id}: ${emptied.reason}`,
+          );
+        }
+        const credited = await this.pointsWallet.apply(tx, {
+          userId: target.id,
+          delta: movedPoints,
+          source: PointsLedgerSource.ACCOUNT_MERGE,
+          referenceKey: `merge:${source.id}:in`,
+          details: { mergedFrom: source.id },
+          shortfall: 'floor',
+        });
+        if (!credited.applied) {
+          throw new BadRequestException(
+            `Account merge could not credit the points of ${source.id} to ${target.id}: ${credited.reason}`,
+          );
+        }
+      }
       await tx.user.update({
         where: { id: target.id },
         data: {
           telegramId: finalTelegram,
           email: finalEmail,
-          points: target.points + source.points,
           maxSubscriptions: Math.max(target.maxSubscriptions, source.maxSubscriptions),
           personalDiscount: Math.max(target.personalDiscount, source.personalDiscount),
           purchaseDiscount: Math.max(target.purchaseDiscount, source.purchaseDiscount),

@@ -5,6 +5,7 @@ import {
   ImportStatus,
   Locale,
   PaymentGatewayType,
+  PointsLedgerSource,
   Prisma,
   PurchaseChannel,
   PurchaseType,
@@ -13,6 +14,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
@@ -96,6 +98,7 @@ export class StealthnetImporterService {
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly stealthnetReferralSyncService: StealthnetReferralSyncService,
+    private readonly pointsWallet: PointsWalletService,
   ) {}
 
   public async run(input: RunInput): Promise<ImportSummary> {
@@ -191,19 +194,31 @@ export class StealthnetImporterService {
 
         // Migration goodwill: carry the user's leftover STEALTHNET wallet
         // balance over as loyalty points so they don't lose money when the
-        // owner switches panels. Idempotent: credited only while the user
-        // still has 0 points (guarded `updateMany`), so a re-import never
-        // double-credits and already-earned points are never overwritten.
-        // This covers both freshly-created users AND ones matched to an
-        // existing account (e.g. re-import after a prior run).
+        // owner switches panels. Idempotent twice over: the wallet credits
+        // only while the user still holds 0 points (`expectedBalance`, checked
+        // in the same conditional write), and the ledger key is one per user,
+        // so a re-import never double-credits and already-earned points are
+        // never overwritten. This covers both freshly-created users AND ones
+        // matched to an existing account (e.g. re-import after a prior run).
         if (pointsConversion.enabled) {
           const points = balanceToPoints(client.balance, pointsConversion.rate);
           if (points > 0) {
-            const credited = await this.prismaService.user.updateMany({
-              where: { id: userId, points: 0 },
-              data: { points },
-            });
-            if (credited.count > 0) pointsGranted += points;
+            const credited = await this.prismaService.$transaction((tx) =>
+              this.pointsWallet.apply(tx, {
+                userId,
+                delta: points,
+                source: PointsLedgerSource.IMPORT,
+                referenceKey: `stealthnet-balance:${userId}`,
+                expectedBalance: 0,
+                details: {
+                  importer: 'stealthnet',
+                  clientId: client.id,
+                  balance: client.balance,
+                  rate: pointsConversion.rate,
+                },
+              }),
+            );
+            if (credited.applied) pointsGranted += points;
           }
         }
 

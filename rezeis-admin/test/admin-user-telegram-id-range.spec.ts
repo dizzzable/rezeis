@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 import { AdminUserManagementController } from '../src/modules/users/controllers/admin-user-management.controller';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
 import { AdminUserWebController } from '../src/modules/users/controllers/admin-user-web.controller';
 import { MAX_POSTGRES_BIGINT } from '../src/common/utils/postgres-bigint.util';
@@ -74,6 +75,7 @@ describe('AdminUserManagementController telegramId range', () => {
       {} as never, // PlansAdminService
       undefined as never,
       { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+      new PointsWalletService(),
     );
   }
 
@@ -141,6 +143,7 @@ describe('AdminUserManagementController telegramId range', () => {
       {} as never, // PlansAdminService
       undefined as never,
       { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+      new PointsWalletService(),
     );
     // The route param resolves; the pasted referral identifier is the overflow.
     (controller as never as { prismaService: { user: { findFirst: unknown } } }).prismaService.user.findFirst =
@@ -234,6 +237,7 @@ describe('AdminUserManagementController telegramId range', () => {
         {} as never, // PlansAdminService
       undefined as never,
         { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+        new PointsWalletService(),
       );
 
       await controller.createUser({ telegramId: input }, ADMIN, REQ);

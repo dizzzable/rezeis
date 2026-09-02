@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { SubscriptionStatus } from '@prisma/client';
 
 import { BackupPlanClonerService } from '../src/modules/imports/services/backup-plan-cloner.service';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { ReferralPointsExchangeService } from '../src/modules/referrals/services/referral-points-exchange.service';
 import { RemnawaveWebhookService } from '../src/modules/remnawave/services/remnawave-webhook.service';
 import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
@@ -288,9 +289,11 @@ describe('referral points traffic top-up', () => {
             },
             profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
             referralPointsExchange: { create: async () => ({ id: 'exchange-1' }) },
+            pointsLedgerEntry: { findUnique: async () => null, create: async () => ({ id: 'ledger-1' }) },
           }),
       } as never,
       { enqueue: async () => undefined } as never,
+      new PointsWalletService(),
     );
 
     await service.executeExchange({ userId: 'user-1', type: 'TRAFFIC', points: 100 });
