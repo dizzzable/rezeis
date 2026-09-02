@@ -155,11 +155,11 @@ run('SpinWalletService on PostgreSQL', () => {
 
     const [first, second] = await Promise.all([
       prisma.$transaction(
-        (tx) => wallet.consumeSpin(tx, { userId, spinId: 'free-race-a', freeSpinCooldownHours: 24 }),
+        (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'free-race-a', freeSpinCooldownHours: 24 }),
         TX_OPTIONS,
       ),
       prisma.$transaction(
-        (tx) => wallet.consumeSpin(tx, { userId, spinId: 'free-race-b', freeSpinCooldownHours: 24 }),
+        (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'free-race-b', freeSpinCooldownHours: 24 }),
         TX_OPTIONS,
       ),
     ]);
@@ -178,14 +178,14 @@ run('SpinWalletService on PostgreSQL', () => {
     createdUsers.push(userId);
 
     const first = await prisma.$transaction(
-      (tx) => wallet.consumeSpin(tx, { userId, spinId: 'cd-a', freeSpinCooldownHours: 24 }),
+      (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'cd-a', freeSpinCooldownHours: 24 }),
       TX_OPTIONS,
     );
     assert.equal(first.consumed && first.paidWith, 'FREE');
 
     // Immediately after: no free spin, no balance, so no spin at all.
     const second = await prisma.$transaction(
-      (tx) => wallet.consumeSpin(tx, { userId, spinId: 'cd-b', freeSpinCooldownHours: 24 }),
+      (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'cd-b', freeSpinCooldownHours: 24 }),
       TX_OPTIONS,
     );
     assert.deepEqual(second, { consumed: false, reason: 'NO_SPINS' });
@@ -193,12 +193,12 @@ run('SpinWalletService on PostgreSQL', () => {
     // A day later it is back, and it is ONE — staying away does not stack it.
     const tomorrow = new Date(Date.now() + 25 * 60 * 60 * 1000);
     const third = await prisma.$transaction(
-      (tx) => wallet.consumeSpin(tx, { userId, spinId: 'cd-c', freeSpinCooldownHours: 24, now: tomorrow }),
+      (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'cd-c', freeSpinCooldownHours: 24, now: tomorrow }),
       TX_OPTIONS,
     );
     assert.equal(third.consumed && third.paidWith, 'FREE');
     const fourth = await prisma.$transaction(
-      (tx) => wallet.consumeSpin(tx, { userId, spinId: 'cd-d', freeSpinCooldownHours: 24, now: tomorrow }),
+      (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'cd-d', freeSpinCooldownHours: 24, now: tomorrow }),
       TX_OPTIONS,
     );
     assert.deepEqual(fourth, { consumed: false, reason: 'NO_SPINS' });
@@ -211,11 +211,11 @@ run('SpinWalletService on PostgreSQL', () => {
 
     const outcomes = await Promise.allSettled([
       prisma.$transaction(
-        (tx) => wallet.consumeSpin(tx, { userId, spinId: 'same-spin', freeSpinCooldownHours: null }),
+        (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'same-spin', freeSpinCooldownHours: null }),
         TX_OPTIONS,
       ),
       prisma.$transaction(
-        (tx) => wallet.consumeSpin(tx, { userId, spinId: 'same-spin', freeSpinCooldownHours: null }),
+        (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'same-spin', freeSpinCooldownHours: null }),
         TX_OPTIONS,
       ),
     ]);
@@ -237,7 +237,7 @@ run('SpinWalletService on PostgreSQL', () => {
     assert.deepEqual(await balanceAndLedgerSum(userId), { balance: 3, sum: -1, rows: 1 });
 
     const later = await prisma.$transaction(
-      (tx) => wallet.consumeSpin(tx, { userId, spinId: 'same-spin', freeSpinCooldownHours: null }),
+      (tx) => wallet.consumeSpin(tx, { userId, spinRequestKey: 'same-spin', freeSpinCooldownHours: null }),
       TX_OPTIONS,
     );
     assert.deepEqual(later, { consumed: false, reason: 'DUPLICATE' }, 'a later replay is told, not charged');

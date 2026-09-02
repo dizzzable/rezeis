@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PointsLedgerSource, Prisma } from '@prisma/client';
+import { PointsLedgerSource, Prisma, PromocodeRewardType } from '@prisma/client';
 
 import { MAX_DISCOUNT_PERCENT } from '../src/common/utils/discount.util';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
@@ -18,7 +18,7 @@ import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/se
  * business — the claim, the budget, the snapshot, the trial fallback.
  */
 interface World {
-  readonly user: { personalDiscount: number; points: number };
+  readonly user: { personalDiscount: number; points: number; telegramId: bigint | null };
   readonly subscriptions: Array<{ id: string; expiresAt: Date | null; trafficLimit: number | null; planSnapshot: unknown }>;
   readonly writes: Array<{ op: string; args: Record<string, unknown> }>;
 }
@@ -27,8 +27,11 @@ function makeTx(world: World) {
   const record = (op: string, args: Record<string, unknown>) => world.writes.push({ op, args });
   const tx = {
     user: {
-      findUnique: async (args: { select?: Record<string, boolean> }) =>
-        args.select?.['points'] ? { points: world.user.points } : { personalDiscount: world.user.personalDiscount },
+      findUnique: async (args: { select?: Record<string, boolean> }) => {
+        if (args.select?.['points']) return { points: world.user.points };
+        if (args.select?.['telegramId']) return { telegramId: world.user.telegramId };
+        return { personalDiscount: world.user.personalDiscount };
+      },
       update: async (args: { data: { personalDiscount?: number } }) => {
         record('user.update', args);
         if (args.data.personalDiscount !== undefined) world.user.personalDiscount = args.data.personalDiscount;
@@ -86,7 +89,7 @@ function makeTx(world: World) {
 
 function world(overrides: Partial<World> = {}): World {
   return {
-    user: { personalDiscount: 0, points: 0 },
+    user: { personalDiscount: 0, points: 0, telegramId: 100n },
     subscriptions: [],
     writes: [],
     ...overrides,
@@ -142,7 +145,7 @@ describe('RewardGrantService — points', () => {
 
 describe('RewardGrantService — the permanent discount', () => {
   it('adds to what the person already has', async () => {
-    const state = world({ user: { personalDiscount: 10, points: 0 } });
+    const state = world({ user: { personalDiscount: 10, points: 0, telegramId: 100n } });
 
     const applied = await service.apply(makeTx(state), {
       userId: 'u1',
@@ -160,7 +163,7 @@ describe('RewardGrantService — the permanent discount', () => {
     // work, so a stored 100 was a number no checkout could ever spend: the
     // column said one thing and every purchase did another. The customer is
     // unaffected — only the stored figure stops lying.
-    const state = world({ user: { personalDiscount: 80, points: 0 } });
+    const state = world({ user: { personalDiscount: 80, points: 0, telegramId: 100n } });
 
     const applied = await service.apply(makeTx(state), {
       userId: 'u1',
@@ -365,5 +368,127 @@ describe('RewardGrantService — minted codes', () => {
       assert.doesNotMatch(code.slice('QUEST-'.length), /[IO01]/, code);
     }
     assert.ok(new Set(codes).size > 1, 'and they are not all the same code');
+  });
+});
+
+describe('RewardGrantService — a minted code belongs to the person who won it', () => {
+  it('binds the code to the winner, so a screenshot of it is not a coupon', () => {
+    // The doc comment on the minter has said "personal" since it was written;
+    // the row did not. A code minted `availability: ALL` is spendable by the
+    // first person to read it off a screenshot, and single-use only decides
+    // WHO gets there first.
+    const state = world({ user: { personalDiscount: 0, points: 0, telegramId: 4242n } });
+
+    return service
+      .apply(makeTx(state), { userId: 'u1', grant: grant('PROMOCODE', 30), origin: ORIGIN })
+      .then(() => {
+        const minted = state.writes.find((entry) => entry.op === 'promocode.create')!.args as {
+          data: { availability: string; allowedTelegramIds: bigint[]; maxActivations: number };
+        };
+        assert.equal(minted.data.availability, 'ALLOWED');
+        assert.deepEqual(minted.data.allowedTelegramIds, [4242n]);
+        assert.equal(minted.data.maxActivations, 1, 'and still once, so the winner cannot re-spend it');
+      });
+  });
+
+  it('leaves a code open when there is no telegram id to bind it to', async () => {
+    // A web-only account has nothing for the availability check to compare,
+    // and a bound code would refuse the winner their own prize.
+    const state = world({ user: { personalDiscount: 0, points: 0, telegramId: null } });
+
+    await service.apply(makeTx(state), {
+      userId: 'u1',
+      grant: grant('PROMOCODE', 30),
+      origin: ORIGIN,
+    });
+
+    const minted = state.writes.find((entry) => entry.op === 'promocode.create')!.args as {
+      data: { availability: string; allowedTelegramIds?: bigint[] };
+    };
+    assert.equal(minted.data.availability, 'ALL');
+    assert.equal(minted.data.allowedTelegramIds, undefined);
+  });
+});
+
+describe('RewardGrantService — a code the caller spells out', () => {
+  it('mints the discount the wheel asked for, on the plans it named, for as long as it said', async () => {
+    const state = world();
+
+    const applied = await service.apply(makeTx(state), {
+      userId: 'u1',
+      grant: {
+        kind: 'PROMOCODE',
+        amount: 20,
+        planId: null,
+        promo: {
+          rewardType: PromocodeRewardType.PURCHASE_DISCOUNT,
+          allowedPlanIds: ['plan-a', 'plan-b'],
+          lifetimeDays: 14,
+        },
+      },
+      origin: { ...ORIGIN, codePrefix: 'WHEEL-' },
+    });
+
+    const minted = state.writes.find((entry) => entry.op === 'promocode.create')!.args as {
+      data: { rewardType: string; reward: number; allowedPlanIds: string[]; lifetime: number };
+    };
+    assert.equal(minted.data.rewardType, 'PURCHASE_DISCOUNT');
+    assert.equal(minted.data.reward, 20);
+    assert.deepEqual(minted.data.allowedPlanIds, ['plan-a', 'plan-b']);
+    assert.equal(minted.data.lifetime, 14);
+    assert.match(applied.promoCode ?? '', /^WHEEL-/);
+  });
+
+  it('omits the filter and the deadline rather than writing an empty one', async () => {
+    // An empty `allowedPlanIds` means "any plan" to the validator, and a
+    // `lifetime` of null means "never expires" — but writing either explicitly
+    // would overwrite a column default with the same value for no reason, and
+    // the absence is what the legacy path has always produced.
+    const state = world();
+
+    await service.apply(makeTx(state), {
+      userId: 'u1',
+      grant: {
+        kind: 'PROMOCODE',
+        amount: 7,
+        planId: null,
+        promo: {
+          rewardType: PromocodeRewardType.DURATION,
+          allowedPlanIds: [],
+          lifetimeDays: null,
+        },
+      },
+      origin: ORIGIN,
+    });
+
+    const minted = state.writes.find((entry) => entry.op === 'promocode.create')!.args as {
+      data: Record<string, unknown>;
+    };
+    assert.equal('allowedPlanIds' in minted.data, false);
+    assert.equal('lifetime' in minted.data, false);
+  });
+
+  it('refuses a subscription code with no plan instead of minting a code for nothing', async () => {
+    const state = world();
+
+    await assert.rejects(
+      () =>
+        service.apply(makeTx(state), {
+          userId: 'u1',
+          grant: {
+            kind: 'PROMOCODE',
+            amount: 30,
+            planId: null,
+            promo: {
+              rewardType: PromocodeRewardType.SUBSCRIPTION,
+              allowedPlanIds: [],
+              lifetimeDays: null,
+            },
+          },
+          origin: ORIGIN,
+        }),
+      /plan/i,
+    );
+    assert.equal(state.writes.some((entry) => entry.op === 'promocode.create'), false);
   });
 });

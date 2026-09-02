@@ -9,9 +9,9 @@ export interface SpinMovementInput {
   readonly delta: number;
   readonly source: SpinLedgerSource;
   /**
-   * Idempotency handle, unique per `source`: the spin id for SPENT and for the
-   * WHEEL_PRIZE it produced, the purchase id for PURCHASED. `null` for an
-   * operator's adjustment, which is not idempotent by nature.
+   * Idempotency handle, unique per `source`: the spin REQUEST handle for SPENT
+   * and for the WHEEL_PRIZE it produced, the purchase id for PURCHASED.
+   * `null` for an operator's adjustment, which is not idempotent by nature.
    */
   readonly referenceKey: string | null;
   readonly details?: Prisma.InputJsonObject;
@@ -137,8 +137,13 @@ export class SpinWalletService {
     tx: SpinWalletTx,
     input: {
       readonly userId: string;
-      /** Identifies THIS spin; the ledger row for a paid spin is keyed on it. */
-      readonly spinId: string;
+      /**
+       * Identifies THIS spin request; the ledger row for a paid spin is keyed
+       * on it. The REQUEST handle and not the spin id, because the spin row is
+       * written at the end of the transaction — after the payment this key
+       * exists to guard. `WheelSpin.idempotencyKey` carries the same value.
+       */
+      readonly spinRequestKey: string;
       readonly freeSpinCooldownHours: number | null;
       readonly now?: Date;
     },
@@ -170,8 +175,8 @@ export class SpinWalletService {
       userId: input.userId,
       delta: -1,
       source: SpinLedgerSource.SPENT,
-      referenceKey: input.spinId,
-      details: { spinId: input.spinId },
+      referenceKey: input.spinRequestKey,
+      details: { spinRequestKey: input.spinRequestKey },
     });
     if (spent.applied) {
       return { consumed: true, paidWith: 'BALANCE', balanceAfter: spent.balanceAfter };

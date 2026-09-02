@@ -1,5 +1,10 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { Prisma, SubscriptionStatus } from '@prisma/client';
+import {
+  Prisma,
+  PromocodeAvailability,
+  PromocodeRewardType,
+  SubscriptionStatus,
+} from '@prisma/client';
 
 import { clampDiscountPercent } from '../../common/utils/discount.util';
 import { PointsWalletService } from '../points/services/points-wallet.service';
@@ -58,7 +63,7 @@ export class RewardGrantService {
       case 'PROMOCODE':
         return {
           kind: 'PROMOCODE',
-          promoCode: await this.mintPromocode(tx, input.grant, input.origin),
+          promoCode: await this.mintPromocode(tx, input.userId, input.grant, input.origin),
           syncSubscriptionId: null,
         };
     }
@@ -186,7 +191,7 @@ export class RewardGrantService {
       return {
         kind: 'DAYS',
         days: input.grant.amount,
-        promoCode: await this.mintPromocode(tx, input.grant, input.origin),
+        promoCode: await this.mintPromocode(tx, input.userId, input.grant, input.origin),
         syncSubscriptionId: null,
       };
     }
@@ -217,14 +222,52 @@ export class RewardGrantService {
    * A personal, single-use code. Written with the legacy reward columns and no
    * action rows, which `mapPromocodeActions` reads as one action — the
    * documented path for a code minted outside the panel's own editor.
+   *
+   * ── "Personal" is now enforced, not just claimed ─────────────────────────
+   *
+   * This comment said "personal" long before the row did: a code was minted
+   * `availability: ALL` with a single activation, so the first person to
+   * learn it could spend it — a screenshot of a win was a coupon for whoever
+   * saw it. Bound to the winner's telegram id, the availability check refuses
+   * everybody else, and single-use still stops the winner spending it twice.
+   *
+   * Somebody with no telegram id (a web-only account) cannot be bound: the
+   * check has nothing to compare and would refuse the winner their own prize.
+   * Those codes stay open, which is exactly what they were before.
    */
   private async mintPromocode(
     tx: Prisma.TransactionClient,
+    userId: string,
     grant: RewardGrant,
     origin: RewardOrigin,
   ): Promise<string> {
+    const winner = await tx.user.findUnique({
+      where: { id: userId },
+      select: { telegramId: true },
+    });
+    const binding =
+      winner?.telegramId == null
+        ? { availability: PromocodeAvailability.ALL }
+        : {
+            availability: PromocodeAvailability.ALLOWED,
+            allowedTelegramIds: [winner.telegramId],
+          };
+    const restriction = {
+      ...(grant.promo === undefined || grant.promo.allowedPlanIds.length === 0
+        ? {}
+        : { allowedPlanIds: [...grant.promo.allowedPlanIds] }),
+      ...(grant.promo?.lifetimeDays == null ? {} : { lifetime: grant.promo.lifetimeDays }),
+    };
+
     const code = generatePromoCode(origin.codePrefix);
-    if (grant.planId !== null) {
+    const rewardType =
+      grant.promo?.rewardType ??
+      (grant.planId !== null ? PromocodeRewardType.SUBSCRIPTION : PromocodeRewardType.DURATION);
+
+    if (rewardType === PromocodeRewardType.SUBSCRIPTION) {
+      if (grant.planId === null) {
+        throw new BadRequestException('A subscription code needs a plan');
+      }
       const plan = await tx.plan.findUnique({
         where: { id: grant.planId },
         select: {
@@ -251,23 +294,26 @@ export class RewardGrantService {
         data: {
           code,
           isActive: true,
-          availability: 'ALL',
-          rewardType: 'SUBSCRIPTION',
+          ...binding,
+          rewardType: PromocodeRewardType.SUBSCRIPTION,
           reward: grant.amount,
           plan: snapshot as Prisma.InputJsonValue,
           maxActivations: 1,
+          ...restriction,
         },
       });
       return code;
     }
+
     await tx.promocode.create({
       data: {
         code,
         isActive: true,
-        availability: 'ALL',
-        rewardType: 'DURATION',
+        ...binding,
+        rewardType,
         reward: grant.amount,
         maxActivations: 1,
+        ...restriction,
       },
     });
     return code;

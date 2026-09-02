@@ -246,7 +246,7 @@ describe('SpinWalletService.consumeSpin', () => {
 
     const result = await wallet.consumeSpin(world.tx, {
       userId: 'u1',
-      spinId: 'spin-1',
+      spinRequestKey: 'spin-1',
       freeSpinCooldownHours: 24,
       now: NOW,
     });
@@ -262,7 +262,7 @@ describe('SpinWalletService.consumeSpin', () => {
 
     const result = await wallet.consumeSpin(world.tx, {
       userId: 'u1',
-      spinId: 'spin-2',
+      spinRequestKey: 'spin-2',
       freeSpinCooldownHours: 24,
       now: new Date(NOW.getTime() + 60_000),
     });
@@ -279,10 +279,10 @@ describe('SpinWalletService.consumeSpin', () => {
     const world = makeTx({ row: { spinBalance: 1, freeSpinUsedAt: null } });
 
     const first = await wallet.consumeSpin(world.tx, {
-      userId: 'u1', spinId: 'spin-a', freeSpinCooldownHours: 24, now: NOW,
+      userId: 'u1', spinRequestKey: 'spin-a', freeSpinCooldownHours: 24, now: NOW,
     });
     const second = await wallet.consumeSpin(world.tx, {
-      userId: 'u1', spinId: 'spin-b', freeSpinCooldownHours: 24, now: NOW,
+      userId: 'u1', spinRequestKey: 'spin-b', freeSpinCooldownHours: 24, now: NOW,
     });
 
     assert.equal(first.consumed && first.paidWith, 'FREE');
@@ -294,7 +294,7 @@ describe('SpinWalletService.consumeSpin', () => {
     const world = makeTx({ row: { spinBalance: 2, freeSpinUsedAt: null } });
 
     const result = await wallet.consumeSpin(world.tx, {
-      userId: 'u1', spinId: 'spin-3', freeSpinCooldownHours: null, now: NOW,
+      userId: 'u1', spinRequestKey: 'spin-3', freeSpinCooldownHours: null, now: NOW,
     });
 
     assert.equal(result.consumed && result.paidWith, 'BALANCE');
@@ -306,7 +306,7 @@ describe('SpinWalletService.consumeSpin', () => {
 
     const result = await wallet.consumeSpin(world.tx, {
       userId: 'u1',
-      spinId: 'spin-4',
+      spinRequestKey: 'spin-4',
       freeSpinCooldownHours: 24,
       now: new Date(NOW.getTime() + 60_000),
     });
@@ -326,7 +326,7 @@ describe('SpinWalletService.consumeSpin', () => {
 
     const result = await wallet.consumeSpin(world.tx, {
       userId: 'u1',
-      spinId: 'spin-5',
+      spinRequestKey: 'spin-5',
       freeSpinCooldownHours: 24,
       now: new Date(NOW.getTime() + 60_000),
     });

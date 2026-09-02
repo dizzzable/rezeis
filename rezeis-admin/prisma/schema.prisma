@@ -422,6 +422,63 @@ enum SpinLedgerSource {
   MANUAL_ADJUSTMENT
 }
 
+/// What a sector of the wheel gives. The five the platform already knows how
+/// to hand out (`RewardGrantService`), plus four that exist only here.
+enum WheelSectorKind {
+  /// "Не повезло". At least one sector must be this, and it is the only kind
+  /// that can never be capped or exhausted - which is what keeps the set of
+  /// winnable sectors non-empty for every person at every instant.
+  NOTHING
+  POINTS
+  /// Spins pay spins. Winning three means three more turns, not three of
+  /// anything else.
+  SPINS
+  DAYS
+  TRAFFIC
+  /// The permanent personal discount, added to what the person already has.
+  DISCOUNT
+  /// A minted code the person spends later, and which may be restricted to
+  /// certain plans - the deferred half of the discount.
+  PROMOCODE
+  /// One key out of a pool: a Steam key, a gift code, anything countable and
+  /// unique.
+  KEY
+  /// Anything a human settles: "1000 R", a T-shirt, a jackpot. The platform
+  /// records the win and hands the operator a ticket; it does not pretend to
+  /// pay it.
+  MANUAL
+}
+
+/// The visual tier of a sector: colour, glow and how loudly the win is
+/// announced. It carries NO odds - the weight does that, and the odds are
+/// never shown. A COMMON sector may be rarer than a LEGENDARY one if the
+/// operator sets it up that way, and that is the operator's business.
+enum WheelRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+/// How a spin was paid for. Written on the spin because the free one leaves
+/// no row in the spin ledger to say so.
+enum WheelSpinPayment {
+  FREE
+  BALANCE
+}
+
+/// What became of a spin's prize.
+enum WheelSpinStatus {
+  /// Nothing to give - a NOTHING sector.
+  EMPTY
+  /// The prize was applied in the spin's own transaction.
+  SETTLED
+  /// The prize is owed and not yet handed over: a manual jackpot waiting for
+  /// an operator, a key waiting to be drawn from its pool. The spin is spent
+  /// either way; this is the queue that says who is owed what.
+  PENDING
+}
+
 enum PointsLedgerSource {
   CASHBACK
   CASHBACK_REVERSED
@@ -1504,6 +1561,8 @@ model User {
   referralPointsExchanges ReferralPointsExchange[] @relation("UserReferralPointsExchanges")
   pointsLedger            PointsLedgerEntry[]      @relation("UserPointsLedger")
   spinLedger              SpinLedgerEntry[]        @relation("UserSpinLedger")
+  wheelSpins              WheelSpin[]              @relation("UserWheelSpins")
+  wheelKeys               WheelKey[]               @relation("UserWheelKeys")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
   partnerReferrals        PartnerReferral[]        @relation("PartnerReferralUser")
@@ -2750,6 +2809,11 @@ model Settings {
   /// Absent or empty means OFF: an update must not start handing out points
   /// behind the operator's back. Plans and add-ons in INHERIT mode read this.
   pointsSettings            Json       @default("{}") @map("points_settings")
+  /// The wheel. Shape:
+  /// `{ enabled?: boolean, freeSpinCooldownHours?: number|null, spinPricePoints?: number|null }`.
+  /// Absent or empty means OFF, for the same reason the points block does: an
+  /// update must not start a giveaway behind the operator's back.
+  wheelSettings             Json       @default("{}") @map("wheel_settings")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")
@@ -3114,9 +3178,15 @@ model SpinLedgerEntry {
   delta        Int              @map("delta")
   balanceAfter Int              @map("balance_after")
   source       SpinLedgerSource @map("source")
-  /// Idempotency handle, unique per `source`: the spin id for SPENT and for
-  /// the WHEEL_PRIZE it produced, the purchase id for PURCHASED. NULL for an
-  /// operator's adjustment, which is not idempotent by nature.
+  /// Idempotency handle, unique per `source`: the spin REQUEST handle for
+  /// SPENT and for the WHEEL_PRIZE it produced, the purchase id for
+  /// PURCHASED. NULL for an operator's adjustment, which is not idempotent by
+  /// nature.
+  ///
+  /// The request handle and not the spin id, because the spin row is written
+  /// at the end of the transaction — after the payment this key exists to
+  /// guard. `WheelSpin.idempotencyKey` carries the same value, which is how a
+  /// journal row is traced back to its spin.
   referenceKey String?          @map("reference_key")
   /// What the row is shown as: the sector for a prize, the price in points
   /// for a purchase, the reason and operator for an adjustment.
@@ -4668,4 +4738,184 @@ model UserIpObservation {
   /// Retention sweeps by age.
   @@index([lastSeenAt])
   @@map("user_ip_observations")
+}
+
+/// ---------------------------------------------------------------------------
+/// THE WHEEL
+/// ---------------------------------------------------------------------------
+
+/// One sector of the one wheel.
+///
+/// There is deliberately no "wheel" row above this: the operator asked for a
+/// single wheel whose sectors, odds and slot count are configurable, and a
+/// wheel table with exactly one row in it forever would put a join and a
+/// "which wheel" filter into every query to express nothing. If a second
+/// wheel is ever wanted, it arrives as a column here and a settings block -
+/// not as an abstraction built today for a requirement nobody has.
+model WheelSector {
+  id       String          @id @default(cuid()) @map("id")
+  kind     WheelSectorKind @map("kind")
+  /// Localized copy: { ru, en }.
+  title    Json            @default("{}") @map("title")
+  /// Preset key OR `QuestIconAsset.id` - the same icon system the quests use,
+  /// so an operator uploads an icon once and finds it in both places.
+  iconKind QuestIconKind   @default(PRESET) @map("icon_kind")
+  iconRef  String          @default("") @map("icon_ref")
+  rarity   WheelRarity     @default(COMMON) @map("rarity")
+
+  /// RELATIVE weight, not a percent.
+  ///
+  /// Percents stored per row have to add up, and nothing can make them: an
+  /// operator adds a tenth sector and the wheel silently sums to 103 %.
+  /// Stored as weights, the percentage is derived - `weight / SUM(weight)` -
+  /// so it is always exactly 100 and the panel can show the live figure next
+  /// to every row as it is edited. `0` is a sector that is on the wheel but
+  /// cannot be drawn.
+  weight Int @default(0) @map("weight")
+  /// Magnitude by kind: points, spins, days, GB, percent. NOTHING, KEY and
+  /// MANUAL ignore it; PROMOCODE reads it as the code's own reward.
+  amount Int @default(0) @map("amount")
+
+  /// PROMOCODE: what the minted code does. NULL falls back to a plain
+  /// duration code, which is what a code without a type has always meant.
+  promoRewardType PromocodeRewardType? @map("promo_reward_type")
+  /// PROMOCODE(SUBSCRIPTION): the plan the code grants, frozen into the code
+  /// when it is minted.
+  promoPlanId     String?              @map("promo_plan_id")
+  /// PROMOCODE: the plans the code may be spent on. Empty = any plan. THIS is
+  /// the filter that makes a won discount a targeted one.
+  promoPlanIds    String[]             @default([]) @map("promo_plan_ids")
+  /// PROMOCODE: days until the minted code expires. NULL = it does not.
+  promoLifetime   Int?                 @map("promo_lifetime")
+
+  /// KEY: which pool the key comes out of.
+  keyPoolId String? @map("key_pool_id")
+
+  /// MANUAL: what the operator has to do, in their own words. Shown on the
+  /// ticket, never to the person who won.
+  manualInstructions String? @map("manual_instructions")
+
+  /// How many times ONE person may win this sector, ever. NULL = no ceiling.
+  /// `1` is how "one key per person" and "the permanent discount, once" are
+  /// expressed.
+  maxWinsPerUser Int? @map("max_wins_per_user")
+  /// How many times this sector may be won by anybody. NULL = no ceiling.
+  maxWinsTotal   Int? @map("max_wins_total")
+  /// Guarded counter of wins, incremented conditionally against
+  /// `maxWinsTotal` in the same statement that tests it - the same shape as
+  /// the quest budget, and for the same reason: a read-then-check would let
+  /// two simultaneous spins past the last remaining prize.
+  wonCount       Int  @default(0) @map("won_count")
+
+  /// Position on the wheel. The slot count IS the number of enabled sectors,
+  /// so "how many slots" is answered by adding or removing rows rather than
+  /// by a number that can disagree with them.
+  order     Int      @default(0) @map("order")
+  enabled   Boolean  @default(false) @map("enabled")
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  keyPool WheelKeyPool? @relation("WheelKeyPoolSectors", fields: [keyPoolId], references: [id], onDelete: SetNull)
+  spins   WheelSpin[]   @relation("WheelSectorSpins")
+
+  @@index([enabled, order])
+  @@index([keyPoolId])
+  @@map("wheel_sectors")
+}
+
+/// A named batch of one-use secrets - Steam keys, gift codes - that a KEY
+/// sector draws from.
+model WheelKeyPool {
+  id        String   @id @default(cuid()) @map("id")
+  /// What the operator calls it.
+  name      String   @map("name")
+  /// What the keys are for, in the operator's words.
+  note      String?  @map("note")
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  keys    WheelKey[]    @relation("WheelKeyPoolKeys")
+  sectors WheelSector[] @relation("WheelKeyPoolSectors")
+
+  @@map("wheel_key_pools")
+}
+
+/// One secret in a pool, and who got it.
+///
+/// A key is claimed by an UPDATE whose `WHERE` still says the key is free, so
+/// two people spinning at the same instant cannot be handed the same key: the
+/// second update matches nothing and the draw moves on.
+model WheelKey {
+  id     String @id @default(cuid()) @map("id")
+  poolId String @map("pool_id")
+  /// The secret itself.
+  value  String @map("value")
+
+  /// NULL while the key is still in the pool.
+  claimedByUserId String?   @map("claimed_by_user_id")
+  claimedSpinId   String?   @unique @map("claimed_spin_id")
+  claimedAt       DateTime? @map("claimed_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  pool          WheelKeyPool @relation("WheelKeyPoolKeys", fields: [poolId], references: [id], onDelete: Cascade)
+  claimedByUser User?        @relation("UserWheelKeys", fields: [claimedByUserId], references: [id], onDelete: SetNull)
+  claimedSpin   WheelSpin?   @relation("WheelSpinKey", fields: [claimedSpinId], references: [id], onDelete: SetNull)
+
+  /// The same secret cannot be loaded into one pool twice - a paste repeated
+  /// by an operator would otherwise hand two people the same key.
+  @@unique([poolId, value])
+  /// The pick: the oldest unclaimed key in a pool.
+  @@index([poolId, createdAt])
+  @@index([claimedByUserId])
+  @@map("wheel_keys")
+}
+
+/// One spin: what it cost, what came up, and what became of the prize.
+///
+/// This is the wheel's own history, and it is NOT the spin ledger. The ledger
+/// explains the BALANCE and therefore has no row for a free spin, which never
+/// touches it; this table has a row for every spin however it was paid for.
+model WheelSpin {
+  id     String @id @default(cuid()) @map("id")
+  userId String @map("user_id")
+
+  /// The sector drawn. Set to NULL if the operator later deletes it - the
+  /// snapshot below is what the history keeps showing.
+  sectorId       String?         @map("sector_id")
+  /// What the sector WAS at the moment of the draw: title, icon, rarity,
+  /// amount. A sector edited a month later must not rewrite what somebody
+  /// remembers winning.
+  sectorSnapshot Json            @map("sector_snapshot")
+  kind           WheelSectorKind @map("kind")
+  amount         Int             @default(0) @map("amount")
+
+  status   WheelSpinStatus  @map("status")
+  paidWith WheelSpinPayment @map("paid_with")
+
+  /// Supplied by the caller and unique per person: a request replayed after a
+  /// dropped connection finds its own spin and returns the same result
+  /// instead of spending a second one.
+  idempotencyKey String @map("idempotency_key")
+
+  /// What was actually given - the points credited, the code minted, the key
+  /// id, the extended subscription. Shaped by `kind`.
+  outcome   Json?     @map("outcome")
+  settledAt DateTime? @map("settled_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user   User         @relation("UserWheelSpins", fields: [userId], references: [id], onDelete: Cascade)
+  sector WheelSector? @relation("WheelSectorSpins", fields: [sectorId], references: [id], onDelete: SetNull)
+  key    WheelKey?    @relation("WheelSpinKey")
+
+  @@unique([userId, idempotencyKey])
+  /// One person's history, newest first.
+  @@index([userId, createdAt(sort: Desc)])
+  /// "How many times has this person won this sector" - the per-user ceiling.
+  @@index([userId, sectorId])
+  /// The operator's queue: what is owed and not yet handed over.
+  @@index([status, createdAt])
+  @@map("wheel_spins")
 }

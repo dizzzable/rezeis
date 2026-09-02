@@ -1,4 +1,4 @@
-import { PointsLedgerSource, Prisma } from '@prisma/client';
+import { PointsLedgerSource, Prisma, PromocodeRewardType } from '@prisma/client';
 
 /**
  * The five things this platform knows how to give somebody. Quests award one
@@ -6,6 +6,26 @@ import { PointsLedgerSource, Prisma } from '@prisma/client';
  * shapes are identical because the giving is identical.
  */
 export type RewardKind = 'POINTS' | 'DAYS' | 'TRAFFIC' | 'DISCOUNT' | 'PROMOCODE';
+
+/**
+ * A minted code, spelled out.
+ *
+ * Absent, a code is what it has always been: a subscription code when the
+ * grant names a plan, a duration code when it does not. Present, the caller
+ * says exactly what the code does and where it may be spent - which is how
+ * the wheel gives away "-20 % on these three plans, valid for a fortnight"
+ * without a second minting path growing next to this one.
+ */
+export interface RewardPromoSpec {
+  readonly rewardType: PromocodeRewardType;
+  /**
+   * The plans the code may be spent on. Empty = any. This is the filter that
+   * makes a won discount a targeted one.
+   */
+  readonly allowedPlanIds: readonly string[];
+  /** Days until the code expires. `null` = it does not. */
+  readonly lifetimeDays: number | null;
+}
 
 export interface RewardGrant {
   readonly kind: RewardKind;
@@ -16,6 +36,8 @@ export interface RewardGrant {
    * which is what a code without a plan has always meant.
    */
   readonly planId: string | null;
+  /** What kind of code to mint. Omitted keeps the legacy shape - see above. */
+  readonly promo?: RewardPromoSpec;
 }
 
 /**

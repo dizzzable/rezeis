@@ -1,19 +1,24 @@
 import { Module } from '@nestjs/common';
 
+import { RewardsModule } from '../rewards/rewards.module';
 import { SpinWalletService } from './services/spin-wallet.service';
+import { WheelSpinService } from './services/wheel-spin.service';
 
 /**
- * The wheel of fortune, starting with its wallet.
+ * The wheel of fortune: its wallet, and the spin that spends it.
  *
- * Nothing is imported here, for the same reason `PointsModule` imports
- * nothing: this module is going to be pulled in by the user card, by the
- * cabinet-facing controllers and by events, and a module that only moves a
- * balance must not drag a stack along with it. When the wheel needs to tell
- * somebody what they won, that message is composed where the notification
- * stack already lives, not here.
+ * `RewardsModule` is the ONLY import, and it is itself a leaf — the wheel
+ * hands out what a quest hands out, through the same applier, and gets the
+ * points wallet along with it. Nothing else comes in on purpose: this module
+ * is pulled in by the user card, by the cabinet-facing controllers and by
+ * events, and a module that drags the notification stack behind it arrives
+ * everywhere the wheel is merely READ. When the wheel needs to tell somebody
+ * what they won, or to raise a ticket for a prize an operator settles by
+ * hand, that message is composed where those stacks already live.
  */
 @Module({
-  providers: [SpinWalletService],
-  exports: [SpinWalletService],
+  imports: [RewardsModule],
+  providers: [SpinWalletService, WheelSpinService],
+  exports: [SpinWalletService, WheelSpinService],
 })
 export class WheelModule {}
