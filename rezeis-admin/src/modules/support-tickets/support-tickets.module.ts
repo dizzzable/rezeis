@@ -31,6 +31,10 @@ import { SupportTicketsService } from './services/support-tickets.service';
     SupportAttachmentService,
     GuestGateService,
   ],
-  exports: [SupportTicketsService, SupportGuestService],
+  // `SupportNotificationsService` is exported so a module that posts an
+  // operator message of its own — the wheel settling a manual prize — can
+  // announce it the same way a reply from the inbox is announced, rather
+  // than growing a second, quieter delivery path.
+  exports: [SupportTicketsService, SupportGuestService, SupportNotificationsService],
 })
 export class SupportTicketsModule {}

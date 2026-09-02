@@ -125,6 +125,7 @@ export const en = {
       partners: 'Partners',
       advertising: 'Advertising',
       quests: 'Quests',
+      wheelPrizes: 'Wheel prizes',
       withdrawals: 'Withdrawals',
       platform: 'Platform',
       webReiwa: 'WEB Reiwa',
@@ -911,6 +912,52 @@ export const en = {
     saved: 'Saved',
     deleted: 'Partner deleted',
     saveFailed: 'Failed to save',
+  },
+  wheelPrizesPage: {
+    title: 'Wheel prizes',
+    subtitle: 'What the wheel cannot hand over itself: jackpots, keys, things — a person does',
+    unnamedPrize: 'Prize',
+    noteLabel: 'Note',
+    settledAt: 'Closed',
+    tabs: {
+      PENDING: 'Waiting',
+      SETTLED: 'Handed over',
+      REFUSED: 'Refused',
+    },
+    empty: {
+      PENDING: 'Nobody is waiting for anything.',
+      SETTLED: 'Nothing has been handed over yet.',
+      REFUSED: 'There have been no refusals.',
+    },
+    columns: {
+      prize: 'Prize',
+      winner: 'Winner',
+      won: 'Won',
+      actions: 'Actions',
+    },
+    actions: {
+      issue: 'Hand over',
+      refuse: 'Refuse',
+      openChat: 'Conversation',
+    },
+    issueDialog: {
+      title: 'Mark the prize handed over',
+      description:
+        'The winner sees this in the conversation. The spin is not returned — the prize is closed.',
+      noteLabel: 'Note (optional)',
+      notePlaceholder: 'For example: sent 1000 RUB to the card, receipt in the conversation',
+    },
+    refuseDialog: {
+      title: 'Refuse the prize',
+      description:
+        'The winner sees the reason. The spin is not returned automatically — grant one by hand on the user card if it is owed.',
+      reasonLabel: 'Reason',
+      reasonPlaceholder: 'For example: the account was blocked for gaming the wheel',
+    },
+    toast: {
+      issued: 'Prize marked as handed over',
+      refused: 'Refusal recorded',
+    },
   },
   questsAdminPage: {
     title: 'Quests',

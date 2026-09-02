@@ -54,6 +54,21 @@ async function createUser(suffix: string, spinBalance = 0): Promise<string> {
  */
 async function resetWheel(): Promise<void> {
   await prisma.wheelSector.deleteMany({ where: { id: { startsWith: prefix } } });
+
+  // There is ONE wheel and these specs share a database, so a sector another
+  // FILE leaves enabled is a sector this file can land on — and the symptom is
+  // a draw that pays the wrong prize, which reads like a bug in the draw. Say
+  // so plainly instead. Anything that needs a sector row without spinning
+  // should create it disabled.
+  const foreign = await prisma.wheelSector.findMany({
+    where: { enabled: true, id: { not: { startsWith: prefix } } },
+    select: { id: true },
+  });
+  assert.deepEqual(
+    foreign.map((sector) => sector.id),
+    [],
+    'another spec left an enabled sector on the shared wheel; create sectors disabled unless you spin',
+  );
 }
 
 /**

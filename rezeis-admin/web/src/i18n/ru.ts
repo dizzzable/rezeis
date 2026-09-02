@@ -125,6 +125,7 @@ export const ru = {
       partners: 'Партнёры',
       advertising: 'Рекламный кабинет',
       quests: 'Задания',
+      wheelPrizes: 'Призы с колеса',
       withdrawals: 'Выводы',
       platform: 'Платформа',
       webReiwa: 'WEB Reiwa',
@@ -932,6 +933,52 @@ export const ru = {
     saved: 'Сохранено',
     deleted: 'Партнёр удалён',
     saveFailed: 'Не удалось сохранить',
+  },
+  wheelPrizesPage: {
+    title: 'Призы с колеса',
+    subtitle: 'Что колесо не может выдать само: джекпоты, ключи, вещи — вручает человек',
+    unnamedPrize: 'Приз',
+    noteLabel: 'Комментарий',
+    settledAt: 'Закрыт',
+    tabs: {
+      PENDING: 'Ждут выдачи',
+      SETTLED: 'Вручены',
+      REFUSED: 'Отказано',
+    },
+    empty: {
+      PENDING: 'Никто ничего не ждёт.',
+      SETTLED: 'Пока ничего не вручено.',
+      REFUSED: 'Отказов не было.',
+    },
+    columns: {
+      prize: 'Приз',
+      winner: 'Победитель',
+      won: 'Выигран',
+      actions: 'Действия',
+    },
+    actions: {
+      issue: 'Вручить',
+      refuse: 'Отказать',
+      openChat: 'Переписка',
+    },
+    issueDialog: {
+      title: 'Отметить приз вручённым',
+      description:
+        'Победитель увидит это в переписке. Прокрут не возвращается — приз считается закрытым.',
+      noteLabel: 'Комментарий (необязательно)',
+      notePlaceholder: 'Например: перевёл 1000 ₽ на карту, чек в переписке',
+    },
+    refuseDialog: {
+      title: 'Отказать в призе',
+      description:
+        'Причину увидит победитель. Прокрут не возвращается автоматически — если он нужен, начислите его вручную в карточке пользователя.',
+      reasonLabel: 'Причина отказа',
+      reasonPlaceholder: 'Например: аккаунт заблокирован за накрутку',
+    },
+    toast: {
+      issued: 'Приз отмечен вручённым',
+      refused: 'Отказ записан',
+    },
   },
   questsAdminPage: {
     title: 'Задания',

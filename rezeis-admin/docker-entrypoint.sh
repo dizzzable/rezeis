@@ -56,7 +56,7 @@ is_auto_recoverable_migration() {
     20260823120000_partner_level_accrual_strategy|20260828120000_blocked_identities|20260828160000_blocklist_cascade|20260828180000_device_observations|20260828200000_legal_privacy_policy)
       return 0
       ;;
-    20260829120000_user_hints|20260829150000_guest_support_device|20260829170000_user_ip_observations|20260831120000_traffic_reset_addon|20260901090000_broadcast_schedule_record|20260901120000_broadcast_channel_post|20260901160000_promocode_actions|20260902120000_points_ledger_and_cashback|20260902160000_wheel_spin_wallet|20260902180000_wheel_sectors_and_spins)
+    20260829120000_user_hints|20260829150000_guest_support_device|20260829170000_user_ip_observations|20260831120000_traffic_reset_addon|20260901090000_broadcast_schedule_record|20260901120000_broadcast_channel_post|20260901160000_promocode_actions|20260902120000_points_ledger_and_cashback|20260902160000_wheel_spin_wallet|20260902180000_wheel_sectors_and_spins|20260902200000_wheel_manual_prizes)
       return 0
       ;;
     *)

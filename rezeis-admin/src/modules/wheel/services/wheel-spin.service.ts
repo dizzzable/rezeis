@@ -558,9 +558,16 @@ export class WheelSpinService {
    * After the commit, never inside it: a sync job enqueued in a transaction
    * announces a change a rollback then undoes.
    *
-   * The operator's ticket for a manual prize is raised by the queue that owns
-   * tickets, not here — this module stays a leaf, and a wheel that dragged the
-   * notification stack in would arrive everywhere the wheel is read.
+   * The operator's conversation for a manual prize is opened by
+   * `WheelManualPrizeService`, not here: opening one needs the support stack,
+   * and this module stays a leaf because it is imported wherever the wheel is
+   * merely READ. The debt is recorded as a PENDING spin and
+   * `WheelPrizeReconcilerService` sweeps every minute for owed prizes with no
+   * conversation yet, so nothing is lost even if the caller never asks.
+   *
+   * A caller that CAN reach the prize module — the cabinet controller — should
+   * also call `openTicket` on a PENDING result, so the operator hears about a
+   * jackpot in the same second rather than at the next sweep.
    */
   private async afterCommit(post: PostCommit): Promise<void> {
     if (post.manualSpinId !== null) {

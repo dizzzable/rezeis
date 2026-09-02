@@ -471,12 +471,24 @@ enum WheelSpinPayment {
 enum WheelSpinStatus {
   /// Nothing to give - a NOTHING sector.
   EMPTY
-  /// The prize was applied in the spin's own transaction.
+  /// Nothing is owed any more: the machine applied it in the spin's own
+  /// transaction, or an operator handed it over by hand. Both are "settled"
+  /// because they answer the same question the same way, and WHO settled it
+  /// is written on the row rather than encoded in the status.
   SETTLED
   /// The prize is owed and not yet handed over: a manual jackpot waiting for
-  /// an operator, a key waiting to be drawn from its pool. The spin is spent
-  /// either way; this is the queue that says who is owed what.
+  /// an operator. The spin is spent either way; this is the queue that says
+  /// who is owed what.
   PENDING
+  /// An operator decided not to hand it over, and said why.
+  ///
+  /// The spin is NOT given back automatically. Whether a refusal deserves
+  /// compensation is a judgement about the particular case - abuse, an
+  /// unfulfillable prize, a duplicate - and the operator already has a manual
+  /// spin adjustment for the cases where it does. Inventing a refund here
+  /// would make every refusal pay out, including the ones aimed at somebody
+  /// gaming the wheel.
+  REFUSED
 }
 
 enum PointsLedgerSource {
@@ -4906,6 +4918,16 @@ model WheelSpin {
   settledAt DateTime? @map("settled_at") @db.Timestamptz(3)
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
+  /// The admin who handed the prize over or refused it. NULL when the machine
+  /// settled it, which is what separates the two without a second status.
+  settledBy      String? @map("settled_by")
+  /// What the operator wrote when they settled or refused. The refusal reason
+  /// is shown to the person; the issue note is for the operator's own record.
+  settlementNote String? @map("settlement_note")
+  /// The conversation opened so the operator can reach the winner. Set once
+  /// and never again, which is what makes opening it safe to retry.
+  manualTicketId String? @map("manual_ticket_id")
+
   user   User         @relation("UserWheelSpins", fields: [userId], references: [id], onDelete: Cascade)
   sector WheelSector? @relation("WheelSectorSpins", fields: [sectorId], references: [id], onDelete: SetNull)
   key    WheelKey?    @relation("WheelSpinKey")
@@ -4917,5 +4939,7 @@ model WheelSpin {
   @@index([userId, sectorId])
   /// The operator's queue: what is owed and not yet handed over.
   @@index([status, createdAt])
+  /// The ticket a spin belongs to, for the reverse lookup from a conversation.
+  @@index([manualTicketId])
   @@map("wheel_spins")
 }

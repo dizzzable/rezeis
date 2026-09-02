@@ -128,6 +128,15 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   withdrawals: ['view', 'resolve'],
   /// Gamification quests catalog + settings (reward-granting tasks).
   quests: ['view', 'create', 'edit', 'delete'],
+  /// The wheel of fortune: its sectors and odds (`edit`), and settling the
+  /// prizes a human has to hand over (`resolve`).
+  ///
+  /// `resolve` is separate from `edit` because the two are different jobs:
+  /// editing decides what MIGHT be won, settling decides whether a
+  /// particular person gets a particular thing. A support operator who
+  /// hands out jackpots has no business reweighting the sectors, and
+  /// whoever tunes the odds need not be able to refuse somebody a prize.
+  wheel: ['view', 'edit', 'resolve'],
 
   // Configuration
   settings: ['view', 'edit'],
@@ -285,6 +294,9 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
       { resource: 'quests', action: 'view' },
       { resource: 'quests', action: 'create' },
       { resource: 'quests', action: 'edit' },
+      { resource: 'wheel', action: 'view' },
+      { resource: 'wheel', action: 'edit' },
+      { resource: 'wheel', action: 'resolve' },
       { resource: 'withdrawals', action: 'view' },
       { resource: 'analytics', action: 'view' },
       { resource: 'audit', action: 'view' },
