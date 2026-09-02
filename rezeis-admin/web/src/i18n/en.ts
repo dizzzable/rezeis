@@ -126,6 +126,7 @@ export const en = {
       advertising: 'Advertising',
       quests: 'Quests',
       wheelPrizes: 'Wheel prizes',
+      wheelKeys: 'Key pools',
       withdrawals: 'Withdrawals',
       platform: 'Platform',
       webReiwa: 'WEB Reiwa',
@@ -912,6 +913,61 @@ export const en = {
     saved: 'Saved',
     deleted: 'Partner deleted',
     saveFailed: 'Failed to save',
+  },
+  wheelKeysPage: {
+    title: 'Key pools',
+    subtitle: 'Batches of one-use keys the wheel hands out, one per person',
+    emptyPools: 'No pools yet. Create one and load keys into it.',
+    counts: '{{available}} of {{total}} left',
+    stats: 'Available: {{available}} · Handed out: {{claimed}} · Total: {{total}}',
+    exhausted: 'Empty',
+    usedBy: 'Used by sectors',
+    revealDenied: 'not allowed to read keys',
+    filters: {
+      available: 'Available',
+      claimed: 'Handed out',
+    },
+    emptyKeys: {
+      available: 'No keys left.',
+      claimed: 'Nothing has been handed out yet.',
+    },
+    columns: {
+      key: 'Key',
+      winner: 'Winner',
+      claimedAt: 'When',
+      actions: 'Actions',
+    },
+    actions: {
+      newPool: 'New pool',
+      load: 'Load keys',
+      deletePool: 'Delete pool',
+      removeKey: 'Remove key',
+      reveal: 'Reveal',
+      hide: 'Hide',
+    },
+    createDialog: {
+      title: 'New key pool',
+      nameLabel: 'Name',
+      namePlaceholder: 'For example: Steam — Half-Life 2',
+      noteLabel: 'Note (optional)',
+    },
+    loadDialog: {
+      title: 'Load keys',
+      description:
+        'One key per line. Blank lines are dropped, case is left alone, and keys already in the pool are not duplicated.',
+      placeholder: 'AAAAA-BBBBB-CCCCC\nDDDDD-EEEEE-FFFFF',
+    },
+    deleteDialog: {
+      title: 'Delete the pool?',
+      description:
+        'The pool "{{name}}" and the keys still in it will be deleted. A pool that keys have been handed out from cannot be deleted.',
+    },
+    toast: {
+      poolCreated: 'Pool created',
+      poolDeleted: 'Pool deleted',
+      keyRemoved: 'Key removed',
+      loaded: 'Added {{added}}, duplicates skipped: {{duplicates}}',
+    },
   },
   wheelPrizesPage: {
     title: 'Wheel prizes',

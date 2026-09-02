@@ -136,7 +136,15 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   /// particular person gets a particular thing. A support operator who
   /// hands out jackpots has no business reweighting the sectors, and
   /// whoever tunes the odds need not be able to refuse somebody a prize.
-  wheel: ['view', 'edit', 'resolve'],
+  ///
+  /// `view_secrets` reads the raw values in a key pool. An unclaimed key
+  /// is a bearer secret — whoever reads it can redeem it before its
+  /// winner — so the list is masked without it. Unlike
+  /// `payment_gateways:view_secrets`, this one IS granted by default: a
+  /// winner writes in to say a key does not work and somebody has to
+  /// look, which is not a thing an operator can do with the panel alone
+  /// otherwise.
+  wheel: ['view', 'edit', 'resolve', 'view_secrets'],
 
   // Configuration
   settings: ['view', 'edit'],
@@ -297,6 +305,7 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
       { resource: 'wheel', action: 'view' },
       { resource: 'wheel', action: 'edit' },
       { resource: 'wheel', action: 'resolve' },
+      { resource: 'wheel', action: 'view_secrets' },
       { resource: 'withdrawals', action: 'view' },
       { resource: 'analytics', action: 'view' },
       { resource: 'audit', action: 'view' },
@@ -318,6 +327,12 @@ export const SYSTEM_ROLES: readonly SystemRoleSeed[] = [
       { resource: 'support_tickets', action: 'resolve' },
       { resource: 'support_tickets', action: 'archive' },
       { resource: 'referrals', action: 'view' },
+      // Settling a wheel prize IS support work: it arrives as a support
+      // conversation and is answered in one. `edit` and `view_secrets`
+      // are deliberately absent — this role hands prizes over, it does
+      // not reweight the wheel or read the unclaimed key inventory.
+      { resource: 'wheel', action: 'view' },
+      { resource: 'wheel', action: 'resolve' },
       { resource: 'analytics', action: 'view' },
     ],
   },

@@ -126,6 +126,7 @@ export const ru = {
       advertising: 'Рекламный кабинет',
       quests: 'Задания',
       wheelPrizes: 'Призы с колеса',
+      wheelKeys: 'Пулы ключей',
       withdrawals: 'Выводы',
       platform: 'Платформа',
       webReiwa: 'WEB Reiwa',
@@ -933,6 +934,61 @@ export const ru = {
     saved: 'Сохранено',
     deleted: 'Партнёр удалён',
     saveFailed: 'Не удалось сохранить',
+  },
+  wheelKeysPage: {
+    title: 'Пулы ключей',
+    subtitle: 'Партии одноразовых ключей, которые колесо раздаёт по одному в руки',
+    emptyPools: 'Пулов ещё нет. Заведите первый и загрузите в него ключи.',
+    counts: 'Осталось {{available}} из {{total}}',
+    stats: 'Свободно: {{available}} · Выдано: {{claimed}} · Всего: {{total}}',
+    exhausted: 'Пусто',
+    usedBy: 'Используется секторами',
+    revealDenied: 'нет права смотреть ключи',
+    filters: {
+      available: 'Свободные',
+      claimed: 'Выданные',
+    },
+    emptyKeys: {
+      available: 'Свободных ключей нет.',
+      claimed: 'Пока ничего не выдано.',
+    },
+    columns: {
+      key: 'Ключ',
+      winner: 'Кому',
+      claimedAt: 'Когда',
+      actions: 'Действия',
+    },
+    actions: {
+      newPool: 'Новый пул',
+      load: 'Загрузить ключи',
+      deletePool: 'Удалить пул',
+      removeKey: 'Убрать ключ',
+      reveal: 'Показать',
+      hide: 'Скрыть',
+    },
+    createDialog: {
+      title: 'Новый пул ключей',
+      nameLabel: 'Название',
+      namePlaceholder: 'Например: Steam — Half-Life 2',
+      noteLabel: 'Заметка (необязательно)',
+    },
+    loadDialog: {
+      title: 'Загрузить ключи',
+      description:
+        'По одному ключу в строке. Пустые строки пропускаются, регистр не меняется, уже загруженные ключи не дублируются.',
+      placeholder: 'AAAAA-BBBBB-CCCCC\nDDDDD-EEEEE-FFFFF',
+    },
+    deleteDialog: {
+      title: 'Удалить пул?',
+      description:
+        'Пул «{{name}}» и оставшиеся в нём ключи будут удалены. Пул, из которого уже выдавали ключи, удалить нельзя.',
+    },
+    toast: {
+      poolCreated: 'Пул создан',
+      poolDeleted: 'Пул удалён',
+      keyRemoved: 'Ключ убран',
+      loaded: 'Добавлено {{added}}, пропущено дублей: {{duplicates}}',
+    },
   },
   wheelPrizesPage: {
     title: 'Призы с колеса',
