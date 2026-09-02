@@ -405,6 +405,23 @@ enum PointsCashbackMode {
 /// Why `User.points` moved. One `points_ledger` row per movement, written by
 /// `PointsWalletService` and nobody else: the balance column is the running
 /// sum of these rows, and a writer that bypasses the service breaks that.
+/// Why `User.spinBalance` moved. One `spin_ledger` row per movement, written
+/// by `SpinWalletService` and nobody else, exactly as the points wallet owns
+/// its own balance.
+///
+/// There is no OPENING_BALANCE here and there never was: the column arrives at
+/// zero for everybody, so the ledger starts empty and stays complete.
+enum SpinLedgerSource {
+  /// Won from a wheel sector that pays spins.
+  WHEEL_PRIZE
+  /// Bought with points.
+  PURCHASED
+  /// Consumed by a spin.
+  SPENT
+  /// An operator moved the balance by hand.
+  MANUAL_ADJUSTMENT
+}
+
 enum PointsLedgerSource {
   CASHBACK
   CASHBACK_REVERSED
@@ -1400,6 +1417,16 @@ model User {
   personalDiscount               Int       @default(0) @map("personal_discount")
   purchaseDiscount               Int       @default(0) @map("purchase_discount")
   points                         Int       @default(0) @map("points")
+  /// Wheel spins the user WON or bought. These accumulate: three on the
+  /// balance plus five won is eight. The free spin is NOT counted here — see
+  /// `freeSpinUsedAt`, which is a different thing on purpose.
+  spinBalance                    Int       @default(0) @map("spin_balance")
+  /// When the free spin was last consumed. The free spin is available when
+  /// this is NULL or older than the configured cooldown, which is why it can
+  /// never pile up: not spinning does not start the clock, so a week away
+  /// still leaves exactly one. A counter would have needed a nightly sweep
+  /// over every account to hand out what this answers by subtraction.
+  freeSpinUsedAt                 DateTime? @map("free_spin_used_at") @db.Timestamptz(3)
   isBlocked                      Boolean   @default(false) @map("is_blocked")
   isBotBlocked                   Boolean   @default(false) @map("is_bot_blocked")
   isRulesAccepted                Boolean   @default(true) @map("is_rules_accepted")
@@ -1476,6 +1503,7 @@ model User {
   pendingDiscounts        UserPendingDiscount[]    @relation("UserPendingDiscounts")
   referralPointsExchanges ReferralPointsExchange[] @relation("UserReferralPointsExchanges")
   pointsLedger            PointsLedgerEntry[]      @relation("UserPointsLedger")
+  spinLedger              SpinLedgerEntry[]        @relation("UserSpinLedger")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
   partnerReferrals        PartnerReferral[]        @relation("PartnerReferralUser")
@@ -3072,6 +3100,36 @@ model ReferralPointsExchange {
 /// referral payout, the exchange id for a spend. Movements that are not
 /// idempotent by nature (an operator typing a number) carry NULL, and NULLs
 /// never collide in the unique index.
+/// One movement of `User.spinBalance`, and the sibling of
+/// `PointsLedgerEntry` down to the column names.
+///
+/// A sibling and not a shared table: the two balances answer different
+/// questions, carry different sources, and are read by different screens, so
+/// one table with a "which wallet" column would need every query to remember
+/// the filter. The discipline is what is shared, not the storage — and the
+/// discipline is guarded per wallet by its own live-database test.
+model SpinLedgerEntry {
+  id           String           @id @default(cuid()) @map("id")
+  userId       String           @map("user_id")
+  delta        Int              @map("delta")
+  balanceAfter Int              @map("balance_after")
+  source       SpinLedgerSource @map("source")
+  /// Idempotency handle, unique per `source`: the spin id for SPENT and for
+  /// the WHEEL_PRIZE it produced, the purchase id for PURCHASED. NULL for an
+  /// operator's adjustment, which is not idempotent by nature.
+  referenceKey String?          @map("reference_key")
+  /// What the row is shown as: the sector for a prize, the price in points
+  /// for a purchase, the reason and operator for an adjustment.
+  details      Json?            @map("details")
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation("UserSpinLedger", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([source, referenceKey])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("spin_ledger")
+}
+
 model PointsLedgerEntry {
   id           String             @id @default(cuid()) @map("id")
   userId       String             @map("user_id")
