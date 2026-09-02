@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
-import { PointsModule } from '../points/points.module';
+import { RewardsModule } from '../rewards/rewards.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { SettingsModule } from '../settings/settings.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
@@ -38,7 +38,11 @@ import { QuestService } from './services/quest.service';
  * env fallback) and nonce replay protection.
  */
 @Module({
-  imports: [AuthModule, ProfileSyncModule, SubscriptionsModule, SettingsModule, PointsModule],
+  // `RewardsModule` replaced the points module here: quests no longer write
+  // the balance themselves, they ask the one reward applier to. The wallet
+  // still arrives, through `RewardsModule`, which is the only module needing
+  // it now.
+  imports: [AuthModule, ProfileSyncModule, SubscriptionsModule, SettingsModule, RewardsModule],
   controllers: [
     AdminQuestController,
     InternalQuestController,

@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 
 import { QuestRewardService } from '../src/modules/quests/services/quest-reward.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
+import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
 import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 
 /** Build a QuestRewardService over a configurable in-memory prisma double. */
@@ -56,6 +57,14 @@ function makeService(cfg: {
       },
     },
     subscription: {
+      // The payout resolves the target subscription THROUGH the transaction
+      // now, not beside it on the pool: a read on another connection can
+      // hand back a row this transaction is about to change.
+      findFirst: async (args: { where: { expiresAt?: unknown } }) => {
+        const boundedQuery = args.where.expiresAt !== undefined;
+        const id = boundedQuery ? cfg.boundedSubId : cfg.activeSubId;
+        return id ? { id } : null;
+      },
       findUnique: async () => cfg.subscription ?? { expiresAt: new Date('2026-08-01T00:00:00Z'), trafficLimit: 100 },
       update: async (a: unknown) => {
         calls.subUpdate.push(a);
@@ -133,7 +142,10 @@ function makeService(cfg: {
     prisma as never,
     profileSync as never,
     subMutations as never,
-    new PointsWalletService(),
+    // The REAL reward applier on the real wallet: the payout moved out of
+    // this service, and stubbing it here would leave every assertion below
+    // about a payout that never happened.
+    new RewardGrantService(new PointsWalletService()),
   );
   return { service, calls };
 }

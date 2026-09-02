@@ -10,7 +10,7 @@ import { PaymentReconciliationService } from '../src/modules/payments/services/p
 import { PointsModule } from '../src/modules/points/points.module';
 import { PointsCashbackService } from '../src/modules/points/services/points-cashback.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
-import { QuestRewardService } from '../src/modules/quests/services/quest-reward.service';
+import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
 import { AdminRewardsService } from '../src/modules/referrals/services/admin-rewards.service';
 import { ReferralPointsExchangeService } from '../src/modules/referrals/services/referral-points-exchange.service';
 import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
@@ -30,12 +30,17 @@ import { AdminUserManagementController } from '../src/modules/users/controllers/
  * be a journal that quietly stops summing to the balance. Required means Nest
  * refuses to start instead, so the thing worth guarding is that Nest CAN
  * start with the wallet and CANNOT without it.
+ *
+ * `QuestRewardService` used to be on this list and is not any more: the
+ * payout moved to `RewardGrantService`, so a quest no longer writes the
+ * balance at all. The applier took its place, which is the whole point of
+ * the move.
  */
 const WRITERS: ReadonlyArray<{ readonly name: string; readonly token: abstract new (...args: never[]) => unknown }> = [
   { name: 'AdminRewardsService', token: AdminRewardsService },
   { name: 'ReferralQualificationService', token: ReferralQualificationService },
   { name: 'ReferralPointsExchangeService', token: ReferralPointsExchangeService },
-  { name: 'QuestRewardService', token: QuestRewardService },
+  { name: 'RewardGrantService', token: RewardGrantService },
   { name: 'AccountMergeService', token: AccountMergeService },
   { name: 'StealthnetImporterService', token: StealthnetImporterService },
   { name: 'AltshopImporterService', token: AltshopImporterService },

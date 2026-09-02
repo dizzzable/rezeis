@@ -16,14 +16,11 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
-import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
+import { RewardGrantService } from '../../rewards/reward-grant.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
-import { buildPlanSnapshot } from '../../users/utils/plan-snapshot.util';
 import { QuestClaimResult } from '../interfaces/quest-claim.interface';
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 /** Bot recheck runs more often; this is the hard server-side claim boundary. */
 const CHANNEL_MEMBERSHIP_MAX_AGE_MS = 15 * 60 * 1000;
 
@@ -48,7 +45,7 @@ export class QuestRewardService {
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly subscriptionMutationsService: SubscriptionMutationsService,
-    private readonly pointsWallet: PointsWalletService,
+    private readonly rewardGrant: RewardGrantService,
   ) {}
 
   /**
@@ -193,130 +190,52 @@ export class QuestRewardService {
         alreadyIssued = true;
         return;
       }
-      switch (quest.rewardType) {
-        case 'POINTS': {
-          // Through the wallet, keyed on the completion: the single-winner
-          // stamp above already makes this exactly-once, and the key makes the
-          // ledger agree with it. A zero-point quest credits nothing and writes
-          // no row — the wallet refuses a movement of zero.
-          if (quest.rewardAmount > 0) {
-            const moved = await this.pointsWallet.apply(tx, {
-              userId,
-              delta: quest.rewardAmount,
-              source: PointsLedgerSource.QUEST_REWARD,
-              referenceKey: completionId,
-              details: {
-                questId: quest.id,
-                questType: quest.type,
-                questTitle: quest.title as Prisma.InputJsonValue,
-              },
-            });
-            if (!moved.applied) {
-              throw new Error(
-                `Quest ${quest.id}: points for completion ${completionId} were not credited (${moved.reason})`,
-              );
-            }
-          }
-          result = { ...result, points: quest.rewardAmount };
-          break;
-        }
-        case 'DISCOUNT': {
-          const user = await tx.user.findUnique({
-            where: { id: userId },
-            select: { personalDiscount: true },
-          });
-          const next = Math.min((user?.personalDiscount ?? 0) + quest.rewardAmount, 100);
-          await tx.user.update({ where: { id: userId }, data: { personalDiscount: next } });
-          result = { ...result, discountPercent: next };
-          break;
-        }
-        case 'TRAFFIC': {
-          const subId = await this.resolveActiveSubscriptionId(userId);
-          if (subId !== null) {
-            // The row lock is what lets the increment below be written as an
-            // absolute value. It has to be absolute: `planSnapshot` is JSON and
-            // cannot be incremented, so the column and the snapshot would drift
-            // apart under two concurrent quest payouts — and a column that no
-            // longer matches its snapshot is exactly the "operator override"
-            // signal this write exists to avoid raising. Same lock, same
-            // reason, as `PromocodeRewardsService.applyTrafficReward` and
-            // `ReferralPointsExchangeService`'s TRAFFIC branch.
-            await tx.$queryRaw(
-              Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subId} FOR UPDATE`,
-            );
-            const sub = await tx.subscription.findUnique({
-              where: { id: subId },
-              // `planSnapshot` is read so the top-up can re-declare the raised
-              // value as plan-given; see `patchSnapshotNumeric` just below.
-              select: { trafficLimit: true, planSnapshot: true },
-            });
-            if (sub?.trafficLimit != null) {
-              const trafficLimitAfter = sub.trafficLimit + quest.rewardAmount;
-              // The snapshot moves with the column, exactly as the promocode
-              // EXTRA_TRAFFIC reward and the referral points exchange do. That
-              // leaves the two in step, so `resolveInheritedPlanLimitUpdate`
-              // still reads the subscription as tracking its plan and the
-              // customer's next renewal resets the traffic to the plan's own
-              // limit.
-              //
-              // Deliberate, and the same rule for every reward path: a quest
-              // top-up is a bonus for the CURRENT period, not a permanent
-              // change to the priced good. Omitting this write would silently
-              // declare an operator override and make the bonus outlive every
-              // renewal for the rest of the subscription's life — as a raw
-              // column bump that routes around `SubscriptionEffectiveProjection`,
-              // which is where a genuinely PURCHASED permanent extra belongs
-              // (the durable add-on entitlement model), not here.
-              await tx.subscription.update({
-                where: { id: subId },
-                data: {
-                  trafficLimit: trafficLimitAfter,
-                  planSnapshot: patchSnapshotNumeric(
-                    sub.planSnapshot,
-                    'trafficLimit',
-                    trafficLimitAfter,
-                  ) as Prisma.InputJsonValue,
-                },
-              });
-              syncSubscriptionId = subId;
-            }
-          }
-          result = { ...result, trafficGb: quest.rewardAmount, subscriptionId: subId ?? undefined };
-          break;
-        }
-        case 'DAYS': {
-          const subId = await this.resolveBoundedSubscriptionId(userId);
-          if (subId !== null) {
-            const sub = await tx.subscription.findUnique({
-              where: { id: subId },
-              select: { expiresAt: true },
-            });
-            const base =
-              sub?.expiresAt != null && sub.expiresAt.getTime() > Date.now()
-                ? sub.expiresAt
-                : new Date();
-            await tx.subscription.update({
-              where: { id: subId },
-              data: {
-                expiresAt: new Date(base.getTime() + quest.rewardAmount * MS_PER_DAY),
-                status: SubscriptionStatus.ACTIVE,
-              },
-            });
-            syncSubscriptionId = subId;
-            result = { ...result, days: quest.rewardAmount, subscriptionId: subId };
-          } else {
-            // No bounded sub → MINT_PROMOCODE fallback.
-            const code = await this.mintPromocode(tx, quest);
-            result = { ...result, days: quest.rewardAmount, promoCode: code };
-          }
-          break;
-        }
-        case 'PROMOCODE': {
-          const code = await this.mintPromocode(tx, quest);
-          result = { ...result, promoCode: code };
-          break;
-        }
-      }
+      // ── THE PAYOUT ITSELF LIVES IN `RewardGrantService` ────────────────
+      //
+      // Five rewards, each with a rule subtle enough to be got wrong the
+      // second time it is written: the discount ceiling, the traffic
+      // snapshot that has to move with its column, the days that become a
+      // code when there is nothing to extend. The wheel gives the same five,
+      // so it calls the same code rather than growing a copy that drifts on
+      // the first fix applied to only one of them.
+      //
+      // What stays here is the part that is a QUEST's business: the
+      // single-winner claim above, the budget, the snapshot below, and the
+      // GRANT_TRIAL fallback, which commits its own transaction and therefore
+      // cannot live inside this one.
+      const applied = await this.rewardGrant.apply(tx, {
+        userId,
+        grant: {
+          kind: quest.rewardType,
+          amount: quest.rewardAmount,
+          planId: quest.rewardPlanId,
+        },
+        origin: {
+          pointsSource: PointsLedgerSource.QUEST_REWARD,
+          referenceKey: completionId,
+          details: {
+            questId: quest.id,
+            questType: quest.type,
+            questTitle: quest.title as Prisma.InputJsonValue,
+          },
+          codePrefix: 'QUEST-',
+        },
+      });
+      syncSubscriptionId = applied.syncSubscriptionId;
+      result = {
+        ...result,
+        ...(applied.points === undefined ? {} : { points: applied.points }),
+        ...(applied.days === undefined ? {} : { days: applied.days }),
+        ...(applied.trafficGb === undefined ? {} : { trafficGb: applied.trafficGb }),
+        ...(applied.discountPercent === undefined
+          ? {}
+          : { discountPercent: applied.discountPercent }),
+        ...(applied.promoCode === undefined ? {} : { promoCode: applied.promoCode }),
+        ...(applied.subscriptionId === undefined
+          ? {}
+          : { subscriptionId: applied.subscriptionId }),
+      };
+
 
       await tx.questCompletion.update({
         where: { id: completionId },
@@ -399,56 +318,6 @@ export class QuestRewardService {
    * snapshot, usable even by a user with none); otherwise a DURATION code that
    * adds `rewardAmount` days to an existing subscription.
    */
-  private async mintPromocode(tx: Prisma.TransactionClient, quest: Quest): Promise<string> {
-    const code = generateQuestPromoCode();
-    if (quest.rewardPlanId !== null) {
-      const plan = await tx.plan.findUnique({
-        where: { id: quest.rewardPlanId },
-        select: {
-          id: true,
-          name: true,
-          tag: true,
-          type: true,
-          icon: true,
-          trafficLimit: true,
-          deviceLimit: true,
-          trafficLimitStrategy: true,
-          internalSquads: true,
-          externalSquad: true,
-        },
-      });
-      if (plan === null) {
-        throw new BadRequestException('Quest reward plan not found');
-      }
-      const snapshot = {
-        ...(buildPlanSnapshot(plan) as Record<string, unknown>),
-        duration: quest.rewardAmount,
-      };
-      await tx.promocode.create({
-        data: {
-          code,
-          isActive: true,
-          availability: 'ALL',
-          rewardType: 'SUBSCRIPTION',
-          reward: quest.rewardAmount,
-          plan: snapshot as Prisma.InputJsonValue,
-          maxActivations: 1,
-        },
-      });
-      return code;
-    }
-    await tx.promocode.create({
-      data: {
-        code,
-        isActive: true,
-        availability: 'ALL',
-        rewardType: 'DURATION',
-        reward: quest.rewardAmount,
-        maxActivations: 1,
-      },
-    });
-    return code;
-  }
 
   /** Most-recent ACTIVE subscription with a bounded expiry (extendable). */
   private async resolveBoundedSubscriptionId(userId: string): Promise<string | null> {
@@ -460,15 +329,6 @@ export class QuestRewardService {
     return sub?.id ?? null;
   }
 
-  /** Most-recent ACTIVE subscription (bounded or unlimited). */
-  private async resolveActiveSubscriptionId(userId: string): Promise<string | null> {
-    const sub = await this.prismaService.subscription.findFirst({
-      where: { userId, status: SubscriptionStatus.ACTIVE },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true },
-    });
-    return sub?.id ?? null;
-  }
 
   private async enqueueProfileSync(
     subscriptionId: string,
@@ -526,12 +386,3 @@ function snapshotToResult(questId: string, snapshot: Prisma.JsonValue): QuestCla
   return { questId, rewardType: 'POINTS' };
 }
 
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-
-function generateQuestPromoCode(): string {
-  let code = 'QUEST-';
-  for (let i = 0; i < 8; i++) {
-    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
-  }
-  return code;
-}
