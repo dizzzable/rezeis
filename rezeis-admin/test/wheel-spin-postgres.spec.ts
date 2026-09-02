@@ -7,6 +7,7 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { lockWheel, unlockWheel } from './helpers/wheel-exclusive';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
+import { PrizePayoutService } from '../src/modules/wheel/services/prize-payout.service';
 import { SpinWalletService } from '../src/modules/wheel/services/spin-wallet.service';
 import { WheelSpinService } from '../src/modules/wheel/services/wheel-spin.service';
 import type { WheelSettings } from '../src/modules/wheel/wheel-settings.util';
@@ -107,10 +108,11 @@ run('WheelSpinService on PostgreSQL', () => {
     prisma = new PrismaService();
     await prisma.$connect();
     await lockWheel(prisma);
+    const spinWallet = new SpinWalletService();
     service = new WheelSpinService(
       prisma,
-      new SpinWalletService(),
-      new RewardGrantService(new PointsWalletService()),
+      spinWallet,
+      new PrizePayoutService(spinWallet, new RewardGrantService(new PointsWalletService())),
     );
   });
 

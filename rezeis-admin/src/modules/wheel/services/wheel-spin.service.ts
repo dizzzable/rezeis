@@ -1,16 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  PointsLedgerSource,
-  Prisma,
-  SpinLedgerSource,
-  WheelSectorKind,
-  WheelSpinPayment,
-  WheelSpinStatus,
-} from '@prisma/client';
+import { Prisma, WheelSectorKind, WheelSpinPayment, WheelSpinStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { RewardGrantService } from '../../rewards/reward-grant.service';
-import type { RewardGrant, RewardKind } from '../../rewards/reward-grant.types';
 import {
   drawSector,
   isWheelSpinnable,
@@ -19,6 +10,7 @@ import {
   type SectorForDraw,
 } from '../wheel-draw.util';
 import { readWheelSettings, type WheelSettings } from '../wheel-settings.util';
+import { PrizePayoutService } from './prize-payout.service';
 import { SpinWalletService } from './spin-wallet.service';
 
 /** Why a spin did not happen. None of these costs the person anything. */
@@ -141,7 +133,7 @@ export class WheelSpinService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly spinWallet: SpinWalletService,
-    private readonly rewardGrant: RewardGrantService,
+    private readonly payout: PrizePayoutService,
   ) {}
 
   /**
@@ -256,11 +248,15 @@ export class WheelSpinService {
         continue;
       }
 
-      const applied = await this.payOut(tx, {
+      const applied = await this.payout.payOut(tx, {
         userId: input.userId,
-        idempotencyKey: input.idempotencyKey,
-        sector,
-        keyId: claim.keyId,
+        prize: sector,
+        origin: {
+          source: 'WHEEL',
+          referenceKey: input.idempotencyKey,
+          details: { sectorId: sector.id, spinRequestKey: input.idempotencyKey },
+          claimedKeyId: claim.keyId,
+        },
       });
 
       const spin = await tx.wheelSpin.create({
@@ -402,7 +398,7 @@ export class WheelSpinService {
 
     if (sector.kind !== WheelSectorKind.KEY) return { claimed: true, keyId: null };
 
-    const keyId = await this.claimKey(tx, sector.keyPoolId, userId);
+    const keyId = await this.payout.claimKey(tx, sector.keyPoolId, userId);
     if (keyId === null) {
       // The pool emptied between the read and here. Give the slot back, or the
       // ceiling would count a prize nobody received.
@@ -413,129 +409,6 @@ export class WheelSpinService {
       return { claimed: false, keyId: null };
     }
     return { claimed: true, keyId };
-  }
-
-  /**
-   * The oldest unclaimed key in the pool, taken atomically.
-   *
-   * `FOR UPDATE SKIP LOCKED` is what makes this contention-free: a second
-   * spinner arriving at the same instant steps over the row this one is
-   * taking instead of waiting for it and then finding it gone.
-   */
-  private async claimKey(
-    tx: Prisma.TransactionClient,
-    poolId: string | null,
-    userId: string,
-  ): Promise<string | null> {
-    if (poolId === null) return null;
-    const claimed = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      UPDATE "wheel_keys"
-         SET "claimed_by_user_id" = ${userId},
-             "claimed_at" = NOW()
-       WHERE "id" = (
-         SELECT "id"
-           FROM "wheel_keys"
-          WHERE "pool_id" = ${poolId}
-            AND "claimed_at" IS NULL
-          ORDER BY "created_at"
-          LIMIT 1
-            FOR UPDATE SKIP LOCKED
-       )
-      RETURNING "id"
-    `);
-    return claimed[0]?.id ?? null;
-  }
-
-  /** Hand the prize over, or record that it is owed. */
-  private async payOut(
-    tx: Prisma.TransactionClient,
-    input: {
-      readonly userId: string;
-      readonly idempotencyKey: string;
-      readonly sector: SectorRow;
-      readonly keyId: string | null;
-    },
-  ): Promise<{
-    readonly status: WheelSpinStatus;
-    readonly outcome: Prisma.InputJsonObject | null;
-    readonly syncSubscriptionId: string | null;
-    readonly spinBalanceAfter: number | null;
-  }> {
-    const { sector } = input;
-
-    switch (sector.kind) {
-      case WheelSectorKind.NOTHING:
-        return { status: WheelSpinStatus.EMPTY, outcome: null, syncSubscriptionId: null, spinBalanceAfter: null };
-
-      case WheelSectorKind.MANUAL:
-        // Recorded as owed, not paid. A jackpot the operator settles by hand
-        // is the one prize this system must not pretend to have delivered.
-        return {
-          status: WheelSpinStatus.PENDING,
-          outcome: { manual: true, instructions: sector.manualInstructions ?? '' },
-          syncSubscriptionId: null,
-          spinBalanceAfter: null,
-        };
-
-      case WheelSectorKind.KEY:
-        return {
-          status: WheelSpinStatus.SETTLED,
-          outcome: { keyId: input.keyId, poolId: sector.keyPoolId },
-          syncSubscriptionId: null,
-          spinBalanceAfter: null,
-        };
-
-      case WheelSectorKind.SPINS: {
-        const credited = await this.spinWallet.apply(tx, {
-          userId: input.userId,
-          delta: sector.amount,
-          source: SpinLedgerSource.WHEEL_PRIZE,
-          referenceKey: input.idempotencyKey,
-          details: { sectorId: sector.id, spinRequestKey: input.idempotencyKey },
-        });
-        if (!credited.applied) {
-          throw new Error(`Won spins were not credited (${credited.reason})`);
-        }
-        return {
-          status: WheelSpinStatus.SETTLED,
-          outcome: { spins: sector.amount, balanceAfter: credited.balanceAfter },
-          syncSubscriptionId: null,
-          spinBalanceAfter: credited.balanceAfter,
-        };
-      }
-
-      // Named one by one rather than gathered into a `default`, so that adding
-      // a tenth sector kind is a compile error here instead of a value quietly
-      // cast into a reward the applier has never heard of.
-      case WheelSectorKind.POINTS:
-      case WheelSectorKind.DAYS:
-      case WheelSectorKind.TRAFFIC:
-      case WheelSectorKind.DISCOUNT:
-      case WheelSectorKind.PROMOCODE: {
-        const applied = await this.rewardGrant.apply(tx, {
-          userId: input.userId,
-          grant: grantFor(sector.kind, sector),
-          origin: {
-            pointsSource: PointsLedgerSource.QUEST_REWARD,
-            referenceKey: input.idempotencyKey,
-            details: { source: 'WHEEL', sectorId: sector.id },
-            codePrefix: 'WHEEL-',
-          },
-        });
-        return {
-          status: WheelSpinStatus.SETTLED,
-          outcome: {
-            ...(applied.points === undefined ? {} : { points: applied.points }),
-            ...(applied.days === undefined ? {} : { days: applied.days }),
-            ...(applied.trafficGb === undefined ? {} : { trafficGb: applied.trafficGb }),
-            ...(applied.discountPercent === undefined ? {} : { discountPercent: applied.discountPercent }),
-            ...(applied.promoCode === undefined ? {} : { promoCode: applied.promoCode }),
-          },
-          syncSubscriptionId: applied.syncSubscriptionId,
-          spinBalanceAfter: null,
-        };
-      }
-    }
   }
 
   private async readSpin(userId: string, idempotencyKey: string): Promise<SpinRecord | null> {
@@ -589,42 +462,6 @@ export class WheelSpinService {
       this.logger.debug(`Wheel prize changed subscription ${post.syncSubscriptionId}`);
     }
   }
-}
-
-/** The five kinds the shared applier already knows how to give. */
-const REWARD_KIND_OF: Readonly<Record<GrantableKind, RewardKind>> = {
-  [WheelSectorKind.POINTS]: 'POINTS',
-  [WheelSectorKind.DAYS]: 'DAYS',
-  [WheelSectorKind.TRAFFIC]: 'TRAFFIC',
-  [WheelSectorKind.DISCOUNT]: 'DISCOUNT',
-  [WheelSectorKind.PROMOCODE]: 'PROMOCODE',
-};
-
-type GrantableKind =
-  | typeof WheelSectorKind.POINTS
-  | typeof WheelSectorKind.DAYS
-  | typeof WheelSectorKind.TRAFFIC
-  | typeof WheelSectorKind.DISCOUNT
-  | typeof WheelSectorKind.PROMOCODE;
-
-function grantFor(kind: GrantableKind, sector: SectorRow): RewardGrant {
-  if (kind !== WheelSectorKind.PROMOCODE) {
-    return { kind: REWARD_KIND_OF[kind], amount: sector.amount, planId: null };
-  }
-  return {
-    kind: 'PROMOCODE',
-    amount: sector.amount,
-    planId: sector.promoPlanId,
-    ...(sector.promoRewardType === null
-      ? {}
-      : {
-          promo: {
-            rewardType: sector.promoRewardType,
-            allowedPlanIds: sector.promoPlanIds,
-            lifetimeDays: sector.promoLifetime,
-          },
-        }),
-  };
 }
 
 /**

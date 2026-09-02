@@ -414,6 +414,8 @@ enum PointsCashbackMode {
 enum SpinLedgerSource {
   /// Won from a wheel sector that pays spins.
   WHEEL_PRIZE
+  /// Won in a contest draw.
+  CONTEST_PRIZE
   /// Bought with points.
   PURCHASED
   /// Consumed by a spin.
@@ -460,6 +462,23 @@ enum WheelRarity {
   LEGENDARY
 }
 
+/// Where a contest is in its life.
+///
+/// There is no ENDED between ACTIVE and DRAWN on purpose: "ended, waiting
+/// for the draw" is ACTIVE with `endAt` in the past, and the draw runs
+/// within the minute. A status that a sweep flips and nothing else reads
+/// would be one more thing to keep in step.
+enum ContestStatus {
+  /// Being written. Prizes and dates may still change; nobody can enter.
+  DRAFT
+  /// Open for entries until `endAt`, then waiting for the draw.
+  ACTIVE
+  /// The draw has run. Winners exist, prizes are paid or owed.
+  DRAWN
+  /// Called off before the draw. Entries stay for the record; nothing is paid.
+  CANCELLED
+}
+
 /// How a spin was paid for. Written on the spin because the free one leaves
 /// no row in the spin ledger to say so.
 enum WheelSpinPayment {
@@ -497,6 +516,10 @@ enum PointsLedgerSource {
   REFERRAL_REWARD
   REFERRAL_REWARD_REVOKED
   QUEST_REWARD
+  /// Won on the wheel.
+  WHEEL_PRIZE
+  /// Won in a contest draw.
+  CONTEST_PRIZE
   EXCHANGE
   MANUAL_ADJUSTMENT
   ACCOUNT_MERGE
@@ -1575,6 +1598,8 @@ model User {
   spinLedger              SpinLedgerEntry[]        @relation("UserSpinLedger")
   wheelSpins              WheelSpin[]              @relation("UserWheelSpins")
   wheelKeys               WheelKey[]               @relation("UserWheelKeys")
+  contestEntries          ContestEntry[]           @relation("UserContestEntries")
+  contestWins             ContestWinner[]          @relation("UserContestWins")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
   partnerReferrals        PartnerReferral[]        @relation("PartnerReferralUser")
@@ -4848,8 +4873,9 @@ model WheelKeyPool {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  keys    WheelKey[]    @relation("WheelKeyPoolKeys")
-  sectors WheelSector[] @relation("WheelKeyPoolSectors")
+  keys          WheelKey[]     @relation("WheelKeyPoolKeys")
+  sectors       WheelSector[]  @relation("WheelKeyPoolSectors")
+  contestPrizes ContestPrize[] @relation("ContestPrizeKeyPool")
 
   @@map("wheel_key_pools")
 }
@@ -4868,13 +4894,16 @@ model WheelKey {
   /// NULL while the key is still in the pool.
   claimedByUserId String?   @map("claimed_by_user_id")
   claimedSpinId   String?   @unique @map("claimed_spin_id")
+  /// The contest winner this key went to, when it went out in a draw rather than on the wheel.
+  claimedWinnerId String?   @unique @map("claimed_winner_id")
   claimedAt       DateTime? @map("claimed_at") @db.Timestamptz(3)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  pool          WheelKeyPool @relation("WheelKeyPoolKeys", fields: [poolId], references: [id], onDelete: Cascade)
-  claimedByUser User?        @relation("UserWheelKeys", fields: [claimedByUserId], references: [id], onDelete: SetNull)
-  claimedSpin   WheelSpin?   @relation("WheelSpinKey", fields: [claimedSpinId], references: [id], onDelete: SetNull)
+  pool          WheelKeyPool   @relation("WheelKeyPoolKeys", fields: [poolId], references: [id], onDelete: Cascade)
+  claimedByUser User?          @relation("UserWheelKeys", fields: [claimedByUserId], references: [id], onDelete: SetNull)
+  claimedSpin   WheelSpin?     @relation("WheelSpinKey", fields: [claimedSpinId], references: [id], onDelete: SetNull)
+  claimedWinner ContestWinner? @relation("ContestWinnerKey", fields: [claimedWinnerId], references: [id], onDelete: SetNull)
 
   /// The same secret cannot be loaded into one pool twice - a paste repeated
   /// by an operator would otherwise hand two people the same key.
@@ -4942,4 +4971,126 @@ model WheelSpin {
   /// The ticket a spin belongs to, for the reverse lookup from a conversation.
   @@index([manualTicketId])
   @@map("wheel_spins")
+}
+
+/// ---------------------------------------------------------------------------
+/// CONTESTS - an event with a draw at the end
+/// ---------------------------------------------------------------------------
+
+/// A time-boxed event people enter, with a draw when it closes.
+///
+/// The wheel is the PERMANENT event; this is the temporary kind. What the two
+/// share is the prize vocabulary (`WheelSectorKind`), the payout, and the
+/// operator's settlement of prizes a human hands over - deliberately, so a
+/// jackpot won on Friday's contest lands in the same queue as one won on the
+/// wheel.
+model Contest {
+  id             String        @id @default(cuid()) @map("id")
+  /// Localized copy: { ru, en }.
+  title          Json          @default("{}") @map("title")
+  description    Json          @default("{}") @map("description")
+  status         ContestStatus @default(DRAFT) @map("status")
+  startAt        DateTime      @map("start_at") @db.Timestamptz(3)
+  /// When entries close and the draw is due.
+  endAt          DateTime      @map("end_at") @db.Timestamptz(3)
+  /// Who may enter, in the broadcast filter shape. NULL = anybody not blocked.
+  audienceFilter Json?         @map("audience_filter")
+  /// Ceiling on entries. NULL = unlimited.
+  maxEntries     Int?          @map("max_entries")
+  drawnAt        DateTime?     @map("drawn_at") @db.Timestamptz(3)
+  /// How many had entered when the draw ran - the denominator every winner's
+  /// odds were, kept because the entries can be pruned later.
+  drawnEntries   Int?          @map("drawn_entries")
+  order          Int           @default(0) @map("order")
+  createdBy      String?       @map("created_by")
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  prizes  ContestPrize[]  @relation("ContestPrizes")
+  entries ContestEntry[]  @relation("ContestEntries")
+  winners ContestWinner[] @relation("ContestWinners")
+
+  @@index([status, endAt])
+  @@index([status, order])
+  @@map("contests")
+}
+
+/// One place in a contest and what it wins. A sector without a weight: the
+/// draw decides who, the place decides what.
+model ContestPrize {
+  id        String          @id @default(cuid()) @map("id")
+  contestId String          @map("contest_id")
+  /// 1 is first prize. Unique per contest, so a draw hands each place out once.
+  place     Int             @map("place")
+  kind      WheelSectorKind @map("kind")
+  title     Json            @default("{}") @map("title")
+  amount    Int             @default(0) @map("amount")
+
+  promoRewardType    PromocodeRewardType? @map("promo_reward_type")
+  promoPlanId        String?              @map("promo_plan_id")
+  promoPlanIds       String[]             @default([]) @map("promo_plan_ids")
+  promoLifetime      Int?                 @map("promo_lifetime")
+  keyPoolId          String?              @map("key_pool_id")
+  manualInstructions String?              @map("manual_instructions")
+
+  contest Contest         @relation("ContestPrizes", fields: [contestId], references: [id], onDelete: Cascade)
+  keyPool WheelKeyPool?   @relation("ContestPrizeKeyPool", fields: [keyPoolId], references: [id], onDelete: SetNull)
+  winners ContestWinner[] @relation("ContestWinnerPrize")
+
+  @@unique([contestId, place])
+  @@index([keyPoolId])
+  @@map("contest_prizes")
+}
+
+/// One person's entry. One per contest: the draw is uniform over people, not
+/// over tickets, so nobody can buy their way to better odds.
+model ContestEntry {
+  id        String   @id @default(cuid()) @map("id")
+  contestId String   @map("contest_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  contest Contest @relation("ContestEntries", fields: [contestId], references: [id], onDelete: Cascade)
+  user    User    @relation("UserContestEntries", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([contestId, userId])
+  @@index([userId])
+  @@map("contest_entries")
+}
+
+/// Who won which place, and what became of the prize.
+///
+/// The settlement columns are the wheel spin's, name for name, because the
+/// operator's queue of "prizes a human hands over" is one queue however the
+/// prize was won.
+model ContestWinner {
+  id            String          @id @default(cuid()) @map("id")
+  contestId     String          @map("contest_id")
+  userId        String          @map("user_id")
+  prizeId       String?         @map("prize_id")
+  place         Int             @map("place")
+  /// What the prize WAS when it was won, so editing it later rewrites nothing.
+  prizeSnapshot Json            @map("prize_snapshot")
+  kind          WheelSectorKind @map("kind")
+  status        WheelSpinStatus @map("status")
+  outcome       Json?           @map("outcome")
+
+  settledAt      DateTime? @map("settled_at") @db.Timestamptz(3)
+  settledBy      String?   @map("settled_by")
+  settlementNote String?   @map("settlement_note")
+  manualTicketId String?   @map("manual_ticket_id")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  contest Contest       @relation("ContestWinners", fields: [contestId], references: [id], onDelete: Cascade)
+  user    User          @relation("UserContestWins", fields: [userId], references: [id], onDelete: Cascade)
+  prize   ContestPrize? @relation("ContestWinnerPrize", fields: [prizeId], references: [id], onDelete: SetNull)
+  key     WheelKey?     @relation("ContestWinnerKey")
+
+  /// Each place goes to one person, and one person takes one place.
+  @@unique([contestId, place])
+  @@unique([contestId, userId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([manualTicketId])
+  @@map("contest_winners")
 }

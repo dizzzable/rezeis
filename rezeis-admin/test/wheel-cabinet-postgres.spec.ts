@@ -6,6 +6,7 @@ import { Prisma, WheelSectorKind, WheelSpinStatus } from '@prisma/client';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
+import { PrizePayoutService } from '../src/modules/wheel/services/prize-payout.service';
 import { SpinWalletService } from '../src/modules/wheel/services/spin-wallet.service';
 import { WheelSpinService } from '../src/modules/wheel/services/wheel-spin.service';
 import { WheelCabinetService } from '../src/modules/wheel-cabinet/services/wheel-cabinet.service';
@@ -86,7 +87,7 @@ run('the wheel cabinet contract on PostgreSQL', () => {
     spinService = new WheelSpinService(
       prisma,
       spinWallet,
-      new RewardGrantService(pointsWallet),
+      new PrizePayoutService(spinWallet, new RewardGrantService(pointsWallet)),
     );
     cabinet = new WheelCabinetService(prisma, spinService, spinWallet, pointsWallet);
     config = new WheelSectorService(prisma);

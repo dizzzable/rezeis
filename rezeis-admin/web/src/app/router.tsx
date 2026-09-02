@@ -129,6 +129,7 @@ const ReferralSettingsPage = lazy(() => import('@/features/settings/referral-set
 const PointsSettingsPage = lazy(() => import('@/features/settings/points-settings-page'));
 const QuestsPage = lazy(() => import('@/features/quests/quests-page'));
 const WheelConfigPage = lazy(() => import('@/features/wheel/wheel-config-page'));
+const ContestsPage = lazy(() => import('@/features/wheel/contests-page'));
 const WheelPrizesPage = lazy(() => import('@/features/wheel/wheel-prizes-page'));
 const WheelKeysPage = lazy(() => import('@/features/wheel/wheel-keys-page'));
 const PartnerSettingsPage = lazy(() => import('@/features/settings/partner-settings-page'));
@@ -237,6 +238,7 @@ export const router = createBrowserRouter([
           { path: 'advertising', element: withSuspense(<AdvertisingPage />) },
           { path: 'quests', element: withSuspense(<QuestsPage />) },
           { path: 'wheel', element: withSuspense(<WheelConfigPage />) },
+          { path: 'contests', element: withSuspense(<ContestsPage />) },
           { path: 'wheel/prizes', element: withSuspense(<WheelPrizesPage />) },
           { path: 'wheel/keys', element: withSuspense(<WheelKeysPage />) },
           { path: 'automations', element: withSuspense(<AutomationsPage />) },

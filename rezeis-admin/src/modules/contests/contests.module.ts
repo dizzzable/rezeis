@@ -1,20 +1,27 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
-import { ContestsService } from './services/contests.service';
+import { SupportTicketsModule } from '../support-tickets/support-tickets.module';
+import { WheelModule } from '../wheel/wheel.module';
+import { AdminContestsController } from './controllers/admin-contests.controller';
+import { InternalContestsController } from './controllers/internal-contests.controller';
+import { ContestReconcilerService } from './services/contest-reconciler.service';
+import { ContestService } from './services/contest.service';
+import { ContestWinnerService } from './services/contest-winner.service';
 
 /**
- * Contests / Giveaway module — manages time-limited promotional events
- * where users can win prizes (subscription days, traffic, gift codes).
+ * Contests — an event with a draw at the end.
  *
- * This is a new feature not present in the altshop donor. The module
- * provides the backend contract for the admin UI to create/manage contests
- * and for the public ruid edge to display active contests and record
- * participation.
+ * The temporary sibling of the wheel, and built out of the wheel's parts on
+ * purpose: `WheelModule` for the payout (the same nine prize kinds, the same
+ * journals), `SupportTicketsModule` for the conversation a manual prize is
+ * settled in. What is the contest's own — entering, the draw, the places —
+ * lives here.
  */
 @Module({
-  imports: [AuthModule],
-  providers: [ContestsService],
-  exports: [ContestsService],
+  imports: [AuthModule, WheelModule, SupportTicketsModule],
+  controllers: [AdminContestsController, InternalContestsController],
+  providers: [ContestService, ContestWinnerService, ContestReconcilerService],
+  exports: [ContestService, ContestWinnerService],
 })
 export class ContestsModule {}

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { RewardsModule } from '../rewards/rewards.module';
+import { PrizePayoutService } from './services/prize-payout.service';
 import { SpinWalletService } from './services/spin-wallet.service';
 import { WheelSpinService } from './services/wheel-spin.service';
 
@@ -18,7 +19,7 @@ import { WheelSpinService } from './services/wheel-spin.service';
  */
 @Module({
   imports: [RewardsModule],
-  providers: [SpinWalletService, WheelSpinService],
-  exports: [SpinWalletService, WheelSpinService],
+  providers: [SpinWalletService, PrizePayoutService, WheelSpinService],
+  exports: [SpinWalletService, PrizePayoutService, WheelSpinService],
 })
 export class WheelModule {}

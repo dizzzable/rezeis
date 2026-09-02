@@ -5,6 +5,7 @@ import { Test } from '@nestjs/testing';
 
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
+import { PrizePayoutService } from '../src/modules/wheel/services/prize-payout.service';
 import { SpinWalletService } from '../src/modules/wheel/services/spin-wallet.service';
 import { WheelSpinService } from '../src/modules/wheel/services/wheel-spin.service';
 import { WHEEL_OFF, readWheelSettings } from '../src/modules/wheel/wheel-settings.util';
@@ -64,12 +65,15 @@ describe('the wheel module stays a leaf', () => {
 
     const spin = moduleRef.get(WheelSpinService) as unknown as {
       spinWallet?: unknown;
-      rewardGrant?: unknown;
+      payout?: unknown;
     };
     assert.ok(spin.spinWallet instanceof SpinWalletService);
-    assert.ok(spin.rewardGrant instanceof RewardGrantService);
+    assert.ok(spin.payout instanceof PrizePayoutService);
+    const payout = spin.payout as unknown as { spinWallet?: unknown; rewardGrant?: unknown };
+    assert.ok(payout.spinWallet instanceof SpinWalletService);
+    assert.ok(payout.rewardGrant instanceof RewardGrantService);
     assert.ok(
-      (spin.rewardGrant as unknown as { pointsWallet?: unknown }).pointsWallet instanceof
+      (payout.rewardGrant as unknown as { pointsWallet?: unknown }).pointsWallet instanceof
         PointsWalletService,
       'and the applier got the real points wallet, so the one-writer rule holds',
     );

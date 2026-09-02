@@ -18,6 +18,7 @@ import {
   Megaphone,
   Trophy,
   CircleDot,
+  Dices,
   Gift,
   KeyRound,
   Settings,
@@ -133,6 +134,12 @@ export const navGroups: ReadonlyArray<NavGroup> = [
         key: 'wheel',
         path: '/wheel',
         icon: CircleDot,
+        requiredPermission: { resource: 'wheel', action: 'view' },
+      },
+      {
+        key: 'contests',
+        path: '/contests',
+        icon: Dices,
         requiredPermission: { resource: 'wheel', action: 'view' },
       },
       {
