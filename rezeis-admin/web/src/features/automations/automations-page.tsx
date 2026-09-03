@@ -20,6 +20,7 @@ import {
   Clock,
   Lightbulb,
   Loader2,
+  MessageSquare,
   PlayCircle,
   Plus,
   Sparkles,
@@ -105,6 +106,9 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
  * a draft (not saved until the operator reviews + presses Create). `textKey`
  * lets the seed Telegram message be localized at apply time.
  */
+import { HINT_TEMPLATES, buildHint, buildHintAction, type HintTemplate } from './hint-templates';
+import { createUserHint, updateUserHint } from '@/features/user-hints/user-hints-api';
+
 interface RuleTemplate {
   readonly id: string;
   readonly triggerKind: AutomationTriggerKind;
@@ -193,6 +197,40 @@ export default function AutomationsPage() {
     setSelectedId('__new__');
   }
 
+  /**
+   * A pop-up template creates BOTH halves, because neither half works alone.
+   *
+   * The hint is written immediately (it is inert until something fires it), and
+   * the rule opens as a draft the operator still has to press Create on — so
+   * nothing reaches a customer without a review, and the operator never meets
+   * the failure where a rule fires a hint key that does not exist.
+   *
+   * An existing hint with the same key is UPDATED rather than duplicated: keys
+   * are what a rule points at, so a second one would be unreachable, and the
+   * operator applying a template twice means "give me the stock text back".
+   */
+  const applyHintTemplate = useMutation({
+    mutationFn: async (template: HintTemplate) => {
+      const payload = buildHint(template, (key) => String(t(key)));
+      const existing = (await listUserHints()).find((hint) => hint.key === template.hintKey);
+      return existing === undefined
+        ? createUserHint(payload)
+        : updateUserHint(existing.id, payload);
+    },
+    onSuccess: (hint, template) => {
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'user-hints'] });
+      openDraft({
+        name: t(`automationsPage.hintTemplates.${template.id}.name`),
+        description: t(`automationsPage.hintTemplates.${template.id}.description`),
+        triggerKind: 'REALTIME',
+        triggerSpec: template.triggerSpec,
+        actions: buildHintAction(template),
+      });
+      toast.success(t('automationsPage.hintTemplates.created', { title: hint.titleRu }));
+    },
+    onError: () => toast.error(t('automationsPage.hintTemplates.failed')),
+  });
+
   function useTemplate(template: RuleTemplate) {
     openDraft({
       name: t(`automationsPage.templates.${template.id}.name`),
@@ -249,7 +287,13 @@ export default function AutomationsPage() {
 
       {activeTab === 'hints' && <UserHintsTab />}
 
-      {activeTab === 'rules' && <HelpAndTemplates onUseTemplate={useTemplate} />}
+      {activeTab === 'rules' && (
+        <HelpAndTemplates
+          onUseTemplate={useTemplate}
+          onUseHintTemplate={(template) => applyHintTemplate.mutate(template)}
+          hintTemplatePending={applyHintTemplate.isPending}
+        />
+      )}
 
       {activeTab === 'rules' && rulesQuery.error && (
         <Alert variant="destructive">
@@ -310,7 +354,15 @@ export default function AutomationsPage() {
  * and action types, shows example use-cases, and offers one-click templates
  * that open the editor pre-filled (unsaved until reviewed).
  */
-function HelpAndTemplates({ onUseTemplate }: { onUseTemplate: (template: RuleTemplate) => void }) {
+function HelpAndTemplates({
+  onUseTemplate,
+  onUseHintTemplate,
+  hintTemplatePending,
+}: {
+  onUseTemplate: (template: RuleTemplate) => void;
+  onUseHintTemplate: (template: HintTemplate) => void;
+  hintTemplatePending: boolean;
+}) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
 
@@ -412,6 +464,45 @@ function HelpAndTemplates({ onUseTemplate }: { onUseTemplate: (template: RuleTem
                     </p>
                     <code className="mb-2 truncate text-[10px] text-muted-foreground">{tpl.triggerSpec}</code>
                     <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onUseTemplate(tpl)}>
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                      {t('automationsPage.help.useTemplate')}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Pop-ups, separate from the rule templates above because they
+                create two things rather than one, and because an operator
+                looking for "show the customer something" is not looking for
+                "notify me in Telegram". */}
+            <div className="space-y-2">
+              <p className="flex items-center gap-1.5 text-xs font-semibold">
+                <MessageSquare className="h-3.5 w-3.5 text-primary" />
+                {t('automationsPage.hintTemplates.title')}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {t('automationsPage.hintTemplates.subtitle')}
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {HINT_TEMPLATES.map((tpl) => (
+                  <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
+                    <p className="text-xs font-medium">
+                      {t(`automationsPage.hintTemplates.${tpl.id}.name`)}
+                    </p>
+                    <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
+                      {t(`automationsPage.hintTemplates.${tpl.id}.description`)}
+                    </p>
+                    <code className="mb-2 truncate text-[10px] text-muted-foreground">
+                      {tpl.triggerSpec}
+                    </code>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      disabled={hintTemplatePending}
+                      onClick={() => onUseHintTemplate(tpl)}
+                    >
                       <Plus className="mr-1.5 h-3.5 w-3.5" />
                       {t('automationsPage.help.useTemplate')}
                     </Button>

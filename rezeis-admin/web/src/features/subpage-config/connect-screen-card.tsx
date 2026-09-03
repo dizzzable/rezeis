@@ -22,6 +22,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { usePermissionStore } from '@/features/rbac/use-permission-store';
 
 const CONNECT_PAGE_KEYS = { all: ['admin', 'connect-page'] as const } as const;
 
@@ -62,6 +63,7 @@ const connectPageApi = {
 export function ConnectScreenCard(): JSX.Element {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const canEdit = usePermissionStore((state) => state.hasPermission('subpage_config', 'edit'));
 
   const { data, isLoading } = useQuery({
     queryKey: CONNECT_PAGE_KEYS.all,
@@ -109,7 +111,7 @@ export function ConnectScreenCard(): JSX.Element {
             </div>
             <Switch
               checked={enabled}
-              disabled={toggle.isPending}
+              disabled={toggle.isPending || !canEdit}
               onCheckedChange={(next) => toggle.mutate(next)}
               aria-label={t('connectScreen.label')}
             />

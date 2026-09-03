@@ -201,5 +201,7 @@ export const en = {
     retry: 'Retry',
     corruptedTitle: 'The saved catalog cannot be read',
     corruptedHint: 'What is shown below is the built-in default, NOT yours. Saving will overwrite the stored one. Reason: {{reason}}',
+    readOnlyTitle: 'Read only',
+    readOnlyHint: 'Editing the catalog needs the {{token}} permission. Quote it to whoever administers roles.',
   },
 };

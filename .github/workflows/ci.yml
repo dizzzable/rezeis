@@ -175,3 +175,4 @@ jobs:
           test/wheel-manual-prize-postgres.spec.ts
           test/wheel-cabinet-postgres.spec.ts
           test/contests-postgres.spec.ts
+          test/connect-page-postgres.spec.ts

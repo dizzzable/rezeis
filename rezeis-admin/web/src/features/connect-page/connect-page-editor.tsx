@@ -56,6 +56,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import { usePermissionStore } from '@/features/rbac/use-permission-store';
 
 import {
   BUTTON_KINDS,
@@ -84,6 +85,14 @@ import {
 export function ConnectPageEditor(): JSX.Element {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  // The server gates `validate` and the save on `subpage_config:edit` while the
+  // page itself only needs `view`. Rendering a live editor to a role that
+  // cannot save it means half an hour of work and then a 403 with nothing in
+  // it that names the missing token — and, because the draft lives in this
+  // component, nothing left afterwards either. The convention in this panel is
+  // to refuse in words rather than hide, so the operator can quote the token to
+  // whoever administers roles.
+  const canEdit = usePermissionStore((state) => state.hasPermission('subpage_config', 'edit'));
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: CONNECT_PAGE_KEYS.all,
@@ -175,6 +184,30 @@ export function ConnectPageEditor(): JSX.Element {
 
   const usedPlatformIds = config.platforms.map((platform) => platform.id);
   const freePlatformIds = PLATFORM_IDS.filter((id) => !usedPlatformIds.includes(id));
+
+  if (!canEdit) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <AlertTriangle className="h-4 w-4" />
+            {t('connectPageEditor.readOnlyTitle')}
+          </CardTitle>
+          <CardDescription>
+            {t('connectPageEditor.readOnlyHint', { token: 'subpage_config:edit' })}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            {t('connectPageEditor.summary', {
+              platforms: config.platforms.length,
+              apps: config.platforms.reduce((sum, platform) => sum + platform.apps.length, 0),
+            })}
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-4">
