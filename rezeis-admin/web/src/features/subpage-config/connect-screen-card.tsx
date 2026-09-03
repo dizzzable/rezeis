@@ -44,9 +44,18 @@ const connectPageApi = {
     const response = await api.get('/admin/connect-page');
     return z.object({ config: connectPageSchema, stored: z.boolean() }).parse(response.data);
   },
-  async replace(config: ConnectPageConfig): Promise<ConnectPageConfig> {
-    const response = await api.put('/admin/connect-page', { config });
-    return z.object({ config: connectPageSchema }).passthrough().parse(response.data).config;
+  /**
+   * Writes the switch and NOTHING else.
+   *
+   * It used to PUT the whole config back with one boolean changed, which meant
+   * the first flick froze the built-in default catalog into the database
+   * forever — no later improvement to it would ever reach this install — and a
+   * catalog draft branched before the flick silently turned the screen off
+   * again on the next save. The switch has its own row and its own endpoint.
+   */
+  async setEnabled(enabled: boolean): Promise<boolean> {
+    const response = await api.put('/admin/connect-page/enabled', { enabled });
+    return z.object({ enabled: z.boolean() }).parse(response.data).enabled;
   },
 };
 
@@ -62,8 +71,7 @@ export function ConnectScreenCard(): JSX.Element {
   const toggle = useMutation({
     // The whole config goes back, not a patch: the API replaces it, and sending
     // only the flag would wipe the catalog the operator spent an hour on.
-    mutationFn: (enabled: boolean) =>
-      connectPageApi.replace({ ...(data?.config ?? {}), connectScreenEnabled: enabled }),
+    mutationFn: (enabled: boolean) => connectPageApi.setEnabled(enabled),
     onSuccess: (_config, enabled) => {
       void queryClient.invalidateQueries({ queryKey: CONNECT_PAGE_KEYS.all });
       toast.success(
@@ -74,6 +82,9 @@ export function ConnectScreenCard(): JSX.Element {
   });
 
   const enabled = data?.config.connectScreenEnabled === true;
+  // "Unknown" is not "off". A failed read used to render a confident off
+  // position for a switch nobody had touched.
+  const unknown = !isLoading && data === undefined;
 
   return (
     <Card>
@@ -86,6 +97,8 @@ export function ConnectScreenCard(): JSX.Element {
       <CardContent>
         {isLoading ? (
           <Skeleton className="h-12 w-full" />
+        ) : unknown ? (
+          <p className="text-sm text-muted-foreground">{t('connectScreen.unknown')}</p>
         ) : (
           <div className="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/30 p-3">
             <div className="space-y-0.5">

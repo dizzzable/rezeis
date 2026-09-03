@@ -39,12 +39,12 @@ export type LocalizedText = z.infer<typeof localizedText>;
 
 const buttonSchema = z
   .object({
-    kind: z.enum(BUTTON_KINDS),
+    kind: z.string(),
     label: localizedText,
     url: z.string().optional(),
     template: z.string().optional(),
     /** Derived by the server; shown, never edited. */
-    encode: z.enum(['raw', 'component']).optional(),
+    encode: z.string().optional(),
   })
   .passthrough();
 export type ConnectButton = z.infer<typeof buttonSchema>;
@@ -82,9 +82,10 @@ export type ConnectPlatform = z.infer<typeof platformSchema>;
 
 export const connectPageConfigSchema = z
   .object({
-    version: z.literal(2),
-    connectScreenEnabled: z.boolean(),
-    showConnectionKeys: z.boolean(),
+    // Not `z.literal(2)`: a version this editor has not met should not turn the
+    // whole page into a permanent skeleton.
+    version: z.number(),
+    connectScreenEnabled: z.boolean().optional(),
     icons: z.record(z.string(), z.string()),
     platforms: z.array(platformSchema),
   })
@@ -101,16 +102,25 @@ const issueSchema = z.object({ path: z.string(), message: z.string() });
 export const CONNECT_PAGE_KEYS = { all: ['admin', 'connect-page'] as const } as const;
 
 export const connectPageApi = {
-  async get(): Promise<{ config: ConnectPageConfig; stored: boolean }> {
+  async get(): Promise<{ config: ConnectPageConfig; stored: boolean; corrupted: string | null }> {
     const response = await api.get('/admin/connect-page');
     return z
-      .object({ config: connectPageConfigSchema, stored: z.boolean() })
+      .object({
+        config: connectPageConfigSchema,
+        stored: z.boolean(),
+        // Present but unreadable is NOT the same as never saved: both hand back
+        // the built-in default, and editing what looks like your catalog and
+        // pressing Save destroys the real one.
+        corrupted: z.string().nullable().catch(null),
+      })
       .parse(response.data);
   },
 
   async validate(config: ConnectPageConfig): Promise<{ ok: boolean; issues: ConnectPageIssue[] }> {
     const response = await api.post('/admin/connect-page/validate', { config });
-    return z.object({ ok: z.boolean(), issues: z.array(issueSchema) }).parse(response.data);
+    return z
+      .object({ ok: z.boolean(), issues: z.array(issueSchema) })
+      .parse(response.data);
   },
 
   async replace(config: ConnectPageConfig): Promise<{
@@ -211,7 +221,11 @@ export const emptyButton = (kind: ButtonKind): ConnectButton => ({
 
 export const emptyStep = (): ConnectStep => ({
   title: { ru: '', en: '' },
-  body: { ru: '', en: '' },
+  // `null`, not an empty pair. A description is optional, but an empty object
+  // is a PRESENT value that fails "at least one language must carry text" — so
+  // every newly added step was unsaveable until something was typed into a
+  // field the operator had no reason to fill.
+  body: null,
   iconKey: null,
   buttons: [],
 });

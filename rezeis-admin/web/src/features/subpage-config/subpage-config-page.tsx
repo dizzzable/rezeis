@@ -190,7 +190,12 @@ export default function SubpageConfigPage() {
         {/* The cabinet's own screen. The tabs after it configure the EXTERNAL
             subscription page, which is a different product surface — they are
             not two views of one thing. */}
-        <TabsContent value="connect" className="space-y-6 pt-4">
+        {/* `forceMount`: Radix unmounts an inactive tab, and the catalog draft
+            lives in the editor's own state. Glancing at another tab and coming
+            back used to throw away an hour of edits with no warning and no
+            trace. `hidden` keeps it out of the layout and out of the a11y tree
+            while it stays mounted. */}
+        <TabsContent forceMount value="connect" className="space-y-6 pt-4 data-[state=inactive]:hidden">
           <ConnectPageEditor />
         </TabsContent>
 

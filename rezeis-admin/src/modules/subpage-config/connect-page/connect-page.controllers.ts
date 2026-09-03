@@ -32,12 +32,12 @@ export class AdminConnectPageController {
 
   @Get()
   @ApiOperation({ summary: 'Read the connect-screen catalog' })
-  public async get(): Promise<{ config: ConnectPageConfig; stored: boolean }> {
-    const [config, stored] = await Promise.all([
-      this.connectPage.getEffectiveConfig(),
-      this.connectPage.hasStoredConfig(),
-    ]);
-    return { config, stored };
+  public async get(): Promise<{
+    config: ConnectPageConfig;
+    stored: boolean;
+    corrupted: string | null;
+  }> {
+    return this.connectPage.readState();
   }
 
   /**
@@ -51,8 +51,30 @@ export class AdminConnectPageController {
   @HttpCode(HttpStatus.OK)
   @RequirePermission('subpage_config', 'edit')
   @ApiOperation({ summary: 'Validate a draft catalog without storing it' })
-  public validate(@Body() body: unknown): { ok: boolean; issues: readonly ConnectPageIssue[] } {
+  public validate(@Body() body: unknown): {
+    ok: boolean;
+    issues: readonly ConnectPageIssue[];
+    cleanedIcons: Readonly<Record<string, readonly string[]>>;
+  } {
     return this.connectPage.dryRun(unwrap(body));
+  }
+
+  /**
+   * The switch, on its own.
+   *
+   * Separate from the catalog PUT because flicking it must not be an edit of
+   * the catalog: sending the whole config back to change one boolean froze the
+   * built-in default into the database on the first flick, and let a stale
+   * editor draft turn the screen off again on the next save.
+   */
+  @Put('enabled')
+  @RequirePermission('subpage_config', 'edit')
+  @ApiOperation({ summary: 'Turn the cabinet connect screen on or off' })
+  public async setEnabled(@Body() body: unknown): Promise<{ enabled: boolean }> {
+    const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const enabled = await this.connectPage.setEnabled(raw['enabled'] === true);
+    void this.reiwaCache.invalidateConnectPage('connect screen toggled');
+    return { enabled };
   }
 
   @Put()

@@ -22,7 +22,6 @@ import {
 function config(overrides: Partial<ConnectPageConfig> = {}): ConnectPageConfig {
   return {
     version: 2,
-    showConnectionKeys: false,
     icons: { happ: '<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>' },
     platforms: [
       {

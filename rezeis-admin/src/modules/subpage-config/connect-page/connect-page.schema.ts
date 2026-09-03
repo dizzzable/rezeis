@@ -66,6 +66,7 @@ export const MAX_STEPS_PER_APP = 12;
 export const MAX_BUTTONS_PER_STEP = 6;
 export const MAX_TEXT_LENGTH = 2_000;
 export const MAX_URL_LENGTH = 2_000;
+export const MAX_LOCALES = 8;
 export const MAX_ICONS = 200;
 export const MAX_ICON_BYTES = 32 * 1024;
 
@@ -121,7 +122,11 @@ export const localizedTextSchema = z
   .refine(
     (value) => Object.values(value).some((text) => text.trim().length > 0),
     'At least one language must carry text',
-  );
+  )
+  // The one collection in this file that had no count bound, against a header
+  // that says every list is bounded. 676 two-letter codes × 2000 characters is
+  // 1.35 MB from a single label, fetched by every cabinet on every cold start.
+  .refine((value) => Object.keys(value).length <= MAX_LOCALES, `At most ${MAX_LOCALES} languages`);
 
 export type LocalizedText = z.infer<typeof localizedTextSchema>;
 
@@ -135,10 +140,18 @@ const httpUrlSchema = z
   .string()
   .min(1)
   .max(MAX_URL_LENGTH)
-  .refine((value) => {
-    const scheme = schemeOf(value);
-    return scheme === 'http' || scheme === 'https';
-  }, 'A store or download link must be http(s)');
+  // A scheme token is not an address: `https:`, `http://` and
+  // `https://<control chars>` all passed the old check and rendered a button
+  // that goes nowhere. The neighbour (`landing-config.schema.ts`) already
+  // requires a whole URL, and this now matches it.
+  .refine(
+    (value) =>
+      /^https?:\/\/[^\s]+$/i.test(value.trim()) &&
+      // Scanned rather than matched: a control character inside a regular
+      // expression is a lint error here, and the scan says what it means.
+      ![...value].some((ch) => ch.codePointAt(0)! < 0x20),
+    'A store or download link must be a full http(s) address',
+  );
 
 /**
  * A deep-link template: a scheme, and exactly one placeholder.
@@ -159,6 +172,17 @@ const deepLinkTemplateSchema = z
     }
     if (FORBIDDEN_SCHEMES.has(scheme)) {
       ctx.addIssue({ code: 'custom', message: `The scheme "${scheme}:" is not allowed in a link` });
+    }
+    // An `https:` template is not a deep link. It is a browser navigation that
+    // would carry the customer's subscription token to that host in a query
+    // string — the very thing the audit already refuses for a store link — and
+    // inside a Mini App it takes the container with it, with no way back.
+    if (scheme === 'http' || scheme === 'https') {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'A deep link opens an app, not a web page. An http(s) address here would send the subscription link to that site.',
+      });
     }
     const first = value.indexOf(SUBSCRIPTION_LINK_TOKEN);
     if (first === -1) {
@@ -195,19 +219,25 @@ export type LinkEncoding = (typeof LINK_ENCODINGS)[number];
 export function encodingFor(template: string): LinkEncoding {
   const placeholder = template.indexOf(SUBSCRIPTION_LINK_TOKEN);
   if (placeholder === -1) return 'raw';
+  // The fragment ends the query. `app://open?mode=add#{{TOKEN}}` has a `?`
+  // before the placeholder and the placeholder is nowhere near the query
+  // string — encoding it there hands the app a percent-encoded blob where it
+  // expects an address. Anything after `#` is a fragment and takes path rules.
+  const fragment = template.indexOf('#');
+  if (fragment !== -1 && fragment < placeholder) return 'raw';
   const query = template.indexOf('?');
   return query !== -1 && query < placeholder ? 'component' : 'raw';
 }
 
 // ── Buttons ──────────────────────────────────────────────────────────────────
 
-const externalButtonSchema = z.object({
+const externalButtonSchema = z.strictObject({
   kind: z.literal('external'),
   label: localizedTextSchema,
   url: httpUrlSchema,
 });
 
-const deepLinkButtonSchema = z.object({
+const deepLinkButtonSchema = z.strictObject({
   kind: z.literal('deepLink'),
   label: localizedTextSchema,
   template: deepLinkTemplateSchema,
@@ -222,7 +252,7 @@ const deepLinkButtonSchema = z.object({
  * and a catalog that could name one would be a catalog that could name somebody
  * else's.
  */
-const copyLinkButtonSchema = z.object({
+const copyLinkButtonSchema = z.strictObject({
   kind: z.literal('copyLink'),
   label: localizedTextSchema,
 });
@@ -237,7 +267,7 @@ export type ConnectPageButton = z.infer<typeof buttonSchema>;
 
 // ── Steps, apps, platforms ───────────────────────────────────────────────────
 
-export const stepSchema = z.object({
+export const stepSchema = z.strictObject({
   title: localizedTextSchema,
   body: localizedTextSchema.nullable().optional(),
   iconKey: slugSchema.nullable().optional(),
@@ -246,7 +276,7 @@ export const stepSchema = z.object({
 
 export type ConnectPageStep = z.infer<typeof stepSchema>;
 
-export const appSchema = z.object({
+export const appSchema = z.strictObject({
   /** Stable, never shown. Remembering a customer's choice hangs off this. */
   id: slugSchema,
   /** A product name, deliberately not localized — "Hiddify" is "Hiddify". */
@@ -259,7 +289,7 @@ export const appSchema = z.object({
 
 export type ConnectPageApp = z.infer<typeof appSchema>;
 
-export const platformSchema = z.object({
+export const platformSchema = z.strictObject({
   id: z.enum(PLATFORM_IDS),
   title: localizedTextSchema,
   iconKey: slugSchema.nullable().optional(),
@@ -277,7 +307,10 @@ export const connectPageConfigSchema = z
      * Ordered, and the order is the operator's. An object keyed by platform
      * would put the order at the mercy of whatever serializes it next.
      */
-    platforms: z.array(platformSchema).max(MAX_PLATFORMS),
+    // `.min(1)`: an empty list parses, audits clean and shows the customer a
+    // blank screen with no way back to the old flow. The same reasoning was
+    // applied one level down (`apps.min(1)`) and not one level up.
+    platforms: z.array(platformSchema).min(1, 'A catalog with no platforms shows nothing').max(MAX_PLATFORMS),
     /**
      * Sanitized SVG markup by key. Values arrive as authored and leave through
      * `sanitizeIconMarkup` — the panel is the only place that can be trusted to
@@ -300,12 +333,6 @@ export const connectPageConfigSchema = z
      * the off position is the rollback: no deploy, one switch.
      */
     connectScreenEnabled: z.boolean().default(false),
-    /**
-     * Show the raw connection keys on the screen. Off by default: inside the
-     * cabinet the person is already signed in, so this stops being a
-     * convenience and becomes a policy about what we put on screen.
-     */
-    showConnectionKeys: z.boolean().default(false),
   })
   .strict();
 
@@ -330,12 +357,30 @@ export function auditConnectPageConfig(config: ConnectPageConfig): ConnectPageIs
   const issues: ConnectPageIssue[] = [];
   const seenPlatforms = new Set<string>();
 
+  /**
+   * A language that is present and blank is worse than a language that is
+   * absent: the cabinet falls back for the missing one and renders an empty
+   * button for the empty one. The schema only asks that SOME language carries
+   * text — that is the right rule for saving a half-written row, and the wrong
+   * rule for shipping it.
+   */
+  const checkText = (at: string, what: string, text: LocalizedText | null | undefined): void => {
+    if (text === null || text === undefined) return;
+    const blank = Object.entries(text)
+      .filter(([, value]) => value.trim().length === 0)
+      .map(([locale]) => locale);
+    if (blank.length > 0) {
+      issues.push({ path: at, message: `${what}: language "${blank.join('", "')}" is present but empty` });
+    }
+  };
+
   for (const [pi, platform] of config.platforms.entries()) {
     const at = `platforms[${pi}]`;
     if (seenPlatforms.has(platform.id)) {
       issues.push({ path: at, message: `Platform "${platform.id}" is listed twice` });
     }
     seenPlatforms.add(platform.id);
+    checkText(at, 'platform name', platform.title);
 
     // Exactly one featured app: zero means the screen has to guess which app to
     // open on, and more than one means the guess is between them.
@@ -379,7 +424,10 @@ export function auditConnectPageConfig(config: ConnectPageConfig): ConnectPageIs
       }
 
       for (const [si, step] of app.steps.entries()) {
+        checkText(`${appAt}.steps[${si}]`, 'step title', step.title);
+        checkText(`${appAt}.steps[${si}]`, 'step description', step.body);
         for (const [bi, button] of step.buttons.entries()) {
+          checkText(`${appAt}.steps[${si}].buttons[${bi}]`, 'button label', button.label);
           if (button.kind !== 'external') continue;
           if (button.url.includes(SUBSCRIPTION_LINK_TOKEN)) {
             issues.push({

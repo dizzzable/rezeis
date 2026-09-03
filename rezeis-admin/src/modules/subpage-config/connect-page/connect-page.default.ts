@@ -178,7 +178,6 @@ export const DEFAULT_CONNECT_PAGE_CONFIG: ConnectPageConfig = {
   version: 2,
   // Off until an operator turns it on: this replaces a working flow.
   connectScreenEnabled: false,
-  showConnectionKeys: false,
   icons: ICONS,
   platforms: [
     {

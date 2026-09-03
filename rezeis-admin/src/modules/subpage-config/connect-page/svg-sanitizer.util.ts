@@ -32,7 +32,18 @@
  * person thought it did.
  */
 
-/** Elements an icon is built from. Everything else is dropped whole. */
+/**
+ * Elements an icon is built from. Everything else is dropped whole.
+ *
+ * `use`, `defs`, the gradients, `clipPath` and `mask` were here and are gone.
+ * Two reasons, and the second is the reason the first mattered: every one of
+ * them can only be reached through `url(#…)` or an `href` fragment, and `url(`
+ * is stripped unconditionally — so they were already inert decoration. And
+ * `use` is a billion-laughs vector: ten nested groups referencing each other
+ * fit in 1.9 KB, pass every ceiling here, and expand to ten billion nodes in
+ * the customer's browser. Keeping five dead elements to enable one live attack
+ * is a poor trade.
+ */
 const ALLOWED_ELEMENTS = new Set([
   'svg',
   'g',
@@ -43,15 +54,8 @@ const ALLOWED_ELEMENTS = new Set([
   'line',
   'polyline',
   'polygon',
-  'defs',
   'title',
   'desc',
-  'linearGradient',
-  'radialGradient',
-  'stop',
-  'clipPath',
-  'mask',
-  'use',
 ]);
 
 /**
@@ -94,26 +98,20 @@ const ALLOWED_ATTRIBUTES = new Set([
   'offset',
   'stop-color',
   'stop-opacity',
-  'gradientunits',
-  'gradienttransform',
-  'clip-path',
   'clip-rule',
-  'mask',
-  'id',
-  'class',
   'aria-hidden',
   'role',
   'focusable',
-  'href',
-  'xlink:href',
 ]);
 
 /**
  * Values that may not appear in an attribute.
  *
- * `href` is allowed on `<use>` because an icon legitimately references its own
- * `<defs>` — but only as a same-document fragment. Anything with a scheme is a
- * request to somewhere else, and an icon has no business making one.
+ * `id` and `class` were allowed and are not any more. Both are written verbatim
+ * into a page this markup does not own: `class="fixed inset-0 z-50"` are real
+ * utilities in the cabinet's stylesheet and lift the icon out of the flow over
+ * everything else, and an `id` collides with the page's own — including with
+ * the same icon drawn twice. `href` went with `use`.
  */
 const SCHEME_LIKE = /^[a-z][a-z0-9+.-]*:/i;
 
@@ -125,7 +123,9 @@ export interface SanitizeIconResult {
 
 export class InvalidIconError extends Error {}
 
-const MAX_INPUT_BYTES = 64 * 1024;
+// Matches the schema's per-icon ceiling rather than doubling it: at 64 KB this
+// never fired, because zod refused at 32 KB first.
+const MAX_INPUT_BYTES = 32 * 1024;
 const MAX_NODES = 2_000;
 
 /**
@@ -258,7 +258,12 @@ function canonicalElement(name: string): string | null {
 /** Elements that actually put ink on the canvas. */
 const DRAWING_ELEMENTS = ['path', 'circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon', 'use'];
 
-const ENTITY = /&(?:[a-zA-Z][a-zA-Z0-9]{1,30}|#\d{1,7}|#x[0-9a-fA-F]{1,6});/;
+// Anchored. Unanchored, `.test(text.slice(at))` copied the rest of the string
+// and scanned all of it for every single `&` — quadratic, and one 32 KB icon of
+// bare ampersands blocked the event loop for half a second. Two hundred of them
+// in one request is a minute and a half of synchronous CPU, on an endpoint that
+// does not even write.
+const ENTITY = /^&(?:[a-zA-Z][a-zA-Z0-9]{1,30}|#\d{1,7}|#x[0-9a-fA-F]{1,6});/;
 
 function appendText(out: string[], text: string): void {
   if (text.trim().length === 0) return;
@@ -269,7 +274,7 @@ function appendText(out: string[], text: string): void {
     text.replace(/[<>&]/g, (ch, at: number) => {
       if (ch === '<') return '&lt;';
       if (ch === '>') return '&gt;';
-      return ENTITY.test(text.slice(at)) && text.slice(at).indexOf('&') === 0 ? '&' : '&amp;';
+      return ENTITY.test(text.slice(at)) ? '&' : '&amp;';
     }),
   );
 }
@@ -325,11 +330,6 @@ function sanitizeAttributes(source: string, removed: Set<string>): string {
     }
     if (!ALLOWED_ATTRIBUTES.has(lower)) {
       removed.add(`@${lower}`);
-      continue;
-    }
-    // A fragment reference is the only outward-looking value an icon needs.
-    if ((lower === 'href' || lower === 'xlink:href') && !value.startsWith('#')) {
-      removed.add('@href');
       continue;
     }
     // `xmlns` is a namespace declaration, not a request: its value is a URL by

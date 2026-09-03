@@ -126,6 +126,7 @@ export const en = {
     turnedOn: 'Connect screen is on',
     turnedOff: 'Connect screen is off — the button opens the external page again',
     saveFailed: 'Could not save',
+    unknown: 'Could not read the current state. Reload the page.',
   },
   connectPageEditor: {
     summary: 'Platforms: {{platforms}}, apps: {{apps}}',
@@ -139,9 +140,6 @@ export const en = {
     issuesTitle: 'This catalog would not work',
     issuesHint: 'Saving is refused until these are fixed. The path on the left says where.',
     iconsCleaned: 'Some markup was stripped from these icons: {{icons}}',
-    showKeys: 'Show connection keys',
-    showKeysHint:
-      'Raw keys on the customer screen. Off by default: inside the cabinet the person is already signed in, which makes this a policy question rather than a convenience.',
     addPlatform: 'Add a platform',
     removePlatform: 'Remove the platform',
     platformTitle: 'Platform name',
@@ -181,6 +179,7 @@ export const en = {
     icons: 'Icon library',
     iconsHint:
       'Paste an SVG — for example one copied from tabler.io/icons. On save everything that is not part of the drawing is stripped out.',
+    iconPending: 'Shown after saving — the server cleans the markup',
     iconKey: 'Key',
     iconMarkup: 'SVG',
     addIcon: 'Add',
@@ -197,5 +196,10 @@ export const en = {
       androidtv: 'Android TV',
       appletv: 'Apple TV',
     },
+    loadFailed: 'Could not load the catalog',
+    loadFailedHint: 'A temporary problem on our side. Try again.',
+    retry: 'Retry',
+    corruptedTitle: 'The saved catalog cannot be read',
+    corruptedHint: 'What is shown below is the built-in default, NOT yours. Saving will overwrite the stored one. Reason: {{reason}}',
   },
 };

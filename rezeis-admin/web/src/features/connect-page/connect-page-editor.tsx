@@ -85,7 +85,7 @@ export function ConnectPageEditor(): JSX.Element {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: CONNECT_PAGE_KEYS.all,
     queryFn: connectPageApi.get,
   });
@@ -101,8 +101,10 @@ export function ConnectPageEditor(): JSX.Element {
 
   const save = useMutation({
     mutationFn: (config: ConnectPageConfig) => connectPageApi.replace(config),
-    onSuccess: ({ config, cleanedIcons }) => {
-      setDraft(config);
+    onSuccess: ({ cleanedIcons }) => {
+      // The server's copy is NOT written back over the draft. It used to be,
+      // and everything typed while the request was in flight vanished under a
+      // green "saved" toast — the Save button was disabled, the fields were not.
       setIssues([]);
       void queryClient.invalidateQueries({ queryKey: CONNECT_PAGE_KEYS.all });
       const cleaned = Object.keys(cleanedIcons);
@@ -136,6 +138,24 @@ export function ConnectPageEditor(): JSX.Element {
 
   const iconKeys = useMemo(() => Object.keys(config?.icons ?? {}).sort(), [config?.icons]);
 
+  if (isError || (!isLoading && config === null)) {
+    // `retry: false` is the client default, so this is the only attempt. An
+    // endless skeleton with no words was the previous answer to a 500.
+    return (
+      <Card className="border-destructive/40 bg-destructive/5">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">{t('connectPageEditor.loadFailed')}</CardTitle>
+          <CardDescription>{t('connectPageEditor.loadFailedHint')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button variant="outline" disabled={isFetching} onClick={() => void refetch()}>
+            {t('connectPageEditor.retry')}
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (isLoading || config === null) {
     return (
       <div className="space-y-3">
@@ -145,7 +165,13 @@ export function ConnectPageEditor(): JSX.Element {
     );
   }
 
-  const patch = (next: Partial<ConnectPageConfig>): void => setDraft({ ...config, ...next });
+  const patch = (next: Partial<ConnectPageConfig>): void => {
+    // Paths like `platforms[3].apps[2]` stop meaning what they meant the moment
+    // anything is added, removed or reordered, and a red card pointing at the
+    // wrong row is worse than no red card.
+    setIssues([]);
+    setDraft({ ...config, ...next });
+  };
 
   const usedPlatformIds = config.platforms.map((platform) => platform.id);
   const freePlatformIds = PLATFORM_IDS.filter((id) => !usedPlatformIds.includes(id));
@@ -167,11 +193,25 @@ export function ConnectPageEditor(): JSX.Element {
           >
             {t('connectPageEditor.check')}
           </Button>
-          <Button onClick={() => save.mutate(config)} disabled={save.isPending}>
+          <Button onClick={() => save.mutate(config)} disabled={save.isPending || check.isPending}>
             <Save className="mr-2 h-4 w-4" /> {t('connectPageEditor.save')}
           </Button>
         </div>
       </div>
+
+      {data?.corrupted !== null && data?.corrupted !== undefined && (
+        <Card className="border-destructive/50 bg-destructive/10">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="h-4 w-4 text-destructive" />
+              {t('connectPageEditor.corruptedTitle')}
+            </CardTitle>
+            <CardDescription>
+              {t('connectPageEditor.corruptedHint', { reason: data.corrupted })}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       {issues.length > 0 && (
         <Card className="border-destructive/40 bg-destructive/5">
@@ -193,23 +233,9 @@ export function ConnectPageEditor(): JSX.Element {
         </Card>
       )}
 
-      <Card>
-        <CardContent className="flex items-center justify-between gap-4 py-4">
-          <div className="space-y-0.5">
-            <Label className="text-sm">{t('connectPageEditor.showKeys')}</Label>
-            <p className="text-xs text-muted-foreground">{t('connectPageEditor.showKeysHint')}</p>
-          </div>
-          <Switch
-            checked={config.showConnectionKeys}
-            onCheckedChange={(next) => patch({ showConnectionKeys: next })}
-            aria-label={t('connectPageEditor.showKeys')}
-          />
-        </CardContent>
-      </Card>
-
       {config.platforms.map((platform, index) => (
         <PlatformCard
-          key={`${platform.id}-${index}`}
+          key={platform.id}
           platform={platform}
           iconKeys={iconKeys}
           canMoveUp={index > 0}
@@ -247,6 +273,9 @@ export function ConnectPageEditor(): JSX.Element {
 
       <IconLibrary
         icons={config.icons}
+        // Only what the SERVER has already cleaned may be drawn. Everything in
+        // the draft that is not also in this map is a raw paste.
+        sanitized={data?.config.icons ?? {}}
         onChange={(icons) => patch({ icons })}
         inUse={collectUsedIcons(config)}
       />
@@ -320,7 +349,7 @@ function PlatformCard({
           <div className="space-y-3 border-t border-border/60 pt-3">
             {platform.apps.map((app, index) => (
               <AppCard
-                key={`${app.id}-${index}`}
+                key={`app-${index}`}
                 app={app}
                 iconKeys={iconKeys}
                 canMoveUp={index > 0}
@@ -519,7 +548,15 @@ function StepCard({
         label={t('connectPageEditor.stepBody')}
         multiline
         value={step.body ?? { ru: '', en: '' }}
-        onChange={(body) => onChange({ ...step, body })}
+        // Cleared back to `null` rather than left as an empty pair: an empty
+        // present value is refused on save, and there was no way to get back
+        // to absent through the form.
+        onChange={(body) =>
+          onChange({
+            ...step,
+            body: Object.values(body).every((line) => line.trim().length === 0) ? null : body,
+          })
+        }
       />
       <IconPicker
         label={t('connectPageEditor.icon')}
@@ -642,10 +679,13 @@ function ButtonRow({
 
 function IconLibrary({
   icons,
+  sanitized,
   inUse,
   onChange,
 }: {
   icons: Record<string, string>;
+  /** The icons as the server stored them — the only markup safe to render. */
+  sanitized: Record<string, string>;
   inUse: ReadonlySet<string>;
   onChange: (next: Record<string, string>) => void;
 }): JSX.Element {
@@ -654,8 +694,13 @@ function IconLibrary({
   const [markup, setMarkup] = useState('');
 
   const add = (): void => {
-    const slug = slugify(key, Object.keys(icons));
-    if (markup.trim().length === 0) return;
+    if (markup.trim().length === 0 || key.trim().length === 0) return;
+    // An existing key REPLACES. Minting `hiddify-2` instead meant an operator
+    // could never fix a wrong logo: the new icon was orphaned, the old one
+    // could not be deleted because something still pointed at it, and nothing
+    // in the interface updated markup.
+    const existing = Object.keys(icons).includes(key.trim());
+    const slug = existing ? key.trim() : slugify(key, Object.keys(icons));
     onChange({ ...icons, [slug]: markup.trim() });
     setKey('');
     setMarkup('');
@@ -674,12 +719,26 @@ function IconLibrary({
               key={iconKey}
               className="flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5"
             >
-              {/* Sanitized by the API before it was stored. What is on screen
-                  here came back from the server, not from the paste box below. */}
-              <span
-                className="inline-flex h-5 w-5 [&>svg]:h-5 [&>svg]:w-5"
-                dangerouslySetInnerHTML={{ __html: iconMarkup }}
-              />
+              {/* ONLY server-cleaned markup is rendered. This used to draw the
+                  draft, which is the raw paste for anything just added — an
+                  `<img onerror>` in the paste box ran in the panel, where the
+                  admin token lives in localStorage and the CSP is
+                  report-only. A pending icon shows a placeholder until a save
+                  has been through the sanitizer. */}
+              {sanitized[iconKey] === iconMarkup ? (
+                <span
+                  aria-hidden="true"
+                  className="inline-flex h-5 w-5 [&>svg]:h-5 [&>svg]:w-5"
+                  dangerouslySetInnerHTML={{ __html: iconMarkup }}
+                />
+              ) : (
+                <span
+                  className="inline-flex h-5 w-5 items-center justify-center rounded border border-dashed border-border text-[9px] text-muted-foreground"
+                  title={t('connectPageEditor.iconPending')}
+                >
+                  ?
+                </span>
+              )}
               <span className="text-xs">{iconKey}</span>
               <Button
                 variant="ghost"
@@ -712,7 +771,7 @@ function IconLibrary({
               placeholder="<svg viewBox=&quot;0 0 24 24&quot;>…</svg>"
             />
           </Field>
-          <Button onClick={add} disabled={markup.trim().length === 0}>
+          <Button onClick={add} disabled={markup.trim().length === 0 || key.trim().length === 0}>
             <Plus className="mr-2 h-4 w-4" /> {t('connectPageEditor.addIcon')}
           </Button>
         </div>

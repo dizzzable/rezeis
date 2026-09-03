@@ -33,13 +33,68 @@ describe('an ordinary icon survives', () => {
     assert.deepEqual(removed, []);
   });
 
-  it('keeps a gradient, which is the one legitimate reason to reference itself', () => {
+  it('drops the referencing machinery, which was inert and dangerous at once', () => {
+    // `use`, `defs`, gradients, `clipPath` and `mask` used to be allowed. Every
+    // one of them is reachable only through `url(#…)` or an href fragment, and
+    // `url(` is stripped unconditionally — so they drew nothing. Meanwhile ten
+    // nested groups referencing each other through `use` fit in under 2 KB,
+    // pass every ceiling in the file, and expand to ten billion nodes in the
+    // customer's browser.
     const { markup } = sanitizeIconMarkup(
-      '<svg viewBox="0 0 24 24"><defs><linearGradient id="g"><stop offset="0" stop-color="#0af"/></linearGradient></defs><use href="#g"/></svg>',
+      '<svg viewBox="0 0 24 24"><defs><linearGradient id="g"><stop offset="0"/></linearGradient></defs><use href="#g"/><path d="M0 0"/></svg>',
     );
 
-    assert.match(markup, /<linearGradient id="g">/);
-    assert.match(markup, /<use href="#g"\/>/);
+    assert.doesNotMatch(markup, /use|linearGradient|defs/i);
+    assert.match(markup, /<path d="M0 0"\/>/, 'the drawing still survives');
+  });
+
+  it('refuses a use bomb outright', () => {
+    const bomb = `<svg viewBox="0 0 1 1">${Array.from(
+      { length: 10 },
+      (_, i) => `<g id="l${i}">${'<use href="#l' + (i - 1) + '"/>'.repeat(10)}</g>`,
+    ).join('')}<path d="M0 0"/></svg>`;
+
+    const { markup } = sanitizeIconMarkup(bomb);
+
+    assert.doesNotMatch(markup, /<use/i);
+  });
+
+  it('strips id and class, which are written into a page this markup does not own', () => {
+    // `fixed inset-0 z-50` are real utilities in the cabinet's stylesheet: the
+    // icon would lift out of the flow and cover the screen. An id collides with
+    // the page's own — including with the same icon drawn twice.
+    const { markup, removed } = sanitizeIconMarkup(
+      '<svg viewBox="0 0 24 24" class="fixed inset-0 z-50" id="app"><path d="M0 0" id="p"/></svg>',
+    );
+
+    assert.doesNotMatch(markup, /class=|id=/);
+    assert.ok(removed.includes('@class') && removed.includes('@id'));
+  });
+
+  it('escapes a quote so a single-quoted value cannot break out', () => {
+    // The rebuilt output always double-quotes. A value that arrived in single
+    // quotes may legally contain `"`, and without escaping it would close the
+    // attribute and open a live `onload` — the one guard in the file that
+    // nothing else backs up.
+    const { markup } = sanitizeIconMarkup(
+      `<svg viewBox="0 0 1 1"><path d='M0 0" onload="alert(1)'/></svg>`,
+    );
+
+    assert.doesNotMatch(markup, /onload="alert/);
+    assert.match(markup, /&quot;/);
+  });
+
+  it('does not spend a second of CPU on an icon full of ampersands', () => {
+    // The entity test used to scan the whole remaining string for every `&`.
+    // At the schema's own 32 KB ceiling that was half a second per icon, and
+    // two hundred icons in one request is a minute and a half of blocked event
+    // loop — on the endpoint that only validates and writes nothing.
+    const dense = `<svg viewBox="0 0 1 1"><path d="M0 0"/><title>${'&'.repeat(30_000)}</title></svg>`;
+
+    const started = Date.now();
+    sanitizeIconMarkup(dense);
+
+    assert.ok(Date.now() - started < 250, 'escaping text must be linear in its length');
   });
 });
 
@@ -78,14 +133,15 @@ describe('what an icon is not allowed to be', () => {
   });
 
   it('refuses a reference that leaves the document', () => {
-    // A same-document fragment is how a gradient is used. Anything with a
-    // scheme is a request somewhere else, and an icon has no reason to make one.
-    const { markup, removed } = sanitizeIconMarkup(
-      '<svg viewBox="0 0 24 24"><use href="https://evil.test/x.svg#a"/><path d="M0 0"/></svg>',
+    // Nothing may reach outward, whether by scheme or by protocol-relative
+    // address. The element carrying it is dropped whole now, which is stricter
+    // than stripping the attribute and leaving the shell.
+    const { markup } = sanitizeIconMarkup(
+      '<svg viewBox="0 0 24 24"><use href="//evil.test/x.svg#a"/><path d="M0 0"/></svg>',
     );
 
-    assert.doesNotMatch(markup, /evil\.test/);
-    assert.ok(removed.includes('@href'));
+    assert.doesNotMatch(markup, /evil\.test|<use/i);
+    assert.match(markup, /<path/);
   });
 
   it('refuses a scheme hidden in an ordinary attribute', () => {

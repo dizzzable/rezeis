@@ -7,6 +7,7 @@ import { DEFAULT_CONNECT_PAGE_CONFIG } from './connect-page.default';
 import {
   auditConnectPageConfig,
   connectPageConfigSchema,
+  MAX_ICON_BYTES,
   normalizeConnectPageConfig,
   type ConnectPageConfig,
   type ConnectPageIssue,
@@ -41,6 +42,19 @@ import { InvalidIconError, sanitizeIconMarkup } from './svg-sanitizer.util';
 @Injectable()
 export class ConnectPageService {
   private static readonly KEY = 'connect-page-v2';
+  /**
+   * The switch lives in its OWN row, not in the catalog.
+   *
+   * It travels to the cabinet inside the same payload — that part was right and
+   * is unchanged. What was wrong was storing it there: the toggle card had to
+   * send the whole config back to flip one boolean, so the first flick froze
+   * the built-in default into the database forever and no later improvement to
+   * it would ever reach that install. And the editor, saving a draft branched
+   * before the flick, silently switched the screen back off.
+   *
+   * Two rows, one payload, and neither writer can clobber the other's field.
+   */
+  private static readonly ENABLED_KEY = 'connect-page-enabled';
 
   private readonly logger = new Logger(ConnectPageService.name);
 
@@ -51,18 +65,23 @@ export class ConnectPageService {
    * never been edited still has a working catalog.
    */
   public async getEffectiveConfig(): Promise<ConnectPageConfig> {
-    const row = await this.prisma.subpageConfig.findUnique({
-      where: { key: ConnectPageService.KEY },
+    const [row, enabled] = await Promise.all([
+      this.prisma.subpageConfig.findUnique({ where: { key: ConnectPageService.KEY } }),
+      this.isEnabled(),
+    ]);
+    const withFlag = (config: ConnectPageConfig): ConnectPageConfig => ({
+      ...config,
+      connectScreenEnabled: enabled,
     });
     // Normalized on the way out as well as on the way in, so `encode` is
     // present on every deep link the cabinet ever sees — including the default,
     // which never passes through the save path. The cabinet refuses to render a
     // button without it rather than guessing, and "the default is the one
     // config that guesses" is not a difference anyone would find on purpose.
-    if (row === null) return normalizeConnectPageConfig(DEFAULT_CONNECT_PAGE_CONFIG);
+    if (row === null) return withFlag(normalizeConnectPageConfig(DEFAULT_CONNECT_PAGE_CONFIG));
 
     const parsed = connectPageConfigSchema.safeParse(readJsonObject(row.config));
-    if (parsed.success) return normalizeConnectPageConfig(parsed.data);
+    if (parsed.success) return withFlag(normalizeConnectPageConfig(parsed.data));
 
     // A stored config that no longer parses is a schema change that landed
     // without a migration. Serving the default keeps customers connecting while
@@ -73,7 +92,30 @@ export class ConnectPageService {
         parsed.error.issues[0]?.message ?? 'unknown'
       }`,
     );
-    return normalizeConnectPageConfig(DEFAULT_CONNECT_PAGE_CONFIG);
+    return withFlag(normalizeConnectPageConfig(DEFAULT_CONNECT_PAGE_CONFIG));
+  }
+
+  /**
+   * Whether the cabinet opens its own screen.
+   *
+   * Read and written on its own so flicking the switch is not an edit of the
+   * catalog — see {@link ConnectPageService.ENABLED_KEY}.
+   */
+  public async isEnabled(): Promise<boolean> {
+    const row = await this.prisma.subpageConfig.findUnique({
+      where: { key: ConnectPageService.ENABLED_KEY },
+    });
+    return row === null ? false : readJsonObject(row.config)['enabled'] === true;
+  }
+
+  public async setEnabled(enabled: boolean): Promise<boolean> {
+    await this.prisma.subpageConfig.upsert({
+      where: { key: ConnectPageService.ENABLED_KEY },
+      create: { key: ConnectPageService.ENABLED_KEY, config: { enabled } },
+      update: { config: { enabled } },
+    });
+    this.logger.log(`Connect screen ${enabled ? 'enabled' : 'disabled'}.`);
+    return enabled;
   }
 
   /** True once an operator has saved one, as opposed to running the default. */
@@ -82,6 +124,34 @@ export class ConnectPageService {
       where: { key: ConnectPageService.KEY },
     });
     return count > 0;
+  }
+
+  /**
+   * Whether the stored catalog is there but unreadable.
+   *
+   * The editor has to be able to tell that apart from "nothing saved yet",
+   * because the two look identical from `getEffectiveConfig` + `hasStoredConfig`:
+   * both hand back the built-in default with `stored: true`. An operator would
+   * see the default, assume it was their catalog, change one label and save —
+   * destroying the real one. The neighbouring landing builder was bitten by
+   * exactly this and now returns a `corrupted` marker; so does this.
+   */
+  public async readState(): Promise<{
+    readonly config: ConnectPageConfig;
+    readonly stored: boolean;
+    readonly corrupted: string | null;
+  }> {
+    const row = await this.prisma.subpageConfig.findUnique({
+      where: { key: ConnectPageService.KEY },
+    });
+    const config = await this.getEffectiveConfig();
+    if (row === null) return { config, stored: false, corrupted: null };
+    const parsed = connectPageConfigSchema.safeParse(readJsonObject(row.config));
+    return {
+      config,
+      stored: true,
+      corrupted: parsed.success ? null : (parsed.error.issues[0]?.message ?? 'unreadable'),
+    };
   }
 
   /**
@@ -113,6 +183,18 @@ export class ConnectPageService {
     for (const [key, markup] of Object.entries(parsed.data.icons)) {
       try {
         const result = sanitizeIconMarkup(markup);
+        // Re-checked AFTER cleaning, because cleaning grows the string: every
+        // `&` becomes `&amp;`. An icon just under the ceiling on the way in
+        // came out over it, was stored anyway, and then failed to parse on the
+        // way out — turning a successful save into a config the cabinet could
+        // not read and the editor could not tell from a fresh install.
+        if (result.markup.length > MAX_ICON_BYTES) {
+          iconIssues.push({
+            path: `icons.${key}`,
+            message: 'The icon is too large once cleaned — simplify it or shorten its text',
+          });
+          continue;
+        }
         icons[key] = result.markup;
         if (result.removed.length > 0) cleanedIcons[key] = [...result.removed];
       } catch (error) {
@@ -123,7 +205,10 @@ export class ConnectPageService {
       }
     }
 
-    const config = normalizeConnectPageConfig({ ...parsed.data, icons });
+    // The flag is not the editor's to write: a draft branched before the switch
+    // was flicked would carry the old value and turn the screen back off under
+    // a green "saved" toast. It is re-read from its own row on the way out.
+    const config = normalizeConnectPageConfig({ ...parsed.data, icons, connectScreenEnabled: false });
     // The audit runs on the CLEANED config: an icon the sanitizer refused is an
     // icon key that no longer exists, and the audit is what notices that
     // something still points at it.
@@ -138,13 +223,14 @@ export class ConnectPageService {
       update: { config: config as unknown as Prisma.InputJsonValue },
     });
 
+    const enabled = await this.isEnabled();
     this.logger.log(
       `Connect-page catalog updated: ${config.platforms.length} platform(s), ${config.platforms.reduce(
         (sum, platform) => sum + platform.apps.length,
         0,
       )} app(s).`,
     );
-    return { config, cleanedIcons };
+    return { config: { ...config, connectScreenEnabled: enabled }, cleanedIcons };
   }
 
   /**
@@ -154,11 +240,17 @@ export class ConnectPageService {
    * a preview that validated differently from the save would tell an operator
    * their catalog is fine and then refuse it.
    */
-  public dryRun(input: unknown): { readonly ok: boolean; readonly issues: readonly ConnectPageIssue[] } {
+  public dryRun(input: unknown): {
+    readonly ok: boolean;
+    readonly issues: readonly ConnectPageIssue[];
+    /** What a save would strip from each icon — reported, not silently applied. */
+    readonly cleanedIcons: Readonly<Record<string, readonly string[]>>;
+  } {
     const parsed = connectPageConfigSchema.safeParse(input);
     if (!parsed.success) {
       return {
         ok: false,
+        cleanedIcons: {},
         issues: parsed.error.issues.slice(0, 20).map((issue) => ({
           path: issue.path.join('.'),
           message: issue.message,
@@ -168,9 +260,12 @@ export class ConnectPageService {
 
     const issues: ConnectPageIssue[] = [];
     const icons: Record<string, string> = {};
+    const cleanedIcons: Record<string, string[]> = {};
     for (const [key, markup] of Object.entries(parsed.data.icons)) {
       try {
-        icons[key] = sanitizeIconMarkup(markup).markup;
+        const result = sanitizeIconMarkup(markup);
+        icons[key] = result.markup;
+        if (result.removed.length > 0) cleanedIcons[key] = [...result.removed];
       } catch (error) {
         issues.push({
           path: `icons.${key}`,
@@ -178,7 +273,11 @@ export class ConnectPageService {
         });
       }
     }
-    issues.push(...auditConnectPageConfig(normalizeConnectPageConfig({ ...parsed.data, icons })));
-    return { ok: issues.length === 0, issues };
+    issues.push(
+      ...auditConnectPageConfig(
+        normalizeConnectPageConfig({ ...parsed.data, icons, connectScreenEnabled: false }),
+      ),
+    );
+    return { ok: issues.length === 0, issues, cleanedIcons };
   }
 }
