@@ -54,10 +54,15 @@ export class ConnectPageService {
     const row = await this.prisma.subpageConfig.findUnique({
       where: { key: ConnectPageService.KEY },
     });
-    if (row === null) return DEFAULT_CONNECT_PAGE_CONFIG;
+    // Normalized on the way out as well as on the way in, so `encode` is
+    // present on every deep link the cabinet ever sees — including the default,
+    // which never passes through the save path. The cabinet refuses to render a
+    // button without it rather than guessing, and "the default is the one
+    // config that guesses" is not a difference anyone would find on purpose.
+    if (row === null) return normalizeConnectPageConfig(DEFAULT_CONNECT_PAGE_CONFIG);
 
     const parsed = connectPageConfigSchema.safeParse(readJsonObject(row.config));
-    if (parsed.success) return parsed.data;
+    if (parsed.success) return normalizeConnectPageConfig(parsed.data);
 
     // A stored config that no longer parses is a schema change that landed
     // without a migration. Serving the default keeps customers connecting while
@@ -68,7 +73,7 @@ export class ConnectPageService {
         parsed.error.issues[0]?.message ?? 'unknown'
       }`,
     );
-    return DEFAULT_CONNECT_PAGE_CONFIG;
+    return normalizeConnectPageConfig(DEFAULT_CONNECT_PAGE_CONFIG);
   }
 
   /** True once an operator has saved one, as opposed to running the default. */

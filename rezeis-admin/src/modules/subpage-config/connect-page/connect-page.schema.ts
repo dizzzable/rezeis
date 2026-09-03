@@ -288,6 +288,19 @@ export const connectPageConfigSchema = z
       `At most ${MAX_ICONS} icons`,
     ),
     /**
+     * Whether "Подключить" opens this screen or keeps redirecting outward.
+     *
+     * It rides in the catalog rather than in the platform policy on purpose:
+     * the flag and the thing it switches on then travel in one payload, behind
+     * one cache and one invalidation, so they can never disagree with each
+     * other for a TTL. It also needs no migration, and an operator edits the
+     * switch in the same place they edit what it reveals.
+     *
+     * Off by default. It replaces a flow that works, so it is opted into — and
+     * the off position is the rollback: no deploy, one switch.
+     */
+    connectScreenEnabled: z.boolean().default(false),
+    /**
      * Show the raw connection keys on the screen. Off by default: inside the
      * cabinet the person is already signed in, so this stops being a
      * convenience and becomes a policy about what we put on screen.

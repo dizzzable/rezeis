@@ -29,6 +29,7 @@ import {
   subpageConfigSchema,
   type SubpageConfig,
 } from './subpage-config-api';
+import { ConnectScreenCard } from './connect-screen-card';
 import { SubpageConfigClients } from './subpage-config-clients';
 import { SubpageIcons, SubpageTheme, SubpageTranslations } from './subpage-config-assets';
 
@@ -157,6 +158,12 @@ export default function SubpageConfigPage() {
             </Button>
           </div>
         </div>
+      </FadeIn>
+
+      {/* The switch first: it is the decision about whether anybody sees the
+          catalog below it, and it stays usable while the catalog is half-written. */}
+      <FadeIn>
+        <ConnectScreenCard />
       </FadeIn>
 
       {!data?.stored && (

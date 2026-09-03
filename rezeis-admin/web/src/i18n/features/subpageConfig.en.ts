@@ -113,4 +113,17 @@ export const en = {
       invalid: 'Config is invalid',
     },
   },
+  connectScreen: {
+    title: 'Connect screen in the cabinet',
+    description:
+      'Where the "Connect" button on a subscription card goes: the external page, or a screen inside the cabinet.',
+    label: 'Open the connect screen in the cabinet',
+    hintOn:
+      'The customer stays in the cabinet: the platform is detected, the chosen app is remembered, the link is one tap away.',
+    hintOff:
+      'As today: "Connect" opens the external subscription page. This position is also the rollback — no deploy needed.',
+    turnedOn: 'Connect screen is on',
+    turnedOff: 'Connect screen is off — the button opens the external page again',
+    saveFailed: 'Could not save',
+  },
 };
