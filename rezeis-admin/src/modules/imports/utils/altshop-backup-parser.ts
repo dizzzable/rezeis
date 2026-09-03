@@ -1,7 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
-import { Readable } from 'node:stream';
-import { createGunzip } from 'node:zlib';
-import { extract, Headers } from 'tar-stream';
+
+import {
+  MAX_GZIP_OUTPUT_BYTES,
+  MAX_INPUT_BYTES,
+  MAX_JSON_BYTES,
+  ensureBufferWithinLimit,
+  findArchivePayload,
+  gunzipBuffer,
+  isGzipBuffer,
+  isTarBuffer,
+  toBadRequestException,
+} from './backup-archive.util';
 
 import type {
   AltshopExcludedDataSummary,
@@ -67,11 +76,6 @@ export interface AltshopBackupData {
   planPrices: AltshopPlanPrice[];
 }
 
-const MAX_INPUT_BYTES = 128 * 1024 * 1024;
-const MAX_GZIP_OUTPUT_BYTES = 256 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRY_BYTES = 256 * 1024 * 1024;
-const MAX_JSON_BYTES = 64 * 1024 * 1024;
-const ALLOWED_TAR_ENTRY_TYPES = new Set(['file', 'directory', 'pax-header', 'pax-global-header']);
 
 /**
  * Parses an official AltShop `.tar.gz` backup (with a root `database.json`),
@@ -82,7 +86,7 @@ const ALLOWED_TAR_ENTRY_TYPES = new Set(['file', 'directory', 'pax-header', 'pax
 export async function parseAltshopBackup(buffer: Buffer): Promise<AltshopBackupData> {
   ensureBufferWithinLimit(buffer, MAX_INPUT_BYTES, 'Backup file');
 
-  if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
+  if (isGzipBuffer(buffer)) {
     const decompressed = await gunzipBuffer(buffer, MAX_GZIP_OUTPUT_BYTES, 'backup file');
     if (!isTarBuffer(decompressed)) {
       return parseJsonBuffer(decompressed, 'Decompressed JSON export');
@@ -91,10 +95,6 @@ export async function parseAltshopBackup(buffer: Buffer): Promise<AltshopBackupD
   }
 
   return parseJsonBuffer(buffer, 'JSON export');
-}
-
-function isTarBuffer(buffer: Buffer): boolean {
-  return buffer.length > 262 && buffer.toString('ascii', 257, 262) === 'ustar';
 }
 
 function parseJsonBuffer(buffer: Buffer, label: string): AltshopBackupData {
@@ -109,75 +109,29 @@ function parseJsonBuffer(buffer: Buffer, label: string): AltshopBackupData {
   }
 }
 
+/**
+ * AltShop keeps its export at the ROOT of the archive, named exactly
+ * `database.json` — not by basename, so a `backups/database.json` inside some
+ * other tool's archive is not mistaken for one.
+ */
+function classifyAltshopEntry(name: string): 'json' | null {
+  return name === 'database.json' ? 'json' : null;
+}
+
 async function parseAltshopArchive(tarBuffer: Buffer): Promise<AltshopBackupData> {
-  return new Promise((resolve, reject) => {
-    const readable = Readable.from([tarBuffer]);
-    const extractor = extract();
-    let settled = false;
-    let databaseJson: Buffer | null = null;
-
-    const fail = (error: unknown): void => {
-      if (settled) return;
-      settled = true;
-      readable.unpipe(extractor);
-      readable.destroy();
-      extractor.destroy();
-      reject(toBadRequestException(error, 'Failed to parse AltShop archive'));
-    };
-
-    extractor.on('entry', (header: Headers, stream, next) => {
-      let normalizedName: string;
-      let type: 'file' | 'ignore';
-      try {
-        normalizedName = normalizeTarEntryName(header.name);
-        type = normalizeTarEntryType(header.type);
-        if (type === 'file') ensureArchiveEntrySize(normalizedName, header.size);
-      } catch (error) {
-        stream.resume();
-        fail(error);
-        return;
-      }
-
-      stream.on('error', fail);
-      if (type !== 'file' || normalizedName !== 'database.json') {
-        stream.resume();
-        stream.on('end', next);
-        return;
-      }
-
-      if (databaseJson !== null) {
-        stream.resume();
-        fail(new BadRequestException('Archive contains more than one database.json payload'));
-        return;
-      }
-
-      void readStreamToBuffer(stream, MAX_ARCHIVE_ENTRY_BYTES, "archive entry 'database.json'")
-        .then((bytes) => {
-          if (settled) return;
-          databaseJson = bytes;
-          next();
-        })
-        .catch(fail);
-    });
-
-    extractor.on('finish', () => {
-      if (settled) return;
-      try {
-        if (databaseJson === null) {
-          throw new BadRequestException('database.json not found in the AltShop archive');
-        }
-        ensureBufferWithinLimit(databaseJson, MAX_JSON_BYTES, "Archive entry 'database.json'");
-        settled = true;
-        resolve(extractDataFromJson(JSON.parse(databaseJson.toString('utf-8'))));
-      } catch (error) {
-        fail(error);
-      }
-    });
-
-    extractor.on('error', fail);
-    readable.on('error', fail);
-    readable.pipe(extractor);
-  });
+  const payload = await findArchivePayload(tarBuffer, classifyAltshopEntry);
+  if (payload === null) {
+    throw new BadRequestException('database.json not found in the AltShop archive');
+  }
+  ensureBufferWithinLimit(payload.bytes, MAX_JSON_BYTES, "Archive entry 'database.json'");
+  try {
+    return extractDataFromJson(JSON.parse(payload.bytes.toString('utf-8')));
+  } catch (error) {
+    // Not `parseJsonBuffer`: somebody who uploaded a perfectly good archive
+    // whose payload is malformed should be told THAT, not advised to upload
+    // an archive.
+    throw toBadRequestException(error, 'Failed to parse AltShop archive');
+  }
 }
 
 function extractDataFromJson(json: unknown): AltshopBackupData {
@@ -255,95 +209,3 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function ensureBufferWithinLimit(buffer: Buffer, limit: number, label: string): void {
-  if (buffer.length > limit) {
-    throw new BadRequestException(`${label} exceeds the ${formatBytes(limit)} size limit`);
-  }
-}
-
-// `size` is optional in the tar header, and an entry that does not declare one
-// is rejected exactly like a malformed one — we refuse to read a payload whose
-// length we cannot bound in advance.
-function ensureArchiveEntrySize(name: string, size: number | undefined): void {
-  if (size === undefined || !Number.isSafeInteger(size) || size < 0) {
-    throw new BadRequestException(`Archive entry '${name}' has an invalid size`);
-  }
-  if (size > MAX_ARCHIVE_ENTRY_BYTES) {
-    throw new BadRequestException(
-      `Archive entry '${name}' exceeds the ${formatBytes(MAX_ARCHIVE_ENTRY_BYTES)} size limit`,
-    );
-  }
-}
-
-function normalizeTarEntryName(name: string): string {
-  if (!name || name.includes('\0') || name.includes('\\')) {
-    throw new BadRequestException('Archive contains an unsafe entry name');
-  }
-  if (name.startsWith('/') || /^[A-Za-z]:/.test(name)) {
-    throw new BadRequestException(`Archive entry '${name}' must use a relative path`);
-  }
-  const parts = name.split('/');
-  // tar commonly stores directories as `assets/`; the trailing slash is not
-  // a path traversal segment and is discarded before validation.
-  if (parts[parts.length - 1] === '') parts.pop();
-  if (parts.some((part) => part === '' || part === '.' || part === '..')) {
-    throw new BadRequestException(`Archive entry '${name}' contains an unsafe path`);
-  }
-  return parts.join('/');
-}
-
-// Typed off the tar-stream header instead of a bare `string`: the library also
-// reports `null` for an entry with no type byte, and that case must land on the
-// same "plain file" default as a missing one.
-function normalizeTarEntryType(type: Headers['type']): 'file' | 'ignore' {
-  const normalized = type ?? 'file';
-  if (!ALLOWED_TAR_ENTRY_TYPES.has(normalized)) {
-    throw new BadRequestException(`Archive contains unsafe entry type '${normalized}'`);
-  }
-  return normalized === 'file' ? 'file' : 'ignore';
-}
-
-async function gunzipBuffer(buffer: Buffer, limit: number, label: string): Promise<Buffer> {
-  const input = Readable.from([buffer]);
-  const gunzip = createGunzip();
-  try {
-    return await readStreamToBuffer(input.pipe(gunzip), limit, `Decompressed ${label}`);
-  } catch (error) {
-    input.destroy();
-    gunzip.destroy();
-    throw toBadRequestException(error, `Failed to decompress ${label}`);
-  }
-}
-
-async function readStreamToBuffer(stream: NodeJS.ReadableStream, limit: number, label: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    stream.on('data', (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += bytes.length;
-      if (size > limit) {
-        const destroyable = stream as NodeJS.ReadableStream & {
-          destroy?: (error?: Error) => void;
-        };
-        destroyable.destroy?.(
-          new BadRequestException(`${label} exceeds the ${formatBytes(limit)} size limit`),
-        );
-        return;
-      }
-      chunks.push(bytes);
-    });
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
-}
-
-function toBadRequestException(error: unknown, fallback: string): BadRequestException {
-  if (error instanceof BadRequestException) return error;
-  const message = error instanceof Error && error.message ? `: ${error.message}` : '';
-  return new BadRequestException(`${fallback}${message}`);
-}
-
-function formatBytes(bytes: number): string {
-  return `${Math.round(bytes / 1024 / 1024)} MiB`;
-}

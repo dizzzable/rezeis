@@ -1,5 +1,11 @@
-import { BadRequestException } from '@nestjs/common';
-import { createGunzip } from 'node:zlib';
+import {
+  MAX_GZIP_OUTPUT_BYTES,
+  MAX_INPUT_BYTES,
+  MAX_SQL_BYTES,
+  ensureBufferWithinLimit,
+  gunzipBuffer,
+  isGzipBuffer,
+} from './backup-archive.util';
 
 /**
  * STEALTHNET backup parser.
@@ -182,26 +188,22 @@ export interface StealthnetBackupData {
  * magic so an admin doesn't get a confusing error).
  */
 export async function parseStealthnetBackup(buffer: Buffer): Promise<StealthnetBackupData> {
-  // Detect gzip magic bytes (STEALTHNET dumps are usually plain SQL,
-  // but occasionally they get re-gzipped before transit).
-  if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
-    const decompressed = await gunzipBuffer(buffer);
+  // This parser used to bound NOTHING: no ceiling on the upload and, worse,
+  // none on the decompression — its own `gunzipBuffer` concatenated chunks
+  // until the stream ended. A gzip bomb is a small file by definition, so the
+  // 100 MB cap at the HTTP layer bounded the wrong number and a modest upload
+  // could expand until the process died. Same ceilings as every other importer
+  // now, from the one place that owns them.
+  ensureBufferWithinLimit(buffer, MAX_INPUT_BYTES, 'Backup file');
+
+  if (isGzipBuffer(buffer)) {
+    const decompressed = await gunzipBuffer(buffer, MAX_GZIP_OUTPUT_BYTES, 'backup file');
+    ensureBufferWithinLimit(decompressed, MAX_SQL_BYTES, 'Decompressed SQL dump');
     return parseSqlDump(decompressed.toString('utf-8'));
   }
-  return parseSqlDump(buffer.toString('utf-8'));
-}
 
-async function gunzipBuffer(buffer: Buffer): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const gunzip = createGunzip();
-    const chunks: Buffer[] = [];
-    gunzip.on('data', (chunk: Buffer) => chunks.push(chunk));
-    gunzip.on('end', () => resolve(Buffer.concat(chunks)));
-    gunzip.on('error', (err) =>
-      reject(new BadRequestException(`Failed to decompress archive: ${err.message}`)),
-    );
-    gunzip.end(buffer);
-  });
+  ensureBufferWithinLimit(buffer, MAX_SQL_BYTES, 'Backup payload');
+  return parseSqlDump(buffer.toString('utf-8'));
 }
 
 // ── Core parser ─────────────────────────────────────────────────────────────

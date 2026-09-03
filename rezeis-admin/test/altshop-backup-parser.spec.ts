@@ -61,9 +61,14 @@ describe('parseAltshopBackup', () => {
       { name: 'database.json', content: Buffer.from('{"users":[{"id":1}]}') },
       { name: 'database.json', content: Buffer.from('{"users":[{"id":2}]}') },
     ]);
+    // The refusal now NAMES both offending entries — one wording for every
+    // importer, since they all share one archive reader. It said "more than
+    // one database.json" while remnashop's said "duplicate database payloads";
+    // two sentences for one refusal is how the two readers drifted apart in
+    // the first place.
     await assert.rejects(
       () => parseAltshopBackup(duplicate),
-      /more than one database\.json/i,
+      /duplicate database payloads/i,
     );
     const traversal = await buildTarGz([{ name: '../database.json', content: Buffer.from('{}') }]);
     await assert.rejects(

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import { gzipSync } from 'node:zlib';
 
 import { parseStealthnetBackup } from '../src/modules/imports/utils/stealthnet-backup-parser';
 
@@ -97,5 +98,27 @@ describe('parseStealthnetBackup', () => {
     assert.equal(data.referralCredits.length, 2);
     assert.equal(data.clients.filter((client) => client.referrer_id !== null).length, 1);
     assert.equal(data.referralCredits.reduce((total, credit) => total + credit.amount, 0), 18);
+  });
+});
+
+describe('the ceilings on a STEALTHNET upload', () => {
+  it('refuses a gzip that expands past the ceiling', async () => {
+    // THE HOLE THIS TEST EXISTS FOR. This parser used to decompress with no
+    // ceiling at all — it concatenated chunks until the stream ended. A gzip
+    // bomb is a SMALL file by definition, so the 100 MB cap at the HTTP layer
+    // bounded the wrong number entirely: a modest upload could expand until
+    // the process died. Half a gigabyte of zeroes compresses to well under a
+    // megabyte.
+    const bomb = gzipSync(Buffer.alloc(512 * 1024 * 1024, 0));
+
+    await assert.rejects(
+      () => parseStealthnetBackup(bomb),
+      /after decompression/i,
+      'an unbounded decompression is a denial of service with an upload button',
+    );
+  });
+
+  it('refuses an empty upload by name', async () => {
+    await assert.rejects(() => parseStealthnetBackup(Buffer.alloc(0)), /empty/i);
   });
 });

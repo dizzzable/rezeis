@@ -1,7 +1,18 @@
 import { BadRequestException } from '@nestjs/common';
-import { Readable } from 'node:stream';
-import { createGunzip } from 'node:zlib';
-import { extract, Headers } from 'tar-stream';
+
+import {
+  MAX_GZIP_OUTPUT_BYTES,
+  MAX_INPUT_BYTES,
+  MAX_JSON_BYTES,
+  MAX_SQL_BYTES,
+  couldBeTarBuffer,
+  ensureBufferWithinLimit,
+  findArchivePayload,
+  gunzipBuffer,
+  isGzipBuffer,
+  isTarBuffer,
+  toBadRequestException,
+} from './backup-archive.util';
 
 import {
   RemnashopExcludedDataSummary,
@@ -80,12 +91,6 @@ interface RemnashopBackupData {
   planPrices: RemnashopPlanPrice[];
 }
 
-const MAX_INPUT_BYTES = 128 * 1024 * 1024;
-const MAX_GZIP_OUTPUT_BYTES = 256 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRY_BYTES = 256 * 1024 * 1024;
-const MAX_JSON_BYTES = 64 * 1024 * 1024;
-const MAX_SQL_BYTES = 256 * 1024 * 1024;
-const ALLOWED_TAR_ENTRY_TYPES = new Set(['file', 'directory', 'pax-header', 'pax-global-header']);
 
 /**
  * Parses a remnashop backup file.
@@ -101,8 +106,8 @@ const ALLOWED_TAR_ENTRY_TYPES = new Set(['file', 'directory', 'pax-header', 'pax
 export async function parseRemnashopBackup(buffer: Buffer): Promise<RemnashopBackupData> {
   ensureBufferWithinLimit(buffer, MAX_INPUT_BYTES, 'Backup file');
 
-  // Gzip magic (1f 8b) — could be a .tar.gz, a gzipped .sql, or gzipped json.
-  if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
+  // Could be a .tar.gz, a gzipped .sql, or gzipped json.
+  if (isGzipBuffer(buffer)) {
     const decompressed = await gunzipBuffer(buffer, MAX_GZIP_OUTPUT_BYTES, 'backup file');
 
     if (isTarBuffer(decompressed)) {
@@ -146,125 +151,42 @@ export async function parseRemnashopBackup(buffer: Buffer): Promise<RemnashopBac
   }
 }
 
-/** POSIX tar archives carry the "ustar" magic at byte offset 257. */
-function isTarBuffer(buf: Buffer): boolean {
-  return buf.length > 262 && buf.toString('ascii', 257, 262) === 'ustar';
-}
-
-function couldBeTarBuffer(buf: Buffer): boolean {
-  return buf.length >= 512 && buf.length % 512 === 0;
-}
-
 /**
- * Walk a (already-decompressed) tar archive, capturing either a top-level
- * `database.json` or a nested `*.sql` / `*.sql.gz` pg dump. The bulky
- * `bot_dir_*.tar.gz` and `backup_meta.info` entries are skipped.
+ * Capture either a top-level `database.json` or a nested `*.sql` / `*.sql.gz`
+ * pg dump. The bulky `bot_dir_*.tar.gz` and `backup_meta.info` entries carry
+ * nothing we import and are skipped.
  */
 async function parseRemnashopArchive(tarBuffer: Buffer): Promise<RemnashopBackupData> {
-  return new Promise((resolve, reject) => {
-    const readable = Readable.from([tarBuffer]);
-    const extractor = extract();
-    let settled = false;
-    let payload: {
-      readonly kind: 'json' | 'sql.gz' | 'sql';
-      readonly name: string;
-      readonly bytes: Buffer;
-    } | null = null;
+  const payload = await findArchivePayload(tarBuffer, classifyArchiveEntry);
+  if (payload === null) {
+    throw new BadRequestException(
+      'No database.json or .sql dump found in the archive (expected a Remnawave/remnashop backup).',
+    );
+  }
 
-    const fail = (err: unknown): void => {
-      if (settled) return;
-      settled = true;
-      const exception = toBadRequestException(err, 'Failed to parse backup contents');
-      readable.unpipe(extractor);
-      readable.destroy();
-      extractor.destroy();
-      reject(exception);
-    };
+  // Wrapped, because a malformed payload inside a well-formed archive used to
+  // come back as a refusal and must keep doing so — a raw SyntaxError escaping
+  // here would reach the operator as a 500.
+  try {
+    if (payload.kind === 'json') {
+      ensureBufferWithinLimit(payload.bytes, MAX_JSON_BYTES, `Archive entry '${payload.name}'`);
+      return extractDataFromJson(JSON.parse(payload.bytes.toString('utf-8')));
+    }
 
-    extractor.on('entry', (header: Headers, stream, next) => {
-      let normalizedName: string;
-      let type: 'file' | 'ignore';
+    if (payload.kind === 'sql.gz') {
+      const sqlBytes = await gunzipBuffer(
+        payload.bytes,
+        MAX_SQL_BYTES,
+        `archive entry '${payload.name}'`,
+      );
+      return parseRemnashopSqlDump(sqlBytes.toString('utf-8'));
+    }
 
-      try {
-        normalizedName = normalizeTarEntryName(header.name);
-        type = normalizeTarEntryType(header.type);
-        if (type === 'file') ensureArchiveEntrySize(normalizedName, header.size);
-      } catch (err) {
-        stream.resume();
-        fail(err);
-        return;
-      }
-
-      stream.on('error', fail);
-
-      if (type !== 'file') {
-        stream.resume();
-        stream.on('end', next);
-        return;
-      }
-
-      const entryKind = classifyArchiveEntry(normalizedName);
-      if (entryKind === null) {
-        stream.resume();
-        stream.on('end', next);
-        return;
-      }
-
-      if (payload !== null) {
-        stream.resume();
-        fail(
-          new BadRequestException(
-            `Archive contains duplicate database payloads ('${payload.name}' and '${normalizedName}')`,
-          ),
-        );
-        return;
-      }
-
-      void readStreamToBuffer(stream, MAX_ARCHIVE_ENTRY_BYTES, `archive entry '${normalizedName}'`)
-        .then((bytes) => {
-          if (settled) return;
-          payload = { kind: entryKind, name: normalizedName, bytes };
-          next();
-        })
-        .catch(fail);
-    });
-
-    extractor.on('finish', async () => {
-      if (settled) return;
-      try {
-        if (payload === null) {
-          throw new BadRequestException(
-            'No database.json or .sql dump found in the archive (expected a Remnawave/remnashop backup).',
-          );
-        }
-
-        if (payload.kind === 'json') {
-          ensureBufferWithinLimit(payload.bytes, MAX_JSON_BYTES, `Archive entry '${payload.name}'`);
-          resolve(extractDataFromJson(JSON.parse(payload.bytes.toString('utf-8'))));
-          return;
-        }
-
-        if (payload.kind === 'sql.gz') {
-          const sqlBytes = await gunzipBuffer(
-            payload.bytes,
-            MAX_SQL_BYTES,
-            `archive entry '${payload.name}'`,
-          );
-          resolve(parseRemnashopSqlDump(sqlBytes.toString('utf-8')));
-          return;
-        }
-
-        ensureBufferWithinLimit(payload.bytes, MAX_SQL_BYTES, `Archive entry '${payload.name}'`);
-        resolve(parseRemnashopSqlDump(payload.bytes.toString('utf-8')));
-      } catch (err) {
-        fail(err);
-      }
-    });
-
-    extractor.on('error', fail);
-    readable.on('error', fail);
-    readable.pipe(extractor);
-  });
+    ensureBufferWithinLimit(payload.bytes, MAX_SQL_BYTES, `Archive entry '${payload.name}'`);
+    return parseRemnashopSqlDump(payload.bytes.toString('utf-8'));
+  } catch (error) {
+    throw toBadRequestException(error, 'Failed to parse backup contents');
+  }
 }
 
 /** remnashop `user_role` enum → the numeric role the importer expects. */
@@ -458,140 +380,6 @@ function extractDataFromJson(json: Record<string, unknown>): RemnashopBackupData
   };
 }
 
-async function gunzipBuffer(buffer: Buffer, maxBytes: number, label: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const readable = Readable.from([buffer]);
-    const gunzip = createGunzip();
-    const chunks: Buffer[] = [];
-    let settled = false;
-    let totalBytes = 0;
-
-    const fail = (err: unknown): void => {
-      if (settled) return;
-      settled = true;
-      const exception = toBadRequestException(err, `Failed to decompress ${label}`);
-      readable.unpipe(gunzip);
-      readable.destroy();
-      gunzip.destroy();
-      reject(exception);
-    };
-
-    gunzip.on('data', (chunk: Buffer) => {
-      totalBytes += chunk.length;
-      if (totalBytes > maxBytes) {
-        fail(
-          new BadRequestException(
-            `${capitalize(label)} exceeds ${formatBytes(maxBytes)} after decompression`,
-          ),
-        );
-        return;
-      }
-      chunks.push(chunk);
-    });
-    gunzip.on('end', () => {
-      if (settled) return;
-      settled = true;
-      resolve(Buffer.concat(chunks, totalBytes));
-    });
-    gunzip.on('error', fail);
-    readable.on('error', fail);
-    readable.pipe(gunzip);
-  });
-}
-
-function readStreamToBuffer(
-  stream: NodeJS.ReadableStream,
-  maxBytes: number,
-  label: string,
-): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let settled = false;
-    let totalBytes = 0;
-
-    const fail = (err: unknown): void => {
-      if (settled) return;
-      settled = true;
-      const destroyable = stream as unknown as { destroy?: () => void };
-      if (typeof destroyable.destroy === 'function') {
-        destroyable.destroy();
-      }
-      reject(toBadRequestException(err, `Failed to read ${label}`));
-    };
-
-    stream.on('data', (chunk: Buffer | string) => {
-      const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      totalBytes += bufferChunk.length;
-      if (totalBytes > maxBytes) {
-        fail(new BadRequestException(`${capitalize(label)} exceeds ${formatBytes(maxBytes)}`));
-        return;
-      }
-      chunks.push(bufferChunk);
-    });
-    stream.on('end', () => {
-      if (settled) return;
-      settled = true;
-      resolve(Buffer.concat(chunks, totalBytes));
-    });
-    stream.on('error', fail);
-  });
-}
-
-function ensureBufferWithinLimit(buffer: Buffer, maxBytes: number, label: string): void {
-  if (buffer.length === 0) {
-    throw new BadRequestException(`${label} is empty`);
-  }
-  if (buffer.length > maxBytes) {
-    throw new BadRequestException(`${label} exceeds ${formatBytes(maxBytes)}`);
-  }
-}
-
-function ensureArchiveEntrySize(name: string, size: number | undefined): void {
-  if (!Number.isFinite(size) || size === undefined || size < 0) {
-    throw new BadRequestException(`Archive entry '${name}' has an invalid size`);
-  }
-  if (size > MAX_ARCHIVE_ENTRY_BYTES) {
-    throw new BadRequestException(
-      `Archive entry '${name}' exceeds ${formatBytes(MAX_ARCHIVE_ENTRY_BYTES)}`,
-    );
-  }
-}
-
-// Typed off the tar-stream header instead of a bare `string`: the library also
-// reports `null` for an entry with no type byte, and that case must land on the
-// same "plain file" default as a missing one.
-function normalizeTarEntryType(type: Headers['type']): 'file' | 'ignore' {
-  const normalized = type ?? 'file';
-  if (!ALLOWED_TAR_ENTRY_TYPES.has(normalized)) {
-    throw new BadRequestException(`Archive entry type '${normalized}' is not allowed`);
-  }
-  return normalized === 'file' ? 'file' : 'ignore';
-}
-
-function normalizeTarEntryName(name: string): string {
-  if (typeof name !== 'string' || name.length === 0) {
-    throw new BadRequestException('Archive entry has an empty name');
-  }
-  if (name.includes('\0')) {
-    throw new BadRequestException('Archive entry name contains a null byte');
-  }
-  if (name.includes('\\')) {
-    throw new BadRequestException(`Archive entry '${name}' uses an unsafe path separator`);
-  }
-
-  const trimmed = name.replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
-  if (trimmed.length === 0 || trimmed.startsWith('/') || /^[A-Za-z]:/.test(trimmed)) {
-    throw new BadRequestException(`Archive entry '${name}' has an unsafe path`);
-  }
-
-  const segments = trimmed.split('/');
-  if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
-    throw new BadRequestException(`Archive entry '${name}' has an unsafe path`);
-  }
-
-  return trimmed;
-}
-
 function classifyArchiveEntry(name: string): 'json' | 'sql.gz' | 'sql' | null {
   const basename = name.split('/').pop() ?? name;
   if (basename === 'database.json') return 'json';
@@ -651,19 +439,3 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function formatBytes(bytes: number): string {
-  const mebibytes = bytes / (1024 * 1024);
-  return `${mebibytes.toFixed(Number.isInteger(mebibytes) ? 0 : 1)} MiB`;
-}
-
-function capitalize(value: string): string {
-  return value.length === 0 ? value : `${value[0].toUpperCase()}${value.slice(1)}`;
-}
-
-function toBadRequestException(err: unknown, fallbackMessage: string): BadRequestException {
-  if (err instanceof BadRequestException) return err;
-  if (err instanceof Error && err.message.length > 0) {
-    return new BadRequestException(`${fallbackMessage}: ${err.message}`);
-  }
-  return new BadRequestException(fallbackMessage);
-}
