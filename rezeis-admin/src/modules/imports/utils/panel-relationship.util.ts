@@ -85,6 +85,24 @@ function looksNumeric(value: string): boolean {
 }
 
 /**
+ * Spread a sample across the whole list instead of taking its head.
+ *
+ * A backup's rows come out in insertion order, so its first identifiers are the
+ * OLDEST customers — precisely the cohort an operator is most likely to have
+ * pruned from the panel over the years. Twenty-five deleted veterans read
+ * exactly like a panel that has none of them, and the run would then provision
+ * a duplicate profile for every customer who already had a working one. A
+ * stride costs nothing and cannot be fooled that way.
+ */
+function stride<T>(items: readonly T[], size: number): T[] {
+  if (items.length <= size) return [...items];
+  const step = items.length / size;
+  const picked: T[] = [];
+  for (let i = 0; i < size; i += 1) picked.push(items[Math.floor(i * step)]);
+  return picked;
+}
+
+/**
  * Pick the identifiers worth asking about: distinct, and owners first.
  *
  * Owner agreement is the only signal that survives id collision, so a sample
@@ -104,7 +122,9 @@ function chooseSamples(
     seen.add(sample.anchor);
     (sample.telegramId === null ? anonymous : withOwner).push(sample);
   }
-  return [...withOwner, ...anonymous].slice(0, size);
+  const chosen = stride(withOwner, size);
+  if (chosen.length >= size) return chosen;
+  return [...chosen, ...stride(anonymous, size - chosen.length)];
 }
 
 /**

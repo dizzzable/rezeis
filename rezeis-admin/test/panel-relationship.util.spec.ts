@@ -140,6 +140,47 @@ describe('when the panel is the one these customers were on', () => {
   });
 });
 
+describe('which identifiers get asked about', () => {
+  it('spreads the sample across the dump instead of taking its head', async () => {
+    // THE BIAS THAT WOULD HAVE SHIPPED. Backup rows come out in insertion
+    // order, so a prefix is the oldest cohort — the one an operator is most
+    // likely to have pruned from the panel years ago. Read as "this panel has
+    // none of them", the run provisions a SECOND profile for every customer who
+    // already had a working one.
+    const dump = samples(500);
+    const alive = new Set(dump.slice(100).map((s) => s.anchor));
+
+    const verdict = await decidePanelRelationship({
+      samples: dump,
+      lookup: lookup(),
+      resolve: (anchor) =>
+        Promise.resolve(
+          alive.has(anchor)
+            ? { panel: { telegramId: 100 + Number(anchor) }, known: true }
+            : { panel: null, known: true },
+        ),
+    });
+
+    assert.equal(verdict.relationship, 'same');
+  });
+
+  it('asks about each identifier once even when it strides', async () => {
+    const asked: string[] = [];
+
+    await decidePanelRelationship({
+      samples: samples(500),
+      lookup: lookup(),
+      resolve: (anchor) => {
+        asked.push(anchor);
+        return Promise.resolve({ panel: null, known: true });
+      },
+    });
+
+    assert.equal(asked.length, 25);
+    assert.equal(new Set(asked).size, 25);
+  });
+});
+
 describe('when the panel is somebody else entirely', () => {
   it('reads a complete list that has none of them as a different install', async () => {
     const verdict = await decidePanelRelationship({
