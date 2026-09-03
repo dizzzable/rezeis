@@ -51,7 +51,7 @@ describe('the panel relay deadline outlasts the cabinet deadline for the same ro
   it('covers every event on the queue, plus the backup relay that is not on it', () => {
     // Anti-emptiness anchor. A resolver asked about nothing agrees with any
     // implementation, including one that returns 0 for everything.
-    assert.equal(REIWA_RELAY_EVENTS.length, 9);
+    assert.equal(REIWA_RELAY_EVENTS.length, 10);
     for (const event of [...REIWA_RELAY_EVENTS, BACKUP_EVENT]) {
       const budget = relayRequestTimeoutMs(event);
       assert.ok(
@@ -63,7 +63,7 @@ describe('the panel relay deadline outlasts the cabinet deadline for the same ro
 
   it('gives message routes more than the cabinet gives the bot for them', () => {
     const messageEvents = REIWA_RELAY_EVENTS.filter((e) => !e.endsWith('.document'));
-    assert.equal(messageEvents.length, 7);
+    assert.equal(messageEvents.length, 8);
     for (const event of messageEvents) {
       const budget = relayRequestTimeoutMs(event);
       assert.equal(budget, 10_000, event);

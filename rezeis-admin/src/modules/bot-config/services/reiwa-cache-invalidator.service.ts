@@ -107,12 +107,23 @@ export class ReiwaCacheInvalidatorService {
     await this.relayQueue.enqueue('reiwa.landing.invalidate', { reason });
   }
 
+  /**
+   * Notify reiwa that the connect-screen catalog changed so the cabinet drops
+   * its cached copy and the next customer to tap "Подключить" sees the apps the
+   * operator just edited, instead of waiting out the HTTP cache TTL. Queued,
+   * bounded, and fired only after the write has actually landed.
+   */
+  public async invalidateConnectPage(reason: string): Promise<void> {
+    await this.relayQueue.enqueue('reiwa.connect-page.invalidate', { reason });
+  }
+
   private async dispatch(
     event:
       | 'reiwa.bot.invalidate'
       | 'reiwa.platform.policy_invalidated'
       | 'reiwa.branding.invalidate'
-      | 'reiwa.landing.invalidate',
+      | 'reiwa.landing.invalidate'
+      | 'reiwa.connect-page.invalidate',
     metadata: Record<string, unknown>,
   ): Promise<boolean> {
     if (this.endpoint === null || this.secret === null) return false;

@@ -107,7 +107,7 @@ describe('the relay queue producer puts the policy on the job, not just in a con
   it('hands BullMQ the attempts and the backoff its policy earned, for every event', async () => {
     // Anti-emptiness anchor: a loop over an empty event list proves nothing,
     // and would be the silent way for this whole test to stop working.
-    assert.equal(REIWA_RELAY_EVENTS.length, 9, 'the nine events this queue owns');
+    assert.equal(REIWA_RELAY_EVENTS.length, 10, 'the ten events this queue owns');
 
     for (const event of REIWA_RELAY_EVENTS) {
       const { service, added } = buildQueueService();

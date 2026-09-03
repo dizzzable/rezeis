@@ -1,6 +1,12 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { BotConfigModule } from '../bot-config/bot-config.module';
+import {
+  AdminConnectPageController,
+  InternalConnectPageController,
+} from './connect-page/connect-page.controllers';
+import { ConnectPageService } from './connect-page/connect-page.service';
 import { AdminSubpageConfigController } from './controllers/admin-subpage-config.controller';
 import { InternalSubpageConfigController } from './controllers/internal-subpage-config.controller';
 import { SubpageCacheInvalidateInterceptor } from './interceptors/subpage-cache-invalidate.interceptor';
@@ -17,13 +23,19 @@ import { SubpageConfigService } from './services/subpage-config.service';
  * subpage so operator changes appear immediately.
  */
 @Module({
-  imports: [AuthModule],
-  controllers: [AdminSubpageConfigController, InternalSubpageConfigController],
+  imports: [AuthModule, BotConfigModule],
+  controllers: [
+    AdminSubpageConfigController,
+    InternalSubpageConfigController,
+    AdminConnectPageController,
+    InternalConnectPageController,
+  ],
   providers: [
     SubpageConfigService,
+    ConnectPageService,
     SubpageCacheInvalidatorService,
     SubpageCacheInvalidateInterceptor,
   ],
-  exports: [SubpageConfigService],
+  exports: [SubpageConfigService, ConnectPageService],
 })
 export class SubpageConfigModule {}

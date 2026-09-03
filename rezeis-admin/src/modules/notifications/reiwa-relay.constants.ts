@@ -17,7 +17,7 @@ export const REIWA_RELAY_QUEUE = 'reiwa-relay';
 export const REIWA_RELAY_JOB = 'reiwa.relay';
 
 /**
- * The nine events this queue owns, in the order the audit listed them.
+ * The ten events this queue owns, in the order the audit listed them.
  *
  * `reiwa.backup.document` is deliberately absent — see `REIWA_RELAY_QUEUE`.
  */
@@ -31,6 +31,7 @@ export const REIWA_RELAY_EVENTS = [
   'reiwa.platform.policy_invalidated',
   'reiwa.branding.invalidate',
   'reiwa.landing.invalidate',
+  'reiwa.connect-page.invalidate',
 ] as const;
 
 export type ReiwaRelayEvent = (typeof REIWA_RELAY_EVENTS)[number];

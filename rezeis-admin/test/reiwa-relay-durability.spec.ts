@@ -25,11 +25,11 @@ import type { NotifyDeliveryResult } from '../src/modules/notifications/services
  *
  *  1. WHAT COUNTS AS DELIVERED. The backup relay — the one path that already
  *     did this properly — demands `status === 'confirmed'`. Copying that rule
- *     onto these nine would hang eight of them forever, because the cabinet
+ *     onto these ten would hang nine of them forever, because the cabinet
  *     answers `200 { messageId }` for `reiwa.user.notify` alone and a bodiless
  *     `204` for the rest (`api/routes/webhooks.ts`, "Response contract"), and
  *     `deliver()` maps a 204 to `unconfirmed`. `confirmed` is unreachable for
- *     those eight by construction, so "retry until confirmed" is "retry until
+ *     those nine by construction, so "retry until confirmed" is "retry until
  *     the attempts run out", every time, for every event, forever. It would
  *     look like a working queue: jobs enqueue, jobs retry, alerts fire.
  *
@@ -47,9 +47,9 @@ function outcome(
 }
 
 describe('what the relay queue treats as delivered', () => {
-  it('accepts a bare 2xx for the eight events the cabinet answers with 204', async () => {
+  it('accepts a bare 2xx for the nine events the cabinet answers with 204', async () => {
     const ackOnly = REIWA_RELAY_EVENTS.filter((e) => e !== 'reiwa.user.notify');
-    assert.equal(ackOnly.length, 8);
+    assert.equal(ackOnly.length, 9);
     for (const event of ackOnly) {
       assert.equal(
         isRelayDelivered(event, outcome('unconfirmed', { httpStatus: 204 })),
@@ -73,14 +73,15 @@ describe('what the relay queue treats as delivered', () => {
       assert.ok(policy, `${event} has no retry policy`);
       assert.ok(policy.attempts >= 1);
     }
-    // The four cache hints self-heal at a 60s (policy/legal) or 5-minute
-    // (bot-config) TTL. A third attempt lands after the TTL already fixed it,
+    // The five cache hints self-heal at a 60s (policy/legal/connect-page) or
+    // 5-minute (bot-config) TTL. A third attempt lands after the TTL already fixed it,
     // so it busts a cache that is no longer stale.
     for (const event of [
       'reiwa.bot.invalidate',
       'reiwa.platform.policy_invalidated',
       'reiwa.branding.invalidate',
       'reiwa.landing.invalidate',
+      'reiwa.connect-page.invalidate',
     ] as const) {
       assert.equal(RELAY_EVENT_POLICY[event].durability, 'bounded', event);
       assert.equal(RELAY_EVENT_POLICY[event].attempts, 2, event);
