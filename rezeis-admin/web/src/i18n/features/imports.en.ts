@@ -125,6 +125,10 @@ export const en = {
       actions: 'Actions',
     },
     progressDialog: {
+      panelMove: {
+        title: 'This is a different Remnawave panel',
+        body: 'The identifiers in the backup belong to another installation, so none of these subscriptions has a profile here. They were imported with the expiry and status from the backup and are waiting for {{count}} profile(s) to be created: enable "Sync to panel after import" and run the import again — it will not duplicate anything. The squads did not carry over either, because they belonged to the old panel, so run "Clone source plans" and then "Assign plan to all" first. Every customer gets a NEW connection link — the old ones pointed at the previous panel.',
+      },
       notImported: {
         title: 'Not carried over — settle by hand',
         pendingWithdrawals: 'Withdrawal requests (money still on the balance)',

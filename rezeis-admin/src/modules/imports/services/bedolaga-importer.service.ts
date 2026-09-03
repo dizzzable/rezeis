@@ -33,6 +33,11 @@ import {
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
 import {
+  decidePanelRelationship,
+  type PanelIdentitySample,
+  type PanelRelationship,
+} from '../utils/panel-relationship.util';
+import {
   BedolagaBackupData,
   BedolagaPromoGroup,
   BedolagaPromocode,
@@ -103,6 +108,25 @@ export class BedolagaImporterService {
       this.remnawaveApiService.strictGetAllPanelUsers(),
     );
 
+    // …but only if it is the panel these customers were actually on. Decided
+    // once for the run, because per row "the profile was deleted" and "this is
+    // somebody else's panel" are the same observation — see
+    // `panel-relationship.util`.
+    const panelVerdict = await decidePanelRelationship({
+      samples: collectPanelSamples(data, index),
+      lookup: panelLookup,
+      resolve: (anchor) =>
+        resolvePanelProfile(
+          anchor,
+          panelLookup,
+          (id) => this.remnawaveApiService.getPanelUser(id),
+          this.panelAbsenceProbe(),
+        ),
+    });
+    this.logger.log(
+      `Bedolaga import: panel relationship = ${panelVerdict.relationship} (${panelVerdict.reason})`,
+    );
+
     const errors: string[] = [];
     const createdUserIds: string[] = [];
     /** Bedolaga user id → our user id, for the referral pass afterwards. */
@@ -116,6 +140,8 @@ export class BedolagaImporterService {
     let pointsGranted = 0;
     let discountsApplied = 0;
     let walletsNotCarried = 0;
+    /** Subscriptions left unlinked on purpose, for the sync to provision. */
+    let panelProfilesToCreate = 0;
     /** People whose wallet was in the red — an operator decision, not ours. */
     const debtors: Array<{ readonly telegramId: number | null; readonly kopeks: number }> = [];
 
@@ -154,10 +180,12 @@ export class BedolagaImporterService {
             sub,
             tariff: sub.tariff_id === null ? undefined : index.tariffsById.get(sub.tariff_id),
             panelLookup,
+            panelRelationship: panelVerdict.relationship,
             importRecordId: importRecordId ?? null,
           });
-          if (outcome === 'created') subscriptionsCreated += 1;
-          else if (outcome === 'updated') subscriptionsUpdated += 1;
+          if (outcome.outcome === 'created') subscriptionsCreated += 1;
+          else if (outcome.outcome === 'updated') subscriptionsUpdated += 1;
+          if (outcome.leftUnlinked) panelProfilesToCreate += 1;
         }
 
         for (const transaction of index.transactionsByUser.get(donor.id) ?? []) {
@@ -191,6 +219,20 @@ export class BedolagaImporterService {
       discountsApplied,
       bedolagaReferrals: referrals,
       bedolagaPromocodes: promocodes,
+      // Which panel these customers turned out to be on, and what that cost.
+      // Surfaced rather than logged: on a `different` verdict every migrated
+      // subscription gets a NEW connection link, and that is news the operator
+      // has to hear from the import rather than from support tickets.
+      panelRelationship: {
+        verdict: panelVerdict.relationship,
+        reason: panelVerdict.reason,
+        sampled: panelVerdict.sampled,
+        matchedOwners: panelVerdict.matchedOwners,
+        mismatchedOwners: panelVerdict.mismatchedOwners,
+        absent: panelVerdict.absent,
+        unconfirmed: panelVerdict.unconfirmed,
+        profilesToCreate: panelProfilesToCreate,
+      } satisfies PanelRelationshipReport,
       // Every one of these is either an obligation somebody is owed or a
       // decision only the operator can make. Counted so they are settled by
       // hand instead of disappearing with the old bot.
@@ -443,13 +485,16 @@ export class BedolagaImporterService {
     readonly sub: BedolagaSubscription;
     readonly tariff: BedolagaTariff | undefined;
     readonly panelLookup: PanelLookup;
+    readonly panelRelationship: PanelRelationship;
     readonly importRecordId: string | null;
-  }): Promise<'created' | 'updated' | 'skipped'> {
-    const { userId, donor, sub, tariff, panelLookup, importRecordId } = input;
+  }): Promise<SubscriptionOutcome> {
+    const { userId, donor, sub, tariff, panelLookup, panelRelationship, importRecordId } = input;
+    /** The run proved these identities are not this panel's. */
+    const foreignPanel = panelRelationship === 'different';
 
     // An unpaid trial draft is not a subscription: Bedolaga's own menus and
     // its "has this person used their trial" check both skip it.
-    if (sub.status === 'pending' && sub.is_trial) return 'skipped';
+    if (sub.status === 'pending' && sub.is_trial) return SKIPPED;
 
     // The panel's numeric id, from whichever column the operator's sales mode
     // put it in. `remnawave_uuid` is deliberately not consulted: on a 3.x
@@ -457,7 +502,7 @@ export class BedolagaImporterService {
     // careless reader would mistake for "no such user" and duplicate a
     // profile on.
     const panelId = sub.remnawave_id ?? donor.remnawave_id;
-    if (panelId === null) return 'skipped';
+    if (panelId === null) return SKIPPED;
     const anchor = String(panelId);
 
     // Both spellings, because a rezeis install older than the panel's 3.x
@@ -466,10 +511,24 @@ export class BedolagaImporterService {
     // that row and create a SECOND subscription for one panel profile — and
     // when one of the two expires, the sweep deletes the profile out from under
     // the other.
-    const existing = await this.prismaService.subscription.findFirst({
-      where: { OR: [{ remnawaveId: anchor }, { remnawavePanelId: panelId }] },
-      select: { id: true, userId: true, planSnapshot: true },
-    });
+    //
+    // On a FOREIGN panel the identifier is not an identifier at all: 3.x ids
+    // are small and dense, so id 5 exists on this panel too and belongs to one
+    // of our own customers. Looking it up would find that stranger's row and
+    // refuse the import for the whole base. The durable key across re-runs is
+    // then the stamp this importer itself wrote, scoped to the person.
+    const existing = foreignPanel
+      ? await this.prismaService.subscription.findFirst({
+          where: {
+            userId,
+            planSnapshot: { path: ['sourceSubscriptionId'], equals: sub.id },
+          },
+          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+        })
+      : await this.prismaService.subscription.findFirst({
+          where: { OR: [{ remnawaveId: anchor }, { remnawavePanelId: panelId }] },
+          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+        });
     // A profile that already belongs to somebody else here is a refusal, not a
     // rebind: silently moving a live subscription between two customers is the
     // one mistake an import cannot apologise for afterwards.
@@ -517,12 +576,25 @@ export class BedolagaImporterService {
       backupTrafficUsedGb: sub.traffic_used_gb,
     };
 
-    const { panel, known } = await resolvePanelProfile(
-      anchor,
-      panelLookup,
-      (id) => this.remnawaveApiService.getPanelUser(id),
-      this.panelAbsenceProbe(),
-    );
+    // Which identity to ask THIS panel about.
+    //
+    // On a foreign panel the dump's anchor names nothing here — every answer it
+    // could give is about somebody else's profile, and the one the overlay acts
+    // on ("no such user") becomes EXPIRED written over a paying customer. But a
+    // row this importer already migrated carries the id the sync wrote back
+    // when it created the profile, and that id IS this panel's: re-importing
+    // the same backup must overlay it like any other, not orphan it again.
+    const linkedHere = existing?.remnawaveId ?? null;
+    const panelAnchor = foreignPanel ? linkedHere : anchor;
+    const { panel, known } =
+      panelAnchor === null
+        ? { panel: null, known: false }
+        : await resolvePanelProfile(
+            panelAnchor,
+            panelLookup,
+            (id) => this.remnawaveApiService.getPanelUser(id),
+            this.panelAbsenceProbe(),
+          );
 
     // The local check above only sees rows we already have; on a first import
     // there are none. This one asks the PANEL who the profile belongs to. A
@@ -538,7 +610,7 @@ export class BedolagaImporterService {
       String(panel.telegramId) !== String(donor.telegram_id)
     ) {
       throw new Error(
-        `panel profile ${anchor} belongs to telegram ${String(panel.telegramId)}, not to ${String(donor.telegram_id)}`,
+        `panel profile ${String(panelAnchor)} belongs to telegram ${String(panel.telegramId)}, not to ${String(donor.telegram_id)}`,
       );
     }
 
@@ -559,15 +631,33 @@ export class BedolagaImporterService {
           };
         })()
       : {
+          // `known` is false on a foreign panel, so this keeps the backup's own
+          // status — which is the entire point: the alternative is EXPIRED on
+          // every ACTIVE row in the file.
           status: reconcileMissingPanelStatus(known, mapSubscriptionStatus(sub.status)),
           isTrial: sub.is_trial,
           trafficLimit: withTopUp(backupTraffic, sub.purchased_traffic_gb),
           deviceLimit: sub.device_limit,
-          internalSquads: backupSquads,
-          externalSquad: tariff?.external_squad_uuid ?? null,
-          configUrl: sub.subscription_url,
           expiresAt: toDate(sub.end_date),
           planSnapshot,
+          // Squad uuids and the connection link belong to the panel that issued
+          // them. On a DIFFERENT panel the uuids name nothing, so pushing them
+          // would fail the profile CREATE outright, and the link is a dead
+          // address the customer would be shown as though it worked — so a new
+          // row starts empty and "Назначить тариф" + the sync fill both in.
+          //
+          // An UPDATE on a foreign panel writes neither: by then the columns
+          // hold what the panel itself reported when the profile was created,
+          // and re-importing the same backup must not wipe a working link.
+          ...(foreignPanel
+            ? existing === null
+              ? { internalSquads: [], externalSquad: null, configUrl: null }
+              : {}
+            : {
+                internalSquads: backupSquads,
+                externalSquad: tariff?.external_squad_uuid ?? null,
+                configUrl: sub.subscription_url,
+              }),
         };
 
     if (existing !== null) {
@@ -584,7 +674,7 @@ export class BedolagaImporterService {
           });
         }
       });
-      return 'updated';
+      return { outcome: 'updated', leftUnlinked: foreignPanel && linkedHere === null };
     }
 
     const createdSub = await this.prismaService.$transaction(async (tx) => {
@@ -593,8 +683,14 @@ export class BedolagaImporterService {
         data: {
           ...shared,
           user: { connect: { id: userId } },
-          remnawaveId: anchor,
-          remnawavePanelId: panelId,
+          // Left NULL on a foreign panel, and that is the whole mechanism:
+          // `enqueuePostImportSync` reads an unlinked subscription as
+          // `SyncAction.CREATE`, so the operator's "синхронизировать с панелью"
+          // provisions a fresh profile instead of updating a stranger's.
+          // Stamping the donor's id here would both point at somebody else and
+          // send the sync down the UPDATE path forever.
+          remnawaveId: foreignPanel ? null : anchor,
+          remnawavePanelId: foreignPanel ? null : panelId,
           startedAt: toDate(sub.start_date) ?? new Date(),
         },
       });
@@ -625,7 +721,7 @@ export class BedolagaImporterService {
         data: { currentSubscriptionId: createdSub.id },
       });
     }
-    return 'created';
+    return { outcome: 'created', leftUnlinked: foreignPanel };
   }
 
   // ── Transactions ──────────────────────────────────────────────────────────
@@ -912,6 +1008,40 @@ interface BalanceConversion {
   readonly rate: number;
 }
 
+/**
+ * What one subscription row did, and whether it is waiting for a panel profile.
+ *
+ * The second half is not derivable from the first: on a foreign panel a row can
+ * be `updated` and still unlinked (the previous run's sync never got to it), and
+ * `created` rows on the SAME panel are linked from the start. Counting the
+ * verdict instead of the row is what made the first draft of this report claim
+ * profiles it was not going to create.
+ */
+interface SubscriptionOutcome {
+  readonly outcome: 'created' | 'updated' | 'skipped';
+  readonly leftUnlinked: boolean;
+}
+
+const SKIPPED: SubscriptionOutcome = { outcome: 'skipped', leftUnlinked: false };
+
+/**
+ * The panel verdict as the operator's report carries it.
+ *
+ * Named rather than inlined because the panel SPA parses this block by hand —
+ * the two live in different images, so the shape is a contract and a silent
+ * rename here is a blank card there.
+ */
+interface PanelRelationshipReport {
+  readonly verdict: PanelRelationship;
+  readonly reason: string;
+  readonly sampled: number;
+  readonly matchedOwners: number;
+  readonly mismatchedOwners: number;
+  readonly absent: number;
+  readonly unconfirmed: number;
+  readonly profilesToCreate: number;
+}
+
 interface BackupIndex {
   readonly subscriptionsByUser: ReadonlyMap<number, BedolagaSubscription[]>;
   readonly transactionsByUser: ReadonlyMap<number, BedolagaTransaction[]>;
@@ -961,6 +1091,29 @@ function buildIndex(data: BedolagaBackupData): BackupIndex {
   }
 
   return { subscriptionsByUser, transactionsByUser, tariffsById, promoGroupsByUser };
+}
+
+/**
+ * Every panel identity in the backup, paired with the person who owns it.
+ *
+ * Deliberately walks the users rather than the subscriptions: the owner is the
+ * whole point of the sample, and only the user row carries a telegram id. Rows
+ * whose subscription has no identity of its own fall back to the user's, the
+ * same way {@link BedolagaImporterService.syncSubscription} does — reading a
+ * different column here than the importer reads would have the verdict answer
+ * a question about identifiers nobody is going to write.
+ */
+function collectPanelSamples(data: BedolagaBackupData, index: BackupIndex): PanelIdentitySample[] {
+  const samples: PanelIdentitySample[] = [];
+  for (const donor of data.users) {
+    for (const sub of index.subscriptionsByUser.get(donor.id) ?? []) {
+      if (sub.status === 'pending' && sub.is_trial) continue;
+      const panelId = sub.remnawave_id ?? donor.remnawave_id;
+      if (panelId === null) continue;
+      samples.push({ anchor: String(panelId), telegramId: donor.telegram_id });
+    }
+  }
+  return samples;
 }
 
 // ── Pure mapping helpers ─────────────────────────────────────────────────────

@@ -55,6 +55,8 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 
+import { panelMoveField, type PanelMoveReport } from './panel-move-report'
+
 // ── Public types ──────────────────────────────────────────────────────────
 
 export type ImportSource =
@@ -126,6 +128,12 @@ interface FlattenedSummary {
    * that report none.
    */
   readonly notImported: ReadonlyArray<{ readonly key: string; readonly count: number }>
+  /**
+   * Set only when the run found the backup's panel identities are NOT this
+   * panel's — a migration between Remnawave installations. Null the rest of
+   * the time, which is every import anybody has run until now.
+   */
+  readonly panelMove: PanelMoveReport | null
   readonly errors: ReadonlyArray<string>
 }
 
@@ -449,6 +457,27 @@ function DoneBody({
         </div>
       ) : null}
 
+      {/* A migration between two Remnawave installations. The operator has to
+          hear this from the import rather than from support tickets: the old
+          panel's links are dead, and every customer in the file gets a new
+          one once the profiles are created. */}
+      {summary?.panelMove ? (
+        <>
+          <Separator />
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+            <p className="flex items-center gap-2 text-sm font-medium">
+              <AlertTriangle className="size-4 shrink-0 text-amber-600" aria-hidden="true" />
+              {t('importsPage.progressDialog.panelMove.title')}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t('importsPage.progressDialog.panelMove.body', {
+                count: summary.panelMove.profilesToCreate,
+              })}
+            </p>
+          </div>
+        </>
+      ) : null}
+
       {/* What the run left behind on purpose. Each of these is somebody
           waiting for something, or a decision only the operator can make —
           reporting it is the whole reason the importer counts them. */}
@@ -674,6 +703,7 @@ function flattenResult(record: ImportRecordPayload): FlattenedSummary {
     subsUpdated: numericFieldOrNull(result, 'subscriptionsUpdated'),
     writebacks: numericFieldOrNull(result, 'descriptionWritebacks'),
     notImported: notImportedField(result),
+    panelMove: panelMoveField(result),
     errors: stringArrayField(result, 'errors'),
   }
 }
