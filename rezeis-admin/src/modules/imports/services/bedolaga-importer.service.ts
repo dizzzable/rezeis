@@ -34,8 +34,11 @@ import {
 } from '../utils/remnawave-overlay.util';
 import {
   decidePanelRelationship,
+  panelRelationshipReport,
+  SKIPPED_WRITE,
   type PanelIdentitySample,
   type PanelRelationship,
+  type PanelWriteOutcome,
 } from '../utils/panel-relationship.util';
 import {
   BedolagaBackupData,
@@ -223,16 +226,7 @@ export class BedolagaImporterService {
       // Surfaced rather than logged: on a `different` verdict every migrated
       // subscription gets a NEW connection link, and that is news the operator
       // has to hear from the import rather than from support tickets.
-      panelRelationship: {
-        verdict: panelVerdict.relationship,
-        reason: panelVerdict.reason,
-        sampled: panelVerdict.sampled,
-        matchedOwners: panelVerdict.matchedOwners,
-        mismatchedOwners: panelVerdict.mismatchedOwners,
-        absent: panelVerdict.absent,
-        unconfirmed: panelVerdict.unconfirmed,
-        profilesToCreate: panelProfilesToCreate,
-      } satisfies PanelRelationshipReport,
+      panelRelationship: panelRelationshipReport(panelVerdict, panelProfilesToCreate),
       // Every one of these is either an obligation somebody is owed or a
       // decision only the operator can make. Counted so they are settled by
       // hand instead of disappearing with the old bot.
@@ -487,14 +481,14 @@ export class BedolagaImporterService {
     readonly panelLookup: PanelLookup;
     readonly panelRelationship: PanelRelationship;
     readonly importRecordId: string | null;
-  }): Promise<SubscriptionOutcome> {
+  }): Promise<PanelWriteOutcome> {
     const { userId, donor, sub, tariff, panelLookup, panelRelationship, importRecordId } = input;
     /** The run proved these identities are not this panel's. */
     const foreignPanel = panelRelationship === 'different';
 
     // An unpaid trial draft is not a subscription: Bedolaga's own menus and
     // its "has this person used their trial" check both skip it.
-    if (sub.status === 'pending' && sub.is_trial) return SKIPPED;
+    if (sub.status === 'pending' && sub.is_trial) return SKIPPED_WRITE;
 
     // The panel's numeric id, from whichever column the operator's sales mode
     // put it in. `remnawave_uuid` is deliberately not consulted: on a 3.x
@@ -502,7 +496,7 @@ export class BedolagaImporterService {
     // careless reader would mistake for "no such user" and duplicate a
     // profile on.
     const panelId = sub.remnawave_id ?? donor.remnawave_id;
-    if (panelId === null) return SKIPPED;
+    if (panelId === null) return SKIPPED_WRITE;
     const anchor = String(panelId);
 
     // Both spellings, because a rezeis install older than the panel's 3.x
@@ -1015,40 +1009,6 @@ const NOTHING_CREDITED = { granted: 0, refused: false } as const;
 interface BalanceConversion {
   readonly enabled: boolean;
   readonly rate: number;
-}
-
-/**
- * What one subscription row did, and whether it is waiting for a panel profile.
- *
- * The second half is not derivable from the first: on a foreign panel a row can
- * be `updated` and still unlinked (the previous run's sync never got to it), and
- * `created` rows on the SAME panel are linked from the start. Counting the
- * verdict instead of the row is what made the first draft of this report claim
- * profiles it was not going to create.
- */
-interface SubscriptionOutcome {
-  readonly outcome: 'created' | 'updated' | 'skipped';
-  readonly leftUnlinked: boolean;
-}
-
-const SKIPPED: SubscriptionOutcome = { outcome: 'skipped', leftUnlinked: false };
-
-/**
- * The panel verdict as the operator's report carries it.
- *
- * Named rather than inlined because the panel SPA parses this block by hand —
- * the two live in different images, so the shape is a contract and a silent
- * rename here is a blank card there.
- */
-interface PanelRelationshipReport {
-  readonly verdict: PanelRelationship;
-  readonly reason: string;
-  readonly sampled: number;
-  readonly matchedOwners: number;
-  readonly mismatchedOwners: number;
-  readonly absent: number;
-  readonly unconfirmed: number;
-  readonly profilesToCreate: number;
 }
 
 interface BackupIndex {

@@ -38,6 +38,27 @@ export type PanelRelationship =
   /** Not enough evidence to say. Callers keep their previous behaviour. */
   | 'unknown';
 
+/**
+ * What one subscription row did, and whether it is still waiting for a profile
+ * on THIS panel.
+ *
+ * The second half is not derivable from the first: on a foreign panel a row can
+ * be `updated` and still unlinked (a previous run's sync never got to it), and
+ * `created` rows on the same panel are linked from the start. Counting the
+ * run's verdict instead of the row is what made the first draft of this report
+ * claim profiles it was not going to create.
+ *
+ * Generic in the outcome because two of the importers also report refusals
+ * (`owner-mismatch`) through the same return value.
+ */
+export interface PanelWriteOutcome<TOutcome extends string = 'created' | 'updated' | 'skipped'> {
+  readonly outcome: TOutcome;
+  readonly leftUnlinked: boolean;
+}
+
+/** Nothing was written, so nothing is waiting for a profile either. */
+export const SKIPPED_WRITE: PanelWriteOutcome = { outcome: 'skipped', leftUnlinked: false };
+
 /** One identifier from the dump, with the person it is supposed to belong to. */
 export interface PanelIdentitySample {
   readonly anchor: string;
@@ -58,6 +79,45 @@ export interface PanelRelationshipVerdict {
   readonly absent: number;
   /** Asked, and the answer could not be trusted either way. */
   readonly unconfirmed: number;
+}
+
+/**
+ * The verdict as the operator's report carries it.
+ *
+ * Built here rather than spelled out in each importer: the panel SPA parses
+ * this block by hand out of a free-form result payload, and the two ship as
+ * separate images — so the shape is a contract, and four hand-written copies of
+ * a contract are four chances to drift out of it silently.
+ */
+// A type alias, not an interface, on purpose: only an alias gets TypeScript's
+// implicit index signature, and without one Prisma refuses the whole result
+// payload as "not assignable to InputJsonValue".
+export type PanelRelationshipReport = {
+  readonly verdict: PanelRelationship;
+  readonly reason: string;
+  readonly sampled: number;
+  readonly matchedOwners: number;
+  readonly mismatchedOwners: number;
+  readonly absent: number;
+  readonly unconfirmed: number;
+  /** Subscriptions left unlinked on purpose, for the sync to provision. */
+  readonly profilesToCreate: number;
+};
+
+export function panelRelationshipReport(
+  verdict: PanelRelationshipVerdict,
+  profilesToCreate: number,
+): PanelRelationshipReport {
+  return {
+    verdict: verdict.relationship,
+    reason: verdict.reason,
+    sampled: verdict.sampled,
+    matchedOwners: verdict.matchedOwners,
+    mismatchedOwners: verdict.mismatchedOwners,
+    absent: verdict.absent,
+    unconfirmed: verdict.unconfirmed,
+    profilesToCreate,
+  };
 }
 
 /**
@@ -176,6 +236,13 @@ export async function decidePanelRelationship(input: {
     };
   }
 
+  // Whether the identifiers in this dump CAN collide across installations.
+  // Remnawave 3.x numbers users from one, so id 5 exists on both panels and a
+  // hit says nothing on its own. A uuid cannot collide — two panels do not mint
+  // the same one — so there a resolved profile is proof this is the
+  // installation that issued it, whoever it belongs to now.
+  const collidable = chosen.every((sample) => looksNumeric(sample.anchor));
+
   let present = 0;
   let matchedOwners = 0;
   let mismatchedOwners = 0;
@@ -197,6 +264,8 @@ export async function decidePanelRelationship(input: {
   }
 
   const counted = { sampled: chosen.length, matchedOwners, mismatchedOwners, absent, unconfirmed };
+  /** Resolved, but with no owner on one side or the other to check it against. */
+  const unattributed = present - matchedOwners - mismatchedOwners;
 
   // One identifier that resolves to the very person the backup says owns it
   // settles the question on its own: numeric ids collide across installations,
@@ -209,14 +278,33 @@ export async function decidePanelRelationship(input: {
     };
   }
 
+  // A profile that resolves under an identifier nothing else could have minted
+  // is this installation's, and no telegram id is needed to say so. This is the
+  // ordinary shape of the older donors, whose backups carry 2.x uuids and often
+  // no owner on either side.
+  if (!collidable && unattributed > 0 && mismatchedOwners === 0) {
+    return {
+      relationship: 'same',
+      reason: `${unattributed} of ${chosen.length} identifiers still resolve on this panel`,
+      ...counted,
+    };
+  }
+
   // The two ways a panel says "not mine" — it has no such profile, or it has
   // one belonging to somebody else — are the SAME evidence and have to be
   // counted together. A panel with two customers of its own answers a
   // migrating dump with a mixture of both, and weighing them separately is how
   // the first draft of this file returned `unknown` for the very case it was
   // written for.
+  //
+  // `unattributed === 0` is the other half of that lesson, and the more
+  // expensive one: a profile that resolved but could not be attributed is
+  // evidence FOR this panel that the first version threw away, so a same-panel
+  // run with a handful of deleted customers and no telegram ids anywhere read
+  // as a migration — and would have provisioned a second profile for everyone
+  // who already had a working one.
   const against = absent + mismatchedOwners;
-  if (matchedOwners === 0 && against >= PANEL_VERDICT_MIN_EVIDENCE) {
+  if (matchedOwners === 0 && unattributed === 0 && against >= PANEL_VERDICT_MIN_EVIDENCE) {
     return {
       relationship: 'different',
       reason:

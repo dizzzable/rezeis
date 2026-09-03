@@ -28,6 +28,14 @@ import {
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
 import {
+  decidePanelRelationship,
+  panelRelationshipReport,
+  SKIPPED_WRITE,
+  type PanelIdentitySample,
+  type PanelRelationship,
+  type PanelWriteOutcome,
+} from '../utils/panel-relationship.util';
+import {
   StealthnetClient,
   StealthnetPayment,
   StealthnetReferralCredit,
@@ -151,7 +159,40 @@ export class StealthnetImporterService {
       this.remnawaveApiService.strictGetAllPanelUsers(),
     );
 
+    // …and only if it is the panel these customers were actually on. Every
+    // sentence above assumes the donor sold on THIS installation; on a
+    // different one the hardcoded ACTIVE above turns every single migrated
+    // subscription into EXPIRED, on a run that reports success. Decided once
+    // for the run — see `panel-relationship.util`.
+    const panelSamples: PanelIdentitySample[] = [];
+    for (const client of clients) {
+      for (const sub of subsByOwner.get(client.id) ?? []) {
+        if (!sub.remnawave_uuid) continue;
+        const telegramId = Number(client.telegram_id);
+        panelSamples.push({
+          anchor: sub.remnawave_uuid,
+          telegramId: Number.isSafeInteger(telegramId) && telegramId > 0 ? telegramId : null,
+        });
+      }
+    }
+    const panelVerdict = await decidePanelRelationship({
+      samples: panelSamples,
+      lookup: panelLookup,
+      resolve: (anchor) =>
+        resolvePanelProfile(
+          anchor,
+          panelLookup,
+          (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+          this.panelAbsenceProbe(),
+        ),
+    });
+    this.logger.log(
+      `STEALTHNET import: panel relationship = ${panelVerdict.relationship} (${panelVerdict.reason})`,
+    );
+
     const errors: string[] = [];
+    /** Subscriptions left unlinked on purpose, for the sync to provision. */
+    let panelProfilesToCreate = 0;
     let created = 0;
     let updated = 0;
     let skipped = 0;
@@ -225,9 +266,17 @@ export class StealthnetImporterService {
         // Subscriptions
         const userSubs = subsByOwner.get(client.id) ?? [];
         for (const sub of userSubs) {
-          const result = await this.syncSubscription(userId, sub, tariffById, panelLookup, importRecordId ?? null);
-          if (result === 'created') subscriptionsCreated += 1;
-          else if (result === 'updated') subscriptionsUpdated += 1;
+          const result = await this.syncSubscription(
+            userId,
+            sub,
+            tariffById,
+            panelLookup,
+            panelVerdict.relationship,
+            importRecordId ?? null,
+          );
+          if (result.outcome === 'created') subscriptionsCreated += 1;
+          else if (result.outcome === 'updated') subscriptionsUpdated += 1;
+          if (result.leftUnlinked) panelProfilesToCreate += 1;
         }
 
         // Payments → Transactions (historical)
@@ -279,6 +328,10 @@ export class StealthnetImporterService {
       transactionsCreated,
       pointsGranted,
       stealthnetReferrals: JSON.parse(JSON.stringify(referralImport)),
+      // Which panel these customers turned out to be on. Surfaced rather than
+      // logged: on a `different` verdict every migrated subscription gets a NEW
+      // connection link, and the operator has to hear that from the import.
+      panelRelationship: panelRelationshipReport(panelVerdict, panelProfilesToCreate),
       addOnsCreated,
       errors,
       // hasMatchedWrites blocks a destructive rollback when matched users were
@@ -501,14 +554,27 @@ export class StealthnetImporterService {
     sub: StealthnetSubscription,
     tariffById: ReadonlyMap<string, StealthnetTariff>,
     panelLookup: PanelLookup,
+    panelRelationship: PanelRelationship,
     importRecordId: string | null,
-  ): Promise<'created' | 'updated' | 'skipped'> {
-    if (!sub.remnawave_uuid) return 'skipped';
+  ): Promise<PanelWriteOutcome> {
+    if (!sub.remnawave_uuid) return SKIPPED_WRITE;
+    /** The run proved these identities are not this panel's. */
+    const foreignPanel = panelRelationship === 'different';
 
-    const existing = await this.prismaService.subscription.findFirst({
-      where: { remnawaveId: sub.remnawave_uuid },
-      select: { id: true, userId: true },
-    });
+    // On a FOREIGN panel the backup's identifier names no profile here, so it
+    // is not a key: the durable one across re-runs is the stamp this importer
+    // itself wrote. Keying on the identifier anyway would find nothing on the
+    // second run and mint a duplicate subscription — and, once the sync ran, a
+    // duplicate panel profile beside it.
+    const existing = foreignPanel
+      ? await this.prismaService.subscription.findFirst({
+          where: { userId, planSnapshot: { path: ['sourceSubscriptionId'], equals: sub.id } },
+          select: { id: true, userId: true, remnawaveId: true },
+        })
+      : await this.prismaService.subscription.findFirst({
+          where: { remnawaveId: sub.remnawave_uuid },
+          select: { id: true, userId: true, remnawaveId: true },
+        });
 
     const tariff = sub.tariff_id ? tariffById.get(sub.tariff_id) : undefined;
     const tariffSquads = tariff?.internal_squad_uuids ? [...tariff.internal_squad_uuids] : [];
@@ -552,12 +618,23 @@ export class StealthnetImporterService {
     // panel PROVES it is gone (404), the subscription is no longer live →
     // EXPIRED, kept locally so the user can re-buy through the bot. A panel
     // that merely failed to answer proves nothing and keeps the row live.
-    const { panel, known } = await resolvePanelProfile(
-      sub.remnawave_uuid,
-      panelLookup,
-      (uuid) => this.remnawaveApiService.getPanelUser(uuid),
-      this.panelAbsenceProbe(),
-    );
+    //
+    // A foreign panel is asked nothing: every answer it could give is about
+    // somebody else's profile, and the one this importer acts on — "no such
+    // user" — is what turns the hardcoded ACTIVE below into EXPIRED. A row a
+    // previous run already migrated carries the id the sync wrote back when it
+    // created the profile, and THAT id is this panel's.
+    const linkedHere = existing?.remnawaveId ?? null;
+    const panelAnchor = foreignPanel ? linkedHere : sub.remnawave_uuid;
+    const { panel, known } =
+      panelAnchor === null
+        ? { panel: null, known: false }
+        : await resolvePanelProfile(
+            panelAnchor,
+            panelLookup,
+            (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+            this.panelAbsenceProbe(),
+          );
     const backupExpiresAt = parseOptionalDate(sub.expire_at);
     const dataShared = panel
       ? (() => {
@@ -584,13 +661,25 @@ export class StealthnetImporterService {
           };
         })()
       : {
+          // `known` is false on a foreign panel, so this keeps the hardcoded
+          // ACTIVE — which is the entire point: the alternative is EXPIRED on
+          // every subscription in the file.
           status: reconcileMissingPanelStatus(known, SubscriptionStatus.ACTIVE),
           isTrial: false,
           trafficLimit: panelTrafficLimitToGb(tariff?.traffic_limit_bytes),
           deviceLimit: backupDeviceLimit,
-          internalSquads: tariffSquads,
           expiresAt: backupExpiresAt,
           planSnapshot,
+          // Squad uuids belong to the panel that issued them. On a DIFFERENT
+          // panel they name nothing, so pushing them would fail the profile
+          // CREATE outright; a new row starts empty and "Назначить план всем"
+          // plus the sync fill them in. An UPDATE writes neither, because by
+          // then the columns hold what this panel itself reported.
+          ...(foreignPanel
+            ? existing
+              ? {}
+              : { internalSquads: [], externalSquad: null, configUrl: null }
+            : { internalSquads: tariffSquads }),
         };
 
     if (existing) {
@@ -604,14 +693,18 @@ export class StealthnetImporterService {
           data: { user: { connect: { id: userId } } },
         });
       }
-      return 'updated';
+      return { outcome: 'updated', leftUnlinked: foreignPanel && linkedHere === null };
     }
 
     const newSub = await this.prismaService.subscription.create({
       data: {
         ...dataShared,
         user: { connect: { id: userId } },
-        remnawaveId: sub.remnawave_uuid,
+        // Left NULL on a foreign panel, and that is the whole mechanism:
+        // `enqueuePostImportSync` reads an unlinked subscription as
+        // `SyncAction.CREATE`, so the operator's "синхронизировать с панелью"
+        // provisions a fresh profile instead of updating one that is not there.
+        remnawaveId: foreignPanel ? null : sub.remnawave_uuid,
         startedAt: sub.created_at ? new Date(sub.created_at) : new Date(),
       },
     });
@@ -634,7 +727,7 @@ export class StealthnetImporterService {
       });
     }
 
-    return 'created';
+    return { outcome: 'created', leftUnlinked: foreignPanel };
   }
 
   // ── Payment → Transaction ────────────────────────────────────────────────

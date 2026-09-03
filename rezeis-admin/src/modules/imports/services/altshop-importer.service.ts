@@ -36,6 +36,13 @@ import {
   type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
+import {
+  decidePanelRelationship,
+  panelRelationshipReport,
+  type PanelIdentitySample,
+  type PanelRelationship,
+  type PanelWriteOutcome,
+} from '../utils/panel-relationship.util';
 import type {
   AltshopPlan,
   AltshopPlanDuration,
@@ -238,6 +245,37 @@ export class AltshopImporterService {
       this.remnawaveApiService.strictGetAllPanelUsers(),
     );
 
+    // …and only if it is the panel these customers were actually on. On a
+    // different installation the backup's identifiers name no profile here, the
+    // overlay below reads that as "the panel proves it is gone", and every live
+    // subscription in the file is written EXPIRED on a run that reports
+    // success. Decided once — see `panel-relationship.util`.
+    const panelVerdict = await decidePanelRelationship({
+      samples: subscriptions.reduce<PanelIdentitySample[]>((acc, row) => {
+        const anchor = nonEmpty(row.user_remna_id);
+        if (anchor) {
+          acc.push({
+            anchor,
+            telegramId: isPositiveTelegramId(row.user_telegram_id) ? row.user_telegram_id : null,
+          });
+        }
+        return acc;
+      }, []),
+      lookup: panelLookup,
+      resolve: (anchor) =>
+        resolvePanelProfile(
+          anchor,
+          panelLookup,
+          (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+          this.panelAbsenceProbe(),
+        ),
+    });
+    this.logger.log(
+      `Altshop import: panel relationship = ${panelVerdict.relationship} (${panelVerdict.reason})`,
+    );
+    /** Subscriptions left unlinked on purpose, for the sync to provision. */
+    let panelProfilesToCreate = 0;
+
     const errors: string[] = [];
     const createdUserIds: string[] = [];
     const userIdsByTelegramId = new Map<number, string>();
@@ -288,17 +326,20 @@ export class AltshopImporterService {
         }
 
         for (const subscription of subscriptionsByTelegramId.get(sourceUser.telegram_id) ?? []) {
-          const outcome = await this.syncSubscription(
+          const result = await this.syncSubscription(
             user.id,
             sourceUser.telegram_id,
             subscription,
             panelLookup,
+            panelVerdict.relationship,
             importRecordId ?? null,
           );
+          const outcome = result.outcome;
           if (outcome === 'created') counts.subscriptionsCreated += 1;
           if (outcome === 'updated') counts.subscriptionsUpdated += 1;
           if (outcome === 'owner-mismatch') conflicts.subscriptionOwnerMismatch += 1;
           if (outcome === 'panel-owner-mismatch') conflicts.panelOwnerMismatch += 1;
+          if (result.leftUnlinked) panelProfilesToCreate += 1;
         }
 
         if (sourceUser.is_trial_available === false) {
@@ -386,6 +427,10 @@ export class AltshopImporterService {
       partnerTransactionsCreated: partnerResult.transactionsCreated,
       partnerTransactionsExisting: partnerResult.transactionsExisting,
       conflicts,
+      // Which panel these customers turned out to be on. Surfaced rather than
+      // logged: on a `different` verdict every migrated subscription gets a NEW
+      // connection link, and the operator has to hear that from the import.
+      panelRelationship: panelRelationshipReport(panelVerdict, panelProfilesToCreate),
       excludedData: jsonInput(input.excludedData ?? emptyExcludedData()),
       errors,
       // Matched users may receive historical rows. We intentionally block
@@ -536,41 +581,86 @@ export class AltshopImporterService {
     expectedTelegramId: number,
     source: AltshopSubscription,
     panelLookup: PanelLookup,
+    panelRelationship: PanelRelationship,
     importRecordId: string | null,
-  ): Promise<SubscriptionOutcome> {
+  ): Promise<PanelWriteOutcome<SubscriptionOutcome>> {
     const remnawaveId = nonEmpty(source.user_remna_id);
-    if (!remnawaveId) return 'skipped';
-    const existing = await this.prismaService.subscription.findFirst({
-      where: { remnawaveId },
-      select: { id: true, userId: true, planSnapshot: true },
-    });
-    const { panel, known } = await resolvePanelProfile(
-      remnawaveId,
-      panelLookup,
-      (uuid) => this.remnawaveApiService.getPanelUser(uuid),
-      this.panelAbsenceProbe(),
-    );
+    if (!remnawaveId) return { outcome: 'skipped', leftUnlinked: false };
+    /** The run proved these identities are not this panel's. */
+    const foreignPanel = panelRelationship === 'different';
+
+    // On a FOREIGN panel the backup's identifier names no profile here, so it
+    // is not a key: the durable one across re-runs is the stamp this importer
+    // itself wrote. Keying on the identifier anyway would find nothing on the
+    // second run and mint a duplicate subscription — and, once the sync ran, a
+    // duplicate panel profile beside it.
+    const existing = foreignPanel
+      ? await this.prismaService.subscription.findFirst({
+          where: { userId, planSnapshot: { path: ['sourceSubscriptionId'], equals: source.id } },
+          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+        })
+      : await this.prismaService.subscription.findFirst({
+          where: { remnawaveId },
+          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+        });
+
+    // A foreign panel is asked nothing: every answer it could give is about
+    // somebody else's profile, and the one the overlay acts on — "no such
+    // user" — becomes EXPIRED written over a paying customer. A row a previous
+    // run already migrated carries the id the sync wrote back when it created
+    // the profile, and THAT id is this panel's.
+    const linkedHere = existing?.remnawaveId ?? null;
+    const panelAnchor = foreignPanel ? linkedHere : remnawaveId;
+    const { panel, known } =
+      panelAnchor === null
+        ? { panel: null, known: false }
+        : await resolvePanelProfile(
+            panelAnchor,
+            panelLookup,
+            (uuid) => this.remnawaveApiService.getPanelUser(uuid),
+            this.panelAbsenceProbe(),
+          );
     if (
       panel &&
       panel.telegramId !== null &&
       (!isPositiveTelegramId(expectedTelegramId) || panel.telegramId !== expectedTelegramId)
-    ) return 'panel-owner-mismatch';
-    if (existing && existing.userId !== userId) return 'owner-mismatch';
+    ) return { outcome: 'panel-owner-mismatch', leftUnlinked: false };
+    if (existing && existing.userId !== userId) {
+      return { outcome: 'owner-mismatch', leftUnlinked: false };
+    }
 
     const fresh = panel ? panelSubscriptionState(panel) : null;
     const status = fresh
       ? fresh.status
       : reconcileMissingPanelStatus(known, this.mapStatus(source.status));
+    // Squad uuids and the connection link belong to the panel that issued them.
+    // On a DIFFERENT panel the uuids name nothing, so pushing them would fail
+    // the profile CREATE outright, and the link is a dead address the customer
+    // would be shown as though it worked — a new row starts empty and
+    // "Назначить план всем" plus the sync fill both in. An UPDATE on a foreign
+    // panel writes neither, because by then the columns hold what this panel
+    // itself reported and a re-import must not wipe a working link.
+    const panelOwned = fresh
+      ? {
+          configUrl: fresh.configUrl,
+          internalSquads: fresh.internalSquads,
+          externalSquad: fresh.externalSquad,
+        }
+      : foreignPanel
+        ? { configUrl: null, internalSquads: [], externalSquad: null }
+        : {
+            configUrl: nonEmpty(source.url),
+            internalSquads: stringArray(source.internal_squads),
+            externalSquad: nonEmpty(source.external_squad),
+          };
     const subscriptionData: Prisma.SubscriptionUpdateInput = {
       status,
       isTrial: source.is_trial === true,
       trafficLimit: fresh ? fresh.trafficLimit : positiveNumberOrNull(source.traffic_limit),
       deviceLimit: fresh ? fresh.deviceLimit : nonNegativeInt(source.device_limit),
-      configUrl: fresh ? fresh.configUrl : nonEmpty(source.url),
       expiresAt: fresh ? fresh.expiresAt : this.parseOptionalDate(source.expire_at),
-      internalSquads: fresh ? fresh.internalSquads : stringArray(source.internal_squads),
-      externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
       planSnapshot: this.buildSubscriptionPlanSnapshot(source, importRecordId, existing?.planSnapshot),
+      ...(foreignPanel && !fresh ? {} : panelOwned),
     };
     if (existing) {
       if (source.is_trial === true) {
@@ -588,21 +678,23 @@ export class AltshopImporterService {
       } else {
         await this.prismaService.subscription.update({ where: { id: existing.id }, data: subscriptionData });
       }
-      return 'updated';
+      return { outcome: 'updated', leftUnlinked: foreignPanel && linkedHere === null };
     }
     const createData: Prisma.SubscriptionCreateInput = {
         user: { connect: { id: userId } },
-        remnawaveId,
+        // Left NULL on a foreign panel, and that is the whole mechanism:
+        // `enqueuePostImportSync` reads an unlinked subscription as
+        // `SyncAction.CREATE`, so the operator's "синхронизировать с панелью"
+        // provisions a fresh profile instead of updating one that is not there.
+        remnawaveId: foreignPanel ? null : remnawaveId,
         status,
         isTrial: source.is_trial === true,
         trafficLimit: fresh ? fresh.trafficLimit : positiveNumberOrNull(source.traffic_limit),
         deviceLimit: fresh ? fresh.deviceLimit : nonNegativeInt(source.device_limit),
-        configUrl: fresh ? fresh.configUrl : nonEmpty(source.url),
         expiresAt: fresh ? fresh.expiresAt : this.parseOptionalDate(source.expire_at),
-        internalSquads: fresh ? fresh.internalSquads : stringArray(source.internal_squads),
-        externalSquad: fresh ? fresh.externalSquad : nonEmpty(source.external_squad),
         planSnapshot: this.buildSubscriptionPlanSnapshot(source, importRecordId),
         startedAt: this.parseOptionalDate(source.created_at) ?? new Date(),
+        ...panelOwned,
     };
     const created = source.is_trial === true
       ? await this.prismaService.$transaction(async (tx) => {
@@ -628,7 +720,7 @@ export class AltshopImporterService {
         data: { currentSubscriptionId: created.id },
       });
     }
-    return 'created';
+    return { outcome: 'created', leftUnlinked: foreignPanel };
   }
 
   private async upsertClaimPendingWebAccount(userId: string, source: AltshopWebAccount): Promise<void> {
@@ -993,6 +1085,10 @@ export class AltshopImporterService {
       // instead of a fragile created-at time window). See BulkPlanAssignmentService.
       ...(importRecordId ? { importRecordId } : {}),
       ...(planId ? { planId } : {}),
+      // The donor's own row id. On a panel that never issued these identifiers
+      // it is the ONLY key a second import can find this row by — without it a
+      // re-run mints a duplicate subscription for every customer.
+      sourceSubscriptionId: source.id,
       tag: source.tag,
       trafficLimitStrategy: source.traffic_limit_strategy,
       deviceType: source.device_type,

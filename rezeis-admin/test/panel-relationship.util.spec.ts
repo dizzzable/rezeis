@@ -140,6 +140,72 @@ describe('when the panel is the one these customers were on', () => {
   });
 });
 
+describe('a profile that resolved is evidence FOR this panel', () => {
+  it('does not read deletions as a move while other profiles are still here', async () => {
+    // THE HOLE IN THE FIRST VERSION. Hits that could not be attributed to a
+    // person — no telegram id on one side or the other — were thrown away, so
+    // ten live profiles plus ten deleted ones counted as ten votes for "not our
+    // panel" and none against. On the operator's OWN panel that provisions a
+    // second profile for everybody who already had a working one.
+    const dump = samples(20).map((s) => ({ ...s, telegramId: null }));
+    const alive = new Set(dump.slice(0, 10).map((s) => s.anchor));
+
+    const verdict = await decidePanelRelationship({
+      samples: dump,
+      lookup: lookup(),
+      resolve: (anchor) =>
+        Promise.resolve(
+          alive.has(anchor)
+            ? { panel: { telegramId: null }, known: true }
+            : { panel: null, known: true },
+        ),
+    });
+
+    assert.notEqual(verdict.relationship, 'different');
+    assert.equal(verdict.absent, 10);
+  });
+
+  it('accepts a uuid that still resolves, with nobody to attribute it to', async () => {
+    // The older donors (STEALTHNET, Remnashop, Altshop) carry 2.x uuids, and
+    // both sides are often anonymous. A uuid cannot collide across two panels,
+    // so one that resolves here was minted here — that is the whole proof, and
+    // it must not need a telegram id.
+    const dump = Array.from({ length: 20 }, (_, i) => ({
+      anchor: `2b1e0c${String(i).padStart(2, '0')}-0000-4000-8000-000000000000`,
+      telegramId: null,
+    }));
+    const alive = new Set(dump.slice(0, 3).map((s) => s.anchor));
+
+    const verdict = await decidePanelRelationship({
+      samples: dump,
+      lookup: lookup({ keyKind: 'uuid' }),
+      resolve: (anchor) =>
+        Promise.resolve(
+          alive.has(anchor)
+            ? { panel: { telegramId: null }, known: true }
+            : { panel: null, known: true },
+        ),
+    });
+
+    assert.equal(verdict.relationship, 'same');
+  });
+
+  it('still calls a uuid dump a move when not one of them resolves', async () => {
+    const dump = Array.from({ length: 20 }, (_, i) => ({
+      anchor: `2b1e0c${String(i).padStart(2, '0')}-0000-4000-8000-000000000000`,
+      telegramId: null,
+    }));
+
+    const verdict = await decidePanelRelationship({
+      samples: dump,
+      lookup: lookup({ keyKind: 'uuid' }),
+      resolve: ABSENT,
+    });
+
+    assert.equal(verdict.relationship, 'different');
+  });
+});
+
 describe('which identifiers get asked about', () => {
   it('spreads the sample across the dump instead of taking its head', async () => {
     // THE BIAS THAT WOULD HAVE SHIPPED. Backup rows come out in insertion
