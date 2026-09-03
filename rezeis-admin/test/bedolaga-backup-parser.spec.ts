@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
 import { describe, it } from 'node:test';
+import { Headers, pack } from 'tar-stream';
 
 import { parseBedolagaBackup } from '../src/modules/imports/utils/bedolaga-backup-parser';
 
@@ -313,5 +314,114 @@ describe('what the parser refuses', () => {
     const empty = copyBlock('tariffs', ['id', 'name'], [['1', 'X']]);
 
     await assert.rejects(() => parseBedolagaBackup(Buffer.from(empty, 'utf-8')), /no user records/i);
+  });
+});
+
+/** A `.tar.gz` shaped the way Bedolaga's own backup writer shapes one. */
+function buildBackupArchive(entries: readonly TarEntry[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const archive = pack();
+    const chunks: Buffer[] = [];
+    archive.on('data', (chunk: Buffer) => chunks.push(chunk));
+    archive.on('error', reject);
+    archive.on('end', () => resolve(gzipSync(Buffer.concat(chunks))));
+    const add = (index: number): void => {
+      if (index === entries.length) {
+        archive.finalize();
+        return;
+      }
+      const entry = entries[index];
+      const header: Headers = { name: entry.name, type: entry.type };
+      const done = (error?: Error | null): void => {
+        if (error) reject(error);
+        else add(index + 1);
+      };
+      if (entry.type !== undefined && entry.type !== 'file') archive.entry(header, done);
+      else archive.entry(header, entry.content ?? Buffer.alloc(0), done);
+    };
+    add(0);
+  });
+}
+
+type TarEntry = { readonly name: string; readonly content?: Buffer; readonly type?: Headers['type'] };
+
+describe('the file an operator actually uploads', () => {
+  it('reads the archive the bot writes, alongside its metadata', async () => {
+    // Every other case here feeds a bare dump. This is the shape that comes
+    // out of Bedolaga's own Backups menu, and it was the one shape nothing
+    // exercised.
+    const archive = await buildBackupArchive([
+      { name: './', type: 'directory' },
+      { name: 'metadata.json', content: Buffer.from('{"format_version":"2.0"}') },
+      { name: 'database.sql', content: Buffer.from(sqlDump(), 'utf-8') },
+    ]);
+
+    const data = await parseBedolagaBackup(archive);
+
+    assert.equal(data.sourceFormat, 'sql');
+    assert.equal(data.users.length, 2);
+  });
+
+  it('reads the JSON archive the same way', async () => {
+    const archive = await buildBackupArchive([
+      { name: 'metadata.json', content: Buffer.from('{"format_version":"2.0"}') },
+      { name: 'database.json', content: Buffer.from(JSON.stringify(jsonExport()), 'utf-8') },
+    ]);
+
+    const data = await parseBedolagaBackup(archive);
+
+    assert.equal(data.sourceFormat, 'orm');
+    assert.equal(data.users[0].telegram_id, 777000111);
+  });
+
+  it('is not confused by the operator’s own data directory inside the archive', async () => {
+    // Bedolaga copies the WHOLE `data/` directory into its backup. An
+    // operator with any stray `.sql` in there — or a nested database.json
+    // from some other tool — would give two matches, and two matches is a
+    // refusal. A real backup would be rejected with nothing they could do.
+    const archive = await buildBackupArchive([
+      { name: 'metadata.json', content: Buffer.from('{}') },
+      { name: 'data/exports/last-report.sql', content: Buffer.from('SELECT 1;') },
+      { name: 'data/backups/database.json', content: Buffer.from('{"data":{"users":[]}}') },
+      { name: 'database.sql', content: Buffer.from(sqlDump(), 'utf-8') },
+    ]);
+
+    const data = await parseBedolagaBackup(archive);
+
+    assert.equal(data.users.length, 2, 'the payload is the one at the root');
+  });
+
+  it('refuses a malformed payload as a refusal, not as a raw exception', async () => {
+    // A SyntaxError escaping here becomes the whole of the operator's error
+    // message, and is reported as a server fault rather than a bad upload.
+    const archive = await buildBackupArchive([
+      { name: 'database.json', content: Buffer.from('{"data": {"users": [') },
+    ]);
+
+    await assert.rejects(() => parseBedolagaBackup(archive), /Failed to parse backup contents/i);
+  });
+
+  it('says so when the archive holds no database at all', async () => {
+    const archive = await buildBackupArchive([
+      { name: 'metadata.json', content: Buffer.from('{}') },
+    ]);
+
+    await assert.rejects(() => parseBedolagaBackup(archive), /No database\.sql or database\.json/i);
+  });
+});
+
+describe('what the report can honestly claim', () => {
+  it('admits that a JSON backup cannot see every table', async () => {
+    // The ORM export dumps a hand-picked list of models and coupons are not
+    // among them, so a zero there means "this file does not say" — telling an
+    // operator with three thousand unredeemed coupons that nothing was left
+    // behind would be worse than saying nothing.
+    const fromJson = await parseBedolagaBackup(
+      Buffer.from(JSON.stringify(jsonExport()), 'utf-8'),
+    );
+    const fromSql = await parseBedolagaBackup(Buffer.from(sqlDump(), 'utf-8'));
+
+    assert.equal(fromSql.excludedDataIsComplete, true);
+    assert.equal(fromJson.excludedDataIsComplete, false);
   });
 });

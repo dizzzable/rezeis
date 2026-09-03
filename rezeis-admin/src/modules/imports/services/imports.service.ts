@@ -119,6 +119,11 @@ export class ImportsService {
         }
         await tx.trialClaim.deleteMany({ where: { userId: { in: createdUserIds } } });
         await tx.transaction.deleteMany({ where: { userId: { in: createdUserIds } } });
+        // `referral_rewards.user_id` is ON DELETE RESTRICT, so a run that
+        // imported anybody's referral history could not be rolled back at all:
+        // the user delete below failed on the foreign key and took the whole
+        // transaction with it. The rewards are this run's own rows.
+        await tx.referralReward.deleteMany({ where: { userId: { in: createdUserIds } } });
         const deleted = await tx.user.deleteMany({ where: { id: { in: createdUserIds } } });
         deletedUsers = deleted.count;
       });

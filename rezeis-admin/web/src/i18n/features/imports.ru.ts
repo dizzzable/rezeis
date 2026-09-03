@@ -124,6 +124,22 @@ export const ru = {
       actions: 'Действия',
     },
     progressDialog: {
+      notImported: {
+        title: 'Не перенесено — закройте вручную',
+        pendingWithdrawals: 'Заявки на вывод (деньги ещё на балансе)',
+        withdrawals: 'Заявки на вывод, всего',
+        coupons: 'Купоны, не погашенные',
+        gifts: 'Подарки оплачены, но не вручены',
+        wheelSpins: 'Крутки колеса',
+        contests: 'Конкурсы',
+        temporaryAccess: 'Временные доступы',
+        discountOffers: 'Действующие спецпредложения',
+        tickets: 'Обращения в поддержку',
+        usersInDebt: 'Людей с отрицательным балансом',
+        debtKopeks: 'Долг, копеек',
+        walletsNotCarried: 'Кошельков не перенесено (баллы уже были)',
+        referralEarningsAboveLevelOne: 'Начислений рефералки выше первого уровня',
+      },
       title: 'Импорт из {{source}}',
       titleSync: 'Синхронизация с {{source}}',
       stages: {

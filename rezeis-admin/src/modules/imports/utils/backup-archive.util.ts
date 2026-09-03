@@ -53,6 +53,29 @@ export const MAX_SQL_BYTES = 256 * 1024 * 1024;
  */
 const ALLOWED_TAR_ENTRY_TYPES = new Set(['file', 'directory', 'pax-header', 'pax-global-header']);
 
+/**
+ * No real archive names an entry longer than this, and nothing past it is
+ * worth the time it would take to examine.
+ */
+const MAX_ENTRY_NAME_LENGTH = 4096;
+
+/**
+ * The archive's own root directory, written as `./`, `.`, `/` or a run of
+ * those. Skipped rather than judged: it names no file.
+ */
+function isArchiveRootEntry(name: unknown): boolean {
+  if (typeof name !== 'string') return false;
+  if (name.length === 0 || name.length > MAX_ENTRY_NAME_LENGTH) return false;
+  return /^(?:\.?\/*)+$/.test(name) && !name.includes('..');
+}
+
+/** A trailing-slash trim that cannot backtrack. */
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '/') end -= 1;
+  return value.slice(0, end);
+}
+
 /** Gzip magic: the first two bytes of every gzip stream. */
 export function isGzipBuffer(buffer: Buffer): boolean {
   return buffer.length > 1 && buffer[0] === 0x1f && buffer[1] === 0x8b;
@@ -176,11 +199,11 @@ export function readStreamToBuffer(
  */
 export function ensureArchiveEntrySize(name: string, size: number | undefined): void {
   if (size === undefined || !Number.isSafeInteger(size) || size < 0) {
-    throw new BadRequestException(`Archive entry '${name}' has an invalid size`);
+    throw new BadRequestException(`Archive entry '${forMessage(name)}' has an invalid size`);
   }
   if (size > MAX_ARCHIVE_ENTRY_BYTES) {
     throw new BadRequestException(
-      `Archive entry '${name}' exceeds ${formatBytes(MAX_ARCHIVE_ENTRY_BYTES)}`,
+      `Archive entry '${forMessage(name)}' exceeds ${formatBytes(MAX_ARCHIVE_ENTRY_BYTES)}`,
     );
   }
 }
@@ -210,24 +233,48 @@ export function normalizeTarEntryName(name: string): string {
   if (typeof name !== 'string' || name.length === 0) {
     throw new BadRequestException('Archive entry has an empty name');
   }
+  // LENGTH FIRST, before any pattern touches the string.
+  //
+  // tar-stream resolves a GNU long-path header itself and substitutes the
+  // result into the next entry, so this is not bounded by the classic
+  // hundred-byte name field and no size check has run yet. A greedy
+  // trailing-slash pattern over four million slashes is quadratic — and a
+  // regex cannot be interrupted, so the process that stops is the worker,
+  // which also runs profile sync, backups and broadcasts.
+  if (name.length > MAX_ENTRY_NAME_LENGTH) {
+    throw new BadRequestException('Archive entry name is unreasonably long');
+  }
   if (name.includes('\0')) {
     throw new BadRequestException('Archive entry name contains a null byte');
   }
   if (name.includes('\\')) {
-    throw new BadRequestException(`Archive entry '${name}' uses an unsafe path separator`);
+    throw new BadRequestException(`Archive entry '${forMessage(name)}' uses an unsafe path separator`);
   }
 
-  const trimmed = name.replace(/^(?:\.\/)+/, '').replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(name.replace(/^(?:\.\/)+/, ''));
   if (trimmed.length === 0 || trimmed.startsWith('/') || /^[A-Za-z]:/.test(trimmed)) {
-    throw new BadRequestException(`Archive entry '${name}' has an unsafe path`);
+    throw new BadRequestException(`Archive entry '${forMessage(name)}' has an unsafe path`);
   }
 
   const segments = trimmed.split('/');
   if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
-    throw new BadRequestException(`Archive entry '${name}' has an unsafe path`);
+    throw new BadRequestException(`Archive entry '${forMessage(name)}' has an unsafe path`);
   }
 
   return trimmed;
+}
+
+/**
+ * A name safe to put in a message.
+ *
+ * Refusals travel: into the import record, the audit log, the operator's
+ * Telegram group, every webhook and every open admin socket. A name out of a
+ * hostile file is not a length anybody chose, and the refusal must not become
+ * the payload.
+ */
+function forMessage(name: string): string {
+  const oneLine = name.replace(/\s+/g, ' ');
+  return oneLine.length > 120 ? `${oneLine.slice(0, 120)}…` : oneLine;
 }
 
 /** One entry pulled out of an archive, with the name it had inside. */
@@ -249,6 +296,7 @@ export interface ArchivePayload<Kind extends string> {
 export async function findArchivePayload<Kind extends string>(
   tarBuffer: Buffer,
   classify: (name: string) => Kind | null,
+  entryLimit: number = MAX_ARCHIVE_ENTRY_BYTES,
 ): Promise<ArchivePayload<Kind> | null> {
   return new Promise((resolve, reject) => {
     const readable = Readable.from([tarBuffer]);
@@ -267,6 +315,17 @@ export async function findArchivePayload<Kind extends string>(
     };
 
     extractor.on('entry', (header: Headers, stream, next) => {
+      // `tar czf backup.tar.gz .` writes the directory itself as a member
+      // named exactly `./` — the very first entry in the archive. It
+      // normalises to nothing and would be refused as an unsafe path, taking
+      // the whole upload with it before a single real file was seen. It is
+      // the archive root; there is nothing in it to be unsafe about.
+      if (isArchiveRootEntry(header.name)) {
+        stream.resume();
+        stream.on('end', next);
+        return;
+      }
+
       let normalizedName: string;
       let type: 'file' | 'ignore';
 
@@ -288,7 +347,17 @@ export async function findArchivePayload<Kind extends string>(
         return;
       }
 
-      const kind = classify(normalizedName);
+      let kind: Kind | null;
+      try {
+        kind = classify(normalizedName);
+      } catch (err) {
+        // tar-stream emits `entry` synchronously and holds its lock while it
+        // does, so a throw from here escapes as an uncaught exception AND
+        // leaves the extractor locked — the promise would never settle.
+        stream.resume();
+        fail(err);
+        return;
+      }
       if (kind === null) {
         stream.resume();
         stream.on('end', next);
@@ -305,7 +374,10 @@ export async function findArchivePayload<Kind extends string>(
         return;
       }
 
-      void readStreamToBuffer(stream, MAX_ARCHIVE_ENTRY_BYTES, `archive entry '${normalizedName}'`)
+      // The CALLER's ceiling, not the global one: buffering 256 MB and then
+      // refusing it against a 64 MB limit two lines later spends exactly the
+      // memory the limit exists to protect.
+      void readStreamToBuffer(stream, entryLimit, `archive entry '${normalizedName}'`)
         .then((bytes) => {
           if (settled) return;
           payload = { kind, name: normalizedName, bytes };

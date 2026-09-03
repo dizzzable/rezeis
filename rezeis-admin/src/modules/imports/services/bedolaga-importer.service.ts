@@ -6,16 +6,22 @@ import {
   PaymentGatewayType,
   PointsLedgerSource,
   Prisma,
+  PromocodeAvailability,
   PurchaseChannel,
   PurchaseType,
   ReferralInviteSource,
   SubscriptionStatus,
+  TrialClaimSource,
   TransactionStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { clampDiscountPercent } from '../../../common/utils/discount.util';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
+import {
+  lockTrialClaimUser,
+  recordConsumedTrialSubscription,
+} from '../../subscriptions/services/trial-claim-ledger.util';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import {
@@ -109,6 +115,7 @@ export class BedolagaImporterService {
     let transactionsCreated = 0;
     let pointsGranted = 0;
     let discountsApplied = 0;
+    let walletsNotCarried = 0;
     /** People whose wallet was in the red — an operator decision, not ours. */
     const debtors: Array<{ readonly telegramId: number | null; readonly kopeks: number }> = [];
 
@@ -136,8 +143,9 @@ export class BedolagaImporterService {
         if (donor.balance_kopeks < 0) {
           debtors.push({ telegramId: donor.telegram_id, kopeks: donor.balance_kopeks });
         }
-        const granted = await this.creditBalance(userId, donor, conversion);
-        pointsGranted += granted;
+        const credit = await this.creditBalance(userId, donor, conversion);
+        pointsGranted += credit.granted;
+        if (credit.refused) walletsNotCarried += 1;
 
         for (const sub of index.subscriptionsByUser.get(donor.id) ?? []) {
           const outcome = await this.syncSubscription({
@@ -164,7 +172,7 @@ export class BedolagaImporterService {
 
     // Both ends of a referral edge have to exist before the edge can, so this
     // runs after the user pass rather than inside it.
-    const referrals = await this.importReferrals(data, ourUserIds, errors);
+    const referrals = await this.importReferrals(data, ourUserIds, conversion, errors);
     const promocodes = await this.importPromocodes(data, errors);
 
     const finalStatus = errors.length === 0 ? ImportStatus.COMMITTED : ImportStatus.FAILED;
@@ -187,11 +195,20 @@ export class BedolagaImporterService {
       // decision only the operator can make. Counted so they are settled by
       // hand instead of disappearing with the old bot.
       notImported: {
+        // False when the backup was Bedolaga's JSON export, which does not
+        // carry every table: a zero there means "this file does not say".
+        complete: data.excludedDataIsComplete,
         ...data.excludedData,
+        walletsNotCarried,
+        referralEarningsAboveLevelOne: referrals.skippedLevels,
         usersInDebt: debtors.length,
         debtKopeks: debtors.reduce((sum, row) => sum + Math.abs(row.kopeks), 0),
       },
-      errors,
+      // Capped: this list is copied into the audit log, the operator's Telegram
+      // group, every webhook and every open admin socket. A file with a
+      // million bad rows must not become a million-line notification.
+      errors: errors.slice(0, MAX_REPORTED_ERRORS),
+      errorsTotal: errors.length,
       rollback: { createdUserIds, hasMatchedWrites: updated > 0 },
       catalog: JSON.parse(
         JSON.stringify({
@@ -337,9 +354,14 @@ export class BedolagaImporterService {
   ): Promise<boolean> {
     const group = groupsByUser.get(donor.id);
     const fromGroup = group?.server_discount_percent ?? 0;
-    // A live one-shot offer is a promise too, and the bigger of the two is the
-    // one the person would have seen at checkout.
-    const percent = clampDiscountPercent(Math.max(fromGroup, donor.promo_offer_discount_percent));
+    // A one-shot offer counts only while it is LIVE. Ours is permanent and has
+    // no expiry, so importing a lapsed one would turn a weekend promotion into
+    // a discount this customer keeps for good. A null deadline is Bedolaga's
+    // "until the next purchase", which is still outstanding.
+    const offerExpiry = toDate(donor.promo_offer_discount_expires_at);
+    const offerIsLive = offerExpiry === null || offerExpiry.getTime() > Date.now();
+    const fromOffer = offerIsLive ? donor.promo_offer_discount_percent : 0;
+    const percent = clampDiscountPercent(Math.max(fromGroup, fromOffer));
     if (percent <= 0) return false;
 
     const applied = await this.prismaService.user.updateMany({
@@ -364,11 +386,11 @@ export class BedolagaImporterService {
     userId: string,
     donor: BedolagaUser,
     conversion: BalanceConversion,
-  ): Promise<number> {
-    if (!conversion.enabled) return 0;
-    if (donor.status === 'deleted') return 0;
+  ): Promise<{ readonly granted: number; readonly refused: boolean }> {
+    if (!conversion.enabled) return NOTHING_CREDITED;
+    if (donor.status === 'deleted') return NOTHING_CREDITED;
     const points = balanceToPoints(donor.balance_kopeks / 100, conversion.rate);
-    if (points <= 0) return 0;
+    if (points <= 0) return NOTHING_CREDITED;
 
     const credited = await this.prismaService.$transaction((tx) =>
       this.pointsWallet.apply(tx, {
@@ -385,7 +407,13 @@ export class BedolagaImporterService {
         },
       }),
     );
-    return credited.applied ? points : 0;
+    // Refused means this person already holds points here — they had an
+    // account before the migration. The wallet is NOT carried over on top of
+    // it, and that decision has to reach the operator: silently dropping
+    // somebody's balance is the one outcome nobody would notice.
+    return credited.applied
+      ? { granted: points, refused: false }
+      : { granted: 0, refused: true };
   }
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -432,9 +460,15 @@ export class BedolagaImporterService {
     if (panelId === null) return 'skipped';
     const anchor = String(panelId);
 
+    // Both spellings, because a rezeis install older than the panel's 3.x
+    // upgrade holds the profile as a 2.x uuid in `remnawaveId` with the numeric
+    // id beside it in `remnawavePanelId`. Asking only for the number would miss
+    // that row and create a SECOND subscription for one panel profile — and
+    // when one of the two expires, the sweep deletes the profile out from under
+    // the other.
     const existing = await this.prismaService.subscription.findFirst({
-      where: { remnawaveId: anchor },
-      select: { id: true, userId: true },
+      where: { OR: [{ remnawaveId: anchor }, { remnawavePanelId: panelId }] },
+      select: { id: true, userId: true, planSnapshot: true },
     });
     // A profile that already belongs to somebody else here is a refusal, not a
     // rebind: silently moving a live subscription between two customers is the
@@ -451,9 +485,15 @@ export class BedolagaImporterService {
     // null, and theirs with a zero that reads exactly like "no quota at all".
     const backupTraffic = sub.traffic_limit_gb > 0 ? sub.traffic_limit_gb : null;
 
+    // `planId` is the CUID an operator's clone or bulk-assign wrote here after
+    // the first import. Rebuilding the snapshot from the donor alone would drop
+    // it on every re-run, and every migrated subscription would report itself
+    // unassigned again.
+    const assignedPlanId = readAssignedPlanId(existing?.planSnapshot);
     const planSnapshot: Prisma.InputJsonValue = {
       importedFrom: 'bedolaga',
       ...(importRecordId ? { importRecordId } : {}),
+      ...(assignedPlanId === null ? {} : { planId: assignedPlanId }),
       sourceSubscriptionId: sub.id,
       sourceTariffId: sub.tariff_id,
       // Same shape the other importers emit, so the plan cloner's
@@ -484,6 +524,24 @@ export class BedolagaImporterService {
       this.panelAbsenceProbe(),
     );
 
+    // The local check above only sees rows we already have; on a first import
+    // there are none. This one asks the PANEL who the profile belongs to. A
+    // dump goes stale the moment it is taken — a profile can be reassigned, and
+    // Bedolaga's own account merge moves these very columns — and handing one
+    // customer another's live config, squads and expiry is not something an
+    // import may do on a guess.
+    if (
+      panel !== null &&
+      panel.telegramId !== null &&
+      panel.telegramId !== undefined &&
+      donor.telegram_id !== null &&
+      String(panel.telegramId) !== String(donor.telegram_id)
+    ) {
+      throw new Error(
+        `panel profile ${anchor} belongs to telegram ${String(panel.telegramId)}, not to ${String(donor.telegram_id)}`,
+      );
+    }
+
     const shared = panel
       ? (() => {
           const fresh = panelSubscriptionState(panel);
@@ -513,18 +571,48 @@ export class BedolagaImporterService {
         };
 
     if (existing !== null) {
-      await this.prismaService.subscription.update({ where: { id: existing.id }, data: shared });
+      await this.prismaService.$transaction(async (tx) => {
+        if (sub.is_trial) await lockTrialClaimUser(tx, userId);
+        await tx.subscription.update({ where: { id: existing.id }, data: shared });
+        if (sub.is_trial) {
+          await recordConsumedTrialSubscription(tx, {
+            userId,
+            planId: null,
+            subscriptionId: existing.id,
+            source: TrialClaimSource.LEGACY,
+            consumedAt: toDate(sub.start_date) ?? new Date(),
+          });
+        }
+      });
       return 'updated';
     }
 
-    const createdSub = await this.prismaService.subscription.create({
-      data: {
-        ...shared,
-        user: { connect: { id: userId } },
-        remnawaveId: anchor,
-        remnawavePanelId: panelId,
-        startedAt: toDate(sub.start_date) ?? new Date(),
-      },
+    const createdSub = await this.prismaService.$transaction(async (tx) => {
+      if (sub.is_trial) await lockTrialClaimUser(tx, userId);
+      const row = await tx.subscription.create({
+        data: {
+          ...shared,
+          user: { connect: { id: userId } },
+          remnawaveId: anchor,
+          remnawavePanelId: panelId,
+          startedAt: toDate(sub.start_date) ?? new Date(),
+        },
+      });
+      // A trial somebody already used is a trial they have SPENT. Eligibility
+      // is counted from this ledger and from nothing else — not from
+      // `Subscription.isTrial` — so without the row every migrated trial
+      // customer opens the cabinet and claims a second free one, and the
+      // operator pays for it.
+      if (sub.is_trial) {
+        await recordConsumedTrialSubscription(tx, {
+          userId,
+          planId: null,
+          subscriptionId: row.id,
+          source: TrialClaimSource.LEGACY,
+          consumedAt: toDate(sub.start_date) ?? new Date(),
+        });
+      }
+      return row;
     });
 
     const owner = await this.prismaService.user.findUnique({
@@ -587,6 +675,12 @@ export class BedolagaImporterService {
           amount: new Prisma.Decimal(kopeks).dividedBy(100),
           currency: Currency.RUB,
           channel: PurchaseChannel.TELEGRAM,
+          // Stamped, because `fulfilledAt: null` is not inert — it is the
+          // "not delivered yet" marker. A re-delivered webhook for one of
+          // these donor payments resolves by `gatewayId`, sees a COMPLETED
+          // row nobody has fulfilled, and tries to provision a purchase that
+          // has no plan. These payments WERE delivered, by the other bot.
+          fulfilledAt: toDate(donor.completed_at) ?? toDate(donor.created_at) ?? new Date(),
           planSnapshot: {
             importedFrom: 'bedolaga',
             sourceTransactionId: donor.id,
@@ -619,10 +713,12 @@ export class BedolagaImporterService {
   private async importReferrals(
     data: BedolagaBackupData,
     ourUserIds: ReadonlyMap<number, string>,
+    conversion: BalanceConversion,
     errors: string[],
-  ): Promise<{ readonly edges: number; readonly rewards: number }> {
+  ): Promise<{ readonly edges: number; readonly rewards: number; readonly skippedLevels: number }> {
     let edges = 0;
     let rewards = 0;
+    let skippedLevels = 0;
 
     for (const donor of data.users) {
       if (donor.referred_by_id === null) continue;
@@ -661,14 +757,24 @@ export class BedolagaImporterService {
       const earnerId = ourUserIds.get(earning.user_id);
       const referredId = ourUserIds.get(earning.referral_id);
       if (earnerId === undefined || referredId === undefined) continue;
+      // Bedolaga pays several levels up; our reward hangs off the ONE edge
+      // between an invitee and their direct referrer. A second-level earning
+      // attached to that edge would say the level-1 referrer earned it, which
+      // is a different person. Counted and left to the operator rather than
+      // filed against the wrong name.
+      if (earning.level !== 1) {
+        skippedLevels += 1;
+        continue;
+      }
       // A money reward is in kopeks and our `amount` is read per type, so only
       // the day-denominated ones carry a number that means the same thing on
-      // both sides. Money earnings arrive as points instead, at the same rate
-      // the wallet used, so the two halves of a migration agree.
+      // both sides. Money earnings arrive as points, at THE SAME RATE the
+      // wallet used — otherwise the two halves of one migration disagree about
+      // what a rouble was worth.
       const amount =
         earning.reward_type === 'days'
           ? earning.days_granted
-          : Math.round(earning.amount_kopeks / 100);
+          : balanceToPoints(earning.amount_kopeks / 100, conversion.rate);
       if (amount <= 0) continue;
 
       try {
@@ -698,7 +804,7 @@ export class BedolagaImporterService {
       }
     }
 
-    return { edges, rewards };
+    return { edges, rewards, skippedLevels };
   }
 
   // ── Promocodes ────────────────────────────────────────────────────────────
@@ -733,6 +839,13 @@ export class BedolagaImporterService {
         continue;
       }
 
+      // A code longer than the operator's own form allows is not a code
+      // anybody typed, and it is not one anybody can be holding.
+      if (donor.code.length > MAX_PROMOCODE_CODE_LENGTH) {
+        skippedCount += 1;
+        continue;
+      }
+
       try {
         const existing = await this.prismaService.promocode.findUnique({
           where: { code: donor.code },
@@ -746,6 +859,12 @@ export class BedolagaImporterService {
           data: {
             code: donor.code,
             isActive: true,
+            // The donor's "first purchase only" flag is our NEW availability —
+            // without it a welcome code arrives unrestricted and every existing
+            // paying customer can spend it.
+            availability: donor.first_purchase_only
+              ? PromocodeAvailability.NEW
+              : PromocodeAvailability.ALL,
             rewardType: action.type,
             reward: action.value,
             // What is LEFT, not what it started with — the uses already spent
@@ -781,6 +900,12 @@ interface RunInput {
    */
   readonly balanceToPoints?: { readonly enabled: boolean; readonly rate: number };
 }
+
+/** How many failed rows are worth repeating to everybody the panel notifies. */
+const MAX_REPORTED_ERRORS = 50;
+
+/** Nothing was credited, and nothing was refused either. */
+const NOTHING_CREDITED = { granted: 0, refused: false } as const;
 
 interface BalanceConversion {
   readonly enabled: boolean;
@@ -948,6 +1073,10 @@ export function remainingUses(donor: BedolagaPromocode): number | null {
   return Math.max(donor.max_uses - donor.current_uses, 1);
 }
 
+/** The bounds the operator's own promocode form enforces; a file may not exceed them. */
+export const MAX_PROMOCODE_CODE_LENGTH = 64;
+export const MAX_PROMOCODE_VALUE = 1_000_000;
+
 /** Live, unspent, and inside its window. */
 export function isSpendable(donor: BedolagaPromocode, now: number): boolean {
   if (!donor.is_active) return false;
@@ -975,16 +1104,34 @@ export function promocodeAction(
   switch (donor.type) {
     case 'subscription_days':
     case 'balance_and_days':
+      // Bounded like the form's own `@Max(1_000_000)`. Unclamped, the only
+      // ceiling left is whatever an int4 column happens to hold — two thousand
+      // times what an operator is allowed to type.
       return donor.subscription_days > 0
-        ? { type: 'DURATION', value: donor.subscription_days }
+        ? { type: 'DURATION', value: Math.min(donor.subscription_days, MAX_PROMOCODE_VALUE) }
         : null;
     case 'discount': {
       const percent = clampDiscountPercent(donor.balance_bonus_kopeks);
       return percent > 0 ? { type: 'PURCHASE_DISCOUNT', value: percent } : null;
     }
     default:
-      return donor.traffic_gb > 0 ? { type: 'TRAFFIC', value: donor.traffic_gb } : null;
+      return donor.traffic_gb > 0
+        ? { type: 'TRAFFIC', value: Math.min(donor.traffic_gb, MAX_PROMOCODE_VALUE) }
+        : null;
   }
+}
+
+/**
+ * The plan CUID an operator assigned to this subscription after the import.
+ *
+ * Written into `planSnapshot.planId` by the clone-plans and bulk-assign steps,
+ * and read by both of them plus the promocode plan filter. It is the operator's
+ * answer, not the donor's, so a re-import carries it forward untouched.
+ */
+function readAssignedPlanId(snapshot: unknown): string | null {
+  if (typeof snapshot !== 'object' || snapshot === null) return null;
+  const planId = (snapshot as Record<string, unknown>).planId;
+  return typeof planId === 'string' && planId.length > 0 ? planId : null;
 }
 
 function toDate(raw: string | null): Date | null {
@@ -1022,14 +1169,32 @@ function durationId(tariffId: number, days: number): number {
   return tariffId * 100_000 + days;
 }
 
+/**
+ * Every period a tariff can be bought for.
+ *
+ * A DAILY tariff carries an empty price table by design and prices itself per
+ * day instead — read only from `period_prices` it would be cloned as a plan
+ * with no duration and no price, which an operator would have to notice.
+ */
+function periodsOf(tariff: BedolagaTariff): ReadonlyArray<{ days: number; kopeks: number }> {
+  const periods: Array<{ days: number; kopeks: number }> = [];
+  for (const [days, kopeks] of Object.entries(tariff.period_prices)) {
+    const parsed = Number.parseInt(days, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) continue;
+    periods.push({ days: parsed, kopeks });
+  }
+  if (periods.length === 0 && tariff.is_daily && tariff.daily_price_kopeks > 0) {
+    periods.push({ days: 1, kopeks: tariff.daily_price_kopeks });
+  }
+  return periods;
+}
+
 /** One duration per period their price table names. */
 function deriveDurations(tariffs: readonly BedolagaTariff[]): Array<Record<string, unknown>> {
   const rows: Array<Record<string, unknown>> = [];
   for (const tariff of tariffs) {
-    for (const days of Object.keys(tariff.period_prices)) {
-      const parsed = Number.parseInt(days, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) continue;
-      rows.push({ id: durationId(tariff.id, parsed), plan_id: tariff.id, days: parsed });
+    for (const period of periodsOf(tariff)) {
+      rows.push({ id: durationId(tariff.id, period.days), plan_id: tariff.id, days: period.days });
     }
   }
   return rows;
@@ -1039,14 +1204,12 @@ function deriveDurations(tariffs: readonly BedolagaTariff[]): Array<Record<strin
 function derivePrices(tariffs: readonly BedolagaTariff[]): Array<Record<string, unknown>> {
   const rows: Array<Record<string, unknown>> = [];
   for (const tariff of tariffs) {
-    for (const [days, kopeks] of Object.entries(tariff.period_prices)) {
-      const parsed = Number.parseInt(days, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) continue;
+    for (const period of periodsOf(tariff)) {
       rows.push({
-        id: durationId(tariff.id, parsed),
-        plan_duration_id: durationId(tariff.id, parsed),
+        id: durationId(tariff.id, period.days),
+        plan_duration_id: durationId(tariff.id, period.days),
         currency: 'RUB',
-        price: (kopeks / 100).toFixed(2),
+        price: (period.kopeks / 100).toFixed(2),
       });
     }
   }

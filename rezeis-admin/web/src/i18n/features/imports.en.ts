@@ -125,6 +125,22 @@ export const en = {
       actions: 'Actions',
     },
     progressDialog: {
+      notImported: {
+        title: 'Not carried over — settle by hand',
+        pendingWithdrawals: 'Withdrawal requests (money still on the balance)',
+        withdrawals: 'Withdrawal requests, total',
+        coupons: 'Unredeemed coupons',
+        gifts: 'Gifts paid for but not delivered',
+        wheelSpins: 'Wheel spins',
+        contests: 'Contests',
+        temporaryAccess: 'Temporary access grants',
+        discountOffers: 'Live discount offers',
+        tickets: 'Support tickets',
+        usersInDebt: 'People with a negative balance',
+        debtKopeks: 'Debt, in kopecks',
+        walletsNotCarried: 'Wallets not carried (points already held)',
+        referralEarningsAboveLevelOne: 'Referral earnings above level one',
+      },
       title: 'Import from {{source}}',
       titleSync: 'Sync with {{source}}',
       stages: {

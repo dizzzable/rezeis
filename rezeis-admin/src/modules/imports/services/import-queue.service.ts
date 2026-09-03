@@ -25,8 +25,9 @@ export interface ImportRunJobData {
    */
   readonly stagedFilePath: string | null;
   /**
-   * STEALTHNET only: convert each imported user's leftover wallet balance
-   * into loyalty points on CREATE. Ignored by other sources.
+   * Carry the donor's leftover wallet over as loyalty points. Read by every
+   * importer whose donor HAS a wallet — STEALTHNET and Bedolaga today —
+   * and ignored by the rest.
    */
   readonly balanceToPoints?: { readonly enabled: boolean; readonly rate: number };
   /**
@@ -119,6 +120,21 @@ const ALLOWED_SIMPLE_EXTENSIONS: ReadonlySet<string> = new Set([
 const FALLBACK_EXTENSION = '.bin';
 
 /**
+ * A filename fit to record and to log.
+ *
+ * It arrives in a multipart header, so the uploader chooses every byte of it —
+ * including newlines, which in a log line let them forge whole records. It is
+ * also persisted and read back by the panel, so it is bounded as well. It has
+ * never been part of the path on disk (that is a UUID), so this is about what
+ * is written ABOUT the file, not where the file goes.
+ */
+function safeFilename(name: string): string {
+  const oneLine = name.replace(/[^\P{C}]/gu, ' ').trim();
+  const collapsed = oneLine.length === 0 ? 'upload' : oneLine;
+  return collapsed.length > 255 ? collapsed.slice(0, 255) : collapsed;
+}
+
+/**
  * Map a client-supplied filename onto an allowlisted on-disk extension.
  * Pure and exported so the allowlist is testable without a queue or a DB.
  */
@@ -184,7 +200,7 @@ export class ImportQueueService {
     // Create import record in DRAFT status
     const record = await this.prismaService.importRecord.create({
       data: {
-        filename: input.originalFilename,
+        filename: safeFilename(input.originalFilename),
         sourceType: input.sourceType,
         status: 'DRAFT',
         recordsTotal: 0,
@@ -214,7 +230,7 @@ export class ImportQueueService {
     );
 
     this.logger.log(
-      `Enqueued import job: source=${input.sourceType} file=${input.originalFilename} recordId=${record.id}`,
+      `Enqueued import job: source=${input.sourceType} file=${safeFilename(input.originalFilename)} recordId=${record.id}`,
     );
 
     return { importRecordId: record.id, jobId: job.id ?? record.id };

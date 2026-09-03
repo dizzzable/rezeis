@@ -11,6 +11,7 @@ import {
   gunzipBuffer,
   isGzipBuffer,
   isTarBuffer,
+  toBadRequestException,
 } from './backup-archive.util';
 import { looksLikePgDump, parsePgCopyTables } from './pg-dump-parser';
 
@@ -114,6 +115,13 @@ export interface BedolagaTariff {
   /** `{"30": 50000}` — days (as a STRING key) to kopeks. */
   readonly period_prices: Readonly<Record<string, number>>;
   readonly external_squad_uuid: string | null;
+  /**
+   * A daily tariff prices itself per day and carries an EMPTY `period_prices`
+   * by design — read without these two it arrives as a plan with no duration
+   * and no price at all.
+   */
+  readonly is_daily: boolean;
+  readonly daily_price_kopeks: number;
   readonly is_active: boolean;
   readonly display_order: number;
 }
@@ -229,6 +237,11 @@ export interface BedolagaBackupData {
   readonly referralEarnings: readonly BedolagaReferralEarning[];
   readonly serverSquads: readonly BedolagaServerSquad[];
   readonly excludedData: BedolagaExcludedDataSummary;
+  /**
+   * Whether those counts could be complete. The ORM export dumps a hand-picked
+   * list of models, so a zero from it means "this backup does not say".
+   */
+  readonly excludedDataIsComplete: boolean;
   /** `sql` when read from a pg_dump, `orm` from Bedolaga's JSON export. */
   readonly sourceFormat: 'sql' | 'orm';
 }
@@ -290,14 +303,24 @@ export async function parseBedolagaBackup(buffer: Buffer): Promise<BedolagaBacku
   }
 }
 
-/** Bedolaga names its payload `database.sql` or `database.json`; be lenient. */
-function classifyEntry(name: string): 'json' | 'sql.gz' | 'sql' | null {
-  const basename = name.split('/').pop() ?? name;
-  if (basename === 'database.json') return 'json';
-  if (/\.sql\.gz$/i.test(basename)) return 'sql.gz';
-  if (/\.sql$/i.test(basename)) return 'sql';
-  // `metadata.json` sits beside the payload and must not be mistaken for it.
-  if (/^database\.json\.gz$/i.test(basename)) return 'json';
+/**
+ * Which entry of the archive is the database — anchored to the ROOT.
+ *
+ * Not by basename. Bedolaga's own backup copies the operator's whole `data/`
+ * directory into the archive beside the dump (`_collect_data_snapshot`), so an
+ * operator with any stray `*.sql` in there — or a nested `database.json` from
+ * some other tool — would give us two matches, and two matches is a refusal.
+ * A real backup would be rejected with nothing the operator could do about it.
+ *
+ * `_dump_database` writes the payload at the top level under exactly these
+ * names, so that is all this looks at.
+ */
+function classifyEntry(name: string): 'json' | 'json.gz' | 'sql.gz' | 'sql' | null {
+  if (name.includes('/')) return null;
+  if (name === 'database.json') return 'json';
+  if (name === 'database.json.gz') return 'json.gz';
+  if (name === 'database.sql.gz') return 'sql.gz';
+  if (name === 'database.sql') return 'sql';
   return null;
 }
 
@@ -309,22 +332,33 @@ async function parseArchive(tarBuffer: Buffer): Promise<BedolagaBackupData> {
     );
   }
 
-  if (payload.kind === 'json') {
-    ensureBufferWithinLimit(payload.bytes, MAX_JSON_BYTES, `Archive entry '${payload.name}'`);
-    return fromJsonExport(JSON.parse(payload.bytes.toString('utf-8')));
-  }
+  // Wrapped, because a malformed payload inside a well-formed archive is still
+  // a bad upload and must read as one: a raw SyntaxError escaping here reaches
+  // the operator as the whole of their error message.
+  try {
+    if (payload.kind === 'json' || payload.kind === 'json.gz') {
+      const jsonBytes =
+        payload.kind === 'json.gz'
+          ? await gunzipBuffer(payload.bytes, MAX_JSON_BYTES, `archive entry '${payload.name}'`)
+          : payload.bytes;
+      ensureBufferWithinLimit(jsonBytes, MAX_JSON_BYTES, `Archive entry '${payload.name}'`);
+      return fromJsonExport(JSON.parse(jsonBytes.toString('utf-8')));
+    }
 
-  if (payload.kind === 'sql.gz') {
-    const sqlBytes = await gunzipBuffer(
-      payload.bytes,
-      MAX_SQL_BYTES,
-      `archive entry '${payload.name}'`,
-    );
-    return fromSqlDump(sqlBytes.toString('utf-8'));
-  }
+    if (payload.kind === 'sql.gz') {
+      const sqlBytes = await gunzipBuffer(
+        payload.bytes,
+        MAX_SQL_BYTES,
+        `archive entry '${payload.name}'`,
+      );
+      return fromSqlDump(sqlBytes.toString('utf-8'));
+    }
 
-  ensureBufferWithinLimit(payload.bytes, MAX_SQL_BYTES, `Archive entry '${payload.name}'`);
-  return fromSqlDump(payload.bytes.toString('utf-8'));
+    ensureBufferWithinLimit(payload.bytes, MAX_SQL_BYTES, `Archive entry '${payload.name}'`);
+    return fromSqlDump(payload.bytes.toString('utf-8'));
+  } catch (error) {
+    throw toBadRequestException(error, 'Failed to parse backup contents');
+  }
 }
 
 // ── The two shapes, normalised to one ────────────────────────────────────────
@@ -432,6 +466,8 @@ function build(tables: Tables, sourceFormat: 'sql' | 'orm'): BedolagaBackupData 
         allowed_squads: asStringArray(r.allowed_squads),
         period_prices: asNumberMap(r.period_prices),
         external_squad_uuid: asNullableString(r.external_squad_uuid),
+        is_daily: asBool(r.is_daily),
+        daily_price_kopeks: asInt(r.daily_price_kopeks),
         is_active: asBool(r.is_active),
         display_order: asInt(r.display_order),
       }),
@@ -511,13 +547,25 @@ function build(tables: Tables, sourceFormat: 'sql' | 'orm'): BedolagaBackupData 
         is_available: asBool(r.is_available),
       }),
     ),
+    // WHAT WE COULD NOT COUNT, and why the shape matters.
+    //
+    // A pg_dump carries every table. The ORM export carries only the models
+    // its author listed — coupons are not among them — so a zero from that
+    // shape means "not in this backup", not "none exist". Reporting the two
+    // identically would tell an operator with three thousand unredeemed
+    // coupons that nothing was left behind.
+    excludedDataIsComplete: sourceFormat === 'sql',
     excludedData: {
       pendingWithdrawals: rowsOf(tables, 'withdrawal_requests').filter(
         (r) => asString(r.status, '') === 'pending',
       ).length,
       withdrawals: rowsOf(tables, 'withdrawal_requests').length,
       coupons: rowsOf(tables, 'coupons').filter((r) => asString(r.status, '') === 'active').length,
-      gifts: rowsOf(tables, 'guest_purchases').filter((r) => asBool(r.is_gift)).length,
+      // Paid but undelivered only: an abandoned checkout is not a promise to
+      // anybody, and counting one would send the operator looking for it.
+      gifts: rowsOf(tables, 'guest_purchases').filter(
+        (r) => asBool(r.is_gift) && OWED_GIFT_STATUSES.has(asString(r.status, '')),
+      ).length,
       wheelSpins: rowsOf(tables, 'wheel_spins').length,
       contests: rowsOf(tables, 'referral_contests').length,
       temporaryAccess: rowsOf(tables, 'subscription_temporary_access').filter((r) =>
@@ -528,6 +576,9 @@ function build(tables: Tables, sourceFormat: 'sql' | 'orm'): BedolagaBackupData 
     },
   };
 }
+
+/** A gift whose money was taken and whose subscription was not delivered. */
+const OWED_GIFT_STATUSES: ReadonlySet<string> = new Set(['paid', 'pending_activation']);
 
 function rowsOf(tables: Tables, name: string): readonly LooseRow[] {
   return tables.get(name) ?? [];
@@ -542,14 +593,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Every string from the file is bounded HERE, in the one place they all pass
+ * through.
+ *
+ * The file comes from another product and may be anything at all. Without a
+ * cap a single row can carry a sixty-megabyte `username` straight into a TEXT
+ * column, and from there into every list the panel renders. A name, a code or
+ * a URL longer than this is not data somebody lost — it is data nobody had.
+ */
+const MAX_FIELD_LENGTH = 2048;
+
+function bound(value: string): string {
+  return value.length > MAX_FIELD_LENGTH ? value.slice(0, MAX_FIELD_LENGTH) : value;
+}
+
 function asString(value: unknown, fallback: string): string {
-  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'string' && value.length > 0) return bound(value);
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return fallback;
 }
 
 function asNullableString(value: unknown): string | null {
-  if (typeof value === 'string') return value.length > 0 ? value : null;
+  if (typeof value === 'string') return value.length > 0 ? bound(value) : null;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return null;
 }
@@ -600,7 +666,12 @@ function asIso(value: unknown): string | null {
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
   // `2026-06-10 14:52:59.213265+00` → `...T...+00:00`
-  const normalized = trimmed.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00');
+  const zoned = trimmed.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00');
+  // A timestamp with no zone at all comes from a database older than the
+  // donor's own naive-timestamp migration, and it is UTC there. Read as local
+  // time — which is what `new Date` does — every expiry in the backup would
+  // shift by the container's offset.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(zoned) ? zoned : `${zoned}Z`;
   const parsed = new Date(normalized);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }

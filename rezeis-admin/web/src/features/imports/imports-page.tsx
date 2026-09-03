@@ -525,28 +525,38 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
             />
           </div>
           {CARRIES_A_WALLET.has(source) ? (
+            // Every string here is the DONOR's, not STEALTHNET's. The two
+            // products keep their wallets in different units — STEALTHNET in
+            // major units, Bedolaga in kopeks — so the rate field means a
+            // different thing on each tab and the copy has to say which. It
+            // read "за 1 единицу баланса" on both for exactly as long as this
+            // block hard-coded one donor's keys, and an operator reading that
+            // on the Bedolaga tab would enter 100 to mean "one point per
+            // rouble" — while the importer had already divided by 100.
             <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="space-y-0.5">
-                  <Label className="text-sm">{t('importsPage.stealthnet.balancePoints.label')}</Label>
+                  <Label className="text-sm">
+                    {t(`importsPage.${i18nKey}.balancePoints.label`)}
+                  </Label>
                   <p className="text-xs text-muted-foreground">
-                    {t('importsPage.stealthnet.balancePoints.hint')}
+                    {t(`importsPage.${i18nKey}.balancePoints.hint`)}
                   </p>
                 </div>
                 <Switch
                   checked={convertBalance}
                   onCheckedChange={setConvertBalance}
                   disabled={importMutation.isPending}
-                  aria-label={t('importsPage.stealthnet.balancePoints.label')}
+                  aria-label={t(`importsPage.${i18nKey}.balancePoints.label`)}
                 />
               </div>
               {convertBalance ? (
                 <div className="flex items-center gap-2">
-                  <Label htmlFor="stealthnet-rate" className="text-xs text-muted-foreground">
-                    {t('importsPage.stealthnet.balancePoints.rateLabel')}
+                  <Label htmlFor={`${source}-rate`} className="text-xs text-muted-foreground">
+                    {t(`importsPage.${i18nKey}.balancePoints.rateLabel`)}
                   </Label>
                   <Input
-                    id="stealthnet-rate"
+                    id={`${source}-rate`}
                     type="number"
                     min="0"
                     step="0.1"

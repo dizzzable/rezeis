@@ -135,7 +135,7 @@ describe('ImportsService', () => {
     await assert.rejects(() => service.rollback('import-1'), /newer payment activity/);
   });
 
-  it('removes trial claims before transactions and imported users during rollback', async () => {
+  it('clears every row that would block the user delete, in an order that works', async () => {
     const record = {
       ...createImportRecord({ id: 'import-1', status: ImportStatus.COMMITTED }),
       result: { rollback: { createdUserIds: ['user-1'] } },
@@ -162,6 +162,12 @@ describe('ImportsService', () => {
               return { count: 1 };
             },
           },
+          referralReward: {
+            deleteMany: async () => {
+              calls.push('referral-rewards');
+              return { count: 1 };
+            },
+          },
           user: {
             deleteMany: async () => {
               calls.push('users');
@@ -173,7 +179,16 @@ describe('ImportsService', () => {
 
     await service.rollback('import-1');
 
-    assert.deepStrictEqual(calls, ['trial-claims', 'transactions', 'users']);
+    // `referral_rewards.user_id` is ON DELETE RESTRICT. Any run that imported
+    // somebody's referral history could not be rolled back AT ALL until this
+    // line existed: the user delete failed on the foreign key and took the
+    // whole transaction with it.
+    assert.deepStrictEqual(calls, [
+      'trial-claims',
+      'transactions',
+      'referral-rewards',
+      'users',
+    ]);
   });
 
   it('blocks rollback when an import wrote history onto matched existing users', async () => {

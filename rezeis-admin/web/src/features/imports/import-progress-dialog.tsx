@@ -120,6 +120,12 @@ interface FlattenedSummary {
   readonly subsCreated: number | null
   readonly subsUpdated: number | null
   readonly writebacks: number | null
+  /**
+   * What the run deliberately did NOT bring over — obligations somebody is
+   * still owed and decisions only an operator can make. Absent for importers
+   * that report none.
+   */
+  readonly notImported: ReadonlyArray<{ readonly key: string; readonly count: number }>
   readonly errors: ReadonlyArray<string>
 }
 
@@ -443,6 +449,31 @@ function DoneBody({
         </div>
       ) : null}
 
+      {/* What the run left behind on purpose. Each of these is somebody
+          waiting for something, or a decision only the operator can make —
+          reporting it is the whole reason the importer counts them. */}
+      {summary && summary.notImported.length > 0 ? (
+        <>
+          <Separator />
+          <div>
+            <p className="mb-2 text-sm font-medium">
+              {t('importsPage.progressDialog.notImported.title')}
+            </p>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {summary.notImported.map((row) => (
+                <Stat
+                  key={row.key}
+                  label={t(`importsPage.progressDialog.notImported.${row.key}`, {
+                    defaultValue: row.key,
+                  })}
+                  value={row.count}
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      ) : null}
+
       {/* Errors preview — first five lines, truncated, scrollable. */}
       {summary && summary.errors.length > 0 ? (
         <>
@@ -642,8 +673,26 @@ function flattenResult(record: ImportRecordPayload): FlattenedSummary {
     subsCreated: numericFieldOrNull(result, 'subscriptionsCreated'),
     subsUpdated: numericFieldOrNull(result, 'subscriptionsUpdated'),
     writebacks: numericFieldOrNull(result, 'descriptionWritebacks'),
+    notImported: notImportedField(result),
     errors: stringArrayField(result, 'errors'),
   }
+}
+
+/**
+ * The counts an importer reports as left behind.
+ *
+ * Read generically, not by name: each donor leaves something different behind,
+ * and a fixed list here would silently drop whatever the next one reports. A
+ * zero is skipped — nothing left behind is not news.
+ */
+function notImportedField(
+  record: Record<string, unknown>,
+): ReadonlyArray<{ readonly key: string; readonly count: number }> {
+  const raw = record['notImported']
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return []
+  return Object.entries(raw as Record<string, unknown>)
+    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value) && value > 0)
+    .map(([key, value]) => ({ key, count: value as number }))
 }
 
 function numericField(record: Record<string, unknown>, key: string, fallback: number): number {
