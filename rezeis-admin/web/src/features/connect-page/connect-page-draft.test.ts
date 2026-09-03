@@ -8,6 +8,7 @@ import {
   removeAt,
   replaceAt,
   setAppAt,
+  shapeOf,
   slugify,
   type ConnectApp,
 } from './connect-page-api'
@@ -147,5 +148,59 @@ describe('reading the server back', () => {
     expect(issuesFromError(new Error('offline'))).toEqual([])
     expect(issuesFromError({ response: { data: 'gateway timeout' } })).toEqual([])
     expect(issuesFromError(null)).toEqual([])
+  })
+})
+
+describe('what makes an issue list stale', () => {
+  // Issue paths are positional. `shapeOf` is what decides whether the list the
+  // server sent still describes the catalog on screen — and the bug it replaces
+  // was clearing the list on EVERY edit, so twelve rows vanished at the first
+  // character of the first fix.
+  const catalog = (apps: ConnectApp[]) => ({
+    version: 2,
+    icons: {},
+    platforms: [{ id: 'ios', title: { ru: '', en: '' }, iconKey: null, apps }],
+  })
+
+  const withStep = (id: string, label: string): ConnectApp => ({
+    ...app(id),
+    steps: [
+      {
+        title: { ru: label, en: label },
+        body: null,
+        iconKey: null,
+        buttons: [emptyButton('copyLink')],
+      },
+    ],
+  })
+
+  it('does not move when text inside a row is typed', () => {
+    // The whole point. Fixing one row must not delete the other eleven.
+    const before = shapeOf(catalog([withStep('happ', 'Добавьте')]))
+    const after = shapeOf(catalog([withStep('happ', 'Добавьте подписку')]))
+    expect(after).toBe(before)
+  })
+
+  it('moves when a row is added or removed', () => {
+    const one = shapeOf(catalog([app('happ')]))
+    expect(shapeOf(catalog([app('happ'), app('hiddify')]))).not.toBe(one)
+    expect(shapeOf(catalog([]))).not.toBe(one)
+  })
+
+  it('moves when two rows swap places, which counts changing would miss', () => {
+    // A reorder keeps every count identical and still repoints every path.
+    const before = shapeOf(catalog([app('happ'), app('hiddify')]))
+    const after = shapeOf(catalog(moveItem([app('happ'), app('hiddify')], 1, -1)))
+    expect(after).not.toBe(before)
+  })
+
+  it('moves when a button is added to a step', () => {
+    const base = withStep('happ', 'Добавьте')
+    const before = shapeOf(catalog([base]))
+    const grown = {
+      ...base,
+      steps: [{ ...base.steps[0]!, buttons: [...base.steps[0]!.buttons, emptyButton('external')] }],
+    }
+    expect(shapeOf(catalog([grown]))).not.toBe(before)
   })
 })

@@ -201,6 +201,41 @@ export function slugify(value: string, taken: readonly string[]): string {
  * here rather than leaving it to the operator means they never have to go and
  * find which app was previously recommended in order to change their mind.
  */
+/**
+ * Everything about a catalog that an issue path depends on, and nothing else.
+ *
+ * Issue paths are positional — `platforms[0].apps[2].steps[1].buttons[0]` — so
+ * a list of them survives any edit that leaves every row where it was, and
+ * survives nothing else. This string changes when a row is added, removed or
+ * moved, and does not change when text inside a row is typed. Comparing two of
+ * them is what decides whether the issue list still describes what is on screen.
+ *
+ * Built from the identities and counts a position depends on: platform and app
+ * ids in order, step count per app, and each step's button kinds in order.
+ *
+ * One case it will not catch, stated rather than hidden: reordering two steps
+ * whose buttons are the same kinds in the same order produces the same string.
+ * Those two paths then point at each other's rows — which is also the one case
+ * where the rows are interchangeable enough that an operator reading the card
+ * cannot be led anywhere wrong by it. Adding step text to the signature would
+ * catch it and would put every keystroke back where this started.
+ */
+export function shapeOf(config: ConnectPageConfig): string {
+  return config.platforms
+    .map(
+      (platform) =>
+        `${platform.id}[${platform.apps
+          .map(
+            (app) =>
+              `${app.id}(${app.steps
+                .map((step) => step.buttons.map((button) => button.kind).join('.'))
+                .join('/')})`,
+          )
+          .join(',')}]`,
+    )
+    .join(';');
+}
+
 export function setAppAt(
   apps: readonly ConnectApp[],
   index: number,

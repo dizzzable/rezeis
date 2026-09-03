@@ -15,6 +15,18 @@ import {
 import { InvalidIconError, sanitizeIconMarkup } from './svg-sanitizer.util';
 
 /**
+ * The stable code both refusals of a catalog carry.
+ *
+ * Its twin is a literal inside `admin-safe-exception.filter.ts`, not an import
+ * of this constant — that filter's allowlists are hand-audited on purpose, and
+ * one that imports the set it gates admits every future member automatically.
+ * `connect-page-refusal-wire.spec.ts` checks the two spellings agree, and that
+ * the rows actually survive the filter, because the throw site and the wire are
+ * different places and only the second one is what the editor sees.
+ */
+export const CONNECT_PAGE_CATALOG_INVALID = 'CONNECT_PAGE_CATALOG_INVALID';
+
+/**
  * ConnectPageService
  * ──────────────────
  * Owns the catalog the cabinet's connect screen renders.
@@ -168,7 +180,11 @@ export class ConnectPageService {
   }> {
     const parsed = connectPageConfigSchema.safeParse(input);
     if (!parsed.success) {
+      // The code is what carries the rows past the safe exception filter: it
+      // allowlists `issues` per code, and without it the editor gets a 400 with
+      // nothing in it but "could not save". See `CODES_CARRYING_ISSUES`.
       throw new BadRequestException({
+        code: CONNECT_PAGE_CATALOG_INVALID,
         message: 'Invalid connect-page config',
         issues: parsed.error.issues.slice(0, 20).map((issue) => ({
           path: issue.path.join('.'),
@@ -177,34 +193,9 @@ export class ConnectPageService {
       });
     }
 
-    const cleanedIcons: Record<string, string[]> = {};
-    const icons: Record<string, string> = {};
-    const iconIssues: ConnectPageIssue[] = [];
-    for (const [key, markup] of Object.entries(parsed.data.icons)) {
-      try {
-        const result = sanitizeIconMarkup(markup);
-        // Re-checked AFTER cleaning, because cleaning grows the string: every
-        // `&` becomes `&amp;`. An icon just under the ceiling on the way in
-        // came out over it, was stored anyway, and then failed to parse on the
-        // way out — turning a successful save into a config the cabinet could
-        // not read and the editor could not tell from a fresh install.
-        if (result.markup.length > MAX_ICON_BYTES) {
-          iconIssues.push({
-            path: `icons.${key}`,
-            message: 'The icon is too large once cleaned — simplify it or shorten its text',
-          });
-          continue;
-        }
-        icons[key] = result.markup;
-        if (result.removed.length > 0) cleanedIcons[key] = [...result.removed];
-      } catch (error) {
-        iconIssues.push({
-          path: `icons.${key}`,
-          message: error instanceof InvalidIconError ? error.message : 'The icon could not be read',
-        });
-      }
-    }
-
+    const { icons, cleanedIcons, issues: iconIssues } = ConnectPageService.cleanIcons(
+      parsed.data.icons,
+    );
     // The flag is not the editor's to write: a draft branched before the switch
     // was flicked would carry the old value and turn the screen back off under
     // a green "saved" toast. It is re-read from its own row on the way out.
@@ -214,7 +205,11 @@ export class ConnectPageService {
     // something still points at it.
     const issues = [...iconIssues, ...auditConnectPageConfig(config)];
     if (issues.length > 0) {
-      throw new BadRequestException({ message: 'The catalog would not work', issues });
+      throw new BadRequestException({
+        code: CONNECT_PAGE_CATALOG_INVALID,
+        message: 'The catalog would not work',
+        issues,
+      });
     }
 
     await this.prisma.subpageConfig.upsert({
@@ -258,12 +253,52 @@ export class ConnectPageService {
       };
     }
 
-    const issues: ConnectPageIssue[] = [];
+    const { icons, cleanedIcons, issues: iconIssues } = ConnectPageService.cleanIcons(
+      parsed.data.icons,
+    );
+    const issues = [
+      ...iconIssues,
+      ...auditConnectPageConfig(
+        normalizeConnectPageConfig({ ...parsed.data, icons, connectScreenEnabled: false }),
+      ),
+    ];
+    return { ok: issues.length === 0, issues, cleanedIcons };
+  }
+
+  /**
+   * The icon pass, shared by the save and the dry run because the docblock
+   * above promised they were "deliberately the same code" and they were not.
+   *
+   * The dry run had its own copy of this loop, missing exactly one branch: the
+   * size re-check below. So an icon that grew past the ceiling while being
+   * cleaned passed the preview and was refused by the save a click later —
+   * a green "the catalog works" followed by a red refusal, which is precisely
+   * the outcome that comment forbids. A promise of sameness that two copies
+   * have to keep is not a promise, it is a hope; now there is one copy.
+   */
+  private static cleanIcons(source: Readonly<Record<string, string>>): {
+    readonly icons: Record<string, string>;
+    readonly cleanedIcons: Record<string, string[]>;
+    readonly issues: ConnectPageIssue[];
+  } {
     const icons: Record<string, string> = {};
     const cleanedIcons: Record<string, string[]> = {};
-    for (const [key, markup] of Object.entries(parsed.data.icons)) {
+    const issues: ConnectPageIssue[] = [];
+    for (const [key, markup] of Object.entries(source)) {
       try {
         const result = sanitizeIconMarkup(markup);
+        // Checked AFTER cleaning, because cleaning GROWS the string: every `&`
+        // becomes `&amp;`. An icon just under the ceiling on the way in came out
+        // over it, was stored anyway, and then failed to parse on the way out —
+        // turning a successful save into a config the cabinet could not read and
+        // the editor could not tell from a fresh install.
+        if (result.markup.length > MAX_ICON_BYTES) {
+          issues.push({
+            path: `icons.${key}`,
+            message: 'The icon is too large once cleaned — simplify it or shorten its text',
+          });
+          continue;
+        }
         icons[key] = result.markup;
         if (result.removed.length > 0) cleanedIcons[key] = [...result.removed];
       } catch (error) {
@@ -273,11 +308,6 @@ export class ConnectPageService {
         });
       }
     }
-    issues.push(
-      ...auditConnectPageConfig(
-        normalizeConnectPageConfig({ ...parsed.data, icons, connectScreenEnabled: false }),
-      ),
-    );
-    return { ok: issues.length === 0, issues, cleanedIcons };
+    return { icons, cleanedIcons, issues };
   }
 }

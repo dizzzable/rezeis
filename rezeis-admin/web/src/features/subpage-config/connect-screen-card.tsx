@@ -9,6 +9,21 @@
  * It reads and writes the v2 config directly. The editor beside it is still
  * bound to v1 and the two are stored under separate keys, so neither can save
  * over the other.
+ *
+ * ── One key, one reader ───────────────────────────────────────────
+ *
+ * This card used to declare its own `['admin','connect-page']` with its own
+ * shallow schema, and both it and the editor are always mounted. React Query
+ * keys ARE the cache entry: two observers on one key share the row, and the
+ * fetch runs whichever `queryFn` the winning observer had. When this card's won,
+ * its schema dropped `corrupted` on the floor — and `corrupted` is the flag that
+ * says "the row in the database cannot be read, what you see below is the
+ * built-in default, saving over it destroys your real catalog". The editor's red
+ * banner went dark, silently, decided by mount order.
+ *
+ * So the key and the reader come from the editor's module now. This card wants
+ * one boolean out of that answer; it does not want a second opinion about the
+ * shape of it.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link2 } from 'lucide-react';
@@ -22,43 +37,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { CONNECT_PAGE_KEYS, connectPageApi } from '@/features/connect-page/connect-page-api';
 import { usePermissionStore } from '@/features/rbac/use-permission-store';
 
-const CONNECT_PAGE_KEYS = { all: ['admin', 'connect-page'] as const } as const;
-
 /**
- * Deliberately shallow, and passthrough where the catalog lives.
+ * Writes the switch and NOTHING else.
  *
- * The panel API validates this config exhaustively on the way in; re-declaring
- * the whole catalog here would be a second copy of that schema, free to drift
- * from the first. This card only needs the one field it toggles, and it must
- * hand the rest back untouched.
+ * It used to PUT the whole config back with one boolean changed, which meant
+ * the first flick froze the built-in default catalog into the database
+ * forever — no later improvement to it would ever reach this install — and a
+ * catalog draft branched before the flick silently turned the screen off
+ * again on the next save. The switch has its own row and its own endpoint.
  */
-const connectPageSchema = z
-  .object({ connectScreenEnabled: z.boolean().optional() })
-  .passthrough();
-
-type ConnectPageConfig = z.infer<typeof connectPageSchema>;
-
-const connectPageApi = {
-  async get(): Promise<{ config: ConnectPageConfig; stored: boolean }> {
-    const response = await api.get('/admin/connect-page');
-    return z.object({ config: connectPageSchema, stored: z.boolean() }).parse(response.data);
-  },
-  /**
-   * Writes the switch and NOTHING else.
-   *
-   * It used to PUT the whole config back with one boolean changed, which meant
-   * the first flick froze the built-in default catalog into the database
-   * forever — no later improvement to it would ever reach this install — and a
-   * catalog draft branched before the flick silently turned the screen off
-   * again on the next save. The switch has its own row and its own endpoint.
-   */
-  async setEnabled(enabled: boolean): Promise<boolean> {
-    const response = await api.put('/admin/connect-page/enabled', { enabled });
-    return z.object({ enabled: z.boolean() }).parse(response.data).enabled;
-  },
-};
+async function setEnabled(enabled: boolean): Promise<boolean> {
+  const response = await api.put('/admin/connect-page/enabled', { enabled });
+  return z.object({ enabled: z.boolean() }).parse(response.data).enabled;
+}
 
 export function ConnectScreenCard(): JSX.Element {
   const { t } = useTranslation();
@@ -71,10 +65,8 @@ export function ConnectScreenCard(): JSX.Element {
   });
 
   const toggle = useMutation({
-    // The whole config goes back, not a patch: the API replaces it, and sending
-    // only the flag would wipe the catalog the operator spent an hour on.
-    mutationFn: (enabled: boolean) => connectPageApi.setEnabled(enabled),
-    onSuccess: (_config, enabled) => {
+    mutationFn: (enabled: boolean) => setEnabled(enabled),
+    onSuccess: (_written, enabled) => {
       void queryClient.invalidateQueries({ queryKey: CONNECT_PAGE_KEYS.all });
       toast.success(
         enabled ? t('connectScreen.turnedOn') : t('connectScreen.turnedOff'),

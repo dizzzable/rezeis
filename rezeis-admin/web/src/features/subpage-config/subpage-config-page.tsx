@@ -46,6 +46,10 @@ export default function SubpageConfigPage() {
   const [config, setConfig] = useState<SubpageConfig | null>(null);
   const [rawText, setRawText] = useState('');
   const [jsonError, setJsonError] = useState<string | null>(null);
+  // Controlled rather than `defaultValue`, because the header actions belong to
+  // the five v1 tabs and have to know which tab is open. The catalog tab stays
+  // the landing tab — it is the one most operators came for.
+  const [tab, setTab] = useState('connect');
 
   useEffect(() => {
     // Seed the editable local editor state once the async config query lands.
@@ -147,17 +151,26 @@ export default function SubpageConfigPage() {
             </h1>
             <p className="text-muted-foreground">{t('subpageConfigPage.subtitle')}</p>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={handleDownload}>
-              <Download className="mr-2 h-4 w-4" /> {t('subpageConfigPage.actions.download')}
-            </Button>
-            <Button variant="outline" onClick={handleReset} disabled={saveMutation.isPending}>
-              <RotateCcw className="mr-2 h-4 w-4" /> {t('subpageConfigPage.actions.reset')}
-            </Button>
-            <Button onClick={handleSave} disabled={saveMutation.isPending || jsonError !== null}>
-              <Save className="mr-2 h-4 w-4" /> {t('subpageConfigPage.actions.save')}
-            </Button>
-          </div>
+          {/* These three write the EXTERNAL page's config and nothing else, so
+              they are not shown while the catalog tab is open. The page opens on
+              that tab, which put the largest, bluest "Save" on the screen
+              directly above an editor it cannot save: an hour of catalog work,
+              one confident click, a green toast, and the catalog still in a
+              draft that the next navigation throws away. `handleReset` was worse
+              — it says "changes reset" and resets a different document. */}
+          {tab !== 'connect' && (
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={handleDownload}>
+                <Download className="mr-2 h-4 w-4" /> {t('subpageConfigPage.actions.download')}
+              </Button>
+              <Button variant="outline" onClick={handleReset} disabled={saveMutation.isPending}>
+                <RotateCcw className="mr-2 h-4 w-4" /> {t('subpageConfigPage.actions.reset')}
+              </Button>
+              <Button onClick={handleSave} disabled={saveMutation.isPending || jsonError !== null}>
+                <Save className="mr-2 h-4 w-4" /> {t('subpageConfigPage.actions.save')}
+              </Button>
+            </div>
+          )}
         </div>
       </FadeIn>
 
@@ -167,7 +180,11 @@ export default function SubpageConfigPage() {
         <ConnectScreenCard />
       </FadeIn>
 
-      {!data?.stored && (
+      {/* Same reason as the buttons: `stored` is the EXTERNAL config's row, and
+          "not saved yet, you are seeing the built-in default" is a sentence
+          about a document the catalog tab does not show. The catalog reports its
+          own stored/corrupted state inside its own editor. */}
+      {!data?.stored && tab !== 'connect' && (
         <FadeIn>
           <Card className="border-amber-500/40 bg-amber-500/5">
             <CardContent className="py-3 text-sm text-muted-foreground">
@@ -177,7 +194,7 @@ export default function SubpageConfigPage() {
         </FadeIn>
       )}
 
-      <Tabs defaultValue="connect">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="flex-wrap">
           <TabsTrigger value="connect">{t('subpageConfigPage.tabs.connect')}</TabsTrigger>
           <TabsTrigger value="general">{t('subpageConfigPage.tabs.general')}</TabsTrigger>

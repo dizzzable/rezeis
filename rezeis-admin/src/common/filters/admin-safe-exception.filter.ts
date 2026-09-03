@@ -22,6 +22,11 @@ interface SafeErrorResponse {
    * two literal values below — see `extractSafeReauthFactor`.
    */
   factor?: SafeReauthFactor;
+  /**
+   * Per-row refusals for a document the operator submitted whole. Carried only
+   * by the codes in `CODES_CARRYING_ISSUES` — see `extractSafeIssues`.
+   */
+  issues?: readonly SafeIssue[];
   error?: string;
 }
 
@@ -31,6 +36,16 @@ interface SafeErrorResponse {
  * make on purpose, not a value that arrives from an exception body.
  */
 type SafeReauthFactor = 'totp' | 'password';
+
+/**
+ * One refused row of a submitted document: where it is, and what is wrong with
+ * it. Both halves are rebuilt from validated primitives, never the objects the
+ * exception body carried — see `extractSafeIssues`.
+ */
+interface SafeIssue {
+  readonly path: string;
+  readonly message: string;
+}
 
 const GENERIC_INTERNAL_ERROR_MESSAGE = 'Internal server error';
 const GENERIC_INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -259,6 +274,19 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // `admin-push-subscribe-endpoint-race.spec.ts` checks the correspondence by
   // name.
   'PUSH_SUBSCRIBE_ENDPOINT_RACE_UNSETTLED',
+  // The connect-screen catalog is submitted as ONE document and refused per
+  // row, so the refusal is worthless collapsed: without the rows, a catalog of
+  // five platforms and thirty apps answers "could not save" and the operator
+  // has nowhere to look. The rows ride in `issues`, gated a second time by
+  // `CODES_CARRYING_ISSUES` below.
+  //
+  // It reached this list the same way `totp_enroll_reauth_required` did — by
+  // being missing. `connect-page.service.ts` threw the rows from the day it was
+  // written, `issuesFromError` read them from the day IT was written, and this
+  // filter dropped them in between, so the editor's own red card could not be
+  // reached from the save path at all. The dry run showed the rows only because
+  // it answers 200 and never meets this filter.
+  'CONNECT_PAGE_CATALOG_INVALID',
 ]);
 /**
  * Codes whose refusal is meaningless without naming the credential it wants.
@@ -299,6 +327,37 @@ export const CODES_CARRYING_REAUTH_FACTOR: ReadonlySet<string> = new Set<string>
  * path, an id, a stack fragment — leaves nothing behind.
  */
 const SAFE_REAUTH_FACTORS = new Set<string>(['totp', 'password'] satisfies SafeReauthFactor[]);
+/**
+ * Codes whose refusal names the rows it refused. Same shape and same rule as
+ * `CODES_CARRYING_REAUTH_FACTOR` above, on a different field: a subset of
+ * {@link SAFE_PRODUCT_CODES}, checked mechanically by
+ * `connect-page-refusal-wire.spec.ts`, and a code listed only here forwards
+ * nothing.
+ *
+ * Kept narrow on purpose. This is the one channel through which a list of
+ * sentences written elsewhere in the app reaches an operator's screen, so every
+ * entry has to be a path where the rows are per-row diagnostics for a document
+ * that operator just submitted — not a place where a caught error's text could
+ * take their place.
+ */
+export const CODES_CARRYING_ISSUES: ReadonlySet<string> = new Set<string>([
+  'CONNECT_PAGE_CATALOG_INVALID',
+]);
+/**
+ * Caps on the list, so a refusal cannot become a payload. Twenty is what the
+ * throw sites already slice to; the two lengths are generous for a path like
+ * `platforms[0].apps[2].steps[1]` and for a sentence, and short enough that a
+ * body which smuggled something bigger loses it.
+ */
+const MAX_SAFE_ISSUES = 20;
+const MAX_SAFE_ISSUE_PATH_LENGTH = 200;
+const MAX_SAFE_ISSUE_MESSAGE_LENGTH = 300;
+/**
+ * What a row says when its own text was scrubbed. Deliberately says which row
+ * rather than nothing: the path beside it is still the address of the field,
+ * and an operator who can see the address can find the field.
+ */
+const REDACTED_ISSUE_MESSAGE = 'This row was refused; its diagnostic could not be shown';
 /**
  * Sentences the panel wrote on purpose, and is therefore allowed to say out
  * loud. Matched on EXACT equality against the whole string.
@@ -429,6 +488,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       const payload = findSafeProductPayload(response);
       const productCode = payload?.code;
       const factor = extractSafeReauthFactor(payload);
+      const issues = extractSafeIssues(payload);
       return {
         timestamp,
         path,
@@ -440,6 +500,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
         errorCode: productCode ?? mapStatusToErrorCode(statusCode),
         ...(productCode ? { code: productCode } : {}),
         ...(factor ? { factor } : {}),
+        ...(issues ? { issues } : {}),
         ...(error ? { error } : {}),
       };
     }
@@ -522,6 +583,44 @@ function extractSafeReauthFactor(
   return typeof candidate === 'string' && SAFE_REAUTH_FACTORS.has(candidate)
     ? (candidate as SafeReauthFactor)
     : undefined;
+}
+
+/**
+ * The `issues` passthrough. Gated on the code like `factor`, and then REBUILT
+ * rather than forwarded: every row that survives is a fresh `{ path, message }`
+ * of two strings this function checked itself, so a body carrying
+ * `issues: [{ path, message, sql }]` leaves the `sql` behind.
+ *
+ * Both halves still meet the pattern scrub. The rows are written by the panel,
+ * but half of what they quote is text the OPERATOR typed — an app name, an icon
+ * key — and the scrub is what stops a submitted document from choosing what
+ * this filter says. A row whose message trips it keeps its path, because the
+ * path is what the editor scrolls to and it is built from field names and
+ * indices, never from submitted text.
+ */
+function extractSafeIssues(
+  payload: { readonly code: string; readonly body: Record<string, unknown> } | undefined,
+): readonly SafeIssue[] | undefined {
+  if (!payload || !CODES_CARRYING_ISSUES.has(payload.code)) return undefined;
+  const candidate: unknown = payload.body.issues;
+  if (!Array.isArray(candidate)) return undefined;
+  // Typed back to `unknown[]` immediately: `Array.isArray` narrows to `any[]`,
+  // and every field read off an `any` is unchecked for the rest of the block.
+  const rows: readonly unknown[] = candidate;
+  const issues: SafeIssue[] = [];
+  for (const row of rows.slice(0, MAX_SAFE_ISSUES)) {
+    if (!isRecord(row)) continue;
+    const path: unknown = row.path;
+    const message: unknown = row.message;
+    if (typeof path !== 'string' || typeof message !== 'string') continue;
+    if (path.length > MAX_SAFE_ISSUE_PATH_LENGTH) continue;
+    if (message.length > MAX_SAFE_ISSUE_MESSAGE_LENGTH) continue;
+    issues.push({
+      path: containsSensitiveHttpText(path) ? '' : path,
+      message: containsSensitiveHttpText(message) ? REDACTED_ISSUE_MESSAGE : message,
+    });
+  }
+  return issues.length > 0 ? issues : undefined;
 }
 
 function sanitizeHttpExceptionMessage(message: string, statusCode: number): string {

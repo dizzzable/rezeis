@@ -181,4 +181,24 @@ describe('the dry run judges exactly as the save does', () => {
     assert.equal(s.dryRun(broken).ok, false);
     await assert.rejects(() => s.replaceConfig(broken));
   });
+
+  it('refuses an icon that outgrows the ceiling while being cleaned, as the save does', async () => {
+    // The one branch the dry run's own copy of the icon loop was missing, in
+    // the block named for the promise it broke: `dryRun` skipped the post-clean
+    // size check, so this catalog passed the preview and was refused by the
+    // save on the very next click — "the catalog works", then a red 400.
+    //
+    // The two share one method now. This test is what notices if they stop.
+    const dense = `<svg viewBox="0 0 1 1"><path d="M0 0"/><title>${'&'.repeat(16_000)}</title></svg>`;
+    const { service: s } = service();
+
+    const preview = s.dryRun(catalog({ big: dense }));
+
+    assert.equal(preview.ok, false);
+    assert.ok(
+      preview.issues.some((issue) => /too large once cleaned/i.test(issue.message)),
+      JSON.stringify(preview.issues),
+    );
+    await assert.rejects(() => s.replaceConfig(catalog({ big: dense })));
+  });
 });

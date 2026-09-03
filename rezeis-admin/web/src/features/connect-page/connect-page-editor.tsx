@@ -56,6 +56,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import { UnsavedChangesGuard } from '@/components/unsaved-changes-guard';
 import { usePermissionStore } from '@/features/rbac/use-permission-store';
 
 import {
@@ -72,6 +73,7 @@ import {
   removeAt,
   replaceAt,
   setAppAt,
+  shapeOf,
   slugify,
   type ConnectApp,
   type ConnectButton,
@@ -108,9 +110,23 @@ export function ConnectPageEditor(): JSX.Element {
   const [issues, setIssues] = useState<ConnectPageIssue[]>([]);
   const config = draft ?? data?.config ?? null;
 
+  // The exact object the last successful save was given, held to answer one
+  // question: is what is on screen still that object?
+  //
+  // Identity, not deep equality, and that is the whole trick. `patch` rebuilds
+  // the root on every keystroke, so anything typed after the save — including
+  // anything typed WHILE it was in flight, which is the case a boolean flag
+  // gets wrong — makes `config` a different object and the editor dirty again.
+  // Nothing typed, and it is the same object. Borrowed from the landing
+  // builder, which needs a version guard on top only because it seeds its
+  // state in an effect and this editor does not.
+  const [savedConfig, setSavedConfig] = useState<ConnectPageConfig | null>(null);
+  const unsavedWork = draft !== null && draft !== savedConfig;
+
   const save = useMutation({
     mutationFn: (config: ConnectPageConfig) => connectPageApi.replace(config),
-    onSuccess: ({ cleanedIcons }) => {
+    onSuccess: ({ cleanedIcons }, submitted) => {
+      setSavedConfig(submitted);
       // The server's copy is NOT written back over the draft. It used to be,
       // and everything typed while the request was in flight vanished under a
       // green "saved" toast — the Save button was disabled, the fields were not.
@@ -175,11 +191,21 @@ export function ConnectPageEditor(): JSX.Element {
   }
 
   const patch = (next: Partial<ConnectPageConfig>): void => {
+    const updated = { ...config, ...next };
     // Paths like `platforms[3].apps[2]` stop meaning what they meant the moment
-    // anything is added, removed or reordered, and a red card pointing at the
-    // wrong row is worse than no red card.
-    setIssues([]);
-    setDraft({ ...config, ...next });
+    // a row is added, removed or reordered, and a red card pointing at the wrong
+    // row is worse than no red card. That is true — and it was being applied to
+    // TYPING, which moves no row at all.
+    //
+    // The cost was the whole point of the list. The server answers with twelve
+    // rows, the operator scrolls to the first one, fixes one character, and the
+    // other eleven are gone; the only way to see them again is to press Check
+    // and re-read them, once per fix. The hint above the card invites reading it
+    // as a checklist and the card deleted itself at the first tick.
+    //
+    // So the list is dropped when the SHAPE moves, not when the text does.
+    if (shapeOf(updated) !== shapeOf(config)) setIssues([]);
+    setDraft(updated);
   };
 
   const usedPlatformIds = config.platforms.map((platform) => platform.id);
@@ -211,6 +237,19 @@ export function ConnectPageEditor(): JSX.Element {
 
   return (
     <div className="space-y-4">
+      {/* The draft lives in this component's state and nowhere else, so a click
+          on the side menu used to end an hour of work with no dialog, no
+          browser prompt and no trace. Switching TABS was already safe — the
+          tab is force-mounted — which made the loss harder to predict, not
+          easier. */}
+      <UnsavedChangesGuard
+        when={unsavedWork}
+        title={t('connectPageEditor.unsavedGuard.title')}
+        description={t('connectPageEditor.unsavedGuard.description')}
+        stay={t('connectPageEditor.unsavedGuard.stay')}
+        leave={t('connectPageEditor.unsavedGuard.leave')}
+      />
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           {t('connectPageEditor.summary', {
@@ -876,13 +915,20 @@ function LocalizedField({
   onChange: (next: LocalizedText) => void;
 }): JSX.Element {
   const Control = multiline ? Textarea : Input;
+  // One visible label over two inputs, so the label element cannot name either
+  // of them on its own — it named NEITHER, and a screen reader announced two
+  // anonymous text boxes. The visible text stays where it is and each box gets
+  // its own accessible name from it plus the language it holds.
   return (
-    <div className="space-y-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
+    <div className="space-y-1.5" role="group" aria-label={label}>
+      <Label className="text-xs text-muted-foreground" aria-hidden="true">
+        {label}
+      </Label>
       <div className="grid gap-2 sm:grid-cols-2">
         {(['ru', 'en'] as const).map((locale) => (
           <div key={locale} className="relative">
             <Control
+              aria-label={`${label} (${locale})`}
               value={value[locale] ?? ''}
               rows={multiline ? 2 : undefined}
               onChange={(e: { target: { value: string } }) =>
