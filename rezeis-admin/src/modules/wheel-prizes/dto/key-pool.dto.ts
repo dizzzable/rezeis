@@ -14,7 +14,11 @@ import {
   MinLength,
 } from 'class-validator';
 
-import { KEY_LOAD_MAX, KEY_PAGE_MAX_LIMIT } from '../services/wheel-key-pool.service';
+import {
+  KEY_LOAD_MAX,
+  KEY_PAGE_MAX_LIMIT,
+  KEY_VALUE_MAX_LENGTH,
+} from '../services/wheel-key-pool.service';
 
 export class CreateKeyPoolDto {
   @ApiProperty({ description: 'Как оператор называет пул.', maxLength: 200 })
@@ -60,6 +64,10 @@ export class LoadKeysDto {
   @ArrayNotEmpty()
   @ArrayMaxSize(KEY_LOAD_MAX)
   @IsString({ each: true })
+  // The service refuses anything longer anyway; saying it here means the
+  // refusal names the field instead of arriving as a bare 400 after five
+  // thousand strings have been parsed and walked.
+  @MaxLength(KEY_VALUE_MAX_LENGTH, { each: true })
   public values!: string[];
 }
 

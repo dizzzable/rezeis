@@ -134,13 +134,17 @@ export const navGroups: ReadonlyArray<NavGroup> = [
         key: 'wheel',
         path: '/wheel',
         icon: CircleDot,
-        requiredPermission: { resource: 'wheel', action: 'view' },
+        // `edit`, not `view`: the support preset holds wheel:view + resolve
+        // deliberately, and every control on this screen and the next two
+        // needs edit. Listing them for somebody whose every save is a 403 is
+        // a menu of dead ends.
+        requiredPermission: { resource: 'wheel', action: 'edit' },
       },
       {
         key: 'contests',
         path: '/contests',
         icon: Dices,
-        requiredPermission: { resource: 'wheel', action: 'view' },
+        requiredPermission: { resource: 'wheel', action: 'edit' },
       },
       {
         key: 'wheelPrizes',
@@ -152,7 +156,7 @@ export const navGroups: ReadonlyArray<NavGroup> = [
         key: 'wheelKeys',
         path: '/wheel/keys',
         icon: KeyRound,
-        requiredPermission: { resource: 'wheel', action: 'view' },
+        requiredPermission: { resource: 'wheel', action: 'edit' },
       },
     ],
   },

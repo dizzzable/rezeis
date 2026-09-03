@@ -7,7 +7,6 @@ import {
   IsDate,
   IsEnum,
   IsInt,
-  IsObject,
   IsOptional,
   IsString,
   Max,
@@ -17,11 +16,31 @@ import {
   ValidateNested,
 } from 'class-validator';
 
-import { QuestAudienceFilterDto } from '../../quests/dto/quest-payload.dto';
+import { LocalizedTextDto, QuestAudienceFilterDto } from '../../quests/dto/quest-payload.dto';
 import { MAX_SECTOR_AMOUNT } from '../../wheel-config/dto/wheel-sector.dto';
 
 /** Enough places for a real giveaway; more than this is a lottery, not a contest. */
 export const MAX_PRIZES = 50;
+
+/**
+ * A contest description has room for the rules; a title does not.
+ *
+ * Both are bounded, which the bare `@IsObject()` they replaced was not: the
+ * shape is copied verbatim into every winner's `prizeSnapshot`, so an
+ * unbounded string here is unbounded rows on the busiest table in the
+ * feature.
+ */
+export class LocalizedLongTextDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  public ru?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  public en?: string;
+}
 
 export class ContestPrizeDto {
   @ApiProperty({ minimum: 1, maximum: MAX_PRIZES })
@@ -35,8 +54,9 @@ export class ContestPrizeDto {
   public kind!: WheelSectorKind;
 
   @ApiProperty({ description: 'Локализованное название: { ru, en }.' })
-  @IsObject()
-  public title!: Record<string, unknown>;
+  @ValidateNested()
+  @Type((): typeof LocalizedTextDto => LocalizedTextDto)
+  public title!: LocalizedTextDto;
 
   @ApiProperty({ minimum: 0, maximum: MAX_SECTOR_AMOUNT })
   @IsInt()
@@ -81,13 +101,15 @@ export class ContestPrizeDto {
 
 export class ContestDto {
   @ApiProperty({ description: 'Локализованное название: { ru, en }.' })
-  @IsObject()
-  public title!: Record<string, unknown>;
+  @ValidateNested()
+  @Type((): typeof LocalizedTextDto => LocalizedTextDto)
+  public title!: LocalizedTextDto;
 
   @ApiPropertyOptional({ description: 'Локализованное описание: { ru, en }.' })
   @IsOptional()
-  @IsObject()
-  public description?: Record<string, unknown>;
+  @ValidateNested()
+  @Type((): typeof LocalizedLongTextDto => LocalizedLongTextDto)
+  public description?: LocalizedLongTextDto;
 
   @ApiProperty({ type: String, format: 'date-time' })
   @Type((): DateConstructor => Date)

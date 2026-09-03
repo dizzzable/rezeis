@@ -7,13 +7,15 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
-  IsObject,
   IsOptional,
   IsString,
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+
+import { LocalizedTextDto } from '../../quests/dto/quest-payload.dto';
 
 /** A hundred thousand: room to express a one-in-ten-thousand jackpot. */
 export const MAX_SECTOR_WEIGHT = 100_000;
@@ -26,8 +28,9 @@ export class WheelSectorDto {
   public kind!: WheelSectorKind;
 
   @ApiProperty({ description: 'Локализованное название: { ru, en }.' })
-  @IsObject()
-  public title!: Record<string, unknown>;
+  @ValidateNested()
+  @Type((): typeof LocalizedTextDto => LocalizedTextDto)
+  public title!: LocalizedTextDto;
 
   @ApiPropertyOptional({ enum: ['PRESET', 'SVG'] })
   @IsOptional()

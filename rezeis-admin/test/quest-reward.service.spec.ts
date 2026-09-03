@@ -78,6 +78,8 @@ function makeService(cfg: {
       }),
     },
     promocode: {
+      // The applier checks a freshly generated code is free before writing.
+      findUnique: async () => null,
       create: async (a: unknown) => {
         calls.promocodeCreate.push(a);
         return {};

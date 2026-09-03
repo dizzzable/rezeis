@@ -74,6 +74,9 @@ function makeTx(world: World) {
       }),
     },
     promocode: {
+      // The applier asks whether a freshly generated code is already taken
+      // before it writes one. Nothing is, in this world.
+      findUnique: async () => null,
       create: async (args: { data: Record<string, unknown> }) => {
         record('promocode.create', args);
         return {};

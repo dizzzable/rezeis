@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { drawWinners } from '../src/modules/contests/contest-draw.util';
+import { drawWinners, seededRandom } from '../src/modules/contests/contest-draw.util';
 
 /** A random source that hands back exactly the rolls it was given. */
 function rolls(...values: readonly number[]): () => number {
@@ -82,5 +82,40 @@ describe('the draw', () => {
   it('draws nobody from nobody', () => {
     assert.deepEqual(drawWinners({ entrants: [], count: 3, random: rolls(0.5) }), []);
     assert.deepEqual(drawWinners({ entrants: ['a'], count: 0, random: rolls(0.5) }), []);
+  });
+});
+
+describe('the source of chance behind a draw', () => {
+  it('gives the same winners every time it is built from the same contest', () => {
+    // THE POINT OF SEEDING. A draw that throws part way through rolls back to
+    // ACTIVE and the sweep tries again a minute later. With a fresh source
+    // each time, every retry picks a DIFFERENT field — so a contest whose
+    // second prize cannot be paid would re-roll until it found a set that
+    // could be. That is not a draw, it is a search for a payable outcome.
+    const entrants = Array.from({ length: 40 }, (_, index) => `user-${index}`);
+
+    const first = drawWinners({ entrants, count: 3, random: seededRandom('contest-a') });
+    const again = drawWinners({ entrants, count: 3, random: seededRandom('contest-a') });
+
+    assert.deepEqual(first, again);
+  });
+
+  it('gives different contests different winners', () => {
+    // Seeded is not fixed: two giveaways running side by side must not hand
+    // their prizes to the same people.
+    const entrants = Array.from({ length: 40 }, (_, index) => `user-${index}`);
+
+    const a = drawWinners({ entrants, count: 3, random: seededRandom('contest-a') });
+    const b = drawWinners({ entrants, count: 3, random: seededRandom('contest-b') });
+
+    assert.notDeepEqual(a, b);
+  });
+
+  it('stays inside [0, 1)', () => {
+    const next = seededRandom('anything');
+    for (let index = 0; index < 5000; index += 1) {
+      const value = next();
+      assert.ok(value >= 0 && value < 1, `out of range: ${value}`);
+    }
   });
 });

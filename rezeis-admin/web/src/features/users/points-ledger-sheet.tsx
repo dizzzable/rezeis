@@ -105,7 +105,7 @@ function LedgerRow({ row, locale, t }: { readonly row: PointsLedgerEntry; readon
       <div className="min-w-0 space-y-0.5">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-            {t(`userDetailPanel.pointsLedger.sources.${row.source}`)}
+            {t(`userDetailPanel.pointsLedger.sources.${row.source}`, { defaultValue: row.source })}
           </Badge>
           <span className="text-[11px] text-muted-foreground">
             {new Date(row.createdAt).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' })}
@@ -191,6 +191,14 @@ function describeEntry(row: PointsLedgerEntry, t: TFunction, locale: string): st
       return title === null
         ? t('userDetailPanel.pointsLedger.sources.QUEST_REWARD')
         : t('userDetailPanel.pointsLedger.details.quest', { title })
+    }
+    case 'WHEEL_PRIZE':
+      return t('userDetailPanel.pointsLedger.details.wheel')
+    case 'CONTEST_PRIZE': {
+      const title = localized(details['contestTitle'], locale)
+      return title === null
+        ? t('userDetailPanel.pointsLedger.sources.CONTEST_PRIZE')
+        : t('userDetailPanel.pointsLedger.details.contest', { title })
     }
     case 'EXCHANGE': {
       const type = typeof details['exchangeType'] === 'string' ? details['exchangeType'] : null

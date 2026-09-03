@@ -21,6 +21,68 @@ function sector(overrides: Partial<EconomySector> = {}): EconomySector {
 
 const LOSS = sector({ kind: WheelSectorKind.NOTHING, weight: 70, amount: 0 });
 
+describe('the pool the draw can actually reach', () => {
+  /**
+   * A ceiling does not shrink the wheel evenly. It removes ONE sector from
+   * somebody's pool, and the draw renormalises over what is left — so every
+   * surviving sector's share goes UP. Judging the economy on the wheel as
+   * configured is therefore the KINDEST reading available, and the guard has
+   * to take the harshest.
+   */
+  it('sees the wheel a dry key pool leaves behind', () => {
+    const sectors = [
+      sector({ kind: WheelSectorKind.NOTHING, weight: 20, amount: 0 }),
+      sector({ kind: WheelSectorKind.KEY, weight: 60, amount: 0, keyPoolId: 'pool-1' }),
+      sector({ kind: WheelSectorKind.SPINS, weight: 20, amount: 3 }),
+    ];
+
+    // As configured this looks safe: p(SPINS) = 0.2, R = 0.6. Once the keys
+    // are gone the pool is 20 + 20 and p(SPINS) = 0.5, so R = 1.5 — and the
+    // keys WILL run out, because that is what a pool of keys does.
+    const economy = readWheelEconomy(sectors);
+
+    assert.equal(economy.spinsReturnedPerSpin, 1.5);
+    assert.equal(economy.perpetual, true);
+    assert.deepEqual([...readWheelBlockers(sectors)], ['PERPETUAL']);
+  });
+
+  it('sees the wheel a per-person ceiling leaves behind', () => {
+    // Somebody who has already taken their one jackpot faces the smaller
+    // wheel from then on, forever.
+    const sectors = [
+      sector({ kind: WheelSectorKind.NOTHING, weight: 30, amount: 0 }),
+      sector({ weight: 50, maxWinsPerUser: 1 }),
+      sector({ kind: WheelSectorKind.SPINS, weight: 20, amount: 3 }),
+    ];
+
+    assert.equal(readWheelEconomy(sectors).perpetual, true);
+  });
+
+  it('still counts a capped SPINS sector on both sides', () => {
+    // A spins sector that can run out cannot make the economy worse by
+    // leaving, so it stays in the denominator with everything else.
+    const sectors = [
+      sector({ kind: WheelSectorKind.NOTHING, weight: 90, amount: 0 }),
+      sector({ kind: WheelSectorKind.SPINS, weight: 10, amount: 5, maxWinsTotal: 100 }),
+    ];
+
+    const economy = readWheelEconomy(sectors);
+
+    assert.equal(economy.spinsReturnedPerSpin, 0.5, 'the loss sector is still the denominator');
+    assert.equal(economy.perpetual, false);
+  });
+
+  it('leaves a wheel with nothing removable exactly as it was', () => {
+    // The common case must not move: no ceilings, no keys, no change.
+    const sectors = [
+      sector({ kind: WheelSectorKind.NOTHING, weight: 90, amount: 0 }),
+      sector({ kind: WheelSectorKind.SPINS, weight: 10, amount: 5 }),
+    ];
+
+    assert.equal(readWheelEconomy(sectors).spinsReturnedPerSpin, 0.5);
+  });
+});
+
 describe('the wheel that never stops', () => {
   it('is not ruled out by weights that add up to a hundred', () => {
     // THE CASE THAT MOTIVATED THIS FILE. 70 / 5 / 25 is a perfectly tidy

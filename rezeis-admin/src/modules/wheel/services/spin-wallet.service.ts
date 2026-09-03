@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, SpinLedgerSource } from '@prisma/client';
 
 import { freeSpinClaimThreshold, isFreeSpinEnabled } from '../spin-availability.util';
+import { scopedLedgerReference } from '../ledger-reference.util';
 
 export interface SpinMovementInput {
   readonly userId: string;
@@ -175,7 +176,10 @@ export class SpinWalletService {
       userId: input.userId,
       delta: -1,
       source: SpinLedgerSource.SPENT,
-      referenceKey: input.spinRequestKey,
+      // Scoped to the person: the ledger's unique key is global, and a
+      // handle written through raw would be claimed by the first user to
+      // send it and refused to every other. See `scopedLedgerReference`.
+      referenceKey: scopedLedgerReference(input.userId, input.spinRequestKey),
       details: { spinRequestKey: input.spinRequestKey },
     });
     if (spent.applied) {

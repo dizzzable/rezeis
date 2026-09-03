@@ -42,6 +42,41 @@ export type SettleResult =
 export const MANUAL_PRIZE_DEFAULT_LIMIT = 25;
 export const MANUAL_PRIZE_MAX_LIMIT = 100;
 
+/**
+ * A prize an operator has to hand over.
+ *
+ * MANUAL always is — that is what the kind means. A KEY joins it only when
+ * the pool ran dry between the draw and the payout: the person was told they
+ * won a key and somebody has to find one. A KEY that paid itself out of the
+ * pool is an ordinary win and has no business in this queue, which is what
+ * the second clause says — it is owed if it is still pending, or if a
+ * conversation was ever opened about it.
+ *
+ * The wheel redraws rather than reaching that state today, but the payout can
+ * still produce it, a contest prize does, and a debt nobody can see in the
+ * queue is a debt nobody pays.
+ */
+const OWED_PRIZE: Prisma.WheelSpinWhereInput = {
+  OR: [
+    { kind: WheelSectorKind.MANUAL },
+    {
+      kind: WheelSectorKind.KEY,
+      AND: [{ OR: [{ status: WheelSpinStatus.PENDING }, { manualTicketId: { not: null } }] }],
+    },
+  ],
+};
+
+/** The same question about one row already in hand. */
+function isOwedPrize(spin: {
+  readonly kind: WheelSectorKind;
+  readonly status: WheelSpinStatus;
+  readonly manualTicketId: string | null;
+}): boolean {
+  if (spin.kind === WheelSectorKind.MANUAL) return true;
+  if (spin.kind !== WheelSectorKind.KEY) return false;
+  return spin.status === WheelSpinStatus.PENDING || spin.manualTicketId !== null;
+}
+
 const SPIN_SELECT = {
   id: true,
   status: true,
@@ -105,7 +140,7 @@ export class WheelManualPrizeService {
     const limit = clampLimit(input.limit);
     const rows = await this.prismaService.wheelSpin.findMany({
       where: {
-        kind: WheelSectorKind.MANUAL,
+        ...OWED_PRIZE,
         ...(input.status == null ? { status: WheelSpinStatus.PENDING } : { status: input.status }),
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -154,7 +189,7 @@ export class WheelManualPrizeService {
       },
     });
     if (spin === null) return null;
-    if (spin.kind !== WheelSectorKind.MANUAL) return null;
+    if (!isOwedPrize(spin)) return null;
     if (spin.status !== WheelSpinStatus.PENDING) return null;
     if (spin.manualTicketId !== null) return spin.manualTicketId;
 
@@ -213,7 +248,7 @@ export class WheelManualPrizeService {
   public async openMissingTickets(batch = 50): Promise<number> {
     const owed = await this.prismaService.wheelSpin.findMany({
       where: {
-        kind: WheelSectorKind.MANUAL,
+        kind: { in: [WheelSectorKind.MANUAL, WheelSectorKind.KEY] },
         status: WheelSpinStatus.PENDING,
         manualTicketId: null,
       },

@@ -184,6 +184,8 @@ export const POINTS_LEDGER_SOURCES = [
   'REFERRAL_REWARD',
   'REFERRAL_REWARD_REVOKED',
   'QUEST_REWARD',
+  'WHEEL_PRIZE',
+  'CONTEST_PRIZE',
   'EXCHANGE',
   'MANUAL_ADJUSTMENT',
   'ACCOUNT_MERGE',
@@ -191,11 +193,24 @@ export const POINTS_LEDGER_SOURCES = [
   'OPENING_BALANCE',
 ] as const
 
+export type PointsLedgerSource = (typeof POINTS_LEDGER_SOURCES)[number]
+
 const pointsLedgerEntrySchema = z.object({
   id: z.string(),
   delta: z.number().int(),
   balanceAfter: z.number().int(),
-  source: z.enum(POINTS_LEDGER_SOURCES),
+  /**
+   * NOT an enum on purpose.
+   *
+   * The API grows sources faster than the panel is redeployed — `WHEEL_PRIZE`
+   * and `CONTEST_PRIZE` arrived that way — and a `z.enum` here rejects the
+   * whole PAGE on the first unknown value, not the row: the operator loses
+   * the journal entirely because somebody won on the wheel. The sheet already
+   * falls back to the raw source for a label it has no translation for, so a
+   * source it has never heard of costs one untranslated line and nothing
+   * else.
+   */
+  source: z.string(),
   referenceKey: z.string().nullable(),
   details: z.unknown(),
   createdAt: z.string(),

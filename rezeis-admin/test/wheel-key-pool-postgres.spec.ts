@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { WheelSectorKind, WheelSpinStatus } from '@prisma/client';
+import { ContestStatus, WheelSectorKind, WheelSpinStatus } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { lockWheel, unlockWheel } from './helpers/wheel-exclusive';
@@ -229,6 +229,40 @@ run('wheel key pools on PostgreSQL', () => {
 
     // Disabled, it is the operator's business again.
     await prisma.wheelSector.update({ where: { id: sectorId }, data: { enabled: false } });
+    await service.deletePool(poolId);
+    assert.equal(await prisma.wheelKeyPool.count({ where: { id: poolId } }), 0);
+  });
+
+  it('refuses to delete a pool a contest is still going to draw from', async () => {
+    // A contest prize points at a pool too, and its foreign key NULLS on
+    // delete rather than refusing — so the pool would go, the keys would
+    // cascade away with it, and a contest nobody has drawn yet would quietly
+    // become unpayable. No wheel sector is involved and no key is claimed, so
+    // neither of the other two guards sees this at all.
+    const poolId = await newPool('contest-held');
+    const contestId = `${prefix}-contest`;
+    await prisma.contest.create({
+      data: {
+        id: contestId,
+        title: { ru: 'розыгрыш' },
+        status: ContestStatus.ACTIVE,
+        startAt: new Date(Date.now() - 60_000),
+        endAt: new Date(Date.now() + 3_600_000),
+        prizes: {
+          create: [
+            { place: 1, kind: WheelSectorKind.KEY, title: { ru: 'ключ' }, amount: 0, keyPoolId: poolId },
+          ],
+        },
+      },
+    });
+
+    try {
+      await assert.rejects(() => service.deletePool(poolId), /конкурс/i);
+    } finally {
+      await prisma.contest.delete({ where: { id: contestId } });
+    }
+
+    // Once the contest is gone the pool is the operator's business again.
     await service.deletePool(poolId);
     assert.equal(await prisma.wheelKeyPool.count({ where: { id: poolId } }), 0);
   });

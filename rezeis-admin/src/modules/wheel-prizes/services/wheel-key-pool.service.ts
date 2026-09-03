@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { ContestStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 
@@ -174,6 +174,13 @@ export class WheelKeyPoolService {
       select: {
         id: true,
         sectors: { where: { enabled: true }, select: { id: true } },
+        // A contest prize points at a pool too, and its foreign key nulls on
+        // delete — so without this the pool goes, the keys cascade away, and
+        // a contest that has not been drawn yet quietly becomes unpayable.
+        contestPrizes: {
+          where: { contest: { status: { in: [ContestStatus.DRAFT, ContestStatus.ACTIVE] } } },
+          select: { id: true },
+        },
         _count: { select: { keys: true } },
       },
     });
@@ -181,6 +188,9 @@ export class WheelKeyPoolService {
 
     if (pool.sectors.length > 0) {
       throw new ConflictException('Пул используется включённым сектором колеса');
+    }
+    if (pool.contestPrizes.length > 0) {
+      throw new ConflictException('Пул разыгрывается в конкурсе — его нельзя удалить');
     }
     const claimed = await this.prismaService.wheelKey.count({
       where: { poolId, claimedAt: { not: null } },

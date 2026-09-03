@@ -143,8 +143,11 @@ export class InternalWheelController {
     userId: string,
     result: Extract<SpinResult, { spun: true }>,
   ): Promise<Record<string, unknown> | null> {
-    const page = await this.cabinet.history({ userId, limit: 1 });
-    const row = page.items.find((item) => item.spinId === result.spinId);
+    // By id, not "the newest row". On a replay — the very case the handle
+    // exists for — the spin being answered may no longer be this person's
+    // latest, and taking the top of the history would show them a different
+    // prize or none at all.
+    const row = await this.cabinet.findSpin({ userId, spinId: result.spinId });
     return row?.prize ?? null;
   }
 

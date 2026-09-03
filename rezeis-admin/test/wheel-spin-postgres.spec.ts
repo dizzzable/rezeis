@@ -191,6 +191,29 @@ run('WheelSpinService on PostgreSQL', () => {
     assert.equal(user?.points, 7);
   });
 
+  it('lets two different people use the same handle, independently', async () => {
+    // The handle comes from the cabinet and is only as unique as the cabinet
+    // made it — the contract accepts any 8-100 characters. Both journals are
+    // unique on (source, reference_key) with NO user column, so a handle
+    // written through raw would be claimed by whoever spun first and would
+    // then refuse, or 500, for everybody else who ever sent the same string.
+    await resetWheel();
+    await createSector('shared-handle', 0, { kind: WheelSectorKind.NOTHING, weight: 100 });
+    const one = await createUser('shared-1', 1);
+    const two = await createUser('shared-2', 1);
+
+    const first = await service.spin({ userId: one, idempotencyKey: 'same-handle', settings: ON });
+    const second = await service.spin({ userId: two, idempotencyKey: 'same-handle', settings: ON });
+
+    assert.ok(first.spun, 'the first person spun');
+    assert.ok(second.spun, 'and so did the second, with the very same handle');
+    assert.notEqual(first.spinId, second.spinId, 'two spins, not one answered twice');
+    for (const userId of [one, two]) {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { spinBalance: true } });
+      assert.equal(user?.spinBalance, 0, 'each of them paid for their own');
+    }
+  });
+
   it('refuses when there is nothing to spend, and takes nothing', async () => {
     await resetWheel();
     const userId = await createUser('broke', 0);

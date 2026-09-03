@@ -4838,10 +4838,16 @@ model WheelSector {
   maxWinsPerUser Int? @map("max_wins_per_user")
   /// How many times this sector may be won by anybody. NULL = no ceiling.
   maxWinsTotal   Int? @map("max_wins_total")
-  /// Guarded counter of wins, incremented conditionally against
-  /// `maxWinsTotal` in the same statement that tests it - the same shape as
-  /// the quest budget, and for the same reason: a read-then-check would let
-  /// two simultaneous spins past the last remaining prize.
+  /// Slots taken against `maxWinsTotal`, incremented conditionally in the
+  /// same statement that tests it - the same shape as the quest budget, and
+  /// for the same reason: a read-then-check would let two simultaneous spins
+  /// past the last remaining prize.
+  ///
+  /// It counts NOTHING while `maxWinsTotal` is null. The increment costs a
+  /// row-exclusive lock held to the end of the paying transaction, and a
+  /// sector with no ceiling has nothing to guard - counting the loss sector
+  /// would serialise every concurrent spin behind one row. How often a sector
+  /// has come up is a question for the spin journal.
   wonCount       Int  @default(0) @map("won_count")
 
   /// Position on the wheel. The slot count IS the number of enabled sectors,

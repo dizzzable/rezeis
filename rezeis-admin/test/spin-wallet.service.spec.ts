@@ -269,8 +269,12 @@ describe('SpinWalletService.consumeSpin', () => {
 
     assert.deepEqual(result, { consumed: true, paidWith: 'BALANCE', balanceAfter: 3 });
     assert.deepEqual(world.ledger.map((row) => [row['delta'], row['source'], row['referenceKey']]), [
-      [-1, 'SPENT', 'spin-2'],
+      // Scoped to the person: the journal's unique key is global, and the
+      // handle comes from the cabinet. See `scopedLedgerReference`.
+      [-1, 'SPENT', 'u1:spin-2'],
     ]);
+    const details = world.ledger[0]?.['details'] as Record<string, unknown> | undefined;
+    assert.equal(details?.['spinRequestKey'], 'spin-2', 'the handle itself is recorded, unchanged');
   });
 
   it('claims the free spin exactly once when two spins race for it', async () => {
@@ -319,9 +323,13 @@ describe('SpinWalletService.consumeSpin', () => {
     // A dropped connection is retried by the cabinet with the same spin id.
     // The free branch is already spent by then, and the paid branch is refused
     // by the ledger key rather than taking a second spin.
+    //
+    // The key in the journal is SCOPED to the person — see
+    // `scopedLedgerReference` — which is what the row below has to look like
+    // for this to be the same request rather than somebody else's.
     const world = makeTx({
       row: { spinBalance: 3, freeSpinUsedAt: NOW },
-      ledger: [{ source: 'SPENT', referenceKey: 'spin-5' }],
+      ledger: [{ source: 'SPENT', referenceKey: 'u1:spin-5' }],
     });
 
     const result = await wallet.consumeSpin(world.tx, {
@@ -333,5 +341,26 @@ describe('SpinWalletService.consumeSpin', () => {
 
     assert.deepEqual(result, { consumed: false, reason: 'DUPLICATE' });
     assert.equal(world.row!.spinBalance, 3);
+  });
+
+  it('is not confused by somebody else having used the same handle', async () => {
+    // Both journals are unique on (source, reference_key) with no user column,
+    // so an unscoped handle would be claimed by whoever spun first and refused
+    // to everybody else who ever sent the same string — and the handle comes
+    // from the cabinet, which the contract lets pick any 8-100 characters.
+    const world = makeTx({
+      row: { spinBalance: 3, freeSpinUsedAt: NOW },
+      ledger: [{ source: 'SPENT', referenceKey: 'someone-else:spin-5' }],
+    });
+
+    const result = await wallet.consumeSpin(world.tx, {
+      userId: 'u1',
+      spinRequestKey: 'spin-5',
+      freeSpinCooldownHours: 24,
+      now: new Date(NOW.getTime() + 60_000),
+    });
+
+    assert.equal(result.consumed, true, 'this person spins');
+    assert.equal(world.row!.spinBalance, 2, 'and pays for their own spin');
   });
 });

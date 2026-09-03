@@ -1,7 +1,12 @@
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Eye, EyeOff, KeyRound, Plus, Trash2, Upload } from 'lucide-react'
 
@@ -70,18 +75,26 @@ export default function WheelKeysPage() {
   const current = list.find((pool) => pool.id === selected) ?? list[0] ?? null
   const currentId = current?.id ?? null
 
-  const keys = useQuery({
+  // Paged, not truncated. A pool of five thousand keys is a supported size —
+  // the loader accepts that many in one paste — and a page that showed the
+  // first five hundred and stopped made the winner of key 501 unfindable,
+  // which is the one question this screen exists to answer.
+  const keys = useInfiniteQuery({
     queryKey: ['admin', 'wheel', 'key-pools', currentId, filter, reveal],
-    queryFn: () =>
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam }) =>
       listPoolKeys(currentId as string, {
         claimed: filter === 'claimed',
         // Revealing is opt-in AND permission-gated on the server: without
         // `wheel:view_secrets` the values come back masked whatever is asked.
         reveal,
-        limit: 500,
+        cursor: pageParam,
+        limit: 200,
       }),
+    getNextPageParam: (last) => last.nextCursor,
     enabled: currentId !== null,
   })
+  const keyRows = (keys.data?.pages ?? []).flatMap((page) => page.items)
 
   const invalidate = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['admin', 'wheel', 'key-pools'] })
@@ -275,7 +288,7 @@ export default function WheelKeysPage() {
                         <Skeleton className="h-8 w-full" />
                         <Skeleton className="h-8 w-full" />
                       </div>
-                    ) : (keys.data?.items.length ?? 0) === 0 ? (
+                    ) : keyRows.length === 0 ? (
                       <p className="p-8 text-center text-sm text-muted-foreground">
                         {t(`wheelKeysPage.emptyKeys.${filter}`)}
                       </p>
@@ -297,7 +310,7 @@ export default function WheelKeysPage() {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {(keys.data?.items ?? []).map((key) => (
+                          {keyRows.map((key) => (
                             <TableRow key={key.id}>
                               <TableCell className="font-mono text-sm">
                                 {key.value}
@@ -349,6 +362,20 @@ export default function WheelKeysPage() {
                         </TableBody>
                       </Table>
                     )}
+                    {keys.hasNextPage ? (
+                      <div className="mt-3 flex justify-center">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={keys.isFetchingNextPage}
+                          onClick={() => {
+                            void keys.fetchNextPage()
+                          }}
+                        >
+                          {t('wheelKeysPage.loadMore')}
+                        </Button>
+                      </div>
+                    ) : null}
                   </CardContent>
                 </Card>
               </>

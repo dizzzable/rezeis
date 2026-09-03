@@ -198,6 +198,18 @@ run('the wheel configurator on PostgreSQL', () => {
         }),
       /ломает/i,
     );
+
+    // AND THE EDIT IS GONE. The refusal used to be a lie: the write had
+    // already committed and only the reply said otherwise, so an operator
+    // read "эта правка его ломает" while the live wheel paid spins forever.
+    const after = await prisma.wheelSector.findUnique({
+      where: { id: spins },
+      select: { weight: true, amount: true },
+    });
+    assert.equal(after?.weight, 10, 'the weight is what it was');
+    assert.equal(after?.amount, 2, 'and so is the prize');
+    const overview = await service.overview();
+    assert.equal(overview.economy.perpetual, false, 'the live wheel still ends');
   });
 
   it('will not let the loss sector be deleted out from under a live wheel', async () => {
@@ -206,6 +218,14 @@ run('the wheel configurator on PostgreSQL', () => {
     await service.updateSettings({ enabled: true });
 
     await assert.rejects(() => service.remove(loss), /не повезло/i);
+
+    // Same again, and worse if it were not undone: the sector the refusal is
+    // about would already have been deleted.
+    const survivor = await prisma.wheelSector.findUnique({
+      where: { id: loss },
+      select: { id: true },
+    });
+    assert.ok(survivor !== null, 'the loss sector is still there');
   });
 
   it('lets a half-finished wheel be built while it is off', async () => {
@@ -259,6 +279,16 @@ run('the wheel configurator on PostgreSQL', () => {
       await clearWheel();
       await prisma.wheelKeyPool.delete({ where: { id: pool.id } }).catch(() => undefined);
     }
+  });
+
+  it('refuses a reorder that names one sector twice', async () => {
+    // The same length as the wheel, so a length check alone waves it through
+    // — and the sector it silently drops keeps a stale order that can now
+    // collide with somebody else's.
+    const first = await addSector({ kind: WheelSectorKind.NOTHING, weight: 50 });
+    await addSector({ kind: WheelSectorKind.POINTS, weight: 50, amount: 5 });
+
+    await assert.rejects(() => service.reorder([first, first]), /ровно один раз/i);
   });
 
   it('reorders the wheel, and refuses a list that forgets a sector', async () => {

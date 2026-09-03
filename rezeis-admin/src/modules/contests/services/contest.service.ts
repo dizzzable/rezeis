@@ -5,7 +5,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../../broadcast/utils/broadcast-audience.util';
 import { PrizePayoutService } from '../../wheel/services/prize-payout.service';
 import { validateSector } from '../../wheel-config/wheel-sector-validation.util';
-import { drawWinners } from '../contest-draw.util';
+import { drawWinners, seededRandom } from '../contest-draw.util';
 
 const PRIZE_SELECT = {
   id: true,
@@ -275,7 +275,18 @@ export class ContestService {
 
     if (contest.maxEntries !== null) {
       const taken = await this.prismaService.contestEntry.count({ where: { contestId: input.contestId } });
-      if (taken >= contest.maxEntries) return { entered: false, reason: 'FULL' };
+      if (taken >= contest.maxEntries) {
+        // A full contest still has to answer its own entrants honestly. The
+        // second tap on the button — the case the duplicate catch below is
+        // written for — arrives here first, and telling somebody who is
+        // already in that the contest is full reads as being thrown out.
+        const mine = await this.prismaService.contestEntry.findUnique({
+          where: { contestId_userId: { contestId: input.contestId, userId: input.userId } },
+          select: { id: true },
+        });
+        if (mine !== null) return { entered: true, reason: null };
+        return { entered: false, reason: 'FULL' };
+      }
     }
 
     try {
@@ -304,44 +315,61 @@ export class ContestService {
     readonly random?: () => number;
   }): Promise<DrawResult> {
     const now = input.now ?? new Date();
-    const random = input.random ?? Math.random;
+    // Seeded from the contest id, not `Math.random`.
+    //
+    // A draw that throws part way through rolls back to ACTIVE and the sweep
+    // tries again a minute later. With a fresh source of chance each time,
+    // every retry picks a DIFFERENT field of winners — so a contest whose
+    // second prize cannot be paid would quietly re-roll until it found a set
+    // that could be, which is not a draw, it is a search. Seeded, the retry
+    // reproduces the same winners and either pays them or keeps failing
+    // visibly. It also makes the result reproducible from the contest id
+    // alone, which is the only form of "we did not rig it" worth anything.
+    const random = input.random ?? seededRandom(input.contestId);
 
-    return this.prismaService.$transaction(async (tx) => {
-      // The stamp goes FIRST and is conditional on ACTIVE, so two sweeps
-      // racing for the same contest cannot both draw it. The loser's
-      // transaction has nothing left to do.
-      const contest = await tx.contest.findUnique({
-        where: { id: input.contestId },
-        select: { status: true, endAt: true, prizes: { orderBy: { place: 'asc' }, select: PRIZE_SELECT } },
-      });
-      if (contest === null) throw new NotFoundException('Contest not found');
-      if (contest.status === ContestStatus.DRAWN) return { drawn: false, reason: 'ALREADY_DRAWN' };
-      if (contest.status !== ContestStatus.ACTIVE) return { drawn: false, reason: 'NOT_ACTIVE' };
-      if (contest.endAt.getTime() > now.getTime()) return { drawn: false, reason: 'NOT_OVER' };
+    return this.prismaService.$transaction(
+      async (tx) => {
+        // The stamp goes FIRST and is conditional on ACTIVE, so two sweeps
+        // racing for the same contest cannot both draw it. The loser's
+        // transaction has nothing left to do.
+        const contest = await tx.contest.findUnique({
+          where: { id: input.contestId },
+          select: { status: true, endAt: true, prizes: { orderBy: { place: 'asc' }, select: PRIZE_SELECT } },
+        });
+        if (contest === null) throw new NotFoundException('Contest not found');
+        if (contest.status === ContestStatus.DRAWN) return { drawn: false, reason: 'ALREADY_DRAWN' };
+        if (contest.status !== ContestStatus.ACTIVE) return { drawn: false, reason: 'NOT_ACTIVE' };
+        if (contest.endAt.getTime() > now.getTime()) return { drawn: false, reason: 'NOT_OVER' };
 
-      const entries = await tx.contestEntry.findMany({
-        where: { contestId: input.contestId },
-        select: { userId: true },
-      });
-      const entrants = entries.map((entry) => entry.userId);
+        const entries = await tx.contestEntry.findMany({
+          where: { contestId: input.contestId },
+          select: { userId: true },
+        });
+        const entrants = entries.map((entry) => entry.userId);
 
-      const stamped = await tx.contest.updateMany({
-        where: { id: input.contestId, status: ContestStatus.ACTIVE },
-        data: { status: ContestStatus.DRAWN, drawnAt: now, drawnEntries: entrants.length },
-      });
-      if (stamped.count !== 1) return { drawn: false, reason: 'ALREADY_DRAWN' };
+        const stamped = await tx.contest.updateMany({
+          where: { id: input.contestId, status: ContestStatus.ACTIVE },
+          data: { status: ContestStatus.DRAWN, drawnAt: now, drawnEntries: entrants.length },
+        });
+        if (stamped.count !== 1) return { drawn: false, reason: 'ALREADY_DRAWN' };
 
-      const winners = drawWinners({ entrants, count: contest.prizes.length, random });
-      for (const [index, userId] of winners.entries()) {
-        const prize = contest.prizes[index] as PrizeRow;
-        await this.award(tx, { contestId: input.contestId, userId, prize });
-      }
+        const winners = drawWinners({ entrants, count: contest.prizes.length, random });
+        for (const [index, userId] of winners.entries()) {
+          const prize = contest.prizes[index] as PrizeRow;
+          await this.award(tx, { contestId: input.contestId, userId, prize });
+        }
 
-      this.logger.log(
-        `Contest ${input.contestId} drawn: ${winners.length} winner(s) from ${entrants.length} entrant(s)`,
-      );
-      return { drawn: true, winners: winners.length, entrants: entrants.length };
-    });
+        this.logger.log(
+          `Contest ${input.contestId} drawn: ${winners.length} winner(s) from ${entrants.length} entrant(s)`,
+        );
+        return { drawn: true, winners: winners.length, entrants: entrants.length };
+      },
+      // Up to fifty prizes, each a create, a payout and an update — a
+      // giveaway that size does not fit Prisma's five-second default, and
+      // running out of time rolls the whole draw back onto a sweep that will
+      // simply run out of time again.
+      { maxWait: 15_000, timeout: 120_000 },
+    );
   }
 
   /** Every ACTIVE contest whose end has passed. The sweep's list. */
@@ -403,6 +431,47 @@ export class ContestService {
     if (paid.keyId !== null) {
       await tx.wheelKey.update({ where: { id: paid.keyId }, data: { claimedWinnerId: winner.id } });
     }
+  }
+
+  /**
+   * Which of these contests this person may actually enter.
+   *
+   * The cabinet needs this to decide whether to offer the button at all:
+   * showing "Участвовать" to somebody the audience filter excludes and
+   * answering the tap with a refusal is a worse screen than not offering it.
+   * One query for the whole page rather than one per contest.
+   */
+  public async eligibleAmong(
+    userId: string,
+    contests: readonly { readonly id: string; readonly audienceFilter: Prisma.JsonValue | null }[],
+  ): Promise<ReadonlySet<string>> {
+    const eligible = new Set<string>();
+    if (contests.length === 0) return eligible;
+
+    const blocked = await this.prismaService.user.count({
+      where: { id: userId, isBlocked: false },
+    });
+    if (blocked === 0) return eligible;
+
+    // Contests with no filter at all are open to anybody who is not blocked,
+    // and they are the common case — they cost no query.
+    const filtered: { id: string; where: Prisma.UserWhereInput }[] = [];
+    for (const contest of contests) {
+      const filter = normalizeAudienceFilter(contest.audienceFilter);
+      if (filter === null) {
+        eligible.add(contest.id);
+        continue;
+      }
+      filtered.push({ id: contest.id, where: buildAudienceWhere(BroadcastAudience.ALL, filter) });
+    }
+
+    for (const item of filtered) {
+      const count = await this.prismaService.user.count({
+        where: { AND: [{ id: userId }, { isBlocked: false }, item.where] },
+      });
+      if (count > 0) eligible.add(item.id);
+    }
+    return eligible;
   }
 
   private async isEligible(audienceFilter: Prisma.JsonValue | null, userId: string): Promise<boolean> {

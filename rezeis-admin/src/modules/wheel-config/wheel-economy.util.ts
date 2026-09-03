@@ -27,12 +27,26 @@ import { WheelSectorKind } from '@prisma/client';
  * That second number is the one an operator can actually reason about, so it
  * is what the panel shows next to the percentages.
  *
- * ── Which sectors count ───────────────────────────────────────────────────
+ * ── Which sectors count, and why the ceilings make it WORSE ───────────────
  *
- * The ones a fresh person can draw: enabled, positive weight. Per-user and
- * global ceilings only ever REMOVE sectors from somebody's pool, so ignoring
- * them here gives the wheel's most generous configuration — which is the one
- * worth guarding against.
+ * The obvious answer — every enabled sector with a positive weight — is the
+ * wrong one, and dangerously so. A ceiling does not shrink the wheel evenly:
+ * it removes ONE sector from somebody's pool and the draw then renormalises
+ * over what is left, so every surviving sector's share goes UP. Ignoring the
+ * ceilings therefore gives the KINDEST reading of the economy, not the
+ * harshest.
+ *
+ *     NOTHING 20, KEY 60 (a pool of 500), SPINS +3 at 20
+ *     → as configured:  p(SPINS) = 0.2,  R = 0.6   — looks safe, enables
+ *     → keys exhausted: p(SPINS) = 0.5,  R = 1.5   — perpetual, forever
+ *
+ * So R is computed over the worst pool the draw can actually reach: every
+ * SPINS sector stays in the numerator, and every sector that can DISAPPEAR
+ * from somebody's pool — one carrying either ceiling, or a KEY sector, whose
+ * pool empties — is dropped from the denominator. That is the maximum of R
+ * over every pool a person can face, and it is the number the wheel must
+ * survive. A SPINS sector with a ceiling of its own is the exception: it
+ * cannot make things worse by leaving, so it stays on both sides.
  */
 
 export interface EconomySector {
@@ -41,6 +55,24 @@ export interface EconomySector {
   readonly weight: number;
   /** Spins awarded, read only for a SPINS sector. */
   readonly amount: number;
+  /** A ceiling — either one — makes this sector removable from a pool. */
+  readonly maxWinsPerUser?: number | null;
+  readonly maxWinsTotal?: number | null;
+  /** A KEY sector leaves the pool when its keys run out. */
+  readonly keyPoolId?: string | null;
+}
+
+/**
+ * Can this sector vanish from somebody's draw?
+ *
+ * NOTHING never can — it is exempt from every ceiling, which is exactly what
+ * keeps a pool non-empty — and neither does a plain, uncapped prize.
+ */
+function removableFromPool(sector: EconomySector): boolean {
+  if (sector.kind === WheelSectorKind.NOTHING) return false;
+  if ((sector.maxWinsPerUser ?? null) !== null) return true;
+  if ((sector.maxWinsTotal ?? null) !== null) return true;
+  return sector.kind === WheelSectorKind.KEY;
 }
 
 export interface WheelEconomy {
@@ -80,11 +112,25 @@ export function readWheelEconomy(sectors: readonly EconomySector[]): WheelEconom
     };
   }
 
-  const spinsReturnedPerSpin = drawable.reduce((sum, sector) => {
-    if (sector.kind !== WheelSectorKind.SPINS) return sum;
-    const awarded = Number.isFinite(sector.amount) && sector.amount > 0 ? sector.amount : 0;
-    return sum + (sector.weight / totalWeight) * awarded;
-  }, 0);
+  // The denominator of the WORST pool: everything that cannot be taken away.
+  // A SPINS sector counts even when it is removable, because a smaller
+  // denominator with the spins still in it is the case that has to survive.
+  const worstWeight = drawable.reduce(
+    (sum, sector) =>
+      !removableFromPool(sector) || sector.kind === WheelSectorKind.SPINS
+        ? sum + sector.weight
+        : sum,
+    0,
+  );
+
+  const spinsReturnedPerSpin =
+    worstWeight <= 0
+      ? 0
+      : drawable.reduce((sum, sector) => {
+          if (sector.kind !== WheelSectorKind.SPINS) return sum;
+          const awarded = Number.isFinite(sector.amount) && sector.amount > 0 ? sector.amount : 0;
+          return sum + (sector.weight / worstWeight) * awarded;
+        }, 0);
 
   const perpetual = spinsReturnedPerSpin >= 1;
   return {

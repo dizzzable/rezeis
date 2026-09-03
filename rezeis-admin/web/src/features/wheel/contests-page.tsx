@@ -45,6 +45,8 @@ import {
 } from './contests-api'
 import { listKeyPools } from './wheel-keys-api'
 import { sectorTitle, type WheelSectorKind } from './wheel-config-api'
+import { PromoPrizeFields } from './promo-prize-fields'
+import { emptyPromoDraft, promoDraftOf, promoPayload, type PromoDraft } from './promo-prize'
 
 /** Prize kinds a contest may hand out — everything on the wheel but a loss. */
 const PRIZE_KINDS: readonly WheelSectorKind[] = [
@@ -73,6 +75,8 @@ interface PrizeDraft {
   amount: string
   keyPoolId: string
   manualInstructions: string
+  /** What a PROMOCODE prize's code actually does. */
+  promo: PromoDraft
 }
 
 interface Draft {
@@ -86,7 +90,14 @@ interface Draft {
 }
 
 function emptyPrize(): PrizeDraft {
-  return { kind: 'POINTS', titleRu: '', amount: '100', keyPoolId: '', manualInstructions: '' }
+  return {
+    kind: 'POINTS',
+    titleRu: '',
+    amount: '100',
+    keyPoolId: '',
+    manualInstructions: '',
+    promo: emptyPromoDraft(),
+  }
 }
 
 /** `datetime-local` wants local wall-clock time without a zone. */
@@ -124,8 +135,14 @@ function toDraft(contest: Contest): Draft {
       amount: String(prize.amount),
       keyPoolId: prize.keyPoolId ?? '',
       manualInstructions: prize.manualInstructions ?? '',
+      promo: promoDraftOf(prize),
     })),
   }
+}
+
+/** `datetime-local` gives back '' when the field is cleared. */
+function isValidLocalDate(value: string): boolean {
+  return value.trim() !== '' && !Number.isNaN(new Date(value).getTime())
 }
 
 function toPayload(draft: Draft): ContestPayload {
@@ -142,10 +159,7 @@ function toPayload(draft: Draft): ContestPayload {
       kind: prize.kind,
       title: { ru: prize.titleRu.trim(), en: prize.titleRu.trim() },
       amount: NEEDS_AMOUNT.has(prize.kind) ? Math.trunc(Number(prize.amount)) || 0 : 0,
-      promoRewardType: null,
-      promoPlanId: null,
-      promoPlanIds: [],
-      promoLifetime: null,
+      ...promoPayload(prize.kind, prize.promo),
       keyPoolId: prize.kind === 'KEY' && prize.keyPoolId !== '' ? prize.keyPoolId : null,
       manualInstructions:
         prize.kind === 'MANUAL' && prize.manualInstructions.trim() !== ''
@@ -409,7 +423,15 @@ export default function ContestsPage() {
               {t('common.cancel')}
             </Button>
             <Button
-              disabled={save.isPending || (editing?.draft.titleRu.trim() ?? '') === ''}
+              // A cleared date is `''`, and `new Date('').toISOString()` throws
+              // — the operator saw "Invalid time value" instead of a form that
+              // simply would not submit yet.
+              disabled={
+                save.isPending ||
+                (editing?.draft.titleRu.trim() ?? '') === '' ||
+                !isValidLocalDate(editing?.draft.startAt ?? '') ||
+                !isValidLocalDate(editing?.draft.endAt ?? '')
+              }
               onClick={() => {
                 if (editing !== null) save.mutate(editing)
               }}
@@ -577,6 +599,12 @@ function ContestForm({
                     </SelectContent>
                   </Select>
                 ) : null}
+                {prize.kind === 'PROMOCODE' ? (
+                  <PromoPrizeFields
+                    draft={prize.promo}
+                    onChange={(next) => setPrize(index, { promo: next })}
+                  />
+                ) : null}
                 {prize.kind === 'MANUAL' ? (
                   <Textarea
                     rows={2}
@@ -612,11 +640,15 @@ function WinnersDialog({ contest, onClose }: { readonly contest: Contest | null;
       action === 'issue'
         ? issueContestPrize(winner.id, note.trim() === '' ? null : note.trim())
         : refuseContestPrize(winner.id, note.trim()),
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'contests'] })
       setSettling(null)
       setNote('')
-      toast.success(t('wheelPrizesPage.toast.issued'))
+      // Refusing a prize and handing it over are opposite acts; one toast for
+      // both told the operator the wrong thing half the time.
+      toast.success(
+        t(variables.action === 'issue' ? 'wheelPrizesPage.toast.issued' : 'wheelPrizesPage.toast.refused'),
+      )
     },
     onError: (error: unknown) => {
       toast.error(getErrorMessage(error, t('common.error')))

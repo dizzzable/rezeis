@@ -1,5 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, WheelSectorKind, WheelSpinPayment, WheelSpinStatus } from '@prisma/client';
+import {
+  Prisma,
+  PromocodeRewardType,
+  WheelSectorKind,
+  WheelSpinPayment,
+  WheelSpinStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
@@ -9,6 +15,7 @@ import {
   type DrawPool,
   type SectorForDraw,
 } from '../wheel-draw.util';
+import { scopedLedgerReference } from '../ledger-reference.util';
 import { readWheelSettings, type WheelSettings } from '../wheel-settings.util';
 import { PrizePayoutService } from './prize-payout.service';
 import { SpinWalletService } from './spin-wallet.service';
@@ -93,7 +100,10 @@ export type SectorRow = Prisma.WheelSectorGetPayload<{ select: typeof SECTOR_SEL
  * The slice of Prisma the sector read needs. A transaction client satisfies
  * it, and so does the pool — which is what lets the cabinet reuse the read.
  */
-export type WheelReadClient = Pick<Prisma.TransactionClient, 'wheelSector' | 'wheelSpin' | 'wheelKey'>;
+export type WheelReadClient = Pick<
+  Prisma.TransactionClient,
+  'wheelSector' | 'wheelSpin' | 'wheelKey' | 'plan'
+>;
 
 /**
  * One spin, from the payment to the prize.
@@ -162,15 +172,25 @@ export class WheelSpinService {
 
     let spun: { readonly record: SpinRecord; readonly post: PostCommit } | null = null;
     try {
-      spun = await this.prismaService.$transaction(async (tx: Prisma.TransactionClient) => {
-        return this.spinInTransaction(tx, {
-          userId: input.userId,
-          idempotencyKey: input.idempotencyKey,
-          freeSpinCooldownHours: settings.freeSpinCooldownHours,
-          now: input.now ?? new Date(),
-          random: input.random ?? Math.random,
-        });
-      });
+      spun = await this.prismaService.$transaction(
+        async (tx: Prisma.TransactionClient) => {
+          return this.spinInTransaction(tx, {
+            userId: input.userId,
+            idempotencyKey: input.idempotencyKey,
+            freeSpinCooldownHours: settings.freeSpinCooldownHours,
+            now: input.now ?? new Date(),
+            random: input.random ?? Math.random,
+          });
+        },
+        // Prisma's defaults are 2 s to get in and 5 s to finish. A spin holds
+        // the person's row and the drawn sector's row while it pays out, so
+        // under a promo everybody queues behind whoever is being served. Five
+        // seconds of that is a P2028 — which is neither a refusal nor a
+        // duplicate, so it would surface as a 500 on a spin that was still
+        // owed. The budget is generous because the failure it prevents is
+        // worse than the wait it allows.
+        { maxWait: 15_000, timeout: 30_000 },
+      );
     } catch (error) {
       if (error instanceof SpinRefused) return { spun: false, reason: error.reason };
       // Anything but a lost race is a real failure and belongs to the caller.
@@ -253,7 +273,9 @@ export class WheelSpinService {
         prize: sector,
         origin: {
           source: 'WHEEL',
-          referenceKey: input.idempotencyKey,
+          // Per-person, for the same reason the charge is: the prize
+          // journals share one global key namespace with every other user.
+          referenceKey: scopedLedgerReference(input.userId, input.idempotencyKey),
           details: { sectorId: sector.id, spinRequestKey: input.idempotencyKey },
           claimedKeyId: claim.keyId,
         },
@@ -354,6 +376,28 @@ export class WheelSpinService {
       for (const row of counts) stock.set(row.poolId, row._count._all);
     }
 
+    // A subscription code names a plan by id and nothing stops that plan being
+    // deleted afterwards — there is no foreign key. Resolved here so a sector
+    // pointing at a plan that is gone is excluded from the draw rather than
+    // coming up and throwing in the payout, over and over, for everybody.
+    const planIds = [
+      ...new Set(
+        sectors
+          .filter(
+            (sector) =>
+              sector.kind === WheelSectorKind.PROMOCODE &&
+              sector.promoRewardType === PromocodeRewardType.SUBSCRIPTION &&
+              sector.promoPlanId !== null,
+          )
+          .map((sector) => sector.promoPlanId as string),
+      ),
+    ];
+    const livePlans = new Set<string>();
+    if (planIds.length > 0) {
+      const plans = await tx.plan.findMany({ where: { id: { in: planIds } }, select: { id: true } });
+      for (const plan of plans) livePlans.add(plan.id);
+    }
+
     return {
       userWins,
       sectors: sectors.map((sector) => ({
@@ -366,6 +410,12 @@ export class WheelSpinService {
         wonCount: sector.wonCount,
         keyPoolId: sector.keyPoolId,
         keysAvailable: sector.keyPoolId === null ? null : (stock.get(sector.keyPoolId) ?? 0),
+        promoPlanResolves:
+          sector.kind === WheelSectorKind.PROMOCODE &&
+          sector.promoRewardType === PromocodeRewardType.SUBSCRIPTION &&
+          sector.promoPlanId !== null
+            ? livePlans.has(sector.promoPlanId)
+            : true,
       })),
     };
   }
@@ -389,23 +439,30 @@ export class WheelSpinService {
         data: { wonCount: { increment: 1 } },
       });
       if (taken.count !== 1) return { claimed: false, keyId: null };
-    } else {
-      await tx.wheelSector.update({
-        where: { id: sector.id },
-        data: { wonCount: { increment: 1 } },
-      });
     }
+    // A sector with no ceiling is NOT counted, and that is the whole point of
+    // the counter: it exists to be tested against `maxWinsTotal` inside the
+    // statement that consumes a slot. Incrementing it anyway would take a
+    // row-exclusive lock on the sector, held until the transaction commits —
+    // so every spin landing on the sector most spins land on ("не повезло",
+    // which every wheel must have and which never carries a ceiling) would
+    // queue behind the one being paid out. The panel shows `wonCount` only
+    // next to a ceiling, so nothing on screen goes quiet.
 
     if (sector.kind !== WheelSectorKind.KEY) return { claimed: true, keyId: null };
 
     const keyId = await this.payout.claimKey(tx, sector.keyPoolId, userId);
     if (keyId === null) {
       // The pool emptied between the read and here. Give the slot back, or the
-      // ceiling would count a prize nobody received.
-      await tx.wheelSector.update({
-        where: { id: sector.id },
-        data: { wonCount: { decrement: 1 } },
-      });
+      // ceiling would count a prize nobody received — but only if one was
+      // taken: an uncapped sector was never incremented, and decrementing it
+      // would drive the counter below zero.
+      if (sector.maxWinsTotal !== null) {
+        await tx.wheelSector.update({
+          where: { id: sector.id },
+          data: { wonCount: { decrement: 1 } },
+        });
+      }
       return { claimed: false, keyId: null };
     }
     return { claimed: true, keyId };

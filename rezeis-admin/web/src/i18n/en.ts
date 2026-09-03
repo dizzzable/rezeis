@@ -987,6 +987,24 @@ export const en = {
     },
   },
   wheelConfigPage: {
+    promo: {
+      hint: 'What the code the person wins actually does. It is handed over now and spent later, so the restrictions travel with it.',
+      rewardType: 'Reward type',
+      types: {
+        DURATION: 'Subscription days',
+        TRAFFIC: 'Traffic (GB)',
+        DEVICES: 'Devices',
+        SUBSCRIPTION: 'A subscription on a plan',
+        PERSONAL_DISCOUNT: 'Permanent discount',
+        PURCHASE_DISCOUNT: 'Discount on a purchase',
+      },
+      planId: 'Subscription plan',
+      planPlaceholder: 'Pick a plan',
+      allowedPlans: 'Where the code may be spent',
+      allowedPlansHint: 'Nothing ticked — the code works on any plan.',
+      lifetime: 'Expires after (days)',
+      lifetimePlaceholder: 'Empty — never expires',
+    },
     title: 'Wheel of fortune',
     subtitle: 'Sectors, odds and two switches. The odds are the operator\'s alone',
     empty: 'No sectors yet. Add the first one.',
@@ -1092,6 +1110,7 @@ export const en = {
     },
   },
   wheelKeysPage: {
+    loadMore: 'Load more',
     title: 'Key pools',
     subtitle: 'Batches of one-use keys the wheel hands out, one per person',
     emptyPools: 'No pools yet. Create one and load keys into it.',

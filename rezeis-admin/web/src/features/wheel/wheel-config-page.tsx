@@ -43,6 +43,8 @@ import {
   type WheelRarity,
 } from './wheel-config-api'
 import { WheelPreview } from './wheel-preview'
+import { PromoPrizeFields } from './promo-prize-fields'
+import { emptyPromoDraft, promoDraftOf, promoPayload, type PromoDraft } from './promo-prize'
 
 const KINDS: readonly WheelSectorKind[] = [
   'NOTHING',
@@ -79,6 +81,8 @@ interface Draft {
   manualInstructions: string
   maxWinsPerUser: string
   maxWinsTotal: string
+  /** What a PROMOCODE sector's code actually does. */
+  promo: PromoDraft
   enabled: boolean
 }
 
@@ -94,6 +98,7 @@ function emptyDraft(): Draft {
     manualInstructions: '',
     maxWinsPerUser: '',
     maxWinsTotal: '',
+    promo: emptyPromoDraft(),
     enabled: false,
   }
 }
@@ -110,6 +115,7 @@ function toDraft(sector: WheelSector): Draft {
     manualInstructions: sector.manualInstructions ?? '',
     maxWinsPerUser: sector.maxWinsPerUser === null ? '' : String(sector.maxWinsPerUser),
     maxWinsTotal: sector.maxWinsTotal === null ? '' : String(sector.maxWinsTotal),
+    promo: promoDraftOf(sector),
     enabled: sector.enabled,
   }
 }
@@ -138,6 +144,7 @@ function toPayload(draft: Draft): WheelSectorPayload {
     // would be refused — and there is no box for it in the form either.
     maxWinsPerUser: draft.kind === 'NOTHING' ? null : toNumberOrNull(draft.maxWinsPerUser),
     maxWinsTotal: draft.kind === 'NOTHING' ? null : toNumberOrNull(draft.maxWinsTotal),
+    ...promoPayload(draft.kind, draft.promo),
     enabled: draft.enabled,
   }
 }
@@ -530,6 +537,12 @@ export default function WheelConfigPage() {
  * An empty box is `null` — "off" for the cooldown, "cannot be bought" for the
  * price — which is a different thing from zero and is why this is not a plain
  * number input bound to a mutation.
+ *
+ * Two things it must NOT do, both learned the hard way. It must not save what
+ * it cannot read: `toNumberOrNull` turns a typo into `null`, and `null` here
+ * means "switch this off" — so a mistyped digit and a tab away would quietly
+ * turn free spins off and toast success. And it must not save what has not
+ * changed: leaving a box untouched is not an edit.
  */
 function SettingNumber({
   id,
@@ -544,7 +557,25 @@ function SettingNumber({
   readonly value: number | null
   readonly onSave: (value: number | null) => void
 }) {
-  const [text, setText] = useState(value === null ? '' : String(value))
+  const asText = value === null ? '' : String(value)
+  const [text, setText] = useState(asText)
+  const [touched, setTouched] = useState(false)
+  const invalid = text.trim() !== '' && toNumberOrNull(text) === null
+
+  const commit = () => {
+    if (!touched) return
+    setTouched(false)
+    if (invalid) {
+      // Put the box back to what is actually stored rather than saving a
+      // number nobody typed.
+      setText(asText)
+      return
+    }
+    const next = toNumberOrNull(text)
+    if (next === value) return
+    onSave(next)
+  }
+
   return (
     <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>
@@ -552,8 +583,12 @@ function SettingNumber({
         id={id}
         inputMode="numeric"
         value={text}
-        onChange={(event) => setText(event.target.value)}
-        onBlur={() => onSave(toNumberOrNull(text))}
+        aria-invalid={invalid}
+        onChange={(event) => {
+          setText(event.target.value)
+          setTouched(true)
+        }}
+        onBlur={commit}
       />
       <p className="text-xs text-muted-foreground">{hint}</p>
     </div>
@@ -666,6 +701,10 @@ function SectorForm({
             </SelectContent>
           </Select>
         </div>
+      ) : null}
+
+      {draft.kind === 'PROMOCODE' ? (
+        <PromoPrizeFields draft={draft.promo} onChange={(next) => set('promo', next)} />
       ) : null}
 
       {draft.kind === 'MANUAL' ? (

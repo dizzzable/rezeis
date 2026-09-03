@@ -46,3 +46,28 @@ describe('getErrorMessage', () => {
     expect(getErrorMessage(err, 'fallback')).toBe('fallback')
   })
 })
+
+describe('a validation failure', () => {
+  it('reads as the fields it named, not as "Bad Request"', () => {
+    // NestJS' ValidationPipe answers with one line per field and an `error`
+    // of "Bad Request". Reading the latter told the operator nothing.
+    const err = {
+      response: {
+        data: {
+          message: ['weight must not be greater than 100000', 'amount must be an integer'],
+          error: 'Bad Request',
+        },
+      },
+    }
+
+    expect(getErrorMessage(err, 'fallback')).toBe(
+      'weight must not be greater than 100000; amount must be an integer',
+    )
+  })
+
+  it('falls through an empty list rather than showing a blank toast', () => {
+    const err = { response: { data: { message: [], error: 'Bad Request' } } }
+
+    expect(getErrorMessage(err, 'fallback')).toBe('Bad Request')
+  })
+})

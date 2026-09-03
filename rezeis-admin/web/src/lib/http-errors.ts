@@ -12,7 +12,14 @@
 interface ApiErrorShape {
   response?: {
     data?: {
-      message?: string
+      /**
+       * A string when the handler threw with a message of its own; an ARRAY
+       * when the failure came from `ValidationPipe`, which reports one line
+       * per field. That case used to fall straight through to `data.error`
+       * and surface as the literal "Bad Request" — a toast that tells the
+       * operator nothing about which field it disliked.
+       */
+      message?: string | string[]
       error?: string
     }
   }
@@ -23,6 +30,10 @@ export function getErrorMessage(error: unknown, fallback: string): string {
   if (!error || typeof error !== 'object') return fallback
   const e = error as ApiErrorShape
   const apiMessage = e.response?.data?.message
+  if (Array.isArray(apiMessage)) {
+    const lines = apiMessage.filter((line): line is string => typeof line === 'string' && line !== '')
+    if (lines.length > 0) return lines.join('; ')
+  }
   if (typeof apiMessage === 'string' && apiMessage.length > 0) return apiMessage
   const apiError = e.response?.data?.error
   if (typeof apiError === 'string' && apiError.length > 0) return apiError

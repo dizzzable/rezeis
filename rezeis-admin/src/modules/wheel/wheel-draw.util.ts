@@ -57,6 +57,13 @@ export interface SectorForDraw {
    * kind, which has no stock to run out of.
    */
   readonly keysAvailable?: number | null;
+  /**
+   * PROMOCODE sectors that mint a SUBSCRIPTION code: whether the plan they
+   * name still exists. `true` for everything else — there is nothing to
+   * resolve. A plan can be deleted long after the sector was configured, and
+   * `promo_plan_id` carries no foreign key to stop it.
+   */
+  readonly promoPlanResolves?: boolean;
 }
 
 export interface DrawCandidate {
@@ -114,6 +121,12 @@ function excludeSector(sector: SectorForDraw, winsByThisUser: number): SectorExc
     if (sector.keyPoolId === null || sector.keyPoolId === undefined) return 'UNCONFIGURED';
     if ((sector.keysAvailable ?? 0) <= 0) return 'OUT_OF_STOCK';
   }
+
+  // The same reasoning one kind over: a subscription code whose plan has been
+  // deleted throws in the payout, and the spin is refunded — but the sector
+  // keeps coming up and keeps failing, for everybody, until somebody notices.
+  // Better it simply stops being offered.
+  if (sector.promoPlanResolves === false) return 'UNCONFIGURED';
 
   // NOTHING is deliberately exempt from both ceilings: it is what keeps the
   // pool non-empty for everybody, always. A capped loss sector would leave

@@ -184,7 +184,15 @@ describe('usersApi.listPointsLedger', () => {
     })
   })
 
-  it('refuses a row whose source the panel does not know', async () => {
+  it('keeps the journal readable when the API grows a source this build has never heard of', async () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the opposite was a defect.
+    //
+    // A `z.enum` here rejects the whole PAGE on the first unknown value, not
+    // the row — so the moment the API started writing `WHEEL_PRIZE`, the
+    // operator lost the entire points history of anybody who had ever spun
+    // the wheel, with a Retry button that could never succeed. The API and
+    // the panel ship as separate images; the API growing a source is normal
+    // and must cost one untranslated label, not a screen.
     vi.mocked(api.get).mockResolvedValue({
       data: {
         items: [{ id: 'x', delta: 1, balanceAfter: 1, source: 'LOTTERY', referenceKey: null, details: null, createdAt: new Date().toISOString() }],
@@ -192,7 +200,27 @@ describe('usersApi.listPointsLedger', () => {
       },
     })
 
-    await expect(usersApi.listPointsLedger({ userId: '12345' })).rejects.toThrow()
+    const page = await usersApi.listPointsLedger({ userId: '12345' })
+
+    expect(page.items[0]).toMatchObject({ id: 'x', delta: 1, source: 'LOTTERY' })
+  })
+
+  it('reads the sources this release added', async () => {
+    // The two the wheel and contests write. Named explicitly so the pair is
+    // not quietly dropped by a future tidy-up of the list above.
+    vi.mocked(api.get).mockResolvedValue({
+      data: {
+        items: [
+          { id: 'a', delta: 100, balanceAfter: 100, source: 'WHEEL_PRIZE', referenceKey: null, details: null, createdAt: new Date().toISOString() },
+          { id: 'b', delta: 500, balanceAfter: 600, source: 'CONTEST_PRIZE', referenceKey: null, details: null, createdAt: new Date().toISOString() },
+        ],
+        nextCursor: null,
+      },
+    })
+
+    const page = await usersApi.listPointsLedger({ userId: '12345' })
+
+    expect(page.items.map((row) => row.source)).toEqual(['WHEEL_PRIZE', 'CONTEST_PRIZE'])
   })
 })
 

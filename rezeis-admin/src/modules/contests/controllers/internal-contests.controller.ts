@@ -84,11 +84,17 @@ export class InternalContestsController {
         status: true,
         startAt: true,
         endAt: true,
+        audienceFilter: true,
         prizes: { orderBy: { place: 'asc' }, select: { place: true, kind: true, title: true, amount: true } },
         entries: { where: { userId }, select: { id: true } },
         _count: { select: { entries: true } },
       },
     });
+
+    // Who this person may actually enter. Without it the screen offers the
+    // button to everybody and the audience filter refuses on tap, which reads
+    // as a broken button rather than as a contest that is not for them.
+    const eligible = await this.contests.eligibleAmong(userId, rows);
 
     const mine = await this.prismaService.contestWinner.findMany({
       where: { userId, contestId: { in: rows.map((row) => row.id) } },
@@ -116,7 +122,9 @@ export class InternalContestsController {
         entries: row._count.entries,
         prizes: row.prizes,
         entered: row.entries.length > 0,
-        closed: readClosedReason(row, now),
+        closed:
+          readClosedReason(row, now) ??
+          (row.status === ContestStatus.ACTIVE && !eligible.has(row.id) ? 'NOT_ELIGIBLE' : null),
         myResult:
           win === null
             ? null

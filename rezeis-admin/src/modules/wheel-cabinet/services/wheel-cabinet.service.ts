@@ -14,6 +14,7 @@ import { SECTOR_SELECT, WheelSpinService } from '../../wheel/services/wheel-spin
 import { resolveFreeSpin } from '../../wheel/spin-availability.util';
 import { resolveDrawPool, type SectorExclusion } from '../../wheel/wheel-draw.util';
 import { readWheelSettings } from '../../wheel/wheel-settings.util';
+import { scopedLedgerReference } from '../../wheel/ledger-reference.util';
 
 /** Why a sector is greyed out for this person. */
 export type SectorUnavailable =
@@ -184,15 +185,39 @@ export class WheelCabinetService {
     }
 
     const cost = settings.spinPricePoints * input.count;
-    const reference = `${input.userId}:${input.idempotencyKey}`;
+    const reference = scopedLedgerReference(input.userId, input.idempotencyKey);
 
+    try {
+      return await this.buyInTransaction({ ...input, cost, reference, price: settings.spinPricePoints });
+    } catch (error) {
+      // Two taps that arrive together both pass the wallet's duplicate READ
+      // and race to the unique index; the loser lands here. Exactly one debit
+      // happened — the index is what guarantees that — so the honest answer is
+      // the one the sequential path gives: the balances as they now stand.
+      if (!isDuplicateReference(error)) throw error;
+      const user = await this.prismaService.user.findUnique({
+        where: { id: input.userId },
+        select: { spinBalance: true, points: true },
+      });
+      return { spinBalance: user?.spinBalance ?? 0, pointsBalance: user?.points ?? 0 };
+    }
+  }
+
+  private async buyInTransaction(input: {
+    readonly userId: string;
+    readonly count: number;
+    readonly cost: number;
+    readonly price: number;
+    readonly reference: string;
+  }): Promise<{ readonly spinBalance: number; readonly pointsBalance: number }> {
+    const { cost, reference, price } = input;
     return this.prismaService.$transaction(async (tx) => {
       const spent = await this.pointsWallet.apply(tx, {
         userId: input.userId,
         delta: -cost,
         source: PointsLedgerSource.EXCHANGE,
         referenceKey: reference,
-        details: { purpose: 'WHEEL_SPINS', spins: input.count, pricePoints: settings.spinPricePoints },
+        details: { purpose: 'WHEEL_SPINS', spins: input.count, pricePoints: price },
       });
       if (!spent.applied) {
         if (spent.reason === 'DUPLICATE') {
@@ -214,7 +239,7 @@ export class WheelCabinetService {
         delta: input.count,
         source: SpinLedgerSource.PURCHASED,
         referenceKey: reference,
-        details: { pricePoints: settings.spinPricePoints, costPoints: cost },
+        details: { pricePoints: price, costPoints: cost },
       });
       if (!credited.applied) {
         // The points are debited in this same transaction, so throwing here
@@ -227,6 +252,27 @@ export class WheelCabinetService {
   }
 
   /** This person's own spins, newest first. */
+  /**
+   * One spin of this person's, by id.
+   *
+   * The stop screen needs the prize for the spin that just happened — which,
+   * on a REPLAY, is not necessarily the newest one: two tabs, or any spin
+   * taken between the lost response and the retry, and "the newest row" is
+   * somebody else's answer or a later one. Asking by id is the only reading
+   * that survives the case idempotency exists for. Scoped by `userId`, so an
+   * id from elsewhere finds nothing.
+   */
+  public async findSpin(input: {
+    readonly userId: string;
+    readonly spinId: string;
+  }): Promise<CabinetSpinRow | null> {
+    const spin = await this.prismaService.wheelSpin.findFirst({
+      where: { id: input.spinId, userId: input.userId },
+      select: SPIN_ROW_SELECT,
+    });
+    return spin === null ? null : toSpinRow(spin);
+  }
+
   public async history(input: {
     readonly userId: string;
     readonly cursor?: string | null;
@@ -238,43 +284,69 @@ export class WheelCabinetService {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
-      select: {
-        id: true,
-        kind: true,
-        amount: true,
-        status: true,
-        outcome: true,
-        sectorSnapshot: true,
-        manualTicketId: true,
-        createdAt: true,
-        // The key this spin won, read through the relation rather than out of
-        // the outcome: the outcome names an id, and the person needs the
-        // secret itself. It is theirs — they won it — and it is readable only
-        // through their own history.
-        key: { select: { value: true } },
-      },
+      select: SPIN_ROW_SELECT,
     });
 
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     return {
-      items: page.map((spin) => {
-        const snapshot = readObject(spin.sectorSnapshot);
-        return {
-          spinId: spin.id,
-          kind: spin.kind,
-          title: (snapshot['title'] ?? {}) as Prisma.JsonValue,
-          rarity: typeof snapshot['rarity'] === 'string' ? snapshot['rarity'] : 'COMMON',
-          amount: spin.amount,
-          status: spin.status,
-          createdAt: spin.createdAt.toISOString(),
-          prize: buildPrize(spin.kind, spin.outcome, spin.key?.value ?? null),
-          ticketId: spin.manualTicketId,
-        };
-      }),
+      items: page.map(toSpinRow),
       nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
     };
   }
+}
+
+/**
+ * Everything a spin row needs, and nothing the person may not see: no
+ * settlement note, no operator, no weight.
+ */
+const SPIN_ROW_SELECT = {
+  id: true,
+  kind: true,
+  amount: true,
+  status: true,
+  outcome: true,
+  sectorSnapshot: true,
+  manualTicketId: true,
+  createdAt: true,
+  // The key this spin won, read through the relation rather than out of the
+  // outcome: the outcome names an id, and the person needs the secret itself.
+  // It is theirs — they won it — and it is readable only through their own
+  // history.
+  key: { select: { value: true } },
+} as const;
+
+type SpinRowPayload = Prisma.WheelSpinGetPayload<{ select: typeof SPIN_ROW_SELECT }>;
+
+function toSpinRow(spin: SpinRowPayload): CabinetSpinRow {
+  const snapshot = readObject(spin.sectorSnapshot);
+  return {
+    spinId: spin.id,
+    kind: spin.kind,
+    title: (snapshot['title'] ?? {}) as Prisma.JsonValue,
+    rarity: typeof snapshot['rarity'] === 'string' ? snapshot['rarity'] : 'COMMON',
+    amount: spin.amount,
+    status: spin.status,
+    createdAt: spin.createdAt.toISOString(),
+    prize: buildPrize(spin.kind, spin.outcome, spin.key?.value ?? null),
+    ticketId: spin.manualTicketId,
+  };
+}
+
+/**
+ * A write that lost the race to a unique reference key.
+ *
+ * P2002 on either journal's `(source, reference_key)` index means somebody
+ * else's transaction wrote this exact movement first — which, for a handle,
+ * is the request being served twice, not a failure.
+ */
+function isDuplicateReference(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = error.meta?.['target'];
+  const text = Array.isArray(target) ? target.join(',') : String(target ?? '');
+  return text.includes('reference_key') || text.includes('referenceKey');
 }
 
 /**

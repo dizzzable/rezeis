@@ -1,3 +1,5 @@
+import { randomInt } from 'node:crypto';
+
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   Prisma,
@@ -109,6 +111,14 @@ export class RewardGrantService {
     tx: Prisma.TransactionClient,
     input: { readonly userId: string; readonly grant: RewardGrant },
   ): Promise<RewardApplication> {
+    // The lock has to be taken here, not assumed. A wheel spin already holds
+    // this row (the spin was charged against it), but a quest grant does not —
+    // it locks the quest, never the person — so without this a quest and a
+    // spin awarding a discount at the same moment both read the old figure and
+    // the second write erases the first. The clamp is what forces the write to
+    // be absolute rather than an increment, which is what makes the lock
+    // necessary. Same shape as `applyTraffic` below.
+    await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "users" WHERE "id" = ${input.userId} FOR UPDATE`);
     const user = await tx.user.findUnique({
       where: { id: input.userId },
       select: { personalDiscount: true },
@@ -259,7 +269,6 @@ export class RewardGrantService {
       ...(grant.promo?.lifetimeDays == null ? {} : { lifetime: grant.promo.lifetimeDays }),
     };
 
-    const code = generatePromoCode(origin.codePrefix);
     const rewardType =
       grant.promo?.rewardType ??
       (grant.planId !== null ? PromocodeRewardType.SUBSCRIPTION : PromocodeRewardType.DURATION);
@@ -290,6 +299,9 @@ export class RewardGrantService {
         ...(buildPlanSnapshot(plan) as Record<string, unknown>),
         duration: grant.amount,
       };
+      // Minted last, once everything that can refuse has had its say: a code
+      // burned on a request that then throws is a code nobody can ever use.
+      const code = await mintFreeCode(tx, origin.codePrefix);
       await tx.promocode.create({
         data: {
           code,
@@ -305,6 +317,7 @@ export class RewardGrantService {
       return code;
     }
 
+    const code = await mintFreeCode(tx, origin.codePrefix);
     await tx.promocode.create({
       data: {
         code,
@@ -351,11 +364,35 @@ async function resolveActiveSubscriptionId(
   return sub?.id ?? null;
 }
 
-/** The alphabet drops the characters people mistype off a screen: I, O, 0, 1. */
+/**
+ * The alphabet drops the characters people mistype off a screen: I, O, 0, 1.
+ *
+ * Drawn from the system CSPRNG rather than `Math.random`, because this string
+ * is the prize: whoever knows it can spend it. `Math.random` is seeded from a
+ * predictable source and its state is recoverable from a handful of outputs —
+ * fine for a shuffle, wrong for a bearer token.
+ */
 function generatePromoCode(prefix: string): string {
   let code = prefix;
   for (let index = 0; index < 8; index += 1) {
-    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+    code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
   }
   return code;
+}
+
+/**
+ * A code nobody is using yet.
+ *
+ * One in a trillion says this loop runs once. It exists because the
+ * alternative to a second attempt is a P2002 on `promocodes.code` — which is
+ * neither a refusal nor a duplicate request, so it would roll the whole spin
+ * back and answer 500 on a prize the person had already won.
+ */
+async function mintFreeCode(tx: Prisma.TransactionClient, prefix: string): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const code = generatePromoCode(prefix);
+    const taken = await tx.promocode.findUnique({ where: { code }, select: { id: true } });
+    if (taken === null) return code;
+  }
+  throw new Error('Could not mint an unused promocode');
 }
