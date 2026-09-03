@@ -623,7 +623,16 @@ export class BedolagaImporterService {
             isTrial: sub.is_trial,
             trafficLimit: fresh.trafficLimit,
             deviceLimit: panelDevices > 0 ? panelDevices : sub.device_limit,
-            internalSquads: fresh.internalSquads.length > 0 ? fresh.internalSquads : backupSquads,
+            // The backup's squads are a fallback only while both panels are
+            // the same one. On a foreign panel they are uuids it never had, so
+            // a profile that reports none keeps none rather than acquiring
+            // three dead ones.
+            internalSquads:
+              fresh.internalSquads.length > 0
+                ? fresh.internalSquads
+                : foreignPanel
+                  ? []
+                  : backupSquads,
             externalSquad: fresh.externalSquad,
             configUrl: fresh.configUrl,
             expiresAt: fresh.expiresAt,
@@ -644,7 +653,7 @@ export class BedolagaImporterService {
           // them. On a DIFFERENT panel the uuids name nothing, so pushing them
           // would fail the profile CREATE outright, and the link is a dead
           // address the customer would be shown as though it worked — so a new
-          // row starts empty and "Назначить тариф" + the sync fill both in.
+          // row starts empty and "Назначить план всем" + the sync fill both in.
           //
           // An UPDATE on a foreign panel writes neither: by then the columns
           // hold what the panel itself reported when the profile was created,
