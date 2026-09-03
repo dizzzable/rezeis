@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.7.35-blue" alt="Version" /></a>
+  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.7.36-blue" alt="Version" /></a>
   <a href="https://github.com/dizzzable/rezeis/pkgs/container/rezeis"><img src="https://img.shields.io/badge/ghcr.io-rezeis-2496ED?logo=docker&logoColor=white" alt="GHCR" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
   <a href="#"><img src="https://img.shields.io/badge/NestJS-11-red" alt="NestJS" /></a>
@@ -56,10 +56,10 @@ GitHub Container Registry публикует образ при каждом push
 docker pull ghcr.io/dizzzable/rezeis:latest
 
 # Pin to a specific release
-docker pull ghcr.io/dizzzable/rezeis:v0.9.7.35
+docker pull ghcr.io/dizzzable/rezeis:v0.9.7.36
 ```
 
-Доступные теги: `latest` (актуальный main), `v0.9.7.35` (текущий тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Для воспроизводимого развёртывания указывайте версию релиза, а не `latest`.
+Доступные теги: `latest` (актуальный main), `v0.9.7.36` (текущий тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Для воспроизводимого развёртывания указывайте версию релиза, а не `latest`.
 
 ---
 
