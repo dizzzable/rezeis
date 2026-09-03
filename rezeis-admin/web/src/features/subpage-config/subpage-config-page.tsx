@@ -29,6 +29,7 @@ import {
   subpageConfigSchema,
   type SubpageConfig,
 } from './subpage-config-api';
+import { ConnectPageEditor } from '@/features/connect-page/connect-page-editor';
 import { ConnectScreenCard } from './connect-screen-card';
 import { SubpageConfigClients } from './subpage-config-clients';
 import { SubpageIcons, SubpageTheme, SubpageTranslations } from './subpage-config-assets';
@@ -176,14 +177,22 @@ export default function SubpageConfigPage() {
         </FadeIn>
       )}
 
-      <Tabs defaultValue="general">
+      <Tabs defaultValue="connect">
         <TabsList className="flex-wrap">
+          <TabsTrigger value="connect">{t('subpageConfigPage.tabs.connect')}</TabsTrigger>
           <TabsTrigger value="general">{t('subpageConfigPage.tabs.general')}</TabsTrigger>
           <TabsTrigger value="clients">{t('subpageConfigPage.tabs.clients')}</TabsTrigger>
           <TabsTrigger value="icons">{t('subpageConfigPage.tabs.icons')}</TabsTrigger>
           <TabsTrigger value="translations">{t('subpageConfigPage.tabs.translations')}</TabsTrigger>
           <TabsTrigger value="advanced">{t('subpageConfigPage.tabs.advanced')}</TabsTrigger>
         </TabsList>
+
+        {/* The cabinet's own screen. The tabs after it configure the EXTERNAL
+            subscription page, which is a different product surface — they are
+            not two views of one thing. */}
+        <TabsContent value="connect" className="space-y-6 pt-4">
+          <ConnectPageEditor />
+        </TabsContent>
 
         <TabsContent value="general" className="space-y-6 pt-4">
           {/* Branding */}
