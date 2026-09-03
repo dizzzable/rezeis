@@ -17,10 +17,12 @@ import {
 } from './services/import-queue.service';
 import { RemnashopImporterService } from './services/remnashop-importer.service';
 import { RemnawaveImporterService } from './services/remnawave-importer.service';
+import { BedolagaImporterService } from './services/bedolaga-importer.service';
 import { StealthnetImporterService } from './services/stealthnet-importer.service';
 import { ThreeXuiImporterService } from './services/threexui-importer.service';
 import { parseAltshopBackup } from './utils/altshop-backup-parser';
 import { parseRemnashopBackup } from './utils/remnashop-backup-parser';
+import { parseBedolagaBackup } from './utils/bedolaga-backup-parser';
 import { parseStealthnetBackup } from './utils/stealthnet-backup-parser';
 import { parseThreeXuiBackup } from './utils/threexui-backup-parser';
 
@@ -46,6 +48,7 @@ export class ImportProcessor extends WorkerHost {
     private readonly remnashopImporterService: RemnashopImporterService,
     private readonly altshopImporterService: AltshopImporterService,
     private readonly stealthnetImporterService: StealthnetImporterService,
+    private readonly bedolagaImporterService: BedolagaImporterService,
     private readonly bulkPlanAssignmentService: BulkPlanAssignmentService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
   ) {
@@ -197,6 +200,21 @@ export class ImportProcessor extends WorkerHost {
             tariffPriceOptions,
             payments,
             referralCredits,
+            ...(balanceToPoints ? { balanceToPoints } : {}),
+          });
+          break;
+        }
+
+        case 'bedolaga': {
+          if (!stagedFilePath) throw new Error('Staged file path missing for bedolaga import');
+          const buffer = await fsp.readFile(stagedFilePath);
+          const data = await parseBedolagaBackup(buffer);
+          await job.updateProgress({ stage: 'parsed', percent: 20, records: data.users.length });
+          result = await this.bedolagaImporterService.run({
+            mode,
+            createdBy,
+            importRecordId,
+            data,
             ...(balanceToPoints ? { balanceToPoints } : {}),
           });
           break;

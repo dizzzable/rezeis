@@ -69,6 +69,20 @@ export const en = {
         rateLabel: 'Points per 1 balance unit',
       },
     },
+    bedolaga: {
+      title: 'Import from Bedolaga',
+      description:
+        "Upload the backup the Bedolaga bot makes for itself (.tar.gz) — it may hold a pg_dump or a JSON export, and both are read. Brings over people, subscriptions, the wallet balance as points, referral links, payment history, discounts and unspent promo codes.",
+      action: 'Choose a file',
+      selectFile: 'Choose a Bedolaga backup',
+      importing: 'Importing {{filename}}…',
+      hint: "The archive from the bot's own Backups menu, or an unpacked database.sql / database.json.",
+      balancePoints: {
+        label: 'Convert the balance into points',
+        hint: 'Bedolaga stores the balance in kopecks. When on, each migrated customer is credited their leftover wallet once — a re-import never credits it twice. Debts (a negative balance) are not carried over and are reported instead.',
+        rateLabel: 'Points per 1 unit of balance',
+      },
+    },
     syncToPanel: {
       label: 'Sync to panel after import',
       hint: 'After importing, push the affected subscriptions to Remnawave (update linked profiles, create missing ones). Off by default — imports only read from the panel.',

@@ -168,6 +168,20 @@ interface NormalizedCatalog {
  *      `Subscription.planId === null`. Operator-set planIds are never
  *      overwritten.
  */
+/**
+ * Import sources whose `result.catalog` this service knows how to read.
+ *
+ * A list rather than a chain of `!==`: the chain grew a source at a time and
+ * the message beside it had to be edited by hand every time, which is how it
+ * came to name two sources while the condition tested three.
+ */
+const CLONEABLE_SOURCES: ReadonlySet<string> = new Set([
+  'altshop',
+  'remnashop',
+  'stealthnet',
+  'bedolaga',
+]);
+
 @Injectable()
 export class BackupPlanClonerService {
   private readonly logger = new Logger(BackupPlanClonerService.name);
@@ -502,9 +516,9 @@ export class BackupPlanClonerService {
       where: { id: importRecordId },
     });
     if (!record) throw new NotFoundException(`Import record '${importRecordId}' not found`);
-    if (record.sourceType !== 'altshop' && record.sourceType !== 'remnashop' && record.sourceType !== 'stealthnet') {
+    if (!CLONEABLE_SOURCES.has(record.sourceType)) {
       throw new BadRequestException(
-        `Plan cloning is only supported for altshop, remnashop and stealthnet imports, got '${record.sourceType}'`,
+        `Plan cloning is only supported for ${[...CLONEABLE_SOURCES].join(', ')} imports, got '${record.sourceType}'`,
       );
     }
     return record;

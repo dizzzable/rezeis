@@ -227,6 +227,7 @@ export default function ImportsPage(): JSX.Element {
                 </TabsTrigger>
                 <TabsTrigger value="altshop">Altshop</TabsTrigger>
                 <TabsTrigger value="stealthnet">STEALTHNET</TabsTrigger>
+                <TabsTrigger value="bedolaga">Bedolaga</TabsTrigger>
               </>
             ) : null}
           </TabsList>
@@ -252,6 +253,9 @@ export default function ImportsPage(): JSX.Element {
               </TabsContent>
               <TabsContent value="stealthnet">
                 <FileUploadTab source="stealthnet" onStart={flow.start} onRecordId={flow.setRecordId} />
+              </TabsContent>
+              <TabsContent value="bedolaga">
+                <FileUploadTab source="bedolaga" onStart={flow.start} onRecordId={flow.setRecordId} />
               </TabsContent>
             </>
           ) : null}
@@ -414,8 +418,16 @@ function RemnawaveTab({ onStart, onRecordId, canImport, canRun }: RemnawaveTabPr
 
 // ── File-upload tabs (3x-ui, Remnashop, Altshop) ──────────────────────────
 
+/**
+ * Donors whose customers hold a money balance we can carry over as points.
+ *
+ * A set rather than a chain of `source === '…'`: the same question was asked
+ * in three separate places, and the third one was already a source behind.
+ */
+const CARRIES_A_WALLET: ReadonlySet<string> = new Set(['stealthnet', 'bedolaga'])
+
 interface FileUploadTabProps extends TabProps {
-  readonly source: 'remnashop' | 'altshop' | '3xui' | 'stealthnet'
+  readonly source: 'remnashop' | 'altshop' | '3xui' | 'stealthnet' | 'bedolaga'
 }
 
 function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX.Element {
@@ -423,7 +435,8 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [fileName, setFileName] = useState<string | null>(null)
-  // STEALTHNET-only: convert leftover wallet balance → loyalty points on import.
+  // Migrations that carry a wallet (STEALTHNET, Bedolaga): convert the
+  // leftover balance into loyalty points on import.
   const [convertBalance, setConvertBalance] = useState(true)
   const [balanceRate, setBalanceRate] = useState('1')
   // All file imports: opt-in push to Remnawave after import (OFF by default —
@@ -437,7 +450,7 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
     mutationFn: async (file: File): Promise<ImportEnqueuedResponse> => {
       const formData = new FormData()
       formData.append('file', file)
-      if (source === 'stealthnet') {
+      if (CARRIES_A_WALLET.has(source)) {
         formData.append('convertBalanceToPoints', String(convertBalance))
         formData.append('balancePointsRate', convertBalance ? balanceRate : '0')
       }
@@ -478,7 +491,11 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
       ? '.json,.db'
       : source === 'stealthnet'
         ? '.sql,.sql.gz,.gz'
-        : '.json,.tar.gz,.gz'
+        : source === 'bedolaga'
+          ? // Bedolaga's own backup is a .tar.gz; the .sql and .json are what
+            // is inside it, for an operator who unpacked it or dumped by hand.
+            '.tar.gz,.gz,.sql,.json'
+          : '.json,.tar.gz,.gz'
 
   return (
     <HoverLift>
@@ -507,7 +524,7 @@ function FileUploadTab({ source, onStart, onRecordId }: FileUploadTabProps): JSX
               aria-label={t('importsPage.syncToPanel.label')}
             />
           </div>
-          {source === 'stealthnet' ? (
+          {CARRIES_A_WALLET.has(source) ? (
             <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="space-y-0.5">

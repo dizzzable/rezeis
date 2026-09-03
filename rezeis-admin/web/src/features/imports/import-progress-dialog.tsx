@@ -57,7 +57,13 @@ import { Separator } from '@/components/ui/separator'
 
 // ── Public types ──────────────────────────────────────────────────────────
 
-export type ImportSource = 'remnawave' | '3xui' | 'remnashop' | 'altshop' | 'stealthnet'
+export type ImportSource =
+  | 'remnawave'
+  | '3xui'
+  | 'remnashop'
+  | 'altshop'
+  | 'stealthnet'
+  | 'bedolaga'
 export type ImportMode = 'import' | 'sync'
 
 export interface ImportProgressDialogProps {
@@ -529,7 +535,10 @@ function DoneFooter({
     mode === 'import' &&
     record.status === 'COMMITTED' &&
     onClonePlans !== undefined &&
-    (source === 'altshop' || source === 'remnashop' || source === 'stealthnet') &&
+    (source === 'altshop' ||
+      source === 'remnashop' ||
+      source === 'stealthnet' ||
+      source === 'bedolaga') &&
     hasCatalogPlans
 
   // Plan assignment is offered only after a successful import (sync never

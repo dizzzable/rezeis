@@ -143,6 +143,7 @@ function buildProcessor(hooks: Hooks): ImportProcessor {
     {} as never, // remnashop
     {} as never, // altshop
     {} as never, // stealthnet
+    {} as never, // bedolaga
     {} as never, // bulkPlanAssignment
     profileSyncQueue as never,
   );

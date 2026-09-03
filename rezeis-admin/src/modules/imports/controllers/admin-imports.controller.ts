@@ -275,6 +275,47 @@ export class AdminImportsController {
     return { importRecordId, jobId, message: 'STEALTHNET import enqueued' };
   }
 
+  // ── Bedolaga (file upload: the bot's own .tar.gz backup) ────────────────
+
+  /**
+   * Bedolaga writes its backup as a `.tar.gz` holding either a plain
+   * `pg_dump` or, when `pg_dump` is not on the container's PATH, a JSON
+   * export of the same tables. An operator has whichever one their container
+   * produced and no way to tell which — so both are accepted, along with the
+   * bare `.sql` / `.json` for anyone who dumped by hand.
+   */
+  @Post('bedolaga')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @RequirePermission('imports', 'import')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
+  public async importFromBedolaga(
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @UploadedFile() file?: Express.Multer.File,
+    @Body() body?: { convertBalanceToPoints?: string; balancePointsRate?: string; syncToPanel?: string },
+  ): Promise<ImportEnqueuedResponse> {
+    if (!file) {
+      throw new BadRequestException(
+        'File is required. Upload a Bedolaga backup (.tar.gz), a pg_dump .sql or a database.json export.',
+      );
+    }
+    // Multipart form fields arrive as strings. Default: conversion ON at 1:1,
+    // the same rate every other migration here has used.
+    const enabled = body?.convertBalanceToPoints !== 'false';
+    const parsedRate =
+      body?.balancePointsRate !== undefined ? Number.parseFloat(body.balancePointsRate) : NaN;
+    const rate = Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : 1;
+    const { importRecordId, jobId } = await this.importQueueService.enqueueFileImport({
+      sourceType: 'bedolaga',
+      mode: 'import',
+      createdBy: admin.id,
+      fileBuffer: file.buffer,
+      originalFilename: file.originalname,
+      balanceToPoints: { enabled, rate },
+      syncToPanel: body?.syncToPanel === 'true',
+    });
+    return { importRecordId, jobId, message: 'Bedolaga import enqueued' };
+  }
+
   // ── Bulk Plan Assignment ────────────────────────────────────────────────
 
   @Post('assign-plan')
