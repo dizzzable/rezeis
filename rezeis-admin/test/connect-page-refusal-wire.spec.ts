@@ -119,7 +119,15 @@ describe('a refused catalog names its rows on the wire', () => {
   });
 
   it('says nothing extra when the catalog is fine', async () => {
-    await service().replaceConfig(catalog(true));
+    // Had no assertions at all and passed for that reason. What it is FOR is
+    // the negative half of the channel: a save that succeeds must not answer
+    // with a refusal shape at all.
+    const written = await service().replaceConfig(catalog(true));
+
+    assert.equal(written.config.platforms.length, 1);
+    assert.deepEqual(written.cleanedIcons, {});
+    assert.equal('issues' in (written as Record<string, unknown>), false);
+    assert.equal('code' in (written as Record<string, unknown>), false);
   });
 });
 
@@ -196,23 +204,31 @@ describe('each row is rebuilt, never forwarded', () => {
     assert.deepEqual(assertIssues(body.issues), [{ path: 'platforms[1]', message: 'this one is fine' }]);
   });
 
-  it('scrubs a row that quotes something it should not, and keeps its address', () => {
-    // Half of what a row quotes is text the operator typed. The scrub is what
-    // stops a submitted document from choosing what this filter says.
+  it('delivers a row that quotes what the operator typed, address and all', () => {
+    // The pattern scrub used to run here and it wrecked exactly this row. Icon
+    // keys come from `slugify`, so an icon named "Password Manager" becomes the
+    // key `password-manager`, which those patterns read as a credential: the
+    // path was blanked to `` and the editor drew a dash where the address goes.
+    // The scrub protected nothing — `POST /validate` serves the identical
+    // sentence on 200 to the same operator — so it is gone, and this test is
+    // what notices if it comes back.
     const body = throughFilter(
       refusal([
         {
+          path: 'icons.password-manager',
+          message: 'Icon "password-manager" is not in the icon library',
+        },
+        {
           path: 'platforms[0].apps[0]',
-          message: 'App "postgres://admin:secret-password@db.internal/rezeis" has no way to hand over',
+          message: '"Auth token" has no way to hand over the subscription',
         },
       ]),
     );
 
-    const issues = assertIssues(body.issues);
-    assert.equal(issues[0]?.path, 'platforms[0].apps[0]');
-    assert.equal(issues[0]?.message.includes('postgres://'), false);
-    assert.equal(issues[0]?.message.includes('secret-password'), false);
-    assert.equal(JSON.stringify(body).includes('secret-password'), false);
+    assert.deepEqual(assertIssues(body.issues), [
+      { path: 'icons.password-manager', message: 'Icon "password-manager" is not in the icon library' },
+      { path: 'platforms[0].apps[0]', message: '"Auth token" has no way to hand over the subscription' },
+    ]);
   });
 
   it('caps the list so a refusal cannot become a payload', () => {
@@ -223,16 +239,33 @@ describe('each row is rebuilt, never forwarded', () => {
     assert.equal(assertIssues(body.issues).length, 20);
   });
 
-  it('drops a row whose text is longer than a diagnostic ever is', () => {
+  it('trims a row that is longer than a diagnostic ever is, instead of dropping it', () => {
+    // Dropping reinstated the very bug this channel exists to fix. Twenty
+    // unknown top-level keys make zod write ONE 367-character sentence; the
+    // only row was dropped, `issues` came back absent, and the editor said
+    // "could not save" and nothing else.
     const body = throughFilter(
       refusal([
-        { path: 'platforms[0]', message: 'x'.repeat(301) },
-        { path: `platforms[0].${'y'.repeat(200)}`, message: 'short' },
-        { path: 'platforms[1]', message: 'kept' },
+        { path: 'platforms[0]', message: 'x'.repeat(400) },
+        { path: `platforms[0].${'y'.repeat(300)}`, message: 'short' },
+        { path: 'platforms[1]', message: 'kept whole' },
       ]),
     );
 
-    assert.deepEqual(assertIssues(body.issues), [{ path: 'platforms[1]', message: 'kept' }]);
+    const issues = assertIssues(body.issues);
+    assert.equal(issues.length, 3, 'every row survives, trimmed');
+    assert.equal(issues[0]?.message.length, 300);
+    assert.equal(issues[0]?.message.endsWith('…'), true);
+    assert.equal(issues[0]?.path, 'platforms[0]', 'a long message does not cost the address');
+    assert.equal(issues[1]?.path.length, 200);
+    assert.equal(issues[2]?.message, 'kept whole', 'a short row is untouched');
+  });
+
+  it('never answers a refusal with no rows when the server sent one long row', () => {
+    // The zod "Unrecognized keys" case, which is one row and nothing else.
+    const body = throughFilter(refusal([{ path: '', message: 'Unrecognized keys: '.repeat(30) }]));
+
+    assert.equal(assertIssues(body.issues).length, 1);
   });
 
   it('says nothing rather than an empty list when no row survives', () => {

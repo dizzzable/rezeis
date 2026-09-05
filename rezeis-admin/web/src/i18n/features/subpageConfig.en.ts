@@ -9,6 +9,8 @@ export const en = {
     subtitle: 'Branding and apps for the rezeis-subpage. Changes apply immediately.',
     usingDefault:
       'No config saved yet — the built-in default is being served. Save to override it.',
+    otherTabUnsaved:
+      'The external page tabs have unsaved edits. Open any of them and press Save.',
     tabs: {
       connect: 'Cabinet screen',
       general: 'General',
@@ -140,6 +142,8 @@ export const en = {
     checkFailed: 'Could not check',
     issuesTitle: 'This catalog would not work',
     issuesHint: 'Saving is refused until these are fixed. The path on the left says where.',
+    issuesStale:
+      'The catalog changed after this check — the paths on the left may have shifted. Press Check to refresh the list.',
     iconsCleaned: 'Some markup was stripped from these icons: {{icons}}',
     unsavedGuard: {
       title: 'Leave without saving the catalog?',

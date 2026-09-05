@@ -110,6 +110,30 @@ export function ConnectPageEditor(): JSX.Element {
   const [issues, setIssues] = useState<ConnectPageIssue[]>([]);
   const config = draft ?? data?.config ?? null;
 
+  // The shape the issue list was written against, and whether the catalog has
+  // moved since. Issue paths are positional — `platforms[0].apps[2]` — so an
+  // edit that reorders or removes a row makes every path after it point
+  // somewhere else.
+  //
+  // The list is NOT thrown away when that happens, which is what the first
+  // version did. Throwing it away costs the operator the other eleven rows the
+  // moment they fix the first, and no fingerprint can be exact: `shapeOf`
+  // misses a reorder of two rows that look structurally identical, and it fires
+  // on an edit to the app id field — the very field the row "Two apps share the
+  // id" asks them to change. Guessing wrong in one direction deletes work;
+  // guessing wrong in the other shows a stale address. So the list stays and
+  // says it may be stale, which is true, checkable by pressing Check, and
+  // cannot silently lose anything.
+  const [issuesShape, setIssuesShape] = useState<string | null>(null);
+  const [issuesStale, setIssuesStale] = useState(false);
+
+  /** Show a fresh list, and remember the catalog it describes. */
+  const showIssues = (next: ConnectPageIssue[], shape: ConnectPageConfig | null): void => {
+    setIssues(next);
+    setIssuesShape(shape === null || next.length === 0 ? null : shapeOf(shape));
+    setIssuesStale(false);
+  };
+
   // The exact object the last successful save was given, held to answer one
   // question: is what is on screen still that object?
   //
@@ -130,7 +154,7 @@ export function ConnectPageEditor(): JSX.Element {
       // The server's copy is NOT written back over the draft. It used to be,
       // and everything typed while the request was in flight vanished under a
       // green "saved" toast — the Save button was disabled, the fields were not.
-      setIssues([]);
+      showIssues([], null);
       void queryClient.invalidateQueries({ queryKey: CONNECT_PAGE_KEYS.all });
       const cleaned = Object.keys(cleanedIcons);
       toast.success(t('connectPageEditor.saved'));
@@ -143,7 +167,7 @@ export function ConnectPageEditor(): JSX.Element {
     },
     onError: (error) => {
       const found = issuesFromError(error);
-      setIssues(found);
+      showIssues(found, config);
       toast.error(
         found.length > 0
           ? t('connectPageEditor.refused', { count: found.length })
@@ -154,8 +178,8 @@ export function ConnectPageEditor(): JSX.Element {
 
   const check = useMutation({
     mutationFn: (config: ConnectPageConfig) => connectPageApi.validate(config),
-    onSuccess: (result) => {
-      setIssues([...result.issues]);
+    onSuccess: (result, submitted) => {
+      showIssues([...result.issues], submitted);
       if (result.ok) toast.success(t('connectPageEditor.checkClean'));
     },
     onError: () => toast.error(t('connectPageEditor.checkFailed')),
@@ -163,9 +187,19 @@ export function ConnectPageEditor(): JSX.Element {
 
   const iconKeys = useMemo(() => Object.keys(config?.icons ?? {}).sort(), [config?.icons]);
 
-  if (isError || (!isLoading && config === null)) {
-    // `retry: false` is the client default, so this is the only attempt. An
-    // endless skeleton with no words was the previous answer to a 500.
+  // Only when there is NOTHING to show. `isError` alone used to be enough, and
+  // that made a background refetch able to replace a live editor with an error
+  // card — taking the unsaved-changes guard below down with it, because the
+  // guard lives in the main branch. The path is short and ordinary: save, the
+  // save's own `invalidateQueries` refetches, the refetch answers 500, and a
+  // draft that is still perfectly present in state now sits behind a card with
+  // no prompt on it. The next click on the side menu loses the work silently,
+  // which is the failure this whole patch was about.
+  //
+  // `retry: false` is the client default, so a failed fetch is the only
+  // attempt; an endless skeleton with no words was the answer before that.
+  // Same shape as `landing-builder-page.tsx`, and for the same reason.
+  if (config === null && (isError || !isLoading)) {
     return (
       <Card className="border-destructive/40 bg-destructive/5">
         <CardHeader className="pb-2">
@@ -203,8 +237,14 @@ export function ConnectPageEditor(): JSX.Element {
     // and re-read them, once per fix. The hint above the card invites reading it
     // as a checklist and the card deleted itself at the first tick.
     //
-    // So the list is dropped when the SHAPE moves, not when the text does.
-    if (shapeOf(updated) !== shapeOf(config)) setIssues([]);
+    // Cheap by construction: nothing to compare while there is no list, and
+    // nothing to recompute once it is already known to be stale. On a catalog
+    // at the schema ceiling `shapeOf` builds a 400 KB string, so "only while a
+    // list is on screen and still fresh" is the difference between paying that
+    // on every keystroke and paying it almost never.
+    if (issues.length > 0 && !issuesStale && issuesShape !== null && shapeOf(updated) !== issuesShape) {
+      setIssuesStale(true);
+    }
     setDraft(updated);
   };
 
@@ -292,7 +332,17 @@ export function ConnectPageEditor(): JSX.Element {
               <AlertTriangle className="h-4 w-4 text-destructive" />
               {t('connectPageEditor.issuesTitle')}
             </CardTitle>
-            <CardDescription>{t('connectPageEditor.issuesHint')}</CardDescription>
+            <CardDescription>
+              {t('connectPageEditor.issuesHint')}
+              {/* Said, not guessed. The rows below are still the server's answer;
+                  what changed is that a row has moved since it wrote them, so the
+                  addresses may now point one place along. */}
+              {issuesStale && (
+                <span className="mt-1 block text-amber-600 dark:text-amber-500">
+                  {t('connectPageEditor.issuesStale')}
+                </span>
+              )}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-1.5">
             {issues.map((issue, index) => (

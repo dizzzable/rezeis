@@ -305,6 +305,25 @@ describe('what parses perfectly and still shows nothing', () => {
     assert.ok(issues.some((issue) => /must not carry/i.test(issue.message)));
   });
 
+  it('refuses an icon key that only the prototype chain answers to', () => {
+    // `constructor` is a valid slug, and the membership check used `in`, which
+    // walks the prototype chain — so this catalog audited CLEAN, saved, and
+    // handed the cabinet `Object` itself where an SVG string belongs. Every
+    // member of `Object.prototype` is a slug: `toString`, `valueOf`, the lot.
+    for (const key of ['constructor', 'toString', 'valueOf']) {
+      const draft = config();
+      draft.icons = {};
+      draft.platforms[0].apps[0].iconKey = key;
+
+      const issues = auditConnectPageConfig(draft);
+
+      assert.ok(
+        issues.some((issue) => issue.message.includes(`Icon "${key}" is not in the icon library`)),
+        `${key} was accepted as an icon key: ${JSON.stringify(issues)}`,
+      );
+    }
+  });
+
   it('says nothing about a catalog that is fine', () => {
     assert.deepEqual(auditConnectPageConfig(config()), []);
   });

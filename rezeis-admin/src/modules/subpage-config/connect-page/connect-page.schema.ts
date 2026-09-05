@@ -353,6 +353,14 @@ export interface ConnectPageIssue {
  * the zod schema because zod validates a value against a shape, and these are
  * questions about relationships between values.
  */
+/**
+ * Own-property membership, spelled the long way because the API's TypeScript
+ * target predates `Object.hasOwn`.
+ */
+function hasOwnIcon(icons: Readonly<Record<string, string>>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(icons, key);
+}
+
 export function auditConnectPageConfig(config: ConnectPageConfig): ConnectPageIssue[] {
   const issues: ConnectPageIssue[] = [];
   const seenPlatforms = new Set<string>();
@@ -439,9 +447,14 @@ export function auditConnectPageConfig(config: ConnectPageConfig): ConnectPageIs
       }
     }
 
+    // Own property only, never `in`: `in` walks the prototype chain, and the slug
+    // rule accepts `constructor`, `toString` and every other member of
+    // `Object.prototype`. A catalog with `iconKey: 'constructor'` and an empty
+    // icon library audited CLEAN, saved, and handed the cabinet a FUNCTION
+    // where an SVG string belongs.
     for (const [ai, app] of platform.apps.entries()) {
       for (const key of [app.iconKey, ...app.steps.map((step) => step.iconKey)]) {
-        if (key !== null && key !== undefined && !(key in config.icons)) {
+        if (key !== null && key !== undefined && !hasOwnIcon(config.icons, key)) {
           issues.push({
             path: `${at}.apps[${ai}]`,
             message: `Icon "${key}" is not in the icon library`,
@@ -449,7 +462,11 @@ export function auditConnectPageConfig(config: ConnectPageConfig): ConnectPageIs
         }
       }
     }
-    if (platform.iconKey !== null && platform.iconKey !== undefined && !(platform.iconKey in config.icons)) {
+    if (
+      platform.iconKey !== null &&
+      platform.iconKey !== undefined &&
+      !hasOwnIcon(config.icons, platform.iconKey)
+    ) {
       issues.push({ path: at, message: `Icon "${platform.iconKey}" is not in the icon library` });
     }
   }

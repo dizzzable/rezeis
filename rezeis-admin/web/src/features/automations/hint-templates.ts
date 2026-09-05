@@ -71,7 +71,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
     tone: 'SUCCESS',
     // Straight to the connect screen: this is the one moment where the next
     // thing the person needs is unambiguous.
-    route: '/subscription/connect',
+    route: '/subscription',
     repeatable: true,
     ttlHours: 72,
   },
@@ -81,7 +81,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
     hintKey: 'tpl-trial-granted',
     mode: 'MODAL',
     tone: 'SUCCESS',
-    route: '/subscription/connect',
+    route: '/subscription',
     repeatable: false,
     ttlHours: 72,
   },

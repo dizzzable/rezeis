@@ -183,15 +183,31 @@ export default function SubpageConfigPage() {
       {/* Same reason as the buttons: `stored` is the EXTERNAL config's row, and
           "not saved yet, you are seeing the built-in default" is a sentence
           about a document the catalog tab does not show. The catalog reports its
-          own stored/corrupted state inside its own editor. */}
+          own stored/corrupted state inside its own editor.
+
+          No `FadeIn` around it any more: the wrapper animates on MOUNT, and
+          gating it by tab mounts it again on every return, so an install that
+          has never saved the external config replayed a 0.35s slide on each
+          switch and collapsed instantly on the way back, shoving the page. */}
       {!data?.stored && tab !== 'connect' && (
-        <FadeIn>
-          <Card className="border-amber-500/40 bg-amber-500/5">
-            <CardContent className="py-3 text-sm text-muted-foreground">
-              {t('subpageConfigPage.usingDefault')}
-            </CardContent>
-          </Card>
-        </FadeIn>
+        <Card className="border-amber-500/40 bg-amber-500/5">
+          <CardContent className="py-3 text-sm text-muted-foreground">
+            {t('subpageConfigPage.usingDefault')}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Hiding the header buttons on this tab took away the only thing that
+          said the OTHER document had unsaved edits — the Save button was
+          doubling as that reminder. The unsaved-changes guard belongs to the
+          catalog and knows nothing about this one, so leaving without a word
+          was possible. This says the word. */}
+      {tab === 'connect' && config !== null && config !== data?.config && (
+        <Card className="border-amber-500/40 bg-amber-500/5">
+          <CardContent className="py-3 text-sm text-muted-foreground">
+            {t('subpageConfigPage.otherTabUnsaved')}
+          </CardContent>
+        </Card>
       )}
 
       <Tabs value={tab} onValueChange={setTab}>

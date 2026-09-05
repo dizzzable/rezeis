@@ -144,7 +144,10 @@ describe('a refused save', () => {
     expect(screen.getByText('has no recommended app')).toBeInTheDocument()
   })
 
-  it('drops the list when a row actually moves, because the paths then lie', async () => {
+  it('keeps the list but says it may be stale once a row actually moves', async () => {
+    // A reorder repoints every path after it, so the addresses can now be one
+    // row out. Deleting the list over that would cost the operator every other
+    // row; saying so costs them nothing and is checkable in one click.
     vi.mocked(connectPageApi.replace).mockRejectedValue(
       refusal([{ path: 'platforms[0].apps[1]', message: 'has no way to hand over the subscription' }]),
     )
@@ -153,14 +156,33 @@ describe('a refused save', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Save the catalog' }))
     expect(await screen.findByText(/has no way to hand over/)).toBeInTheDocument()
+    expect(screen.queryByText(/paths on the left may have shifted/)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /iPhone and iPad/ }))
     const up = await screen.findAllByRole('button', { name: 'Move up' })
     await user.click(up[up.length - 1]!)
 
-    await waitFor(() => {
-      expect(screen.queryByText(/has no way to hand over/)).not.toBeInTheDocument()
-    })
+    expect(await screen.findByText(/paths on the left may have shifted/)).toBeInTheDocument()
+    expect(screen.getByText(/has no way to hand over/)).toBeInTheDocument()
+  })
+
+  it('does not cry stale over an edit that moves no row', async () => {
+    // The app id is a free text field, and "Two apps share the id" is one of
+    // the rows that sends an operator to it. Typing there shifts nothing.
+    vi.mocked(connectPageApi.replace).mockRejectedValue(
+      refusal([{ path: 'platforms[0].apps[0]', message: 'Two apps share the id "happ"' }]),
+    )
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Save the catalog' }))
+    expect(await screen.findByText(/Two apps share the id/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /iPhone and iPad/ }))
+    await user.type(await screen.findByLabelText('Platform name (ru)'), 'X')
+
+    expect(screen.getByText(/Two apps share the id/)).toBeInTheDocument()
+    expect(screen.queryByText(/paths on the left may have shifted/)).not.toBeInTheDocument()
   })
 })
 
@@ -197,6 +219,38 @@ describe('leaving with work that is not saved', () => {
     await waitFor(() => {
       expect(fireBeforeUnload().defaultPrevented).toBe(false)
     })
+  })
+})
+
+describe('a background refetch that fails under a live draft', () => {
+  it('leaves the editor and its guard on screen instead of an error card', async () => {
+    // The save's own `invalidateQueries` is what refetches, so this path is
+    // ordinary rather than exotic: save, refetch, 500. The draft is still in
+    // state — replacing the editor with an error card would hide it AND
+    // unmount the unsaved-changes guard, and the next click on the side menu
+    // would take the work with it without a word.
+    vi.mocked(connectPageApi.get)
+      .mockReset()
+      .mockResolvedValueOnce({ config: CONFIG, stored: true, corrupted: null })
+      .mockRejectedValue(new Error('boom'))
+    vi.mocked(connectPageApi.replace).mockResolvedValue({ config: CONFIG, cleanedIcons: {} })
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: /iPhone and iPad/ }))
+    await user.type(await screen.findByLabelText('Platform name (ru)'), 'X')
+    await user.click(screen.getByRole('button', { name: 'Save the catalog' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(connectPageApi.get).mock.calls.length).toBeGreaterThan(1)
+    })
+
+    expect(screen.queryByText('Could not load the catalog')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save the catalog' })).toBeInTheDocument()
+
+    // And the guard is still armed once the draft is dirty again.
+    await user.type(await screen.findByLabelText('Platform name (ru)'), 'Y')
+    expect(fireBeforeUnload().defaultPrevented).toBe(true)
   })
 })
 

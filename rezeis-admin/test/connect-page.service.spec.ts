@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ConnectPageService } from '../src/modules/subpage-config/connect-page/connect-page.service';
+import {
+  ConnectPageService,
+  MAX_REPORTED_ISSUES,
+} from '../src/modules/subpage-config/connect-page/connect-page.service';
 import { DEFAULT_CONNECT_PAGE_CONFIG } from '../src/modules/subpage-config/connect-page/connect-page.default';
 import type { PrismaService } from '../src/common/prisma/prisma.service';
 
@@ -174,6 +177,47 @@ describe('the dry run judges exactly as the save does', () => {
     assert.deepEqual(result.cleanedIcons['x'], ['event handler']);
   });
 
+  it('reports the same number of rows the save reports', async () => {
+    // The preview returned EVERY row while the save threw every row into a
+    // filter that keeps twenty: a catalog with forty-two problems previewed
+    // forty-two and refused with twenty. The operator fixes what they can see,
+    // presses save, and is handed a different list. Both slice now.
+    const many = {
+      ...catalog(),
+      platforms: Array.from({ length: 7 }, (_, index) => ({
+        id: ['ios', 'android', 'windows', 'macos', 'linux', 'androidtv', 'appletv'][index],
+        title: { ru: '', en: '' },
+        iconKey: null,
+        apps: Array.from({ length: 5 }, (_, app) => ({
+          id: `app-${app}`,
+          name: `App ${app}`,
+          iconKey: null,
+          featured: false,
+          // A step whose title is present in both locales and empty in both:
+          // parses, and the audit refuses one row per step. Seven platforms
+          // with no recommended app plus thirty-five blank titles is the
+          // forty-two-row catalog from the report.
+          steps: [
+            {
+              title: { ru: '', en: '' },
+              body: null,
+              iconKey: null,
+              buttons: [{ kind: 'copyLink', label: { ru: 'Копировать', en: 'Copy' } }],
+            },
+          ],
+        })),
+      })),
+    };
+    const { service: s } = service();
+
+    const preview = s.dryRun(many);
+    const refusal = await refusalOf(() => s.replaceConfig(many));
+
+    assert.equal(preview.ok, false);
+    assert.equal(preview.issues.length, MAX_REPORTED_ISSUES);
+    assert.equal(refusal.length, MAX_REPORTED_ISSUES);
+  });
+
   it('refuses the same catalogs the save refuses', async () => {
     const { service: s } = service();
     const broken = { ...catalog(), platforms: [] };
@@ -202,3 +246,15 @@ describe('the dry run judges exactly as the save does', () => {
     await assert.rejects(() => s.replaceConfig(catalog({ big: dense })));
   });
 });
+
+/** The rows a refusal actually carried, or a failure saying it did not refuse. */
+async function refusalOf(run: () => Promise<unknown>): Promise<{ message: string }[]> {
+  try {
+    await run();
+  } catch (error) {
+    return (
+      (error as { response?: { issues?: { message: string }[] } }).response?.issues ?? []
+    );
+  }
+  throw new Error('expected the save to be refused, and it was not');
+}

@@ -344,20 +344,21 @@ export const CODES_CARRYING_ISSUES: ReadonlySet<string> = new Set<string>([
   'CONNECT_PAGE_CATALOG_INVALID',
 ]);
 /**
- * Caps on the list, so a refusal cannot become a payload. Twenty is what the
- * throw sites already slice to; the two lengths are generous for a path like
- * `platforms[0].apps[2].steps[1]` and for a sentence, and short enough that a
- * body which smuggled something bigger loses it.
+ * Caps on the list, so a refusal cannot become a payload.
+ *
+ * Twenty matches `MAX_REPORTED_ISSUES` in `connect-page.service.ts`, which is
+ * where both the preview and the save slice — they have to agree, or the two
+ * answer the same catalog with different lists and the operator fixes rows
+ * that are already fixed. This cap is the independent backstop, not the
+ * primary one: a throw site that forgets to slice loses rows HERE, silently,
+ * so the sameness is asserted on the service side rather than assumed.
+ *
+ * The two lengths are generous for a path like `platforms[0].apps[2].steps[1]`
+ * and for a sentence; anything longer is trimmed, never dropped.
  */
 const MAX_SAFE_ISSUES = 20;
 const MAX_SAFE_ISSUE_PATH_LENGTH = 200;
 const MAX_SAFE_ISSUE_MESSAGE_LENGTH = 300;
-/**
- * What a row says when its own text was scrubbed. Deliberately says which row
- * rather than nothing: the path beside it is still the address of the field,
- * and an operator who can see the address can find the field.
- */
-const REDACTED_ISSUE_MESSAGE = 'This row was refused; its diagnostic could not be shown';
 /**
  * Sentences the panel wrote on purpose, and is therefore allowed to say out
  * loud. Matched on EXACT equality against the whole string.
@@ -589,14 +590,41 @@ function extractSafeReauthFactor(
  * The `issues` passthrough. Gated on the code like `factor`, and then REBUILT
  * rather than forwarded: every row that survives is a fresh `{ path, message }`
  * of two strings this function checked itself, so a body carrying
- * `issues: [{ path, message, sql }]` leaves the `sql` behind.
+ * `issues: [{ path, message, sql }]` leaves the `sql` behind. That rebuild is
+ * the whole safety property here, and it is unconditional.
  *
- * Both halves still meet the pattern scrub. The rows are written by the panel,
- * but half of what they quote is text the OPERATOR typed — an app name, an icon
- * key — and the scrub is what stops a submitted document from choosing what
- * this filter says. A row whose message trips it keeps its path, because the
- * path is what the editor scrolls to and it is built from field names and
- * indices, never from submitted text.
+ * ── Why the pattern scrub is NOT applied to these two strings ────────────────
+ *
+ * It was, briefly, and it was worse than useless. Three things, in order:
+ *
+ *   1. It protected nothing. The same rows are already served on 200 by
+ *      `POST /admin/connect-page/validate`, to the same caller, under the same
+ *      `subpage_config:edit`, and a 200 never meets this filter. The editor
+ *      calls it one click before the save. A sentence this filter refuses to
+ *      say on 400 is a sentence the same operator just read on 200.
+ *   2. It corrupted real diagnostics. Half of what a row quotes is text the
+ *      OPERATOR typed, and `slugify` turns an icon named "Password Manager"
+ *      into the key `password-manager` — which the scrub's own patterns treat
+ *      as a credential. So `icons.password-manager` became `` and the row lost
+ *      the one thing the editor scrolls to, while "Password Manager" in a
+ *      message replaced the sentence outright.
+ *   3. Its patterns cannot do the job anyway. They look for driver and provider
+ *      leakage — connection strings, tokens in URLs. They are not, and were
+ *      never, a filter on what an authenticated operator may read back about
+ *      their own submitted document.
+ *
+ * What DOES hold the line stays: the code allowlist above, the rebuild below,
+ * and the caps. Add a code to {@link CODES_CARRYING_ISSUES} only when its rows
+ * are per-row diagnostics for a document that operator just submitted.
+ *
+ * ── Too long is trimmed, never dropped ──────────────────────────────────────
+ *
+ * Dropping was the first shape and it reinstated the bug this channel exists to
+ * fix: twenty unknown top-level keys make zod write ONE 367-character sentence,
+ * the only row was dropped, `issues` came back absent, and the editor said
+ * "could not save" and nothing else — exactly the mute refusal, now reachable
+ * from a longer document instead of from the filter. A trimmed row still names
+ * its address and still says most of its sentence.
  */
 function extractSafeIssues(
   payload: { readonly code: string; readonly body: Record<string, unknown> } | undefined,
@@ -613,14 +641,17 @@ function extractSafeIssues(
     const path: unknown = row.path;
     const message: unknown = row.message;
     if (typeof path !== 'string' || typeof message !== 'string') continue;
-    if (path.length > MAX_SAFE_ISSUE_PATH_LENGTH) continue;
-    if (message.length > MAX_SAFE_ISSUE_MESSAGE_LENGTH) continue;
     issues.push({
-      path: containsSensitiveHttpText(path) ? '' : path,
-      message: containsSensitiveHttpText(message) ? REDACTED_ISSUE_MESSAGE : message,
+      path: trimTo(path, MAX_SAFE_ISSUE_PATH_LENGTH),
+      message: trimTo(message, MAX_SAFE_ISSUE_MESSAGE_LENGTH),
     });
   }
   return issues.length > 0 ? issues : undefined;
+}
+
+/** Cut to a ceiling, and say so, so a trimmed sentence cannot read as a whole one. */
+function trimTo(value: string, ceiling: number): string {
+  return value.length <= ceiling ? value : `${value.slice(0, ceiling - 1)}…`;
 }
 
 function sanitizeHttpExceptionMessage(message: string, statusCode: number): string {

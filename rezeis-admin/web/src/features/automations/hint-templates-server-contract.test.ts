@@ -54,8 +54,36 @@ const DTO = readFileSync(
   'utf8',
 )
 
-/** Comments quote route names in prose; only the code is the contract. */
-const DTO_CODE = DTO.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+/**
+ * Comments quote route names in prose; only the code is the contract.
+ *
+ * The line form is stripped ANYWHERE on the line, not only at its start: a
+ * trailing `'/plans', // was '/tariffs'` left a phantom route in the parsed
+ * list, and a template aiming at that phantom would have passed this file and
+ * been refused by the server.
+ */
+const DTO_CODE = DTO.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+
+/**
+ * The decorators attached to one field, and nothing else.
+ *
+ * Every parse below anchors through here instead of searching the whole file,
+ * because searching the whole file is how `bound('bodyRu')` came back with
+ * titleRu's ceiling of 120 instead of its own 600 — the nearest earlier
+ * `@Length` happened to fall inside the search window — and how a second
+ * `@Matches` anywhere above `key` would have replaced the key pattern with
+ * itself and let the original broken keys straight through. "Something was
+ * found" is not "the right thing was found".
+ */
+function decoratorsFor(field: string): string {
+  const declaration = new RegExp(`\\n\\s*${field}\\??!?:`).exec(DTO_CODE)
+  expect(declaration, `no declaration of ${field} in the DTO`).not.toBeNull()
+  const before = DTO_CODE.slice(0, declaration!.index)
+  // Back to the end of the previous field: its `;`.
+  const block = before.slice(before.lastIndexOf(';') + 1)
+  expect(block.includes('@'), `no decorators found on ${field}`).toBe(true)
+  return block
+}
 
 function arrayLiteral(name: string): string[] {
   const start = DTO_CODE.indexOf(`export const ${name} = [`)
@@ -78,29 +106,38 @@ const RENDERABLE_MODES = (() => {
 })()
 
 const KEY_PATTERN = (() => {
-  const match = /@Matches\((\/[^/]+\/)[,)]/.exec(DTO_CODE)
+  const match = /@Matches\((\/[^/]+\/)[,)]/.exec(decoratorsFor('key'))
   expect(match, 'the key pattern is no longer declared the way this test reads it').not.toBeNull()
-  const [body, flags] = [match![1]!.slice(1, -1), '']
-  return new RegExp(body, flags)
+  return new RegExp(match![1]!.slice(1, -1))
 })()
 
 function bound(field: string): { min: number; max: number } {
-  const match = new RegExp(`@Length\\((\\d+),\\s*(\\d+)\\)[\\s\\S]{0,120}?\\b${field}\\??!?:`).exec(
-    DTO_CODE,
-  )
-  expect(match, `no @Length found for ${field}`).not.toBeNull()
-  return { min: Number(match![1]), max: Number(match![2]) }
+  const all = [...decoratorsFor(field).matchAll(/@Length\((\d+),\s*(\d+)\)/g)]
+  expect(all.length, `expected exactly one @Length on ${field}`).toBe(1)
+  return { min: Number(all[0]![1]), max: Number(all[0]![2]) }
 }
 
+const KEY = bound('key')
 const TITLE = bound('titleRu')
 const BODY = bound('bodyRu')
+const TITLE_EN = bound('titleEn')
+const BODY_EN = bound('bodyEn')
 const CTA = bound('ctaLabelRu')
 
+/**
+ * Resolve a template string, and FAIL rather than fall back.
+ *
+ * Answering a missing leaf with the key itself hands back a plausible
+ * 44-character string that fits every ceiling, so a deleted translation passed
+ * the length checks below in silence — and would have been sent to the server
+ * as the hint's actual text.
+ */
 const text = (key: string): string => {
   const path = key.split('.').slice(1)
   let node: unknown = ru.automationsPage
-  for (const step of path) node = (node as Record<string, unknown>)[step]
-  return typeof node === 'string' ? node : key
+  for (const step of path) node = (node as Record<string, unknown> | undefined)?.[step]
+  expect(typeof node, `${key} is missing from the ru bundle`).toBe('string')
+  return node as string
 }
 
 describe('every template is a payload the panel API accepts', () => {
@@ -141,8 +178,14 @@ describe('every template is a payload the panel API accepts', () => {
         expect(value.length, `${template.id}.${field} is empty`).toBeGreaterThanOrEqual(limits.min)
         expect(value.length, `${template.id}.${field} is too long`).toBeLessThanOrEqual(limits.max)
       }
-      if (hint.ctaLabelRu !== undefined) {
-        expect(hint.ctaLabelRu.length, `${template.id}.ctaLabelRu`).toBeLessThanOrEqual(CTA.max)
+      expect(hint.key.length, `${template.id}.key`).toBeLessThanOrEqual(KEY.max)
+      // The English half goes into its own columns and was never measured.
+      expect(hint.titleEn?.length ?? 0, `${template.id}.titleEn`).toBeLessThanOrEqual(TITLE_EN.max)
+      expect(hint.bodyEn?.length ?? 0, `${template.id}.bodyEn`).toBeLessThanOrEqual(BODY_EN.max)
+      for (const label of [hint.ctaLabelRu, hint.ctaLabelEn]) {
+        if (label !== undefined) {
+          expect(label.length, `${template.id} cta label`).toBeLessThanOrEqual(CTA.max)
+        }
       }
     }
   })

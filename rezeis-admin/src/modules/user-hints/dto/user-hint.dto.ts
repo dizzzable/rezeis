@@ -45,15 +45,17 @@ export const HINT_ROUTE_TARGETS = [
   '/dashboard',
   '/subscription',
   '/subscription/devices',
-  // The cabinet's own connect screen (`App.tsx`, `/subscription/connect`). It
-  // is the destination for the two hints raised right after a subscription
-  // starts — "you bought it, now put it on your phone" — and it was missing
-  // here while two shipped templates pointed at it, so both were refused by
-  // `validateCtaTarget` with a message listing every route except the one they
-  // wanted. Reachable only while the operator has the connect screen switched
-  // on; with it off the cabinet's own guard sends the customer to the external
-  // page instead, which is the same place the button meant.
-  '/subscription/connect',
+  // NOT `/subscription/connect`, deliberately, though the cabinet does have
+  // that route. Whether a customer lands on the internal connect screen or is
+  // sent to the external subscription page is the operator's decision, and it
+  // lives in ONE switch — which the cabinet reads in exactly one place, the
+  // dashboard's Connect button. A hint's button calls `navigate()` directly,
+  // so pointing one at that route hands every reader the internal screen even
+  // on the installs where the switch is off, which is the default. Two entry
+  // points, one switch, and the switch would govern only one of them.
+  //
+  // The hints that want to say "you bought it, now install it" point at
+  // `/subscription` and let the customer take the door the operator opened.
   '/plans',
   '/purchase',
   '/renew',

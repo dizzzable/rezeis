@@ -27,6 +27,22 @@ import { InvalidIconError, sanitizeIconMarkup } from './svg-sanitizer.util';
 export const CONNECT_PAGE_CATALOG_INVALID = 'CONNECT_PAGE_CATALOG_INVALID';
 
 /**
+ * How many refused rows either answer carries.
+ *
+ * The SAME number on both, and that is the point. The preview and the save must
+ * describe one catalog with one list: the preview used to return every row
+ * while the save threw every row into a filter that keeps twenty, so a catalog
+ * with forty-two problems previewed forty-two and refused with twenty — the
+ * operator fixes the visible ones, presses save, and is handed a different
+ * list. Icon rows come first, so a broken icon library could push every audit
+ * row out of the answer entirely.
+ *
+ * Twenty is a working set, not a limit on how broken a catalog may be: fix
+ * these, press again, get the next twenty.
+ */
+export const MAX_REPORTED_ISSUES = 20;
+
+/**
  * ConnectPageService
  * ──────────────────
  * Owns the catalog the cabinet's connect screen renders.
@@ -186,7 +202,7 @@ export class ConnectPageService {
       throw new BadRequestException({
         code: CONNECT_PAGE_CATALOG_INVALID,
         message: 'Invalid connect-page config',
-        issues: parsed.error.issues.slice(0, 20).map((issue) => ({
+        issues: parsed.error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
           path: issue.path.join('.'),
           message: issue.message,
         })),
@@ -203,7 +219,10 @@ export class ConnectPageService {
     // The audit runs on the CLEANED config: an icon the sanitizer refused is an
     // icon key that no longer exists, and the audit is what notices that
     // something still points at it.
-    const issues = [...iconIssues, ...auditConnectPageConfig(config)];
+    const issues = [...iconIssues, ...auditConnectPageConfig(config)].slice(
+      0,
+      MAX_REPORTED_ISSUES,
+    );
     if (issues.length > 0) {
       throw new BadRequestException({
         code: CONNECT_PAGE_CATALOG_INVALID,
@@ -246,7 +265,7 @@ export class ConnectPageService {
       return {
         ok: false,
         cleanedIcons: {},
-        issues: parsed.error.issues.slice(0, 20).map((issue) => ({
+        issues: parsed.error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
           path: issue.path.join('.'),
           message: issue.message,
         })),
@@ -261,7 +280,7 @@ export class ConnectPageService {
       ...auditConnectPageConfig(
         normalizeConnectPageConfig({ ...parsed.data, icons, connectScreenEnabled: false }),
       ),
-    ];
+    ].slice(0, MAX_REPORTED_ISSUES);
     return { ok: issues.length === 0, issues, cleanedIcons };
   }
 

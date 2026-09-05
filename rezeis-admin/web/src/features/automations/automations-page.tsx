@@ -213,9 +213,23 @@ export default function AutomationsPage() {
     mutationFn: async (template: HintTemplate) => {
       const payload = buildHint(template, (key) => String(t(key)));
       const existing = (await listUserHints()).find((hint) => hint.key === template.hintKey);
-      return existing === undefined
-        ? createUserHint(payload)
-        : updateUserHint(existing.id, payload);
+      if (existing === undefined) return createUserHint(payload);
+      // Refresh the WORDS, keep the operator's aiming.
+      //
+      // This branch was unreachable until the keys were fixed, and the first
+      // time it ran it would have undone real work: a template ships no
+      // audience at all, so a hint narrowed to Telegram on mobile went back to
+      // everyone everywhere, its `groupKey` — the thing that stops two windows
+      // stacking — was cleared, and a hint the operator had switched OFF was
+      // switched back on for customers. Applying a template twice means "give
+      // me the stock text back", not "forget who I aimed it at".
+      return updateUserHint(existing.id, {
+        ...payload,
+        surfaces: existing.surfaces,
+        formFactors: existing.formFactors,
+        ...(existing.groupKey === null ? {} : { groupKey: existing.groupKey }),
+        isActive: existing.isActive,
+      });
     },
     onSuccess: (hint, template) => {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'user-hints'] });
