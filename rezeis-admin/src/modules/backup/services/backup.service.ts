@@ -170,7 +170,16 @@ export interface BackupDeliveryOutcome {
  * Everything else — a missing file, an unconfigured chat, an absent crypt key,
  * a refusal from the Bot API on the direct path — returned in silence.
  */
-const REASONS_THAT_ALREADY_REPORTED: ReadonlySet<string> = new Set(['too_large_for_telegram']);
+/**
+ * The one spelling of the too-large outcome, shared by the `return` that
+ * produces it and the set that excludes it from a second card. They used to be
+ * two literals 790 lines apart with nothing tying them together: rename one and
+ * the operator silently gets two cards about one archive — exactly the split
+ * message this work was undoing.
+ */
+const TOO_LARGE_REASON = 'too_large_for_telegram';
+
+const REASONS_THAT_ALREADY_REPORTED: ReadonlySet<string> = new Set([TOO_LARGE_REASON]);
 
 /**
  * Every relay outcome, whatever its status. The reason is built as
@@ -669,6 +678,18 @@ export class BackupService implements OnModuleInit {
     filename: string,
     scope: string,
     initiatedBy: string | null,
+    /**
+     * Whether the caller is going to hand this archive to Telegram — and
+     * therefore whether the completion card should stay quiet because the
+     * archive will carry the news itself.
+     *
+     * PASSED IN, not read here. It used to be read here AND again in the
+     * processor, which is two answers to one question with a window between
+     * them: flip the setting in that window and the operator gets either two
+     * messages about one archive or none at all. One reading, one decision,
+     * handed down.
+     */
+    willDeliverFile: boolean,
   ): Promise<{ sizeBytes: number; checksum: string }> {
     const dir = this.getBackupLocation();
     await fsp.mkdir(dir, { recursive: true });
@@ -697,7 +718,6 @@ export class BackupService implements OnModuleInit {
       // Telegram delivery off there is no other message, so the card goes as
       // before: a silent success is indistinguishable from a backup that never
       // ran.
-      const willDeliverFile = await this.shouldDeliverToTelegram();
       this.systemEventsService.emit({
         type: EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
         category: 'SYSTEM',
@@ -962,7 +982,7 @@ export class BackupService implements OnModuleInit {
         { backupId: recordId, filename, sizeBytes: stat.size, deliveredToTelegram: false },
       );
       // Terminal: no number of retries shrinks the file.
-      return terminalDelivery('too_large_for_telegram');
+      return terminalDelivery(TOO_LARGE_REASON);
     }
 
     // The caption IS the notification now, so it carries what the separate

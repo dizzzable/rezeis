@@ -152,7 +152,6 @@ export class UserHintDeliveryService {
       },
     });
 
-    await this.copyToFeed(input.userId, hint, delivery.id);
     return delivery;
   }
 
@@ -164,6 +163,9 @@ export class UserHintDeliveryService {
    * that was the end of the text — the hint lived only in its own delivery
    * table, which nothing in the cabinet reads back. Whatever the operator
    * needed to say ("welcome aboard, look in Help") was gone.
+   *
+   * Called from `markShown`, once, on the first time a hint reaches a screen —
+   * see the reasoning there for why queue time was the wrong moment.
    *
    * ── Written straight to the feed table, not through `UserNotifications` ────
    *
@@ -182,16 +184,22 @@ export class UserHintDeliveryService {
    * copy could not be written, and the operator's popup must not fail over its
    * own safety net.
    */
-  private async copyToFeed(
-    userId: string,
-    hint: { key: string; titleRu: string; bodyRu: string; titleEn: string | null; bodyEn: string | null },
-    deliveryId: string,
-  ): Promise<void> {
+  private async copyToFeed(deliveryId: string, userId: string): Promise<void> {
     try {
-      const user = await this.prismaService.user.findUnique({
-        where: { id: userId },
-        select: { language: true },
-      });
+      const [delivery, user] = await Promise.all([
+        this.prismaService.userHintDelivery.findUnique({
+          where: { id: deliveryId },
+          select: {
+            hint: {
+              select: { key: true, titleRu: true, bodyRu: true, titleEn: true, bodyEn: true },
+            },
+          },
+        }),
+        this.prismaService.user.findUnique({ where: { id: userId }, select: { language: true } }),
+      ]);
+      const hint = delivery?.hint;
+      if (!hint) return;
+
       // Per-field fallback, matching the notification templates: an operator
       // who translated the title and not the body still gets a localised
       // title rather than an English row with a Russian heading.
@@ -203,12 +211,19 @@ export class UserHintDeliveryService {
         data: {
           userId,
           type: HINT_FEED_NOTIFICATION_TYPE,
+          // Stamped READ. The words were on the customer's screen a moment ago
+          // — this row is where to find them again, not news. Left unread it
+          // would light the bell, and now also the home-screen icon, for text
+          // they had just been shown; and the icon cannot be corrected until
+          // the next push, so on iOS it would simply be wrong until then.
+          readAt: new Date(),
           payload: { title, text, hintKey: hint.key, hintDeliveryId: deliveryId },
         },
       });
     } catch (err) {
       this.logger.warn(
-        `Hint "${hint.key}" was delivered but its feed copy failed: ${(err as Error).message}`,
+        `Hint delivery ${deliveryId} was shown to user ${userId} but its feed copy failed: ` +
+          (err as Error).message,
       );
     }
   }
@@ -302,6 +317,24 @@ export class UserHintDeliveryService {
       where: { id: deliveryId, userId, shownAt: null },
       data: { shownAt: new Date() },
     });
+    // The feed copy is written HERE, on the first show, and nowhere else.
+    //
+    // Writing it at raise time was wrong in three ways at once, because being
+    // queued and being seen are different things:
+    //
+    //   - SUPERSESSION stopped working. Four hints sharing a `groupKey` are one
+    //     modal by design — and were four feed rows, which is the exact "one
+    //     purchase must not become four" this queue exists to prevent;
+    //   - the SURFACE filter was bypassed. A hint restricted to `browser`
+    //     never shows inside the Telegram mini app, and its copy landed in the
+    //     feed that the mini app renders — the "install the app" message inside
+    //     Telegram that the filter was written to stop;
+    //   - hints that expired, were switched off, or arrived in a mode the
+    //     cabinet does not draw left a row for words nobody ever saw.
+    //
+    // `updateMany` with `shownAt: null` in the WHERE makes this exactly-once
+    // without a second read: a re-render stamps nothing and copies nothing.
+    if (outcome.count > 0) await this.copyToFeed(deliveryId, userId);
     return outcome.count > 0;
   }
 

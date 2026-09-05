@@ -77,7 +77,12 @@ function hint(over: Partial<FakeHint> = {}): FakeHint {
 
 function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: string) {
   let seq = 0;
-  const feedRows: Array<{ userId: string; type: string; payload: Record<string, unknown> }> = [];
+  const feedRows: Array<{
+    userId: string;
+    type: string;
+    payload: Record<string, unknown>;
+    readAt: Date | null;
+  }> = [];
   const prisma = {
     // The recipient's language, for the feed copy the popup leaves behind.
     user: {
@@ -87,8 +92,17 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
     // copy failed inside its own catch and every test here stayed green while
     // the safety net was not being written at all.
     userNotificationEvent: {
-      create: async ({ data }: { data: { userId: string; type: string; payload: Record<string, unknown> } }) => {
-        feedRows.push({ userId: data.userId, type: data.type, payload: data.payload });
+      create: async ({
+        data,
+      }: {
+        data: { userId: string; type: string; payload: Record<string, unknown>; readAt?: Date };
+      }) => {
+        feedRows.push({
+          userId: data.userId,
+          type: data.type,
+          payload: data.payload,
+          readAt: data.readAt ?? null,
+        });
         return { id: 'feed-' + feedRows.length };
       },
     },
@@ -120,6 +134,15 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
        * has to discriminate on the `where` it is handed, not on which caller it
        * guesses is asking.
        */
+      // The delivery row plus its hint, as `copyToFeed` reads it after a first
+      // show. Modelled from the same fixtures, so the copy describes the hint
+      // that was actually shown rather than one the test invented.
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        const row = deliveries.find((d) => d.id === where.id);
+        if (!row) return null;
+        const h = hints.find((x) => x.id === row.hintId);
+        return h === undefined ? null : { hint: h };
+      },
       updateMany: async ({
         where,
         data,
@@ -688,18 +711,73 @@ describe('the defects a review found, pinned', () => {
 });
 
 describe('the words survive the popup being closed', () => {
-  it('leaves a copy in the notification feed when a hint is queued', async () => {
+  /** Queue a hint and put it on screen, which is when the copy is written. */
+  async function raiseAndShow(h: ReturnType<typeof build>, key: string) {
+    const delivery = await h.service.raise({ userId: 'u1', hintKey: key, source: 's' });
+    if (delivery !== null) await h.service.markShown(delivery.id, 'u1');
+    return delivery;
+  }
+
+  it('leaves a copy in the notification feed once the hint is shown', async () => {
     // The whole point. A modal is read once and dismissed, and a mis-tap
     // dismisses it exactly as thoroughly as reading does — after which the
     // text existed only in a delivery table nothing in the cabinet reads.
     const h = build([hint({ key: 'welcome', titleRu: 'Добро пожаловать', bodyRu: 'Загляните в Помощь' })]);
 
-    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+    await raiseAndShow(h, 'welcome');
 
     assert.equal(h.feedRows.length, 1);
     assert.equal(h.feedRows[0]?.userId, 'u1');
     assert.equal(h.feedRows[0]?.payload['title'], 'Добро пожаловать');
     assert.equal(h.feedRows[0]?.payload['text'], 'Загляните в Помощь');
+  });
+
+  it('writes nothing until it actually reaches a screen', async () => {
+    // Queue time is not show time, and the difference is the whole reason this
+    // moved: a hint can be queued and never shown for half a dozen reasons.
+    const h = build([hint({ key: 'welcome' })]);
+
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    assert.deepEqual(h.feedRows, []);
+  });
+
+  it('does not turn one purchase into four rows', async () => {
+    // THE regression this move fixes. Four hints in one group are ONE modal by
+    // design — the newest supersedes the rest — and writing at queue time made
+    // them four feed rows anyway, which is the very thing the group exists to
+    // prevent, moved one surface over.
+    const h = build([
+      hint({ key: 'a', groupKey: 'purchase' }),
+      hint({ key: 'b', groupKey: 'purchase' }),
+      hint({ key: 'c', groupKey: 'purchase' }),
+      hint({ key: 'd', groupKey: 'purchase' }),
+    ]);
+
+    for (const key of ['a', 'b', 'c', 'd']) {
+      // Same clock as `nextFor` below: supersession stamps `expiresAt = now`,
+      // and a lapsed row is excluded by `expiresAt > now`. Two different
+      // `now`s would leave the lapsed rows a hair in the future and offerable.
+      await h.service.raise({ userId: 'u1', hintKey: key, source: 's', now: NOW });
+    }
+    const next = await h.service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+    if (next !== null) await h.service.markShown(next.deliveryId, 'u1');
+
+    assert.equal(h.feedRows.length, 1, JSON.stringify(h.feedRows.map((r) => r.payload['hintKey'])));
+    assert.equal(h.feedRows[0]?.payload['hintKey'], 'd', 'the newest of the group is the one kept');
+  });
+
+  it('writes one row however many times the same show is reported', async () => {
+    // `markShown` is idempotent, and the copy has to be too: a re-render must
+    // not add a second row.
+    const h = build([hint({ key: 'welcome' })]);
+    const delivery = await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    await h.service.markShown(delivery!.id, 'u1');
+    await h.service.markShown(delivery!.id, 'u1');
+    await h.service.markShown(delivery!.id, 'u1');
+
+    assert.equal(h.feedRows.length, 1);
   });
 
   it('names the fields the cabinet feed actually reads', async () => {
@@ -708,11 +786,22 @@ describe('the words survive the popup being closed', () => {
     // "Уведомление / Текст недоступен" — the failure this copy exists to avoid.
     const h = build([hint({ key: 'welcome' })]);
 
-    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+    await raiseAndShow(h, 'welcome');
 
     const payload = h.feedRows[0]?.payload ?? {};
     assert.ok('title' in payload && 'text' in payload, JSON.stringify(payload));
     assert.equal(payload['hintKey'], 'welcome');
+  });
+
+  it('marks the copy read, because the words were just on the screen', async () => {
+    // Left unread it would light the bell — and now the home-screen icon — for
+    // text the customer had just been shown. The row is where to find the
+    // words again, not news.
+    const h = build([hint({ key: 'welcome' })]);
+
+    await raiseAndShow(h, 'welcome');
+
+    assert.notEqual(h.feedRows[0]?.readAt ?? null, null);
   });
 
   it('writes the copy in the recipient language', async () => {
@@ -722,7 +811,7 @@ describe('the words survive the popup being closed', () => {
       'EN',
     );
 
-    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+    await raiseAndShow(h, 'welcome');
 
     assert.equal(h.feedRows[0]?.payload['title'], 'Welcome');
     assert.equal(h.feedRows[0]?.payload['text'], 'Take a look at Help');
@@ -733,35 +822,9 @@ describe('the words survive the popup being closed', () => {
     // a Russian body is one message in two languages; the body falls back.
     const h = build([hint({ key: 'welcome', titleEn: 'Welcome', bodyEn: null })], [], 'EN');
 
-    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+    await raiseAndShow(h, 'welcome');
 
     assert.equal(h.feedRows[0]?.payload['title'], 'Welcome');
     assert.equal(h.feedRows[0]?.payload['text'], 'Текст');
-  });
-
-  it('writes nothing when nothing was queued', async () => {
-    // A hint already delivered once and not repeatable queues nothing, so it
-    // must not leave a second row in the feed either.
-    const h = build(
-      [hint({ key: 'welcome' })],
-      [
-        {
-          id: 'd0',
-          userId: 'u1',
-          hintId: 'hint-welcome',
-          source: 's',
-          shownAt: null,
-          dismissedAt: null,
-          actedAt: null,
-          createdAt: NOW,
-          expiresAt: new Date(NOW.getTime() + 3_600_000),
-        },
-      ],
-    );
-
-    const queued = await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
-
-    assert.equal(queued, null);
-    assert.deepEqual(h.feedRows, []);
   });
 });

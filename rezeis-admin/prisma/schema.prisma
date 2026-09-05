@@ -2715,6 +2715,14 @@ model UserNotificationEvent {
   /// Backs the auto-renew warning dedup lookup
   /// (`userId=… AND type=… AND createdAt>threshold`).
   @@index([userId, type, createdAt])
+  /// Backs the unread total the home-screen icon badge carries on every push
+  /// (`userId=… AND readAt IS NULL`). The single-column indexes either side of
+  /// it cannot serve that pair: `userId` alone means fetching every row this
+  /// person ever received and filtering in memory, and the count now runs once
+  /// per push — including once per recipient of a broadcast. It gets worse with
+  /// age precisely where there are most rows, because reading a notification in
+  /// the Telegram bot does not stamp `read_at` at all.
+  @@index([userId, readAt])
   @@map("user_notification_events")
 }
 

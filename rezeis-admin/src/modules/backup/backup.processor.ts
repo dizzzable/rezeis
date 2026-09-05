@@ -94,12 +94,20 @@ export class BackupProcessor extends WorkerHost {
 
     await job.updateProgress({ stage: 'dumping', percent: 10 });
 
-    const result = await this.backupService.runDump(recordId, filename, scope, initiatedBy);
+    // ONE reading of the setting, used for both decisions it governs: whether
+    // the completion card stays quiet, and whether the archive is handed to
+    // Telegram at all. Two readings could disagree — see `runDump`.
+    const shouldDeliver = await this.backupService.shouldDeliverToTelegram();
+    const result = await this.backupService.runDump(
+      recordId,
+      filename,
+      scope,
+      initiatedBy,
+      shouldDeliver,
+    );
 
     await job.updateProgress({ stage: 'completed', percent: 100 });
 
-    // Auto-deliver to Telegram if configured
-    const shouldDeliver = await this.backupService.shouldDeliverToTelegram();
     if (shouldDeliver && result.sizeBytes > 0) {
       await this.backupService.enqueueDeliverTelegram(recordId, filename);
     }

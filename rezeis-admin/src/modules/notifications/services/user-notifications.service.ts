@@ -428,11 +428,18 @@ export class UserNotificationsService {
 
   private async deliverOperatorWebPush(userId: string, text: string): Promise<ChannelOutcome> {
     try {
+      // The badge total travels on THIS push too. Without it the operator's
+      // own message moved the bell and left the home-screen icon behind, so the
+      // icon read one short until some unrelated notification happened along
+      // and jumped it by two — the one place where the icon and the bell
+      // disagreed and the bell was right.
+      const badgeCount = await this.countUnread(userId);
       const result = await this.webPushService.sendToUser({
         userId,
         title: 'Reiwa',
         body: stripHtml(text),
         url: resolveNotificationPushUrl('ADMIN_MESSAGE'),
+        ...(badgeCount === undefined ? {} : { badgeCount }),
       });
       if (result.disabled) {
         return {

@@ -2018,6 +2018,19 @@ const TELEGRAM_CAPTION_LIMIT = 1024;
 const NEWLINE = String.fromCharCode(10);
 
 /**
+ * How far back a cut may walk looking for a safe boundary.
+ *
+ * A bound, not a nicety: an unterminated `&` or `<` further back than this is
+ * not the start of an entity or a tag, it is ordinary prose — and treating it
+ * as one threw away the rest of the card. `AT&T` followed by five thousand
+ * characters used to clip down to the two letters `AT`.
+ */
+const MAX_MARKUP_LOOKBEHIND = 16;
+
+/** Upper bound on the prefix search, so a huge input cannot make it quadratic. */
+const MAX_SAFE_CUT_SEARCH = 8192;
+
+/**
  * Cut an HTML card down to `limit` WITHOUT handing Telegram broken markup.
  *
  * Two rules, and both matter:
@@ -2048,27 +2061,74 @@ export function clipHtmlCard(html: string, limit: number): string {
   let kept = '';
   for (const line of html.split(NEWLINE)) {
     const next = kept.length === 0 ? line : `${kept}${NEWLINE}${line}`;
-    if (!fits(next)) break;
-    kept = next;
-  }
-
-  // A single line already too long: there is no boundary to honour, so take a
-  // head of it and shrink until the finished string fits. `escapeHtml` output
-  // cannot be split anywhere either — half of `&amp;` is not an entity — so
-  // the cut backs off to before the last unterminated `&`.
-  if (kept.length === 0) {
-    let head = html.slice(0, limit);
-    for (;;) {
-      const lastAmp = head.lastIndexOf('&');
-      const candidate = lastAmp > head.lastIndexOf(';') ? head.slice(0, lastAmp) : head;
-      if (fits(candidate) || candidate.length === 0) {
-        kept = candidate;
-        break;
-      }
-      head = head.slice(0, candidate.length - 1);
+    if (fits(next)) {
+      kept = next;
+      continue;
     }
+    // This line does not fit WHOLE — so take as much of it as does, and stop.
+    //
+    // Stopping outright was the first shape and it threw the budget away: the
+    // error message is ONE long line in the middle of the card, after a short
+    // hashtag line, so a 375-character message produced a 638-character result
+    // out of 1024 and the message itself — the only part anybody reads — was
+    // not in it. The card was shortened to the last thing that happened to end
+    // in a newline.
+    kept = headOf(next, fits);
+    break;
   }
   return `${kept}${closersFor(kept)}${marker}`;
+}
+
+/**
+ * The longest prefix of `value` that `fits`, cut somewhere it is safe to cut.
+ *
+ * Three things must not be halved, and all three are ordinary in these cards:
+ *
+ *   - an HTML entity: half of `&amp;` is not an entity, and Telegram refuses
+ *     the whole body over it;
+ *   - a tag: `<cod` is not markup, and `closersFor` cannot even see it to
+ *     balance it;
+ *   - a surrogate pair: these cards are full of emoji, and `slice` counts
+ *     UTF-16 code units, so an odd offset splits one in half.
+ *
+ * So the cut walks back from the naive offset to the nearest position that is
+ * outside all three, then shrinks further if the closers still do not fit.
+ */
+function headOf(value: string, fits: (candidate: string) => boolean): string {
+  let end = Math.min(value.length, MAX_SAFE_CUT_SEARCH);
+  while (end > 0) {
+    const candidate = value.slice(0, safeCutBefore(value, end));
+    if (candidate.length === 0) return '';
+    if (fits(candidate)) return candidate;
+    end = candidate.length - 1;
+  }
+  return '';
+}
+
+/**
+ * Walk `end` back to the first index that splits nothing.
+ *
+ * Bounded: an unterminated `&` or `<` more than this far back is not a real
+ * entity or tag, and treating it as one would throw away most of the card —
+ * `AT&T` followed by five thousand characters used to cut down to `AT`.
+ */
+function safeCutBefore(value: string, end: number): number {
+  let index = end;
+  // Never between the halves of a surrogate pair.
+  if (index > 0 && index < value.length) {
+    const code = value.charCodeAt(index - 1);
+    if (code >= 0xd800 && code <= 0xdbff) index -= 1;
+  }
+  const window = value.slice(Math.max(0, index - MAX_MARKUP_LOOKBEHIND), index);
+  const openTag = window.lastIndexOf('<');
+  if (openTag !== -1 && !window.slice(openTag).includes('>')) {
+    return index - (window.length - openTag);
+  }
+  const amp = window.lastIndexOf('&');
+  if (amp !== -1 && !window.slice(amp).includes(';')) {
+    return index - (window.length - amp);
+  }
+  return index;
 }
 
 /**

@@ -679,6 +679,8 @@ export class BroadcastDeliveryService {
     let circuitOpen = false;
     /** Recipients the operator cancelled while this batch was already running. */
     let cancelledMidBatch = 0;
+    /** Recipients whose cancellation arrived too late — the message had gone. */
+    let sentAfterCancel = 0;
 
     for (const message of messages) {
       // Re-read this row's status before spending anything on it.
@@ -962,15 +964,33 @@ export class BroadcastDeliveryService {
         // id is the only thing revoke can work from, so the row would be
         // unrevokable as well as unsent-looking. A send that happened is
         // recorded as a send.
-        await this.prismaService.broadcastMessage.update({
-          where: { id: message.id },
-          data: {
-            status: BroadcastMessageStatus.SENT,
-            telegramMessageId,
-            sentAt: new Date(),
-            errorMessage: null,
-          },
+        // Conditional first, and the miss is the signal.
+        //
+        // Zero rows affected means this message was PENDING when the guard
+        // looked and is not PENDING now — i.e. the cancellation landed while
+        // it was in flight. Nothing can un-send it, so it is still recorded as
+        // SENT (a sent message must stay revokable, and revoke reads
+        // `telegramMessageId` off SENT rows) — but it says how it got there,
+        // instead of erasing the only trace. `cancelBroadcast` answers the
+        // operator with a count overstated by exactly these, and "did anyone
+        // get it anyway" is the one thing an operator who cancelled because
+        // the text was wrong actually needs to know.
+        const sentData = {
+          status: BroadcastMessageStatus.SENT,
+          telegramMessageId,
+          sentAt: new Date(),
+        };
+        const claimed = await this.prismaService.broadcastMessage.updateMany({
+          where: { id: message.id, status: BroadcastMessageStatus.PENDING },
+          data: { ...sentData, errorMessage: null },
         });
+        if (claimed.count === 0) {
+          sentAfterCancel++;
+          await this.prismaService.broadcastMessage.update({
+            where: { id: message.id },
+            data: { ...sentData, errorMessage: 'sent_after_cancel' },
+          });
+        }
         sent++;
         continue;
       }
@@ -1052,6 +1072,12 @@ export class BroadcastDeliveryService {
     }
 
     await this.checkAndFinalize(broadcastId);
+    if (sentAfterCancel > 0) {
+      this.logger.warn(
+         +
+          'cancellation reached them — recorded SENT with ',
+      );
+    }
     if (cancelledMidBatch > 0) {
       // Worth a line of its own: from the tally alone, a batch stopped by the
       // operator and a batch that found nobody to write to look identical.

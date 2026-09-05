@@ -287,10 +287,19 @@ export class AdminBroadcastController {
       throw new BadRequestException('Only DRAFT, SCHEDULED or PROCESSING broadcasts can be canceled');
     }
 
-    const canceledMessages = await this.broadcastQueueService.cancelBroadcast(broadcastId);
-
-    // Update broadcast status
+    // The BROADCAST is marked cancelled first, then its messages — and the
+    // order matters now in a way it did not before.
+    //
+    // A running batch re-reads each recipient's status and skips the cancelled
+    // ones, which is the point; the side effect is that the batch finishes
+    // almost instantly instead of grinding through a relay call per person. It
+    // then calls `checkAndFinalize`, sees nothing pending, reads the broadcast
+    // row — and with the old order that row still said PROCESSING, so it
+    // finalised and sent the operator "Broadcast completed: N sent" about the
+    // broadcast they had just cancelled. Flipping the row first closes the
+    // window: a worker arriving in it now reads CANCELED and stands down.
     await this.broadcastService.updateStatus(broadcastId, 'CANCELED');
+    const canceledMessages = await this.broadcastQueueService.cancelBroadcast(broadcastId);
 
     return { canceledMessages, message: 'Broadcast canceled' };
   }

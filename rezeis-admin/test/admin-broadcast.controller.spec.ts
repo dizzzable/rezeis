@@ -520,8 +520,16 @@ describe('AdminBroadcastController', () => {
       // and reschedule address, instead of scanning the whole queue.
       ['recordSchedule', 'draft-1', null, 'job-1'],
       ['get', 'processing-1'],
-      ['cancelQueue', 'processing-1'],
+      // The BROADCAST is flipped to CANCELED before its messages are, and the
+      // order is load-bearing rather than incidental. A running batch now
+      // re-reads each recipient's status and skips the cancelled ones, so it
+      // finishes almost at once instead of grinding through a relay call per
+      // person — and then calls `checkAndFinalize`. With the old order that
+      // finalisation read a broadcast row still saying PROCESSING and sent the
+      // operator "Broadcast completed: N sent" about the broadcast they had
+      // just cancelled.
       ['status', 'processing-1', BroadcastStatus.CANCELED],
+      ['cancelQueue', 'processing-1'],
       ['get', 'completed-1'],
       ['updateContent', { broadcastId: 'completed-1', text: 'Updated text', parseMode: 'HTML' }],
       ['sentIds', 'completed-1'],
