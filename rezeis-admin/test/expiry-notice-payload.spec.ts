@@ -50,6 +50,12 @@ function buildService(options: {
   /** `null` makes every panel read fail, as an unreachable panel would. */
   readonly usage?: Record<string, unknown> | null;
   readonly devices?: number | null;
+  /**
+   * What the pre-send re-read reports. Defaults to ACTIVE; the expired-notice
+   * cases need EXPIRED, because that path's guard asks the status rather than
+   * the deadline.
+   */
+  readonly currentStatus?: SubscriptionStatus;
 } = {}) {
   const created: Array<{ type: string; payload: Record<string, unknown> }> = [];
   const queries: Array<Record<string, unknown>> = [];
@@ -59,6 +65,18 @@ function buildService(options: {
       findMany: async (args: { where: Record<string, unknown> }) => {
         queries.push(args.where);
         return options.rows ?? [subscriptionRow()];
+      },
+      // Re-read immediately before each send, to catch a renewal that landed
+      // between the batch and the notification. Here it answers "unchanged":
+      // what these cases are about is the FACTS the payload carries, not who
+      // gets one, so every selected row must still qualify.
+      findUnique: async (args: { where: { id: string } }) => {
+        const row = (options.rows ?? [subscriptionRow()]).find(
+          (candidate: { id: string }) => candidate.id === args.where.id,
+        );
+        return row === undefined
+          ? null
+          : { status: options.currentStatus ?? SubscriptionStatus.ACTIVE, expiresAt: row.expiresAt };
       },
     },
     userNotificationEvent: { findMany: async () => [] },
@@ -115,6 +133,10 @@ describe('the notices that never fired', () => {
   it('creates an "expired" notice for a subscription that just ended', async () => {
     const { service, created } = buildService({
       rows: [subscriptionRow({ expiresAt: new Date(NOW - 60 * 60 * 1000) })],
+      // Still expired when the send comes round — the ordinary case. The guard
+      // beside it drops rows that went back to ACTIVE while the batch was
+      // being sent, which is a customer who renewed mid-loop.
+      currentStatus: SubscriptionStatus.EXPIRED,
     });
 
     const count = await service.createExpiredNotices({
@@ -124,6 +146,24 @@ describe('the notices that never fired', () => {
 
     assert.equal(count, 1);
     assert.equal(created[0].type, 'expired');
+  });
+
+  it('says nothing to a customer who renewed while the expired batch was being sent', async () => {
+    // Worse than the warning: this one says the subscription HAS ended, and a
+    // customer who has just paid to continue it gets that minutes later.
+    const { service, created } = buildService({
+      rows: [subscriptionRow({ expiresAt: new Date(NOW - 60 * 60 * 1000) })],
+      // Back to ACTIVE by the time the loop reached this row.
+      currentStatus: SubscriptionStatus.ACTIVE,
+    });
+
+    const count = await service.createExpiredNotices({
+      daysAgo: 0,
+      notificationType: 'expired',
+    });
+
+    assert.equal(count, 0);
+    assert.deepEqual(created, []);
   });
 
   it('looks only at rows already marked EXPIRED, inside a bounded window', async () => {

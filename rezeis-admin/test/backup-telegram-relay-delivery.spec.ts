@@ -340,6 +340,14 @@ function buildHarness(fetchStub: FetchStub): Harness {
         }),
       },
       backupRecord: {
+        // The caption the archive carries now describes the record, so the
+        // delivery path reads it. Fixed values: what these cases are about is
+        // retry behaviour, not what the caption says.
+        findUnique: async () => ({
+          scope: 'DB',
+          checksum: 'cc618d41544a0000',
+          createdAt: new Date('2026-09-05T14:00:00.000Z'),
+        }),
         update: async (args: { where: unknown; data: Record<string, unknown> }) => {
           updates.push(args);
           return args;

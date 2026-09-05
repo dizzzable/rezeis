@@ -453,18 +453,56 @@ export class AutoRenewService {
     const notifiedUserIds = new Set<string>(alreadyNotifiedIds);
 
     let created = 0;
+    let renewedMidBatch = 0;
     for (const sub of expiringSoon) {
       if (notifiedUserIds.has(sub.userId)) {
         continue;
       }
-      notifiedUserIds.add(sub.userId);
 
+      // Re-read the deadline immediately before writing the warning.
+      //
+      // The batch above is ONE query, and everything below it is a loop of
+      // awaits: a payload build and a create that fans out to Telegram, per
+      // row, up to `WARNING_BATCH_SIZE` of them. A customer who renews while
+      // that loop is still running was selected on a deadline that no longer
+      // exists, and gets told their subscription is about to end minutes after
+      // paying to extend it — which is the report this guard comes from, and
+      // the one window in this path where the selector's own condition can go
+      // stale between the read and the send.
+      //
+      // Cheap: one indexed lookup per warning actually sent, against a fan-out
+      // that already costs a network round trip.
+      const current = await this.prismaService.subscription.findUnique({
+        where: { id: sub.id },
+        select: { status: true, expiresAt: true },
+      });
+      const stillExpiring =
+        current !== null &&
+        current.status === SubscriptionStatus.ACTIVE &&
+        current.expiresAt !== null &&
+        current.expiresAt > windowStart &&
+        current.expiresAt < horizon;
+      if (!stillExpiring) {
+        renewedMidBatch++;
+        continue;
+      }
+
+      notifiedUserIds.add(sub.userId);
       await this.userNotifications.create({
         userId: sub.userId,
         type: input.notificationType,
         payload: await this.noticePayload.build(sub, { daysLeft: input.daysAhead }),
       });
       created++;
+    }
+
+    if (renewedMidBatch > 0) {
+      // Worth a line: it is the difference between "the guard is doing its job"
+      // and "nobody is getting warned", and those look identical from `created`.
+      this.logger.log(
+        `"${input.notificationType}": skipped ${renewedMidBatch} subscription(s) whose deadline ` +
+          'moved between the batch read and the send',
+      );
     }
 
     if (created > 0) {
@@ -539,8 +577,24 @@ export class AutoRenewService {
     const notifiedUserIds = new Set<string>(alreadyNotifiedIds);
 
     let created = 0;
+    let revivedMidBatch = 0;
     for (const sub of justEnded) {
       if (notifiedUserIds.has(sub.userId)) continue;
+
+      // The same re-read as the warnings above, and the same window between a
+      // single batch query and a loop of sends — except the message here is
+      // "your subscription has ended", which is worse to receive minutes after
+      // paying to continue it. A renewal flips the row back to ACTIVE, so the
+      // status alone answers it.
+      const current = await this.prismaService.subscription.findUnique({
+        where: { id: sub.id },
+        select: { status: true },
+      });
+      if (current === null || current.status !== SubscriptionStatus.EXPIRED) {
+        revivedMidBatch++;
+        continue;
+      }
+
       notifiedUserIds.add(sub.userId);
       await this.userNotifications.create({
         userId: sub.userId,
@@ -548,6 +602,12 @@ export class AutoRenewService {
         payload: await this.noticePayload.build(sub, { daysLeft: 0 }),
       });
       created++;
+    }
+    if (revivedMidBatch > 0) {
+      this.logger.log(
+        `"${input.notificationType}": skipped ${revivedMidBatch} subscription(s) that stopped ` +
+          'being expired between the batch read and the send',
+      );
     }
     if (created > 0) {
       this.logger.log(`Created ${created} "${input.notificationType}" notifications`);

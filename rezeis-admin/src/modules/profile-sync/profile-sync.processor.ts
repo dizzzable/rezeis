@@ -868,11 +868,22 @@ export class ProfileSyncProcessor extends WorkerHost {
       this.logger.log(
         `Linked existing Remnawave profile '${existingRemnawaveId}' (username: ${panelUsername}) to subscription ${subscription.id}`,
       );
+      // Same card as the CREATE branch below, so the same fields: which branch
+      // ran is an internal detail, and an operator reading two notifications
+      // titled "Подписка создана" must not get the plan named in one and not
+      // the other.
       this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${panelUsername}`, {
         subscriptionId: subscription.id,
         userId: subscription.userId,
         remnawaveId: existingRemnawaveId,
         remnawaveUsername: panelUsername,
+        ...(readOptionalString(planSnapshot, 'name') !== undefined
+          ? { planName: readOptionalString(planSnapshot, 'name') }
+          : {}),
+        expireAt,
+        ...(typeof subscription.deviceLimit === 'number'
+          ? { deviceLimit: subscription.deviceLimit }
+          : {}),
       });
       return;
     }
@@ -966,11 +977,26 @@ export class ProfileSyncProcessor extends WorkerHost {
     );
 
     // Emit event
+    //
+    // `planName` and the two beside it are read off the snapshot the row
+    // already carries, because the card an operator gets in Telegram used to
+    // show the subscription as `ID: cmtodyjkc03u2013edxovuzfk` and nothing
+    // else. The renderer has printed `🏷 План:` all along; it was never given
+    // the field, so the one line that says WHICH plan somebody just bought was
+    // missing from the notification about buying a plan.
+    // `planSnapshot` and `expireAt` are the ones already read above for the
+    // panel payload — the same values, not a second reading of the same row.
+    const planName = readOptionalString(planSnapshot, 'name');
     this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${panelUsername}`, {
       subscriptionId: subscription.id,
       userId: subscription.userId,
       remnawaveId,
       remnawaveUsername: panelUsername,
+      ...(planName !== undefined ? { planName } : {}),
+      expireAt,
+      ...(typeof subscription.deviceLimit === 'number'
+        ? { deviceLimit: subscription.deviceLimit }
+        : {}),
     });
   }
 

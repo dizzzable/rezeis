@@ -660,6 +660,14 @@ export class BackupService implements OnModuleInit {
       // log with `adminUserId: null` and `ipAddress: 'system'`, so the audit
       // page showed "system" as the actor for all of them and the admin who
       // pressed the button survived only as a metadata string.
+      // The card is suppressed ONLY when the archive itself is about to be
+      // uploaded, because then the archive carries the same facts as its
+      // caption and the card was a second copy of them in a second topic — the
+      // file in "Бэкапы", the description of that file in "Система". With
+      // Telegram delivery off there is no other message, so the card goes as
+      // before: a silent success is indistinguishable from a backup that never
+      // ran.
+      const willDeliverFile = await this.shouldDeliverToTelegram();
       this.systemEventsService.emit({
         type: EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
         category: 'SYSTEM',
@@ -667,6 +675,7 @@ export class BackupService implements OnModuleInit {
         message: `Backup completed: ${filename} (${formatBytes(sizeBytes)})`,
         metadata: { backupId: recordId, filename, scope, sizeBytes, checksum, initiatedBy, stamped },
         adminId: initiatedBy,
+        skipTelegram: willDeliverFile,
       });
 
       await this.applyRetention();
@@ -884,7 +893,29 @@ export class BackupService implements OnModuleInit {
       return terminalDelivery('too_large_for_telegram');
     }
 
-    const caption = `🗄 Backup: ${filename}\nSize: ${formatBytes(stat.size)}`;
+    // The caption IS the notification now, so it carries what the separate
+    // card used to carry — and stops there. Telegram caps a caption at 1024
+    // characters and this is nowhere near it, which is the point: the card had
+    // room for Context and Build blocks that nobody reads on a backup, and
+    // buying them cost a second message in a second topic.
+    //
+    // Plain text, no parse mode: a filename is operator-supplied and both send
+    // paths below append this verbatim, so there is no markup here to get an
+    // apostrophe or an angle bracket wrong.
+    const record = await this.prismaService.backupRecord.findUnique({
+      where: { id: recordId },
+      select: { scope: true, checksum: true, createdAt: true },
+    });
+    const caption = [
+      `🗄 Резервная копия создана`,
+      `📁 ${filename}`,
+      `🗃 Размер: ${formatBytes(stat.size)}`,
+      ...(record?.scope ? [`📦 Объём: ${record.scope}`] : []),
+      ...(record?.checksum ? [`🔒 Контрольная сумма: ${record.checksum.slice(0, 12)}`] : []),
+      ...(record?.createdAt
+        ? [`🕒 ${record.createdAt.toISOString().replace('T', ' ').slice(0, 19)} UTC`]
+        : []),
+    ].join('\n');
 
     // Direct path — only when rezeis has a local bot token (single-process
     // deployments). On the split deployment the token lives in reiwa.

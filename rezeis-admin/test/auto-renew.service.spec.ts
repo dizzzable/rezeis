@@ -3,7 +3,7 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PaymentGatewayType, TransactionStatus } from '@prisma/client';
+import { PaymentGatewayType, SubscriptionStatus, TransactionStatus } from '@prisma/client';
 
 import { AutoRenewService } from '../src/modules/auto-renew/auto-renew.service';
 
@@ -24,6 +24,13 @@ interface SubRow {
 function createHarness(opts: {
   expiring: SubRow[];
   alreadyNotifiedUserIds: string[];
+  /**
+   * Deadlines as they are when the warning is about to be WRITTEN, keyed by
+   * subscription id — i.e. after anything that happened while the loop ran.
+   * Absent means unchanged. `null` means "this one was renewed", which is the
+   * case the guard exists for.
+   */
+  renewedDuringBatch?: Record<string, Date | null>;
 }): {
   service: AutoRenewService;
   createdFor: string[];
@@ -52,6 +59,20 @@ function createHarness(opts: {
         // everything would make the batch-full case unreachable and the test
         // below would pass against the defect.
         return args.take === undefined ? matching : matching.slice(0, args.take);
+      },
+      // The re-read the service does immediately before each send. It is not
+      // decoration in this double: the batch is one query and the sends are a
+      // loop, so a renewal that lands between them is invisible to `findMany`
+      // and visible only here. A double without it would let the guard be
+      // deleted with every test still green.
+      findUnique: async (args: { where: { id: string } }) => {
+        const row = opts.expiring.find((candidate) => candidate.id === args.where.id);
+        if (!row) return null;
+        const moved = opts.renewedDuringBatch?.[row.id];
+        return {
+          status: SubscriptionStatus.ACTIVE,
+          expiresAt: moved === undefined ? row.expiresAt : moved,
+        };
       },
     },
     userNotificationEvent: {
@@ -82,7 +103,19 @@ function createHarness(opts: {
   return { service, createdFor, counters };
 }
 
-const soon = new Date(Date.now() + 24 * 60 * 60 * 1000);
+/**
+ * A deadline that genuinely sits inside the window the service computes for
+ * `daysAhead` — an hour before the horizon, in the three-hour band it selects.
+ *
+ * It used to be one fixed `now + 24h` shared by every case, including the one
+ * that asks for a THREE-day warning, and that worked only because the
+ * `findMany` double ignored the date term. The service now re-reads the
+ * deadline before each send, so a row declared "expiring" has to actually be.
+ */
+const inWindow = (daysAhead: number): Date =>
+  new Date(Date.now() + daysAhead * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
+const soon = inWindow(1);
+const soon3d = inWindow(3);
 
 describe('AutoRenewService.createExpiryWarnings', () => {
   it('notifies each un-notified user exactly once and dedups the query to a single findMany', async () => {
@@ -115,15 +148,64 @@ describe('AutoRenewService.createExpiryWarnings', () => {
   it('sends only ONE notification to a user with multiple expiring subs (within-batch dedup)', async () => {
     const h = createHarness({
       expiring: [
-        { id: 's1', userId: 'userA', expiresAt: soon, planSnapshot: {} },
-        { id: 's2', userId: 'userA', expiresAt: soon, planSnapshot: {} },
-        { id: 's3', userId: 'userA', expiresAt: soon, planSnapshot: {} },
+        { id: 's1', userId: 'userA', expiresAt: soon3d, planSnapshot: {} },
+        { id: 's2', userId: 'userA', expiresAt: soon3d, planSnapshot: {} },
+        { id: 's3', userId: 'userA', expiresAt: soon3d, planSnapshot: {} },
       ],
       alreadyNotifiedUserIds: [],
     });
     const created = await h.service.createExpiryWarnings({ daysAhead: 3, notificationType: 'expires_in_3_days' });
     assert.equal(created, 1);
     assert.deepEqual(h.createdFor, ['userA']);
+  });
+
+  it('says nothing to a customer who renewed while the batch was being sent', async () => {
+    // THE REPORT. A customer renewed and was told minutes later that their
+    // subscription was about to end.
+    //
+    // The selector is right and the row does leave the window on renewal — but
+    // the window is read ONCE, and the sends that follow are a loop of awaits,
+    // one payload build and one fan-out per row, up to two hundred of them. A
+    // renewal that lands inside that loop is invisible to the batch and visible
+    // only to a re-read, which is what the service now does before each send.
+    const h = createHarness({
+      expiring: [
+        { id: 's1', userId: 'userA', expiresAt: soon, planSnapshot: {} },
+        { id: 's2', userId: 'userB', expiresAt: soon, planSnapshot: {} },
+        { id: 's3', userId: 'userC', expiresAt: soon, planSnapshot: {} },
+      ],
+      alreadyNotifiedUserIds: [],
+      // userB paid while the loop was on userA. Thirty days out: nowhere near
+      // the window the batch was selected on.
+      renewedDuringBatch: { s2: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
+    });
+
+    const created = await h.service.createExpiryWarnings({
+      daysAhead: 1,
+      notificationType: 'expires_in_1_days',
+    });
+
+    assert.equal(created, 2);
+    assert.deepEqual(h.createdFor.sort(), ['userA', 'userC']);
+  });
+
+  it('still warns the customers whose deadline did not move', async () => {
+    // The guard must not become a reason nobody is warned: same batch, nothing
+    // renewed, everybody told.
+    const h = createHarness({
+      expiring: [
+        { id: 's1', userId: 'userA', expiresAt: soon, planSnapshot: {} },
+        { id: 's2', userId: 'userB', expiresAt: soon, planSnapshot: {} },
+      ],
+      alreadyNotifiedUserIds: [],
+    });
+
+    const created = await h.service.createExpiryWarnings({
+      daysAhead: 1,
+      notificationType: 'expires_in_1_days',
+    });
+
+    assert.equal(created, 2);
   });
 
   it('sends nothing, and asks for the notified set exactly once, when nothing is expiring', async () => {
@@ -159,7 +241,7 @@ describe('AutoRenewService.createExpiryWarnings', () => {
     const expiring = Array.from({ length: WARNING_BATCH + 5 }, (_, index) => ({
       id: `sub-${index}`,
       userId: `user-${index}`,
-      expiresAt: new Date(Date.now() + 60_000),
+      expiresAt: inWindow(3),
       planSnapshot: null,
     })) as never[];
     const h = createHarness({

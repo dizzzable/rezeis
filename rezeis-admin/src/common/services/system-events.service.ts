@@ -92,6 +92,22 @@ export interface SystemEventPayload {
   readonly adminId?: string | null;
   /** Timestamp (auto-filled if not provided) */
   readonly timestamp?: string;
+  /**
+   * Skip the Telegram card for this one emit. Everything else — the audit log,
+   * the webhook, the realtime push, the hooks — still happens.
+   *
+   * For events whose story is told better by another message that is already
+   * going out, and would otherwise be told twice in two different places. The
+   * backup is the case it exists for: the archive is uploaded as a document
+   * with its own caption, and the card duplicated all of it into a second
+   * topic, so an operator saw the file in "Бэкапы" and the description of that
+   * file in "Система".
+   *
+   * Set it only when the other message is CERTAIN to be sent. Suppressing a
+   * card whose replacement never leaves is silence, and silence about a backup
+   * reads exactly like a backup that did not run.
+   */
+  readonly skipTelegram?: boolean;
 }
 
 // ── Predefined Event Types ──────────────────────────────────────────────────
@@ -548,9 +564,12 @@ export class SystemEventsService {
     }
 
     // 4. Deliver to Telegram group (async, non-blocking)
-    this.deliverTelegram(enrichedEvent).catch((err) => {
-      this.logger.error(`Telegram delivery failed for ${event.type}: ${(err as Error).message}`);
-    });
+    //    `skipTelegram` opts one emit out of THIS step alone — see the field.
+    if (event.skipTelegram !== true) {
+      this.deliverTelegram(enrichedEvent).catch((err) => {
+        this.logger.error(`Telegram delivery failed for ${event.type}: ${(err as Error).message}`);
+      });
+    }
 
     // 4b. Auto-archive ERROR reports to disk when mode=auto (async, non-blocking)
     this.archiveErrorReport(enrichedEvent).catch((err) => {
