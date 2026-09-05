@@ -1,7 +1,6 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { UNSAFE_DataRouterContext, useBlocker } from 'react-router'
 import { toast } from 'sonner'
 import {
   ChevronDown,
@@ -21,8 +20,8 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { isForceLogoutInProgress } from '@/lib/admin-session'
 import { Button } from '@/components/ui/button'
+import { UnsavedChangesGuard } from '@/components/unsaved-changes-guard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
@@ -188,11 +187,6 @@ export default function LandingBuilderPage() {
   const [saveIssues, setSaveIssues] = useState<LandingPublishStrictIssue[] | null>(null)
   const [rollbackTarget, setRollbackTarget] = useState<string | null>(null)
   const [templateTarget, setTemplateTarget] = useState<LandingTemplate | null>(null)
-  // `useBlocker` only exists inside a data router. The page ships inside
-  // `createBrowserRouter`, but it also renders under a plain `MemoryRouter`
-  // (tests, storybook-style harnesses) where the hook throws — so the guard is
-  // a child component that is mounted only once a data router is really there.
-  const inDataRouter = useContext(UNSAFE_DataRouterContext) !== null
 
   useEffect(() => {
     if (!data?.draft) return
@@ -340,27 +334,6 @@ export default function LandingBuilderPage() {
    * leave and restore the draft by hand.
    */
   const unsavedWork = dirty && corrupted === null
-
-  // Autosave debounces, and a save takes a round trip. A reload inside either
-  // window takes the edits with it, and the browser prompt is the only thing
-  // that can hold the tab long enough for the unmount flush above to land.
-  useEffect(() => {
-    if (!unsavedWork) return
-    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
-      // Not while the app is signing the operator out. A 401 destroys the
-      // session and then navigates the document to /sign-in, which fires this
-      // handler; the prompt's own wording ("changes may not be saved") argues
-      // for the button that cancels that redirect, and `forceEndAdminSession`
-      // fires no second one. Accepting it leaves the operator on an editor
-      // whose every save 401s, holding edits that can no longer be stored.
-      if (isForceLogoutInProgress()) return
-      event.preventDefault()
-      // Chrome and Safari still gate the prompt on a truthy legacy value.
-      event.returnValue = ''
-    }
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [unsavedWork])
 
   const publishMutation = useMutation({
     // Publish takes the STORED draft, so an edit still sitting in the autosave
@@ -902,7 +875,21 @@ export default function LandingBuilderPage() {
         </div>
       </div>
 
-      {inDataRouter && <UnsavedChangesGuard when={unsavedWork} />}
+      {/* Both layers, from one component. The browser prompt is not decoration
+          here: autosave debounces and a save takes a round trip, so a reload
+          inside either window takes the edits with it, and holding the tab is
+          what buys the unmount flush above enough time to land. The in-app
+          blocker is the other half — leaving by the side menu does not throw
+          the work away, but the flush it relies on is fire-and-forget, so if it
+          is rejected the operator is already gone and will never see why.
+          Both skip a forced sign-out; the shared component owns that rule. */}
+      <UnsavedChangesGuard
+        when={unsavedWork}
+        title={t('landingBuilderPage.unsavedGuard.title')}
+        description={t('landingBuilderPage.unsavedGuard.description')}
+        stay={t('landingBuilderPage.unsavedGuard.stay')}
+        leave={t('landingBuilderPage.unsavedGuard.leave')}
+      />
 
       {/* Conflict dialog */}
       <AlertDialog open={conflictVersion !== null} onOpenChange={(open) => !open && setConflictVersion(null)}>
@@ -985,52 +972,6 @@ export default function LandingBuilderPage() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  )
-}
-
-/**
- * Holds an in-app navigation while the draft is not on the server yet.
- *
- * Leaving does not throw the work away — the page flushes the pending save on
- * unmount — but that flush is fire-and-forget: if it is rejected the operator
- * is already gone and will never see why. So the choice is theirs to make.
- *
- * A forced sign-out is the exception, and it reaches here as well as through
- * `beforeunload`: clearing the session re-renders `ProtectedRoute`, which
- * answers with `<Navigate to="/sign-in">` — an in-app navigation this blocker
- * would hold with a dialog offering to stay on a page that can no longer talk
- * to the API.
- * The check is inside the blocker function so it is read when the navigation
- * happens, not when the guard last rendered.
- *
- * Mounted only inside a data router; see `inDataRouter` at the call site.
- */
-function UnsavedChangesGuard({ when }: { when: boolean }) {
-  const { t } = useTranslation()
-  const shouldBlock = useCallback(() => when && !isForceLogoutInProgress(), [when])
-  const blocker = useBlocker(shouldBlock)
-  return (
-    <AlertDialog
-      open={blocker.state === 'blocked'}
-      onOpenChange={(open) => !open && blocker.reset?.()}
-    >
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>{t('landingBuilderPage.unsavedGuard.title')}</AlertDialogTitle>
-          <AlertDialogDescription>
-            {t('landingBuilderPage.unsavedGuard.description')}
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel onClick={() => blocker.reset?.()}>
-            {t('landingBuilderPage.unsavedGuard.stay')}
-          </AlertDialogCancel>
-          <AlertDialogAction onClick={() => blocker.proceed?.()}>
-            {t('landingBuilderPage.unsavedGuard.leave')}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
   )
 }
 
