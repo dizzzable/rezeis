@@ -75,9 +75,23 @@ function hint(over: Partial<FakeHint> = {}): FakeHint {
   };
 }
 
-function build(hints: FakeHint[], deliveries: FakeDelivery[] = []) {
+function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: string) {
   let seq = 0;
+  const feedRows: Array<{ userId: string; type: string; payload: Record<string, unknown> }> = [];
   const prisma = {
+    // The recipient's language, for the feed copy the popup leaves behind.
+    user: {
+      findUnique: async () => ({ language: language ?? 'RU' }),
+    },
+    // Where that copy lands. Modelled rather than stubbed away: without it the
+    // copy failed inside its own catch and every test here stayed green while
+    // the safety net was not being written at all.
+    userNotificationEvent: {
+      create: async ({ data }: { data: { userId: string; type: string; payload: Record<string, unknown> } }) => {
+        feedRows.push({ userId: data.userId, type: data.type, payload: data.payload });
+        return { id: 'feed-' + feedRows.length };
+      },
+    },
     userHint: {
       findUnique: async ({ where }: { where: { key: string } }) =>
         hints.find((h) => h.key === where.key) ?? null,
@@ -201,7 +215,7 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = []) {
     },
   };
   const service = new UserHintDeliveryService(prisma as never);
-  return { service, deliveries, prisma };
+  return { service, deliveries, prisma, feedRows };
 }
 
 const AUDIENCE = { surface: 'browser', formFactor: 'mobile' };
@@ -670,5 +684,84 @@ describe('the defects a review found, pinned', () => {
     });
 
     assert.equal(next?.key, 'wanted');
+  });
+});
+
+describe('the words survive the popup being closed', () => {
+  it('leaves a copy in the notification feed when a hint is queued', async () => {
+    // The whole point. A modal is read once and dismissed, and a mis-tap
+    // dismisses it exactly as thoroughly as reading does — after which the
+    // text existed only in a delivery table nothing in the cabinet reads.
+    const h = build([hint({ key: 'welcome', titleRu: 'Добро пожаловать', bodyRu: 'Загляните в Помощь' })]);
+
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    assert.equal(h.feedRows.length, 1);
+    assert.equal(h.feedRows[0]?.userId, 'u1');
+    assert.equal(h.feedRows[0]?.payload['title'], 'Добро пожаловать');
+    assert.equal(h.feedRows[0]?.payload['text'], 'Загляните в Помощь');
+  });
+
+  it('names the fields the cabinet feed actually reads', async () => {
+    // `title` and `text`, not `titleRu`/`bodyRu`: the presenter reads those two
+    // keys and nothing else, and a row without them renders as
+    // "Уведомление / Текст недоступен" — the failure this copy exists to avoid.
+    const h = build([hint({ key: 'welcome' })]);
+
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    const payload = h.feedRows[0]?.payload ?? {};
+    assert.ok('title' in payload && 'text' in payload, JSON.stringify(payload));
+    assert.equal(payload['hintKey'], 'welcome');
+  });
+
+  it('writes the copy in the recipient language', async () => {
+    const h = build(
+      [hint({ key: 'welcome', titleEn: 'Welcome', bodyEn: 'Take a look at Help' })],
+      [],
+      'EN',
+    );
+
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    assert.equal(h.feedRows[0]?.payload['title'], 'Welcome');
+    assert.equal(h.feedRows[0]?.payload['text'], 'Take a look at Help');
+  });
+
+  it('falls back per field, so a half-translated hint is not half English', async () => {
+    // The operator translated the title and not the body. An English title over
+    // a Russian body is one message in two languages; the body falls back.
+    const h = build([hint({ key: 'welcome', titleEn: 'Welcome', bodyEn: null })], [], 'EN');
+
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    assert.equal(h.feedRows[0]?.payload['title'], 'Welcome');
+    assert.equal(h.feedRows[0]?.payload['text'], 'Текст');
+  });
+
+  it('writes nothing when nothing was queued', async () => {
+    // A hint already delivered once and not repeatable queues nothing, so it
+    // must not leave a second row in the feed either.
+    const h = build(
+      [hint({ key: 'welcome' })],
+      [
+        {
+          id: 'd0',
+          userId: 'u1',
+          hintId: 'hint-welcome',
+          source: 's',
+          shownAt: null,
+          dismissedAt: null,
+          actedAt: null,
+          createdAt: NOW,
+          expiresAt: new Date(NOW.getTime() + 3_600_000),
+        },
+      ],
+    );
+
+    const queued = await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's' });
+
+    assert.equal(queued, null);
+    assert.deepEqual(h.feedRows, []);
   });
 });

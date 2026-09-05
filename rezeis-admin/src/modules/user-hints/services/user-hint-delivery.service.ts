@@ -2,6 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { UserHint, UserHintDelivery } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
+
+/**
+ * The feed row a delivered hint leaves behind.
+ *
+ * A type of its own rather than reusing one of the template types: it has no
+ * template and must not acquire one, because a template would make the fanout
+ * send this text again through Telegram and push after the popup already
+ * showed it. The cabinet feed renders it from `payload.title` / `payload.text`
+ * through its default branch, which needs no cabinet change.
+ */
+export const HINT_FEED_NOTIFICATION_TYPE = 'hint';
 
 /** What the cabinet reports about itself when it asks for pending hints. */
 export interface HintAudience {
@@ -127,7 +139,7 @@ export class UserHintDeliveryService {
       }
     }
 
-    return this.prismaService.userHintDelivery.create({
+    const delivery = await this.prismaService.userHintDelivery.create({
       data: {
         userId: input.userId,
         hintId: hint.id,
@@ -139,6 +151,66 @@ export class UserHintDeliveryService {
         expiresAt: new Date(now.getTime() + hint.ttlHours * 60 * 60 * 1000),
       },
     });
+
+    await this.copyToFeed(input.userId, hint, delivery.id);
+    return delivery;
+  }
+
+  /**
+   * Leave the same words in the notification feed.
+   *
+   * A modal is read once and dismissed, and a dismissal is not a decision: a
+   * mis-tap closes it exactly as thoroughly as reading it does, and until now
+   * that was the end of the text — the hint lived only in its own delivery
+   * table, which nothing in the cabinet reads back. Whatever the operator
+   * needed to say ("welcome aboard, look in Help") was gone.
+   *
+   * ── Written straight to the feed table, not through `UserNotifications` ────
+   *
+   * Deliberately, and for two reasons. `create()` there FANS OUT — Telegram,
+   * web push, the operator mirror — and this text has already reached the
+   * customer, on their screen, in the popup: sending it again through two more
+   * channels turns one message into three. And going through that service
+   * would make the hints module depend on the notifications module for a
+   * single row insert.
+   *
+   * The payload carries `title` and `text` because that is what the cabinet's
+   * feed presenter reads; a row without them renders as "Уведомление / Текст
+   * недоступен", which is the failure this method exists to prevent.
+   *
+   * Best-effort: a hint that was queued and shown is not undone because the
+   * copy could not be written, and the operator's popup must not fail over its
+   * own safety net.
+   */
+  private async copyToFeed(
+    userId: string,
+    hint: { key: string; titleRu: string; bodyRu: string; titleEn: string | null; bodyEn: string | null },
+    deliveryId: string,
+  ): Promise<void> {
+    try {
+      const user = await this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { language: true },
+      });
+      // Per-field fallback, matching the notification templates: an operator
+      // who translated the title and not the body still gets a localised
+      // title rather than an English row with a Russian heading.
+      const english = coerceNotificationLocale(user?.language) === 'en';
+      const title = english && hint.titleEn ? hint.titleEn : hint.titleRu;
+      const text = english && hint.bodyEn ? hint.bodyEn : hint.bodyRu;
+
+      await this.prismaService.userNotificationEvent.create({
+        data: {
+          userId,
+          type: HINT_FEED_NOTIFICATION_TYPE,
+          payload: { title, text, hintKey: hint.key, hintDeliveryId: deliveryId },
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Hint "${hint.key}" was delivered but its feed copy failed: ${(err as Error).message}`,
+      );
+    }
   }
 
   /**
