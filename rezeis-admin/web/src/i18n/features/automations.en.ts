@@ -206,7 +206,7 @@ export const en = {
       },
       traffic_running_out: {
         name: 'Traffic running out',
-        description: 'A toast, not a modal: nothing is broken yet and the person is mid-task.',
+        description: 'A gentle warning before the traffic actually runs out.',
         titleRu: 'Трафик заканчивается',
         bodyRu: 'Скоро лимит будет исчерпан.',
         titleEn: 'You are running out of traffic',
@@ -226,7 +226,7 @@ export const en = {
       },
       promocode_activated: {
         name: 'Promo code applied',
-        description: 'A short confirmation as a toast.',
+        description: 'A short confirmation after a promo code is used.',
         titleRu: 'Промокод применён',
         bodyRu: 'Скидка уже учтена.',
         titleEn: 'Promo code applied',

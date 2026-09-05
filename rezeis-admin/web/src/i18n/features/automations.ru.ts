@@ -206,7 +206,7 @@ export const ru = {
       },
       traffic_running_out: {
         name: 'Трафик заканчивается',
-        description: 'Тост, а не окно: ничего ещё не сломалось, человек занят делом.',
+        description: 'Мягкое предупреждение до того, как трафик кончится.',
         titleRu: 'Трафик заканчивается',
         bodyRu: 'Скоро лимит будет исчерпан.',
         titleEn: 'You are running out of traffic',
@@ -226,7 +226,7 @@ export const ru = {
       },
       promocode_activated: {
         name: 'Промокод применён',
-        description: 'Короткое подтверждение тостом.',
+        description: 'Короткое подтверждение после активации промокода.',
         titleRu: 'Промокод применён',
         bodyRu: 'Скидка уже учтена.',
         titleEn: 'Promo code applied',

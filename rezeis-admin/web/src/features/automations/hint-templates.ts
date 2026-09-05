@@ -54,7 +54,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'payment_failed',
     triggerSpec: 'payment.failed',
-    hintKey: 'tpl.payment_failed',
+    hintKey: 'tpl-payment-failed',
     mode: 'MODAL',
     tone: 'WARNING',
     route: '/plans',
@@ -66,7 +66,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'subscription_created',
     triggerSpec: 'subscription.created',
-    hintKey: 'tpl.subscription_created',
+    hintKey: 'tpl-subscription-created',
     mode: 'MODAL',
     tone: 'SUCCESS',
     // Straight to the connect screen: this is the one moment where the next
@@ -78,7 +78,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'trial_granted',
     triggerSpec: 'subscription.trial_granted',
-    hintKey: 'tpl.trial_granted',
+    hintKey: 'tpl-trial-granted',
     mode: 'MODAL',
     tone: 'SUCCESS',
     route: '/subscription/connect',
@@ -88,7 +88,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'expire_soon',
     triggerSpec: 'user.expire_soon',
-    hintKey: 'tpl.expire_soon',
+    hintKey: 'tpl-expire-soon',
     mode: 'MODAL',
     tone: 'WARNING',
     route: '/renew',
@@ -100,7 +100,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'subscription_expired',
     triggerSpec: 'subscription.expired',
-    hintKey: 'tpl.subscription_expired',
+    hintKey: 'tpl-subscription-expired',
     mode: 'MODAL',
     tone: 'DANGER',
     route: '/renew',
@@ -110,10 +110,15 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'traffic_running_out',
     triggerSpec: 'user.bandwidth_usage_threshold_reached',
-    hintKey: 'tpl.traffic_running_out',
-    mode: 'TOAST',
+    hintKey: 'tpl-traffic-running-out',
+    mode: 'MODAL',
     tone: 'WARNING',
-    // A toast, not a modal: nothing is broken yet and the person is mid-task.
+    // Wanted as a toast — nothing is broken yet and the person is mid-task —
+    // and it is a modal because a toast is not a mode the cabinet draws:
+    // `hint-controller.tsx` skips anything that is not `MODAL`, and the panel
+    // refuses it on the way in (`RENDERABLE_HINT_MODES`). Two templates
+    // shipped asking for it and neither could be created at all. Change this
+    // back in the same commit that teaches the cabinet to render a toast.
     route: null,
     repeatable: true,
     ttlHours: 24,
@@ -121,7 +126,7 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'welcome',
     triggerSpec: 'user.registered',
-    hintKey: 'tpl.welcome',
+    hintKey: 'tpl-welcome',
     mode: 'MODAL',
     tone: 'INFO',
     route: '/plans',
@@ -131,8 +136,8 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
   {
     id: 'promocode_activated',
     triggerSpec: 'promocode.activated',
-    hintKey: 'tpl.promocode_activated',
-    mode: 'TOAST',
+    hintKey: 'tpl-promocode-activated',
+    mode: 'MODAL',
     tone: 'SUCCESS',
     route: null,
     repeatable: true,

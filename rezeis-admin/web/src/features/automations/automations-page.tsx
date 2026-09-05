@@ -228,7 +228,14 @@ export default function AutomationsPage() {
       });
       toast.success(t('automationsPage.hintTemplates.created', { title: hint.titleRu }));
     },
-    onError: () => toast.error(t('automationsPage.hintTemplates.failed')),
+    // The server's own sentence, not just "could not create the pop-up". A
+    // rejected payload comes back from `ValidationPipe` as one line per field —
+    // `getErrorMessage` joins them — and those lines are the whole diagnosis:
+    // every template shipped with a key the server refuses, and the toast said
+    // only that something went wrong, so the feature looked broken rather than
+    // wrong in a specific, fixable way.
+    onError: (error) =>
+      toast.error(getErrorMessage(error, t('automationsPage.hintTemplates.failed'))),
   });
 
   function useTemplate(template: RuleTemplate) {
