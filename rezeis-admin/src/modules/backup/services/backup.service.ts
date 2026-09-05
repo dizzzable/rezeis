@@ -157,6 +157,36 @@ export interface BackupDeliveryOutcome {
   readonly reason: string | null;
 }
 
+/**
+ * Terminal outcomes that raise their own operator event on the way out, and
+ * must therefore NOT get the card of last resort as well — two cards about one
+ * archive is the split-message problem this whole change is undoing.
+ *
+ *   - `too_large_for_telegram` warns with the size, which is the actionable
+ *     part and belongs in that message rather than a generic one;
+ *   - `telegram_relay_failed` goes through `recordRelayNotDelivered`, whose
+ *     alert carries the relay status, the HTTP code and the detail.
+ *
+ * Everything else — a missing file, an unconfigured chat, an absent crypt key,
+ * a refusal from the Bot API on the direct path — returned in silence.
+ */
+const REASONS_THAT_ALREADY_REPORTED: ReadonlySet<string> = new Set(['too_large_for_telegram']);
+
+/**
+ * Every relay outcome, whatever its status. The reason is built as
+ * `telegram_relay_${outcome.status}` — `unconfirmed`, `rejected`, `failed` and
+ * whatever the relay learns to say next — and each one has already gone
+ * through `recordRelayNotDelivered`, which writes the record AND raises the
+ * alert with the relay status, the HTTP code and the detail. A prefix rather
+ * than a list, so a new status does not silently start double-reporting.
+ */
+const RELAY_REASON_PREFIX = 'telegram_relay_';
+
+function alreadyReported(reason: string | null): boolean {
+  const value = reason ?? '';
+  return REASONS_THAT_ALREADY_REPORTED.has(value) || value.startsWith(RELAY_REASON_PREFIX);
+}
+
 /** A failure no further attempt can help with. */
 function terminalDelivery(reason: string): BackupDeliveryOutcome {
   return { delivered: false, retryable: false, reason };
@@ -853,6 +883,48 @@ export class BackupService implements OnModuleInit {
    * exactly as it always has.
    */
   public async attemptTelegramDelivery(
+    recordId: string,
+    filename: string,
+    options: { readonly isFinalAttempt?: boolean } = {},
+  ): Promise<BackupDeliveryOutcome> {
+    const outcome = await this.runTelegramDelivery(recordId, filename, options);
+
+    // THE CARD OF LAST RESORT.
+    //
+    // The completion card is suppressed at creation whenever Telegram delivery
+    // is CONFIGURED, on the understanding that the archive itself will carry
+    // the news. Configured is not delivered: eight terminal outcomes below end
+    // with no file and, before this, four of them ended with no message of any
+    // kind either — an operator whose backups had quietly stopped arriving saw
+    // exactly what an operator with no backups configured sees, which is
+    // nothing.
+    //
+    // So every terminal non-delivery says so here, in one place rather than at
+    // eight `return`s. Retryable failures are not terminal and keep their own
+    // final-attempt alert; a delivered archive says nothing, because the
+    // archive is the message.
+    if (
+      !outcome.delivered &&
+      !outcome.retryable &&
+      !alreadyReported(outcome.reason)
+    ) {
+      this.systemEventsService.warn(
+        EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
+        'SYSTEM',
+        `Backup stored locally — not delivered to Telegram (${outcome.reason}): ${filename}`,
+        {
+          backupId: recordId,
+          filename,
+          deliveredToTelegram: false,
+          relayStatus: outcome.reason,
+        },
+      );
+    }
+    return outcome;
+  }
+
+  /** The delivery itself. Wrapped by {@link attemptTelegramDelivery}. */
+  private async runTelegramDelivery(
     recordId: string,
     filename: string,
     options: { readonly isFinalAttempt?: boolean } = {},

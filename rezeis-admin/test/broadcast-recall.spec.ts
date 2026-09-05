@@ -49,6 +49,10 @@ function build(options: {
       updateMany: async () => ({ count: 1 }),
     },
     broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
       findMany: async () => [
         { id: 'm-1', userId: 'u-1', telegramMessageId: 4242n },
       ],

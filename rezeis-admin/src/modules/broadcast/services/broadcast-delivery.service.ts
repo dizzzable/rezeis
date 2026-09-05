@@ -677,8 +677,36 @@ export class BroadcastDeliveryService {
      */
     let consecutiveTransportFailures = 0;
     let circuitOpen = false;
+    /** Recipients the operator cancelled while this batch was already running. */
+    let cancelledMidBatch = 0;
 
     for (const message of messages) {
+      // Re-read this row's status before spending anything on it.
+      //
+      // The batch above is ONE query; this loop is a relay call, an SMTP send
+      // and a feed write PER RECIPIENT, with a deliberate pause between them —
+      // this file's own estimate is "minutes" for a large audience against an
+      // unwell relay. Cancelling cannot stop that: `cancelBroadcast` removes
+      // WAITING and DELAYED jobs from BullMQ and flips the remaining rows to
+      // CANCELED, but a batch already running is not removable and its rows
+      // were selected before any of it happened.
+      //
+      // So the operator pressed Cancel — usually because the text or the
+      // audience is wrong — the panel answered "cancelled N", and up to a
+      // hundred people received the message anyway. The email half of that is
+      // not recoverable at all: revoke reaches Telegram only, and only inside
+      // its 48-hour window.
+      //
+      // One indexed read, against a recipient that costs a network round trip.
+      const current = await this.prismaService.broadcastMessage.findUnique({
+        where: { id: message.id },
+        select: { status: true },
+      });
+      if (current === null || current.status !== BroadcastMessageStatus.PENDING) {
+        cancelledMidBatch++;
+        continue;
+      }
+
       const user = await this.prismaService.user.findUnique({
         where: { id: message.userId },
         // `webAccount.email` comes along because `User.email` alone is NOT where
@@ -926,6 +954,14 @@ export class BroadcastDeliveryService {
             : textMessageId !== null
               ? BigInt(textMessageId)
               : null;
+        // Unconditional, unlike `markFailed` beside it, and deliberately so.
+        // This runs AFTER the message left for Telegram: a cancellation that
+        // landed in the moment between the guard above and this line does not
+        // un-send it. Refusing to record the send would leave a message in the
+        // subscriber's chat with no `telegramMessageId` on our side — and that
+        // id is the only thing revoke can work from, so the row would be
+        // unrevokable as well as unsent-looking. A send that happened is
+        // recorded as a send.
         await this.prismaService.broadcastMessage.update({
           where: { id: message.id },
           data: {
@@ -1016,6 +1052,14 @@ export class BroadcastDeliveryService {
     }
 
     await this.checkAndFinalize(broadcastId);
+    if (cancelledMidBatch > 0) {
+      // Worth a line of its own: from the tally alone, a batch stopped by the
+      // operator and a batch that found nobody to write to look identical.
+      this.logger.log(
+        `Broadcast ${broadcastId}: skipped ${cancelledMidBatch} recipient(s) cancelled while ` +
+          'this batch was running',
+      );
+    }
     return { sent, failed, unresolved, emailAttempted, emailSent };
   }
 
@@ -1828,8 +1872,12 @@ export class BroadcastDeliveryService {
   }
 
   private async markFailed(messageId: string, reason: string): Promise<void> {
-    await this.prismaService.broadcastMessage.update({
-      where: { id: messageId },
+    // `updateMany` with the status in the WHERE, not `update` by id: an
+    // unconditional write here overwrote the CANCELED the operator had just
+    // asked for, and the finalisation tally then contradicted the cancellation
+    // — "cancelled" on the screen, rows counted as processed underneath.
+    await this.prismaService.broadcastMessage.updateMany({
+      where: { id: messageId, status: BroadcastMessageStatus.PENDING },
       data: { status: BroadcastMessageStatus.FAILED, errorMessage: reason.slice(0, 500) },
     });
   }

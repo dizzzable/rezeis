@@ -138,6 +138,10 @@ describe('BroadcastDeliveryService', () => {
           },
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           createMany: async (args: unknown) => {
             createManyCalls.push(args);
           },
@@ -212,6 +216,10 @@ describe('BroadcastDeliveryService', () => {
           findMany: async () => [{ id: 'user-1' }],
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           createMany: async () => undefined,
           findMany: async () => [{ id: 'message-1' }],
         },
@@ -389,6 +397,10 @@ describe('BroadcastDeliveryService', () => {
         },
         user: { findMany: async () => [{ id: 'user-1' }] },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           createMany: async (args: unknown) => {
             createManyCalls.push(args);
           },
@@ -440,6 +452,10 @@ describe('BroadcastDeliveryService', () => {
           },
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           createMany: async () => undefined,
           findMany: async () => [],
         },
@@ -488,7 +504,18 @@ describe('BroadcastDeliveryService', () => {
           },
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          // `markFailed` writes conditionally now (`where { id, status: PENDING }`)
+          // so it cannot overwrite a CANCELED the operator just set. Recorded
+          // into the same list, so the assertions below still see the write.
+          updateMany: async (args: unknown) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
           update: async (args: unknown) => {
             messageUpdates.push(args);
           },
@@ -568,7 +595,18 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          // `markFailed` writes conditionally now (`where { id, status: PENDING }`)
+          // so it cannot overwrite a CANCELED the operator just set. Recorded
+          // into the same list, so the assertions below still see the write.
+          updateMany: async (args: unknown) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
           update: async (args: unknown) => {
             messageUpdates.push(args);
           },
@@ -640,7 +678,18 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          // `markFailed` writes conditionally now (`where { id, status: PENDING }`)
+          // so it cannot overwrite a CANCELED the operator just set. Recorded
+          // into the same list, so the assertions below still see the write.
+          updateMany: async (args: unknown) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
           update: async (args: unknown) => {
             messageUpdates.push(args);
           },
@@ -710,6 +759,10 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
           update: async () => undefined,
           count: async () => 0,
@@ -760,7 +813,18 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          // `markFailed` writes conditionally now (`where { id, status: PENDING }`)
+          // so it cannot overwrite a CANCELED the operator just set. Recorded
+          // into the same list, so the assertions below still see the write.
+          updateMany: async (args: unknown) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
           update: async (args: unknown) => {
             messageUpdates.push(args);
           },
@@ -824,7 +888,15 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          updateMany: async (args: { data: Record<string, unknown> }) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
           update: async (args: { data: Record<string, unknown> }) => {
             messageUpdates.push(args);
           },
@@ -901,7 +973,18 @@ describe('BroadcastDeliveryService', () => {
           update: async () => undefined,
         },
         broadcastMessage: {
+          // The status re-read the delivery loop does before each recipient, so
+          // a cancellation landing mid-batch stops the rest. Answers PENDING:
+          // these cases are about delivery, not about cancelling.
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
           findMany: async () => [{ id: 'message-1', userId: 'web-user-1' }],
+          // `markFailed` writes conditionally now (`where { id, status: PENDING }`)
+          // so it cannot overwrite a CANCELED the operator just set. Recorded
+          // into the same list, so the assertions below still see the write.
+          updateMany: async (args: unknown) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
           update: async (args: unknown) => {
             messageUpdates.push(args);
           },

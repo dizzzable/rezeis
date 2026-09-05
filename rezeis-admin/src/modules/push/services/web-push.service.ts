@@ -79,6 +79,19 @@ interface SendInput {
    * Defaults to `/dashboard` so a tap always lands somewhere useful.
    */
   readonly url?: string;
+  /**
+   * Unread total for the home-screen icon badge, counted by the caller.
+   *
+   * A TOTAL, never a delta. The service worker cannot count for itself — it
+   * sees one push, not an inbox — and anything it counted locally would drift
+   * the first time the subscriber read something on another device. On iOS
+   * this is also the only route: the badge may be set only from a push handler
+   * or a running page, so a closed app has no other way to learn the number.
+   *
+   * Omitted when the caller could not count. An absent field leaves whatever
+   * is on the icon alone, which beats resetting it to a guess.
+   */
+  readonly badgeCount?: number;
 }
 
 /**
@@ -595,6 +608,7 @@ export class WebPushService implements OnModuleInit {
       body: input.body,
       url: input.url ?? '/dashboard',
       ...(brand.icon === null ? {} : { icon: brand.icon }),
+      ...(typeof input.badgeCount === 'number' ? { badgeCount: input.badgeCount } : {}),
     });
     const outcomes = await Promise.all(
       subs.map((sub) => this.deliverOne(sub, payload, vapidDetails)),

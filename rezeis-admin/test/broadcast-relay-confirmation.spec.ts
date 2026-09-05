@@ -59,6 +59,11 @@ function harness(input: {
   readonly feedRowsFor?: readonly string[];
   /** Message rows that start FAILED, i.e. what `retryBatch` re-drives. */
   readonly startFailed?: boolean;
+  /**
+   * Message ids the operator cancelled AFTER the batch was selected — what the
+   * pre-send re-read finds. Everything else still reads PENDING.
+   */
+  readonly cancelledMidBatch?: readonly string[];
 }) {
   const updates: MessageUpdate[] = [];
   const updateManyCalls: Array<Record<string, unknown>> = [];
@@ -119,11 +124,30 @@ function harness(input: {
     },
     broadcastMessage: {
       findMany: async () => ids.map((id, i) => ({ id, userId: `user-${i + 1}` })),
+      // The status re-read before each send. PENDING: these cases are about
+      // what the relay proved, not about a cancellation arriving mid-batch.
+      findUnique: async (args: { readonly where: { readonly id: string } }) => ({
+        status: (input.cancelledMidBatch ?? []).includes(args.where.id)
+          ? BroadcastMessageStatus.CANCELED
+          : BroadcastMessageStatus.PENDING,
+      }),
       update: async (args: MessageUpdate) => {
         if (typeof args.data['status'] === 'string') settled.add(args.where.id);
         updates.push(args);
       },
-      updateMany: async (args: { readonly data: Record<string, unknown> }) => {
+      updateMany: async (args: {
+        readonly where?: { readonly id?: string };
+        readonly data: Record<string, unknown>;
+      }) => {
+        // ONE row, addressed by id: that is `markFailed`, which writes
+        // conditionally now so it cannot overwrite a CANCELED. It settles that
+        // row and nothing else — treating it as the bulk reset below would
+        // settle the whole batch and wreck the circuit-breaker bookkeeping.
+        if (typeof args.where?.id === 'string') {
+          if (typeof args.data['status'] === 'string') settled.add(args.where.id);
+          updates.push({ where: { id: args.where.id }, data: args.data } as MessageUpdate);
+          return { count: 1 };
+        }
         // `retryBatch` resets FAILED rows to PENDING before re-delivering.
         // That is the opposite of a settlement, so it must not be recorded as
         // one — the circuit-breaker bookkeeping below counts what is still
@@ -198,6 +222,42 @@ function harness(input: {
 
 const statusesWritten = (updates: MessageUpdate[]): unknown[] =>
   updates.map((u) => u.data['status']).filter((s) => s !== undefined);
+
+describe('a cancellation that lands while the batch is running', () => {
+  it('stops sending to the recipients the operator cancelled', async () => {
+    // THE REPORT this guard comes from. `cancelBroadcast` removes WAITING and
+    // DELAYED jobs and flips the remaining rows to CANCELED — but a batch
+    // already running is not removable from BullMQ, and its rows were selected
+    // before any of that. The panel said "cancelled", and up to a hundred
+    // people got the message anyway, the email half of it unrecoverable.
+    const h = harness({
+      recipients: 3,
+      relayStatus: 'confirmed',
+      messageId: 777,
+      cancelledMidBatch: ['message-2'],
+    });
+
+    const result = await h.service.deliverBatch('broadcast-1', h.ids);
+
+    assert.equal(result.sent, 2, 'the cancelled recipient must not be sent to');
+    assert.equal(h.relayCalls.length, 2);
+    assert.equal(
+      h.updates.some((u) => u.where.id === 'message-2'),
+      false,
+      'a cancelled row must not be written at all',
+    );
+  });
+
+  it('still delivers the whole batch when nothing was cancelled', async () => {
+    // The guard must not become a reason nobody is reached.
+    const h = harness({ recipients: 3, relayStatus: 'confirmed', messageId: 777 });
+
+    const result = await h.service.deliverBatch('broadcast-1', h.ids);
+
+    assert.equal(result.sent, 3);
+    assert.equal(h.relayCalls.length, 3);
+  });
+});
 
 describe('a broadcast row only claims what the relay proved', () => {
   it('marks SENT on a confirmed relay and keeps the Telegram message id', async () => {

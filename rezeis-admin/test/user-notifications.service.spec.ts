@@ -50,7 +50,9 @@ describe('UserNotificationsService', () => {
       },
     ]);
     assert.deepStrictEqual(state.webPushCalls, [
-      { userId: 'user-1', title: 'Reiwa', body: 'Manual message', url: '/dashboard' },
+      // `badgeCount` is the unread total the icon draws — it rides on every
+      // templated push, so a closed app still learns the number.
+      { userId: 'user-1', title: 'Reiwa', body: 'Manual message', url: '/dashboard', badgeCount: 3 },
     ]);
     // The Telegram leg went to the durable queue, not to the one-shot client.
     // Asserting the payload alone would pass either way — both stubs record
@@ -114,6 +116,7 @@ describe('UserNotificationsService', () => {
         title: 'Expires soon',
         body: 'Hello Nina, 3 day(s) left',
         url: '/renew',
+        badgeCount: 3,
       },
     ]);
   });
@@ -130,7 +133,7 @@ describe('UserNotificationsService', () => {
 
     assert.deepStrictEqual(state.notifyUserCalls, []);
     assert.deepStrictEqual(state.webPushCalls, [
-      { userId: 'user-1', title: 'Title', body: 'Body', url: '/dashboard' },
+      { userId: 'user-1', title: 'Title', body: 'Body', url: '/dashboard', badgeCount: 3 },
     ]);
   });
 });
@@ -144,6 +147,10 @@ function createService(
 ): UserNotificationsService {
   const prisma = {
     userNotificationEvent: {
+      // The unread total the push carries for the home-screen icon badge.
+      // Fixed: what these cases assert is which channels fire and with what
+      // text, and the count is neither.
+      count: async () => 3,
       create: async (args: NotificationCreateArgs) => {
         state.createCalls.push(args);
         return {

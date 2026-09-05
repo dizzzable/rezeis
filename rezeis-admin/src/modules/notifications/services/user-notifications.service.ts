@@ -407,6 +407,25 @@ export class UserNotificationsService {
     }
   }
 
+  /**
+   * How many notifications this subscriber has not read, for the icon badge.
+   *
+   * Never throws: the badge is a decoration on a push, and a push that arrives
+   * without a number is strictly better than a push that does not arrive
+   * because counting failed. `undefined` tells the sender to omit the field,
+   * and an older cabinet omits it anyway.
+   */
+  private async countUnread(userId: string): Promise<number | undefined> {
+    try {
+      return await this.prismaService.userNotificationEvent.count({
+        where: { userId, readAt: null },
+      });
+    } catch (err) {
+      this.logger.warn(`Could not count unread for badge: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
   private async deliverOperatorWebPush(userId: string, text: string): Promise<ChannelOutcome> {
     try {
       const result = await this.webPushService.sendToUser({
@@ -558,6 +577,7 @@ export class UserNotificationsService {
       // users and gives Telegram-linked users a second channel for when
       // they're at their desktop.
       if (rendered !== null) {
+        const badgeCount = await this.countUnread(input.userId);
         await this.webPushService.sendToUser({
           userId: input.userId,
           title: rendered.title,
@@ -569,6 +589,15 @@ export class UserNotificationsService {
           // cabinet's `resolveNotificationTarget` so PWA pushes and the
           // in-app bell agree on destinations.
           url: resolveNotificationPushUrl(input.type),
+          // The number for the home-screen icon, counted HERE because this is
+          // the only side that knows it. The service worker cannot: it sees one
+          // push, not an inbox, and anything it counted for itself would drift
+          // the moment the subscriber read something on another device.
+          //
+          // Counted AFTER the row above was written, so it includes the
+          // notification this push is announcing. Best-effort: a failed count
+          // sends the push without a badge rather than not sending the push.
+          ...(badgeCount === undefined ? {} : { badgeCount }),
         });
       }
 

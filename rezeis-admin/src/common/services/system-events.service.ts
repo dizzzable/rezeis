@@ -983,7 +983,7 @@ export class SystemEventsService {
           kind: 'message',
           chatId: targetChatId,
           topicId: topicId ?? null,
-          text: html,
+          text: clipHtmlCard(html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
           sourceEventType: event.type,
         },
@@ -1015,7 +1015,7 @@ export class SystemEventsService {
 
     const payload: Record<string, unknown> = {
       chat_id: targetChatId,
-      text: html,
+      text: clipHtmlCard(html, TELEGRAM_TEXT_LIMIT),
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     };
@@ -1203,14 +1203,14 @@ export class SystemEventsService {
           eventId: buildDevRelayEventId(event, 'dev-document'),
           filename: buildErrorReportFilename(opts.reportEvent),
           content: txt,
-          caption: html,
+          caption: clipHtmlCard(html, TELEGRAM_CAPTION_LIMIT),
           parseMode: 'HTML',
         });
       } else {
         // Non-error events (or txt attachment disabled): inline card only.
         await this.relaySystemEvent(event.type, 'reiwa.dev.notify', {
           eventId: buildDevRelayEventId(event, 'dev'),
-          text: html,
+          text: clipHtmlCard(html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
         });
       }
@@ -1283,7 +1283,7 @@ export class SystemEventsService {
           topicThreadId: opts.topicId ?? undefined,
           filename: buildErrorReportFilename(opts.reportEvent),
           content: formatErrorReportTxt(opts.reportEvent, getRezeisBuildInfo()),
-          caption: opts.html,
+          caption: clipHtmlCard(opts.html, TELEGRAM_CAPTION_LIMIT),
           parseMode: 'HTML',
         });
       } else {
@@ -1292,7 +1292,7 @@ export class SystemEventsService {
           eventId: `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}`,
           chatId: opts.chatId,
           topicThreadId: opts.topicId ?? undefined,
-          text: opts.html,
+          text: clipHtmlCard(opts.html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
         });
       }
@@ -1991,6 +1991,113 @@ function eventTypeToHashtag(type: string): string {
 /** Trims a value to `max` characters, marking the cut with an ellipsis. */
 function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+/**
+ * What Telegram accepts, and the reason this file has to care.
+ *
+ * A message body may be 4096 characters; a DOCUMENT CAPTION may be 1024. The
+ * same card is used for both — as `text` on the plain routes and as `caption`
+ * on the two document routes — and nothing trimmed it, so a long card was not
+ * shortened, it was REFUSED: `400 Bad Request: message caption is too long`,
+ * and on the relay route that refusal is terminal on the first attempt.
+ *
+ * That is reachable without anything exotic. An error reported by the cabinet
+ * carries up to 2000 characters of message, the card frame is roughly 500, and
+ * the result is an error report that never arrives — precisely the message an
+ * operator most needs.
+ */
+const TELEGRAM_TEXT_LIMIT = 4096;
+const TELEGRAM_CAPTION_LIMIT = 1024;
+
+/**
+ * Named rather than written inline, because a literal escape in this file has
+ * been silently turned into a real line break by a shell heredoc more than
+ * once. A constant cannot be mangled by whatever writes the file next.
+ */
+const NEWLINE = String.fromCharCode(10);
+
+/**
+ * Cut an HTML card down to `limit` WITHOUT handing Telegram broken markup.
+ *
+ * Two rules, and both matter:
+ *
+ *   1. Cut on LINE boundaries. A cut in the middle of `<blockquote>` or of an
+ *      HTML entity produces a body Telegram rejects outright, which is the
+ *      failure this function exists to prevent — trading "too long" for
+ *      "malformed" would be no improvement at all.
+ *   2. Close what is left open. Dropping the tail can strand an opening tag;
+ *      the closers are appended in reverse order of opening, which is the only
+ *      order that nests correctly.
+ *
+ * The marker is deliberately visible: a silently shortened card reads as a
+ * complete one, and an operator would draw conclusions from a card that stops
+ * early without saying so.
+ */
+export function clipHtmlCard(html: string, limit: number): string {
+  if (html.length <= limit) return html;
+
+  const marker = `${NEWLINE}…`;
+  // Measured on the FINISHED string, not on a budget guessed in advance. The
+  // closers depend on which tags the cut happens to leave open, so reserving
+  // room up front means reserving for the wrong prefix — and the first version
+  // of this did exactly that and produced results over the limit.
+  const fits = (candidate: string): boolean =>
+    candidate.length + closersFor(candidate).length + marker.length <= limit;
+
+  let kept = '';
+  for (const line of html.split(NEWLINE)) {
+    const next = kept.length === 0 ? line : `${kept}${NEWLINE}${line}`;
+    if (!fits(next)) break;
+    kept = next;
+  }
+
+  // A single line already too long: there is no boundary to honour, so take a
+  // head of it and shrink until the finished string fits. `escapeHtml` output
+  // cannot be split anywhere either — half of `&amp;` is not an entity — so
+  // the cut backs off to before the last unterminated `&`.
+  if (kept.length === 0) {
+    let head = html.slice(0, limit);
+    for (;;) {
+      const lastAmp = head.lastIndexOf('&');
+      const candidate = lastAmp > head.lastIndexOf(';') ? head.slice(0, lastAmp) : head;
+      if (fits(candidate) || candidate.length === 0) {
+        kept = candidate;
+        break;
+      }
+      head = head.slice(0, candidate.length - 1);
+    }
+  }
+  return `${kept}${closersFor(kept)}${marker}`;
+}
+
+/**
+ * Closers for everything `kept` left open, innermost first.
+ *
+ * A STACK walked in document order, not a per-tag tally. Counting each tag
+ * separately loses the nesting: `<blockquote><b><code>` closed by tag order
+ * comes out `</blockquote></code></b>`, which is exactly as malformed as
+ * leaving them open — the closers have to mirror the order the tags were
+ * actually opened in, and only the text knows that.
+ */
+function closersFor(kept: string): string {
+  const stack: string[] = [];
+  const tag = /<(\/?)(b|i|code|blockquote)>/g;
+  for (let match = tag.exec(kept); match !== null; match = tag.exec(kept)) {
+    const [, closing, name] = match;
+    if (closing === '/') {
+      // Pop the matching open, if there is one; a stray closer is ignored
+      // rather than treated as an error, because the input is our own card.
+      const at = stack.lastIndexOf(name!);
+      if (at !== -1) stack.splice(at, 1);
+    } else {
+      stack.push(name!);
+    }
+  }
+  return stack
+    .reverse()
+    .map((name) => `</${name}>`)
+    .join('');
 }
 
 /**
