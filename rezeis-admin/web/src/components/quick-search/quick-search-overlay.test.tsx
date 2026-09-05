@@ -49,10 +49,19 @@ vi.mock('@/features/rbac', () => ({
     selector({ loaded: true, hasPermission: () => true }),
 }))
 
-function renderOverlay() {
+/**
+ * @param seed Answers to put in the cache before the first render, keyed by the
+ *   trimmed query. A seeded query is fresh for `staleTime` and never fetches,
+ *   which is how a test can assert what the overlay DRAWS without waiting on a
+ *   network round trip it does not care about.
+ */
+function renderOverlay(seed: Record<string, unknown[]> = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
+  for (const [query, results] of Object.entries(seed)) {
+    queryClient.setQueryData(['quick-search', query], results)
+  }
   return render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -103,20 +112,42 @@ describe('QuickSearchOverlay states', () => {
     expect(get).not.toHaveBeenCalled()
   })
 
-  it('searches on exactly two characters', async () => {
-    const get = vi.spyOn(api, 'get').mockResolvedValue({
-      data: [{ type: 'promocode', id: 'promo-1', label: 'VP' }],
-    })
+  /**
+   * The two-character minimum, split away from the rendering of the answer.
+   *
+   * These were one test, and it was the file's flake: it typed two characters,
+   * let a mocked promise resolve, and waited for the RESULT TEXT to appear.
+   * That is two async boundaries — the promise, then react-query's scheduler
+   * driving a re-render — and on a loaded runner the second one starved. It
+   * took 43ms here and blew a five-second ceiling there, which is not slowness,
+   * it is starvation; raising the ceiling from one second to five had already
+   * failed to help. The neighbour below waits only for the CALL, on the same
+   * mock, and has never flaked — that difference is what these two follow.
+   *
+   * The old comment blamed a debounce. There is no debounce in this overlay;
+   * `useQuery` is gated on `enabled`, and nothing delays the input.
+   */
+  it('issues a request on exactly two characters', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
     renderOverlay()
 
     typeQuery('vp')
 
-    // Real timers and a debounced query: the default one-second wait is enough
-    // on an idle machine and not enough inside the full suite, where 235 files
-    // run in parallel. It failed roughly one run in three — a red build for a
-    // timer, not for a defect.
-    expect(await screen.findByText('VP', undefined, { timeout: 5000 })).toBeInTheDocument()
+    await waitFor(() => expect(get).toHaveBeenCalled())
     expect(get).toHaveBeenCalledWith('/admin/quick-search', { params: { q: 'vp', limit: 12 } })
+  })
+
+  it('draws a result it was given', async () => {
+    // Seeded cache, so there is no request and no scheduler to wait on: the
+    // overlay has the answer at first render. What is under test here is the
+    // drawing, and drawing does not need a network to prove.
+    const get = vi.spyOn(api, 'get')
+    renderOverlay({ vp: [{ type: 'promocode', id: 'promo-1', label: 'VP' }] })
+
+    typeQuery('vp')
+
+    expect(await screen.findByText('VP')).toBeInTheDocument()
+    expect(get).not.toHaveBeenCalled()
   })
 
   /** A pasted value keeps its padding; the request must not. */
