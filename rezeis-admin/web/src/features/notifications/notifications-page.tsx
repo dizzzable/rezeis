@@ -122,6 +122,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'user.registered', 'user.web_registered', 'user.blocked', 'user.unblocked',
     'user.deleted', 'user.role_changed', 'user.telegram_linked', 'user.email_linked',
     'user.first_traffic', 'user.accounts_merged', 'user.points_adjusted',
+    'user.pwa_installed',
     // Points cashback for a paid purchase: credited, taken back on a refund,
     // or skipped for a reason the operator can fix (no price in the default
     // currency, a catalogue row that is gone).

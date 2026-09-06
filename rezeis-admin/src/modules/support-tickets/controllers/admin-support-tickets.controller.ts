@@ -9,6 +9,7 @@ import {
   HttpCode,
   HttpException,
   HttpStatus,
+  NotFoundException,
   Param,
   ParseIntPipe,
   Post,
@@ -26,6 +27,7 @@ import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
+import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { RbacService } from '../../rbac/services/rbac.service';
@@ -131,6 +133,54 @@ export class AdminSupportTicketsController {
       requestMetadata: extractRequestMetadata(req),
       patch: body,
     });
+  }
+
+  /**
+   * Open a ticket WITH a client, on the operator's initiative.
+   *
+   * `support_tickets:create` has sat in the RBAC catalog since the module
+   * was written with no route behind it. This is that route.
+   *
+   * The client sees an ordinary thread they can answer — which is the whole
+   * difference from the one-way "notify user" action on the user card. The
+   * ticket is born OPEN; see `SupportTicketsService.createByAdmin` for why.
+   */
+  @Post()
+  @RequirePermission('support_tickets', 'create')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Open a ticket with a client on the operator initiative' })
+  public async openForUser(
+    @Body() body: { userRef?: unknown; subject?: unknown; message?: unknown },
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ): Promise<unknown> {
+    const subject = readRequiredText(body?.subject, 'Subject', MAX_TICKET_SUBJECT);
+    const message = readRequiredText(body?.message, 'Message', MAX_TICKET_MESSAGE);
+    const reference = typeof body?.userRef === 'string' ? body.userRef.trim() : '';
+    if (reference.length === 0) {
+      throw new BadRequestException('A user reference is required');
+    }
+    const recipient = await this.resolveTicketRecipient(reference);
+
+    const created = await this.supportTicketsService.createByAdmin({
+      userId: recipient.id,
+      subject,
+      content: message,
+      adminId: admin.id,
+    });
+    await this.audit(admin, req, 'support_ticket.open', {
+      ticketId: created.id,
+      userId: recipient.id,
+      subject,
+    });
+    // Best-effort, exactly as a reply is: the thread is already saved, and a
+    // delivery failure must not become a 500 on the operator's screen.
+    void this.supportNotifications.notifyAdminOpenedTicket({
+      ticketId: created.id,
+      subject: created.subject,
+      user: { id: recipient.id, language: recipient.language },
+    });
+    return serializeTicket(await this.supportTicketsService.getById(created.id));
   }
 
   @Get(':ticketId')
@@ -415,6 +465,48 @@ export class AdminSupportTicketsController {
   }
 
   /** Append an audit-log entry (best-effort; mirrors the user-mgmt pattern). */
+  /**
+   * Find the client an operator named: a telegramId, a reiwa_id, or an
+   * `@username`.
+   *
+   * `User.username` is nullable and NOT unique in the schema, so a username
+   * matching two rows is refused rather than guessed. Opening a private
+   * conversation with the wrong person is not a risk worth a saved click,
+   * and the operator has an unambiguous identifier to hand.
+   */
+  private async resolveTicketRecipient(
+    reference: string,
+  ): Promise<{ id: string; language: string }> {
+    if (reference.startsWith('@')) {
+      const username = reference.slice(1).trim();
+      if (username.length === 0) {
+        throw new BadRequestException('Username is empty');
+      }
+      const matches = await this.prismaService.user.findMany({
+        where: { username: { equals: username, mode: 'insensitive' } },
+        select: { id: true, language: true },
+        take: 2,
+      });
+      if (matches.length === 0) {
+        throw new NotFoundException('User not found');
+      }
+      if (matches.length > 1) {
+        throw new BadRequestException(
+          'That username matches more than one account — use the Telegram ID',
+        );
+      }
+      return matches[0];
+    }
+    const user = await this.prismaService.user.findUnique({
+      where: buildUserReferenceWhere(reference),
+      select: { id: true, language: true },
+    });
+    if (user === null) {
+      throw new NotFoundException('User not found');
+    }
+    return user;
+  }
+
   private async audit(
     admin: CurrentAdminInterface,
     req: Request,
@@ -437,6 +529,23 @@ export class AdminSupportTicketsController {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** The subject is a title: it is printed in two lists, a header and a card. */
+const MAX_TICKET_SUBJECT = 200;
+/** Matches the reply cap, so the first message is no different from the next. */
+const MAX_TICKET_MESSAGE = 10_000;
+
+/** Read a required, trimmed, length-capped string out of an untyped body. */
+function readRequiredText(value: unknown, label: string, max: number): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (text.length === 0) {
+    throw new BadRequestException(`${label} must be a non-empty string`);
+  }
+  if (text.length > max) {
+    throw new BadRequestException(`${label} exceeds ${max.toLocaleString('en-US')} characters`);
+  }
+  return text;
+}
 
 type AttachmentRow = {
   readonly id: string;

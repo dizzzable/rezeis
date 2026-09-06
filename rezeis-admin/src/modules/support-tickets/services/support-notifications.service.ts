@@ -44,11 +44,41 @@ export class SupportNotificationsService {
    * deliberately bypasses the notification-template + opt-out gate: a human
    * operator reply is an explicit, one-off send the user always wants.
    */
-  public async notifyAdminReply(input: {
-    readonly ticketId: string;
-    readonly subject: string;
-    readonly user: { readonly id: string; readonly language: string | null } | null;
-  }): Promise<void> {
+  public async notifyAdminReply(input: TicketOwnerNotification): Promise<void> {
+    await this.deliverTicketCard('support_reply', SUPPORT_REPLY_COPY, input);
+  }
+
+  /**
+   * Notify the client that an operator OPENED a conversation with them.
+   *
+   * Same delivery, different words. "There is a new reply to your ticket" is
+   * simply false for a thread the client never started, and it is the first
+   * sentence they read — hence a second, separately editable template.
+   *
+   * ── Why the EVENT type stays `support_reply` ──────────────────────────
+   *
+   * The cabinet counts its support badge by `type === 'support_reply'`
+   * (`use-support-unread.ts`), clears it by matching `payload.ticketId`, and
+   * deep-links from those same rows. Panel and cabinet ship as separate
+   * images and the panel goes first, so a NEW event type would land in a
+   * cabinet that ignores it: no badge, no clearing, a feed row nothing
+   * counts. The TEMPLATE type is a panel-side lookup and is free to be new;
+   * the EVENT type is a cross-image contract and must not be.
+   */
+  public async notifyAdminOpenedTicket(input: TicketOwnerNotification): Promise<void> {
+    await this.deliverTicketCard('support_ticket_opened', SUPPORT_OPENED_COPY, input);
+  }
+
+  /**
+   * The shared body of both notifications above: resolve the operator's
+   * template (falling back to the shipped copy), render it, and hand it to
+   * the one "notify a user" service.
+   */
+  private async deliverTicketCard(
+    templateType: string,
+    fallbackCopy: Record<SupportLang, SupportCardCopy>,
+    input: TicketOwnerNotification,
+  ): Promise<void> {
     // Guest tickets (no account user) are delivered in the anonymous-support
     // phase via the guest channel; nothing to push to a cabinet/bot here.
     if (input.user === null) return;
@@ -58,14 +88,14 @@ export class SupportNotificationsService {
       const substHtml = makeSubstitution({ subject: input.subject, ticketId: input.ticketId }, true);
       const substRaw = makeSubstitution({ subject: input.subject, ticketId: input.ticketId }, false);
 
-      // Operator-editable, seeded `support_reply` template supplies the copy +
-      // buttons (label/emoji/target) — so the notification is visible on the
-      // bot map and editable in the admin (incl. premium custom-emoji on the
-      // button label, which the bot promotes to icon_custom_emoji_id). We
-      // still deliver via the preRenderedText path so it bypasses the
-      // notification opt-out toggle: a human reply must always reach the user.
+      // The operator-editable, seeded template supplies the copy + buttons
+      // (label/emoji/target) — so the notification is visible on the bot map
+      // and editable in the admin (incl. premium custom-emoji on the button
+      // label, which the bot promotes to icon_custom_emoji_id). We still
+      // deliver via the preRenderedText path so it bypasses the notification
+      // opt-out toggle: a human operator message must always reach the user.
       // The built-in copy is the fallback when the row is absent.
-      const template = await this.templatesService.getByType('support_reply').catch(() => null);
+      const template = await this.templatesService.getByType(templateType).catch(() => null);
 
       let title: string;
       let body: string;
@@ -78,7 +108,7 @@ export class SupportNotificationsService {
           applyTicketDeepLink(button, substRaw, input.ticketId),
         );
       } else {
-        const copy = SUPPORT_REPLY_COPY[locale === 'ru' ? 'ru' : 'en'];
+        const copy = fallbackCopy[locale === 'ru' ? 'ru' : 'en'];
         title = copy.title;
         body = copy.body(escapeHtml(input.subject));
         buttons = [{ text: copy.openButton, webAppPath: `/support?ticket=${input.ticketId}` }];
@@ -105,9 +135,9 @@ export class SupportNotificationsService {
         buttons: buttons.length > 0 ? buttons : undefined,
       });
     } catch (err: unknown) {
-      // Never surface to the operator; the reply itself is already saved.
+      // Never surface to the operator; the message itself is already saved.
       this.logger.warn(
-        `Support reply notification failed for ticket ${input.ticketId}: ${
+        `Support notification (${templateType}) failed for ticket ${input.ticketId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -169,7 +199,43 @@ export class SupportNotificationsService {
 
 type SupportLang = 'ru' | 'en';
 
-const SUPPORT_REPLY_COPY: Record<SupportLang, { title: string; body: (subject: string) => string; openButton: string }> = {
+/** Who to notify about which ticket. `user === null` means a guest thread. */
+interface TicketOwnerNotification {
+  readonly ticketId: string;
+  readonly subject: string;
+  readonly user: { readonly id: string; readonly language: string | null } | null;
+}
+
+/** Shipped copy used when the operator's template row is missing. */
+interface SupportCardCopy {
+  readonly title: string;
+  readonly body: (subject: string) => string;
+  readonly openButton: string;
+}
+
+/**
+ * The words for a thread the OPERATOR started.
+ *
+ * Deliberately not "поддержка ответила": nobody asked anything yet, and a
+ * client told they have a reply to a ticket they never wrote will look for
+ * the ticket they never wrote.
+ */
+const SUPPORT_OPENED_COPY: Record<SupportLang, SupportCardCopy> = {
+  ru: {
+    title: '💬 Поддержка написала вам',
+    body: (subject) =>
+      `Поддержка открыла обращение «${subject}» и ждёт вашего ответа. Откройте раздел «Поддержка», чтобы прочитать и ответить.`,
+    openButton: '💬 Открыть обращение',
+  },
+  en: {
+    title: '💬 Support started a conversation',
+    body: (subject) =>
+      `Support opened the ticket "${subject}" and is waiting for your reply. Open the Support section to read and answer.`,
+    openButton: '💬 Open ticket',
+  },
+};
+
+const SUPPORT_REPLY_COPY: Record<SupportLang, SupportCardCopy> = {
   ru: {
     title: '💬 Поддержка ответила',
     body: (subject) =>

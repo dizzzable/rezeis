@@ -1810,6 +1810,7 @@ function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly 
     'appBackground',
     'iconColorMode',
     'iconColors',
+    'iconDecor',
     'borderRadius',
     'cornerRadii',
     'fontFamily',

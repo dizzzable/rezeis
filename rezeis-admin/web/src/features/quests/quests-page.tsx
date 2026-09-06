@@ -18,6 +18,7 @@ import {
   Gift,
   Star,
   Link2,
+  Smartphone,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -75,14 +76,16 @@ import {
 
 // Quest types with a working end-to-end completion path. SUBSCRIBE_CHANNEL
 // (Phase B) and PARTNER_TASK (Phase C) are verified via the bot / signed
-// partner callback; CUSTOM has no detection yet and stays gated off (matches
-// the backend QuestService COMPLETABLE_QUEST_TYPES allow-list).
+// partner callback; INSTALL_PWA from the server-stamped first open out of the
+// installed app; CUSTOM has no detection yet and stays gated off (matches the
+// backend QuestService COMPLETABLE_QUEST_TYPES allow-list).
 const QUEST_TYPES: QuestType[] = [
   'LINK_TELEGRAM',
   'LINK_EMAIL',
   'INVITE_FRIENDS',
   'SUBSCRIBE_CHANNEL',
   'PARTNER_TASK',
+  'INSTALL_PWA',
 ]
 const PARTNER_METHODS = ['manual_code', 'postback', 'timed_visit'] as const
 const REWARD_TYPES: QuestRewardType[] = ['POINTS', 'DAYS', 'PROMOCODE', 'DISCOUNT', 'TRAFFIC']
@@ -98,6 +101,7 @@ const PRESET_ICONS: ReadonlyArray<{ key: string; icon: LucideIcon }> = [
   { key: 'star', icon: Star },
   { key: 'trophy', icon: Trophy },
   { key: 'link', icon: Link2 },
+  { key: 'install', icon: Smartphone },
 ]
 const PRESET_ICON_MAP = new Map(PRESET_ICONS.map((p) => [p.key, p.icon]))
 

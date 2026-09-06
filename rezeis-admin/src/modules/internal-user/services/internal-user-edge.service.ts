@@ -782,18 +782,32 @@ export class InternalUserEdgeService {
     const now = new Date();
     try {
       // Refresh the latest-seen surface snapshot on every report.
-      await this.prismaService.user.update({
+      const touched = await this.prismaService.user.update({
         where: buildUserReferenceWhere(reference),
         data: { lastSurface: surface, lastFormFactor: formFactor, lastOs: os, lastSeenAt: now },
+        select: { id: true },
       });
       // Stamp the first-install instant only when the surface is an installed
       // PWA and it isn't set yet — keeps the milestone stable without a
       // read-modify-write race.
       if (surface === 'pwa') {
-        await this.prismaService.user.updateMany({
-          where: { ...buildUserReferenceWhere(reference), pwaInstalledAt: null },
+        const stamped = await this.prismaService.user.updateMany({
+          where: { id: touched.id, pwaInstalledAt: null },
           data: { pwaInstalledAt: now },
         });
+        // The conditional write is ALSO the "first time" test: a count of one
+        // means this very report is the one that set the milestone, so the
+        // event fires exactly once per account. Reading the column back
+        // afterwards instead would race the customer's other open tabs — the
+        // report fires once per cabinet session, not once per lifetime.
+        if (stamped.count === 1) {
+          this.systemEventsService.info(
+            EVENT_TYPES.USER_PWA_INSTALLED,
+            'USER',
+            'Клиент открыл кабинет из установленного приложения',
+            { userId: touched.id, os, formFactor },
+          );
+        }
       }
     } catch (err: unknown) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {

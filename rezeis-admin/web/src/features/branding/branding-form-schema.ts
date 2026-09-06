@@ -111,6 +111,13 @@ export const DEFAULT_NAV_ITEMS: readonly NavItemDraft[] = [
   { id: 'support', visible: false },
 ]
 
+/** What an operator put on one dashboard icon. Every field optional. */
+export interface BrandingIconDecorDraft {
+  readonly glyph?: string
+  readonly effect?: string
+  readonly color?: string
+}
+
 export interface BrandingFormDraft {
   readonly themePresetId: string | null
   readonly themePresetVersion: number | null
@@ -169,6 +176,7 @@ export interface BrandingFormDraft {
   readonly appBackground?: BrandingAppBackgroundDraft
   readonly iconColorMode: (typeof BRANDING_ICON_COLOR_MODES)[number]
   readonly iconColors?: Record<string, string>
+  readonly iconDecor?: Record<string, BrandingIconDecorDraft>
   readonly borderRadius: string
   readonly cornerRadii: BrandingCornerRadiiDraft
   readonly fontFamily: string
@@ -424,6 +432,8 @@ export interface BrandingFormValidationMessages {
 }
 
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+/** A vocabulary key — kept in step with the panel API's own reader. */
+const SLUG_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
 const OPAQUE_HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/
 const DATA_IMAGE_BASE64_PATTERN = /^data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/i
 const BRANDING_UPLOAD_PATH_PATTERN =
@@ -475,6 +485,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   },
   iconColorMode: 'default',
   iconColors: {},
+  iconDecor: {},
   borderRadius: 'rounded-2xl',
   cornerRadii: DEFAULT_CORNER_RADII_DRAFT,
   fontFamily: 'Geist Variable, system-ui, sans-serif',
@@ -577,7 +588,8 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       path: ['color'],
       message: messages.hexInvalid,
     })
-    .nullish()
+
+    .nullish()
   const subscriptionCardGlassSchema = z.object({
     enabled: z.boolean(),
     tint: z.string().regex(OPAQUE_HEX_PATTERN, messages.hexInvalid),
@@ -674,6 +686,17 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         )
         .refine((value) => Object.keys(value).length <= 100)
         .optional(),
+      iconDecor: z
+        .record(
+          z.string().min(1).max(64),
+          z.object({
+            glyph: z.string().regex(SLUG_PATTERN).optional(),
+            effect: z.string().regex(SLUG_PATTERN).optional(),
+            color: z.string().regex(HEX_PATTERN, messages.hexInvalid).optional(),
+          }),
+        )
+        .refine((value) => Object.keys(value).length <= 64)
+        .optional(),
       borderRadius: borderRadiusSchema(),
       cornerRadii: cornerRadiiSchema,
       fontFamily: z.string().trim().min(1).max(256),
@@ -710,6 +733,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       cardEffectProps: values.cardEffectProps ?? {},
       appBackground: values.appBackground ?? DEFAULT_APP_BACKGROUND_DRAFT,
       iconColors: values.iconColors ?? {},
+      iconDecor: values.iconDecor ?? {},
       planCardStyles: values.planCardStyles ?? {},
       navItems: values.navItems ?? DEFAULT_NAV_ITEMS,
       navGap: values.navGap ?? 2,
@@ -822,6 +846,7 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
     appBackground: normalizeAppBackgroundDraft(input?.appBackground),
     iconColors: isPlainRecord(input?.iconColors) ? input.iconColors : {},
+    iconDecor: normalizeIconDecorDraft(input?.iconDecor),
     cornerRadii: normalizeCornerRadiiDraft(
       input?.cornerRadii,
       input?.borderRadius,
@@ -1323,4 +1348,25 @@ function isPlainRecord(value: unknown): value is Record<string, string> {
 
 function isPlainRecordUnknown(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Keeps only entries the panel API would itself accept, so a stored map that
+ * predates a vocabulary — or that somebody edited by hand — cannot make the
+ * form dirty on load or fail validation on a save the operator did not touch.
+ */
+function normalizeIconDecorDraft(input: unknown): Record<string, BrandingIconDecorDraft> {
+  if (!isPlainRecord(input)) return {}
+  const out: Record<string, BrandingIconDecorDraft> = {}
+  for (const [key, value] of Object.entries(input).slice(0, 64)) {
+    if (key.length === 0 || key.length > 64 || !isPlainRecord(value)) continue
+    const decor: { glyph?: string; effect?: string; color?: string } = {}
+    if (typeof value.glyph === 'string' && SLUG_PATTERN.test(value.glyph)) decor.glyph = value.glyph
+    if (typeof value.effect === 'string' && SLUG_PATTERN.test(value.effect)) decor.effect = value.effect
+    if (typeof value.color === 'string' && HEX_PATTERN.test(value.color)) decor.color = value.color
+    if (decor.glyph !== undefined || decor.effect !== undefined || decor.color !== undefined) {
+      out[key] = decor
+    }
+  }
+  return out
 }

@@ -22,10 +22,12 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
   calls: CreateCall[];
   emails: Array<{ to: string; subject: string; rawHtml?: string }>;
   tokensIssued: string[];
+  templateTypes: string[];
 } {
   const calls: CreateCall[] = [];
   const emails: Array<{ to: string; subject: string; rawHtml?: string }> = [];
   const tokensIssued: string[] = [];
+  const templateTypes: string[] = [];
   const userNotifications = {
     create: async (input: CreateCall): Promise<string> => {
       if (opts?.throwOnCreate) throw new Error('db down');
@@ -58,8 +60,13 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
     },
   };
   const templatesService = {
-    // Default: no seeded row → notifyAdminReply uses the built-in fallback copy.
-    getByType: async () => opts?.template ?? null,
+    // Default: no seeded row → the caller uses the built-in fallback copy.
+    // The requested type is recorded: which template a notification reaches
+    // for is the difference between "support replied" and "support wrote".
+    getByType: async (type: string) => {
+      templateTypes.push(type);
+      return opts?.template ?? null;
+    },
   };
   const service = new SupportNotificationsService(
     userNotifications as never,
@@ -68,7 +75,7 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
     guestService as never,
     templatesService as never,
   );
-  return { service, calls, emails, tokensIssued };
+  return { service, calls, emails, tokensIssued, templateTypes };
 }
 
 describe('SupportNotificationsService.notifyAdminReply', () => {
@@ -176,5 +183,114 @@ describe('SupportNotificationsService.notifyGuestReply', () => {
   it('never throws when the email send fails', async () => {
     const { service } = build({ guestEmail: 'visitor@example.com', sendThrows: true });
     await assert.doesNotReject(service.notifyGuestReply('t-1'));
+  });
+});
+
+/**
+ * A thread the OPERATOR started.
+ *
+ * Two things must hold at once, and they pull in opposite directions:
+ *
+ *  - the WORDS must differ from a reply ("there is a new reply to your
+ *    ticket" is false for a ticket nobody wrote), and
+ *  - the EVENT TYPE must NOT differ, because the cabinet counts its support
+ *    badge by `type === 'support_reply'`, clears it by `payload.ticketId`,
+ *    and ships as a separate image that the panel goes out ahead of.
+ *
+ * A new event type is the obvious-looking change here and it is the one that
+ * breaks: the notification would arrive at a cabinet that counts nothing.
+ */
+describe('SupportNotificationsService.notifyAdminOpenedTicket', () => {
+  it('asks for the opened-ticket template, not the reply one', async () => {
+    const { service, templateTypes } = build();
+    await service.notifyAdminOpenedTicket({
+      ticketId: 't-9',
+      subject: 'Уточнение по оплате',
+      user: { id: 'u-1', language: 'RU' },
+    });
+    assert.deepEqual(templateTypes, ['support_ticket_opened']);
+  });
+
+  it('still delivers under the `support_reply` event type', async () => {
+    // THE cross-image invariant. See the block comment above.
+    const { service, calls } = build();
+    await service.notifyAdminOpenedTicket({
+      ticketId: 't-9',
+      subject: 'Уточнение по оплате',
+      user: { id: 'u-1', language: 'RU' },
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].type, 'support_reply');
+    assert.equal(calls[0].payload.ticketId, 't-9');
+  });
+
+  it('does not tell the client they have a reply', async () => {
+    const { service, calls } = build();
+    await service.notifyAdminOpenedTicket({
+      ticketId: 't-9',
+      subject: 'Уточнение по оплате',
+      user: { id: 'u-1', language: 'RU' },
+    });
+    const text = String(calls[0].payload.text ?? '');
+    assert.ok(!text.includes('ответ от поддержки'), text);
+    assert.ok(text.includes('Уточнение по оплате'), text);
+  });
+
+  it('falls back to English copy for an EN user', async () => {
+    const { service, calls } = build();
+    await service.notifyAdminOpenedTicket({
+      ticketId: 't-9',
+      subject: 'Payment question',
+      user: { id: 'u-1', language: 'EN' },
+    });
+    assert.ok(String(calls[0].payload.title ?? '').includes('Support started'), String(calls[0].payload.title));
+  });
+
+  it('prefers the operator template over the shipped copy', async () => {
+    const { service, calls } = build({
+      template: {
+        type: 'support_ticket_opened',
+        title: 'Мы вам написали',
+        body: 'Тема: {{subject}}',
+        titleEn: null,
+        bodyEn: null,
+        buttons: [],
+      },
+    });
+    await service.notifyAdminOpenedTicket({
+      ticketId: 't-9',
+      subject: 'Возврат',
+      user: { id: 'u-1', language: 'RU' },
+    });
+    assert.equal(calls[0].payload.title, 'Мы вам написали');
+    assert.equal(calls[0].payload.text, 'Тема: Возврат');
+  });
+
+  it('escapes a subject carrying markup', async () => {
+    const { service, calls } = build();
+    await service.notifyAdminOpenedTicket({
+      ticketId: 't-9',
+      subject: '<b>жирный</b>',
+      user: { id: 'u-1', language: 'RU' },
+    });
+    assert.ok(!String(calls[0].payload.text).includes('<b>жирный</b>'), String(calls[0].payload.text));
+    assert.ok(String(calls[0].preRenderedText).includes('&lt;b&gt;'), String(calls[0].preRenderedText));
+  });
+
+  it('sends nothing for a guest thread', async () => {
+    const { service, calls } = build();
+    await service.notifyAdminOpenedTicket({ ticketId: 't-9', subject: 'X', user: null });
+    assert.equal(calls.length, 0);
+  });
+
+  it('never throws when delivery fails', async () => {
+    const { service } = build({ throwOnCreate: true });
+    await assert.doesNotReject(
+      service.notifyAdminOpenedTicket({
+        ticketId: 't-9',
+        subject: 'X',
+        user: { id: 'u-1', language: 'RU' },
+      }),
+    );
   });
 });

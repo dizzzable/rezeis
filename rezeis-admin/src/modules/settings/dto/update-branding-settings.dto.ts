@@ -336,6 +336,59 @@ function HasAllowedPlanTexturePresets(
 }
 
 /**
+ * `iconDecor` is the dashboard-icon decoration map. The reader keeps only
+ * short slugs and hex colours and silently drops the rest, so — exactly as
+ * with `iconColors` — a caller that sends `ff4081`, or an effect name with a
+ * space in it, would otherwise be told `200 OK` and then find the icon
+ * unchanged with nothing to point at. This refuses instead.
+ *
+ * The VALUES are not checked against `ICON_EFFECTS` / `ICON_GLYPHS` on
+ * purpose: the panel ships ahead of the cabinet, and a vocabulary frozen here
+ * would refuse an effect the very next cabinet release understands. The
+ * cabinet degrades an unknown value to the default, which is where that
+ * decision belongs.
+ */
+function IsIconDecorMap(validationOptions?: ValidationOptions): PropertyDecorator {
+  const slug = /^[a-z][a-z0-9-]{0,31}$/;
+  const hex = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+  return ValidateBy(
+    {
+      name: 'isIconDecorMap',
+      validator: {
+        validate: (value: unknown): boolean => {
+          if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+            return true;
+          }
+          const entries = Object.entries(value as Record<string, unknown>);
+          if (entries.length > 64) return false;
+          for (const [key, entry] of entries) {
+            if (key.length === 0 || key.length > 64) return false;
+            if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+            const decor = entry as Record<string, unknown>;
+            for (const field of Object.keys(decor)) {
+              if (!['glyph', 'effect', 'color'].includes(field)) return false;
+            }
+            if (decor.glyph !== undefined && !(typeof decor.glyph === 'string' && slug.test(decor.glyph))) {
+              return false;
+            }
+            if (decor.effect !== undefined && !(typeof decor.effect === 'string' && slug.test(decor.effect))) {
+              return false;
+            }
+            if (decor.color !== undefined && !(typeof decor.color === 'string' && hex.test(decor.color))) {
+              return false;
+            }
+          }
+          return true;
+        },
+        defaultMessage: () =>
+          'iconDecor must map icon keys to { glyph?, effect?, color? } with slug values and a hex colour',
+      },
+    },
+    validationOptions,
+  );
+}
+
+/**
  * `iconColors` is a dynamic-key map, so the reader (`readHexMap`) is what
  * normally shapes it: it keeps the first 100 entries whose key is 1–64 chars
  * and whose value is a hex colour, and drops everything else. Dropping is the
@@ -1016,6 +1069,11 @@ export class UpdateBrandingSettingsDto {
   @IsObject()
   @IsBrandingHexColourMap()
   public iconColors?: Record<string, string>;
+
+  @IsOptional()
+  @IsObject()
+  @IsIconDecorMap()
+  public iconDecor?: Record<string, { glyph?: string; effect?: string; color?: string }>;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))

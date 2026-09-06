@@ -13,6 +13,8 @@ function makeService(cfg: {
   quests: Array<Record<string, unknown>>;
   completions: Array<Record<string, unknown>>;
   eligible?: boolean;
+  /** What the row looks like after an inline settle, or `null` for refused. */
+  settled?: Record<string, unknown> | null;
 }): QuestQueryService {
   const prisma = {
     user: {
@@ -20,7 +22,12 @@ function makeService(cfg: {
       count: async () => (cfg.eligible === false ? 0 : 1),
     },
     quest: { findMany: async () => cfg.quests },
-    questCompletion: { findMany: async () => cfg.completions },
+    questCompletion: {
+      findMany: async () => cfg.completions,
+      findUnique: async () => cfg.settled ?? null,
+      create: async () => ({ id: 'qc-1' }),
+      update: async () => ({ id: 'qc-1' }),
+    },
   };
   const progress = new QuestProgressService(prisma as never);
   return new QuestQueryService(prisma as never, progress);
@@ -37,7 +44,12 @@ function quest(overrides: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
-const user = { points: 42, telegramId: null, webAccount: { emailVerifiedAt: null } };
+const user = {
+  points: 42,
+  telegramId: null,
+  pwaInstalledAt: null,
+  webAccount: { emailVerifiedAt: null },
+};
 
 describe('QuestQueryService.listForUser', () => {
   it('returns the points balance and an actionable quest with no completion', async () => {
@@ -47,6 +59,46 @@ describe('QuestQueryService.listForUser', () => {
     assert.equal(res.quests.length, 1);
     assert.equal(res.quests[0].claimable, false);
     assert.equal(res.quests[0].status, 'IN_PROGRESS');
+  });
+
+  it('settles INSTALL_PWA on the spot for somebody who already has the app', async () => {
+    // The ten-minute reconciler would get there eventually, and in the
+    // meantime the customer opens Задания and sees nothing — the "why is this
+    // stuck" dead end. Recording it during the read turns that into a row
+    // that says «Забрать» on this very load.
+    const svc = makeService({
+      user: { ...user, pwaInstalledAt: new Date('2026-09-01T00:00:00.000Z') },
+      quests: [quest({ type: QuestType.INSTALL_PWA, iconRef: 'install' })],
+      completions: [],
+      settled: { status: 'COMPLETED', progress: 1 },
+    });
+    const res = await svc.listForUser('u1');
+    assert.equal(res.quests.length, 1);
+    assert.equal(res.quests[0].claimable, true);
+  });
+
+  it('hides INSTALL_PWA when settling it was refused', async () => {
+    // Out of window or outside the audience: `completeForUser` writes nothing
+    // and the row must not appear claiming a reward nobody will pay.
+    const svc = makeService({
+      user: { ...user, pwaInstalledAt: new Date('2026-09-01T00:00:00.000Z') },
+      quests: [quest({ type: QuestType.INSTALL_PWA, iconRef: 'install' })],
+      completions: [],
+      settled: null,
+    });
+    const res = await svc.listForUser('u1');
+    assert.equal(res.quests.length, 0);
+  });
+
+  it('shows INSTALL_PWA to somebody who has not installed', async () => {
+    const svc = makeService({
+      user,
+      quests: [quest({ type: QuestType.INSTALL_PWA, iconRef: 'install' })],
+      completions: [],
+    });
+    const res = await svc.listForUser('u1');
+    assert.equal(res.quests.length, 1);
+    assert.equal(res.quests[0].type, QuestType.INSTALL_PWA);
   });
 
   it('auto-hides LINK_TELEGRAM when the user already linked Telegram and has no pending completion', async () => {

@@ -410,6 +410,23 @@ const SUPPORT_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
       'Open the Support section to read it.',
     buttons: SUPPORT_BUTTONS,
   },
+  {
+    // A thread the OPERATOR started. Separate from `support_reply` because
+    // "there is a new reply to your ticket" is false for a ticket the client
+    // never opened — and it is the first sentence they read. The delivered
+    // notification event still carries type `support_reply`, which is what
+    // the cabinet counts and clears; see `SupportNotificationsService`.
+    type: 'support_ticket_opened',
+    title: '💬 Поддержка написала вам',
+    titleEn: '💬 Support started a conversation',
+    body:
+      'Поддержка открыла обращение «{{subject}}» и ждёт вашего ответа. ' +
+      'Откройте раздел «Поддержка», чтобы прочитать и ответить.',
+    bodyEn:
+      'Support opened the ticket "{{subject}}" and is waiting for your reply. ' +
+      'Open the Support section to read and answer.',
+    buttons: SUPPORT_BUTTONS,
+  },
 ];
 
 export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [

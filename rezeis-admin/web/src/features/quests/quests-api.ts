@@ -7,6 +7,7 @@ export type QuestType =
   | 'INVITE_FRIENDS'
   | 'SUBSCRIBE_CHANNEL'
   | 'PARTNER_TASK'
+  | 'INSTALL_PWA'
   | 'CUSTOM'
 
 export type QuestRewardType = 'POINTS' | 'DAYS' | 'PROMOCODE' | 'DISCOUNT' | 'TRAFFIC'

@@ -74,6 +74,7 @@ import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots
 import { GradientBuilder } from "./gradient-builder";
 import { useCustomGradients } from "./use-custom-gradients";
 import { IconColorsSection } from "./icon-colors-section";
+import { DashboardIconsSection } from "./dashboard-icons-section";
 import { PlanCardStylesSection } from "./plan-card-styles-section";
 import { NavConfigSection } from "./nav-config-section";
 import {
@@ -2114,6 +2115,10 @@ export default function WebReiwaPage() {
                   onColorsChange={(c) => form.setValue("iconColors", c, { shouldDirty: true })}
                 />
               )}
+            />
+            <DashboardIconsSection
+              decor={watchedValues.iconDecor ?? {}}
+              onChange={(next) => form.setValue("iconDecor", next, { shouldDirty: true })}
             />
           </div>
 

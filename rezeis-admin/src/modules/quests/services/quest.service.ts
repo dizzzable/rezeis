@@ -200,9 +200,9 @@ const MAX_PARAMS_JSON_BYTES = 4 * 1024;
 
 /**
  * Quest types with a working end-to-end completion path in this release
- * (live event + catch-up reconciler + claim). SUBSCRIBE_CHANNEL / PARTNER_TASK
- * / CUSTOM have no detection yet, so we refuse to create/patch them — an
- * operator must never ship a quest a user can see but never complete.
+ * (live event + catch-up reconciler + claim). CUSTOM has no detection, so we
+ * refuse to create/patch it — an operator must never ship a quest a user can
+ * see but never complete.
  */
 const COMPLETABLE_QUEST_TYPES: readonly QuestType[] = [
   QuestType.LINK_TELEGRAM,
@@ -210,6 +210,7 @@ const COMPLETABLE_QUEST_TYPES: readonly QuestType[] = [
   QuestType.INVITE_FRIENDS,
   QuestType.SUBSCRIBE_CHANNEL,
   QuestType.PARTNER_TASK,
+  QuestType.INSTALL_PWA,
 ];
 
 function assertCompletableType(

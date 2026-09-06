@@ -30,7 +30,12 @@ export class QuestDetectionReconcilerService {
       where: {
         enabled: true,
         type: {
-          in: [QuestType.LINK_TELEGRAM, QuestType.LINK_EMAIL, QuestType.INVITE_FRIENDS],
+          in: [
+            QuestType.LINK_TELEGRAM,
+            QuestType.LINK_EMAIL,
+            QuestType.INVITE_FRIENDS,
+            QuestType.INSTALL_PWA,
+          ],
         },
       },
     });
@@ -65,6 +70,25 @@ export class QuestDetectionReconcilerService {
       const users = await this.prismaService.user.findMany({
         where: {
           webAccount: { emailVerifiedAt: { not: null } },
+          questCompletions: { none: { questId: quest.id } },
+        },
+        select: { id: true },
+        take: QuestDetectionReconcilerService.BATCH,
+      });
+      for (const user of users) {
+        await this.progressService.completeForUser(quest, user.id);
+      }
+      return;
+    }
+
+    if (quest.type === QuestType.INSTALL_PWA) {
+      // `pwaInstalledAt` is stamped once, server-side, the first time the
+      // cabinet reports an installed-app surface. Users who installed BEFORE
+      // the operator created the quest never produced an event, and this is
+      // the only path that reaches them.
+      const users = await this.prismaService.user.findMany({
+        where: {
+          pwaInstalledAt: { not: null },
           questCompletions: { none: { questId: quest.id } },
         },
         select: { id: true },

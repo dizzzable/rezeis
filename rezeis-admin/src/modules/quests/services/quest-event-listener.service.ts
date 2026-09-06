@@ -44,6 +44,15 @@ export class QuestEventListenerService implements OnModuleInit {
           if (userId) await this.progressService.markCompleted(QuestType.LINK_EMAIL, userId);
           break;
         }
+        case EVENT_TYPES.USER_PWA_INSTALLED: {
+          // Fires on the first open FROM the installed app, which is the
+          // earliest moment installation is knowable: no platform tells a page
+          // it was installed, and on iOS there is no install prompt to hook
+          // at all. The stamp behind this event is written server-side.
+          const userId = readString(metadata.userId);
+          if (userId) await this.progressService.markCompleted(QuestType.INSTALL_PWA, userId);
+          break;
+        }
         case EVENT_TYPES.REFERRAL_QUALIFIED: {
           const referrerId = readString(metadata.referrerId);
           if (referrerId) await this.progressService.advanceInvite(referrerId);

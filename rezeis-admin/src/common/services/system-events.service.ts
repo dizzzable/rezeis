@@ -125,6 +125,16 @@ export const EVENT_TYPES = {
   USER_ACCOUNTS_MERGED: 'user.accounts_merged',
   USER_FIRST_TRAFFIC: 'user.first_traffic',
   /**
+   * The customer opened the cabinet from an installed app for the first time.
+   *
+   * Fires once per account, from the same conditional write that stamps
+   * `User.pwaInstalledAt`, so a reinstall or a second device does not repeat
+   * it. Installation itself is invisible to the page on every platform — the
+   * milestone is the first OPEN from the installed app, which is the earliest
+   * moment anything can be known.
+   */
+  USER_PWA_INSTALLED: 'user.pwa_installed',
+  /**
    * An operator moved a customer's points balance by hand
    * (`POST /admin/users/:telegramId/points`). `points` is a SHARED wallet — the
    * referral exchange spends it and quests credit it — so a manual credit or
@@ -2479,6 +2489,7 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
 
   // User traffic usage (detected from Remnawave webhooks; category USER → topic «Пользователи»).
   'user.first_traffic': { emoji: '📶', title: 'Пользователь начал использовать трафик' },
+  'user.pwa_installed': { emoji: '📲', title: 'Приложение установлено на устройство' },
 
   // Remnawave panel (forwarded webhook events)
   'remnawave.user.first_connected': { emoji: '🔌', title: 'Первое подключение пользователя' },

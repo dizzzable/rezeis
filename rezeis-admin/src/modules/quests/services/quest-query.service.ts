@@ -18,6 +18,7 @@ interface CabinetUser {
   readonly points: number;
   readonly telegramId: bigint | null;
   readonly emailVerified: boolean;
+  readonly pwaInstalled: boolean;
 }
 
 /**
@@ -41,6 +42,7 @@ export class QuestQueryService {
       select: {
         points: true,
         telegramId: true,
+        pwaInstalledAt: true,
         webAccount: { select: { emailVerifiedAt: true } },
       },
     });
@@ -51,6 +53,7 @@ export class QuestQueryService {
       points: user.points,
       telegramId: user.telegramId,
       emailVerified: user.webAccount?.emailVerifiedAt != null,
+      pwaInstalled: user.pwaInstalledAt !== null,
     };
 
     const quests = await this.prismaService.quest.findMany({
@@ -69,15 +72,35 @@ export class QuestQueryService {
       if (!withinWindow(quest)) continue;
       if (budgetExhausted(quest)) continue;
 
-      const completion = byQuest.get(quest.id) ?? null;
+      let completion = byQuest.get(quest.id) ?? null;
       // Already rewarded — hide.
       if (completion?.status === QuestCompletionStatus.CLAIMED) continue;
 
       if (completion === null) {
-        // No progress yet: hide if the user isn't targeted, or if the action is
-        // already done (the reconciler will surface it as claimable shortly).
-        if (actionAlreadyDone(quest.type, cabinetUser)) continue;
-        if (!(await this.progressService.isEligible(quest, userId))) continue;
+        if (actionAlreadyDone(quest.type, cabinetUser)) {
+          // The customer already did the thing and nothing recorded it — the
+          // normal state for a quest an operator created AFTER the fact. The
+          // ten-minute reconciler is the backstop for every type.
+          //
+          // INSTALL_PWA is settled HERE instead. "I already have the app, why
+          // does this quest do nothing" is the exact dead end the flow was
+          // asked to avoid, and ten minutes of an empty list is that dead end
+          // with a timer on it. Same idempotent call the reconciler makes: it
+          // re-checks the window and the audience, and the unique key absorbs
+          // a concurrent create.
+          if (quest.type !== QuestType.INSTALL_PWA) continue;
+          await this.progressService.completeForUser(quest, userId);
+          const settled = await this.prismaService.questCompletion.findUnique({
+            where: { questId_userId_periodKey: { questId: quest.id, userId, periodKey: '' } },
+            select: { status: true, progress: true },
+          });
+          // Still nothing means `completeForUser` refused — out of window or
+          // outside the audience. Hiding is then the same answer as before.
+          if (settled === null || settled.status === QuestCompletionStatus.CLAIMED) continue;
+          completion = settled;
+        } else if (!(await this.progressService.isEligible(quest, userId))) {
+          continue;
+        }
       }
 
       items.push(toCabinetItem(quest, completion));
@@ -94,6 +117,7 @@ function budgetExhausted(quest: Quest): boolean {
 function actionAlreadyDone(type: QuestType, user: CabinetUser): boolean {
   if (type === QuestType.LINK_TELEGRAM) return user.telegramId !== null;
   if (type === QuestType.LINK_EMAIL) return user.emailVerified;
+  if (type === QuestType.INSTALL_PWA) return user.pwaInstalled;
   return false;
 }
 

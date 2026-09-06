@@ -19,7 +19,10 @@ import {
   CARD_EFFECT_SLOT_MODES,
   CARD_GRADIENT_SOURCES,
   CARD_LOGO_PRESETS,
+  DASHBOARD_ICON_KEYS,
   ICON_COLOR_MODES,
+  ICON_EFFECTS,
+  ICON_GLYPHS,
   NAV_DESTINATIONS,
   NAV_ESSENTIAL_DESTINATIONS,
   NAV_MAX_VISIBLE,
@@ -140,7 +143,7 @@ const CARD_EFFECT_PARITY_DIGEST =
  * Identical to `BRANDING_VOCABULARY_DIGEST` in `reiwa/test/web/branding-vocabulary-panel-parity.test.ts`.
  */
 const BRANDING_VOCABULARY_DIGEST =
-  'd54362979e50c22b44cd11c46ef892728f8b204dba56ca00eb72f5ca55356c59';
+  'a0d1264e487c8eaa249d61c1c334f112a5b0acf264413939954ae5dd30d0833e';
 
 /**
  * The message printed when a digest moves. It has to carry a REMEDY: two hex
@@ -637,18 +640,18 @@ describe('reiwa parity digest', () => {
     it('states the digest literal twice, over something', () => {
       assert.equal(
         BRANDING_VOCABULARY_DIGEST,
-        'd54362979e50c22b44cd11c46ef892728f8b204dba56ca00eb72f5ca55356c59',
+        'a0d1264e487c8eaa249d61c1c334f112a5b0acf264413939954ae5dd30d0833e',
       );
 
       assertCanonicaliserPinned();
 
-      // NON-VACUITY: 22 vocabularies in the mirror; a reader that lost the
+      // NON-VACUITY: 25 vocabularies in the mirror; a reader that lost the
       // interface, the form schema or the DTO hashes to one of the three
       // below and agrees with itself forever.
       const vocabularies = liveBrandingVocabularies();
       assert.equal(
         Object.keys(vocabularies).length,
-        22,
+        25,
         'the number of mirrored branding vocabularies moved — update this count and BOTH repositories',
       );
       for (const [name, values] of Object.entries(vocabularies)) {
@@ -683,7 +686,7 @@ describe('reiwa parity digest', () => {
 });
 
 /**
- * The 22 vocabularies the mirror holds: fourteen named constants from the
+ * The 25 vocabularies the mirror holds: seventeen named constants from the
  * interface (imported LIVE — they are backend sources, and a rename then
  * fails this spec's own compilation rather than a parse), seven from the
  * SPA's form schema and one derived map read from disk, and the numbers the
@@ -696,6 +699,9 @@ function liveBrandingVocabularies(): Readonly<Record<string, readonly string[]>>
     appBackgroundKinds: [...APP_BACKGROUND_KINDS],
     appBackgroundTextures: [...APP_BACKGROUND_TEXTURES],
     iconColorModes: [...ICON_COLOR_MODES],
+    iconEffects: [...ICON_EFFECTS],
+    iconGlyphs: [...ICON_GLYPHS],
+    dashboardIconKeys: [...DASHBOARD_ICON_KEYS],
     subscriptionCardTextModes: [...SUBSCRIPTION_CARD_TEXT_MODES],
     planCardTextModes: [...PLAN_CARD_TEXT_MODES],
     cardEffectSlotModes: [...CARD_EFFECT_SLOT_MODES],

@@ -30,12 +30,39 @@ interface CreateGuestTicketInput {
   readonly subject: string;
 }
 
+interface CreateByAdminInput {
+  readonly userId: string;
+  readonly subject: string;
+  readonly content: string;
+  readonly adminId: string;
+}
+
 interface AddMessageInput {
   readonly ticketId: string;
   readonly authorType: 'USER' | 'ADMIN' | 'SYSTEM';
   readonly authorId: string | null;
   readonly content: string;
   readonly metadata?: Prisma.InputJsonValue;
+}
+
+/**
+ * The status a ticket lands in after a message from `authorType`.
+ *
+ * Returns the CURRENT status when nothing transitions — the caller writes it
+ * back either way, to move `updatedAt`. CLOSED never moves on a message: a
+ * closed thread is reopened explicitly, through the reopen route.
+ */
+function nextTicketStatus(
+  current: SupportTicketStatus,
+  authorType: AddMessageInput['authorType'],
+): SupportTicketStatus {
+  if (authorType === 'ADMIN' && current === SupportTicketStatus.OPEN) {
+    return SupportTicketStatus.WAITING_REPLY;
+  }
+  if (authorType === 'USER' && current === SupportTicketStatus.WAITING_REPLY) {
+    return SupportTicketStatus.OPEN;
+  }
+  return current;
 }
 
 interface CreateDocumentRequestInput {
@@ -236,6 +263,43 @@ export class SupportTicketsService {
   }
 
   /**
+   * Open a ticket WITH a client, on the operator's initiative — the thread
+   * and its first message land together or not at all.
+   *
+   * ── Why this does not go through `addMessage` ─────────────────────────
+   *
+   * `addMessage` flips OPEN → WAITING_REPLY on any ADMIN message, which is
+   * right for a reply and wrong for an opening line: the ticket would be
+   * born in the status the panel's default filter hides, so an operator
+   * would create a conversation and watch it vanish from their own list.
+   * The cabinet would label it «Ответ» — a reply to nothing.
+   *
+   * OPEN is also what an unchanged cabinet renders correctly («Открыт»),
+   * which matters because the panel ships ahead of it. The normal flow
+   * resumes from the operator's SECOND message.
+   */
+  public async createByAdmin(input: CreateByAdminInput) {
+    return this.prismaService.$transaction(async (tx) => {
+      const ticket = await tx.supportTicket.create({
+        data: {
+          userId: input.userId,
+          subject: input.subject,
+          status: SupportTicketStatus.OPEN,
+        },
+      });
+      await tx.supportTicketMessage.create({
+        data: {
+          ticketId: ticket.id,
+          authorType: 'ADMIN',
+          authorId: input.adminId,
+          content: input.content,
+        },
+      });
+      return ticket;
+    });
+  }
+
+  /**
    * Create a guest-owned (anonymous) ticket. Channel is GUEST and there is
    * no `userId` — the owner-exclusivity CHECK in the DB enforces that exactly
    * one of user_id / guest_id is set.
@@ -268,20 +332,19 @@ export class SupportTicketsService {
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       },
     });
-    // Update ticket status to WAITING_REPLY when admin responds
-    if (input.authorType === 'ADMIN' && ticket.status === SupportTicketStatus.OPEN) {
-      await this.prismaService.supportTicket.update({
-        where: { id: input.ticketId },
-        data: { status: SupportTicketStatus.WAITING_REPLY },
-      });
-    }
-    // Reopen if user responds to a waiting ticket
-    if (input.authorType === 'USER' && ticket.status === SupportTicketStatus.WAITING_REPLY) {
-      await this.prismaService.supportTicket.update({
-        where: { id: input.ticketId },
-        data: { status: SupportTicketStatus.OPEN },
-      });
-    }
+    // The ticket row is touched on EVERY message, not only when the status
+    // moves. `updatedAt` is what both lists sort by and what the panel and
+    // the cabinet print as the thread's time, so leaving it alone sank an
+    // active conversation below dormant ones the moment the status stopped
+    // changing — that is every operator message after the first, and every
+    // client message on an already-OPEN thread.
+    //
+    // Writing the same status back when nothing transitions is deliberate:
+    // `@updatedAt` fires on the update, so one statement serves both.
+    await this.prismaService.supportTicket.update({
+      where: { id: input.ticketId },
+      data: { status: nextTicketStatus(ticket.status, input.authorType) },
+    });
     // A user/guest reply satisfies the oldest still-pending document request
     // on the ticket (fulfillment "by a message" — the operator can still
     // cancel or ask again). SYSTEM/ADMIN messages never fulfill.

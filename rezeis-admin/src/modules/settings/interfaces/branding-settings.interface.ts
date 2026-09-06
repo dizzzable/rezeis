@@ -297,6 +297,50 @@ export const ICON_KEYS = [
 ] as const;
 export type IconKey = (typeof ICON_KEYS)[number];
 
+/**
+ * The cabinet's dashboard header controls — the row of round buttons above
+ * the subscription card. These are the icons an operator can decorate; the
+ * `ICON_KEYS` above are the settings-menu rows, which are a list and take
+ * colour only.
+ */
+export const DASHBOARD_ICON_KEYS = ['quests', 'wheel', 'bell', 'buy', 'promo'] as const;
+export type DashboardIconKey = (typeof DASHBOARD_ICON_KEYS)[number];
+
+/**
+ * Attention effects an operator can put on a dashboard icon.
+ *
+ * Deliberately three and no more, all CSS and all on `transform`/`opacity`:
+ * the cabinet's own paint contract refuses a keyframe that animates anything
+ * paint-bound, and an iPhone allows sixteen live WebGL contexts per render
+ * process — a row of shader-backed icons would spend the budget the
+ * subscription card's effects already live on.
+ */
+export const ICON_EFFECTS = ['none', 'pulse', 'shake', 'glow'] as const;
+export type IconEffect = (typeof ICON_EFFECTS)[number];
+
+/**
+ * Glyphs an operator can swap onto a dashboard icon. `default` keeps whatever
+ * the cabinet ships for that position.
+ */
+export const ICON_GLYPHS = [
+  'default',
+  'sparkles',
+  'gift',
+  'star',
+  'trophy',
+  'crown',
+  'flame',
+  'zap',
+  'rocket',
+  'heart',
+  'gem',
+  'target',
+  'bell',
+  'cart',
+  'ticket',
+] as const;
+export type IconGlyph = (typeof ICON_GLYPHS)[number];
+
 export const CARD_EFFECT_SLOT_MODES = ['inherit', 'override'] as const;
 export type CardEffectSlotMode = (typeof CARD_EFFECT_SLOT_MODES)[number];
 
@@ -410,6 +454,20 @@ export interface AppBackgroundTextureSettings {
  * resolves the no-effect case to `none` — the built-in pattern those payloads
  * have always rendered, never `plain`.
  */
+/**
+ * What an operator put on one dashboard icon. Every field is optional; an
+ * empty object is indistinguishable from an absent key and both mean "leave
+ * this icon alone".
+ */
+export interface IconDecorSettings {
+  /** A key from `ICON_GLYPHS`, or absent to keep the shipped glyph. */
+  readonly glyph?: string;
+  /** A key from `ICON_EFFECTS`, or absent for no effect. */
+  readonly effect?: string;
+  /** Hex accent for the glyph and the effect, or absent for the brand colour. */
+  readonly color?: string;
+}
+
 export interface AppBackgroundSettings {
   readonly kind: AppBackgroundKind;
   /** Animated effect (kind === 'effect'). */
@@ -851,6 +909,19 @@ export interface BrandingSettingsInterface {
    */
   readonly iconColors: Record<string, string>;
 
+  /**
+   * Per-icon decoration for the dashboard header controls, keyed by
+   * `DashboardIconKey`. Every field is optional and an absent key means "ship
+   * what the cabinet ships" — so an install that never opens this section
+   * looks exactly as it did.
+   *
+   * `effect` and `glyph` are typed `string`, not the unions above, on purpose:
+   * the panel and the cabinet are separate images and the panel goes first, so
+   * a value this cabinet has never heard of must degrade to the default rather
+   * than break the render. The same reason `CardEffect` is a bare string.
+   */
+  readonly iconDecor: Record<string, IconDecorSettings>;
+
   /** Tailwind-friendly border-radius token (e.g. `rounded-2xl`). */
   readonly borderRadius: string;
   /** Exact, independently editable Reiwa corner radii. */
@@ -973,6 +1044,7 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   },
   iconColorMode: 'default',
   iconColors: {},
+  iconDecor: {},
   borderRadius: 'rounded-2xl',
   cornerRadii: {
     cardPx: 24,

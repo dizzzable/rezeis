@@ -134,6 +134,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     appBackground: readAppBackground(record),
     iconColorMode: readIconColorMode(record, DEFAULT_BRANDING.iconColorMode),
     iconColors: readHexMap(record, 'iconColors'),
+    iconDecor: readIconDecorMap(record, 'iconDecor'),
     borderRadius: readBorderRadius(record),
     cornerRadii: readCornerRadii(record),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
@@ -965,6 +966,48 @@ function readHexMap(record: Record<string, unknown>, key: string): Record<string
   }
   return out;
 }
+
+/**
+ * Reads the `{ iconKey: { glyph?, effect?, color? } }` decoration map.
+ *
+ * Shaped here rather than trusted, for the same reason `readHexMap` exists:
+ * the colour lands in an inline style and the effect lands in a class name,
+ * so a value that is not a short slug or a hex colour is dropped instead of
+ * stored. An entry left with nothing usable is dropped whole — an empty
+ * object would otherwise persist forever as a key that means nothing.
+ */
+function readIconDecorMap(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, { glyph?: string; effect?: string; color?: string }> {
+  const value = record[key];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const out: Record<string, { glyph?: string; effect?: string; color?: string }> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>).slice(0, 64)) {
+    if (k.length === 0 || k.length > 64) continue;
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) continue;
+    const entry = v as Record<string, unknown>;
+    const decor: { glyph?: string; effect?: string; color?: string } = {};
+    if (typeof entry.glyph === 'string' && SLUG_PATTERN.test(entry.glyph.trim())) {
+      decor.glyph = entry.glyph.trim();
+    }
+    if (typeof entry.effect === 'string' && SLUG_PATTERN.test(entry.effect.trim())) {
+      decor.effect = entry.effect.trim();
+    }
+    if (typeof entry.color === 'string' && HEX_PATTERN.test(entry.color.trim())) {
+      decor.color = entry.color.trim();
+    }
+    if (decor.glyph !== undefined || decor.effect !== undefined || decor.color !== undefined) {
+      out[k] = decor;
+    }
+  }
+  return out;
+}
+
+/** A vocabulary key: lowercase, short, and safe inside a class name. */
+const SLUG_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 
 function readJsonRecord(record: Record<string, unknown>, key: string): Record<string, unknown> {
   const value = record[key];

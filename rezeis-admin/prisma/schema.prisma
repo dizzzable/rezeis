@@ -4470,6 +4470,10 @@ enum QuestType {
   INVITE_FRIENDS
   SUBSCRIBE_CHANNEL
   PARTNER_TASK
+  /// Installed the cabinet as an app and opened it once. Detected from
+  /// `User.pwaInstalledAt`, which the cabinet's own surface report stamps
+  /// server-side — the client asserts nothing.
+  INSTALL_PWA
   CUSTOM
 }
 

@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   Download,
   Settings,
+  Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
@@ -37,6 +38,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { usePermissionStore } from '@/features/rbac';
 import { useMediaViewer } from '@/components/media/use-media-viewer';
 import { useAttachmentBlobs } from '@/components/media/use-attachment-blobs';
 import {
@@ -152,6 +154,12 @@ export default function SupportTicketsPage() {
   const [selectedTicket, setSelectedTicket] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
+  const [openTicketOpen, setOpenTicketOpen] = useState(false);
+  const [newUserRef, setNewUserRef] = useState('');
+  const [newSubject, setNewSubject] = useState('');
+  const [newMessage, setNewMessage] = useState('');
+  const hasPermission = usePermissionStore((s) => s.hasPermission);
+  const canOpenTicket = hasPermission('support_tickets', 'create');
 
   // Deep-link: a push notification opens `/support-tickets?ticket=<id>` — show
   // all statuses so the target is found, and auto-select it.
@@ -198,6 +206,40 @@ export default function SupportTicketsPage() {
     onError: () => toast.error(t('supportTicketsPage.toast.replyFailed')),
   });
 
+  /**
+   * Open a thread with a client. The server refuses an unknown or ambiguous
+   * reference, and its message says which — so it is shown verbatim instead
+   * of a generic failure toast the operator cannot act on.
+   */
+  const openTicketMutation = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<Ticket>('/admin/support-tickets', {
+          userRef: newUserRef.trim(),
+          subject: newSubject.trim(),
+          message: newMessage.trim(),
+        })
+      ).data,
+    onSuccess: (ticket) => {
+      setOpenTicketOpen(false);
+      setNewUserRef('');
+      setNewSubject('');
+      setNewMessage('');
+      // Show the thread that was just created: it is born OPEN, which the
+      // default filter already includes, but a deep-linked operator may be
+      // looking at another bucket.
+      setStatusFilter('all');
+      setSelectedTicket(ticket.id);
+      queryClient.invalidateQueries({ queryKey: ['support-tickets'] });
+      toast.success(t('supportTicketsPage.toast.ticketOpened'));
+    },
+    onError: (err) =>
+      toast.error(
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+          t('supportTicketsPage.toast.ticketOpenFailed'),
+      ),
+  });
+
   const closeMutation = useMutation({
     mutationFn: () => api.post(`/admin/support-tickets/${selectedTicket}/close`),
     onSuccess: () => {
@@ -242,6 +284,16 @@ export default function SupportTicketsPage() {
           <p className="text-muted-foreground">{t('supportTicketsPage.subtitle')}</p>
         </div>
         <div className="flex gap-2">
+          {canOpenTicket && (
+            <Button
+              onClick={() => setOpenTicketOpen(true)}
+              className="gap-1.5"
+              aria-label={t('supportTicketsPage.openTicket.action')}
+            >
+              <Plus className="h-4 w-4" />
+              <span className="hidden sm:inline">{t('supportTicketsPage.openTicket.action')}</span>
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => setConfigOpen(true)}
@@ -352,6 +404,80 @@ export default function SupportTicketsPage() {
       </div>
 
       <SupportConfigDialog open={configOpen} onOpenChange={setConfigOpen} />
+
+      <Dialog open={openTicketOpen} onOpenChange={setOpenTicketOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('supportTicketsPage.openTicket.title')}</DialogTitle>
+            <DialogDescription>{t('supportTicketsPage.openTicket.description')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="open-ticket-user">{t('supportTicketsPage.openTicket.userLabel')}</Label>
+              <Input
+                id="open-ticket-user"
+                value={newUserRef}
+                onChange={(e) => setNewUserRef(e.target.value)}
+                placeholder={t('supportTicketsPage.openTicket.userPlaceholder')}
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                {t('supportTicketsPage.openTicket.userHint')}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="open-ticket-subject">
+                {t('supportTicketsPage.openTicket.subjectLabel')}
+              </Label>
+              <Input
+                id="open-ticket-subject"
+                value={newSubject}
+                onChange={(e) => setNewSubject(e.target.value)}
+                maxLength={200}
+                placeholder={t('supportTicketsPage.openTicket.subjectPlaceholder')}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t('supportTicketsPage.openTicket.subjectHint')}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="open-ticket-message">
+                {t('supportTicketsPage.openTicket.messageLabel')}
+              </Label>
+              <Textarea
+                id="open-ticket-message"
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                maxLength={10000}
+                rows={5}
+                placeholder={t('supportTicketsPage.openTicket.messagePlaceholder')}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenTicketOpen(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              onClick={() => openTicketMutation.mutate()}
+              disabled={
+                openTicketMutation.isPending ||
+                newUserRef.trim().length === 0 ||
+                newSubject.trim().length === 0 ||
+                newMessage.trim().length === 0
+              }
+              className="gap-1.5"
+            >
+              {openTicketMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+              {t('supportTicketsPage.openTicket.submit')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
