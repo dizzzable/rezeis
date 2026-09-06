@@ -5,6 +5,10 @@ import { wrapInBrandedEmailLayout } from '../utils/email-branded-layout.util';
 import { emailThemeFromBranding } from '../utils/email-theme.util';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import type { EmailBrandingInterface } from '../interfaces/email.interface';
+import {
+  resolveTemplateLocale,
+  type NotificationLocale,
+} from '../../notifications/utils/notification-template-locale.util';
 
 /**
  * Renders notification templates into branded HTML emails.
@@ -33,21 +37,34 @@ export class EmailTemplateRendererService {
     rawHtml?: string;
     /** Subject for the rawHtml path (DB templates derive it from the title). */
     subject?: string;
+    /** Recipient's language. Absent = Russian, the previous behaviour. */
+    locale?: NotificationLocale;
   }): Promise<{ subject: string; html: string } | null> {
     const branding = await this.loadBranding();
 
     // If raw HTML provided, just wrap it in the layout
     if (input.rawHtml) {
       return {
-        subject: input.subject && input.subject.trim().length > 0 ? input.subject : 'Notification',
-        html: this.wrapInLayout(input.rawHtml, branding),
+        subject:
+          input.subject && input.subject.trim().length > 0
+            ? input.subject
+            : // One language, and it happened to be the other one from every
+              // other default in this file. A caller that supplies no subject
+              // at least gets it in the recipient's language.
+              (input.locale ?? 'ru') === 'en'
+              ? 'Notification'
+              : 'Уведомление',
+        html: this.wrapInLayout(input.rawHtml, branding, input.locale ?? 'ru'),
       };
     }
 
     // Load template from DB
     const template = await this.prismaService.notificationTemplate.findUnique({
       where: { type: input.templateType },
-      select: { title: true, body: true, isActive: true },
+      // `titleEn`/`bodyEn` belong here or the whole English half of the
+      // template table is dead weight: every row in the catalogue carries
+      // both languages, and this query asked for one of them.
+      select: { title: true, body: true, titleEn: true, bodyEn: true, isActive: true },
     });
 
     if (!template || !template.isActive) {
@@ -55,10 +72,14 @@ export class EmailTemplateRendererService {
       return null;
     }
 
-    const subject = this.interpolate(template.title, input.variables);
-    const bodyText = this.interpolate(template.body, input.variables);
+    // The same resolver the Telegram and feed legs use — per FIELD, so an
+    // operator who translated only the body still gets an English body rather
+    // than two Russian strings.
+    const localized = resolveTemplateLocale(template, input.locale ?? 'ru');
+    const subject = this.interpolate(localized.title, input.variables);
+    const bodyText = this.interpolate(localized.body, input.variables);
     const bodyHtml = this.textToHtml(bodyText);
-    const html = this.wrapInLayout(bodyHtml, branding);
+    const html = this.wrapInLayout(bodyHtml, branding, input.locale ?? 'ru');
 
     return { subject, html };
   }
@@ -92,8 +113,12 @@ export class EmailTemplateRendererService {
    * module can send the same shell — it did not go through this service at all,
    * which is why one email out of the whole system arrived unbranded.
    */
-  private wrapInLayout(content: string, branding: EmailBrandingInterface): string {
-    return wrapInBrandedEmailLayout(content, branding);
+  private wrapInLayout(
+    content: string,
+    branding: EmailBrandingInterface,
+    locale: NotificationLocale = 'ru',
+  ): string {
+    return wrapInBrandedEmailLayout(content, branding, locale);
   }
 
   /**

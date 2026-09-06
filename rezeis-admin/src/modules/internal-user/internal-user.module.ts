@@ -12,6 +12,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { InternalUserController } from './controllers/internal-user.controller';
 import { InternalUserDevicesController } from './controllers/internal-user-devices.controller';
 import { InternalUserPaymentMethodsController } from './controllers/internal-user-payment-methods.controller';
+import { InternalUserServersController } from './controllers/internal-user-servers.controller';
 import { InternalUserEdgeService } from './services/internal-user-edge.service';
 import { InternalUserService } from './services/internal-user.service';
 import { ExactlyOneUserIdentifierValidator } from './validators/exactly-one-user-identifier.validator';
@@ -37,6 +38,7 @@ import { ExactlyOneUserIdentifierValidator } from './validators/exactly-one-user
     InternalUserController,
     InternalUserDevicesController,
     InternalUserPaymentMethodsController,
+    InternalUserServersController,
   ],
   providers: [
     InternalUserService,

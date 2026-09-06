@@ -18,7 +18,7 @@ import {
 import { toast } from 'sonner'
 
 import { getErrorMessage } from '@/lib/http-errors'
-import { formatDateTime, truncate } from '@/lib/utils'
+import { activeLocale, formatDateTime, truncate } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -194,7 +194,7 @@ function OverviewPanel({ partnerId }: { readonly partnerId: string }) {
           value={formatKopecks(partner.balance)}
           numericValue={partner.balance / 100}
           formatter={(v) =>
-            `${v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+            `${v.toLocaleString(activeLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
           }
           accent="emerald"
         />
@@ -203,7 +203,7 @@ function OverviewPanel({ partnerId }: { readonly partnerId: string }) {
           value={formatKopecks(partner.totalEarned)}
           numericValue={partner.totalEarned / 100}
           formatter={(v) =>
-            `${v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+            `${v.toLocaleString(activeLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
           }
         />
         <MetricCard
@@ -211,7 +211,7 @@ function OverviewPanel({ partnerId }: { readonly partnerId: string }) {
           value={formatKopecks(partner.totalWithdrawn)}
           numericValue={partner.totalWithdrawn / 100}
           formatter={(v) =>
-            `${v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+            `${v.toLocaleString(activeLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
           }
         />
         <MetricCard

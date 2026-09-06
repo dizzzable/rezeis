@@ -72,8 +72,8 @@ export const ru = {
     base: {
       title: 'Настройки страницы',
       description: 'Мета-теги и что показывает страница.',
-      metaTitle: 'Meta title',
-      metaDescription: 'Meta description',
+      metaTitle: 'Заголовок страницы (meta title)',
+      metaDescription: 'Описание страницы (meta description)',
       showConnectionKeys: 'Показывать ключи подключения',
       hideGetLinkButton: 'Скрыть кнопку «Получить ссылку»',
     },

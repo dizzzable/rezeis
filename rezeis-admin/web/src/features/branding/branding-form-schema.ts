@@ -118,6 +118,28 @@ export interface BrandingIconDecorDraft {
   readonly color?: string
 }
 
+/**
+ * The globe the subscriber sees, as the form holds it.
+ *
+ * `props` carries only what the operator moved away from the variant's
+ * defaults. Storing the full set instead would freeze today's defaults into
+ * every row: a later change to a shipped value would stop reaching anyone who
+ * had ever opened this tab, including the operators who never touched that
+ * particular slider.
+ */
+export interface BrandingServersGlobeDraft {
+  readonly enabled: boolean
+  readonly variant: string
+  readonly props: Record<string, string | number | boolean>
+}
+
+/** The globe every installation starts from, before the operator touches it. */
+export const DEFAULT_SERVERS_GLOBE: BrandingServersGlobeDraft = {
+  enabled: true,
+  variant: 'globe',
+  props: {},
+}
+
 export interface BrandingFormDraft {
   readonly themePresetId: string | null
   readonly themePresetVersion: number | null
@@ -177,6 +199,7 @@ export interface BrandingFormDraft {
   readonly iconColorMode: (typeof BRANDING_ICON_COLOR_MODES)[number]
   readonly iconColors?: Record<string, string>
   readonly iconDecor?: Record<string, BrandingIconDecorDraft>
+  readonly serversGlobe?: BrandingServersGlobeDraft
   readonly borderRadius: string
   readonly cornerRadii: BrandingCornerRadiiDraft
   readonly fontFamily: string
@@ -446,7 +469,14 @@ const BRANDING_UPLOAD_PATH_PATTERN =
  */
 const IMAGE_URL_MAX = 524288
 
-const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
+/**
+ * Every field the form holds, at its shipped value.
+ *
+ * Exported because it is the canonical list of branding fields: the dirty
+ * gate iterates it, and `branding-tab-routing.test.ts` uses it to fail when a
+ * new field has nowhere to be shown.
+ */
+export const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   themePresetId: null,
   themePresetVersion: null,
   themeModePolicy: 'fixed',
@@ -486,6 +516,7 @@ const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   iconColorMode: 'default',
   iconColors: {},
   iconDecor: {},
+  serversGlobe: DEFAULT_SERVERS_GLOBE,
   borderRadius: 'rounded-2xl',
   cornerRadii: DEFAULT_CORNER_RADII_DRAFT,
   fontFamily: 'Geist Variable, system-ui, sans-serif',
@@ -697,6 +728,22 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         )
         .refine((value) => Object.keys(value).length <= 64)
         .optional(),
+      // The variant is a slug, not one of a fixed list. This form is the panel,
+      // and the panel ships ahead of the cabinet — freezing the vocabulary here
+      // would mean a planet added in the next release cannot be saved from the
+      // release that introduces it.
+      serversGlobe: z
+        .object({
+          enabled: z.boolean(),
+          variant: z.string().regex(SLUG_PATTERN),
+          props: z
+            .record(
+              z.string().min(1).max(64),
+              z.union([z.string().min(1).max(64), z.number().finite(), z.boolean()]),
+            )
+            .refine((value) => Object.keys(value).length <= 64),
+        })
+        .optional(),
       borderRadius: borderRadiusSchema(),
       cornerRadii: cornerRadiiSchema,
       fontFamily: z.string().trim().min(1).max(256),
@@ -734,6 +781,7 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
       appBackground: values.appBackground ?? DEFAULT_APP_BACKGROUND_DRAFT,
       iconColors: values.iconColors ?? {},
       iconDecor: values.iconDecor ?? {},
+      serversGlobe: values.serversGlobe ?? DEFAULT_SERVERS_GLOBE,
       planCardStyles: values.planCardStyles ?? {},
       navItems: values.navItems ?? DEFAULT_NAV_ITEMS,
       navGap: values.navGap ?? 2,
@@ -847,6 +895,7 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     appBackground: normalizeAppBackgroundDraft(input?.appBackground),
     iconColors: isPlainRecord(input?.iconColors) ? input.iconColors : {},
     iconDecor: normalizeIconDecorDraft(input?.iconDecor),
+    serversGlobe: normalizeServersGlobeDraft(input?.serversGlobe),
     cornerRadii: normalizeCornerRadiiDraft(
       input?.cornerRadii,
       input?.borderRadius,
@@ -1355,6 +1404,37 @@ function isPlainRecordUnknown(value: unknown): value is Record<string, unknown> 
  * predates a vocabulary — or that somebody edited by hand — cannot make the
  * form dirty on load or fail validation on a save the operator did not touch.
  */
+/**
+ * Reads a stored globe block back into the form.
+ *
+ * Anything unusable falls back to the shipped default rather than to an empty
+ * object: the form's controls all need a variant to describe, and an absent one
+ * would render a tab of settings belonging to no planet.
+ */
+function normalizeServersGlobeDraft(input: unknown): BrandingServersGlobeDraft {
+  const fallback = DEFAULT_SERVERS_GLOBE
+  if (!isPlainRecordUnknown(input)) return fallback
+  const variant =
+    typeof input.variant === 'string' && SLUG_PATTERN.test(input.variant)
+      ? input.variant
+      : fallback.variant
+  const props: Record<string, string | number | boolean> = {}
+  if (isPlainRecordUnknown(input.props)) {
+    for (const [name, value] of Object.entries(input.props).slice(0, 64)) {
+      if (name.length === 0 || name.length > 64) continue
+      if (typeof value === 'boolean' || typeof value === 'number') props[name] = value
+      else if (typeof value === 'string' && value.length > 0 && value.length <= 64) {
+        props[name] = value
+      }
+    }
+  }
+  return {
+    enabled: input.enabled === undefined ? fallback.enabled : input.enabled !== false,
+    variant,
+    props,
+  }
+}
+
 function normalizeIconDecorDraft(input: unknown): Record<string, BrandingIconDecorDraft> {
   if (!isPlainRecord(input)) return {}
   const out: Record<string, BrandingIconDecorDraft> = {}

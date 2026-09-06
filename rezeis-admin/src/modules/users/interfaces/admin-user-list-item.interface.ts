@@ -1,3 +1,4 @@
+import type { UserPresence } from '../utils/user-presence.util';
 /**
  * Lightweight projection used by the admin Users list page.
  *
@@ -34,6 +35,13 @@ export interface AdminUserListItemInterface {
    * `updatedAt` which only bumps when the User row is written.
    */
   readonly lastSeenAt: string | null;
+  /**
+   * At the screen, stepped away, or gone — derived from `lastSeenAt`.
+   *
+   * Sent alongside the raw timestamp rather than instead of it: a list shows
+   * the bucket, a user card shows the time.
+   */
+  readonly presence: UserPresence;
 }
 
 export interface AdminUserListResultInterface {

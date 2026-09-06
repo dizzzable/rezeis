@@ -67,8 +67,10 @@ import {
   type BrandingFormValidationMessages,
   type PlanCardStyleDraft,
   type NavItemDraft,
+  DEFAULT_SERVERS_GLOBE,
 } from "./branding-form-schema";
 import { CardEffectSection } from "./card-effect-section";
+import { ServersGlobeSection } from "./servers-globe-section";
 import { AppBackgroundSection } from "./app-background-section";
 import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots-section";
 import { GradientBuilder } from "./gradient-builder";
@@ -105,7 +107,16 @@ const BORDER_RADIUS_VALUES = [
 ] as const;
 
 /** Configurator tabs (category grouping). */
-const BRANDING_TABS = ['brand', 'colors', 'card', 'appbg', 'icons', 'planCards', 'nav'] as const;
+const BRANDING_TABS = [
+  'brand',
+  'colors',
+  'card',
+  'appbg',
+  'icons',
+  'planCards',
+  'nav',
+  'servers',
+] as const;
 type BrandingTab = (typeof BRANDING_TABS)[number];
 
 /**
@@ -168,7 +179,19 @@ function themeTileRadiusPercent(itemPx: number): number {
   return Math.min(BRAND_LOGO_BOUNDS.radius.max, Math.round((px / BRAND_LOGO_TILE_BASE_PX.md) * 100))
 }
 
-function tabForBrandingField(field: string): BrandingTab {
+export const BRANDING_FALLBACK_TAB: BrandingTab = 'brand';
+
+/**
+ * Which tab to open when a field fails validation.
+ *
+ * The fallback is load-bearing and quietly wrong for anything it catches by
+ * accident: the page jumps to that tab and sets the error at a path like
+ * `serversGlobe.props.speed`, which react-hook-form cannot attach to any
+ * rendered input — so no field is marked and the operator sees a Save button
+ * that appears to do nothing. `branding-tab-routing.test.ts` next door pins
+ * every field to a tab for that reason.
+ */
+export function tabForBrandingField(field: string): BrandingTab {
   if (['brandName', 'tagline', 'logoUrl', 'pwaIconUrl', 'brandLogo', 'themePresetId', 'themePresetVersion', 'themeModePolicy', 'themeDefaultMode', 'themeVariants'].includes(field)) {
     return 'brand';
   }
@@ -180,6 +203,7 @@ function tabForBrandingField(field: string): BrandingTab {
   if (field.startsWith('icon')) return 'icons';
   if (field === 'planCardStyles') return 'planCards';
   if (field.startsWith('nav')) return 'nav';
+  if (field === 'serversGlobe') return 'servers';
   return 'brand';
 }
 
@@ -2153,6 +2177,28 @@ export default function WebReiwaPage() {
                   subscriptionCardText={watchedValues.subscriptionCardText}
                 />
               )}
+            />
+          </div>
+
+          {/* ── Servers tab ───────────────────────────────────────────── */}
+          <div className={gate('servers')}>
+            <Controller
+              name="serversGlobe"
+              control={form.control}
+              render={({ field }) =>
+                // Mounted only while its own tab is showing. The section draws
+                // a real globe, which costs a live WebGL context, and the card
+                // preview on the other tabs is already holding one.
+                tab === 'servers' ? (
+                  <ServersGlobeSection
+                    active
+                    value={field.value ?? DEFAULT_SERVERS_GLOBE}
+                    onChange={(next) => field.onChange(next)}
+                  />
+                ) : (
+                  <></>
+                )
+              }
             />
           </div>
 

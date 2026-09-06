@@ -16,6 +16,7 @@ import {
   updateAdminIpAllowlistEntry,
   deleteAdminIpAllowlistEntry,
 } from './two-factor-api'
+import { activeLocale } from '@/lib/utils'
 
 interface AdminIpAllowlistPageProps {
   /**
@@ -178,7 +179,7 @@ export default function AdminIpAllowlistPage({ embedded = false }: AdminIpAllowl
                       {entry.label || <span className="text-muted-foreground">—</span>}
                     </td>
                     <td className="px-4 py-2 text-xs text-muted-foreground">
-                      {new Date(entry.createdAt).toLocaleDateString()}
+                      {new Date(entry.createdAt).toLocaleDateString(activeLocale())}
                     </td>
                     <td className="px-4 py-2">
                       <Switch

@@ -229,6 +229,7 @@ export const en = {
       // button that does not exist.
       expiryCannotBeCleared: 'Nothing was saved: pick an expiry date. This screen cannot make a subscription unlimited.',
       status: {
+        LIMITED: 'Limited',
         ACTIVE: 'Active',
         DISABLED: 'Disabled',
         EXPIRED: 'Expired',

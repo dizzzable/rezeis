@@ -6,6 +6,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EmailDeliveryService } from './email-delivery.service';
+import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
 
 /**
  * Bridges SystemEventsService → Email delivery.
@@ -59,7 +60,13 @@ export class EmailEventBridgeService implements OnModuleInit {
     // Resolve user email
     const user = await this.prismaService.user.findUnique({
       where: { id: userId },
-      select: { email: true, name: true, webAccount: { select: { email: true } } },
+      select: {
+        email: true,
+        name: true,
+        // Without this the letter is Russian for everybody.
+        language: true,
+        webAccount: { select: { email: true } },
+      },
     });
 
     const email = user?.email ?? user?.webAccount?.email;
@@ -74,9 +81,14 @@ export class EmailEventBridgeService implements OnModuleInit {
 
     await this.emailDeliveryService.send({
       to: email,
-      subject: event.message,
+      // `event.message` is the operator's own audit sentence and is Russian.
+      // It is inert today — the renderer honours `subject` only on the
+      // `rawHtml` path — but leaving it here invites somebody to add that
+      // branch and ship operator prose into a customer's inbox. The template's
+      // own localized title is the subject, so say nothing.
       templateType: event.type,
       variables,
+      locale: coerceNotificationLocale(user?.language),
     });
   }
 

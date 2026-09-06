@@ -5,6 +5,10 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { CARD_EFFECT_CATALOG } from '@/features/branding/card-effect-catalog'
+import {
+  GLOBE_COMPONENT_FILE,
+  GLOBE_SUPPORT_FILES,
+} from './originkit/globe-preferences'
 
 /**
  * Byte-freeze for the vendored Originkit effect components.
@@ -127,12 +131,24 @@ describe('vendored Originkit components', () => {
     const declared = new Set(declaredComponents().map(([, file]) => file))
     expect(declared.size).toBeGreaterThan(0)
 
+    // Not every vendored file is a card background any more. The three globes
+    // exist for the subscriber's server map, and they are configured from their
+    // own catalog rather than from `card-effect-catalog` — a card that turned
+    // into a spinning Earth would be a different product decision. Both sets
+    // are DERIVED, not listed: a fourth planet added to the vendored catalog
+    // accounts for itself here, which is the whole point of this file.
+    const offeredByGlobes = new Set<string>([
+      ...Object.values(GLOBE_COMPONENT_FILE),
+      ...GLOBE_SUPPORT_FILES,
+    ])
+    expect(offeredByGlobes.size).toBeGreaterThan(0)
+
     const vendored = listComponents(ORIGINKIT_DIR)
     expect(vendored.length).toBeGreaterThan(0)
 
     expect(
-      vendored.filter((file) => !declared.has(file)),
-      'vendored components no catalog entry offers — give each one an entry in card-effect-catalog.ts, or delete it from reiwa and re-run scripts/sync-originkit.mjs',
+      vendored.filter((file) => !declared.has(file) && !offeredByGlobes.has(file)),
+      'vendored components nothing offers — give each one an entry in card-effect-catalog.ts, or name it in the globe catalog, or delete it from reiwa and re-run scripts/sync-originkit.mjs',
     ).toEqual([])
   })
 

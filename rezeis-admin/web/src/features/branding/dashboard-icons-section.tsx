@@ -31,11 +31,17 @@ import {
   Trophy,
   Zap,
 } from 'lucide-react'
-import type { ComponentType, SVGProps } from 'react'
+import type { ComponentType, CSSProperties, SVGProps } from 'react'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import type { BrandingIconDecorDraft } from './branding-form-schema'
+
+// The cabinet's own rules, mirrored byte for byte so this preview shows what
+// the subscriber will see rather than something like it. See the file's own
+// header, and `icon-effect-css-parity.test.ts` in reiwa, which fails on drift.
+import './icon-effects-preview.css'
 
 type Glyph = ComponentType<SVGProps<SVGSVGElement>>
 
@@ -43,7 +49,7 @@ type Glyph = ComponentType<SVGProps<SVGSVGElement>>
  * The header row, in the order the cabinet renders it. `Icon` is what the
  * cabinet ships for that position — the swatch a `default` glyph shows.
  */
-const DASHBOARD_ICONS: ReadonlyArray<{ key: string; Icon: Glyph; accent: string }> = [
+export const DASHBOARD_ICONS: ReadonlyArray<{ key: string; Icon: Glyph; accent: string }> = [
   { key: 'quests', Icon: Sparkles, accent: '#f59e0b' },
   { key: 'wheel', Icon: CircleDot, accent: '#a78bfa' },
   { key: 'bell', Icon: Bell, accent: '#60a5fa' },
@@ -52,7 +58,7 @@ const DASHBOARD_ICONS: ReadonlyArray<{ key: string; Icon: Glyph; accent: string 
 ]
 
 /** Kept in step with `ICON_GLYPHS` in the panel API's branding interface. */
-const GLYPHS: ReadonlyArray<{ key: string; Icon: Glyph | null }> = [
+export const GLYPHS: ReadonlyArray<{ key: string; Icon: Glyph | null }> = [
   { key: 'default', Icon: null },
   { key: 'sparkles', Icon: Sparkles },
   { key: 'gift', Icon: Gift },
@@ -71,7 +77,23 @@ const GLYPHS: ReadonlyArray<{ key: string; Icon: Glyph | null }> = [
 ]
 
 /** Kept in step with `ICON_EFFECTS`. */
-const EFFECTS = ['none', 'pulse', 'shake', 'glow'] as const
+const EFFECTS = ['none', 'pulse', 'shake', 'glow', 'glint', 'iridescent'] as const
+
+/**
+ * Effect name to the class the mirrored CSS defines.
+ *
+ * The cabinet has the same map in `lib/icon-decor.ts`. Two copies, and the
+ * parity test over the CSS covers the rules but not this — so the safety here
+ * is that a name with no entry simply previews as no effect, which is visible
+ * on screen the moment an operator clicks it.
+ */
+export const EFFECT_CLASS: Readonly<Record<string, string>> = {
+  pulse: 'icon-effect-pulse',
+  shake: 'icon-effect-shake',
+  glow: 'icon-effect-glow',
+  glint: 'icon-effect-glint',
+  iridescent: 'icon-effect-iridescent',
+}
 
 interface DashboardIconsSectionProps {
   decor: Record<string, BrandingIconDecorDraft>
@@ -126,15 +148,35 @@ export function DashboardIconsSection({
           return (
             <div key={def.key} className="rounded-lg border border-border/60 p-3">
               <div className="mb-3 flex items-center gap-3">
-                <div
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl"
-                  style={{
-                    color,
-                    backgroundColor: `color-mix(in oklab, ${color} 12%, transparent)`,
-                  }}
+                {/* The effect runs HERE, live, with the operator's own colour.
+                    Two boxes and not one, mirroring the cabinet exactly: the
+                    class goes on a wrapper and the colour on the glyph,
+                    because a class on the child sets `color` and would beat an
+                    inline style on the parent — a tint applied to the wrapper
+                    looks right here and does nothing in the cabinet.
+                    `--icon-effect-color` rides on the wrapper because a
+                    pseudo-element's halo can be handed a colour no other way. */}
+                <span
+                  className={cn('relative inline-flex shrink-0', EFFECT_CLASS[effect])}
+                  style={
+                    {
+                      '--icon-effect-color': color,
+                      // The cabinet's icons are pills; these tiles are squircles,
+                      // and the glow would otherwise draw a pill-shaped halo
+                      // around a rounded square.
+                      '--icon-effect-radius': '0.75rem',
+                    } as CSSProperties
+                  }
                 >
-                  <Preview className="h-5 w-5" />
-                </div>
+                  <span
+                    className="flex h-10 w-10 items-center justify-center rounded-xl"
+                    style={{
+                      backgroundColor: `color-mix(in oklab, ${color} 12%, transparent)`,
+                    }}
+                  >
+                    <Preview className="h-5 w-5" style={{ color }} />
+                  </span>
+                </span>
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">
                     {t(`brandingPage.sections.dashboardIcons.icons.${def.key}`)}

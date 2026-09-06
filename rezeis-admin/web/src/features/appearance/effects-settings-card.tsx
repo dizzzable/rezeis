@@ -360,7 +360,9 @@ function HoverPreview({ effect }: { effect: HoverEffectId }) {
           <div className="text-[10px] text-muted-foreground">{t('effectsSettings.sample.cardHint')}</div>
         </div>
         <Badge variant="secondary" className="text-[9px]">
-          {effect}
+          {/* The cursor and click previews in this same file already do this;
+              only the hover one was left printing the raw id. */}
+          {t(`effectsSettings.options.hoverEffect.${effect}`, { defaultValue: effect })}
         </Badge>
       </div>
     </button>

@@ -50,7 +50,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PermissionGate, useHasPermission } from '@/features/rbac'
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 
 /** Mirrors `AutoRenewCycleResult`. */
 interface AutoRenewCycleResult {
@@ -195,7 +195,7 @@ export function AutoRenewPanel() {
               <div className="space-y-2">
                 <p className="text-xs text-muted-foreground">
                   {t('autoRenewPanel.lastRun', {
-                    time: new Date(last.finishedAt).toLocaleString(),
+                    time: new Date(last.finishedAt).toLocaleString(activeLocale()),
                     duration: toCount(last.durationMs),
                   })}
                 </p>

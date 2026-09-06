@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 
 import { formatPercent } from './partner-formatters'
 import { useCohortRetention } from './partners-queries'
+import { activeLocale } from '@/lib/utils'
 
 const HORIZON = 8
 
@@ -117,5 +118,5 @@ function RetentionCell({ value }: { readonly value: number | null }) {
 function formatCohortLabel(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
-  return `${date.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' })}`
+  return `${date.toLocaleDateString(activeLocale(), { day: '2-digit', month: 'short' })}`
 }

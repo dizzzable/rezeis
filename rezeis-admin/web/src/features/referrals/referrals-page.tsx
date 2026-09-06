@@ -30,7 +30,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { FadeIn, StaggerList, StaggerItem } from '@/lib/motion'
-import { cn, truncate } from '@/lib/utils'
+import { activeLocale, cn, truncate } from '@/lib/utils'
 
 import ReferralSettingsPage from '@/features/settings/referral-settings-page'
 import ReferralsAnalyticsTab from './referrals-analytics-tab'
@@ -107,7 +107,7 @@ export default function ReferralsPage() {
                 <Card>
                   <CardContent className="pt-4 pb-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-2xl font-bold tabular-nums">{s.value.toLocaleString('ru-RU')}</p>
+                      <p className="text-2xl font-bold tabular-nums">{s.value.toLocaleString(activeLocale())}</p>
                       <Icon className="h-4 w-4 text-muted-foreground/50" />
                     </div>
                     <p className="text-xs text-muted-foreground">{s.label}</p>
@@ -339,14 +339,14 @@ function ReferralsTab() {
                         {r.qualifiedAt ? (
                           <div className="inline-flex items-center gap-1">
                             <BadgeCheck className="h-4 w-4 text-emerald-500" />
-                            <span className="text-xs">{new Date(r.qualifiedAt).toLocaleDateString('ru-RU')}</span>
+                            <span className="text-xs">{new Date(r.qualifiedAt).toLocaleDateString(activeLocale())}</span>
                           </div>
                         ) : (
                           <span className="text-xs text-muted-foreground">—</span>
                         )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
-                        {new Date(r.createdAt).toLocaleDateString('ru-RU')}
+                        {new Date(r.createdAt).toLocaleDateString(activeLocale())}
                       </TableCell>
                     </TableRow>
                   )
@@ -470,7 +470,7 @@ function InvitesTab() {
                         </span>
                       </TableCell>
                       <TableCell className="text-xs">
-                        {inv.expiresAt ? new Date(inv.expiresAt).toLocaleDateString('ru-RU') : '∞'}
+                        {inv.expiresAt ? new Date(inv.expiresAt).toLocaleDateString(activeLocale()) : '∞'}
                       </TableCell>
                       <TableCell>
                         <Badge variant="outline" className="gap-1 capitalize">
@@ -703,7 +703,7 @@ function RewardsTab() {
                         )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
-                        {new Date(rw.createdAt).toLocaleDateString('ru-RU')}
+                        {new Date(rw.createdAt).toLocaleDateString(activeLocale())}
                       </TableCell>
                       <TableCell>
                         {!rw.isIssued && (

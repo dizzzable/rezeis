@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { adminQueryKeys } from '@/lib/admin-query-keys';
 import { authStorage } from '@/lib/auth-storage';
-import { formatDateTime } from '@/lib/utils';
+import { formatBytes, formatDateTime } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -120,15 +120,6 @@ function foreignArchiveRefusal(error: unknown): string | null {
 async function fetchBackups(): Promise<BackupListResponse> {
   const res = await api.get<BackupListResponse>('/admin/backup', { params: { limit: 50 } });
   return res.data;
-}
-
-function formatBytes(bytes: string | number): string {
-  const n = Number(bytes);
-  if (!n) return '—';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 function BackupStatusBadge({ record }: { record: BackupRecord }) {
@@ -469,9 +460,11 @@ export default function BackupPage() {
                       {b.filename}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{b.scope}</Badge>
+                      <Badge variant="outline">
+                        {t(`backupPage.scopes.${b.scope}`, { defaultValue: b.scope })}
+                      </Badge>
                     </TableCell>
-                    <TableCell className="text-sm">{formatBytes(b.sizeBytes)}</TableCell>
+                    <TableCell className="text-sm">{formatBytes(Number(b.sizeBytes))}</TableCell>
                     <TableCell>
                       <BackupStatusBadge record={b} />
                     </TableCell>

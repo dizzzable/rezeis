@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/card'
 
 import type { DashboardSummaryInterface } from './dashboard-api'
+import { activeLocale } from '@/lib/utils'
 
 const SEVERITY_BADGE_VARIANT = {
   INFO: 'secondary',
@@ -59,7 +60,7 @@ export function DashboardAttentionSection({
                 })}
               </p>
               <p className="text-xs text-muted-foreground">
-                {new Date(item.occurredAt).toLocaleString()}
+                {new Date(item.occurredAt).toLocaleString(activeLocale())}
               </p>
             </div>
           ))

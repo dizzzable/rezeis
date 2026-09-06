@@ -50,6 +50,7 @@ import {
   type WebhookDelivery,
   type WebhookSubscription,
 } from './webhooks-api'
+import { activeLocale } from '@/lib/utils'
 
 /**
  * Webhooks dashboard — operator-facing UI for outgoing webhook
@@ -433,7 +434,7 @@ function SubscriptionCard({
               </span>
               {subscription.lastDeliveredAt && (
                 <span>
-                  {t('webhooksPage.subscriptions.stats.lastSuccess')}: {new Date(subscription.lastDeliveredAt).toLocaleString()}
+                  {t('webhooksPage.subscriptions.stats.lastSuccess')}: {new Date(subscription.lastDeliveredAt).toLocaleString(activeLocale())}
                 </span>
               )}
             </div>
@@ -658,5 +659,5 @@ function timeAgo(iso: string, t: (key: string, options?: Record<string, unknown>
   if (ms < 60_000) return t('webhooksPage.deliveries.relative.seconds', { count: Math.floor(ms / 1_000) })
   if (ms < 3_600_000) return t('webhooksPage.deliveries.relative.minutes', { count: Math.floor(ms / 60_000) })
   if (ms < 86_400_000) return t('webhooksPage.deliveries.relative.hours', { count: Math.floor(ms / 3_600_000) })
-  return new Date(iso).toLocaleDateString()
+  return new Date(iso).toLocaleDateString(activeLocale())
 }

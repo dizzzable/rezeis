@@ -45,7 +45,7 @@ import { EmojiPicker } from './emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
 import { usePlans } from '@/features/plans/plans-api'
-import { cn, truncate } from '@/lib/utils'
+import { activeLocale, cn, formatBytes, truncate } from '@/lib/utils'
 
 const AUDIENCES = [
   { value: 'ALL', labelKey: 'broadcastPage.audiences.ALL' },
@@ -553,9 +553,9 @@ export default function BroadcastPage() {
                           this row, and it was nowhere on screen at all. */}
                       {b.status === 'SCHEDULED' && b.scheduledAt
                         ? t('broadcastPage.scheduledFor', {
-                            when: new Date(b.scheduledAt).toLocaleString('ru-RU'),
+                            when: new Date(b.scheduledAt).toLocaleString(activeLocale()),
                           })
-                        : new Date(b.createdAt).toLocaleString('ru-RU')}
+                        : new Date(b.createdAt).toLocaleString(activeLocale())}
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
@@ -1180,12 +1180,6 @@ function CreateBroadcastForm({
     void validateThen((payload) => saveMutation.mutate(payload))()
   }
 
-  function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-  }
-
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-2">
@@ -1592,7 +1586,7 @@ function CreateBroadcastForm({
         */}
         {promoCode.trim().length > 0 && mediaType !== 'none' && (
           <p className="text-xs text-amber-600 dark:text-amber-500">
-            {t('broadcastPage.form.promoCodeMediaWarning')}
+            {t('broadcastPage.promoCodeMediaWarning')}
           </p>
         )}
         {promoCode.trim().length > 0 && (

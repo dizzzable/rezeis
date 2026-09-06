@@ -53,7 +53,7 @@ import {
   Tooltip as ChartTooltip,
   XAxis,
 } from 'recharts'
-import { formatDateTime, truncate } from '@/lib/utils'
+import { activeLocale, formatDateTime, truncate } from '@/lib/utils'
 
 import {
   approveAdRequest,
@@ -235,7 +235,7 @@ function OverviewTile({
     <Card>
       <CardContent className="p-3">
         <p className="text-xl font-bold tabular-nums">
-          {value?.toLocaleString() ?? '—'}
+          {value?.toLocaleString(activeLocale()) ?? '—'}
           {value !== undefined && suffix !== undefined && (
             <span className="ml-1 text-xs font-normal text-muted-foreground">{suffix}</span>
           )}
@@ -474,9 +474,9 @@ function PlacementMetrics({ placementId }: { placementId: string }) {
     v === null ? t('advertisingPage.metrics.na') : formatMoney(v, (data as AdMetrics).currency)
   return (
     <div className="grid grid-cols-2 gap-x-6 gap-y-2 rounded-md bg-muted/40 p-3 text-xs sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-      <Metric label={t('advertisingPage.metrics.opens')} value={data.opens.toLocaleString()} />
-      <Metric label={t('advertisingPage.metrics.registrations')} value={data.registrations.toLocaleString()} />
-      <Metric label={t('advertisingPage.metrics.conversions')} value={data.conversions.toLocaleString()} />
+      <Metric label={t('advertisingPage.metrics.opens')} value={data.opens.toLocaleString(activeLocale())} />
+      <Metric label={t('advertisingPage.metrics.registrations')} value={data.registrations.toLocaleString(activeLocale())} />
+      <Metric label={t('advertisingPage.metrics.conversions')} value={data.conversions.toLocaleString(activeLocale())} />
       <Metric label={t('advertisingPage.metrics.revenue')} value={formatMoney(data.revenueMinor, data.currency)} />
       <Metric label={t('advertisingPage.metrics.cost')} value={formatMoney(data.costMinor, data.currency)} hint={t('advertisingPage.help.cost')} />
       <Metric label={t('advertisingPage.metrics.cac')} value={money(data.cac)} hint={t('advertisingPage.help.cac')} />
@@ -680,8 +680,8 @@ function UtmBreakdown({ rows, currency }: { rows: AdUtmBreakdownRow[]; currency:
                 <td className="py-1 pr-3">{row.utmSource ?? dash}</td>
                 <td className="py-1 pr-3">{row.utmMedium ?? dash}</td>
                 <td className="py-1 pr-3">{row.utmCampaign ?? dash}</td>
-                <td className="py-1 pr-3 text-right">{row.opens.toLocaleString()}</td>
-                <td className="py-1 pr-3 text-right">{row.conversions.toLocaleString()}</td>
+                <td className="py-1 pr-3 text-right">{row.opens.toLocaleString(activeLocale())}</td>
+                <td className="py-1 pr-3 text-right">{row.conversions.toLocaleString(activeLocale())}</td>
                 <td className="py-1 text-right">{formatMoney(row.revenueMinor, currency)}</td>
               </tr>
             ))}
@@ -954,7 +954,7 @@ function RequestRow({ request, moderation }: { request: AdPlacementRequest; mode
         {request.reviewedAt !== null && (
           <p className="text-[11px] text-muted-foreground">
             {t('advertisingPage.requests.reviewedAt', {
-              at: new Date(request.reviewedAt).toLocaleString(),
+              at: new Date(request.reviewedAt).toLocaleString(activeLocale()),
             })}
           </p>
         )}

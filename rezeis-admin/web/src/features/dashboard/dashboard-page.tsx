@@ -30,6 +30,7 @@ const DashboardOnlineTrend = lazy(() =>
 )
 import { DashboardAttentionSection } from './dashboard-attention'
 import { DashboardTimelinesSection } from './dashboard-timelines'
+import { activeLocale } from '@/lib/utils'
 
 export default function DashboardPage(): JSX.Element {
   const { t } = useTranslation()
@@ -142,7 +143,7 @@ function DashboardHeader({ summary }: { readonly summary: DashboardSummaryInterf
         <TitleEffect>{t('dashboardPage.title')}</TitleEffect>
       </h1>
       <p className="text-sm text-muted-foreground">
-        {t('dashboardPage.snapshotAt', { time: new Date(summary.checkedAt).toLocaleString() })}
+        {t('dashboardPage.snapshotAt', { time: new Date(summary.checkedAt).toLocaleString(activeLocale()) })}
       </p>
     </div>
   )

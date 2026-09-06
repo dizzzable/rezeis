@@ -7,6 +7,13 @@
 
 export const ru = {
   importsPage: {
+    statuses: {
+      DRAFT: 'Черновик',
+      DRY_RUN: 'Пробный прогон',
+      COMMITTED: 'Применён',
+      ROLLED_BACK: 'Откачен',
+      FAILED: 'Ошибка',
+    },
     title: 'Импорт пользователей',
     subtitle:
       'Импорт и синхронизация пользователей из нескольких источников: Remnawave, 3x-ui, Remnashop, Altshop.',

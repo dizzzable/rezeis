@@ -1,5 +1,6 @@
 import { useDeferredValue, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
+import { useTranslation } from 'react-i18next'
 
 import type { LandingConfig, LandingSection } from '../landing-builder-api'
 // The landing kit — the SAME renderer reiwa serves to visitors, vendored by
@@ -84,6 +85,11 @@ function SectionShell({
   onDragStart,
   children,
 }: ShellProps) {
+  // These five titles are the ONLY accessible name each icon button has, and
+  // they were written as «Русский / English» in a single string — so neither
+  // language went through the dictionary. `landingBuilderPage.sectionList`
+  // already holds all five, for the identical controls in the sidebar.
+  const { t } = useTranslation()
   return (
     <div
       className="ls-pv-section"
@@ -97,7 +103,7 @@ function SectionShell({
         <button
           type="button"
           className="ls-pv-btn ls-pv-handle"
-          title="Перетащить / Drag"
+          title={t('landingBuilderPage.sectionList.dragHandle')}
           onPointerDown={(e) => {
             e.stopPropagation()
             onDragStart(index, e)
@@ -106,10 +112,10 @@ function SectionShell({
         >
           ⠿
         </button>
-        <button type="button" className="ls-pv-btn" title="Вверх / Up" onClick={(e) => { e.stopPropagation(); onMove(index, -1) }} disabled={index === 0}>↑</button>
-        <button type="button" className="ls-pv-btn" title="Вниз / Down" onClick={(e) => { e.stopPropagation(); onMove(index, 1) }} disabled={index === total - 1}>↓</button>
-        <button type="button" className="ls-pv-btn" title="Скрыть / Hide" onClick={(e) => { e.stopPropagation(); onToggleVisible(index) }}>{section.visible ? '👁' : '⃠'}</button>
-        <button type="button" className="ls-pv-btn" title="Удалить / Delete" onClick={(e) => { e.stopPropagation(); onDelete(index) }}>✕</button>
+        <button type="button" className="ls-pv-btn" title={t('landingBuilderPage.sectionList.moveUp')} onClick={(e) => { e.stopPropagation(); onMove(index, -1) }} disabled={index === 0}>↑</button>
+        <button type="button" className="ls-pv-btn" title={t('landingBuilderPage.sectionList.moveDown')} onClick={(e) => { e.stopPropagation(); onMove(index, 1) }} disabled={index === total - 1}>↓</button>
+        <button type="button" className="ls-pv-btn" title={t('landingBuilderPage.sectionList.toggleVisible')} onClick={(e) => { e.stopPropagation(); onToggleVisible(index) }}>{section.visible ? '👁' : '⃠'}</button>
+        <button type="button" className="ls-pv-btn" title={t('landingBuilderPage.sectionList.delete')} onClick={(e) => { e.stopPropagation(); onDelete(index) }}>✕</button>
       </div>
       {/* Remount on animation change so the operator replays the reveal the
           moment they pick it — the live page only ever plays it once. */}

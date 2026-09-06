@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { safeGetItem, safeSetItem } from '@/lib/safe-storage'
 
 import { getUpdateStatus } from './update-checker-api'
+import { activeLocale } from '@/lib/utils'
 
 const DISMISS_KEY = 'rezeis-admin:update-banner:dismissed-version'
 
@@ -24,7 +25,7 @@ const DISMISS_KEY = 'rezeis-admin:update-banner:dismissed-version'
  *   - the operator dismissed this exact version.
  */
 export function UpdateBanner() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const status = useQuery({
     queryKey: ['update-checker', 'status'],
     queryFn: () => getUpdateStatus(false),
@@ -62,7 +63,7 @@ export function UpdateBanner() {
           <span className="text-xs text-emerald-700 dark:text-emerald-300">
             {t('updateBanner.publishedAt', {
               date: new Date(status.data.publishedAt).toLocaleDateString(
-                i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                activeLocale(),
               ),
             })}
           </span>

@@ -5,6 +5,14 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SupportNotificationsService } from '../../support-tickets/services/support-notifications.service';
 import { SupportTicketsService } from '../../support-tickets/services/support-tickets.service';
 import type { SettleResult } from '../../wheel-prizes/services/wheel-manual-prize.service';
+import {
+  contestPrizeGreeting,
+  contestPrizeRefused,
+  contestPrizeSettled,
+  contestPrizeSubject,
+  prizeTicketLocale,
+  type PrizeTicketLocale,
+} from '../../support-tickets/utils/prize-ticket-copy.util';
 
 export interface ContestWinnerRow {
   readonly id: string;
@@ -109,11 +117,16 @@ export class ContestWinnerService {
         manualTicketId: true,
         prizeSnapshot: true,
         userId: true,
+        // The thread below is written into the winner's OWN support inbox, so
+        // it has to be in their language. The notification card announcing the
+        // same prize has been localized since it shipped.
+        user: { select: { language: true } },
         contest: { select: { title: true } },
       },
     });
     if (winner === null) return null;
     if (winner.status !== WheelSpinStatus.PENDING) return null;
+    const locale = prizeTicketLocale(winner.user?.language ?? null);
     if (winner.manualTicketId !== null) return winner.manualTicketId;
 
     const contestTitle = readTitle(winner.contest.title);
@@ -121,7 +134,11 @@ export class ContestWinnerService {
     try {
       return await this.prismaService.$transaction(async (tx) => {
         const ticket = await tx.supportTicket.create({
-          data: { userId: winner.userId, subject: `Приз конкурса «${contestTitle}»: ${prizeTitle}`, status: 'OPEN' },
+          data: {
+            userId: winner.userId,
+            subject: contestPrizeSubject(contestTitle, prizeTitle, locale),
+            status: 'OPEN',
+          },
           select: { id: true },
         });
         const claimed = await tx.contestWinner.updateMany({
@@ -134,9 +151,7 @@ export class ContestWinnerService {
             ticketId: ticket.id,
             authorType: 'SYSTEM',
             authorId: null,
-            content:
-              `Вы выиграли в конкурсе «${contestTitle}»: ${prizeTitle}. ` +
-              'Оператор свяжется с вами здесь, чтобы вручить приз.',
+            content: contestPrizeGreeting(contestTitle, prizeTitle, locale),
             metadata: { type: 'contest_prize', winnerId: winner.id },
           },
         });
@@ -180,7 +195,8 @@ export class ContestWinnerService {
     return this.settle({
       ...input,
       status: WheelSpinStatus.SETTLED,
-      message: (prize) => `Приз вручён: ${prize}.` + (input.note ? `\n\n${input.note}` : ''),
+      message: (prize, locale) =>
+        contestPrizeSettled(prize, locale) + (input.note ? `\n\n${input.note}` : ''),
     });
   }
 
@@ -190,7 +206,7 @@ export class ContestWinnerService {
       adminId: input.adminId,
       note: input.reason,
       status: WheelSpinStatus.REFUSED,
-      message: (prize) => `По призу «${prize}» принято решение отказать.\n\n${input.reason}`,
+      message: (prize, locale) => `${contestPrizeRefused(prize, locale)}\n\n${input.reason}`,
     });
   }
 
@@ -199,7 +215,7 @@ export class ContestWinnerService {
     readonly adminId: string;
     readonly note: string | null;
     readonly status: WheelSpinStatus;
-    readonly message: (prizeTitle: string) => string;
+    readonly message: (prizeTitle: string, locale: PrizeTicketLocale) => string;
   }): Promise<SettleResult> {
     const winner = await this.prismaService.contestWinner.findUnique({
       where: { id: input.winnerId },
@@ -231,13 +247,19 @@ export class ContestWinnerService {
         ticketId,
         authorType: 'ADMIN',
         authorId: input.adminId,
-        content: input.message(prizeTitle),
+        content: input.message(prizeTitle, prizeTicketLocale(winner.user?.language ?? null)),
         metadata: { type: 'contest_prize', winnerId: winner.id, outcome: input.status },
       });
       if (winner.user !== null) {
         void this.supportNotifications.notifyAdminReply({
           ticketId,
-          subject: `Приз конкурса «${readTitle(winner.contest.title)}»: ${prizeTitle}`,
+          // The card wrapping this subject IS localized, so a Russian
+          // subject line arrived inside an English notification.
+          subject: contestPrizeSubject(
+            readTitle(winner.contest.title),
+            prizeTitle,
+            prizeTicketLocale(winner.user.language),
+          ),
           user: { id: winner.user.id, language: winner.user.language },
         });
       }

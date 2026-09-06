@@ -73,12 +73,34 @@ export interface EmailThemeColorsInterface {
 export interface SendEmailPayload {
   /** Recipient email address. */
   readonly to: string;
-  /** Email subject line. */
-  readonly subject: string;
+  /**
+   * Subject line — for the `rawHtml` path only.
+   *
+   * Optional, because the DB-template path derives the subject from the
+   * template's own localized title and ignores this field entirely. While it
+   * was required, two callers supplied an English literal ('Welcome', an
+   * operator audit sentence) that was silently thrown away, and read to every
+   * later reader as though the subject were in that language.
+   */
+  readonly subject?: string;
   /** Notification template type (e.g. 'expires_in_3_days'). */
   readonly templateType: string;
   /** Template variables for placeholder substitution. */
   readonly variables: Record<string, string | number | null>;
+  /**
+   * The recipient's language, for the DB-template path.
+   *
+   * Absent means Russian, which is what every caller got before this existed:
+   * the renderer selected only `title`/`body` and never looked at `titleEn`/
+   * `bodyEn`, so an English customer received a Russian letter from a template
+   * that had been translated all along. The Telegram and web-push legs had
+   * resolved the locale correctly since the day they shipped; e-mail was the
+   * one channel that did not.
+   *
+   * The `rawHtml` path ignores this by design — that caller has already
+   * rendered the copy in the right language and passes the result.
+   */
+  readonly locale?: 'ru' | 'en';
   /** Optional override: raw HTML body (skips template rendering). */
   readonly rawHtml?: string;
   /**

@@ -4,6 +4,7 @@ import { cleanup, screen, within } from '@testing-library/react'
 import { api } from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import SubscriptionsPage from './subscriptions-page'
+import i18n from 'i18next'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -35,6 +36,28 @@ function expectedRuDate(iso: string): string {
   const d = new Date(iso)
   const pad = (n: number): string => String(n).padStart(2, '0')
   return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`
+}
+
+/**
+ * The same date the component would print, in the language the panel is
+ * currently in.
+ *
+ * The cell used to be pinned to `ru-RU` and so was this expectation. Now it
+ * follows the operator's language like every other date in the panel, and an
+ * assertion that hard-codes one language would fail in the other for a reason
+ * that has nothing to do with the cell.
+ *
+ * The parts are still spelled out by hand rather than borrowed from
+ * `toLocaleDateString` — re-running the component's own call here would
+ * assert only that it equals itself.
+ */
+function expectedDate(iso: string): string {
+  return i18n.language?.startsWith('ru') === true
+    ? expectedRuDate(iso)
+    : (() => {
+        const d = new Date(iso)
+        return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`
+      })()
 }
 
 const datedExpiry = isoDaysFromNow(30)
@@ -165,7 +188,7 @@ describe('SubscriptionsPage accessibility', () => {
     await screen.findByText('Alice')
     const cell = expiresCellOf('Alice')
 
-    expect(cell.textContent?.trim()).toBe(expectedRuDate(datedExpiry))
+    expect(cell.textContent?.trim()).toBe(expectedDate(datedExpiry))
     expect(cell).not.toHaveTextContent('Unlimited')
   })
 })

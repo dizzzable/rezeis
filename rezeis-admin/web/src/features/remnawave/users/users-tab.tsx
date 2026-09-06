@@ -48,7 +48,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { truncate } from '@/lib/utils'
+import { activeLocale, truncate } from '@/lib/utils'
 
 import { remnawaveApi, type RemnawaveUserSummary } from '../remnawave-api'
 import { KEYS } from '../remnawave-query-keys'
@@ -217,7 +217,7 @@ function UserSummaryPanel({ user }: { user: RemnawaveUserSummary }) {
       />
       <SummaryRow
         label={t('remnaWavePage.users.summary.expiresAt')}
-        value={user.expireAt ? new Date(user.expireAt).toLocaleString() : '—'}
+        value={user.expireAt ? new Date(user.expireAt).toLocaleString(activeLocale()) : '—'}
       />
       <SummaryRow label={t('remnaWavePage.users.summary.hwidLimit')} value={String(user.hwidDeviceLimit ?? '—')} />
       <SummaryRow label={t('remnaWavePage.users.summary.tag')} value={user.tag ?? '—'} />
@@ -477,7 +477,7 @@ function SubscriptionRequestLogCard() {
               {data.map((entry) => (
                 <TableRow key={entry.id}>
                   <TableCell className="text-xs">
-                    {entry.requestedAt ? new Date(entry.requestedAt).toLocaleString() : '—'}
+                    {entry.requestedAt ? new Date(entry.requestedAt).toLocaleString(activeLocale()) : '—'}
                     {/* 2.7.4 identifies the owner by uuid, 2.8.0 by a panel-internal
                         integer. Rendering `userUuid.slice(0, 8)` for both used to
                         display the integer as though it were a uuid prefix. */}

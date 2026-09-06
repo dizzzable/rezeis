@@ -58,7 +58,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 import { FadeIn, StaggerItem, StaggerList } from '@/lib/motion'
 
 import {
@@ -288,7 +288,7 @@ function ProvidersSection({ days }: { readonly days: number }): JSX.Element {
           <SummaryCard
             icon={<Activity className="h-4 w-4 text-sky-500" />}
             title={t('paymentsAnalytics.summary.transactions')}
-            value={data.totalTransactions.toLocaleString()}
+            value={data.totalTransactions.toLocaleString(activeLocale())}
             subtitle={t('paymentsAnalytics.summary.completed', { count: data.totalCompleted })}
           />
         </StaggerItem>
@@ -392,11 +392,11 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
               <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 pt-0.5 text-[11px] text-muted-foreground">
                 <span>
                   {t('paymentsAnalytics.providers.transactionsLabel')}{' '}
-                  <span className="text-foreground">{provider.transactions.toLocaleString()}</span>
+                  <span className="text-foreground">{provider.transactions.toLocaleString(activeLocale())}</span>
                 </span>
                 <span>
                   {t('paymentsAnalytics.providers.completedLabel')}{' '}
-                  <span className="text-foreground">{provider.completed.toLocaleString()}</span>
+                  <span className="text-foreground">{provider.completed.toLocaleString(activeLocale())}</span>
                 </span>
                 <span>
                   {t('paymentsAnalytics.providers.successRateLabel')}{' '}
@@ -681,7 +681,7 @@ function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element 
               <SummaryCard
                 icon={<Webhook className="h-4 w-4 text-sky-500" />}
                 title={t('paymentsAnalytics.webhooks.received')}
-                value={data.totalReceived.toLocaleString()}
+                value={data.totalReceived.toLocaleString(activeLocale())}
                 subtitle={t('paymentsAnalytics.webhooks.processed', { count: data.totalProcessed })}
               />
             </StaggerItem>
@@ -697,7 +697,7 @@ function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element 
               <SummaryCard
                 icon={<AlertTriangle className="h-4 w-4 text-amber-500" />}
                 title={t('paymentsAnalytics.webhooks.txMissingWebhook')}
-                value={data.reconciliation.transactionsMissingWebhook.toLocaleString()}
+                value={data.reconciliation.transactionsMissingWebhook.toLocaleString(activeLocale())}
                 subtitle={t('paymentsAnalytics.webhooks.txMissingWebhookHint')}
               />
             </StaggerItem>
@@ -705,7 +705,7 @@ function WebhookHealthSection({ days }: { readonly days: number }): JSX.Element 
               <SummaryCard
                 icon={<RefreshCw className="h-4 w-4 text-rose-500" />}
                 title={t('paymentsAnalytics.webhooks.webhookMissingTx')}
-                value={data.reconciliation.webhooksMissingTransaction.toLocaleString()}
+                value={data.reconciliation.webhooksMissingTransaction.toLocaleString(activeLocale())}
                 subtitle={t('paymentsAnalytics.webhooks.webhookMissingTxHint')}
               />
             </StaggerItem>
@@ -761,7 +761,7 @@ function WebhookGatewayRow({ gateway }: { readonly gateway: WebhookGatewayHealth
         <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 pt-0.5 text-[11px] text-muted-foreground">
           <span>
             {t('paymentsAnalytics.webhooks.receivedLabel')}{' '}
-            <span className="text-foreground">{gateway.received.toLocaleString()}</span>
+            <span className="text-foreground">{gateway.received.toLocaleString(activeLocale())}</span>
           </span>
           <span>
             {t('paymentsAnalytics.webhooks.deliveryRateLabel')}{' '}
@@ -874,7 +874,7 @@ function ProgressLine({
       <div className="flex items-center justify-between text-xs">
         <span>{label}</span>
         <span className="tabular-nums text-muted-foreground">
-          {count.toLocaleString()}
+          {count.toLocaleString(activeLocale())}
           {suffix ?? ''} {suffix ? '' : pct > 0 ? `· ${pct.toFixed(1)}%` : ''}
         </span>
       </div>

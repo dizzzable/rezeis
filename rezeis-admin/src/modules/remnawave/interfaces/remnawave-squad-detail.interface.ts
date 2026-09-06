@@ -11,6 +11,15 @@ export interface RemnawaveInternalSquadDetailInterface {
   readonly viewPosition: number;
   readonly membersCount: number;
   readonly inboundsCount: number;
+  /**
+   * UUIDs of the squad's inbounds — and nothing else from the inbound.
+   *
+   * This is the join that says which hosts a subscriber can actually reach: a
+   * host carries `configProfileInboundUuid`, so a host belongs to a squad when
+   * that UUID appears here. Nothing else in the inbound row may be taken; see
+   * the note in `remnawave-squad-mappers` for what sits next to it.
+   */
+  readonly inboundUuids: readonly string[];
   readonly createdAt: string;
   readonly updatedAt: string;
 }

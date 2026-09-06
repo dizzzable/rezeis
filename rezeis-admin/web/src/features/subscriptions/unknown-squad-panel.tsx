@@ -179,7 +179,7 @@ export function UnknownSquadPanel() {
                     <tr key={row.subscriptionId} className="border-b last:border-0">
                       <td className="py-1.5 pr-3 font-mono">{row.subscriptionId}</td>
                       <td className="py-1.5 pr-3">{row.planName ?? '—'}</td>
-                      <td className="py-1.5 pr-3">{row.status}</td>
+                      <td className="py-1.5 pr-3">{t(`subscriptionsPage.statuses.${row.status}`, { defaultValue: row.status })}</td>
                       <td className="py-1.5">
                         <div className="flex flex-wrap gap-1">
                           {row.unknownSquads.map((uuid) => (

@@ -56,6 +56,7 @@ import {
   type AdvancedAnalyticsReport,
   type SurfaceCount,
 } from './analytics-api'
+import { activeLocale } from '@/lib/utils'
 
 const WINDOW_OPTIONS: ReadonlyArray<{ label: string; days: number }> = [
   { label: '7d', days: 7 },
@@ -151,9 +152,9 @@ function OverviewTab({ report, loading }: { report: AdvancedAnalyticsReport | un
   return (
     <>
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KpiCard icon={DollarSign} title={t('analyticsPage.kpi.revenue')} value={formatCurrency(kpis.totalRevenue)} subtitle={t('analyticsPage.kpi.revenueSubtitle', { count: kpis.paidCount.toLocaleString() })} />
-        <KpiCard icon={Users} title={t('analyticsPage.kpi.payingUsers')} value={kpis.payingUsers.toLocaleString()} subtitle={t('analyticsPage.kpi.payingUsersSubtitle', { arppu: formatCurrency(kpis.arppu), arpu: formatCurrency(kpis.arpu) })} />
-        <KpiCard icon={CreditCard} title={t('analyticsPage.kpi.activeSubs')} value={kpis.activeSubscriptions.toLocaleString()} subtitle={t('analyticsPage.kpi.activeSubsSubtitle', { trial: kpis.trialSubscriptions.toLocaleString(), users: kpis.totalUsers.toLocaleString() })} />
+        <KpiCard icon={DollarSign} title={t('analyticsPage.kpi.revenue')} value={formatCurrency(kpis.totalRevenue)} subtitle={t('analyticsPage.kpi.revenueSubtitle', { count: kpis.paidCount.toLocaleString(activeLocale()) })} />
+        <KpiCard icon={Users} title={t('analyticsPage.kpi.payingUsers')} value={kpis.payingUsers.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.payingUsersSubtitle', { arppu: formatCurrency(kpis.arppu), arpu: formatCurrency(kpis.arpu) })} />
+        <KpiCard icon={CreditCard} title={t('analyticsPage.kpi.activeSubs')} value={kpis.activeSubscriptions.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.activeSubsSubtitle', { trial: kpis.trialSubscriptions.toLocaleString(activeLocale()), users: kpis.totalUsers.toLocaleString(activeLocale()) })} />
         <KpiCard icon={churn.churnRate > 0.1 ? TrendingDown : TrendingUp} title={t('analyticsPage.kpi.retention')} value={`${(churn.retentionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.kpi.retentionSubtitle', { churned: churn.churned, total: churn.prevActive })} negative={churn.churnRate > 0.2} />
       </div>
       <DailyChart daily={report.daily} />
@@ -198,15 +199,15 @@ function SurfaceUsageCard() {
             <div className="space-y-4">
               <div className="grid grid-cols-3 gap-3">
                 <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-2xl font-bold tabular-nums">{data.totalTracked.toLocaleString()}</p>
+                  <p className="text-2xl font-bold tabular-nums">{data.totalTracked.toLocaleString(activeLocale())}</p>
                   <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.tracked')}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-2xl font-bold tabular-nums text-emerald-600">{data.activeLast30d.toLocaleString()}</p>
+                  <p className="text-2xl font-bold tabular-nums text-emerald-600">{data.activeLast30d.toLocaleString(activeLocale())}</p>
                   <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.active30d')}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-2xl font-bold tabular-nums text-sky-600">{data.pwaInstalls.toLocaleString()}</p>
+                  <p className="text-2xl font-bold tabular-nums text-sky-600">{data.pwaInstalls.toLocaleString(activeLocale())}</p>
                   <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.pwaInstalls')}</p>
                 </div>
               </div>
@@ -262,7 +263,7 @@ function SurfaceDonut({
                 <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />
               ))}
             </Pie>
-            <Tooltip formatter={(v) => [Number(v ?? 0).toLocaleString(), '']} />
+            <Tooltip formatter={(v) => [Number(v ?? 0).toLocaleString(activeLocale()), '']} />
           </PieChart>
         </ResponsiveContainer>
       </div>
@@ -273,7 +274,7 @@ function SurfaceDonut({
             <div key={item.key} className="flex items-center gap-2 text-sm">
               <div className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }} />
               <span className="truncate text-muted-foreground">{item.name}</span>
-              <span className="ml-auto font-medium tabular-nums">{item.value.toLocaleString()}</span>
+              <span className="ml-auto font-medium tabular-nums">{item.value.toLocaleString(activeLocale())}</span>
               <span className="text-xs text-muted-foreground">· {pct}%</span>
             </div>
           )
@@ -306,7 +307,7 @@ function SurfaceBreakdownRow({
             return (
               <Badge key={item.key} variant="outline" className="gap-1.5">
                 {labelFor(item.key)}
-                <span className="font-semibold tabular-nums">{item.count.toLocaleString()}</span>
+                <span className="font-semibold tabular-nums">{item.count.toLocaleString(activeLocale())}</span>
                 <span className="text-muted-foreground">· {pct}%</span>
               </Badge>
             )
@@ -440,7 +441,7 @@ function ConversionTab({ days }: { days: number }) {
       {/* KPI Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <KpiCard icon={ArrowRightLeft} title={t('analyticsPage.conversion.rate')} value={`${(conversion.conversionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.conversion.rateSubtitle', { converted: conversion.convertedUsers, total: conversion.totalTrialUsers })} />
-        <KpiCard icon={Users} title={t('analyticsPage.conversion.trialUsers')} value={conversion.totalTrialUsers.toLocaleString()} subtitle={t('analyticsPage.conversion.trialUsersSubtitle', { days })} />
+        <KpiCard icon={Users} title={t('analyticsPage.conversion.trialUsers')} value={conversion.totalTrialUsers.toLocaleString(activeLocale())} subtitle={t('analyticsPage.conversion.trialUsersSubtitle', { days })} />
         <KpiCard icon={DollarSign} title={t('analyticsPage.conversion.revenueFromConverted')} value={formatCurrency(conversion.revenueFromConverted)} subtitle={t('analyticsPage.conversion.revenueSubtitle')} />
         <KpiCard icon={TrendingUp} title={t('analyticsPage.conversion.avgDays')} value={`${conversion.avgDaysToConvert}d`} subtitle={t('analyticsPage.conversion.avgDaysSubtitle')} />
       </div>
@@ -549,7 +550,7 @@ function RetentionTab() {
             <Layers className="h-4 w-4" />
             <CardTitle className="text-base">{t('analyticsPage.ltv.title')}</CardTitle>
           </div>
-          <CardDescription>{t('analyticsPage.ltv.description', { count: totalLtvUsers.toLocaleString() })}</CardDescription>
+          <CardDescription>{t('analyticsPage.ltv.description', { count: totalLtvUsers.toLocaleString(activeLocale()) })}</CardDescription>
         </CardHeader>
         <CardContent>
           {ltv.isLoading ? <Skeleton className="h-48 w-full" /> : totalLtvUsers === 0 ? (
@@ -609,7 +610,7 @@ function LeaderboardTab() {
                   <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{row.telegramId ?? '—'}</td>
                   <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.totalSpent)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.transactionCount}</td>
-                  <td className="px-3 py-2 text-right text-xs text-muted-foreground">{row.lastPaymentAt ? new Date(row.lastPaymentAt).toLocaleDateString() : '—'}</td>
+                  <td className="px-3 py-2 text-right text-xs text-muted-foreground">{row.lastPaymentAt ? new Date(row.lastPaymentAt).toLocaleDateString(activeLocale()) : '—'}</td>
                 </tr>
               ))}
             </tbody>
@@ -678,7 +679,7 @@ function FunnelCard({ funnel }: { funnel: readonly { key: string; label: string;
           <div key={step.key} className="space-y-1">
             <div className="flex items-center justify-between text-sm">
               <span className="font-medium">{step.label}</span>
-              <span className="tabular-nums text-muted-foreground">{step.count.toLocaleString()} <span className="text-xs">({(step.pctOfStart * 100).toFixed(1)}%)</span></span>
+              <span className="tabular-nums text-muted-foreground">{step.count.toLocaleString(activeLocale())} <span className="text-xs">({(step.pctOfStart * 100).toFixed(1)}%)</span></span>
             </div>
             <Progress value={step.pctOfStart * 100} className="h-2" />
           </div>

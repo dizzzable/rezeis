@@ -3,7 +3,7 @@
  * memory used vs total, etc.). Always renders a tabular number row above
  * the bar so columns align across rows.
  */
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 
 interface MetricBarProps {
   readonly value: number
@@ -20,7 +20,7 @@ interface MetricBarProps {
 export function MetricBar({
   value,
   max,
-  format = (n) => n.toLocaleString(),
+  format = (n) => n.toLocaleString(activeLocale()),
   className,
   toneByThreshold = true,
 }: MetricBarProps) {

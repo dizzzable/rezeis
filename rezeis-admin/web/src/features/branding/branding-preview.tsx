@@ -8,7 +8,7 @@
  * the operator is editing, so changes are visible instantly.
  */
 
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type CSSProperties } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, type PanInfo } from 'motion/react'
 import {
@@ -31,6 +31,15 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 
+import {
+  DASHBOARD_ICONS,
+  EFFECT_CLASS,
+  GLYPHS,
+} from './dashboard-icons-section'
+// The cabinet's own effect rules, mirrored. Imported here as well as in the
+// section so this file states what it depends on; the bundler emits one copy.
+import './icon-effects-preview.css'
+import { cn } from '@/lib/utils'
 import { ReiwaMark } from './reiwa-mark'
 import { CardLogoMark, type CardLogoPreset } from './card-logo-mark'
 
@@ -82,6 +91,15 @@ import {
   type NavDestinationId,
 } from './branding-form-schema'
 
+/**
+ * The header row the cabinet actually renders, in its order.
+ *
+ * Named here rather than taken whole from `DASHBOARD_ICONS`, which also holds
+ * the two that live beside the card (`buy`, `promo`) — those are previewed in
+ * the configurator section, not up here.
+ */
+const HEADER_ICON_KEYS = ['quests', 'wheel', 'bell'] as const
+
 interface BrandingPreviewProps {
   values: {
     themePresetId?: string | null
@@ -117,6 +135,7 @@ interface BrandingPreviewProps {
     appBackground?: BrandingAppBackgroundDraft
     navItems?: readonly NavItemDraft[]
     navGap?: number
+    iconDecor?: Record<string, { glyph?: string; effect?: string; color?: string }>
   }
   /** Active configurator tab — drives a context-aware preview view. */
   focus?: string
@@ -1253,23 +1272,61 @@ export function BrandingPreview({ values, focus }: BrandingPreviewProps) {
                 </p>
               </div>
             </div>
+            {/* The cabinet's own header row — quests, wheel, notifications,
+                in that order — instead of the two blank discs that stood here.
+                Each wears the operator's glyph, colour and effect, live, which
+                is the only place in this panel they are seen at the size and
+                against the surface a subscriber sees them. The cabinet hides
+                any of the three that has nothing behind it; the preview shows
+                all three, because an operator decorating an icon needs to see
+                the icon whether or not this installation has quests today. */}
             <div className="flex gap-1.5">
-              <span
-                className="h-6 w-6 rounded-full border"
-                style={{
-                  backgroundColor: toRgba(surfaceTheme.surface, surfaceTheme.surfaceOpacity),
-                  borderColor: toRgba(surfaceTheme.borderSoft, surfaceTheme.borderSoftOpacity),
-                  backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
-                }}
-              />
-              <span
-                className="h-6 w-6 rounded-full border"
-                style={{
-                  backgroundColor: toRgba(surfaceTheme.surface, surfaceTheme.surfaceOpacity),
-                  borderColor: toRgba(surfaceTheme.borderSoft, surfaceTheme.borderSoftOpacity),
-                  backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
-                }}
-              />
+              {HEADER_ICON_KEYS.map((key) => {
+                const def = DASHBOARD_ICONS.find((icon) => icon.key === key)
+                if (!def) return null
+                const entry = values.iconDecor?.[key] ?? {}
+                const Glyph = GLYPHS.find((g) => g.key === entry.glyph)?.Icon ?? def.Icon
+                const iconColor = entry.color ?? primary
+                return (
+                  <span
+                    key={key}
+                    // `Object.hasOwn`, not a bare index. `constructor` is
+                    // the one prototype name that passes the slug
+                    // validator, so it can be stored and served — and a
+                    // bare read answers `Object`, which `??` does not
+                    // catch and a template literal stringifies straight
+                    // into the class attribute.
+                    className={cn(
+                      'relative inline-flex',
+                      entry.effect !== undefined && Object.hasOwn(EFFECT_CLASS, entry.effect)
+                        ? EFFECT_CLASS[entry.effect]
+                        : undefined,
+                    )}
+                    style={
+                      {
+                        '--icon-effect-color': iconColor,
+                      } as CSSProperties
+                    }
+                  >
+                    <span
+                      className="flex h-6 w-6 items-center justify-center rounded-full border"
+                      style={{
+                        backgroundColor: toRgba(
+                          surfaceTheme.surface,
+                          surfaceTheme.surfaceOpacity,
+                        ),
+                        borderColor: toRgba(
+                          surfaceTheme.borderSoft,
+                          surfaceTheme.borderSoftOpacity,
+                        ),
+                        backdropFilter: `blur(${surfaceTheme.glassBlurPx}px)`,
+                      }}
+                    >
+                      <Glyph className="h-3 w-3" style={{ color: iconColor }} />
+                    </span>
+                  </span>
+                )
+              })}
             </div>
           </div>
 

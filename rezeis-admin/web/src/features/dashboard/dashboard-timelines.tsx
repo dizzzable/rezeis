@@ -16,6 +16,7 @@ import type {
   DashboardTimelineEntryInterface,
   DashboardTimelineStatus,
 } from './dashboard-api'
+import { activeLocale } from '@/lib/utils'
 
 const OPERATIONS_FILTER_OPTIONS: ReadonlyArray<DashboardOperationsTimelineSource> = [
   'BROADCAST',
@@ -158,7 +159,7 @@ function TimelineEntries({
               <p className="text-sm text-muted-foreground">{copy.description}</p>
             ) : null}
             <p className="text-xs text-muted-foreground">
-              {new Date(entry.createdAt).toLocaleString()}
+              {new Date(entry.createdAt).toLocaleString(activeLocale())}
             </p>
           </li>
         )

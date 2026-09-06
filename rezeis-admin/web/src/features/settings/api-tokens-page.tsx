@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useHasPermission } from '@/features/rbac'
 import { settingsApi } from '@/features/settings/settings-api'
+import { activeLocale } from '@/lib/utils'
 
 interface ApiTokenFormValues {
   readonly name: string
@@ -39,7 +40,7 @@ function formatDateTime(value: string | null | undefined): string {
   if (Number.isNaN(date.getTime())) {
     return value
   }
-  return date.toLocaleString()
+  return date.toLocaleString(activeLocale())
 }
 
 export function ApiTokensPage(): JSX.Element {
@@ -183,7 +184,9 @@ export function ApiTokensPage(): JSX.Element {
                     <ShieldCheck className="mt-0.5 size-5 text-emerald-600 dark:text-emerald-400" />
                     <div className="min-w-0 flex-1 space-y-2">
                       <p className="text-sm font-semibold">
-                        {t('settings.apiTokens.secretTitle')}: <span className="font-mono">{createdToken.tokenName}</span>
+                        {/* The copy carries `{{name}}` — supplying it is what
+                            stops the operator reading the braces themselves. */}
+                        {t('settings.apiTokens.secretTitle', { name: createdToken.tokenName })}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {t('settings.apiTokens.secretDescription', {

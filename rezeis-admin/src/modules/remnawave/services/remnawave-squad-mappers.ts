@@ -12,10 +12,19 @@ import {
  * an `info` sub-object with the counters Remnawave's own UI shows. We
  * tolerate older panels where `info` is missing (counters fall back to 0).
  *
- * Everything beyond the counters and identifying fields is dropped — the
- * raw `inbounds[*].rawInbound` block alone is several KB per squad and
- * surfacing it through the admin API would leak panel internals (raw Reality
- * keys, public/private keypairs).
+ * Everything beyond the counters, the identifying fields and each inbound's
+ * UUID is dropped — the raw `inbounds[*].rawInbound` block alone is several KB
+ * per squad and surfacing it through the admin API would leak panel internals
+ * (raw Reality keys, public/private keypairs).
+ *
+ * The UUID is the one field taken, and it is taken deliberately: it is the only
+ * link from a subscriber's squad to the hosts they can reach, because a host
+ * names its inbound in `configProfileInboundUuid` and names nothing else about
+ * where it belongs. It is an opaque identifier — it carries no key, no address
+ * and no protocol setting. `extractInboundUuids` below reads that field and
+ * refuses to walk any further into the row on purpose; widening it to take the
+ * whole inbound would put the keypairs one spread operator away from a
+ * customer-facing response.
  */
 
 interface RawSquadList {
@@ -64,6 +73,7 @@ export function mapInternalSquadDetails(
     inboundsCount:
       toNumber(squad.info?.inboundsCount) ||
       (Array.isArray(squad.inbounds) ? squad.inbounds.length : 0),
+    inboundUuids: extractInboundUuids(squad.inbounds),
     createdAt: toIsoString(squad.createdAt),
     updatedAt: toIsoString(squad.updatedAt),
   }));
@@ -81,6 +91,25 @@ export function mapExternalSquadDetails(
     createdAt: toIsoString(squad.createdAt),
     updatedAt: toIsoString(squad.updatedAt),
   }));
+}
+
+/**
+ * Reads `uuid` off each inbound and stops there.
+ *
+ * Written as an explicit field read rather than a pick or an omit: a pick list
+ * that later gains a field, or an omit list that fails to gain one, both end
+ * with `rawInbound` on the wire. Here the only way to widen it is to write
+ * another line, which a reviewer sees.
+ */
+function extractInboundUuids(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  const uuids: string[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const uuid = (entry as Record<string, unknown>)['uuid'];
+    if (typeof uuid === 'string' && uuid.length > 0) uuids.push(uuid);
+  }
+  return uuids;
 }
 
 function toString(value: unknown): string {

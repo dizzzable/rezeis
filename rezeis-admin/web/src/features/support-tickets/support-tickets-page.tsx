@@ -17,10 +17,12 @@ import {
   Download,
   Settings,
   Plus,
+  Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { formatDateTime } from '@/lib/utils';
+import { UserPickerDialog } from './user-picker-dialog';
+import { formatBytes, formatDateTime } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -163,6 +165,9 @@ export default function SupportTicketsPage() {
   const [configOpen, setConfigOpen] = useState(false);
   const [openTicketOpen, setOpenTicketOpen] = useState(false);
   const [newUserRef, setNewUserRef] = useState('');
+  /** Who the picker chose, shown beside the field so the id is not the only clue. */
+  const [newUserLabel, setNewUserLabel] = useState('');
+  const [userPickerOpen, setUserPickerOpen] = useState(false);
   const [newSubject, setNewSubject] = useState('');
   const [newMessage, setNewMessage] = useState('');
   const hasPermission = usePermissionStore((s) => s.hasPermission);
@@ -230,6 +235,7 @@ export default function SupportTicketsPage() {
     onSuccess: (ticket) => {
       setOpenTicketOpen(false);
       setNewUserRef('');
+      setNewUserLabel('');
       setNewSubject('');
       setNewMessage('');
       // Show the thread that was just created: it is born OPEN, which the
@@ -290,7 +296,7 @@ export default function SupportTicketsPage() {
       toast.success(
         t('supportTicketsPage.toast.attachmentsPurged', {
           count: result.purged,
-          size: formatFreedBytes(result.freedBytes),
+          size: formatBytes(result.freedBytes),
         }),
       );
     },
@@ -446,6 +452,15 @@ export default function SupportTicketsPage() {
 
       <SupportConfigDialog open={configOpen} onOpenChange={setConfigOpen} />
 
+      <UserPickerDialog
+        open={userPickerOpen}
+        onOpenChange={setUserPickerOpen}
+        onPick={(reference, label) => {
+          setNewUserRef(reference);
+          setNewUserLabel(label);
+        }}
+      />
+
       <Dialog open={openTicketOpen} onOpenChange={setOpenTicketOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
@@ -455,15 +470,34 @@ export default function SupportTicketsPage() {
           <div className="space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="open-ticket-user">{t('supportTicketsPage.openTicket.userLabel')}</Label>
-              <Input
-                id="open-ticket-user"
-                value={newUserRef}
-                onChange={(e) => setNewUserRef(e.target.value)}
-                placeholder={t('supportTicketsPage.openTicket.userPlaceholder')}
-                autoComplete="off"
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="open-ticket-user"
+                  value={newUserRef}
+                  onChange={(e) => {
+                    setNewUserRef(e.target.value);
+                    // Typing replaces whatever the picker chose, so the name
+                    // shown below can never describe a different person from
+                    // the reference actually being sent.
+                    setNewUserLabel('');
+                  }}
+                  placeholder={t('supportTicketsPage.openTicket.userPlaceholder')}
+                  autoComplete="off"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => setUserPickerOpen(true)}
+                >
+                  <Users className="mr-2 h-4 w-4" />
+                  {t('supportTicketsPage.openTicket.pickFromList')}
+                </Button>
+              </div>
               <p className="text-xs text-muted-foreground">
-                {t('supportTicketsPage.openTicket.userHint')}
+                {newUserLabel.length > 0
+                  ? t('supportTicketsPage.openTicket.picked', { name: newUserLabel })
+                  : t('supportTicketsPage.openTicket.userHint')}
               </p>
             </div>
             <div className="space-y-1.5">
@@ -1264,9 +1298,3 @@ function SupportConfigDialog({
   );
 }
 
-/** Freed disk in the largest unit that still reads as a number, not a wall. */
-function formatFreedBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}

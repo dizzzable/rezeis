@@ -294,6 +294,7 @@ describe('SettingsController', () => {
       iconColorMode: 'default',
       iconColors: {},
       iconDecor: {},
+  serversGlobe: { enabled: true, variant: 'globe', props: {} },
       borderRadius: '1rem',
       cornerRadii: { cardPx: 24, itemPx: 14, pillPx: 9999 },
       fontFamily: 'Inter',

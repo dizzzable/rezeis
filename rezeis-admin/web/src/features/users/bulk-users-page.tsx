@@ -266,7 +266,9 @@ function ResultCard({ result }: { readonly result: BulkUserOperationResult }) {
                           : 'text-destructive'
                     }`}
                   >
-                    {item.status}
+                    {t(`bulkUsersPage.resultStatuses.${item.status}`, {
+                      defaultValue: item.status,
+                    })}
                   </td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">{item.message ?? '—'}</td>
                 </tr>

@@ -262,13 +262,30 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
         where: { key: seed.key },
         select: { id: true },
       });
-      if (existing !== null) continue;
       try {
-        await this.botTextsService.create({
-          key: seed.key,
-          value: seed.value,
-          visible: true,
-        });
+        if (existing === null) {
+          await this.botTextsService.create({
+            key: seed.key,
+            value: seed.value,
+            visible: true,
+          });
+        }
+        // The English sibling, when the seed carries one. OUTSIDE the Russian
+        // row's guard, and that placement is the whole point: every existing
+        // installation already has the Russian rows, so a `continue` above this
+        // block means the English ones are never created anywhere except on a
+        // virgin database. The comment here used to say exactly that while the
+        // code sat inside the branch it describes skipping.
+        if (seed.valueEn !== undefined) {
+          const enKey = `${seed.key}${EN_KEY_SUFFIX}`;
+          const existingEn = await this.prismaService.botText.findUnique({
+            where: { key: enKey },
+            select: { id: true },
+          });
+          if (existingEn === null) {
+            await this.botTextsService.create({ key: enKey, value: seed.valueEn, visible: true });
+          }
+        }
       } catch (err: unknown) {
         this.logger.warn(
           `Failed to seed bot text "${seed.key}": ${
@@ -718,8 +735,14 @@ function resolveWelcomeMessageEn(
   enRow: BotText | undefined,
 ): string | null {
   if (baseRow !== undefined && baseRow.visible === false) return null;
-  if (enRow === undefined) return null;
-  return enRow.value.trim().length > 0 ? enRow.value : null;
+  // The shipped English greeting when the operator has not written one. It was
+  // added to `DEFAULT_VISUAL` and then read by nothing, so an English customer
+  // still met a Russian first message — a default that exists and is never
+  // consulted is worse than none, because it reads as handled.
+  if (enRow === undefined) return DEFAULT_VISUAL.welcomeMessageEn;
+  return enRow.value.trim().length > 0
+    ? enRow.value
+    : DEFAULT_VISUAL.welcomeMessageEn;
 }
 
 /**
@@ -745,7 +768,11 @@ const DEFAULT_VISUAL: Omit<
   'bannerUrl' | 'bannerApplyAll'
 > = {
   welcomeMessage: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
-  welcomeMessageEn: null,
+  // The first message every Telegram customer ever sees. The English slot
+  // has existed since the field was added and shipped empty, so an English
+  // customer's first contact with the product was in Russian — and the
+  // operator had no way to know a second field was waiting to be filled.
+  welcomeMessageEn: 'Hi, {{firstName}}! 👋\n\nWelcome to Rezeis VPN.',
   supportUsername: '',
   subscriptionInfoFormat: 'full',
 };
@@ -800,6 +827,16 @@ const DEFAULT_EMOJIS: readonly DefaultEmojiSeed[] = [
 interface DefaultTextSeed {
   readonly key: string;
   readonly value: string;
+  /**
+   * The English sibling, seeded as `<key>@en`.
+   *
+   * The mechanism existed from the start — `mapTexts` projects that row as
+   * `<key>.en` straight into reiwa's EN pack — and nothing ever filled it. A
+   * fresh deploy therefore shipped a bot that spoke Russian to every customer,
+   * including the five slash-command descriptions Telegram puts in its own
+   * autocomplete bubble.
+   */
+  readonly valueEn?: string;
 }
 
 /**
@@ -820,22 +857,22 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
   //   `minimal` — greeting alone, no summary
   { key: SUBSCRIPTION_INFO_FORMAT_KEY, value: 'full' },
   // Mini-profile (greeting summary)
-  { key: 'profile.subscription',       value: 'Подписка' },
-  { key: 'profile.devices',            value: 'Устройств: {{count}} доступно' },
-  { key: 'profile.devices_unlimited',  value: 'Устройств: безлимит' },
-  { key: 'profile.traffic',            value: 'Трафик' },
-  { key: 'profile.until',              value: 'До' },
-  { key: 'profile.unlimited',          value: 'Безлимит' },
+  { key: 'profile.subscription',       value: 'Подписка' , valueEn: 'Subscription' },
+  { key: 'profile.devices',            value: 'Устройств: {{count}} доступно' , valueEn: 'Devices: {{count}} available' },
+  { key: 'profile.devices_unlimited',  value: 'Устройств: безлимит' , valueEn: 'Devices: unlimited' },
+  { key: 'profile.traffic',            value: 'Трафик' , valueEn: 'Traffic' },
+  { key: 'profile.until',              value: 'До' , valueEn: 'Until' },
+  { key: 'profile.unlimited',          value: 'Безлимит' , valueEn: 'Unlimited' },
   // Slash-command descriptions — the autocomplete bubble Telegram shows on /.
   // Seeded so they appear in the texts editor at all; reiwa re-registers them
   // with Telegram on cache invalidation, so an edit lands without a restart.
-  { key: 'commands.start.description',      value: 'Главное меню' },
-  { key: 'commands.help.description',       value: 'Справка и поддержка' },
-  { key: 'commands.lang.description',       value: 'Сменить язык' },
-  { key: 'commands.rules.description',      value: 'Правила сервиса' },
-  { key: 'commands.paysupport.description', value: 'Помощь с оплатой' },
+  { key: 'commands.start.description',      value: 'Главное меню' , valueEn: 'Main menu' },
+  { key: 'commands.help.description',       value: 'Справка и поддержка' , valueEn: 'Help and support' },
+  { key: 'commands.lang.description',       value: 'Сменить язык' , valueEn: 'Change language' },
+  { key: 'commands.rules.description',      value: 'Правила сервиса' , valueEn: 'Service terms' },
+  { key: 'commands.paysupport.description', value: 'Помощь с оплатой' , valueEn: 'Payment help' },
   // Generic fallbacks shared across the bot
-  { key: 'common.not_available',       value: 'Н/Д' },
+  { key: 'common.not_available',       value: 'Н/Д' , valueEn: 'N/A' },
   // Platform access-mode kill-switch banners (used by /start when the
   // operator switches the platform out of PUBLIC). Editable copy so
   // operators can soften / expand the wording without redeploying.
@@ -843,18 +880,26 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
     key: 'access_mode.restricted',
     value:
       '🛠 Сервис временно недоступен — ведутся технические работы. Существующие подключения VPN продолжают работать. Попробуйте позже.',
+    valueEn:
+      '🛠 The service is temporarily unavailable — maintenance is under way. Existing VPN connections keep working. Please try again later.'
   },
   {
     key: 'access_mode.reg_blocked_new',
     value: '🚫 Регистрация в сервисе временно отключена. Свяжитесь с поддержкой, если у вас уже есть аккаунт.',
+    valueEn:
+      '🚫 Registration is temporarily switched off. Contact support if you already have an account.'
   },
   {
     key: 'access_mode.invited_no_code',
     value: '✉️ Сейчас регистрация только по приглашению. Откройте бота по invite-ссылке от друга или партнёра.',
+    valueEn:
+      '✉️ Registration is invite-only right now. Open the bot through an invite link from a friend or a partner.'
   },
   {
     key: 'access_mode.purchase_blocked',
     value: '🛒 Покупка временно недоступна. Действующие подписки можно продлевать как обычно.',
+    valueEn:
+      '🛒 Purchases are temporarily unavailable. Existing subscriptions can be renewed as usual.'
   },
   // Channel-subscription gate (used by /start + the "I subscribed" button
   // when the operator requires a channel subscription). Editable copy.
@@ -862,38 +907,46 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
     key: 'channel.required',
     value:
       'Для доступа к боту подпишитесь на наш канал, затем нажмите «Я подписался».',
+    valueEn:
+      'To use the bot, subscribe to our channel, then tap "I have subscribed".'
   },
-  { key: 'channel.join_button', value: '📢 Перейти в канал' },
-  { key: 'channel.check_button', value: '✅ Я подписался' },
+  { key: 'channel.join_button', value: '📢 Перейти в канал' , valueEn: '📢 Open the channel' },
+  { key: 'channel.check_button', value: '✅ Я подписался' , valueEn: '✅ I have subscribed' },
   {
     key: 'channel.not_subscribed',
     value: '❌ Вы ещё не подписаны на канал. Подпишитесь и попробуйте снова.',
+    valueEn:
+      '❌ You are not subscribed to the channel yet. Subscribe and try again.'
   },
-  { key: 'channel.verified', value: '✅ Подписка подтверждена!' },
+  { key: 'channel.verified', value: '✅ Подписка подтверждена!' , valueEn: '✅ Subscription confirmed!' },
   // Referral / Partner hub (bot "Пригласить" button). Editable so operators
   // can localize / rebrand the program copy without a redeploy.
-  { key: 'referral.hub.title', value: '🔗 Реферальная программа' },
+  { key: 'referral.hub.title', value: '🔗 Реферальная программа' , valueEn: '🔗 Referral program' },
   {
     key: 'referral.hub.description',
     value:
       'Приглашайте друзей по своей ссылке — за каждого, кто оформит подписку, вы получаете баллы. Баллы можно обменять в кабинете.',
+    valueEn:
+      'Invite friends with your link — you earn points for everyone who takes out a subscription. Points can be exchanged in your dashboard.'
   },
-  { key: 'referral.hub.stat_invited', value: '👥 Приглашено: {{count}}' },
-  { key: 'referral.hub.stat_qualified', value: '✅ Оформили подписку: {{count}}' },
-  { key: 'referral.hub.stat_pending', value: '⏳ В ожидании: {{count}}' },
-  { key: 'referral.hub.stat_points', value: '⭐ Баллов: {{count}}' },
-  { key: 'referral.hub.link_label', value: '🔗 Ваша реферальная ссылка:' },
-  { key: 'referral.hub.open_cabinet', value: '👤 Профиль в кабинете' },
-  { key: 'referral.hub.open_exchange', value: '💱 Обменять баллы' },
-  { key: 'partner.hub.title', value: '🤝 Партнёрская программа' },
+  { key: 'referral.hub.stat_invited', value: '👥 Приглашено: {{count}}' , valueEn: '👥 Invited: {{count}}' },
+  { key: 'referral.hub.stat_qualified', value: '✅ Оформили подписку: {{count}}' , valueEn: '✅ Subscribed: {{count}}' },
+  { key: 'referral.hub.stat_pending', value: '⏳ В ожидании: {{count}}' , valueEn: '⏳ Pending: {{count}}' },
+  { key: 'referral.hub.stat_points', value: '⭐ Баллов: {{count}}' , valueEn: '⭐ Points: {{count}}' },
+  { key: 'referral.hub.link_label', value: '🔗 Ваша реферальная ссылка:' , valueEn: '🔗 Your referral link:' },
+  { key: 'referral.hub.open_cabinet', value: '👤 Профиль в кабинете' , valueEn: '👤 Dashboard profile' },
+  { key: 'referral.hub.open_exchange', value: '💱 Обменять баллы' , valueEn: '💱 Exchange points' },
+  { key: 'partner.hub.title', value: '🤝 Партнёрская программа' , valueEn: '🤝 Partner program' },
   {
     key: 'partner.hub.description',
     value:
       'Вы участник партнёрской программы. Получайте вознаграждение за приглашённых пользователей. Вывод средств — в кабинете.',
+    valueEn:
+      'You are in the partner program. Earn rewards for the users you refer. Withdrawals are handled in your dashboard.'
   },
-  { key: 'partner.hub.stat_balance', value: '💰 Баланс: {{amount}}' },
-  { key: 'partner.hub.stat_earned', value: '📈 Всего заработано: {{amount}}' },
-  { key: 'partner.hub.stat_referred', value: '👥 Рефералов: {{count}}' },
+  { key: 'partner.hub.stat_balance', value: '💰 Баланс: {{amount}}' , valueEn: '💰 Balance: {{amount}}' },
+  { key: 'partner.hub.stat_earned', value: '📈 Всего заработано: {{amount}}' , valueEn: '📈 Earned in total: {{amount}}' },
+  { key: 'partner.hub.stat_referred', value: '👥 Рефералов: {{count}}' , valueEn: '👥 Referrals: {{count}}' },
   { key: 'partner.hub.open_cabinet', value: '🤝 Партнёрский кабинет' },
 ];
 

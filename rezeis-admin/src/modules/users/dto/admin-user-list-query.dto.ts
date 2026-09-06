@@ -5,6 +5,7 @@ import {
   IsBoolean,
   IsDate,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -12,6 +13,11 @@ import {
   Max,
   Min,
 } from 'class-validator';
+
+import {
+  USER_PRESENCE_VALUES,
+  type UserPresence,
+} from '../utils/user-presence.util';
 
 /**
  * Query DTO for `GET /admin/users`.
@@ -146,6 +152,17 @@ export class AdminUserListQueryDto {
   @Transform(({ value }) => toBoolean(value))
   @IsBoolean()
   public flagged?: boolean;
+
+  /**
+   * Whether the customer is at the screen, stepped away, or gone.
+   *
+   * Derived from `lastSeenAt` rather than stored, so the buckets move with the
+   * clock and nothing has to be written on a timer. See `user-presence.util`
+   * for why there are three of them and not two.
+   */
+  @IsOptional()
+  @IsIn(USER_PRESENCE_VALUES)
+  public presence?: UserPresence;
 
   @IsOptional()
   @Type(() => Date)

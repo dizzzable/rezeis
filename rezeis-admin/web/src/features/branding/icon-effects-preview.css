@@ -1,0 +1,180 @@
+/* Icon attention effects, mirrored from the cabinet.
+ *
+ * A BYTE-FOR-BYTE COPY of the block between the `icon-effects:begin` and
+ * `icon-effects:end` markers in `reiwa/web/src/index.css`, so the operator
+ * tunes an icon against what the subscriber will actually see rather than
+ * against something similar. `icon-effect-css-parity.test.ts` in reiwa compares
+ * the two and fails on any drift; regenerate this file with
+ * `scratchpad/mark_and_copy_icon_css.py` rather than editing it by hand.
+ *
+ * Its neighbour `card-effect-preview-runtime.css` is deliberately NOT a copy —
+ * it stands in for a WebGL shader, where no copy could be faithful. These are
+ * plain CSS, so the copy can be exact, and an approximation would be the
+ * drifted preview the whole arrangement exists to prevent.
+ *
+ * The reduced-motion rules below are lifted from the cabinet's single shared
+ * block, which carries rules for other selectors too. Only the icon ones are
+ * relevant here, and they are compared by the same test.
+ */
+
+/* icon-effects:begin — mirrored into the panel preview; see icon-effect-css-parity.test.ts */
+/* ── Operator-chosen attention effects for the dashboard header icons ──────
+   Five, and each animates `transform` or `opacity` and nothing else — the
+   paint contract in `visual-css-contract.test.ts` fails any keyframe that
+   touches a paint-bound property, and it is right to: these run on a phone,
+   behind a card that is already compositing an effect of its own.
+
+   The glow follows `pulse-glow` exactly: the halo is a STATIC box-shadow
+   pre-painted on a pseudo-element, and only its opacity breathes. Animating
+   the shadow itself would repaint the header every frame for as long as the
+   dashboard is open.
+
+   Everything here is off under `prefers-reduced-motion` — an icon that asks
+   for attention is precisely what that setting exists to silence. */
+@keyframes icon-effect-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.12); }
+}
+@keyframes icon-effect-shake {
+  0%, 86%, 100% { transform: rotate(0deg); }
+  88%           { transform: rotate(-9deg); }
+  91%           { transform: rotate(8deg); }
+  94%           { transform: rotate(-5deg); }
+  97%           { transform: rotate(3deg); }
+}
+@keyframes icon-effect-glow {
+  0%, 100% { opacity: 0.15; }
+  50%      { opacity: 1; }
+}
+
+.icon-effect-pulse { animation: icon-effect-pulse 2.4s ease-in-out infinite; }
+.icon-effect-shake { animation: icon-effect-shake 4.5s ease-in-out infinite; }
+.icon-effect-glow  { position: relative; }
+.icon-effect-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* The wrapper carrying this class is a bare `inline-flex` with no radius of
+     its own — `inherit` would draw a square halo behind a round button. Every
+     dashboard control is a pill, so that is the default. */
+  border-radius: var(--icon-effect-radius, var(--radius-pill, 9999px));
+  pointer-events: none;
+  box-shadow:
+    0 0 14px var(--icon-effect-color, var(--brand-primary)),
+    0 0 28px var(--icon-effect-color, var(--brand-primary));
+  opacity: 0.15;
+  animation: icon-effect-glow 2.6s ease-in-out infinite;
+}
+
+
+/* ── Glint ─────────────────────────────────────────────────────────────────
+   A highlight sweeps across the icon. The quests icon has shipped with this
+   for a long time as a hard-coded overlay of its own; here it is the same
+   sweep made available to every icon, and the quests overlay stands down as
+   soon as an operator chooses anything, so the two can never run at once.
+
+   IT STAYS INSIDE THE PILL WITHOUT ANY CLIPPING, and that is the whole design
+   of the numbers below. The obvious version — a bar translated from -170% to
+   +170% — needs `overflow: hidden` on its container to look right, and the
+   container here is the WRAPPER, which also carries the unread badge hanging
+   off the corner. Clipping it slices the badge; the comment in `quests-icon`
+   records that exact bug being fixed once already. So the bar is 40% wide and
+   travels from 0 to 150% of its own width, which lands its trailing edge
+   exactly on the wrapper's right edge and never past it. */
+@keyframes icon-effect-glint {
+  0%   { opacity: 0; transform: translateX(0) skewX(-18deg); }
+  8%   { opacity: 0.62; }
+  22%  { opacity: 0; transform: translateX(150%) skewX(-18deg); }
+  100% { opacity: 0; transform: translateX(150%) skewX(-18deg); }
+}
+.icon-effect-glint { position: relative; }
+.icon-effect-glint::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--icon-effect-color, var(--brand-foreground)) 55%, transparent),
+    transparent
+  );
+  opacity: 0;
+  animation: icon-effect-glint 3.8s ease-in-out infinite;
+}
+
+/* ── Iridescence ───────────────────────────────────────────────────────────
+   Colours drift across the icon.
+
+   THE OBVIOUS TWO WAYS ARE BOTH FORBIDDEN HERE. `filter: hue-rotate` and an
+   animated `background-image` are paint-bound: they repaint the header on
+   every frame, for as long as the dashboard is open, on a phone that is
+   already compositing the card effect behind it. The contract test refuses
+   both by name.
+
+   So the movement is a CROSS-FADE between two pre-painted gradients that sit
+   still. Each is painted once; only their opacities animate, which stays on
+   the compositor. Offset by half a period, the pair reads as one shifting
+   sheen rather than two blinking layers.
+
+   `mix-blend-mode: color` rather than an overlay: it takes the hue from the
+   gradient and the LIGHTNESS from what is underneath, so the icon's dark
+   surface stays dark and only the glyph — the bright pixels — takes on the
+   colour. It also means this works on an operator's uploaded SVG with no mask
+   at all, because it composites over whatever was rendered rather than
+   needing to know its shape. */
+@keyframes icon-effect-iridescent-a {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0; }
+}
+@keyframes icon-effect-iridescent-b {
+  0%, 100% { opacity: 0; }
+  50%      { opacity: 0.55; }
+}
+.icon-effect-iridescent { position: relative; isolation: isolate; }
+.icon-effect-iridescent::before,
+.icon-effect-iridescent::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--icon-effect-radius, var(--radius-pill, 9999px));
+  pointer-events: none;
+  mix-blend-mode: color;
+}
+.icon-effect-iridescent::before {
+  background: conic-gradient(
+    from 0deg,
+    #ff7ab6,
+    #ffd36e,
+    #7cf0c0,
+    #6fa8ff,
+    #c79cff,
+    #ff7ab6
+  );
+  animation: icon-effect-iridescent-a 5.2s ease-in-out infinite;
+}
+.icon-effect-iridescent::after {
+  background: conic-gradient(
+    from 140deg,
+    #7cf0c0,
+    #6fa8ff,
+    #c79cff,
+    #ff7ab6,
+    #ffd36e,
+    #7cf0c0
+  );
+  animation: icon-effect-iridescent-b 5.2s ease-in-out infinite;
+}
+/* icon-effects:end */
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-effect-pulse,
+  .icon-effect-shake { animation: none; }
+  .icon-effect-glow::after { animation: none; opacity: 0.35; }
+  .icon-effect-glint::after { animation: none; opacity: 0; }
+  .icon-effect-iridescent::before { animation: none; opacity: 0.5; }
+  .icon-effect-iridescent::after { animation: none; opacity: 0; }
+}

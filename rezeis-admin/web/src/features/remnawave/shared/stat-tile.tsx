@@ -10,7 +10,7 @@ import { Suspense, lazy } from 'react'
 import type { ComponentType, SVGProps } from 'react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 
 // Number-flow ships an animated `<NumberFlow value={…}/>` widget; we lazy-load
 // it so dashboards that don't render any tiles never pull the runtime.
@@ -59,7 +59,7 @@ export function StatTile({
       <CardContent>
         <div className={cn('font-bold tabular-nums leading-tight', compact ? 'text-xl' : 'text-2xl', toneClasses[tone])}>
           {typeof value === 'number' ? (
-            <Suspense fallback={value.toLocaleString()}>
+            <Suspense fallback={value.toLocaleString(activeLocale())}>
               <NumberFlow value={value} />
             </Suspense>
           ) : (

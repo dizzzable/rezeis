@@ -58,6 +58,7 @@ import {
   useTopPartners,
   useWithdrawalThroughput,
 } from './partners-queries'
+import { activeLocale } from '@/lib/utils'
 
 const LEVEL_COLORS = ['#10b981', '#3b82f6', '#a855f7'] as const
 const PIE_PALETTE = [
@@ -138,7 +139,7 @@ function KpiHeroCards({ from, to }: { readonly from: string; readonly to: string
           <AnimatedCounter
             value={data.aov / 100}
             format={(v) =>
-              `${v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+              `${v.toLocaleString(activeLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
             }
             className="text-2xl font-bold tabular-nums"
           />
@@ -152,7 +153,7 @@ function KpiHeroCards({ from, to }: { readonly from: string; readonly to: string
           <AnimatedCounter
             value={data.epap / 100}
             format={(v) =>
-              `${v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+              `${v.toLocaleString(activeLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
             }
             className="text-2xl font-bold tabular-nums"
           />

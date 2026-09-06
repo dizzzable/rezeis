@@ -52,10 +52,42 @@ describe('EmailTemplateRendererService branding', () => {
       rawHtml: '<p>x</p>',
     });
     assert.ok(result !== null);
-    assert.equal(result.subject, 'Notification');
+    // No locale given means Russian, the product's default — the subject used
+    // to be the English literal for everybody, which is the same one-language
+    // defect as the rest of this sweep, just pointing the other way.
+    assert.equal(result.subject, 'Уведомление');
     // Default brand is the user-facing project ("Reiwa"), NOT "Rezeis".
     assert.ok(result.html.includes('Reiwa'));
     assert.ok(!result.html.includes('Rezeis'));
     assert.ok(result.html.includes('#22c55e'));
+  });
+
+  it('gives an English recipient an English subject and document language', async () => {
+    // `<html lang>` was hard-coded to `ru` on every message the product sends.
+    // A screen reader takes that literally and pronounces an English letter
+    // with a Russian voice; the mail client offers to translate it into the
+    // language it is already in.
+    const renderer = makeRenderer({});
+    const result = await renderer.render({
+      templateType: '__test__',
+      variables: {},
+      rawHtml: '<p>x</p>',
+      locale: 'en',
+    });
+    assert.ok(result !== null);
+    assert.equal(result.subject, 'Notification');
+    assert.ok(result.html.includes('<html lang="en">'), result.html.slice(0, 120));
+  });
+
+  it('keeps the Russian document language for a Russian recipient', async () => {
+    const renderer = makeRenderer({});
+    const result = await renderer.render({
+      templateType: '__test__',
+      variables: {},
+      rawHtml: '<p>x</p>',
+      locale: 'ru',
+    });
+    assert.ok(result !== null);
+    assert.ok(result.html.includes('<html lang="ru">'));
   });
 });

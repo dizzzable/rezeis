@@ -31,7 +31,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useHasPermission } from '@/features/rbac'
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 import { reconciliationHealthQueryKey } from './payments-ops-keys'
 
 /** Mirrors `PaymentReconciliationQueueCountsInterface`. */
@@ -204,7 +204,7 @@ export function ReconciliationHealthCard() {
             {data?.generatedAt ? (
               <p className="text-[11px] text-muted-foreground">
                 {t('paymentsReconciliation.generatedAt', {
-                  time: new Date(data.generatedAt).toLocaleString(),
+                  time: new Date(data.generatedAt).toLocaleString(activeLocale()),
                 })}
               </p>
             ) : null}

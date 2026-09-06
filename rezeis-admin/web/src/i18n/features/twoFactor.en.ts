@@ -14,6 +14,11 @@ export const en = {
     recoveryCodesRemaining: 'Recovery codes remaining: {{count}}',
     disabledDescription: 'Protect your admin account with a one-time code from an authenticator app.',
     enableButton: 'Enable 2FA',
+    enrollReauth: {
+      passwordLabel: 'Confirm with your current password',
+      passwordHint:
+        'A second factor outlives a password change, so turning it on asks you to prove it is you.',
+    },
     confirm: {
       title: 'Confirm 2FA setup',
       description: 'Scan the QR code, then enter the first 6-digit code below.',

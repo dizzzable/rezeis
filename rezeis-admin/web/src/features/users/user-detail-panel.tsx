@@ -48,7 +48,7 @@ import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
 import { expectArray, isRecord } from '@/lib/api-utils'
-import { cn, truncate } from '@/lib/utils'
+import { activeLocale, cn, truncate } from '@/lib/utils'
 import { plansQueryKeys, usePlans } from '@/features/plans/plans-api'
 import { getErrorMessage } from '@/lib/http-errors'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
@@ -127,6 +127,7 @@ import {
   useRevokeReferralInviteMutation,
   type ReferralInviteCapacity,
 } from '@/features/referrals/referrals-queries'
+import { presenceDotClass } from './user-presence-dot'
 
 interface UserDetailPanelProps {
   readonly telegramId: string
@@ -399,7 +400,7 @@ function ProfileTab({
   telegramId: string
   queryKey: string[]
 }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [role, setRole] = useState(user.role ?? 'USER')
   const [personalDiscount, setPersonalDiscount] = useState(
@@ -487,7 +488,7 @@ function ProfileTab({
     })
   }
 
-  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const locale = activeLocale()
   const identityLabel = t(`userDetailPanel.header.identityKind.${user.identityKind ?? 'LOCAL_ONLY'}`)
   const currentSub = user.subscriptions?.find((s) => s.status === 'ACTIVE')
 
@@ -593,7 +594,7 @@ function ProfileTab({
               {t('userDetailPanel.profile.sectionMeta')}
             </p>
             <div className="grid gap-0.5">
-              <InfoRow icon={<Link2 className="h-3 w-3" />} label="Referral Code" value={user.referralCode} mono />
+              <InfoRow icon={<Link2 className="h-3 w-3" />} label={t('userDetailPanel.profile.referralCode')} value={user.referralCode} mono />
               <InfoRow icon={<AtSign className="h-3 w-3" />} label="Email" value={user.email ?? user.webAccount?.email ?? '—'} />
               <InfoRow
                 icon={<Calendar className="h-3 w-3" />}
@@ -1496,7 +1497,7 @@ function UserHeader({
   telegramId: string
   queryKey: string[]
 }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const currentTime = useCurrentTime()
 
   const identityKey = (user.identityKind ?? 'LOCAL_ONLY') as IdentityKind
@@ -1561,7 +1562,7 @@ function UserHeader({
           {tempPasswordActive
             ? t('userDetailPanel.header.webPasswordTemporary', {
                 expiresAt: new Date(tempPasswordExpiresAt!).toLocaleString(
-                  i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                  activeLocale(),
                 ),
               })
             : t('userDetailPanel.header.webRequiresPasswordChange')}
@@ -1697,10 +1698,10 @@ function ReviewFlags({
             <p className="mt-0.5 opacity-70">
               {flag.clearedAt === null
                 ? t('userDetailPanel.reviewFlags.openSince', {
-                    date: new Date(flag.createdAt).toLocaleString(),
+                    date: new Date(flag.createdAt).toLocaleString(activeLocale()),
                   })
                 : t('userDetailPanel.reviewFlags.clearedOn', {
-                    date: new Date(flag.clearedAt).toLocaleString(),
+                    date: new Date(flag.clearedAt).toLocaleString(activeLocale()),
                   })}
             </p>
           </div>
@@ -1735,26 +1736,15 @@ function ReviewFlags({
  * presence.
  */
 function UserStatusDot({ user }: { user: UserDetail }) {
-  // TODO: refactor — recompute the dot class via useMemo with a 1-minute interval tick
-  // instead of reading Date.now() during render.
-  // eslint-disable-next-line react-hooks/purity
-  const now = Date.now()
-  const lastSeen = user.lastSeenAt ? new Date(user.lastSeenAt).getTime() : 0
-  const diffMin = (now - lastSeen) / 60000
-
-  let dotClass: string
-
-  if (user.isBlocked) {
-    dotClass = 'bg-destructive text-destructive'
-  } else if (diffMin < 5) {
-    dotClass = 'bg-emerald-500 text-emerald-500 status-dot-pulse'
-  } else if (diffMin < 30) {
-    dotClass = 'bg-amber-500 text-amber-500'
-  } else {
-    dotClass = 'bg-transparent border border-muted-foreground/50'
-  }
-
-  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${dotClass}`} />
+  // The shared rule, so this card cannot disagree with the list beside it or
+  // with the support picker. The detail payload carries no `presence` field, so
+  // the bucket is derived here — with the SAME thresholds, from the same
+  // module, instead of a third private copy of them.
+  return (
+    <span
+      className={`inline-block h-2.5 w-2.5 rounded-full ${presenceDotClass(user)}`}
+    />
+  )
 }
 
 
@@ -2389,7 +2379,7 @@ function SubscriptionDeleteConfirmation({
  * A `Date` carries two calendars and this screen only ever shows one of them.
  * react-day-picker hands back LOCAL midnight, the picker's own trigger renders
  * `format(value, 'dd.MM.yyyy')` from LOCAL parts, and the read-only "Expires"
- * row above it renders `toLocaleDateString()` — also local. The change
+ * row above it renders `toLocaleDateString(activeLocale())` — also local. The change
  * detector alone used `.toISOString().slice(0, 10)`, which is the UTC day, and
  * for this product's operators (Moscow, UTC+3) those two calendars disagree
  * for three hours out of every twenty-four.
@@ -2536,8 +2526,8 @@ function SubscriptionCard({
   onLinkRemnawaveProfile: (remnawaveId: string) => void
   isLinkingRemnawaveProfile: boolean
 }) {
-  const { t, i18n } = useTranslation()
-  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const { t } = useTranslation()
+  const locale = activeLocale()
   const syncActivity = subscriptionSyncActivity(sub)
 
   const statusKey = String(sub.status ?? 'UNKNOWN')
@@ -2761,7 +2751,7 @@ function SubscriptionCard({
           <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDot}`} />
           <span className="truncate text-xs font-medium">{sub.plan?.name ?? `#${truncate(sub.id, 8)}`}</span>
           <span className={`text-[10px] font-medium ${statusColor}`}>{statusLabel}</span>
-          {sub.isTrial && <span className="rounded border border-pink-500/50 px-1 py-px text-[9px] uppercase text-pink-400">Trial</span>}
+          {sub.isTrial && <span className="rounded border border-pink-500/50 px-1 py-px text-[9px] uppercase text-pink-400">{t('userDetailPage.subscriptions.trialBadge')}</span>}
           {isSyncing || syncActivity === 'PENDING' ? (
             <span className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[9px] font-medium uppercase text-primary">
               <Loader2 className="h-2.5 w-2.5 animate-spin" />
@@ -3157,11 +3147,11 @@ function GiveSubForm({ telegramId, queryKey, onClose }: { telegramId: string; qu
 // ══════════════════════════════════════════════════════════════════════════════
 
 function PartnerTab({ user, telegramId, queryKey }: { user: UserDetail; telegramId: string; queryKey: string[] }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [adjustAmount, setAdjustAmount] = useState('')
   const [adjustReason, setAdjustReason] = useState('')
-  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const locale = activeLocale()
 
   const toggleMutation = useMutation({
     mutationFn: () => api.post(`/admin/users/${telegramId}/partner/toggle`),
@@ -3890,8 +3880,8 @@ function InviteQuotaNotice({
 }
 
 function UserInvitesCard({ userId }: { userId: string }) {
-  const { t, i18n } = useTranslation()
-  const locale = i18n.language === 'ru' ? 'ru-RU' : 'en-US'
+  const { t } = useTranslation()
+  const locale = activeLocale()
   const currentTime = useCurrentTime()
 
   const invitesQuery = useReferralInvitesQuery(userId)
@@ -4480,7 +4470,7 @@ function TransactionsTab({ user }: { user: UserDetail }) {
                   <td className="px-3 py-2"><Badge variant={tx.status === 'COMPLETED' ? 'success' : 'secondary'} className="text-[10px]">{tx.status}</Badge></td>
                   <td className="px-3 py-2 font-mono">{tx.amount} {tx.currency}</td>
                   <td className="px-3 py-2 text-xs uppercase">{tx.gatewayType}</td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">{new Date(tx.createdAt).toLocaleDateString('ru-RU')}</td>
+                  <td className="px-3 py-2 text-xs text-muted-foreground">{new Date(tx.createdAt).toLocaleDateString(activeLocale())}</td>
                 </tr>
               ))}
             </tbody>
@@ -4569,9 +4559,19 @@ function OperationCard({ operation, locale }: { operation: UserOperation; locale
         <p className="font-mono text-xs text-muted-foreground">{operation.payload.paymentId ?? t('userDetailPanel.operations.noPaymentId')}</p>
         <div className="flex flex-wrap items-center justify-between gap-1.5 text-xs">
           <div className="flex flex-wrap gap-1.5">
-            <Badge variant="secondary">{operation.payload.status}</Badge>
+            <Badge variant="secondary">
+              {t(`paymentsPage.statuses.${operation.payload.status}`, {
+                defaultValue: operation.payload.status,
+              })}
+            </Badge>
             {operation.payload.gatewayType && <Badge variant="outline">{operation.payload.gatewayType}</Badge>}
-            {operation.payload.purchaseType && <Badge variant="outline">{operation.payload.purchaseType}</Badge>}
+            {operation.payload.purchaseType && (
+              <Badge variant="outline">
+                {t(`paymentsPage.purchaseTypes.${operation.payload.purchaseType}`, {
+                  defaultValue: operation.payload.purchaseType,
+                })}
+              </Badge>
+            )}
           </div>
           <RefundPaymentAction
             transactionId={operation.id}
@@ -4967,7 +4967,7 @@ function WebCabinetTab({
   telegramId: string
   queryKey: string[]
 }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const currentTime = useCurrentTime()
   const queryClient = useQueryClient()
   const [tempCredentials, setTempCredentials] = useState<{
@@ -5130,7 +5130,7 @@ function WebCabinetTab({
                   <InfoRow
                     label={t('userDetailPanel.web.tempUntil')}
                     value={new Date(activeTemporaryPasswordExpiresAt).toLocaleString(
-                      i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                      activeLocale(),
                     )}
                   />
                 )}
@@ -5302,7 +5302,7 @@ function WebCabinetTab({
               <p className="text-xs text-muted-foreground">
                 {t('userDetailPanel.web.tempExpires', {
                   expiresAt: new Date(tempCredentials.expiresAt).toLocaleString(
-                    i18n.language === 'ru' ? 'ru-RU' : 'en-US',
+                    activeLocale(),
                   ),
                 })}
               </p>

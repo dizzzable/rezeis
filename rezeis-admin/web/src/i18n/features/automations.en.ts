@@ -104,7 +104,7 @@ export const en = {
       deleteFailed: 'Delete failed: {{message}}',
       runFinished: 'Run finished: {{status}}',
       runFailed: 'Run failed: {{message}}',
-      toggleFailed: 'Failed to toggle rule: {{message}}',
+      toggleFailed: 'Failed to toggle rule',
     },
     help: {
       title: 'How it works — examples & templates',
@@ -131,6 +131,8 @@ export const en = {
       },
       actionsTitle: 'Actions',
       actionDescriptions: {
+        show_hint: 'show a cabinet hint to the person the event names.',
+        show_hint_to_audience: 'show a cabinet hint to a chosen audience on a schedule.',
         notify_telegram: 'send a Telegram message through the configured delivery.',
         webhook_post: 'POST JSON to an arbitrary URL (with optional auth header).',
         block_ip: 'block the IP from the trigger data or an explicit one.',

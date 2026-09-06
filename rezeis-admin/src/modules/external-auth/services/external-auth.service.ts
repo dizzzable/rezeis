@@ -30,6 +30,7 @@ import { TelegramOidcAdapter } from './providers/telegram-oidc.adapter';
 import { YandexOAuthAdapter } from './providers/yandex-oauth.adapter';
 import { DisposableEmailService } from './disposable-email.service';
 import { ExternalProviderConfigService } from './external-provider-config.service';
+import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
 
 /**
  * Core external-auth engine: builds authorization URLs, runs OAuth adapters,
@@ -274,12 +275,24 @@ export class ExternalAuthService {
     const outcome = await this.prismaService.$transaction(async (tx) => {
       const account = await tx.webAccount.findUnique({
         where: { userId: input.userId },
-        select: { id: true, passwordHash: true, email: true },
+        // `user.language` rides along: the welcome e-mail below is rendered
+        // from a DB template that carries both languages, and without this it
+        // is Russian for every recipient.
+        select: {
+          id: true,
+          passwordHash: true,
+          email: true,
+          user: { select: { language: true } },
+        },
       });
       if (!account) throw new NotFoundException('Web account not found');
       if (account.passwordHash !== null) {
         // Credentials already set (idempotent double-submit) — nothing to do.
-        return { credentialsSet: false, email: null as string | null };
+        return {
+          credentialsSet: false,
+          email: null as string | null,
+          language: null as string | null,
+        };
       }
       const loginConflict = await tx.webAccount.findUnique({
         where: { loginNormalized },
@@ -298,7 +311,11 @@ export class ExternalAuthService {
           credentialsBootstrappedAt: new Date(),
         },
       });
-      return { credentialsSet: true, email: account.email };
+      return {
+        credentialsSet: true,
+        email: account.email,
+        language: account.user?.language ?? null,
+      };
     });
 
     // Best-effort welcome email (login only — never the password). Skips
@@ -307,9 +324,12 @@ export class ExternalAuthService {
       try {
         await this.emailDeliveryService.send({
           to: outcome.email,
-          subject: 'Welcome',
+          // No `subject`: the DB-template path derives it from the template's
+          // own localized title. The literal 'Welcome' here was silently
+          // discarded and read as though the subject were English.
           templateType: 'web_welcome',
           variables: { login },
+          locale: coerceNotificationLocale(outcome.language),
         });
       } catch (err) {
         this.logger.warn(`External-auth welcome email failed: ${(err as Error).message}`);

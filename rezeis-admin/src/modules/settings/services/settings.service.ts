@@ -1846,7 +1846,17 @@ function extractUpdatedPaymentOpsFields(dto: UpdatePaymentOpsAlertSettingsDto): 
   return fields;
 }
 
-function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly string[] {
+/**
+ * Which branding fields this request actually changes.
+ *
+ * The list below is the gate: `updateBrandingSettings` returns EARLY and writes
+ * nothing when it comes back empty. A field the DTO accepts but this list omits
+ * therefore validates, arrives, and is silently discarded — the operator is told
+ * the save succeeded and the setting reverts on the next read, with nothing
+ * anywhere to point at. `branding-field-gate.spec.ts` derives the expected
+ * membership from the DTO itself so that omission is a failing test.
+ */
+export function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly string[] {
   const fields: Array<keyof UpdateBrandingSettingsDto> = [
     'themePresetId',
     'themePresetVersion',
@@ -1887,6 +1897,7 @@ function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): readonly 
     'iconColorMode',
     'iconColors',
     'iconDecor',
+    'serversGlobe',
     'borderRadius',
     'cornerRadii',
     'fontFamily',

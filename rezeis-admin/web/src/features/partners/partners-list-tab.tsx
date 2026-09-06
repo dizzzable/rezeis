@@ -35,6 +35,7 @@ import {
 } from './partner-formatters'
 import { ListPartnersSort, Partner } from './partners-api'
 import { usePartnerMutations, usePartnersList } from './partners-queries'
+import { activeLocale } from '@/lib/utils'
 
 const PAGE_SIZE = 25
 
@@ -188,7 +189,7 @@ export default function PartnersListTab() {
                       <AnimatedCounter
                         value={partner.balance / 100}
                         format={(v) =>
-                          v.toLocaleString('ru-RU', {
+                          v.toLocaleString(activeLocale(), {
                             minimumFractionDigits: 2,
                             maximumFractionDigits: 2,
                           })
@@ -320,20 +321,20 @@ function PartnerRowActions({ partner }: { readonly partner: Partner }) {
         )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          onClick={() => copy(partner.id, 'partner ID')}
+          onClick={() => copy(partner.id, t('partnersList.actions.copyLabels.partnerId'))}
         >
           <Copy className="h-3.5 w-3.5 mr-2" />
           {t('partnersList.actions.copyPartnerId')}
         </DropdownMenuItem>
         <DropdownMenuItem
-          onClick={() => copy(partner.user.id, 'user ID')}
+          onClick={() => copy(partner.user.id, t('partnersList.actions.copyLabels.userId'))}
         >
           <Copy className="h-3.5 w-3.5 mr-2" />
           {t('partnersList.actions.copyUserId')}
         </DropdownMenuItem>
         {partner.user.telegramId && (
           <DropdownMenuItem
-            onClick={() => copy(partner.user.telegramId, 'telegram ID')}
+            onClick={() => copy(partner.user.telegramId, t('partnersList.actions.copyLabels.telegramId'))}
           >
             <Copy className="h-3.5 w-3.5 mr-2" />
             {t('partnersList.actions.copyTelegramId')}

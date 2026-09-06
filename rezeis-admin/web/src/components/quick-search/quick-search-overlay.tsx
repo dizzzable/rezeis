@@ -305,9 +305,12 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                           )}
                         </div>
                         <Badge variant="outline" className="text-[10px] shrink-0">
-                          {result.type === 'navigation'
-                            ? t('quickSearchOverlay.types.navigation')
-                            : result.type}
+                          {/* All six, not just `navigation`: the other five
+                              rendered the raw wire value, so an English badge
+                              sat beside a Russian one in the same list. */}
+                          {t(`quickSearchOverlay.types.${result.type}`, {
+                            defaultValue: result.type,
+                          })}
                         </Badge>
                       </button>
                     </li>

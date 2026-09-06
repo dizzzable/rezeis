@@ -19,7 +19,7 @@ import {
   Undo2,
 } from 'lucide-react'
 
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { UnsavedChangesGuard } from '@/components/unsaved-changes-guard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -1348,7 +1348,7 @@ function RevisionsDrawer({ onRollback }: { onRollback: (id: string) => void }) {
             (revisions ?? []).map((rev) => (
               <div key={rev.id} className="flex items-center justify-between rounded-md border p-2 text-sm">
                 <div>
-                  <div>{new Date(rev.publishedAt).toLocaleString()}</div>
+                  <div>{new Date(rev.publishedAt).toLocaleString(activeLocale())}</div>
                   {rev.isCurrent && (
                     <Badge variant="secondary" className="text-[10px]">
                       {t('landingBuilderPage.revisionsDrawer.current')}

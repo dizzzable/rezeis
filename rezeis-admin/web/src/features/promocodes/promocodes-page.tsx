@@ -218,10 +218,14 @@ export default function PromocodesPage() {
                             : t('promocodesIndex.status.inactive')}
                         </Badge>
                         <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                          {promo.rewardType.replace(/_/g, ' ')}
+                          {t(`promocodeForm.rewardTypes.${promo.rewardType}`, {
+                            defaultValue: promo.rewardType.replace(/_/g, ' '),
+                          })}
                         </Badge>
                         <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                          {promo.availability}
+                          {t(`promocodeForm.availabilities.${promo.availability}`, {
+                            defaultValue: promo.availability,
+                          })}
                         </Badge>
                       </div>
 

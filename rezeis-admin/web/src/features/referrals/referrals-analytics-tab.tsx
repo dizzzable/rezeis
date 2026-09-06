@@ -30,7 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
-import { truncate } from '@/lib/utils'
+import { activeLocale, truncate } from '@/lib/utils'
 
 /** Granularity supported by the time-series endpoint. */
 type Granularity = 'day' | 'week'
@@ -195,7 +195,7 @@ function FunnelCard({ from, to }: { readonly from: string; readonly to: string }
 function FunnelStep({ label, value }: { readonly label: string; readonly value: number }) {
   return (
     <div className="rounded-lg border bg-card/50 px-4 py-3 text-center md:col-span-1">
-      <p className="text-2xl font-bold tabular-nums">{value.toLocaleString('ru-RU')}</p>
+      <p className="text-2xl font-bold tabular-nums">{value.toLocaleString(activeLocale())}</p>
       <p className="text-[11px] text-muted-foreground mt-1">{label}</p>
     </div>
   )
@@ -239,7 +239,7 @@ function TimeseriesCard({
     if (!data) return []
     return data.points.map((p) => ({
       ...p,
-      bucketLabel: new Date(p.bucket).toLocaleDateString('ru-RU', {
+      bucketLabel: new Date(p.bucket).toLocaleDateString(activeLocale(), {
         month: 'short',
         day: 'numeric',
       }),

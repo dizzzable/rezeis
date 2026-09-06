@@ -473,10 +473,10 @@ function SortablePlanCard({
             {plan.isActive ? t('plansPage.status.active') : t('plansPage.status.inactive')}
           </Badge>
           <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-            {plan.type}
+            {t(`planForm.types.${plan.type}`, { defaultValue: plan.type })}
           </Badge>
           <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-            {plan.availability}
+            {t(`planForm.availabilities.${plan.availability}`, { defaultValue: plan.availability })}
           </Badge>
           {/* Only a plan that departs from the global cashback rule gets a
               badge: INHERIT is the default, and what an API without the column

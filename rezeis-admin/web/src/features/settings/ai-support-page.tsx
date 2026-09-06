@@ -445,7 +445,11 @@ export default function AiSupportPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{instruction.title}</span>
-                      <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">{instruction.category}</span>
+                      <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">
+                        {t(`aiSupport.cat${instruction.category.charAt(0).toUpperCase()}${instruction.category.slice(1)}`, {
+                          defaultValue: instruction.category,
+                        })}
+                      </span>
                     </div>
                     <p className="text-sm text-muted-foreground truncate mt-1">{truncate(instruction.content, 100)}</p>
                   </div>

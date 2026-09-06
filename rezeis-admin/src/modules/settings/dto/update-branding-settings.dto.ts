@@ -348,6 +348,62 @@ function HasAllowedPlanTexturePresets(
  * cabinet degrades an unknown value to the default, which is where that
  * decision belongs.
  */
+/**
+ * `serversGlobe` is the operator's globe choice: which planet, and its settings.
+ *
+ * The vocabulary is deliberately NOT frozen here — the same reasoning as
+ * `iconDecor` above. A planet or a setting named by a newer panel must be
+ * storable, because the panel ships first and the cabinet is the side that
+ * degrades gracefully. What is refused is a shape no control can produce: a
+ * variant that is not a slug, a prop that is an object or an array, a string
+ * longer than any picker emits. Those would be dropped by the reader and
+ * answered `200 OK`, and the operator would find the setting reverted with
+ * nothing to point at.
+ */
+function IsServersGlobe(validationOptions?: ValidationOptions): PropertyDecorator {
+  const slug = /^[a-z][a-z0-9-]{0,31}$/;
+  return ValidateBy(
+    {
+      name: 'isServersGlobe',
+      validator: {
+        validate: (value: unknown): boolean => {
+          if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+            return true;
+          }
+          const block = value as Record<string, unknown>;
+          for (const field of Object.keys(block)) {
+            if (!['enabled', 'variant', 'props'].includes(field)) return false;
+          }
+          if (block.enabled !== undefined && typeof block.enabled !== 'boolean') return false;
+          if (
+            block.variant !== undefined &&
+            !(typeof block.variant === 'string' && slug.test(block.variant))
+          ) {
+            return false;
+          }
+          if (block.props === undefined) return true;
+          if (typeof block.props !== 'object' || block.props === null || Array.isArray(block.props)) {
+            return false;
+          }
+          const props = Object.entries(block.props as Record<string, unknown>);
+          if (props.length > 64) return false;
+          for (const [name, entry] of props) {
+            if (name.length === 0 || name.length > 64) return false;
+            if (typeof entry === 'boolean') continue;
+            if (typeof entry === 'number' && Number.isFinite(entry)) continue;
+            if (typeof entry === 'string' && entry.length > 0 && entry.length <= 64) continue;
+            return false;
+          }
+          return true;
+        },
+        defaultMessage: () =>
+          'serversGlobe must be { enabled?: boolean, variant?: slug, props?: { [name]: string | number | boolean } }',
+      },
+    },
+    validationOptions,
+  );
+}
+
 function IsIconDecorMap(validationOptions?: ValidationOptions): PropertyDecorator {
   const slug = /^[a-z][a-z0-9-]{0,31}$/;
   const hex = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -1074,6 +1130,28 @@ export class UpdateBrandingSettingsDto {
   @IsObject()
   @IsIconDecorMap()
   public iconDecor?: Record<string, { glyph?: string; effect?: string; color?: string }>;
+
+  /**
+   * The globe a subscriber sees on a double tap, and how it is set up.
+   *
+   * One block rather than three fields: the props belong to the variant, and
+   * sending them apart would let a variant change carry the previous planet's
+   * tuning. See `ServersGlobeSettings` for the whole argument.
+   */
+  @IsOptional()
+  // `@IsObject()` in front of the shape check, exactly as `iconDecor`
+  // has it. `IsServersGlobe` answers `true` for a non-object — the
+  // convention here, so each validator checks one thing — which without
+  // this line meant a string, a number or an array was accepted, stored
+  // verbatim and read back as the shipped default: 200 OK, and the
+  // operator's planet and tuning silently gone.
+  @IsObject()
+  @IsServersGlobe()
+  public serversGlobe?: {
+    enabled?: boolean;
+    variant?: string;
+    props?: Record<string, string | number | boolean>;
+  };
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))

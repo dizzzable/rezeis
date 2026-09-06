@@ -1,5 +1,14 @@
 export const en = {
+  exportDropdown: {
+    trigger: 'Export',
+    csv_one: 'CSV ({{count}} row)',
+    csv_other: 'CSV ({{count}} rows)',
+    json_one: 'JSON ({{count}} row)',
+    json_other: 'JSON ({{count}} rows)',
+  },
   adminShell: {
+    collapseSidebar: 'Collapse sidebar',
+    expandSidebar: 'Expand sidebar',
     headerSubtitle: 'Rezeis VPN Administration',
     openMenu: 'Open navigation menu',
     search: 'Search…',
@@ -220,6 +229,7 @@ export const en = {
     slugLabel: 'Slug',
     instrCategoryLabel: 'Category',
     catApp: 'App',
+    catVpn: 'VPN',
     instrContentLabel: 'Content (Markdown) *',
     fillRequired: 'Please fill in all required fields',
     cancel: 'Cancel',
@@ -316,7 +326,12 @@ export const en = {
       copyPartnerId: 'Copy partner ID',
       copyUserId: 'Copy user ID',
       copyTelegramId: 'Copy Telegram ID',
-      copied: '{{label}} copied',
+      copied: 'Copied: {{label}}',
+      copyLabels: {
+        partnerId: 'partner ID',
+        userId: 'user ID',
+        telegramId: 'Telegram ID',
+      },
       copyFailed: 'Could not copy',
     },
   },
@@ -1768,6 +1783,7 @@ export const en = {
       invalidCode: 'Invalid verification code',
     },
     oauth: {
+      passkeyFailed: 'Passkey sign-in was not completed',
       or: 'or continue with',
       continueWith: 'Continue with {{provider}}',
       passkey: 'Sign in with Passkey',
@@ -1837,6 +1853,11 @@ export const en = {
     searching: 'Searching…',
     noResults: 'No results for "{{query}}"',
     types: {
+      user: 'user',
+      subscription: 'subscription',
+      transaction: 'transaction',
+      promocode: 'promo code',
+      partner: 'partner',
       navigation: 'page',
     },
     footer: {
@@ -1856,6 +1877,13 @@ export const en = {
     reset: 'Reset',
   },
   common: {
+    units: {
+      b: 'B',
+      kb: 'KB',
+      mb: 'MB',
+      gb: 'GB',
+      tb: 'TB',
+    },
     appName: 'Rezeis Admin',
     language: 'Language',
     logout: 'Logout',
@@ -2912,6 +2940,11 @@ export const en = {
     update: 'Update promocode',
   },
   bulkUsersPage: {
+    resultStatuses: {
+      ok: 'OK',
+      skipped: 'Skipped',
+      error: 'Error',
+    },
     title: 'Bulk user operations',
     subtitle:
       'Apply a single action to up to 1000 users in one request. Each row is processed independently; partial failures do not roll back successful rows.',
@@ -3144,6 +3177,7 @@ export const en = {
       mustChange: 'Password change',
     },
     roles: {
+      USER: 'User',
       DEV: 'Developer',
       ADMIN: 'Administrator',
     },
@@ -3510,11 +3544,36 @@ export const en = {
       empty: 'No tickets found',
       guestBadge: 'Guest',
     },
+    userPicker: {
+      title: 'Choose a client',
+      description: 'Find the person instead of recalling their identifier.',
+      searchPlaceholder: 'Name, @username, login, ID or email',
+      loading: 'Searching…',
+      empty: 'Nobody matches these filters',
+      blocked: 'Blocked',
+      failed: 'Could not load the list — check the role’s permissions.',
+      shownCapped: 'Showing {{shown}} of {{total}} — narrow the search or the filters',
+      shown: 'Showing {{shown}} of {{total}}',
+      presence: {
+        any: 'Any',
+        online: 'Online',
+        away: 'Away',
+        offline: 'Offline',
+      },
+      subscription: {
+        any: 'Any subscription',
+        with: 'With a subscription',
+        trial: 'Trial',
+        without: 'No subscription',
+      },
+    },
     openTicket: {
       action: 'Message a client',
       title: 'Open a ticket with a client',
       description:
         'The client gets an ordinary ticket they can reply to, plus a notification about it.',
+      pickFromList: 'From list',
+      picked: 'Selected: {{name}}',
       userLabel: 'To',
       userPlaceholder: '123456789, @username or Reiwa ID',
       userHint:
@@ -3743,6 +3802,14 @@ export const en = {
     },
   },
   authProviders: {
+    providerDescriptions: {
+      TELEGRAM: 'Telegram Login Widget (HMAC-SHA256)',
+      GITHUB: 'GitHub OAuth2 (user:email scope)',
+      YANDEX: 'Yandex OAuth2',
+      KEYCLOAK: 'Keycloak OpenID Connect',
+      POCKETID: 'PocketID self-hosted identity',
+      GENERIC_OAUTH2: 'Custom OAuth2 provider',
+    },
     title: 'Authentication Methods',
     subtitle: 'Configure OAuth2 providers for admin panel login.',
     accessDeniedTitle: 'Authentication provider access is restricted',
@@ -3757,6 +3824,16 @@ export const en = {
       description: 'Username + password authentication (always enabled)',
     },
     fields: {
+      clientIdLabel: 'Client ID',
+      clientSecretLabel: 'Client Secret',
+      frontendDomainLabel: 'Frontend domain',
+      backendDomainLabel: 'Backend domain',
+      realmLabel: 'Realm',
+      authorizationUrlLabel: 'Authorization URL',
+      tokenUrlLabel: 'Token URL',
+      usePkceLabel: 'Use PKCE',
+      secretShow: 'Show',
+      secretHide: 'Hide',
       botToken: 'Bot token from @BotFather (used as Client ID for Telegram)',
       clientIdHint: 'OAuth2 Client ID from the provider',
       clientIdPlaceholder: 'Enter Client ID',
@@ -3844,6 +3921,11 @@ export const en = {
     },
   },
   backupPage: {
+    scopes: {
+      DB: 'Database',
+      ASSETS: 'Assets',
+      FULL: 'Full',
+    },
     title: 'Backup',
     subtitle: 'Database backup management',
     accessDeniedTitle: 'Backup access is restricted',
@@ -4369,6 +4451,35 @@ export const en = {
       icons: 'Menu icons',
       planCards: 'Tariff cards',
       nav: 'Navigation',
+      servers: 'Servers',
+    },
+    servers: {
+      title: 'Server map',
+      description:
+        'What a subscriber sees when they double-tap their subscription card: a planet, and the servers available to them with their state.',
+      enabledLabel: 'Open on a double tap',
+      enabledHint:
+        'Off means a double tap on the card opens nothing, and the server list is unavailable to subscribers.',
+      variantLabel: 'Planet',
+      noMarkers:
+        'This planet carries no real geography, so servers are not marked on it. The list underneath still shows them all.',
+      previewLabel: 'How it looks',
+      previewHint:
+        'The real animation with your settings. The three markers are an example; a subscriber sees their own servers.',
+      variants: {
+        globe: {
+          name: 'Dotted Earth',
+          note: 'Real continents, with a marker per server country.',
+        },
+        'globe-mesh': {
+          name: 'Mesh sphere',
+          note: 'Abstract: motion without a map, and no markers.',
+        },
+        'dither-globe': {
+          name: 'Dithered sphere',
+          note: 'Drawn without WebGL — the lightest on weak phones.',
+        },
+      },
     },
     sections: {
       nav: {
@@ -4683,6 +4794,8 @@ export const en = {
           pulse: 'Pulse',
           shake: 'Wiggle',
           glow: 'Glow',
+          glint: 'Glint',
+          iridescent: 'Iridescence',
         },
         glyphs: {
           default: 'As shipped',

@@ -7,6 +7,13 @@
 
 export const en = {
   importsPage: {
+    statuses: {
+      DRAFT: 'Draft',
+      DRY_RUN: 'Dry run',
+      COMMITTED: 'Committed',
+      ROLLED_BACK: 'Rolled back',
+      FAILED: 'Failed',
+    },
     title: 'Imports',
     subtitle:
       'Import and sync users from multiple sources: Remnawave, 3x-ui, Remnashop, Altshop.',

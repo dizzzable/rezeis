@@ -2,8 +2,8 @@
   "comment": "DO NOT EDIT files in live/ by hand — they are vendored from reiwa (web/src/features/landing). Edit there, then: node scripts/sync-landing-kit.mjs",
   "sourceRepo": "dizzzable/reiwa",
   "sourcePath": "web/src/features/landing",
-  "sourceCommit": "9d13fc5e1e5e60157b6c05aef2c30568db48420b-dirty",
-  "syncedAt": "2026-09-06T10:46:55.491Z",
+  "sourceCommit": "82d9146ebb25f69d4d47ee9226bfae8c47dc0fa6-dirty",
+  "syncedAt": "2026-09-06T12:23:06.080Z",
   "files": {
     "landing-background.tsx": "0f69db85e48a99d6b5746614809bee5ee3868ad9343a45adda705f436d154efa",
     "landing-kit-context.tsx": "134808c6a944dffef4235bfe2f1f3364404c00ca41da3a8a20f13b39eae89a83",
@@ -15,6 +15,6 @@
     "sections/hero.tsx": "8ce335e160edffe28f3ffb20af38715a84d3d5d6c239f5968a512a02d232ca02",
     "sections/how-it-works.tsx": "f1a7b106ddcba3683775c92db6993d4ac7f2e7ef69ac47e18782b87047618df6",
     "sections/misc.tsx": "f69d1959e83e3670ea759f164045ab1f8815fd93a5c1ec7898892d09ee22db19",
-    "sections/pricing.tsx": "8bddab26ec8d2455483b214a8afce6feef8a190b10e2e4ce69c6b21e05fb8fc9"
+    "sections/pricing.tsx": "6dbdea73f3dca22829c700cf468478ab3e8e61ed0a8c2a6adc8807c8d8de8f61"
   }
 }

@@ -14,7 +14,7 @@
 import * as React from 'react'
 import * as RechartsPrimitive from 'recharts'
 
-import { cn } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 const THEMES = { light: '', dark: '.dark' } as const
@@ -277,7 +277,7 @@ const ChartTooltipContent = React.forwardRef<
                       </div>
                       {item.value !== undefined && (
                         <span className="font-mono font-medium tabular-nums text-foreground">
-                          {item.value.toLocaleString()}
+                          {item.value.toLocaleString(activeLocale())}
                         </span>
                       )}
                     </div>

@@ -315,7 +315,14 @@ export type DashboardIconKey = (typeof DASHBOARD_ICON_KEYS)[number];
  * process — a row of shader-backed icons would spend the budget the
  * subscription card's effects already live on.
  */
-export const ICON_EFFECTS = ['none', 'pulse', 'shake', 'glow'] as const;
+export const ICON_EFFECTS = [
+  'none',
+  'pulse',
+  'shake',
+  'glow',
+  'glint',
+  'iridescent',
+] as const;
 export type IconEffect = (typeof ICON_EFFECTS)[number];
 
 /**
@@ -708,6 +715,20 @@ export interface BrandingThemeVariants {
   readonly dark: BrandingThemeVariant;
 }
 
+/**
+ * The operator's globe choice, as stored.
+ *
+ * `props` holds only what the operator changed away from the variant's
+ * defaults; everything absent takes the shipped value on the reading side. That
+ * keeps a stored block meaningful after a variant gains a setting — the new one
+ * arrives at its default instead of the row having to be rewritten.
+ */
+export interface ServersGlobeSettings {
+  readonly enabled: boolean;
+  readonly variant: string;
+  readonly props: Record<string, string | number | boolean>;
+}
+
 export interface BrandingSettingsInterface {
   /**
    * Stable id of the ready-made theme currently applied by WEB Reiwa.
@@ -922,6 +943,30 @@ export interface BrandingSettingsInterface {
    */
   readonly iconDecor: Record<string, IconDecorSettings>;
 
+  /**
+   * The globe a subscriber sees when they double-tap their subscription card.
+   *
+   * ONE BLOCK, NOT THREE FIELDS, because it is one decision: which planet, and
+   * how that planet is set up. The props belong to the variant they configure —
+   * `globe` has a graticule and markers, `dither-globe` has a pixel size and a
+   * dither depth, and neither means anything to the other. Split into siblings,
+   * a save that changed only the variant would carry the previous planet's
+   * tuning onto the new one, which is precisely the defect `cardEffect` and
+   * `cardEffectProps` have and which `mergeBrandingSettings` has to repair by
+   * hand for that pair.
+   *
+   * `variant` is a bare `string` and `props` a bare record for the reason
+   * `cardEffect` is: the panel ships ahead of the cabinet, so a planet or a
+   * setting this cabinet has never heard of must fall back to what is shipped
+   * rather than blank the screen. The cabinet clamps every value into the
+   * range it knows — see `globe-preferences` there.
+   *
+   * `enabled: false` turns the gesture off entirely. An ABSENT block is not the
+   * same thing: it means the operator has never opened the tab, and they get
+   * the default globe.
+   */
+  readonly serversGlobe: ServersGlobeSettings;
+
   /** Tailwind-friendly border-radius token (e.g. `rounded-2xl`). */
   readonly borderRadius: string;
   /** Exact, independently editable Reiwa corner radii. */
@@ -1045,6 +1090,7 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   iconColorMode: 'default',
   iconColors: {},
   iconDecor: {},
+  serversGlobe: { enabled: true, variant: 'globe', props: {} },
   borderRadius: 'rounded-2xl',
   cornerRadii: {
     cardPx: 24,

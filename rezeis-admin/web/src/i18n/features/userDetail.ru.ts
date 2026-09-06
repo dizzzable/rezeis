@@ -134,7 +134,7 @@ export const ru = {
       reiwaId: 'Reiwa ID',
       telegramId: 'Telegram ID',
       telegramIdNone: 'Не привязан',
-      referralCode: 'Referral Code',
+      referralCode: 'Реферальный код',
       email: 'Email',
       registered: 'Зарегистрирован',
       language: 'Язык',
@@ -233,6 +233,7 @@ export const ru = {
       // кнопку, которой нет.
       expiryCannotBeCleared: 'Ничего не сохранено: выберите срок действия. Этот экран не может сделать подписку бессрочной.',
       status: {
+        LIMITED: 'Ограничена',
         ACTIVE: 'Активна',
         DISABLED: 'Отключена',
         EXPIRED: 'Истекла',

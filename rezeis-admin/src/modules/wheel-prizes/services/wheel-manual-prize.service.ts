@@ -4,6 +4,14 @@ import { Prisma, WheelSectorKind, WheelSpinStatus } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SupportNotificationsService } from '../../support-tickets/services/support-notifications.service';
 import { SupportTicketsService } from '../../support-tickets/services/support-tickets.service';
+import {
+  prizeTicketLocale,
+  wheelPrizeGreeting,
+  wheelPrizeRefused,
+  wheelPrizeSettled,
+  wheelPrizeSubject,
+  type PrizeTicketLocale,
+} from '../../support-tickets/utils/prize-ticket-copy.util';
 
 export interface ManualPrizeRow {
   readonly spinId: string;
@@ -186,6 +194,8 @@ export class WheelManualPrizeService {
         manualTicketId: true,
         sectorSnapshot: true,
         userId: true,
+        // The ticket copy below is written in the CUSTOMER's language.
+        user: { select: { language: true } },
       },
     });
     if (spin === null) return null;
@@ -194,12 +204,16 @@ export class WheelManualPrizeService {
     if (spin.manualTicketId !== null) return spin.manualTicketId;
 
     const title = readTitle(spin.sectorSnapshot);
+    // The customer's OWN thread, so it has to be in the customer's language.
+    // The notification card announcing this same prize has been localized
+    // since it shipped; the conversation it opens was not.
+    const locale = prizeTicketLocale(spin.user.language);
     try {
       return await this.prismaService.$transaction(async (tx) => {
         const ticket = await tx.supportTicket.create({
           data: {
             userId: spin.userId,
-            subject: `Приз с колеса: ${title}`,
+            subject: wheelPrizeSubject(title, locale),
             status: 'OPEN',
           },
           select: { id: true },
@@ -215,9 +229,7 @@ export class WheelManualPrizeService {
             ticketId: ticket.id,
             authorType: 'SYSTEM',
             authorId: null,
-            content:
-              `Вы выиграли на колесе: ${title}. ` +
-              'Оператор свяжется с вами здесь, чтобы вручить приз.',
+            content: wheelPrizeGreeting(title, locale),
             metadata: { type: 'wheel_manual_prize', spinId: spin.id },
           },
         });
@@ -283,8 +295,8 @@ export class WheelManualPrizeService {
       adminId: input.adminId,
       note: input.note,
       status: WheelSpinStatus.SETTLED,
-      message: (title) =>
-        `Приз с колеса вручён: ${title}.` + (input.note ? `\n\n${input.note}` : ''),
+      message: (title, locale) =>
+        wheelPrizeSettled(title, locale) + (input.note ? `\n\n${input.note}` : ''),
     });
   }
 
@@ -306,7 +318,7 @@ export class WheelManualPrizeService {
       adminId: input.adminId,
       note: input.reason,
       status: WheelSpinStatus.REFUSED,
-      message: (title) => `По призу с колеса «${title}» принято решение отказать.\n\n${input.reason}`,
+      message: (title, locale) => `${wheelPrizeRefused(title, locale)}\n\n${input.reason}`,
     });
   }
 
@@ -315,7 +327,7 @@ export class WheelManualPrizeService {
     readonly adminId: string;
     readonly note: string | null;
     readonly status: WheelSpinStatus;
-    readonly message: (title: string) => string;
+    readonly message: (title: string, locale: PrizeTicketLocale) => string;
   }): Promise<SettleResult> {
     const spin = await this.prismaService.wheelSpin.findUnique({
       where: { id: input.spinId },
@@ -362,7 +374,7 @@ export class WheelManualPrizeService {
         ticketId,
         authorType: 'ADMIN',
         authorId: input.adminId,
-        content: input.message(title),
+        content: input.message(title, prizeTicketLocale(spin.user.language)),
         metadata: { type: 'wheel_manual_prize', spinId: spin.id, outcome: input.status },
       });
       if (spin.user !== null) {
@@ -370,7 +382,11 @@ export class WheelManualPrizeService {
         // that fails must not undo a prize that was handed over.
         void this.supportNotifications.notifyAdminReply({
           ticketId,
-          subject: `Приз с колеса: ${title}`,
+          // Localized for the same reason the contest path is: the card
+          // wrapping this subject IS translated, so a Russian subject
+          // line arrived inside an English notification. Two sites, one
+          // bug; only the other one was fixed.
+          subject: wheelPrizeSubject(title, prizeTicketLocale(spin.user.language)),
           user: { id: spin.user.id, language: spin.user.language },
         });
       }

@@ -41,6 +41,7 @@ import {
   loadKeys,
   type KeyPool,
 } from './wheel-keys-api'
+import { activeLocale } from '@/lib/utils'
 
 type KeyFilter = 'available' | 'claimed'
 
@@ -341,7 +342,7 @@ export default function WheelKeysPage() {
                                   </TableCell>
                                   <TableCell className="text-sm text-muted-foreground">
                                     {key.claimedAt
-                                      ? new Date(key.claimedAt).toLocaleString()
+                                      ? new Date(key.claimedAt).toLocaleString(activeLocale())
                                       : '—'}
                                   </TableCell>
                                 </>

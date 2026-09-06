@@ -1,5 +1,22 @@
 export const ru = {
+  exportDropdown: {
+    trigger: 'Экспорт',
+    // Со склонениями: раньше строка была прибита как `CSV (1 rows)`.
+    csv_one: 'CSV ({{count}} строка)',
+    csv_few: 'CSV ({{count}} строки)',
+    csv_many: 'CSV ({{count}} строк)',
+    csv_other: 'CSV ({{count}} строк)',
+    json_one: 'JSON ({{count}} строка)',
+    json_few: 'JSON ({{count}} строки)',
+    json_many: 'JSON ({{count}} строк)',
+    json_other: 'JSON ({{count}} строк)',
+  },
   adminShell: {
+    // Подпись кнопки-стрелки боковой панели. Ключа не было ни в одном языке —
+    // `defaultValue` держал английский текст, и русский оператор слышал его
+    // с экрана, хотя все соседние ориентиры переведены.
+    collapseSidebar: 'Свернуть боковую панель',
+    expandSidebar: 'Развернуть боковую панель',
     headerSubtitle: 'Администрирование Rezeis VPN',
     openMenu: 'Открыть меню навигации',
     search: 'Поиск…',
@@ -220,6 +237,7 @@ export const ru = {
     slugLabel: 'Slug',
     instrCategoryLabel: 'Категория',
     catApp: 'Приложение',
+    catVpn: 'VPN',
     instrContentLabel: 'Содержимое (Markdown) *',
     fillRequired: 'Заполните все обязательные поля',
     cancel: 'Отмена',
@@ -316,7 +334,12 @@ export const ru = {
       copyPartnerId: 'Скопировать Partner ID',
       copyUserId: 'Скопировать User ID',
       copyTelegramId: 'Скопировать Telegram ID',
-      copied: '{{label}} скопирован',
+      copied: 'Скопировано: {{label}}',
+      copyLabels: {
+        partnerId: 'ID партнёра',
+        userId: 'ID пользователя',
+        telegramId: 'Telegram ID',
+      },
       copyFailed: 'Не удалось скопировать',
     },
   },
@@ -1798,6 +1821,7 @@ export const ru = {
       invalidCode: 'Неверный код',
     },
     oauth: {
+      passkeyFailed: 'Вход по ключу доступа не завершён',
       or: 'или войти через',
       continueWith: 'Войти через {{provider}}',
       passkey: 'Войти с Passkey',
@@ -1867,6 +1891,11 @@ export const ru = {
     searching: 'Идёт поиск…',
     noResults: 'Нет результатов по «{{query}}»',
     types: {
+      user: 'пользователь',
+      subscription: 'подписка',
+      transaction: 'транзакция',
+      promocode: 'промокод',
+      partner: 'партнёр',
       navigation: 'страница',
     },
     footer: {
@@ -1886,6 +1915,13 @@ export const ru = {
     reset: 'Сбросить',
   },
   common: {
+    units: {
+      b: 'Б',
+      kb: 'КБ',
+      mb: 'МБ',
+      gb: 'ГБ',
+      tb: 'ТБ',
+    },
     appName: 'Rezeis Admin',
     language: 'Язык',
     logout: 'Выйти',
@@ -2952,6 +2988,11 @@ export const ru = {
     update: 'Обновить промокод',
   },
   bulkUsersPage: {
+    resultStatuses: {
+      ok: 'Успех',
+      skipped: 'Пропущено',
+      error: 'Ошибка',
+    },
     title: 'Массовые операции над пользователями',
     subtitle:
       'Применяет одно действие к списку пользователей (до 1000 за раз). Каждая строка обрабатывается независимо: ошибки не отменяют успешные строки.',
@@ -3204,6 +3245,7 @@ export const ru = {
       mustChange: 'Смена пароля',
     },
     roles: {
+      USER: 'Пользователь',
       DEV: 'Разработчик',
       ADMIN: 'Администратор',
     },
@@ -3572,11 +3614,37 @@ export const ru = {
       empty: 'Тикеты не найдены',
       guestBadge: 'Гость',
     },
+    userPicker: {
+      title: 'Выбор клиента',
+      description:
+        'Найдите нужного человека вместо того, чтобы вспоминать его идентификатор.',
+      searchPlaceholder: 'Имя, @username, логин, ID или почта',
+      loading: 'Ищем…',
+      empty: 'Никто не подошёл под фильтры',
+      blocked: 'Заблокирован',
+      failed: 'Не удалось загрузить список — проверьте права роли.',
+      shownCapped: 'Показано {{shown}} из {{total}} — уточните поиск или фильтры',
+      shown: 'Показано {{shown}} из {{total}}',
+      presence: {
+        any: 'Любые',
+        online: 'В сети',
+        away: 'Отошёл',
+        offline: 'Не в сети',
+      },
+      subscription: {
+        any: 'Любая подписка',
+        with: 'С подпиской',
+        trial: 'Пробная',
+        without: 'Без подписки',
+      },
+    },
     openTicket: {
       action: 'Написать клиенту',
       title: 'Новое обращение к клиенту',
       description:
         'Клиент получит обычный тикет, на который сможет ответить, и уведомление о нём.',
+      pickFromList: 'Из списка',
+      picked: 'Выбран: {{name}}',
       userLabel: 'Кому',
       userPlaceholder: '123456789, @username или Reiwa ID',
       userHint:
@@ -3805,6 +3873,14 @@ export const ru = {
     },
   },
   authProviders: {
+    providerDescriptions: {
+      TELEGRAM: 'Виджет входа Telegram (HMAC-SHA256)',
+      GITHUB: 'GitHub OAuth2 (доступ user:email)',
+      YANDEX: 'Яндекс OAuth2',
+      KEYCLOAK: 'Keycloak OpenID Connect',
+      POCKETID: 'PocketID — собственный сервер учётных записей',
+      GENERIC_OAUTH2: 'Произвольный провайдер OAuth2',
+    },
     title: 'Способы аутентификации',
     subtitle: 'Настройка OAuth2 провайдеров для входа в админ-панель.',
     accessDeniedTitle: 'Доступ к провайдерам аутентификации ограничен',
@@ -3819,6 +3895,16 @@ export const ru = {
       description: 'Аутентификация по логину и паролю (всегда включена)',
     },
     fields: {
+      clientIdLabel: 'Идентификатор клиента (Client ID)',
+      clientSecretLabel: 'Секрет клиента (Client Secret)',
+      frontendDomainLabel: 'Домен фронтенда',
+      backendDomainLabel: 'Домен бэкенда',
+      realmLabel: 'Realm',
+      authorizationUrlLabel: 'URL авторизации',
+      tokenUrlLabel: 'URL токена',
+      usePkceLabel: 'Использовать PKCE',
+      secretShow: 'Показать',
+      secretHide: 'Скрыть',
       botToken: 'Токен бота от @BotFather (используется как Client ID для Telegram)',
       clientIdHint: 'Client ID OAuth2 от провайдера',
       clientIdPlaceholder: 'Введите Client ID',
@@ -3908,6 +3994,11 @@ export const ru = {
     },
   },
   backupPage: {
+    scopes: {
+      DB: 'База данных',
+      ASSETS: 'Файлы',
+      FULL: 'Полный',
+    },
     title: 'Бэкапы',
     subtitle: 'Управление резервными копиями базы данных',
     accessDeniedTitle: 'Доступ к бэкапам ограничен',
@@ -4443,6 +4534,35 @@ export const ru = {
       icons: 'Иконки меню',
       planCards: 'Тарифные карточки',
       nav: 'Навигация',
+      servers: 'Сервера',
+    },
+    servers: {
+      title: 'Карта серверов',
+      description:
+        'Что видит подписчик, дважды коснувшись карточки подписки: планета и список доступных ему серверов с их состоянием.',
+      enabledLabel: 'Показывать по двойному тапу',
+      enabledHint:
+        'Выключено — двойное касание карточки ничего не открывает. Список серверов подписчику недоступен.',
+      variantLabel: 'Планета',
+      noMarkers:
+        'На этой планете нет настоящей географии, поэтому отметок серверов на ней не будет. Список под ней покажет их все.',
+      previewLabel: 'Так это выглядит',
+      previewHint:
+        'Настоящая анимация с вашими настройками. Три отметки — для примера; подписчику покажутся его сервера.',
+      variants: {
+        globe: {
+          name: 'Земля из точек',
+          note: 'Настоящие материки и отметки серверов по странам.',
+        },
+        'globe-mesh': {
+          name: 'Сетчатый шар',
+          note: 'Абстрактный: движение без карты, отметок нет.',
+        },
+        'dither-globe': {
+          name: 'Пиксельный шар',
+          note: 'Рисуется без WebGL — самый лёгкий для слабых телефонов.',
+        },
+      },
     },
     sections: {
       nav: {
@@ -4760,6 +4880,8 @@ export const ru = {
           pulse: 'Пульсация',
           shake: 'Подёргивание',
           glow: 'Свечение',
+          glint: 'Блеск',
+          iridescent: 'Переливание',
         },
         glyphs: {
           default: 'Как в кабинете',

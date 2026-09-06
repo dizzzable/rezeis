@@ -95,6 +95,7 @@ export class EmailDeliveryService {
       variables: payload.variables,
       rawHtml: payload.rawHtml,
       subject: payload.subject,
+      locale: payload.locale,
     });
 
     if (!rendered) {

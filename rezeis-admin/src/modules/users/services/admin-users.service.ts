@@ -14,6 +14,10 @@ import {
 } from '../interfaces/admin-user-list-item.interface';
 import { AdminUserResolveResultInterface } from '../interfaces/admin-user-resolve-result.interface';
 import { AdminUserSearchResultInterface } from '../interfaces/admin-user-search-result.interface';
+import {
+  presenceFilter,
+  resolveUserPresence,
+} from '../utils/user-presence.util';
 
 /** Matches a CUID-shaped reiwa user id (Prisma default `cuid()`). */
 const CUID_PATTERN = /^c[a-z0-9]{20,}$/i;
@@ -96,12 +100,27 @@ export class AdminUsersService {
   ): Promise<AdminUserListResultInterface> {
     const limit = query.limit ?? DEFAULT_LIST_LIMIT;
     const offset = query.offset ?? DEFAULT_LIST_OFFSET;
-    const where = buildUserListWhere(query);
+    // ONE reading of the clock for the whole request. The filter and the
+        // label both bucket by elapsed time, and taking `now` twice — once
+        // before the query and once after it — lets a row cross a boundary in
+        // between: selected by the `online` filter, then labelled `away`. That
+        // contradiction is exactly what the strict comparison in
+        // `presenceFilter` was written to prevent, and two clocks put it back.
+    const now = new Date();
+    const where = buildUserListWhere(query, now);
 
     const [rows, total] = await this.prismaService.$transaction([
       this.prismaService.user.findMany({
         where,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        // Asking "who is here now" and answering with the newest
+        // REGISTRATIONS is the wrong list. With a presence filter the page is
+        // ordered by activity, so the person who wrote a minute ago is at the
+        // top instead of being cut off below the limit on any install with more
+        // online customers than fit on one page.
+        orderBy:
+          query.presence === undefined
+            ? [{ createdAt: 'desc' }, { id: 'desc' }]
+            : [{ lastSeenAt: 'desc' }, { id: 'desc' }],
         skip: offset,
         take: limit,
         select: {
@@ -144,6 +163,11 @@ export class AdminUsersService {
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
       lastSeenAt: user.lastSeenAt?.toISOString() ?? null,
+      // Computed here rather than left to the reader. The thresholds are a
+      // product decision, and the panel SPA builds from its own directory and
+      // cannot import this module — so a copy over there would be a second
+      // definition free to drift from this one.
+      presence: resolveUserPresence(user.lastSeenAt, now),
     }));
 
     return { items, total };
@@ -162,7 +186,10 @@ export class AdminUsersService {
  * not a narrowing: no row's `telegramId` can equal a value the column cannot
  * store, so the clause could never have matched.
  */
-function buildUserListWhere(query: AdminUserListQueryDto): Prisma.UserWhereInput {
+function buildUserListWhere(
+  query: AdminUserListQueryDto,
+  now: Date = new Date(),
+): Prisma.UserWhereInput {
   // Every filter is an AND term; a multi-value filter is an OR within its own
   // term. Collected in a list rather than merged into one object because two
   // filters can both want `subscriptions.some` and the second would silently
@@ -251,6 +278,13 @@ function buildUserListWhere(query: AdminUserListQueryDto): Prisma.UserWhereInput
         ? { reviewFlags: { some: { clearedAt: null } } }
         : { reviewFlags: { none: { clearedAt: null } } },
     );
+  }
+
+  if (query.presence !== undefined) {
+    // Composed into the same query rather than filtered afterwards: narrowing a
+    // page in memory returns fewer rows than the caller asked for and makes the
+    // total meaningless.
+    and.push(presenceFilter(query.presence, now) as Prisma.UserWhereInput);
   }
 
   if (query.createdFrom !== undefined || query.createdTo !== undefined) {

@@ -27,6 +27,7 @@ import {
   BrandingThemeVariant,
   BrandingThemeVariants,
   BrandingSettingsInterface,
+  ServersGlobeSettings,
   BrandPaletteSource,
   CARD_EFFECTS,
   CARD_LOGO_PRESETS,
@@ -135,6 +136,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     iconColorMode: readIconColorMode(record, DEFAULT_BRANDING.iconColorMode),
     iconColors: readHexMap(record, 'iconColors'),
     iconDecor: readIconDecorMap(record, 'iconDecor'),
+    serversGlobe: readServersGlobe(record, 'serversGlobe'),
     borderRadius: readBorderRadius(record),
     cornerRadii: readCornerRadii(record),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
@@ -1004,6 +1006,53 @@ function readIconDecorMap(
     }
   }
   return out;
+}
+
+/**
+ * Reads the stored globe choice, keeping only what a renderer could use.
+ *
+ * Deliberately NOT checked against a list of known planets or known settings.
+ * The panel ships ahead of the cabinet, so a variant named by a newer panel has
+ * to survive storage and reach the cabinet, which clamps it to something it can
+ * draw. Refusing it here would mean an operator on a new panel cannot save a
+ * setting at all, which is worse than a cabinet that shows the default until it
+ * catches up.
+ *
+ * What IS enforced is shape: a slug for the variant, and props that are plain
+ * scalars within bounds. A prop that is an object or an unbounded string is not
+ * a value any control produces, and storing it would put arbitrary JSON on the
+ * public config route.
+ */
+function readServersGlobe(record: Record<string, unknown>, key: string): ServersGlobeSettings {
+  const fallback: ServersGlobeSettings = DEFAULT_BRANDING.serversGlobe;
+  const value = record[key];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return fallback;
+  const source = value as Record<string, unknown>;
+
+  const variant =
+    typeof source['variant'] === 'string' && SLUG_PATTERN.test(source['variant'].trim())
+      ? source['variant'].trim()
+      : fallback.variant;
+
+  const props: Record<string, string | number | boolean> = {};
+  const rawProps = source['props'];
+  if (typeof rawProps === 'object' && rawProps !== null && !Array.isArray(rawProps)) {
+    for (const [name, entry] of Object.entries(rawProps as Record<string, unknown>).slice(0, 64)) {
+      if (name.length === 0 || name.length > 64) continue;
+      if (typeof entry === 'boolean') props[name] = entry;
+      else if (typeof entry === 'number' && Number.isFinite(entry)) props[name] = entry;
+      else if (typeof entry === 'string' && entry.length > 0 && entry.length <= 64) {
+        props[name] = entry;
+      }
+    }
+  }
+
+  return {
+    // Absent means "never configured", which is not the same as switched off.
+    enabled: source['enabled'] === undefined ? fallback.enabled : source['enabled'] !== false,
+    variant,
+    props,
+  };
 }
 
 /** A vocabulary key: lowercase, short, and safe inside a class name. */

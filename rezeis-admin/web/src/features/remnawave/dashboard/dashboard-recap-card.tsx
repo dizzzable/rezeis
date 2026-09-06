@@ -13,6 +13,7 @@ import { remnawaveApi } from '../remnawave-api'
 import { KEYS } from '../remnawave-query-keys'
 import { formatBytes, formatUptime, getBandwidthDelta } from '../remnawave-utils'
 import { EndpointDegraded } from '../shared/endpoint-degraded'
+import { activeLocale } from '@/lib/utils'
 
 export function DashboardRecapCard() {
   const { t } = useTranslation()
@@ -41,11 +42,11 @@ export function DashboardRecapCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
-        <Row label={t('remnaWavePage.recap.totalUsers')} value={(recap.total?.users ?? 0).toLocaleString()} />
-        <Row label={t('remnaWavePage.recap.totalNodes')} value={(recap.total?.nodes ?? 0).toLocaleString()} />
-        <Row label={t('remnaWavePage.recap.countries')} value={(recap.total?.distinctCountries ?? 0).toLocaleString()} />
+        <Row label={t('remnaWavePage.recap.totalUsers')} value={(recap.total?.users ?? 0).toLocaleString(activeLocale())} />
+        <Row label={t('remnaWavePage.recap.totalNodes')} value={(recap.total?.nodes ?? 0).toLocaleString(activeLocale())} />
+        <Row label={t('remnaWavePage.recap.countries')} value={(recap.total?.distinctCountries ?? 0).toLocaleString(activeLocale())} />
         <Row label={t('remnaWavePage.recap.totalTraffic')} value={formatBytes(Number(recap.total?.traffic ?? 0))} />
-        <Row label={t('remnaWavePage.recap.thisMonthUsers')} value={(recap.thisMonth?.users ?? 0).toLocaleString()} />
+        <Row label={t('remnaWavePage.recap.thisMonthUsers')} value={(recap.thisMonth?.users ?? 0).toLocaleString(activeLocale())} />
         <Row label={t('remnaWavePage.recap.thisMonthTraffic')} value={formatBytes(Number(recap.thisMonth?.traffic ?? 0))} />
         <Row label={t('remnaWavePage.recap.uptime')} value={formatUptime(stats?.uptime ?? 0)} />
       </CardContent>

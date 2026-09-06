@@ -274,7 +274,7 @@ export const ru = {
           source: 'Источник',
           queue: 'Очередь',
           job: 'Job',
-          batchLimit: 'Batch limit',
+          batchLimit: 'Размер пачки',
         },
         problemSummaryTitle: 'Сводка проблем',
         problemSummaryHint: 'Счётчики собраны только из последней безопасной выборки problem events.',

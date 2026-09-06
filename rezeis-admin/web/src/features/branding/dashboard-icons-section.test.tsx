@@ -31,6 +31,74 @@ function state(): Record<string, BrandingIconDecorDraft> {
   return JSON.parse(screen.getByTestId('state').textContent ?? '{}')
 }
 
+/**
+ * The live preview beside each icon.
+ *
+ * WHY IT IS ASSERTED HERE. Before this, the section named the effect in words
+ * and showed a still glyph — an operator picked "Iridescence" and had no way to
+ * see it without opening the cabinet. The preview is the whole answer to that,
+ * so the thing worth guarding is that the effect actually reaches the DOM: a
+ * wrapper with no class renders exactly like the old still glyph, and nothing
+ * else on screen would say so.
+ *
+ * The colour assertions mirror a rule the cabinet learned the hard way: the
+ * class goes on the WRAPPER and the colour on the GLYPH, because a class on a
+ * child sets `color` and beats an inline style on its parent. A preview that
+ * tinted the wrapper would look right here and do nothing in the cabinet —
+ * which is the exact failure this preview exists to make impossible.
+ */
+describe('DashboardIconsSection live preview', () => {
+  /** The wrapper the effect class rides on, for one icon row. */
+  function previewWrapper(iconLabel: RegExp): HTMLElement {
+    const heading = screen.getByText(iconLabel)
+    const row = heading.closest('div.rounded-lg')
+    expect(row, 'the icon row moved — this selector no longer finds it').not.toBeNull()
+    const wrapper = row?.querySelector('span.relative.inline-flex')
+    expect(wrapper, 'no preview wrapper in the row').not.toBeNull()
+    return wrapper as HTMLElement
+  }
+
+  it('shows a still glyph while no effect is chosen', () => {
+    renderWithProviders(<Harness />)
+    expect(previewWrapper(/Задания|Quests/).className).not.toContain('icon-effect')
+  })
+
+  it.each([
+    ['pulse', 'icon-effect-pulse'],
+    ['shake', 'icon-effect-shake'],
+    ['glow', 'icon-effect-glow'],
+    ['glint', 'icon-effect-glint'],
+    ['iridescent', 'icon-effect-iridescent'],
+  ])('runs the %s effect on the preview', (effect, className) => {
+    renderWithProviders(<Harness initial={{ quests: { effect } }} />)
+    expect(previewWrapper(/Задания|Quests/).className).toContain(className)
+  })
+
+  it('hands the colour to the glyph and the variable to the wrapper', () => {
+    renderWithProviders(<Harness initial={{ quests: { effect: 'glow', color: '#ff0055' } }} />)
+    const wrapper = previewWrapper(/Задания|Quests/)
+    // The halo is a pseudo-element; a CSS variable is the only way to reach it.
+    expect(wrapper.getAttribute('style')).toContain('--icon-effect-color')
+    const svg = wrapper.querySelector('svg')
+    expect(svg?.style.color).toBe('rgb(255, 0, 85)')
+  })
+
+  it('decorates only the icon it was told to', () => {
+    renderWithProviders(<Harness initial={{ quests: { effect: 'pulse' } }} />)
+    expect(previewWrapper(/Колесо|Wheel/).className).not.toContain('icon-effect')
+  })
+
+  it('previews nothing for an effect this build does not know', () => {
+    // The panel can be older than the settings in front of it after a
+    // rollback. An unknown name must leave a plain glyph, not an undefined
+    // class name in the DOM.
+    renderWithProviders(<Harness initial={{ quests: { effect: 'supernova' } }} />)
+    const className = previewWrapper(/Задания|Quests/).className
+    expect(className).not.toContain('icon-effect')
+    expect(className).not.toContain('undefined')
+  })
+})
+
 describe('DashboardIconsSection', () => {
   it('stores nothing until the operator touches something', () => {
     renderWithProviders(<Harness />)

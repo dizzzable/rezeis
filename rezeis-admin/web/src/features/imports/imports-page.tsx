@@ -667,7 +667,9 @@ function ImportHistory(): JSX.Element {
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={statusVariant(record.status)}>{record.status}</Badge>
+                    <Badge variant={statusVariant(record.status)}>
+                      {t(`importsPage.statuses.${record.status}`, { defaultValue: record.status })}
+                    </Badge>
                   </TableCell>
                   <TableCell className="text-sm">
                     {record.recordsOk}

@@ -18,6 +18,15 @@ import { EmailBrandingInterface } from '../interfaces/email.interface';
 export function wrapInBrandedEmailLayout(
   content: string,
   branding: EmailBrandingInterface,
+  /**
+   * The recipient's language, for `<html lang>`.
+   *
+   * It was hard-coded to `ru` on every message the product sends. That tag is
+   * what a screen reader pronounces the mail with and what the client uses to
+   * offer a translation — so an English letter was read aloud in a Russian
+   * voice and offered a translation into the language it was already in.
+   */
+  locale: 'ru' | 'en' = 'ru',
 ): string {
   const { serviceName, logoUrl, primaryColor, supportEmail, websiteUrl } = branding;
   // The operator's own surfaces. Absent on a settings blob with no theme, and
@@ -33,7 +42,7 @@ export function wrapInBrandedEmailLayout(
   const footerBorder = `${muted}33`;
 
   return `<!DOCTYPE html>
-<html lang="ru">
+<html lang="${locale === 'en' ? 'en' : 'ru'}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">

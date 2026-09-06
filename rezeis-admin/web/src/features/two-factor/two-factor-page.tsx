@@ -46,6 +46,7 @@ import {
   type TwoFactorEnrollment,
   type TwoFactorStatus,
 } from './two-factor-api'
+import { activeLocale } from '@/lib/utils'
 
 /**
  * Security tab — single page for the current admin to manage:
@@ -271,7 +272,7 @@ function TwoFactorStatusCard({
             {enrollNeedsPassword ? (
               <div className="grid gap-2">
                 <Label htmlFor="enroll-reauth-pw">
-                  {t('twoFactorPage.passkey.reauth.passwordLabel')}
+                  {t('twoFactorPage.enrollReauth.passwordLabel')}
                 </Label>
                 <Input
                   id="enroll-reauth-pw"
@@ -740,7 +741,7 @@ function PasskeySection(): JSX.Element {
               transports: response.getTransports?.() ?? [],
             },
           },
-          name: name.trim() || `Passkey ${new Date().toLocaleDateString()}`,
+          name: name.trim() || `Passkey ${new Date().toLocaleDateString(activeLocale())}`,
         },
         // Carries the WebAuthn attestation, so its 401 is a verdict on that.
         { submitsCredential: true },
@@ -811,7 +812,7 @@ function PasskeySection(): JSX.Element {
   const passkeySupported = typeof window !== 'undefined' && 'credentials' in navigator
 
   const openRegisterDialog = (): void => {
-    setPendingName(t('twoFactorPage.passkey.defaultName', { date: new Date().toLocaleDateString() }))
+    setPendingName(t('twoFactorPage.passkey.defaultName', { date: new Date().toLocaleDateString(activeLocale()) }))
     // A fresh attempt starts from the local status again rather than from the
     // last refusal: enabling or disabling 2FA invalidates that query, so by now
     // it is the newer of the two. If it is still wrong the server says so again.
@@ -1009,9 +1010,9 @@ function PasskeyRow({
             </button>
           )}
           <div className="flex flex-wrap items-center gap-2 pt-0.5 text-[11px] text-muted-foreground">
-            <span>{t('twoFactorPage.passkey.registered', { date: new Date(passkey.registeredAt).toLocaleDateString() })}</span>
+            <span>{t('twoFactorPage.passkey.registered', { date: new Date(passkey.registeredAt).toLocaleDateString(activeLocale()) })}</span>
             {passkey.lastUsedAt && (
-              <span>· {t('twoFactorPage.passkey.lastUsed', { date: new Date(passkey.lastUsedAt).toLocaleDateString() })}</span>
+              <span>· {t('twoFactorPage.passkey.lastUsed', { date: new Date(passkey.lastUsedAt).toLocaleDateString(activeLocale()) })}</span>
             )}
             {passkey.backedUp && (
               <Badge variant="outline" className="h-4 gap-1 px-1 py-0 text-[10px]">

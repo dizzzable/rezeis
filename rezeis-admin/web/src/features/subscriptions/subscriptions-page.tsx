@@ -20,6 +20,7 @@ import { AutoRenewPanel } from './auto-renew-panel'
 import { PanelLinkReconciliationPanel } from './panel-link-reconciliation-panel'
 import { DuplicateSubscriptionMergePanel } from './duplicate-subscription-merge-panel'
 import { UnknownSquadPanel } from './unknown-squad-panel'
+import { activeLocale } from '@/lib/utils'
 
 const STATUSES = ['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED', 'DELETED']
 
@@ -278,7 +279,7 @@ export default function SubscriptionsPage() {
                           rather than be absorbed into "unlimited". */}
                       {sub.expireAt === null
                         ? t('subscriptionsPage.unlimitedExpiry')
-                        : new Date(sub.expireAt).toLocaleDateString('ru-RU')}
+                        : new Date(sub.expireAt).toLocaleDateString(activeLocale())}
                     </TableCell>
                     <TableCell>
                       <Button

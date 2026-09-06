@@ -591,12 +591,20 @@ function RuleList({
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-sm truncate">{rule.name}</span>
                     <Badge variant={active ? 'secondary' : 'outline'} className="text-[10px]">
-                      {rule.triggerKind}
+                      {t(`automationsPage.triggers.${rule.triggerKind.toLowerCase()}`, {
+                        defaultValue: rule.triggerKind,
+                      })}
                     </Badge>
                   </div>
                   <p className={cn('text-xs truncate mt-0.5', active ? 'text-primary-foreground/80' : 'text-muted-foreground')}>
                     {t('automationsPage.list.runCount', { count: rule.runCount })}
-                    {rule.lastRunStatus ? t('automationsPage.list.lastRun', { status: rule.lastRunStatus.toLowerCase() }) : ''}
+                    {rule.lastRunStatus
+                      ? t('automationsPage.list.lastRun', {
+                          status: t(`automationsPage.statuses.${rule.lastRunStatus}`, {
+                            defaultValue: rule.lastRunStatus.toLowerCase(),
+                          }),
+                        })
+                      : ''}
                   </p>
                 </button>
                 <div className="flex items-center pr-3">
@@ -1214,7 +1222,9 @@ function ExecutionsList({ ruleId }: { ruleId: string }) {
                   ) : (
                     <Clock className="h-3 w-3 text-muted-foreground" />
                   )}
-                  <code className="text-[11px]">{r.type}</code>
+                  <code className="text-[11px]">
+                    {t(`automationsPage.actionTypes.${r.type}`, { defaultValue: r.type })}
+                  </code>
                   {r.message && <span className="truncate">— {r.message}</span>}
                 </li>
               ))}

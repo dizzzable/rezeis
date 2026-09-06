@@ -52,13 +52,16 @@ interface ProviderConfig {
   allowedTelegramIds: bigint[]
 }
 
-const PROVIDER_META: Record<AuthProviderIconType, { color: string; description: string }> = {
-  TELEGRAM: { color: 'text-sky-500', description: 'Telegram Login Widget (HMAC-SHA256)' },
-  GITHUB: { color: 'text-foreground', description: 'GitHub OAuth2 (user:email scope)' },
-  YANDEX: { color: 'text-red-500', description: 'Yandex OAuth2' },
-  KEYCLOAK: { color: 'text-purple-500', description: 'Keycloak OpenID Connect' },
-  POCKETID: { color: 'text-orange-500', description: 'PocketID self-hosted identity' },
-  GENERIC_OAUTH2: { color: 'text-emerald-500', description: 'Custom OAuth2 provider' },
+// Colour only. The descriptions moved into the dictionary: they are prose an
+// operator reads under every provider card, and a `Record` of English literals
+// is a place a translation can never reach.
+const PROVIDER_META: Record<AuthProviderIconType, { color: string }> = {
+  TELEGRAM: { color: 'text-sky-500' },
+  GITHUB: { color: 'text-foreground' },
+  YANDEX: { color: 'text-red-500' },
+  KEYCLOAK: { color: 'text-purple-500' },
+  POCKETID: { color: 'text-orange-500' },
+  GENERIC_OAUTH2: { color: 'text-emerald-500' },
 }
 
 interface AuthProvidersTabProps {
@@ -359,7 +362,11 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
             </div>
             <div className="text-left">
               <CardTitle className="text-sm">{provider.displayName}</CardTitle>
-              <CardDescription className="text-xs">{meta.description}</CardDescription>
+              <CardDescription className="text-xs">
+                {t(`authProviders.providerDescriptions.${provider.type}`, {
+                  defaultValue: provider.type,
+                })}
+              </CardDescription>
             </div>
           </CollapsibleTrigger>
           <div className="flex items-center gap-3">
@@ -382,7 +389,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
             <form className="space-y-4" onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))}>
             {/* Client ID */}
             <div className="space-y-1.5">
-              <Label className="text-xs font-medium">Client ID</Label>
+              <Label className="text-xs font-medium">{t('authProviders.fields.clientIdLabel')}</Label>
               <p className="text-xs text-muted-foreground">
                 {provider.type === 'TELEGRAM' ? t('authProviders.fields.botToken') : t('authProviders.fields.clientIdHint')}
               </p>
@@ -398,7 +405,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
             {/* Client Secret (not for Telegram) */}
             {provider.type !== 'TELEGRAM' && (
               <div className="space-y-1.5">
-                <Label className="text-xs font-medium">Client Secret</Label>
+                <Label className="text-xs font-medium">{t('authProviders.fields.clientSecretLabel')}</Label>
                 <p className="text-xs text-muted-foreground">{t('authProviders.fields.clientSecretHint')}</p>
                 <div className="relative">
                   <Input
@@ -415,7 +422,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
                       size="icon"
                       className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
                       onClick={() => setShowSecret(!showSecret)}
-                      aria-label={showSecret ? 'Hide' : 'Show'}
+                      aria-label={t(showSecret ? 'authProviders.fields.secretHide' : 'authProviders.fields.secretShow')}
                     >
                       {showSecret ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                     </Button>
@@ -427,7 +434,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
 
             {/* Frontend Domain */}
             <div className="space-y-1.5">
-              <Label className="text-xs font-medium">Frontend Domain</Label>
+              <Label className="text-xs font-medium">{t('authProviders.fields.frontendDomainLabel')}</Label>
               <p className="text-xs text-muted-foreground">{t('authProviders.fields.frontendDomainHint')}</p>
               <Input
                 {...form.register('frontendDomain')}
@@ -441,7 +448,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
             {/* Backend Domain */}
             {provider.type !== 'TELEGRAM' && (
               <div className="space-y-1.5">
-                <Label className="text-xs font-medium">Backend Domain</Label>
+                <Label className="text-xs font-medium">{t('authProviders.fields.backendDomainLabel')}</Label>
                 <p className="text-xs text-muted-foreground">{t('authProviders.fields.backendDomainHint')}</p>
                 <Input
                   {...form.register('backendDomain')}
@@ -457,7 +464,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
             {provider.type === 'KEYCLOAK' && (
               <>
                 <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">Realm</Label>
+                  <Label className="text-xs font-medium">{t('authProviders.fields.realmLabel')}</Label>
                   <Input
                     {...form.register('realm')}
                     placeholder="master"
@@ -497,7 +504,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
             {provider.type === 'GENERIC_OAUTH2' && (
               <>
                 <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">Authorization URL</Label>
+                  <Label className="text-xs font-medium">{t('authProviders.fields.authorizationUrlLabel')}</Label>
                   <Input
                     {...form.register('authorizationUrl')}
                     placeholder="https://example.com/oauth2/authorize"
@@ -507,7 +514,7 @@ function ProviderCard({ provider, canEdit }: { provider: ProviderConfig; canEdit
                   <FieldError message={errors.authorizationUrl?.message} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">Token URL</Label>
+                  <Label className="text-xs font-medium">{t('authProviders.fields.tokenUrlLabel')}</Label>
                   <Input
                     {...form.register('tokenUrl')}
                     placeholder="https://example.com/oauth2/token"

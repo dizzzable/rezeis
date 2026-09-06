@@ -143,7 +143,7 @@ const CARD_EFFECT_PARITY_DIGEST =
  * Identical to `BRANDING_VOCABULARY_DIGEST` in `reiwa/test/web/branding-vocabulary-panel-parity.test.ts`.
  */
 const BRANDING_VOCABULARY_DIGEST =
-  'a0d1264e487c8eaa249d61c1c334f112a5b0acf264413939954ae5dd30d0833e';
+  '72f51f774a13856fdf5548f54411b4ac13ce4a8523ec6f0168de3ba2cb2e1e1b';
 
 /**
  * The message printed when a digest moves. It has to carry a REMEDY: two hex
@@ -640,7 +640,7 @@ describe('reiwa parity digest', () => {
     it('states the digest literal twice, over something', () => {
       assert.equal(
         BRANDING_VOCABULARY_DIGEST,
-        'a0d1264e487c8eaa249d61c1c334f112a5b0acf264413939954ae5dd30d0833e',
+        '72f51f774a13856fdf5548f54411b4ac13ce4a8523ec6f0168de3ba2cb2e1e1b',
       );
 
       assertCanonicaliserPinned();

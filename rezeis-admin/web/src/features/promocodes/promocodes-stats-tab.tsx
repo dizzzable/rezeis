@@ -131,7 +131,9 @@ export function PromocodesStatsTab() {
                       {row.promocodeCode}
                     </span>
                     <Badge variant="outline" className="text-[10px]">
-                      {row.rewardType.replace(/_/g, ' ')}
+                      {t(`promocodeForm.rewardTypes.${row.rewardType}`, {
+                        defaultValue: row.rewardType.replace(/_/g, ' '),
+                      })}
                     </Badge>
                   </div>
                   <div className="flex items-center gap-3 text-xs whitespace-nowrap">

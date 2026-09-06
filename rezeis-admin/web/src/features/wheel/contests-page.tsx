@@ -47,6 +47,7 @@ import { listKeyPools } from './wheel-keys-api'
 import { sectorTitle, type WheelSectorKind } from './wheel-config-api'
 import { PromoPrizeFields } from './promo-prize-fields'
 import { emptyPromoDraft, promoDraftOf, promoPayload, type PromoDraft } from './promo-prize'
+import { activeLocale } from '@/lib/utils'
 
 /** Prize kinds a contest may hand out — everything on the wheel but a loss. */
 const PRIZE_KINDS: readonly WheelSectorKind[] = [
@@ -316,9 +317,9 @@ export default function ContestsPage() {
                         ) : null}
                       </TableCell>
                       <TableCell className="align-top text-xs text-muted-foreground">
-                        {new Date(contest.startAt).toLocaleString()}
+                        {new Date(contest.startAt).toLocaleString(activeLocale())}
                         <br />
-                        {new Date(contest.endAt).toLocaleString()}
+                        {new Date(contest.endAt).toLocaleString(activeLocale())}
                       </TableCell>
                       <TableCell className="align-top text-right tabular-nums">
                         {contest.entries}

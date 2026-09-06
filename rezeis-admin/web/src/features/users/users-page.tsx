@@ -64,6 +64,7 @@ import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { useIsMobile } from '@/lib/use-is-mobile'
 import { withFeatureBundle } from '@/i18n/i18n'
 import { PageTitle } from '@/components/layout/page-title'
+import { presenceDotClass, type UserPresence } from './user-presence-dot'
 
 const UserDetailPanel = lazy(
   withFeatureBundle('userDetail', () => import('./user-detail-panel')),
@@ -84,14 +85,17 @@ const ALLOWED_TABS = HUB_TABS['/users']
 const SEARCH_DEBOUNCE_MS = 300
 type UsersTab = (typeof ALLOWED_TABS)[number]
 
-function getUserStatusClass(user: { isBlocked: boolean; lastSeenAt?: string | null }): string {
-  if (user.isBlocked) return 'bg-destructive text-destructive'
-  const now = Date.now()
-  const lastSeen = user.lastSeenAt ? new Date(user.lastSeenAt).getTime() : 0
-  const diffMin = (now - lastSeen) / 60000
-  if (diffMin < 5) return 'bg-emerald-500 text-emerald-500 status-dot-pulse'
-  if (diffMin < 30) return 'bg-amber-500 text-amber-500'
-  return 'border border-muted-foreground/50 bg-transparent'
+/**
+ * The dot, from the shared rule — and from the API's own answer when the row
+ * carries one, which it now does. This used to recompute presence here with a
+ * second copy of the thresholds and the operator's workstation clock.
+ */
+function getUserStatusClass(user: {
+  isBlocked: boolean
+  lastSeenAt?: string | null
+  presence?: UserPresence
+}): string {
+  return presenceDotClass(user)
 }
 
 interface UserListItem {
@@ -127,6 +131,7 @@ interface UserListResponse {
     openReviewFlags: number
     createdAt: string
     lastSeenAt: string | null
+    presence?: UserPresence
   }>
   total: number
 }

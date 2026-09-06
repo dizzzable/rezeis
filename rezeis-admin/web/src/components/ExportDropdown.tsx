@@ -7,6 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { useTranslation } from 'react-i18next'
 
 export interface ExportColumnDefinition<TRow> {
   /** Column header rendered in CSV / first JSON key. */
@@ -44,6 +45,7 @@ export interface ExportDropdownProps<TRow> {
  *   - JSON pretty-prints with 2-space indent.
  */
 export function ExportDropdown<TRow>(props: ExportDropdownProps<TRow>) {
+  const { t } = useTranslation()
   const dateSuffix = new Date().toISOString().slice(0, 10)
   const stem = `${props.filename}-${dateSuffix}`
 
@@ -73,17 +75,17 @@ export function ExportDropdown<TRow>(props: ExportDropdownProps<TRow>) {
           disabled={props.disabled || props.rows.length === 0}
         >
           <Download className="mr-2 h-4 w-4" />
-          {props.label ?? 'Export'}
+          {props.label ?? t('exportDropdown.trigger')}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={downloadCsv}>
           <FileSpreadsheet className="mr-2 h-4 w-4" />
-          CSV ({props.rows.length} rows)
+          {t('exportDropdown.csv', { count: props.rows.length })}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={downloadJson}>
           <FileJson className="mr-2 h-4 w-4" />
-          JSON ({props.rows.length} rows)
+          {t('exportDropdown.json', { count: props.rows.length })}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

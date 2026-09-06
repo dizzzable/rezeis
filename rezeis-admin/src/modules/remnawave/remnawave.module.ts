@@ -11,6 +11,7 @@ import { NodeAddressesService } from './services/node-addresses.service';
 import { RemnawaveApiService } from './services/remnawave-api.service';
 import { RemnawaveMetricsCollectorService } from './services/remnawave-metrics-collector.service';
 import { RemnawaveVersionService } from './services/remnawave-version.service';
+import { SubscriberServersService } from './services/subscriber-servers.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RemnawaveWebhookService } from './services/remnawave-webhook.service';
 import { SubscriptionNoticePayloadService } from './services/subscription-notice-payload.service';
@@ -27,6 +28,7 @@ import { SubscriptionNoticePayloadService } from './services/subscription-notice
     RemnawaveMetricsCollectorService,
     RemnawaveVersionService,
     RemnawaveWebhookService,
+    SubscriberServersService,
     SubscriptionNoticePayloadService,
     ...buildPanelClientProviders(),
   ],
@@ -36,6 +38,7 @@ import { SubscriptionNoticePayloadService } from './services/subscription-notice
     RemnawaveMetricsCollectorService,
     RemnawaveVersionService,
     RemnawaveWebhookService,
+    SubscriberServersService,
     SubscriptionNoticePayloadService,
     PanelUsersClient,
     PanelDevicesClient,

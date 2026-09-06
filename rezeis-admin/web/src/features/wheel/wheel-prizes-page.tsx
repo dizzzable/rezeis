@@ -24,6 +24,7 @@ import {
   type ManualPrize,
   type WheelSpinStatus,
 } from './wheel-prizes-api'
+import { activeLocale } from '@/lib/utils'
 
 /** The three states an operator sorts this queue by. */
 const TABS: readonly WheelSpinStatus[] = ['PENDING', 'SETTLED', 'REFUSED']
@@ -157,11 +158,11 @@ export default function WheelPrizesPage() {
                       <WinnerCell prize={prize} />
                     </TableCell>
                     <TableCell className="align-top text-sm text-muted-foreground">
-                      {new Date(prize.createdAt).toLocaleString()}
+                      {new Date(prize.createdAt).toLocaleString(activeLocale())}
                       {prize.settledAt ? (
                         <div className="text-xs">
                           {t('wheelPrizesPage.settledAt')}:{' '}
-                          {new Date(prize.settledAt).toLocaleString()}
+                          {new Date(prize.settledAt).toLocaleString(activeLocale())}
                         </div>
                       ) : null}
                     </TableCell>
