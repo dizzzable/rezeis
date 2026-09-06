@@ -26,30 +26,31 @@ import { UserNotificationsService } from './services/user-notifications.service'
  *     enabled in Settings → Telegram delivery — variant A: one
  *     Telegram delivery surface, no separate broadcast-channels table).
  *
- * ── There is no email leg here, and there never was ─────────────────────
+ *   - email, when the operator has switched it on (see below).
+ *
+ * ── The email leg, and what it is not ───────────────────────────────────
  *
  * This block used to claim a "per-channel email bridge reads the same
- * `UserNotificationEvent` rows on its own schedule". No such schedule exists:
- * the only readers of that table are the cabinet feed, the auto-renew dedup,
- * the broadcast, and the retention deleter. Email is absent from
- * `NOTIFICATION_DELIVERY_CHANNELS` and from `fanout()` alike.
+ * `UserNotificationEvent` rows on its own schedule". No such schedule ever
+ * existed: the only readers of that table are the cabinet feed, the
+ * auto-renew dedup, the broadcast, and the retention deleter. The cabinet
+ * meanwhile told customers their notifications could arrive by mail.
  *
- * What DOES exist is `EmailEventBridgeService`, and it hangs off a different
- * stream entirely: `SystemEventsService`, matching an active
- * `NotificationTemplate` whose type equals the dotted EVENT type. Only three
- * dotted types have templates, and auto-renew emits no system events at all —
- * so the expiry mail its own docstring advertises is unreachable by
- * construction, not merely unconfigured.
+ * The leg is real now and rides `fanout()` with the other three, behind four
+ * gates: the operator's `email.notifyUsers` switch (off until set), SMTP
+ * being configured at all, a TEMPLATE render — never a `preRenderedText`
+ * send, so broadcasts and support replies keep their own mailers instead of
+ * arriving twice — and a VERIFIED address.
  *
- * Two things follow, and both are worth knowing before wiring anything:
+ * `EmailEventBridgeService` is a different thing and still is: it hangs off
+ * `SystemEventsService`, matching a template whose type equals the dotted
+ * EVENT type. Only three dotted types have templates and auto-renew emits no
+ * system events at all, so nothing about subscriber notifications reaches it.
  *
- *  - `NotificationTemplate.isActive` is ONE flag shared by Telegram, web-push
- *    and this bridge. Switching a template off to stop email silently kills
- *    the other two channels for that type.
- *  - Turning the email leg on is an outward-facing change: it starts sending
- *    mail to customers who linked an address for sign-in and never asked for
- *    notifications there. It needs an operator switch of its own, not a code
- *    change that quietly starts delivering.
+ * One trap remains, and it is worth knowing before touching a template:
+ * `NotificationTemplate.isActive` is ONE flag shared by Telegram, web-push
+ * and email. Switching a template off to stop the mail silently kills the
+ * other two channels for that type.
  */
 @Module({
   imports: [AuthModule, InternalPushModule, CustomEmojiModule, ReiwaRelayModule, TelegramDirectModule],

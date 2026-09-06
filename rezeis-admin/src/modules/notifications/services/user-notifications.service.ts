@@ -25,6 +25,7 @@ import {
 } from '../utils/notification-template-locale.util';
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
 import { buildSubscriptionFacts } from '../utils/subscription-facts.util';
+import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 
 /**
  * Categories the user notifications fall under for topic routing when
@@ -177,6 +178,13 @@ export class UserNotificationsService {
     @Optional()
     @Inject(appConfig.KEY)
     private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
+    /**
+     * The email leg, `@Optional()` at the tail for the same reason as the two
+     * above: the specs construct this service positionally. Absent means the
+     * channel simply does not run, which is what it did before it existed.
+     */
+    @Optional()
+    private readonly emailDelivery?: EmailDeliveryService,
   ) {}
 
   /**
@@ -592,6 +600,26 @@ export class UserNotificationsService {
         await this.persistRenderedCopy(input.eventId, input.payload, rendered);
       }
 
+      // ── Email, when the operator asked for it ──────────────────────────
+      //
+      // Gated on THREE things, and each one is a promise to somebody:
+      //
+      //  * `notifyUsers` — the operator's own switch, off by default. Most
+      //    addresses on file were given for signing in; their owners never
+      //    asked to hear from the product in their inbox.
+      //  * a TEMPLATE render — never a `preRenderedText` send. Broadcasts have
+      //    an email leg of their own and would otherwise arrive twice; support
+      //    replies are answered by the support mailer; an operator's one-off
+      //    message is a Telegram/push action.
+      //  * a VERIFIED address. An unverified one belongs to whoever typed it,
+      //    which is not necessarily the customer.
+      //
+      // The subscriber's own switch is already honoured: it returns above,
+      // before any channel runs.
+      if (rendered !== null && template !== null) {
+        await this.deliverEmail(input.userId, input.type, rendered, input.eventId);
+      }
+
       // Telegram bot fanout — only for users who haven't blocked us and whose
       // telegramId is a real positive Telegram id. A non-positive value (dirty
       // import / negative chat id) would be rejected by the bot's /notify with
@@ -922,6 +950,53 @@ export class UserNotificationsService {
    * and the push channels already have the text. A failure here costs the
    * feed's wording, never the notification.
    */
+  /**
+   * The subscriber-notification email leg.
+   *
+   * Best-effort like every other channel here: a mail failure must not take
+   * down the Telegram send that already happened, or the feed row that
+   * already exists.
+   *
+   * `dedupeKey` is the notification's own id, so a retry of this fanout — or
+   * two workers racing the same event — collapses into one letter rather than
+   * two. The same idempotency the bot relay gets from `eventId`.
+   */
+  private async deliverEmail(
+    userId: string,
+    type: string,
+    rendered: { readonly title: string; readonly body: string; readonly html: string },
+    eventId: string,
+  ): Promise<void> {
+    try {
+      if (this.emailDelivery === undefined) return;
+      const config = await this.emailDelivery.getSmtpSettings();
+      if (!config.enabled || !config.notifyUsers) return;
+
+      const account = await this.prismaService.webAccount.findFirst({
+        where: { userId, emailVerifiedAt: { not: null }, email: { not: null } },
+        select: { email: true },
+      });
+      const to = account?.email ?? null;
+      if (to === null) return;
+
+      await this.emailDelivery.send({
+        to,
+        subject: rendered.title,
+        templateType: type,
+        variables: {},
+        rawHtml: rendered.html,
+        text: rendered.body,
+        dedupeKey: `notify:${eventId}`,
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Email fanout failed for notification ${eventId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   private async persistRenderedCopy(
     eventId: string,
     payload: unknown,

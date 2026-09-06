@@ -1570,6 +1570,7 @@ function PaymentOpsAlertsForm({ initial }: PaymentOpsAlertsFormProps) {
 
 interface SmtpSettings {
   enabled: boolean
+  notifyUsers: boolean
   host: string | null
   port: number
   username: string | null
@@ -1601,6 +1602,7 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
   const schema = z
     .object({
       enabled: z.boolean(),
+      notifyUsers: z.boolean(),
       host: z.string().trim(),
       port: z.coerce
         .number({ error: t('notificationsPage.email.validation.portInvalid') })
@@ -1637,6 +1639,10 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
     resolver: zodResolver(schema) as Resolver<FormValues, unknown, FormValues>,
     defaultValues: {
       enabled: initial.enabled,
+      // An install upgrading into this feature has no stored value, and the
+      // answer for a missing one is "no" — nobody's customers start receiving
+      // mail because a column was absent.
+      notifyUsers: initial.notifyUsers === true,
       host: initial.host ?? '',
       port: initial.port,
       username: initial.username ?? '',
@@ -1897,6 +1903,42 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
                 )}
               />
             </div>
+
+            <Separator />
+
+            {/*
+              Sending subscriber notifications by email is a separate decision
+              from "SMTP works". Most addresses on file were given for signing
+              in, and their owners never asked to hear from the product in
+              their inbox — so this is off until an operator says otherwise,
+              and the description says out loud who would start receiving mail.
+            */}
+            <FormField
+              control={form.control}
+              name="notifyUsers"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between rounded-lg border px-4 py-3 space-y-0">
+                  <div className="flex items-center gap-2">
+                    <Bell className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <FormLabel className="font-medium">
+                        {t('notificationsPage.email.notifyUsersLabel')}
+                      </FormLabel>
+                      <FormDescription className="text-xs">
+                        {t('notificationsPage.email.notifyUsersDescription')}
+                      </FormDescription>
+                    </div>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      disabled={!form.watch('enabled')}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
 
             <Separator />
 

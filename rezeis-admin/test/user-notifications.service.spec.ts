@@ -248,6 +248,12 @@ function createService(
       readonly notificationPrefs?: Record<string, boolean> | null;
     } | null;
     readonly template?: { readonly isActive: boolean; readonly title: string; readonly body: string } | null;
+    /** SMTP config the email leg reads. Absent means the leg is not wired. */
+    readonly smtp?: { readonly enabled: boolean; readonly notifyUsers: boolean } | null;
+    /** An address on file, or `null` for none. */
+    readonly verifiedEmail?: string | null;
+    /** Whether that address is verified. Default true. */
+    readonly emailVerified?: boolean;
   } = {},
 ): UserNotificationsService {
   const prisma = {
@@ -272,6 +278,17 @@ function createService(
       update: async (args: { where: { id: string }; data: { payload: unknown } }) => {
         state.updateCalls.push(args);
         return { id: args.where.id };
+      },
+    },
+    webAccount: {
+      // The double HONOURS the `where`, and that is the point: the
+      // verification gate IS a where clause, so a stub that ignores it makes
+      // "mails only verified addresses" untestable while reading as covered.
+      findFirst: async (args: { where?: Record<string, unknown> }) => {
+        if (input.verifiedEmail === undefined || input.verifiedEmail === null) return null;
+        const demandsVerified = args?.where?.emailVerifiedAt !== undefined;
+        if (demandsVerified && input.emailVerified === false) return null;
+        return { email: input.verifiedEmail };
       },
     },
     user: {
@@ -329,6 +346,16 @@ function createService(
     substituteTelegramHtml: async (text: string) => text,
     substituteFallbacks: async (text: string) => text,
   };
+  // The email leg is `@Optional()` at the tail, so the two positional slots
+  // before it have to be filled to reach it. A double that omits the service
+  // entirely turns the leg into a silent no-op — green tests over a channel
+  // that never runs, which is the failure this file has hit before.
+  const emailDelivery = {
+    getSmtpSettings: async () => input.smtp ?? { enabled: false, notifyUsers: false },
+    send: async (payload: Record<string, unknown>) => {
+      state.emailCalls.push(payload);
+    },
+  };
   return new UserNotificationsService(
     prisma as never,
     templates as never,
@@ -336,6 +363,9 @@ function createService(
     webPush as never,
     customEmoji as never,
     relayQueue as never,
+    undefined,
+    undefined,
+    emailDelivery as never,
   );
 }
 
@@ -347,6 +377,7 @@ function createState(input: {
     userNotifications: input.userNotifications ?? {},
     systemNotifications: input.systemNotifications ?? {},
     createCalls: [] as NotificationCreateArgs[],
+    emailCalls: [] as Array<Record<string, unknown>>,
     updateCalls: [] as Array<{ where: { id: string }; data: { payload: unknown } }>,
     settingsFindCalls: [] as unknown[],
     userFindCalls: [] as unknown[],
@@ -467,6 +498,205 @@ describe('a subscriber who switched a reminder off', () => {
       user: { telegramId: 42n, isBotBlocked: false, name: 'Ann', notificationPrefs: null },
       template: { isActive: true, title: 'Через 3 дня', body: 'Скоро истекает.' },
     });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.notifyUserCalls.length, 1);
+  });
+});
+
+/**
+ * Email as a third channel — and the four gates in front of it.
+ *
+ * The module's own docstring used to promise "a per-channel email bridge
+ * reads the same rows on its own schedule". No such schedule existed, and
+ * email appeared in neither the channel list nor the fanout: the cabinet told
+ * customers their notifications could arrive by mail, and none ever did.
+ *
+ * Turning it on is not a code decision. Most addresses on file were given for
+ * signing in, and their owners never asked to hear from the product in their
+ * inbox — so the operator's switch is off until somebody sets it, and three
+ * further gates decide the rest.
+ */
+describe('the email leg', () => {
+  const SMTP_ON = { enabled: true, notifyUsers: true };
+  const TEMPLATE = { isActive: true, title: 'Через 3 дня', body: 'Скоро истекает.' };
+
+  it('sends to a verified address once the operator asked for it', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.emailCalls.length, 1);
+    assert.equal(state.emailCalls[0].to, 'ann@example.com');
+    assert.equal(state.emailCalls[0].subject, 'Через 3 дня');
+  });
+
+  it('sends nothing while the operator switch is off', async () => {
+    // THE default. An install that upgrades into this feature has no stored
+    // value, and a missing value must never mean "start mailing customers".
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: { enabled: true, notifyUsers: false },
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+  });
+
+  it('sends nothing when SMTP itself is off', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: { enabled: false, notifyUsers: true },
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+  });
+
+  it('will not mail an address nobody verified', async () => {
+    // An unverified address belongs to whoever typed it, which is not
+    // necessarily the customer.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: null,
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+  });
+
+  it('will not mail an address that is on file but unverified', async () => {
+    // THE gate. An address somebody typed and never confirmed may belong to
+    // anyone; mailing a customer's subscription state to it is the one
+    // mistake here that cannot be taken back.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'stranger@example.com',
+      emailVerified: false,
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+  });
+
+  it('stays out of a broadcast, which mails on its own', async () => {
+    // Broadcasts arrive here with `preRenderedText` and carry an email leg of
+    // their own. A second one here means every recipient gets the letter
+    // twice.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({
+      userId: 'user-1',
+      type: 'broadcast',
+      payload: { broadcastId: 'b-1' },
+      preRenderedText: '<b>Объявление</b>',
+    });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+  });
+
+  it('honours the subscriber who switched that reminder off', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: {
+        telegramId: 42n,
+        isBotBlocked: false,
+        name: 'Ann',
+        notificationPrefs: { expires_in_3_days: false },
+      },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+  });
+
+  it('keys the letter on the notification so a retry cannot double it', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.emailCalls[0].dedupeKey, 'notify:notification-1');
+  });
+
+  it('carries a plain-text part alongside the HTML', async () => {
+    // A message with no text alternative scores worse with spam filters, and
+    // a reader whose client refuses HTML would receive nothing at all.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.equal(typeof state.emailCalls[0].rawHtml, 'string');
+    assert.equal(state.emailCalls[0].text, 'Скоро истекает.');
+  });
+
+  it('does not take down the Telegram send when mail fails', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+    // Break the mailer after construction.
+    (service as unknown as { emailDelivery: { send: () => Promise<void> } }).emailDelivery.send =
+      async () => {
+        throw new Error('smtp down');
+      };
 
     await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
     await flushFanout();

@@ -23,6 +23,11 @@ class UpdateSmtpSettingsDto {
   @IsBoolean()
   enabled?: boolean;
 
+  /** Deliver subscriber notifications by email too. Off unless asked for. */
+  @IsOptional()
+  @IsBoolean()
+  notifyUsers?: boolean;
+
   @IsOptional()
   @IsString()
   host?: string;

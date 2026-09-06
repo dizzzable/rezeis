@@ -233,6 +233,30 @@ export const archiveAdPlacement = (id: string) =>
 export const getPlacementMetrics = (id: string) =>
   api.get<AdMetrics>(`/admin/advertising/placements/${id}/metrics`).then((r) => r.data)
 
+/** One person a placement brought in. */
+export interface AdPlacementUser {
+  id: string
+  telegramId: string | null
+  username: string | null
+  name: string | null
+  acquisitionAt: string | null
+  createdAt: string
+  /** They went on to pay — which is the question an advertisement is buying. */
+  converted: boolean
+}
+
+export interface AdPlacementUsers {
+  items: AdPlacementUser[]
+  total: number
+}
+
+export const getPlacementUsers = (id: string, limit = 25, offset = 0) =>
+  api
+    .get<AdPlacementUsers>(`/admin/advertising/placements/${id}/users`, {
+      params: { limit, offset },
+    })
+    .then((r) => r.data)
+
 export const getPlacementChartData = (id: string, days = 14) =>
   api
     .get(`/admin/advertising/placements/${id}/chart-data`, { params: { days } })

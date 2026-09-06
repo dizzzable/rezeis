@@ -191,6 +191,9 @@ export const en = {
       },
     },
     email: {
+      notifyUsersLabel: 'Email subscriber notifications',
+      notifyUsersDescription:
+        'Off by default. Mail goes only to verified addresses and only for types that have a template. Broadcasts and support replies keep their own paths and are unaffected. A subscriber can opt out in the cabinet.',
       title: 'Email (SMTP)',
       description: 'Configure SMTP server for sending email notifications to users. Emails use branding from customization settings.',
       enableLabel: 'Enable email delivery',

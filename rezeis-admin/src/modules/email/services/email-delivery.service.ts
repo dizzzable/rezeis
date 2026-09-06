@@ -283,6 +283,10 @@ export class EmailDeliveryService {
     // Merge: DB overrides env
     return {
       enabled: typeof dbEmail.enabled === 'boolean' ? dbEmail.enabled : this.emailConfiguration.enabled,
+      // No environment fallback and no default-on: an install that upgrades
+      // into this feature must not start mailing its customers because a
+      // column was absent.
+      notifyUsers: dbEmail.notifyUsers === true,
       host: typeof dbEmail.host === 'string' ? dbEmail.host : this.emailConfiguration.host,
       port: typeof dbEmail.port === 'number' ? dbEmail.port : this.emailConfiguration.port,
       username: typeof dbEmail.username === 'string' ? dbEmail.username : this.emailConfiguration.username,

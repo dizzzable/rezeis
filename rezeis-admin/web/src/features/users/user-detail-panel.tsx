@@ -281,9 +281,19 @@ function AnalyticsTab({ user }: { user: UserDetail }) {
             ))
           ) : (
             <p className="text-xs text-muted-foreground">
-              {canPii
-                ? t('userDetailPanel.analytics.utmEmpty')
-                : t('userDetailPanel.analytics.piiDenied')}
+              {/*
+                "Не сохранены" read as a failure and sent an operator looking
+                for a broken feature. It is a statement about where the person
+                came FROM: Telegram's deep link is one opaque token and cannot
+                carry utm at all, so for bot and Mini App arrivals there is
+                nothing to store and never was. When the acquisition placement
+                below DOES name the source, say that instead of implying loss.
+              */}
+              {!canPii
+                ? t('userDetailPanel.analytics.piiDenied')
+                : placement
+                  ? t('userDetailPanel.analytics.utmFromPlacement')
+                  : t('userDetailPanel.analytics.utmEmpty')}
             </p>
           )}
         </CardContent>

@@ -1,9 +1,12 @@
 import {
   Body,
   Controller,
+  DefaultValuePipe,
   Delete,
+  ForbiddenException,
   Get,
   Param,
+  ParseIntPipe,
   Patch,
   Post,
   Query,
@@ -21,6 +24,7 @@ import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
+import { RbacService } from '../../rbac/services/rbac.service';
 import {
   CreateCampaignDto,
   CreatePlacementDto,
@@ -42,6 +46,7 @@ export class AdminAdvertisingController {
     private readonly metricsService: AdMetricsService,
     private readonly prismaService: PrismaService,
     private readonly fxRateService: FxRateService,
+    private readonly rbacService: RbacService,
   ) {}
 
   @Get('overview')
@@ -164,6 +169,38 @@ export class AdminAdvertisingController {
   @RequirePermission('advertising', 'view')
   public getPlacementMetrics(@Param('id') id: string) {
     return this.metricsService.getPlacementMetrics(id);
+  }
+
+  /**
+   * The people a placement brought in.
+   *
+   * Two permissions, and the second is not decoration: this returns names,
+   * usernames and Telegram ids. `advertising:view` says you may look at the
+   * campaign; `users:view` says you may look at customers. A role that has
+   * the first and not the second — a media buyer, say — gets the numbers and
+   * not the people.
+   */
+  @Get('placements/:id/users')
+  @RequirePermission('advertising', 'view')
+  @ApiOperation({ summary: 'Users acquired through this placement' })
+  public async listPlacementUsers(
+    @Param('id') placementId: string,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+  ): Promise<unknown> {
+    const maySeeUsers = await this.rbacService.hasPermission(
+      { id: admin.id, role: admin.role, rbacRoleId: admin.rbacRoleId },
+      'users',
+      'view',
+    );
+    if (!maySeeUsers) {
+      throw new ForbiddenException('users:view is required to list acquired users');
+    }
+    return this.metricsService.listPlacementUsers(placementId, {
+      limit: Math.min(Math.max(limit, 1), 200),
+      offset: Math.max(offset, 0),
+    });
   }
 
   @Get('placements/:id/chart-data')

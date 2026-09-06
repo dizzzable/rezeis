@@ -2,7 +2,19 @@
  * SMTP configuration stored in Settings.systemNotifications.email JSON.
  */
 export interface SmtpSettingsInterface {
+  /** SMTP itself is configured and usable. Gates every email in the product. */
   readonly enabled: boolean;
+  /**
+   * Also deliver SUBSCRIBER notifications by email — expiry reminders and the
+   * rest of the automated family.
+   *
+   * Separate from `enabled`, and off by default, because turning it on is an
+   * outward-facing change: most addresses on file were given for signing in,
+   * not for notifications, and their owners never asked to hear from the
+   * product in their inbox. `enabled` says "we CAN send mail"; this says
+   * "send THIS kind of mail to customers".
+   */
+  readonly notifyUsers: boolean;
   readonly host: string | null;
   readonly port: number;
   readonly username: string | null;

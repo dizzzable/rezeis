@@ -2,19 +2,19 @@
   "comment": "DO NOT EDIT files in live/ by hand — they are vendored from reiwa (web/src/features/landing). Edit there, then: node scripts/sync-landing-kit.mjs",
   "sourceRepo": "dizzzable/reiwa",
   "sourcePath": "web/src/features/landing",
-  "sourceCommit": "54bcbda1cee4efc1ebdea48a7256244941d2e2b7",
-  "syncedAt": "2026-09-02T18:44:18.158Z",
+  "sourceCommit": "98c8cca941937e32b867ab62af3465102587622e-dirty",
+  "syncedAt": "2026-09-06T09:47:07.887Z",
   "files": {
     "landing-background.tsx": "0f69db85e48a99d6b5746614809bee5ee3868ad9343a45adda705f436d154efa",
-    "landing-kit-context.tsx": "badc8042b5138f79db403881f8ad6c30eb05caec3147354628ca1e06016d9df5",
+    "landing-kit-context.tsx": "134808c6a944dffef4235bfe2f1f3364404c00ca41da3a8a20f13b39eae89a83",
     "landing-renderer.tsx": "5eaa3a80a23422322daeebe1cd94925ec800d5bf74fcd1333d58d1a9d5df199f",
     "landing-schema.ts": "8349d0e26a2c96b66c0e8cc8c7b8dad1fadea31c09a9142bb9f09a993ee881c2",
     "landing.css": "571b1693cd90570e01d0185e9c2db2e24b62ef3c016af5182a694289cf5cf20d",
     "sections/faq.tsx": "ec17b3b3878851de428ab20a6fe323eced8678299b53f0d4719d6f8e31fc7147",
     "sections/features-grid.tsx": "12b6c16e58c971fcc3b51608b7990c31531d0dc231da002fd687765b610a7230",
-    "sections/hero.tsx": "c42fd70e134758265f89b02ec6180b9407dcdefb1630a4c93aa89beee099c4d3",
+    "sections/hero.tsx": "8ce335e160edffe28f3ffb20af38715a84d3d5d6c239f5968a512a02d232ca02",
     "sections/how-it-works.tsx": "f1a7b106ddcba3683775c92db6993d4ac7f2e7ef69ac47e18782b87047618df6",
-    "sections/misc.tsx": "849387e959a96aeac0f7361267c20089c373faf468dfb1a6df4ecd4b5b927b14",
-    "sections/pricing.tsx": "e27cbc9723e00a27f9b26a597fd94c65282c0965dd3fcb90da0f0e0dce8215e6"
+    "sections/misc.tsx": "f69d1959e83e3670ea759f164045ab1f8815fd93a5c1ec7898892d09ee22db19",
+    "sections/pricing.tsx": "8bddab26ec8d2455483b214a8afce6feef8a190b10e2e4ce69c6b21e05fb8fc9"
   }
 }

@@ -69,6 +69,89 @@ export class AdMetricsService {
     };
   }
 
+  /**
+   * WHO came from this placement — the list, not the count.
+   *
+   * `getPlacementMetrics` has always fetched exactly these rows and reduced
+   * them to `registrations = acquiredUsers.length`. Everything above the
+   * service layer then saw an integer, so an operator running an advertisement
+   * could read "12 registrations" and had no way in the product to learn which
+   * twelve. That is the question this answers.
+   *
+   * `users.acquisition_placement_id` is the authoritative edge and the only
+   * one that works for every surface: it is stamped once, never overwritten,
+   * and indexed. `ad_clicks.user_id` looks like an alternative and is not —
+   * on the web funnel the click is recorded anonymously and the account is
+   * bound later without a second click, so that column is NULL for the whole
+   * of it.
+   *
+   * `converted` comes from `AdConversion`, because "registered" and "paid" are
+   * different questions and an advertiser is buying the second one.
+   */
+  public async listPlacementUsers(
+    placementId: string,
+    options: { readonly limit: number; readonly offset: number },
+  ): Promise<{
+    readonly items: ReadonlyArray<{
+      readonly id: string;
+      readonly telegramId: string | null;
+      readonly username: string | null;
+      readonly name: string | null;
+      readonly acquisitionAt: string | null;
+      readonly createdAt: string;
+      readonly converted: boolean;
+    }>;
+    readonly total: number;
+  }> {
+    const where = { acquisitionPlacementId: placementId };
+    const [total, users] = await Promise.all([
+      this.prismaService.user.count({ where }),
+      this.prismaService.user.findMany({
+        where,
+        select: {
+          id: true,
+          telegramId: true,
+          username: true,
+          name: true,
+          acquisitionAt: true,
+          createdAt: true,
+        },
+        // Newest first: an operator checking on a running advertisement wants
+        // the people it brought today, not the ones it brought in March.
+        orderBy: [{ acquisitionAt: 'desc' }, { id: 'desc' }],
+        take: options.limit,
+        skip: options.offset,
+      }),
+    ]);
+
+    // One query for the page, not one per row.
+    const paid =
+      users.length === 0
+        ? []
+        : await this.prismaService.adConversion.findMany({
+            where: {
+              placementId,
+              status: 'ATTRIBUTED',
+              userId: { in: users.map((user) => user.id) },
+            },
+            select: { userId: true },
+          });
+    const paidIds = new Set(paid.map((row) => row.userId));
+
+    return {
+      items: users.map((user) => ({
+        id: user.id,
+        telegramId: user.telegramId === null ? null : user.telegramId.toString(),
+        username: user.username,
+        name: user.name,
+        acquisitionAt: user.acquisitionAt?.toISOString() ?? null,
+        createdAt: user.createdAt.toISOString(),
+        converted: paidIds.has(user.id),
+      })),
+      total,
+    };
+  }
+
   public async getPlacementMetrics(placementId: string): Promise<AdMetrics> {
     const placement = await this.prismaService.adPlacement.findUnique({
       where: { id: placementId },

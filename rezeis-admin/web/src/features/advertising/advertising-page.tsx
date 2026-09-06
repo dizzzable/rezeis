@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Megaphone, Info, Plus, Copy, Archive, BarChart3, Pencil, Pause, Play } from 'lucide-react'
+import { Megaphone, Info, Plus, Copy, Archive, BarChart3, Pencil, Pause, Play, Users } from 'lucide-react'
+import { Link } from 'react-router'
 
 import {
   AlertDialog,
@@ -52,7 +53,7 @@ import {
   Tooltip as ChartTooltip,
   XAxis,
 } from 'recharts'
-import { truncate } from '@/lib/utils'
+import { formatDateTime, truncate } from '@/lib/utils'
 
 import {
   approveAdRequest,
@@ -63,6 +64,7 @@ import {
   getAdOverview,
   getPlacementChartData,
   getPlacementMetrics,
+  getPlacementUsers,
   isHistoryRequest,
   listAdCampaigns,
   listAdRequests,
@@ -496,6 +498,136 @@ function PlacementMetrics({ placementId }: { placementId: string }) {
       <div className="col-span-full">
         <UtmBreakdown rows={data.utmBreakdown ?? []} currency={data.currency} />
       </div>
+      <div className="col-span-full">
+        <PlacementUsers placementId={placementId} total={data.registrations} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The people this placement brought in.
+ *
+ * The count above it has always been derived from exactly these rows — the
+ * metrics service fetched them and kept only `.length`. So an operator could
+ * read "12 registrations" and had no way in the product to learn which twelve,
+ * which is the gap this closes. Each row opens that customer's card.
+ *
+ * Loaded on demand rather than with the metrics: most visits to this panel
+ * want the numbers, and a placement can have thousands of rows behind it.
+ */
+function PlacementUsers({ placementId, total }: { placementId: string; total: number }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [page, setPage] = useState(0)
+  const PAGE_SIZE = 25
+
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['admin', 'advertising', 'placement-users', placementId, page],
+    queryFn: () => getPlacementUsers(placementId, PAGE_SIZE, page * PAGE_SIZE),
+    enabled: open,
+    retry: false,
+    placeholderData: keepPreviousData,
+  })
+
+  if (total === 0) {
+    return <p className="text-[11px] text-muted-foreground">{t('advertisingPage.users.none')}</p>
+  }
+
+  if (!open) {
+    return (
+      <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
+        <Users className="mr-2 h-3.5 w-3.5" />
+        {t('advertisingPage.users.show', { count: total })}
+      </Button>
+    )
+  }
+
+  if (isLoading && !data) return <Skeleton className="h-24 w-full" />
+  if (isError || !data) {
+    return (
+      <InlineError message={t('advertisingPage.users.loadFailed')} onRetry={() => void refetch()} />
+    )
+  }
+
+  const shown = data.items.length
+  const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE))
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] font-medium text-muted-foreground">
+        {t('advertisingPage.users.title', { count: data.total })}
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-[11px]">
+          <thead className="text-muted-foreground">
+            <tr className="border-b">
+              <th className="py-1 text-left font-normal">{t('advertisingPage.users.user')}</th>
+              <th className="py-1 text-left font-normal">{t('advertisingPage.users.arrived')}</th>
+              <th className="py-1 text-right font-normal">{t('advertisingPage.users.paid')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.items.map((user) => (
+              <tr key={user.id} className="border-b last:border-0">
+                <td className="py-1">
+                  {/*
+                    The panel's user route takes a Telegram id OR an internal
+                    id, which matters here: a customer who signed up on the web
+                    has no Telegram id at all, and linking by it would produce a
+                    dead row for exactly the audience a web advertisement brings.
+                  */}
+                  <Link
+                    to={`/users/${user.telegramId ?? user.id}`}
+                    className="text-primary hover:underline"
+                  >
+                    {user.username
+                      ? `@${user.username}`
+                      : user.name?.trim() || user.telegramId || user.id.slice(0, 8)}
+                  </Link>
+                </td>
+                <td className="py-1 text-muted-foreground">
+                  {formatDateTime(user.acquisitionAt ?? user.createdAt)}
+                </td>
+                <td className="py-1 text-right">
+                  {user.converted ? (
+                    <span className="text-emerald-600 dark:text-emerald-500">
+                      {t('advertisingPage.users.yes')}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">{t('advertisingPage.users.no')}</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {pages > 1 && (
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page === 0}
+            onClick={() => setPage((current) => Math.max(0, current - 1))}
+          >
+            {t('advertisingPage.users.prev')}
+          </Button>
+          <span className="text-[11px] text-muted-foreground">
+            {t('advertisingPage.users.page', { page: page + 1, pages })}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page + 1 >= pages || shown === 0}
+            onClick={() => setPage((current) => current + 1)}
+          >
+            {t('advertisingPage.users.next')}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

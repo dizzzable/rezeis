@@ -74,8 +74,11 @@ export const en = {
       userAgent: 'User-Agent',
       piiDenied: 'You do not have permission to view registration IP / UA / Referer / UTM (users:view_registration).',
       utmTitle: 'Advertising marks (UTM)',
-      utmHint: 'Parameters taken from the registration URL.',
-      utmEmpty: 'No UTM parameters stored for this user.',
+      utmHint: 'Parameters from the page address at the moment of registration.',
+      utmEmpty:
+        'No marks. They exist only for people who reached the site through a link carrying utm parameters. Arrivals from the Telegram bot or the Mini App never have them — there the source is the ad placement, shown below.',
+      utmFromPlacement:
+        'No marks: this user arrived from Telegram, which carries no utm parameters. The source is in the Acquisition block below.',
       adTitle: 'Advertising first-touch',
       adHint: 'Immutable acquisition from ad_<code> deep-link (bot / Mini App).',
       adEmpty: 'No advertising placement attributed.',
