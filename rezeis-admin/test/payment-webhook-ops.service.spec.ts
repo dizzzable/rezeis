@@ -355,12 +355,12 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
     });
   });
 
-  it('returns false before a stalled replay queue inspection finishes', async () => {
-    const slowInspection = new Promise<boolean>(() => undefined);
+  it("answers 'absent' before a stalled replay queue inspection finishes", async () => {
+    const slowInspection = new Promise<'pending' | 'retained' | 'absent'>(() => undefined);
 
     const result = await runPaymentWebhookReplayQueueInspectionWithTimeout(() => slowInspection, 5);
 
-    assert.equal(result, false);
+    assert.equal(result, 'absent');
   });
 
   it('degrades replay duplicate queue inspection failures to not queued without surfacing raw details', async () => {
@@ -373,7 +373,7 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
 
     const serialized = JSON.stringify({ result });
 
-    assert.equal(result, false);
+    assert.equal(result, 'absent');
     assert.equal(serialized.includes(rawError), false);
     assert.equal(serialized.includes('secret'), false);
     assert.equal(serialized.includes('redis://'), false);
@@ -391,7 +391,7 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
 
     const serialized = JSON.stringify({ result });
 
-    assert.equal(result, false);
+    assert.equal(result, 'absent');
     assert.equal(serialized.includes(rawError), false);
     assert.equal(serialized.includes('secret'), false);
     assert.equal(serialized.includes('redis://'), false);
@@ -561,5 +561,103 @@ describe('PaymentWebhookOpsService replay queue inspection bounds', () => {
     );
 
     assert.deepEqual(markFailedCalls, [['webhook-event-1', PaymentWebhookLifecycleStatus.FAILED]]);
+  });
+});
+
+/**
+ * A replay that reported success and reconciled nothing.
+ *
+ * `jobId` is `reconcile:webhook:<eventId>` — unique per unit of work, which is
+ * right. The gap was on the other side: the guard asked only "is this job
+ * PENDING", and a job that had already completed or failed answered no. The
+ * code then called `queue.add` with that same id, and BullMQ handed back the
+ * RETAINED job instead of scheduling anything (`removeOnComplete: 100` keeps
+ * a hundred of them).
+ *
+ * The operator saw a REPLAY_REQUESTED row, an audit entry and a success
+ * screen. On the money path. Nothing ran.
+ */
+describe('replaying a webhook whose job is still retained', () => {
+  function retainedJob(state: 'completed' | 'failed') {
+    const removed: string[] = [];
+    return {
+      removed,
+      job: {
+        getState: async () => state,
+        remove: async () => {
+          removed.push(state);
+        },
+      },
+    };
+  }
+
+  for (const state of ['completed', 'failed'] as const) {
+    it(`frees the id of a ${state} job so the replay is actually scheduled`, async () => {
+      const event = createWebhookEventFixture();
+      const addCalls: unknown[][] = [];
+      const { job, removed } = retainedJob(state);
+      const service = createService({
+        findUnique: async () => event,
+        markReplayRequested: async () => ({
+          ...event,
+          status: PaymentWebhookLifecycleStatus.ENQUEUED,
+        }),
+        getJob: async () => job,
+        add: async (...args: readonly unknown[]) => {
+          addCalls.push([...args]);
+          return {};
+        },
+      });
+
+      const result = await service.replayEvent({
+        eventId: 'webhook-event-1',
+        reason: 'operator retry',
+        force: false,
+        currentAdmin: { id: 'admin-1', role: 'ADMIN', username: 'admin' } as never,
+        requestMetadata: { requestId: 'request-1', remoteAddress: null, userAgent: null },
+      });
+
+      assert.equal(result.alreadyQueued, false);
+      assert.deepEqual(removed, [state], 'the retained job was not cleared');
+      assert.equal(addCalls.length, 1, 'nothing was enqueued');
+    });
+  }
+
+  it('still refuses to re-enqueue work that is genuinely pending', async () => {
+    // The deduplication is not the enemy. A second press while the job waits
+    // must still be a no-op — only the terminal states had to stop being read
+    // as "nothing there".
+    const event = createWebhookEventFixture();
+    const addCalls: unknown[][] = [];
+    const removed: string[] = [];
+    const service = createService({
+      findUnique: async () => event,
+      markReplayRequested: async () => ({
+        ...event,
+        status: PaymentWebhookLifecycleStatus.ENQUEUED,
+      }),
+      getJob: async () => ({
+        getState: async () => 'waiting',
+        remove: async () => {
+          removed.push('waiting');
+        },
+      }),
+      add: async (...args: readonly unknown[]) => {
+        addCalls.push([...args]);
+        return {};
+      },
+    });
+
+    const result = await service.replayEvent({
+      eventId: 'webhook-event-1',
+      reason: 'operator retry',
+      force: false,
+      currentAdmin: { id: 'admin-1', role: 'ADMIN', username: 'admin' } as never,
+      requestMetadata: { requestId: 'request-1', remoteAddress: null, userAgent: null },
+    });
+
+    assert.equal(result.alreadyQueued, true);
+    assert.deepEqual(addCalls, []);
+    assert.deepEqual(removed, [], 'a pending job must never be removed');
   });
 });

@@ -62,6 +62,10 @@ import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { FadeIn } from '@/lib/motion'
 import { PermissionGate } from '@/features/rbac'
+import {
+  reportTelegramTest,
+  type TelegramTestResult,
+} from './telegram-test-toast'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +96,12 @@ const USER_NOTIFICATION_KEYS = [
   'partner_withdrawal_under_review',
   'partner_withdrawal_completed',
   'partner_withdrawal_rejected',
+  // Advertising decisions the partner is told about. Listed here so the
+  // operator can EDIT them: this array is the tick-box list, and a type
+  // missing from it is a template nobody can find.
+  'advertising.request_countered',
+  'advertising.request_rejected',
+  'advertising.request_activated',
 ] as const
 
 const SYSTEM_NOTIFICATION_KEYS = [
@@ -783,9 +793,21 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
     onError: () => toast.error(t('notificationsPage.toasts.deliveryFailed')),
   })
 
+  /**
+   * Report what the probe DID, not that a request completed.
+   *
+   * `onSuccess` used to toast "отправлено" for any 200, and the endpoint
+   * answered 200 for a revoked token, a bot kicked from the group and a wrong
+   * topic id alike — the send swallowed Telegram's refusal into a log line.
+   * The one control whose entire job is to tell the truth about delivery was
+   * the one control that could not report a failure.
+   */
   const testMutation = useMutation({
-    mutationFn: () => api.post('/admin/settings/system-notifications/telegram/test'),
-    onSuccess: () => toast.success(t('notificationsPage.toasts.testSent')),
+    mutationFn: async () =>
+      (
+        await api.post<TelegramTestResult>('/admin/settings/system-notifications/telegram/test')
+      ).data,
+    onSuccess: (result) => reportTelegramTest(result, t),
     onError: () => toast.error(t('notificationsPage.toasts.testFailed')),
   })
 
@@ -793,9 +815,13 @@ function TelegramDeliveryForm({ settings }: TelegramDeliveryFormProps) {
   // operator can verify routing for a single category. Uses the stored config,
   // so save topic changes before testing them.
   const testCategoryMutation = useMutation({
-    mutationFn: (category: string) =>
-      api.post('/admin/settings/system-notifications/telegram/test', { category }),
-    onSuccess: () => toast.success(t('notificationsPage.toasts.testSent')),
+    mutationFn: async (category: string) =>
+      (
+        await api.post<TelegramTestResult>('/admin/settings/system-notifications/telegram/test', {
+          category,
+        })
+      ).data,
+    onSuccess: (result) => reportTelegramTest(result, t),
     onError: () => toast.error(t('notificationsPage.toasts.testFailed')),
   })
 

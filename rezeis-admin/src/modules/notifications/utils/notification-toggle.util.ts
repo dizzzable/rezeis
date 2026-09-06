@@ -65,3 +65,62 @@ export function isNotificationDeliveryEnabled(
   if (value === undefined || value === null) return true;
   return value !== false;
 }
+
+/**
+ * The notification types a SUBSCRIBER may switch off for themselves.
+ *
+ * A closed list on purpose. `support_reply`, `ADMIN_MESSAGE` and the
+ * operator's own sends are conversations somebody started with this person —
+ * an opt-out there would let a customer silence the answer to their own
+ * question. What is here is the expiry family: reminders the system sends on
+ * its own schedule, which is exactly the kind a person is entitled to stop.
+ *
+ * The cabinet's switches are keyed by these values, so adding one here is
+ * also what makes a new switch possible.
+ */
+export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
+  'expires_in_3_days',
+  'expires_in_2_days',
+  'expires_in_1_days',
+  'expired',
+  'expired_1_day_ago',
+] as const;
+
+export type SubscriberMutableNotificationType =
+  (typeof SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES)[number];
+
+/**
+ * Whether this subscriber still wants the PUSH channels for `type`.
+ *
+ * Opt-OUT, like the operator map above: an absent key, a malformed column and
+ * a customer who never opened the screen all mean "send it". The direction
+ * matters — the inverse would silence every subscriber who predates the
+ * feature.
+ *
+ * The cabinet feed row is written regardless, and that is deliberate: the
+ * switch says "stop pushing this at me", not "hide it from me". A customer
+ * who opens the app should still find out their subscription ended.
+ */
+export function isSubscriberNotificationEnabled(prefs: unknown, type: string): boolean {
+  if (!(SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES as readonly string[]).includes(type)) {
+    return true;
+  }
+  if (prefs === null || typeof prefs !== 'object' || Array.isArray(prefs)) return true;
+  return (prefs as Record<string, unknown>)[type] !== false;
+}
+
+/**
+ * Narrow an arbitrary payload down to the switches this build knows, so a
+ * client cannot store keys nobody reads — or mute a type it was never
+ * allowed to.
+ */
+export function readSubscriberNotificationPrefs(input: unknown): Record<string, boolean> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const out: Record<string, boolean> = {};
+  for (const type of SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES) {
+    const value = source[type];
+    if (typeof value === 'boolean') out[type] = value;
+  }
+  return out;
+}

@@ -328,8 +328,13 @@ describe('SettingsController', () => {
         calls.push(input);
         return buildTelegramConfig();
       },
-      sendTelegramDeliveryTest: async (input: DelegatedCall<SendTelegramDeliveryTestDto>): Promise<void> => {
+      sendTelegramDeliveryTest: async (
+        input: DelegatedCall<SendTelegramDeliveryTestDto>,
+      ): Promise<Record<string, unknown>> => {
         calls.push(input);
+        // The probe's OUTCOME, which the controller now passes through
+        // instead of answering with the literal `{ sent: true }`.
+        return { delivered: false, via: 'primary', outcome: 'failed', reason: 'Unauthorized' };
       },
       updateReferralSettings: async (input: DelegatedCall<Record<string, unknown>>): Promise<Record<string, unknown>> => {
         calls.push(input);
@@ -362,7 +367,12 @@ describe('SettingsController', () => {
 
     assert.deepStrictEqual(await controller.updateNotificationToggles(notificationsDto, currentAdmin, buildRequest('request-4')), { userNotifications: { renew: true }, systemNotifications: { incidents: false } });
     assert.deepStrictEqual(await controller.updateTelegramDelivery(telegramDto, currentAdmin, buildRequest('request-5')), buildTelegramConfig());
-    assert.deepStrictEqual(await controller.sendTelegramDeliveryTest(telegramTestDto, currentAdmin, buildRequest('request-6')), { sent: true });
+    // The controller must hand the service's answer through untouched: the
+    // failure it reports is the whole point of the route.
+    assert.deepStrictEqual(
+      await controller.sendTelegramDeliveryTest(telegramTestDto, currentAdmin, buildRequest('request-6')),
+      { delivered: false, via: 'primary', outcome: 'failed', reason: 'Unauthorized' },
+    );
     assert.deepStrictEqual(await controller.updateReferralSettings(referralPatch, currentAdmin, buildRequest('request-7')), referralPatch);
     assert.deepStrictEqual(await controller.updatePartnerSettings(partnerPatch, currentAdmin, buildRequest('request-8')), partnerPatch);
     assert.deepStrictEqual(await controller.updateBrandingSettings(brandingDto, currentAdmin, buildRequest('request-9')), branding);

@@ -272,6 +272,29 @@ export class InternalUserController {
     return this.internalUserEdgeService.getUnreadCount(requireUserReference(query));
   }
 
+  /**
+   * The subscriber's own notification switches, read and written by the
+   * cabinet's «Уведомления» screen. Those switches had no handler, no route
+   * and no storage — seven controls that stayed where you put them until the
+   * page unmounted and changed nothing at all.
+   */
+  @Get('notifications/preferences')
+  public async getNotificationPrefs(
+    @Query() query: InternalByTelegramQueryDto,
+  ): Promise<{ prefs: Record<string, boolean>; available: readonly string[] }> {
+    return this.internalUserEdgeService.getNotificationPrefs(requireUserReference(query));
+  }
+
+  @Post('notifications/preferences')
+  public async updateNotificationPrefs(
+    @Body() body: InternalByTelegramQueryDto & { readonly prefs?: unknown },
+  ): Promise<{ prefs: Record<string, boolean>; available: readonly string[] }> {
+    return this.internalUserEdgeService.updateNotificationPrefs(
+      requireUserReference(body),
+      body.prefs,
+    );
+  }
+
   @Post('notifications/read-all')
   public async readAll(
     @Body() body: InternalByTelegramQueryDto,

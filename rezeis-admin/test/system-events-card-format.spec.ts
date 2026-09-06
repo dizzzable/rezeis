@@ -386,3 +386,146 @@ describe('SystemEventsService card formatting (enriched)', () => {
     assert.ok(text.includes('🎫 Код: <code>&lt;b&gt;OOPS&lt;/b&gt;</code>'));
   });
 });
+
+/**
+ * Three alerts that arrived as a frame with no facts
+ * ═══════════════════════════════════════════════════
+ * The card prints a per-type header INSTEAD of the raw message — the case at
+ * the top of this file pins exactly that, and it is right: `event.message` is
+ * a machine sentence and the header is written for a person.
+ *
+ * It works because every fact an operator needs is picked out of `metadata`
+ * by a curated block. For these three there was no such block, and their
+ * facts lived only in the message. So the operator received
+ * «Концентрация онлайна в одной стране» and was told neither the country nor
+ * the share — an alert that names a problem and withholds every fact about
+ * it, which is worse than no alert because it looks like one.
+ */
+describe('an alert whose facts live only in its metadata', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it('names the country and the share for a geo-concentration alert', async () => {
+    const { service, getLastText } = buildService();
+    service.info(
+      'node.geo_concentration',
+      'NODE',
+      '73% of online users (219/300) are connected through DE nodes',
+      {
+        kind: 'geo_concentration',
+        band: 70,
+        country: 'DE',
+        usersInCountry: 219,
+        totalOnline: 300,
+        percentInCountry: 73,
+      },
+    );
+    await flush();
+
+    const card = getLastText() ?? '';
+    assert.match(card, /DE/, 'the country is missing');
+    assert.match(card, /73/, 'the share is missing');
+    assert.match(card, /219/, 'the head count is missing');
+    assert.match(card, /300/, 'the total is missing');
+  });
+
+  it('reads `country`, which is the key the detector actually emits', async () => {
+    // The Node block above reads `countryCode`. The detector has always
+    // emitted `country`, so even the flag never rendered — a near-miss the
+    // card could not report on itself.
+    const { service, getLastText } = buildService();
+    service.info('node.geo_concentration', 'NODE', 'x', {
+      country: 'NL',
+      percentInCountry: 51,
+      usersInCountry: 10,
+      totalOnline: 20,
+    });
+    await flush();
+
+    assert.match(getLastText() ?? '', /NL/);
+  });
+
+  it('names the average for a panel-wide HWID alert', async () => {
+    // `kind` here is `hwid_average`, not `fraudKind` — which is why the fraud
+    // block skipped it and the number went nowhere.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'remnawave.hwid_average_high',
+      'REMNAWAVE',
+      'Panel-wide HWID average is 4.2 devices per user',
+      {
+        kind: 'hwid_average',
+        band: 4,
+        averageDevicesPerUser: 4.2,
+        totalHwidDevices: 8400,
+        totalUniqueDevices: 2000,
+      },
+    );
+    await flush();
+
+    const card = getLastText() ?? '';
+    assert.match(card, /4\.2/, 'the average is missing');
+    assert.match(card, /8400/, 'the device total is missing');
+  });
+
+  it('names the action and the ratio for a bulk operation', async () => {
+    const { service, getLastText } = buildService();
+    service.info('system.bulk_users_executed', 'SYSTEM', 'Bulk user operation "block" executed', {
+      action: 'block',
+      adminId: 'admin-1',
+      batchId: 'batch-1',
+      total: 15,
+      succeeded: 12,
+      failed: 2,
+      skipped: 1,
+    });
+    await flush();
+
+    const card = getLastText() ?? '';
+    assert.match(card, /block/, 'the action is missing');
+    assert.match(card, /12/, 'the success count is missing');
+    assert.match(card, /15/, 'the total is missing');
+  });
+
+  it('leaves a clean bulk run without an error line', async () => {
+    const { service, getLastText } = buildService();
+    service.info('system.bulk_users_executed', 'SYSTEM', 'x', {
+      action: 'unblock',
+      batchId: 'batch-2',
+      total: 5,
+      succeeded: 5,
+      failed: 0,
+      skipped: 0,
+    });
+    await flush();
+
+    const card = getLastText() ?? '';
+    assert.match(card, /unblock/);
+    assert.doesNotMatch(card, /Ошибок/, 'zero failures must not print a failure line');
+    assert.doesNotMatch(card, /Пропущено/);
+  });
+
+  it('still keeps the raw machine message out of the card', async () => {
+    // The blocks exist so the header can stay; they must not smuggle the
+    // message back in through a metadata key.
+    const { service, getLastText } = buildService();
+    service.info('node.geo_concentration', 'NODE', 'RAW-MACHINE-SENTENCE', {
+      country: 'DE',
+      percentInCountry: 73,
+      usersInCountry: 219,
+      totalOnline: 300,
+    });
+    await flush();
+
+    assert.doesNotMatch(getLastText() ?? '', /RAW-MACHINE-SENTENCE/);
+  });
+});

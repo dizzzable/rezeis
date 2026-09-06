@@ -12,7 +12,11 @@ import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { ReiwaRelayQueueService } from './reiwa-relay-queue.service';
 import { TelegramDirectQueueService } from './telegram-direct-queue.service';
 import { NotificationTemplatesService } from './notification-templates.service';
-import { isNotificationDeliveryEnabled, resolveToggleKey } from '../utils/notification-toggle.util';
+import {
+  isNotificationDeliveryEnabled,
+  isSubscriberNotificationEnabled,
+  resolveToggleKey,
+} from '../utils/notification-toggle.util';
 import {
   coerceNotificationLocale,
   resolveTemplateButtons,
@@ -513,9 +517,31 @@ export class UserNotificationsService {
 
       const user = await this.prismaService.user.findUnique({
         where: { id: input.userId },
-        select: { telegramId: true, isBotBlocked: true, name: true, language: true },
+        select: {
+          telegramId: true,
+          isBotBlocked: true,
+          name: true,
+          language: true,
+          notificationPrefs: true,
+        },
       });
       if (user === null) return;
+
+      // The SUBSCRIBER's own opt-out, read here rather than at create time so
+      // it cannot suppress the feed row. Same shape as the operator gate
+      // above and the same reason: the switch says "stop pushing this at me",
+      // not "hide it from me" — somebody who opens the app should still find
+      // out their subscription ended.
+      //
+      // `preRenderedText` sends skip it for the reason they skip the operator
+      // gate: they are a person writing to this person, and the closed list
+      // in `SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES` excludes them anyway.
+      if (
+        input.preRenderedText === undefined &&
+        !isSubscriberNotificationEnabled(user.notificationPrefs, input.type)
+      ) {
+        return;
+      }
 
       // Render the message once for both channels — keeps Telegram and
       // browser pushes in lockstep. `null` when no active template
@@ -548,6 +574,23 @@ export class UserNotificationsService {
                 );
                 return resolved.length > 0 ? resolved : undefined;
               })();
+
+      // ── The rendered copy goes back INTO the feed row ──────────────────
+      //
+      // The row is written first, so the cabinet shows it at once; the
+      // template is rendered HERE, for Telegram and web-push. Nothing ever
+      // carried the result back, so a feed row held whatever bare identifiers
+      // its emitter happened to pass — and eight types pass none at all.
+      // "Трафик исчерпан", "начислен кэшбэк" and "партнёру выплачено" all
+      // opened as «Текст уведомления недоступен».
+      //
+      // Only a TEMPLATE render is persisted. The `preRenderedText` callers
+      // (support replies, hints, operator messages) already put real copy in
+      // the payload, and their `body` is Telegram HTML — writing that into a
+      // field the feed prints would trade a blank card for one full of tags.
+      if (rendered !== null && template !== null) {
+        await this.persistRenderedCopy(input.eventId, input.payload, rendered);
+      }
 
       // Telegram bot fanout — only for users who haven't blocked us and whose
       // telegramId is a real positive Telegram id. A non-positive value (dirty
@@ -867,6 +910,50 @@ export class UserNotificationsService {
    * happened upstream so we don't pay for it twice when the caller also
    * needs the row to resolve buttons.
    */
+  /**
+   * Merge the rendered title/body into the stored payload so the cabinet feed
+   * has something to print.
+   *
+   * MERGED, never overwritten: an emitter that already wrote real copy knows
+   * more about its own message than a re-render does, and `support_reply`
+   * deliberately stores a subject-bearing body this would flatten.
+   *
+   * Best-effort, like everything else in the fanout: the row already exists
+   * and the push channels already have the text. A failure here costs the
+   * feed's wording, never the notification.
+   */
+  private async persistRenderedCopy(
+    eventId: string,
+    payload: unknown,
+    rendered: { readonly title: string; readonly body: string },
+  ): Promise<void> {
+    const current =
+      payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {};
+    const hasTitle = typeof current['title'] === 'string' && current['title'].length > 0;
+    const hasText = typeof current['text'] === 'string' && current['text'].length > 0;
+    if (hasTitle && hasText) return;
+    try {
+      await this.prismaService.userNotificationEvent.update({
+        where: { id: eventId },
+        data: {
+          payload: {
+            ...current,
+            title: hasTitle ? current['title'] : rendered.title,
+            text: hasText ? current['text'] : rendered.body,
+          } as Prisma.InputJsonObject,
+        },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Could not store rendered copy on notification ${eventId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   private async renderFromTemplate(
     template: {
       readonly title: string;

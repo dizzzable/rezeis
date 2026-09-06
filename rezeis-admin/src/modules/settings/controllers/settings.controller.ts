@@ -37,7 +37,10 @@ import {
   BRANDING_ASSET_MAX_FILE_SIZE,
   BrandingAssetUploadedInterface,
 } from '../services/branding-asset-upload.service';
-import { SettingsService } from '../services/settings.service';
+import {
+  SettingsService,
+  type TelegramDeliveryTestResult,
+} from '../services/settings.service';
 import { PaymentOpsAlertSettingsInterface } from '../../../common/interfaces/payment-ops-alert-settings.interface';
 
 /**
@@ -278,14 +281,16 @@ export class SettingsController {
     @Body() body: SendTelegramDeliveryTestDto,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
-  ): Promise<{ readonly sent: true }> {
-    await this.settingsService.sendTelegramDeliveryTest({
+  ): Promise<TelegramDeliveryTestResult> {
+    // The literal `{ sent: true }` this used to return made failure
+    // unrepresentable: the type itself said the probe always worked, and the
+    // screen believed it. The outcome now comes from the send.
+    return this.settingsService.sendTelegramDeliveryTest({
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
       note: body.note ?? null,
       category: body.category ?? null,
     });
-    return { sent: true };
   }
 
   /**

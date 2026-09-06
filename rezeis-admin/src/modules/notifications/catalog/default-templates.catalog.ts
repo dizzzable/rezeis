@@ -208,6 +208,56 @@ const POINTS_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   },
 ];
 
+/**
+ * The three advertising decisions a partner used to hear nothing about.
+ *
+ * `AdPlacementRequestService` has emitted these since the module shipped, and
+ * `fanout` gates EVERY channel on a rendered template — Telegram, web-push and
+ * the operator mirror alike. With no catalogue row, `rendered` was `null` and
+ * all three produced nothing at all: the partner's request was countered,
+ * rejected or activated in a screen they had no reason to reopen, and the
+ * only trace was a feed row with no text.
+ *
+ * The gap was undiscoverable from the panel too: the Seed button inserts the
+ * catalogue, and nothing lists types that HAVE no catalogue entry.
+ */
+const ADVERTISING_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: 'advertising.request_countered',
+    title: '📝 Встречное предложение по размещению',
+    titleEn: '📝 Counter-offer on your placement',
+    body:
+      'По вашей заявке на размещение предложены другие условия: ' +
+      '<b>{{approvedWindowDays}}</b> дн. вместо запрошенных {{proposedWindowDays}}. ' +
+      'Откройте партнёрский кабинет, чтобы принять или отказаться.',
+    bodyEn:
+      'Your placement request came back with different terms: ' +
+      '<b>{{approvedWindowDays}}</b> days instead of the {{proposedWindowDays}} you asked for. ' +
+      'Open the partner dashboard to accept or decline.',
+    buttons: PARTNER_BUTTONS,
+  },
+  {
+    type: 'advertising.request_rejected',
+    title: '🚫 Заявка на размещение отклонена',
+    titleEn: '🚫 Placement request declined',
+    body: 'Ваша заявка на размещение отклонена. Причина: {{reviewNotes}}',
+    bodyEn: 'Your placement request was declined. Reason: {{reviewNotes}}',
+    buttons: PARTNER_BUTTONS,
+  },
+  {
+    type: 'advertising.request_activated',
+    title: '🚀 Размещение запущено',
+    titleEn: '🚀 Placement is live',
+    body:
+      'Ваше размещение активировано на <b>{{approvedWindowDays}}</b> дн. ' +
+      'Площадок в кампании: {{placements}}. Статистика — в партнёрском кабинете.',
+    bodyEn:
+      'Your placement is live for <b>{{approvedWindowDays}}</b> days. ' +
+      'Placements in the campaign: {{placements}}. Statistics are in the partner dashboard.',
+    buttons: PARTNER_BUTTONS,
+  },
+];
+
 const PARTNER_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   {
     type: 'partner_referral_registered',
@@ -434,6 +484,7 @@ export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTe
   ...REFERRAL_TEMPLATES,
   ...POINTS_TEMPLATES,
   ...PARTNER_TEMPLATES,
+  ...ADVERTISING_TEMPLATES,
   ...SYSTEM_TEMPLATES,
   ...SUPPORT_TEMPLATES,
 ];

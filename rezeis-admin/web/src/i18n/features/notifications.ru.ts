@@ -31,6 +31,9 @@ export const ru = {
       partner_withdrawal_under_review: 'Вывод на рассмотрении',
       partner_withdrawal_completed: 'Вывод завершён',
       partner_withdrawal_rejected: 'Вывод отклонён',
+      'advertising.request_countered': 'Встречное предложение по размещению',
+      'advertising.request_rejected': 'Заявка на размещение отклонена',
+      'advertising.request_activated': 'Размещение запущено',
     },
     systemLabels: {
       bot_lifetime: 'Время работы бота',
@@ -99,6 +102,13 @@ export const ru = {
       deliveryFailed: 'Не удалось сохранить настройки',
       testSent: 'Тестовое сообщение отправлено',
       testFailed: 'Не удалось отправить тестовое сообщение',
+      testHandedOn:
+        'Карточка передана боту reiwa. Доставку он подтвердит сам — если через минуту в чате пусто, смотрите события reiwa.relay_undelivered.',
+      testNotSelected:
+        'Отправка не состоялась: в режиме «выбранные типы» этот пробный тип не отмечен. Включите общий флажок или режим «все события».',
+      testNoTransport: 'Отправка не состоялась: канал доставки недоступен.',
+      testRefused: 'Telegram отказал: {{reason}}',
+      testNoReason: 'причина не названа',
     },
     delivery: {
       title: 'Доставка в Telegram',

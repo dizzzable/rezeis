@@ -27,6 +27,10 @@ import {
 } from '../interfaces/internal-user-notification.interface';
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
+import {
+  SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES,
+  readSubscriberNotificationPrefs,
+} from '../../notifications/utils/notification-toggle.util';
 import { mapInternalUserSession, INTERNAL_USER_INCLUDE } from './internal-user.mappers';
 import { evaluateTrialClaim, readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
 import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
@@ -444,6 +448,68 @@ export class InternalUserEdgeService {
       where: { userId, readAt: null },
     });
     return { unread };
+  }
+
+  /**
+   * The subscriber's own notification switches.
+   *
+   * Absent keys are the norm and mean "send it": the column is nullable, so a
+   * customer who never opened the screen — which is nearly all of them — reads
+   * back as everything on. The cabinet fills the gaps with `true`, and this
+   * returns only what was actually stored so the two cannot disagree about
+   * what a missing key means.
+   */
+  public async getNotificationPrefs(
+    reference: string,
+  ): Promise<{ prefs: Record<string, boolean>; available: readonly string[] }> {
+    const userId = await this.resolveUserId(reference);
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { notificationPrefs: true },
+    });
+    if (user === null) {
+      throw new NotFoundException('User not found');
+    }
+    return {
+      prefs: readSubscriberNotificationPrefs(user.notificationPrefs),
+      // The switches this build honours. Shipped WITH the values so a cabinet
+      // that is a release ahead renders only what the panel can actually act
+      // on, instead of a switch that silently does nothing — the exact defect
+      // this whole screen had.
+      available: [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES],
+    };
+  }
+
+  /**
+   * Merge a patch into the stored switches.
+   *
+   * MERGED, not replaced: the cabinet sends the one switch the person just
+   * moved, and a replace would silently reset every other switch to its
+   * default on a screen that shows them all as still set.
+   */
+  public async updateNotificationPrefs(
+    reference: string,
+    patch: unknown,
+  ): Promise<{ prefs: Record<string, boolean>; available: readonly string[] }> {
+    const userId = await this.resolveUserId(reference);
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { notificationPrefs: true },
+    });
+    if (user === null) {
+      throw new NotFoundException('User not found');
+    }
+    // Narrowed on the way in as well as on the way out: the body comes from a
+    // browser, and a column nobody reads is still a column somebody filled.
+    const next = {
+      ...readSubscriberNotificationPrefs(user.notificationPrefs),
+      ...readSubscriberNotificationPrefs(patch),
+    };
+    await this.prismaService.user.update({
+      where: { id: userId },
+      data: { notificationPrefs: next as Prisma.InputJsonObject },
+    });
+    return { prefs: next, available: [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES] };
   }
 
   public async markAllRead(telegramId: string): Promise<{ updated: number }> {

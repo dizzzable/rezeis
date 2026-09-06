@@ -23,6 +23,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   SystemEventCategory,
   SystemEventsService,
+  type TelegramDeliveryResult,
 } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { readAdminBotToken } from '../../../common/utils/admin-bot-token.util';
@@ -112,6 +113,53 @@ interface UpdateTelegramDeliveryInput {
   readonly errorReportTelegramTxt?: boolean;
   readonly eventsMode?: 'all' | 'selected';
   readonly events?: string[];
+}
+
+/**
+ * What the operator's test probe actually did.
+ *
+ * `delivered` is the only field the toast should gate on. `outcome` says
+ * which shape of not-yet-delivered it was, because "handed to the reiwa bot"
+ * and "Telegram refused it" call for opposite next steps.
+ */
+export interface TelegramDeliveryTestResult {
+  readonly delivered: boolean;
+  readonly via: 'primary' | 'dev' | 'legacy';
+  readonly outcome: 'sent' | 'queued' | 'relayed' | 'failed';
+  readonly reason: string | null;
+}
+
+/** Fold a delivery result into the answer the operator's screen needs. */
+function describeTestDelivery(
+  via: 'primary' | 'dev',
+  delivery: TelegramDeliveryResult,
+): TelegramDeliveryTestResult {
+  switch (delivery.kind) {
+    case 'sent':
+      return { delivered: true, via, outcome: 'sent', reason: null };
+    case 'queued':
+      return { delivered: false, via, outcome: 'queued', reason: null };
+    case 'relayed':
+      return { delivered: false, via, outcome: 'relayed', reason: null };
+    case 'muted':
+      // `not-selected` cannot reach here: `isEventTelegramAllowed` exempts
+      // `settings.telegram.test` by name, so the operator's tick-boxes never
+      // silence their own probe. It is still mapped rather than assumed away
+      // — an exemption removed upstream would otherwise turn into a probe
+      // that reports success while sending nothing, which is the exact defect
+      // this whole outcome exists to end.
+      return {
+        delivered: false,
+        via,
+        outcome: 'failed',
+        reason:
+          delivery.reason === 'not-selected'
+            ? 'TELEGRAM_TEST_EVENT_NOT_SELECTED'
+            : 'TELEGRAM_TRANSPORT_UNAVAILABLE',
+      };
+    case 'failed':
+      return { delivered: false, via, outcome: 'failed', reason: delivery.reason };
+  }
 }
 
 interface SendTelegramDeliveryTestInput {
@@ -1028,7 +1076,24 @@ export class SettingsService {
     return readTelegramDeliveryConfig(settings.systemNotifications);
   }
 
-  public async sendTelegramDeliveryTest(input: SendTelegramDeliveryTestInput): Promise<void> {
+  /**
+   * Send the probe and report WHAT HAPPENED TO IT.
+   *
+   * This used to return nothing and the controller answered `{ sent: true }`
+   * unconditionally — a literal type, so failure was unrepresentable. The
+   * send below swallows Telegram's refusal into a log line, so a revoked
+   * token, a bot removed from the group, or a wrong topic id all produced
+   * "Тестовое сообщение отправлено" under a button whose only purpose is to
+   * tell the operator whether the channel works.
+   *
+   * `queued` and `relayed` are reported as themselves rather than folded into
+   * success: on the split deployment the panel hands the card to the reiwa
+   * bot and genuinely does not yet know. Saying so is the honest answer, and
+   * it is a different instruction to the operator than "delivered".
+   */
+  public async sendTelegramDeliveryTest(
+    input: SendTelegramDeliveryTestInput,
+  ): Promise<TelegramDeliveryTestResult> {
     const config = readTelegramDeliveryConfig(
       (await this.getOrCreateSettingsRecord(this.prismaService)).systemNotifications,
     );
@@ -1038,7 +1103,7 @@ export class SettingsService {
     // so the test honours category→topic routing AND works on the split
     // deployment (no local bot token → relayed via the reiwa bot).
     if (this.systemEvents) {
-      const { via } = await this.systemEvents.sendTelegramTest({
+      const { via, delivery } = await this.systemEvents.sendTelegramTest({
         category,
         note: input.note ?? null,
         adminId: input.currentAdmin.id,
@@ -1046,9 +1111,14 @@ export class SettingsService {
       if (via === 'none') {
         throw new BadRequestException('TELEGRAM_DELIVERY_NOT_CONFIGURED');
       }
+      const result = describeTestDelivery(via, delivery);
       await this.prismaService.adminAuditLog.create({
         data: buildAdminAuditLogData({
-          action: 'settings.telegramDelivery.test.sent',
+          // The audit row states the outcome too. "test.sent" on an attempt
+          // that failed is the same lie as the toast, written down.
+          action: result.delivered
+            ? 'settings.telegramDelivery.test.sent'
+            : 'settings.telegramDelivery.test.attempted',
           actorId: input.currentAdmin.id,
           requestMetadata: input.requestMetadata,
           metadata: {
@@ -1057,10 +1127,12 @@ export class SettingsService {
             topicId: config.topicId,
             category,
             via,
+            outcome: result.outcome,
+            reason: result.reason,
           },
         }),
       });
-      return;
+      return result;
     }
 
     // Legacy direct path (only when the system-events service is unavailable
@@ -1106,6 +1178,9 @@ export class SettingsService {
         },
       }),
     });
+    // The legacy path does not catch, so reaching here means the Bot API
+    // accepted it.
+    return { delivered: true, via: 'legacy', outcome: 'sent', reason: null };
   }
 
   private async getOrCreateSettingsRecord(settingsClient: SettingsClient): Promise<Settings> {

@@ -361,3 +361,98 @@ describe('the panel stamps a dedup key on both dev relays', () => {
     assert.ok(eventIdOf(direct[0]).startsWith('sysevt:reiwa.relay_undelivered:'));
   });
 });
+
+/**
+ * The same key, now on the OPERATOR channel — and why it had to move there.
+ *
+ * The three sibling routes (the operator relay, its document form, and the
+ * panel's own direct queue) all built `sysevt:${type}:${timestamp}`, whose
+ * entire discriminator is an ISO millisecond. `emitOperationalAlerts` is a
+ * synchronous `for` loop with no `await` in it, so a per-node traffic alert
+ * and its neighbour genuinely share that millisecond.
+ *
+ * What happened then was not a duplicate card. The key IS the BullMQ `jobId`,
+ * so the second alert was never queued — and `enqueue` still returned `true`,
+ * with nothing logged. The detector records the crossed band BEFORE it emits,
+ * so that alert was never raised again either. Past the first node in a run,
+ * those alerts were lost permanently and silently.
+ */
+
+/** Operator group configured, and no local bot token → the relay broadcast. */
+const OPERATOR_GROUP = {
+  enabled: true,
+  chatId: '-1001234567890',
+  devChatId: null,
+  errorReports: { mode: 'manual', telegramTxt: false },
+};
+
+/** Pin the clock so "the same millisecond" is a fact, not a race. */
+function withFrozenClock<T>(iso: string, run: () => T): T {
+  const real = Date.prototype.toISOString;
+  Date.prototype.toISOString = function frozen(): string {
+    return iso;
+  };
+  try {
+    return run();
+  } finally {
+    Date.prototype.toISOString = real;
+  }
+}
+
+describe('two operator alerts inside one millisecond', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it('do not share a key when they are different alerts', async () => {
+    const { service, queued } = buildService(OPERATOR_GROUP);
+    withFrozenClock('2026-09-06T12:00:00.000Z', () => {
+      service.warn('node.traffic_notify', 'SYSTEM', 'Node DE-1 crossed 80%', { nodeName: 'DE-1' });
+      service.warn('node.traffic_notify', 'SYSTEM', 'Node NL-2 crossed 80%', { nodeName: 'NL-2' });
+    });
+    await flush();
+
+    assert.equal(queued.length, 2, 'both alerts must reach the relay');
+    assert.notEqual(
+      eventIdOf(queued[0]),
+      eventIdOf(queued[1]),
+      'the second alert would never be queued: the key is the BullMQ jobId',
+    );
+  });
+
+  it('still collapse a genuinely identical card', async () => {
+    // The dedup is not the enemy — a retry of the SAME alert must still be
+    // recognised. Only distinct alerts had to stop colliding.
+    const { service, queued } = buildService(OPERATOR_GROUP);
+    withFrozenClock('2026-09-06T12:00:00.000Z', () => {
+      service.warn('node.traffic_notify', 'SYSTEM', 'Node DE-1 crossed 80%', { nodeName: 'DE-1' });
+      service.warn('node.traffic_notify', 'SYSTEM', 'Node DE-1 crossed 80%', { nodeName: 'DE-1' });
+    });
+    await flush();
+
+    assert.equal(queued.length, 2);
+    assert.equal(eventIdOf(queued[0]), eventIdOf(queued[1]));
+  });
+
+  it('keeps the key inside the length the cabinet accepts', async () => {
+    // The operator route validates `eventId` with a REQUIRED `.max(128)` and
+    // no soft fallback: an over-long key is a 400, the relay reads a 4xx as
+    // non-transient, and the card is lost outright.
+    const { service, queued } = buildService(OPERATOR_GROUP);
+    service.warn(`node.${'t'.repeat(190)}`, 'SYSTEM', 'x'.repeat(1_000), {
+      blob: 'z'.repeat(5_000),
+    });
+    await flush();
+
+    const id = eventIdOf(queued[0]);
+    assert.ok(id.length <= 128, `eventId is ${id.length} chars: ${id}`);
+  });
+});

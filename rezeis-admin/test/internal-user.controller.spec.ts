@@ -65,6 +65,10 @@ describe('InternalUserController', () => {
       'updateLanguage',
       'listNotifications',
       'unreadCount',
+      // The subscriber's own notification switches, which had no route at all
+      // until the cabinet's seven dead toggles were given one.
+      'getNotificationPrefs',
+      'updateNotificationPrefs',
       'readAll',
       'readOne',
       'listTransactions',

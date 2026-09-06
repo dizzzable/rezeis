@@ -31,6 +31,9 @@ export const en = {
       partner_withdrawal_under_review: 'Withdrawal under review',
       partner_withdrawal_completed: 'Withdrawal completed',
       partner_withdrawal_rejected: 'Withdrawal rejected',
+      'advertising.request_countered': 'Placement counter-offer',
+      'advertising.request_rejected': 'Placement request declined',
+      'advertising.request_activated': 'Placement is live',
     },
     systemLabels: {
       bot_lifetime: 'Bot uptime',
@@ -99,6 +102,13 @@ export const en = {
       deliveryFailed: 'Failed to save settings',
       testSent: 'Test message sent',
       testFailed: 'Failed to send test message',
+      testHandedOn:
+        'The card was handed to the reiwa bot. It confirms delivery itself — if the chat is still empty in a minute, look for reiwa.relay_undelivered events.',
+      testNotSelected:
+        'Nothing was sent: in "selected types" mode this probe type is not ticked. Switch on the catch-all box, or use "all events".',
+      testNoTransport: 'Nothing was sent: the delivery channel is unavailable.',
+      testRefused: 'Telegram refused it: {{reason}}',
+      testNoReason: 'no reason given',
     },
     delivery: {
       title: 'Telegram delivery',

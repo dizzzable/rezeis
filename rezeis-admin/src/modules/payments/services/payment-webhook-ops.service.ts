@@ -94,9 +94,19 @@ export class PaymentWebhookOpsService {
       force: input.force,
     });
     const jobId = buildReconciliationJobId(event.id);
-    const alreadyQueued = await runPaymentWebhookReplayQueueInspectionWithTimeout(
-      () => this.isAlreadyQueued(jobId),
+    const existing = await runPaymentWebhookReplayQueueInspectionWithTimeout(() =>
+      this.inspectExistingJob(jobId),
     );
+    const alreadyQueued = existing === 'pending';
+    // A job RETAINED under this id — completed or failed — makes the `add`
+    // below a silent no-op: BullMQ hands back the old job and the operator
+    // gets a REPLAY_REQUESTED row, an audit entry, and a success screen for
+    // work that never ran. Clearing it is what makes a second replay a
+    // replay. `isAlreadyQueued` was never wrong about pending-ness; the gap
+    // was that nothing looked at the other two states at all.
+    if (existing === 'retained') {
+      await this.clearRetainedJob(jobId);
+    }
     const updatedEvent = alreadyQueued
       ? event
       : await this.paymentWebhookInboxService.markReplayRequested(event.id);
@@ -243,21 +253,52 @@ export class PaymentWebhookOpsService {
     });
   }
 
-  private async isAlreadyQueued(jobId: string): Promise<boolean> {
+  /**
+   * Three answers, not two.
+   *
+   * `pending` — the work is already on its way; a second request is a
+   * duplicate and must not re-enqueue.
+   *
+   * `retained` — a finished job is still sitting under this id. `queue.add`
+   * would return that job instead of scheduling anything, so the id has to be
+   * freed first.
+   *
+   * `absent` — nothing there; enqueue.
+   */
+  private async inspectExistingJob(jobId: string): Promise<'pending' | 'retained' | 'absent'> {
     const job = await this.paymentReconciliationQueue.getJob(jobId);
     if (job === undefined || job === null) {
-      return false;
+      return 'absent';
     }
     const state = await runPaymentWebhookReplayJobStateInspectionWithTimeout(() => job.getState());
     if (state === null) {
-      return false;
+      // The inspection timed out or the job vanished mid-read. Treating it as
+      // absent keeps the old behaviour, and the enqueue below is idempotent
+      // on the pending states anyway.
+      return 'absent';
     }
-    return (
+    if (
       state === 'waiting' ||
       state === 'active' ||
       state === 'delayed' ||
       state === 'prioritized'
-    );
+    ) {
+      return 'pending';
+    }
+    return 'retained';
+  }
+
+  /** Free a finished job's id so the same id can be scheduled again. */
+  private async clearRetainedJob(jobId: string): Promise<void> {
+    try {
+      const job = await this.paymentReconciliationQueue.getJob(jobId);
+      if (job === undefined || job === null) return;
+      await job.remove();
+    } catch {
+      // Losing the race to a cleaner, or a job that became active between the
+      // inspection and here. The `add` that follows is then either a no-op on
+      // a job already running — which is the right outcome — or succeeds.
+    }
   }
 }
 
@@ -277,21 +318,33 @@ export async function runPaymentReconciliationQueueCountsWithTimeout(
   }
 }
 
+/**
+ * Inspect the queue without letting a stalled Redis hold the request.
+ *
+ * Both the timeout and the failure path answer `'absent'`, which is the same
+ * conservative direction the boolean form had: never claim a duplicate we did
+ * not see, and never claim a retained job we did not see either. The raw
+ * error is dropped rather than returned — it carries a Redis URL with
+ * credentials and payment identifiers.
+ */
 export async function runPaymentWebhookReplayQueueInspectionWithTimeout(
-  operation: () => Promise<boolean>,
+  operation: () => Promise<PaymentReplayJobPresence>,
   timeoutMs = 5_000,
-): Promise<boolean> {
+): Promise<PaymentReplayJobPresence> {
   try {
     return await Promise.race([
       operation(),
-      new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(false), timeoutMs);
+      new Promise<PaymentReplayJobPresence>((resolve) => {
+        setTimeout(() => resolve('absent'), timeoutMs);
       }),
     ]);
   } catch {
-    return false;
+    return 'absent';
   }
 }
+
+/** What sits under a reconciliation job id right now. */
+export type PaymentReplayJobPresence = 'pending' | 'retained' | 'absent';
 
 export async function runPaymentWebhookReplayJobStateInspectionWithTimeout(
   operation: () => Promise<string>,

@@ -674,7 +674,10 @@ export class SystemEventsService {
     readonly category: SystemEventCategory;
     readonly note: string | null;
     readonly adminId: string;
-  }): Promise<{ readonly via: 'primary' | 'dev' | 'none' }> {
+  }): Promise<{
+    readonly via: 'primary' | 'dev' | 'none';
+    readonly delivery: TelegramDeliveryResult;
+  }> {
     const tgConfig = await this.loadTelegramConfig();
     const note = input.note?.trim();
     const event: SystemEventPayload & { timestamp: string } = {
@@ -690,8 +693,13 @@ export class SystemEventsService {
       resolved === null ? 'none' : resolved.isDevFallback ? 'dev' : 'primary';
     // `synchronous` — the operator is looking at a spinner. See the branch in
     // `deliverTelegram`.
-    await this.deliverTelegram(event, { synchronous: true });
-    return { via };
+    //
+    // `via` says where the card was ROUTED and is read off configuration
+    // alone, so it is `primary` just as readily for a revoked token as for a
+    // working one. `delivery` is what actually happened. Reporting only the
+    // first is how this button came to answer "sent" no matter what.
+    const delivery = await this.deliverTelegram(event, { synchronous: true });
+    return { via, delivery };
   }
 
   // ── Private ─────────────────────────────────────────────────────────────────
@@ -881,8 +889,8 @@ export class SystemEventsService {
   private async deliverTelegram(
     event: SystemEventPayload & { timestamp: string },
     opts: { readonly synchronous?: boolean } = {},
-  ): Promise<void> {
-    if (!this.httpService) return;
+  ): Promise<TelegramDeliveryResult> {
+    if (!this.httpService) return { kind: 'muted', reason: 'no-transport' };
 
     const tgConfig = await this.loadTelegramConfig();
 
@@ -902,7 +910,7 @@ export class SystemEventsService {
         knownTypes: REGISTERED_EVENT_TYPES,
       })
     ) {
-      return;
+      return { kind: 'muted', reason: 'not-selected' };
     }
 
     // Resolve the user's Telegram id / name / username from `metadata.userId`
@@ -930,7 +938,7 @@ export class SystemEventsService {
       // internal channel (the bot knows its dev id; rezeis doesn't). The
       // event filter is intentionally NOT applied — the dev firehose sees all.
       await this.deliverToReiwaDev(enriched, { errorEvent, attachTxt, reportEvent });
-      return;
+      return { kind: 'relayed' };
     }
 
     // Direct send (operator group or manual devChatId) needs a bot token —
@@ -960,7 +968,7 @@ export class SystemEventsService {
           reportEvent,
         });
       }
-      return;
+      return { kind: 'relayed' };
     }
     const targetChatId = resolved.chatId;
     const topicId = resolved.topicId;
@@ -997,7 +1005,7 @@ export class SystemEventsService {
           parseMode: 'HTML',
           sourceEventType: event.type,
         },
-        `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}`,
+        buildRelayEventId(event, 'direct'),
       );
       if (attachTxt) {
         // A SECOND job, not a caption, because that is what this path has
@@ -1017,10 +1025,10 @@ export class SystemEventsService {
             content: formatErrorReportTxt(reportEvent, getRezeisBuildInfo()),
             sourceEventType: event.type,
           },
-          `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}:error-report`,
+          buildRelayEventId(event, 'direct-document'),
         );
       }
-      return;
+      return { kind: 'queued' };
     }
 
     const payload: Record<string, unknown> = {
@@ -1033,16 +1041,28 @@ export class SystemEventsService {
       payload['message_thread_id'] = topicId;
     }
 
+    let outcome: TelegramDeliveryResult = { kind: 'sent' };
     try {
-      await firstValueFrom(
+      const response = await firstValueFrom(
         this.httpService.post(
           `https://api.telegram.org/bot${tgConfig.botToken}/sendMessage`,
           payload,
           { timeout: 10_000 },
         ),
       );
+      // Telegram answers a refusal with a non-2xx and axios throws, so this
+      // is belt-and-braces — but a body that says `ok: false` under a 200 is
+      // still a card nobody received, and the whole point of returning an
+      // outcome is that "sent" means sent.
+      const body = (response as { data?: { ok?: unknown; description?: unknown } })?.data;
+      if (body !== undefined && body.ok === false) {
+        outcome = { kind: 'failed', reason: describeTelegramRefusal(body.description) };
+      }
     } catch (err) {
-      this.logger.warn(`Telegram send failed: ${(err as Error).message}`);
+      outcome = { kind: 'failed', reason: describeTelegramError(err) };
+    }
+    if (outcome.kind === 'failed') {
+      this.logger.warn(`Telegram send failed: ${outcome.reason}`);
     }
 
     // Attach the .txt error report as a follow-up document when enabled.
@@ -1054,6 +1074,7 @@ export class SystemEventsService {
         reportEvent,
       });
     }
+    return outcome;
   }
 
   /** Map an emitted system event to the normalized error-report shape. */
@@ -1210,7 +1231,7 @@ export class SystemEventsService {
         // trace + raw payload live in the attached .txt, one tap away.
         const txt = formatErrorReportTxt(opts.reportEvent, getRezeisBuildInfo());
         await this.relaySystemEvent(event.type, 'reiwa.dev.notify.document', {
-          eventId: buildDevRelayEventId(event, 'dev-document'),
+          eventId: buildRelayEventId(event, 'dev-document'),
           filename: buildErrorReportFilename(opts.reportEvent),
           content: txt,
           caption: clipHtmlCard(html, TELEGRAM_CAPTION_LIMIT),
@@ -1219,7 +1240,7 @@ export class SystemEventsService {
       } else {
         // Non-error events (or txt attachment disabled): inline card only.
         await this.relaySystemEvent(event.type, 'reiwa.dev.notify', {
-          eventId: buildDevRelayEventId(event, 'dev'),
+          eventId: buildRelayEventId(event, 'dev'),
           text: clipHtmlCard(html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
         });
@@ -1288,7 +1309,7 @@ export class SystemEventsService {
         // `:error-report` suffix, and matches `buildDevRelayEventId` so this
         // file has one rule rather than two.
         await this.relaySystemEvent(event.type, 'reiwa.channel.broadcast.document', {
-          eventId: `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}:error-report`,
+          eventId: buildRelayEventId(event, 'relay-document'),
           chatId: opts.chatId,
           topicThreadId: opts.topicId ?? undefined,
           filename: buildErrorReportFilename(opts.reportEvent),
@@ -1299,7 +1320,7 @@ export class SystemEventsService {
       } else {
         // Clipped for the reason spelt out on the document branch above.
         await this.relaySystemEvent(event.type, 'reiwa.channel.broadcast', {
-          eventId: `sysevt:${clip(event.type, 48)}:${clip(event.timestamp, 32)}`,
+          eventId: buildRelayEventId(event, 'relay'),
           chatId: opts.chatId,
           topicThreadId: opts.topicId ?? undefined,
           text: clipHtmlCard(opts.html, TELEGRAM_TEXT_LIMIT),
@@ -1549,6 +1570,76 @@ export class SystemEventsService {
         );
       lines.push(`<blockquote>${nodeLines.join('\n')}</blockquote>`);
     }
+
+    // ── Three alerts that used to arrive as a frame with no facts ─────────
+    //
+    // The card prints a per-type header INSTEAD of `event.message`, which is
+    // right — the message is a machine sentence and the header is written
+    // for a person. That works because every fact an operator needs is
+    // picked out of `metadata` by one of these blocks.
+    //
+    // For these three it was not. Their whole content lived in the message
+    // and their metadata keys matched no block, so the card announced
+    // «Концентрация онлайна в одной стране» and then named neither the
+    // country nor the share — an alert that states a problem and withholds
+    // every fact about it.
+    //
+    // The geo case had a second near-miss worth naming: the Node block above
+    // reads `countryCode` and the detector emits `country`, so even the flag
+    // would not have rendered.
+
+    // Geo concentration — which country, and how much of the online base.
+    if (meta['percentInCountry'] !== undefined && meta['country']) {
+      lines.push('');
+      lines.push('🌍 <b>Концентрация:</b>');
+      const geoLines: string[] = [];
+      geoLines.push(
+        `🏴 Страна: ${countryCodeToFlag(meta['country'])} ${escapeHtml(meta['country'])}`,
+      );
+      geoLines.push(`📈 Доля онлайна: ${escapeHtml(meta['percentInCountry'])}%`);
+      if (meta['usersInCountry'] !== undefined && meta['totalOnline'] !== undefined) {
+        geoLines.push(
+          `👥 Пользователей: ${escapeHtml(meta['usersInCountry'])} из ${escapeHtml(meta['totalOnline'])}`,
+        );
+      }
+      lines.push(`<blockquote>${geoLines.join('\n')}</blockquote>`);
+    }
+
+    // Panel-wide HWID average. `kind` here is `hwid_average`, not `fraudKind`,
+    // which is why the fraud block never matched it.
+    if (meta['averageDevicesPerUser'] !== undefined) {
+      lines.push('');
+      lines.push('📱 <b>Устройства:</b>');
+      const hwidLines: string[] = [];
+      hwidLines.push(
+        `📊 В среднем на пользователя: ${escapeHtml(meta['averageDevicesPerUser'])}`,
+      );
+      if (meta['totalHwidDevices'] !== undefined)
+        hwidLines.push(`🔢 Всего привязок: ${escapeHtml(meta['totalHwidDevices'])}`);
+      if (meta['totalUniqueDevices'] !== undefined)
+        hwidLines.push(`🔹 Уникальных устройств: ${escapeHtml(meta['totalUniqueDevices'])}`);
+      lines.push(`<blockquote>${hwidLines.join('\n')}</blockquote>`);
+    }
+
+    // A bulk operation over many users. `action` renders in the Error block
+    // too, but that one is gated on an error and this event is `.info()`.
+    if (meta['action'] && meta['batchId']) {
+      lines.push('');
+      lines.push('👥 <b>Массовая операция:</b>');
+      const bulkLines: string[] = [];
+      bulkLines.push(`🛠 Действие: <code>${escapeHtml(meta['action'])}</code>`);
+      if (meta['succeeded'] !== undefined && meta['total'] !== undefined) {
+        bulkLines.push(
+          `✅ Успешно: ${escapeHtml(meta['succeeded'])} из ${escapeHtml(meta['total'])}`,
+        );
+      }
+      if (Number(meta['failed'] ?? 0) > 0)
+        bulkLines.push(`⚠️ Ошибок: ${escapeHtml(meta['failed'])}`);
+      if (Number(meta['skipped'] ?? 0) > 0)
+        bulkLines.push(`⏭ Пропущено: ${escapeHtml(meta['skipped'])}`);
+      lines.push(`<blockquote>${bulkLines.join('\n')}</blockquote>`);
+    }
+
     if (meta['partnerId'] || meta['earning']) {
       lines.push('');
       lines.push('🤝 <b>Партнёр:</b>');
@@ -2192,16 +2283,24 @@ function closersFor(kept: string): string {
  * arrive under a fresh key, the cabinet would claim each one as new, and the
  * protection would be decoration.
  *
- * DISTINCT EVENTS MUST NOT COLLIDE. `sysevt:${type}:${timestamp}`, the shape
- * the operator-channel relays next door use, is not enough here. Its whole
- * discriminator is an ISO millisecond, and the firehose's characteristic
- * traffic is a burst of same-type ERROR events from one failing loop — which
- * really can land inside one millisecond. A collision is not a harmless
- * duplicate: `enqueue` derives the BullMQ `jobId` from this key, so the second
- * card would never even be queued, and the bot would swallow it too. The
- * digest closes that: it covers everything that makes the event itself, so two
- * different cards in the same millisecond get different keys, while a genuinely
- * identical card collapses — which is the behaviour you want anyway.
+ * DISTINCT EVENTS MUST NOT COLLIDE. `sysevt:${type}:${timestamp}` — the shape
+ * every route here used to use, and the reason this function now serves all
+ * six — is not enough. Its whole discriminator is an ISO millisecond, and the
+ * characteristic traffic is a burst of same-type events from one detector
+ * pass: `emitOperationalAlerts` is a synchronous loop with no `await` in it,
+ * so a per-node traffic alert and its neighbour genuinely share a millisecond.
+ *
+ * A collision is not a harmless duplicate. `enqueue` derives the BullMQ
+ * `jobId` from this key, so the second alert is never queued — and `enqueue`
+ * still returns `true`, with no log line. Worse, the detector records the
+ * crossed band BEFORE emitting, so the swallowed alert is never raised again:
+ * past the first node in a run, those alerts were lost permanently and
+ * silently.
+ *
+ * The digest closes it: it covers everything that makes the event itself, so
+ * two different cards in the same millisecond get different keys, while a
+ * genuinely identical card still collapses — which is the behaviour the
+ * deduplication was for.
  *
  * Length is bounded ON PURPOSE. The cabinet parses this with
  * `z.string().trim().min(1).max(128)` and `.catch(undefined)`, so an over-long
@@ -2211,9 +2310,58 @@ function closersFor(kept: string): string {
  * runtime), so it is clipped; the digest still covers it in full. Worst case:
  * 7 + 49 + 1 + 33 + 1 + 12 + 1 + 16 = 120 characters.
  */
-function buildDevRelayEventId(
+/**
+ * What happened to one card on the Telegram route.
+ *
+ * Every caller but one ignores this, and should: a card that could not be
+ * delivered must never take down the operation that raised it. The Settings
+ * test button is the exception, because reporting which of these it got is
+ * the button's entire job.
+ */
+export type TelegramDeliveryResult =
+  | { readonly kind: 'sent' }
+  | { readonly kind: 'queued' }
+  | { readonly kind: 'relayed' }
+  | { readonly kind: 'muted'; readonly reason: 'no-transport' | 'not-selected' }
+  | { readonly kind: 'failed'; readonly reason: string };
+
+/** Telegram's own words for a refusal, when it gave any. */
+function describeTelegramRefusal(description: unknown): string {
+  return typeof description === 'string' && description.trim().length > 0
+    ? description.trim().slice(0, 300)
+    : 'Telegram refused the message without saying why';
+}
+
+/**
+ * A transport failure in words an operator can act on.
+ *
+ * Telegram puts the useful sentence in `response.data.description` — "chat not
+ * found", "bot was kicked from the supergroup chat", "message thread not
+ * found". The axios message alone is `Request failed with status code 400`,
+ * which names nothing an operator can fix.
+ */
+function describeTelegramError(err: unknown): string {
+  const response = (err as { response?: { data?: { description?: unknown }; status?: unknown } })
+    ?.response;
+  const described = response?.data?.description;
+  if (typeof described === 'string' && described.trim().length > 0) {
+    return described.trim().slice(0, 300);
+  }
+  if (typeof response?.status === 'number') {
+    return `Telegram answered ${response.status}`;
+  }
+  return err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300);
+}
+
+function buildRelayEventId(
   event: SystemEventPayload & { timestamp: string },
-  route: 'dev' | 'dev-document',
+  route:
+    | 'dev'
+    | 'dev-document'
+    | 'direct'
+    | 'direct-document'
+    | 'relay'
+    | 'relay-document',
 ): string {
   let payload: string;
   try {

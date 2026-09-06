@@ -1571,6 +1571,12 @@ model User {
   registrationReferer            String?   @map("registration_referer")
   /// JSON: { source?, medium?, campaign?, content?, term?, raw? } — classic UTM.
   registrationUtm                Json?     @map("registration_utm")
+  /// Per-subscriber notification opt-outs: `{ "<type>": false }`. An absent
+  /// key means "send it" — so a customer who never opened the screen, and
+  /// every row that predates it, keep receiving everything. Only the PUSH
+  /// channels honour it; the cabinet feed row is always written, exactly as
+  /// with the operator's own toggles.
+  notificationPrefs              Json?     @map("notification_prefs")
   /// Channel that produced the snapshot: web | tma | bot | oauth.
   registrationChannel            String?   @map("registration_channel")
   /// Optional pointer to the user's currently selected subscription.

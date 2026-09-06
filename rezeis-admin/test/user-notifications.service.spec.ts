@@ -138,10 +138,115 @@ describe('UserNotificationsService', () => {
   });
 });
 
+/**
+ * What the cabinet feed has to print.
+ *
+ * The row is written first, so the feed shows it immediately; the template is
+ * rendered later, inside the fanout, for Telegram and web-push. Nothing ever
+ * carried that result back — so a feed row held whatever its emitter happened
+ * to pass, and eight types pass bare identifiers and nothing else. «Трафик
+ * исчерпан», «начислен кэшбэк» and «партнёру выплачено» all opened as
+ * "Текст уведомления недоступен".
+ *
+ * The cabinet reads `payload.title` and `payload.text`, so this is also the
+ * fix that needs no cabinet release to take effect.
+ */
+describe('the rendered copy reaches the feed row', () => {
+  it('writes the template title and body onto the row', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: { isActive: true, title: 'Трафик исчерпан', body: 'Лимит израсходован.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'limited', payload: { subscriptionId: 's-1' } });
+    await flushFanout();
+
+    assert.equal(state.updateCalls.length, 1);
+    const payload = state.updateCalls[0].data.payload as Record<string, unknown>;
+    assert.equal(payload.title, 'Трафик исчерпан');
+    assert.equal(payload.text, 'Лимит израсходован.');
+    assert.equal(payload.subscriptionId, 's-1', 'the emitter payload must survive');
+  });
+
+  it('does not overwrite copy the emitter already wrote', async () => {
+    // `support_reply` stores a subject-bearing body on purpose, and it knows
+    // more about its own message than a re-render does.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: { isActive: true, title: 'Шаблон', body: 'Из шаблона.' },
+    });
+
+    await service.create({
+      userId: 'user-1',
+      type: 'limited',
+      payload: { title: 'Своё', text: 'Свой текст' },
+    });
+    await flushFanout();
+
+    assert.equal(state.updateCalls.length, 0);
+  });
+
+  it('fills only the half that is missing', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: { isActive: true, title: 'Шаблон', body: 'Из шаблона.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'limited', payload: { title: 'Своё' } });
+    await flushFanout();
+
+    const payload = state.updateCalls[0].data.payload as Record<string, unknown>;
+    assert.equal(payload.title, 'Своё');
+    assert.equal(payload.text, 'Из шаблона.');
+  });
+
+  it('writes nothing for a preRenderedText send', async () => {
+    // Those callers own their payload copy, and their body is Telegram HTML —
+    // storing it in a field the feed prints trades a blank card for tags.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: { isActive: true, title: 'Шаблон', body: 'Из шаблона.' },
+    });
+
+    await service.create({
+      userId: 'user-1',
+      type: 'support_reply',
+      payload: { ticketId: 't-1' },
+      preRenderedText: '<b>Поддержка ответила</b>',
+    });
+    await flushFanout();
+
+    assert.equal(state.updateCalls.length, 0);
+  });
+
+  it('writes nothing when no template matches', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann' },
+      template: null,
+    });
+
+    await service.create({ userId: 'user-1', type: 'unknown_type', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.updateCalls.length, 0);
+  });
+});
+
 function createService(
   state: ReturnType<typeof createState>,
   input: {
-    readonly user?: { readonly telegramId: bigint | null; readonly isBotBlocked: boolean; readonly name: string | null } | null;
+    readonly user?: {
+      readonly telegramId: bigint | null;
+      readonly isBotBlocked: boolean;
+      readonly name: string | null;
+      /** The subscriber's own switches; absent means "everything on". */
+      readonly notificationPrefs?: Record<string, boolean> | null;
+    } | null;
     readonly template?: { readonly isActive: boolean; readonly title: string; readonly body: string } | null;
   } = {},
 ): UserNotificationsService {
@@ -159,6 +264,14 @@ function createService(
           type: args.data.type,
           payload: args.data.payload,
         };
+      },
+      // The rendered copy is written back onto the row so the cabinet feed
+      // has something to print. A double without this method turns that
+      // write into a caught-and-logged failure — green tests over a feature
+      // that never ran.
+      update: async (args: { where: { id: string }; data: { payload: unknown } }) => {
+        state.updateCalls.push(args);
+        return { id: args.where.id };
       },
     },
     user: {
@@ -234,6 +347,7 @@ function createState(input: {
     userNotifications: input.userNotifications ?? {},
     systemNotifications: input.systemNotifications ?? {},
     createCalls: [] as NotificationCreateArgs[],
+    updateCalls: [] as Array<{ where: { id: string }; data: { payload: unknown } }>,
     settingsFindCalls: [] as unknown[],
     userFindCalls: [] as unknown[],
     templateLookups: [] as string[],
@@ -248,3 +362,115 @@ function createState(input: {
 async function flushFanout(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+/**
+ * The subscriber's own switches, honoured at last.
+ *
+ * The cabinet's «Уведомления» screen shipped seven of them with no handler,
+ * no route and no column: they stayed where you put them until the page
+ * unmounted and changed nothing. What follows is the send-side half — the
+ * half that makes the screen mean something.
+ *
+ * Two properties are load-bearing and pull against each other:
+ *
+ *  1. a muted type must not PUSH — no Telegram, no web-push;
+ *  2. the cabinet feed row must be written anyway. The switch says "stop
+ *     pushing this at me", not "hide it from me", and somebody who opens the
+ *     app should still find out their subscription ended. Exactly the
+ *     semantics the operator's own toggle already has.
+ */
+describe('a subscriber who switched a reminder off', () => {
+  it('gets no Telegram and no web-push for that type', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: {
+        telegramId: 42n,
+        isBotBlocked: false,
+        name: 'Ann',
+        notificationPrefs: { expires_in_3_days: false },
+      },
+      template: { isActive: true, title: 'Через 3 дня', body: 'Скоро истекает.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.notifyUserCalls, []);
+    assert.deepStrictEqual(state.webPushCalls, []);
+  });
+
+  it('still gets the row in the cabinet feed', async () => {
+    // THE counterweight. An opt-out that also hid the notification would let
+    // somebody switch off "your subscription ended" and then have no way to
+    // learn that it did.
+    const state = createState({});
+    const service = createService(state, {
+      user: {
+        telegramId: 42n,
+        isBotBlocked: false,
+        name: 'Ann',
+        notificationPrefs: { expired: false },
+      },
+      template: { isActive: true, title: 'Закончилась', body: 'Подписка закончилась.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'expired', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.createCalls.length, 1);
+    assert.equal(state.createCalls[0].data.type, 'expired');
+  });
+
+  it('keeps receiving every type they did not switch off', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: {
+        telegramId: 42n,
+        isBotBlocked: false,
+        name: 'Ann',
+        notificationPrefs: { expires_in_3_days: false },
+      },
+      template: { isActive: true, title: 'Завтра', body: 'Истекает завтра.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_1_days', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.notifyUserCalls.length, 1);
+  });
+
+  it('cannot silence a support reply', async () => {
+    // Not in the mutable list, and it must never be: an opt-out there lets a
+    // customer switch off the answer to their own question.
+    const state = createState({});
+    const service = createService(state, {
+      user: {
+        telegramId: 42n,
+        isBotBlocked: false,
+        name: 'Ann',
+        notificationPrefs: { support_reply: false } as Record<string, boolean>,
+      },
+      template: { isActive: true, title: 'Поддержка', body: 'Ответ.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'support_reply', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.notifyUserCalls.length, 1);
+  });
+
+  it('sends everything to a subscriber who never opened the screen', async () => {
+    // The column is nullable and nearly every row has it null. Reading that
+    // as "opted out of everything" would silence the entire customer base.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: 'Ann', notificationPrefs: null },
+      template: { isActive: true, title: 'Через 3 дня', body: 'Скоро истекает.' },
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: {} });
+    await flushFanout();
+
+    assert.equal(state.notifyUserCalls.length, 1);
+  });
+});
