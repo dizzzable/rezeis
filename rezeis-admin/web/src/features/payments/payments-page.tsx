@@ -2,7 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { truncate } from '@/lib/utils'
+import { activeLocale, truncate } from '@/lib/utils'
 import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import { Card, CardContent } from '@/components/ui/card'
@@ -14,7 +14,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DatePicker } from '@/components/ui/date-picker'
-import { PermissionGate } from '@/features/rbac'
+import { PermissionGate } from '@/features/rbac'
+
 import { useTabSync } from '@/lib/use-tab-sync'
 import { ReconciliationHealthCard } from './reconciliation-health-card'
 import { WebhookReplayControl } from './webhook-replay-control'
@@ -316,8 +317,8 @@ function TransactionsTab() {
                     <TableCell className="text-xs uppercase">{tx.gatewayType}</TableCell>
                     <TableCell className="font-mono text-sm">{tx.amount ?? '—'} {tx.currency}</TableCell>
                     <TableCell className="text-xs">{tx.planSnapshot?.name ?? '—'}</TableCell>
-                    <TableCell><Badge variant="outline" className="text-xs">{tx.purchaseType}</Badge></TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{new Date(tx.createdAt).toLocaleString()}</TableCell>
+                    <TableCell><Badge variant="outline" className="text-xs">{t(`paymentsPage.purchaseTypes.${tx.purchaseType}`, { defaultValue: tx.purchaseType })}</Badge></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{new Date(tx.createdAt).toLocaleString(activeLocale())}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -431,7 +432,7 @@ function WebhooksTab() {
                     <TableCell className="text-xs uppercase">{ev.gatewayType}</TableCell>
                     <TableCell className="font-mono text-xs">{truncate(ev.providerEventId, 16)}</TableCell>
                     <TableCell><Badge variant="outline">{ev.status}</Badge></TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{new Date(ev.receivedAt).toLocaleString()}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{new Date(ev.receivedAt).toLocaleString(activeLocale())}</TableCell>
                     <TableCell className="text-right">
                       <WebhookReplayControl event={ev} />
                     </TableCell>
