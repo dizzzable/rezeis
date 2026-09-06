@@ -36,9 +36,20 @@ const notifications = {
 const createdUsers: string[] = [];
 const createdSectors: string[] = [];
 
-async function createUser(suffix: string): Promise<string> {
+/**
+ * A winner, in the language they read.
+ *
+ * The default is `EN` because that is the SCHEMA's default
+ * (`User.language @default(EN)`), so a user created without one really is
+ * English — which is why the prize copy below is English unless a case says
+ * otherwise. Spelling it out here stops the next reader assuming Russian from
+ * the surrounding wording.
+ */
+async function createUser(suffix: string, language: 'RU' | 'EN' = 'EN'): Promise<string> {
   const id = `${prefix}-${suffix}`;
-  await prisma.user.create({ data: { id, referralCode: `${id}-ref`, name: suffix } });
+  await prisma.user.create({
+    data: { id, referralCode: `${id}-ref`, name: suffix, language },
+  });
   createdUsers.push(id);
   return id;
 }
@@ -139,7 +150,9 @@ run('manual wheel prizes on PostgreSQL', () => {
       select: { userId: true, subject: true, status: true, messages: true },
     });
     assert.equal(ticket?.userId, userId);
-    assert.equal(ticket?.subject, 'Приз с колеса: Джекпот 1000 ₽');
+    // English, because this winner is: see `createUser`. The Russian case
+    // is the last one in this suite.
+    assert.equal(ticket?.subject, 'Wheel prize: Джекпот 1000 ₽');
     assert.equal(ticket?.status, 'OPEN');
     assert.equal(ticket?.messages.length, 1);
     assert.equal(ticket?.messages[0]?.authorType, 'SYSTEM');
@@ -255,7 +268,7 @@ run('manual wheel prizes on PostgreSQL', () => {
     assert.equal(messages.length, 2);
     assert.equal(messages[1]?.authorType, 'ADMIN');
     assert.equal(messages[1]?.authorId, 'admin-7');
-    assert.match(messages[1]?.content ?? '', /вручён/i);
+    assert.match(messages[1]?.content ?? '', /handed over/i);
     assert.deepEqual(announced, [{ ticketId: spin?.manualTicketId ?? '', userId }]);
   });
 
@@ -388,7 +401,30 @@ run('manual wheel prizes on PostgreSQL', () => {
       where: { id: ticketId ?? '' },
       select: { subject: true },
     });
-    assert.equal(ticket?.subject, 'Приз с колеса: Старое имя');
+    assert.equal(ticket?.subject, 'Wheel prize: Старое имя');
+  });
+
+  it('writes the thread in the winner’s own language', async () => {
+    // The half no test covered. The prize copy was hardcoded Russian until
+    // this release; now it follows `User.language`, and the only way to know
+    // it still does is to ask for the other language and look.
+    const userId = await createUser('russian', 'RU');
+    const sectorId = await createSector('russian-s', 'Джекпот', 'Вручить');
+    const spinId = await recordWin({
+      userId,
+      sectorId,
+      title: 'Джекпот',
+      instructions: 'Вручить',
+      key: 'russian-1',
+    });
+
+    const ticketId = await service.openTicket(spinId);
+    const ticket = await prisma.supportTicket.findUnique({
+      where: { id: ticketId ?? '' },
+      select: { subject: true, messages: { select: { content: true } } },
+    });
+    assert.equal(ticket?.subject, 'Приз с колеса: Джекпот');
+    assert.match(ticket?.messages[0]?.content ?? '', /Вы выиграли на колесе/);
   });
 
   it('shows the queue with the winner and the operator instructions', async () => {
