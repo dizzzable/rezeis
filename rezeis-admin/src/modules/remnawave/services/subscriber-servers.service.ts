@@ -73,15 +73,48 @@ export class SubscriberServersService {
       select: { internalSquads: true },
     });
 
-    if (!subscription || subscription.internalSquads.length === 0) {
+    if (!subscription) {
+      // Not this user's, or deleted. A stale page explains it, so it is quiet.
+      this.explain(subscriptionId, {
+        level: 'debug',
+        reason: 'no such subscription for this user (deleted, or not theirs)',
+      });
+      return { servers: [], recommendedServerId: null };
+    }
+    if (subscription.internalSquads.length === 0) {
+      this.explain(subscriptionId, explainEmpty([], EMPTY_SNAPSHOT));
       return { servers: [], recommendedServerId: null };
     }
 
     const snapshot = await this.readSnapshot();
+    // `readSnapshot` has already warned with the upstream error, which says
+    // more than anything this could add.
     if (!snapshot) return { servers: [], recommendedServerId: null };
 
     const servers = buildServers(subscription.internalSquads, snapshot);
+    if (servers.length === 0) {
+      this.explain(subscriptionId, explainEmpty(subscription.internalSquads, snapshot));
+    }
     return { servers, recommendedServerId: pickRecommended(servers) };
+  }
+
+  /**
+   * Says why the customer is looking at an empty screen.
+   *
+   * The line that was missing. An empty list has seven distinct causes and
+   * exactly one appearance, so an operator reporting "it shows no servers"
+   * handed us nothing to work with -- which is how a mapper reading the wrong
+   * field survived a release.
+   *
+   * The level comes from the reason rather than being fixed here, because
+   * `SystemLogsService` floors at `log` in production: a broken link has to be
+   * `warn` to reach the Logs page at all, and a plan the operator deliberately
+   * left without squads has to stay below it, or the channel becomes noise.
+   */
+  private explain(subscriptionId: string, { level, reason }: EmptyReason): void {
+    const line = `Empty server list for subscription ${subscriptionId}: ${reason}`;
+    if (level === 'warn') this.logger.warn(line);
+    else this.logger.debug(line);
   }
 
   /**
@@ -134,6 +167,9 @@ const SNAPSHOT_CACHE_KEY = 'remnawave:subscriber-servers:snapshot';
  */
 const SNAPSHOT_TTL_SECONDS = 20;
 
+/** For the reason given before a snapshot has been read. */
+const EMPTY_SNAPSHOT: PanelSnapshot = { hosts: [], nodes: [], squads: [] };
+
 interface PanelSnapshot {
   readonly hosts: readonly RemnawaveHostInterface[];
   readonly nodes: readonly RemnawaveNodeInterface[];
@@ -151,13 +187,8 @@ export function buildServers(
   squadUuids: readonly string[],
   snapshot: PanelSnapshot,
 ): readonly SubscriberServerInterface[] {
-  const wanted = new Set(squadUuids);
-  const reachableInbounds = new Set<string>();
-  for (const squad of snapshot.squads) {
-    if (!wanted.has(squad.uuid)) continue;
-    for (const inbound of squad.inboundUuids) reachableInbounds.add(inbound);
-  }
-  if (reachableInbounds.size === 0) return [];
+  const reachedBy = squadsByInbound(squadUuids, snapshot.squads);
+  if (reachedBy.size === 0) return [];
 
   const nodesByUuid = new Map(snapshot.nodes.map((node) => [node.uuid, node]));
 
@@ -167,13 +198,129 @@ export function buildServers(
       // one of their servers — the list says "available", and showing an
       // unreachable entry as merely "offline" would be a different claim.
       if (host.isHidden || host.isDisabled) return false;
-      return (
-        host.configProfileInboundUuid !== null &&
-        reachableInbounds.has(host.configProfileInboundUuid)
-      );
+      if (host.configProfileInboundUuid === null) return false;
+      const squads = reachedBy.get(host.configProfileInboundUuid);
+      if (squads === undefined) return false;
+      // Reaching the inbound is not enough: the host can opt out of individual
+      // squads, and Remnawave then leaves it out of THOSE squads' configs. It
+      // belongs in this list while at least one squad that got the customer
+      // here still carries it -- a customer in two squads keeps a host the
+      // second one excludes.
+      const excluded = new Set(host.excludedInternalSquads);
+      for (const squad of squads) {
+        if (!excluded.has(squad)) return true;
+      }
+      return false;
     })
     .sort((a, b) => a.viewPosition - b.viewPosition)
     .map((host) => describeHost(host, nodesByUuid));
+}
+
+export interface EmptyReason {
+  /**
+   * `debug` for a state the operator chose, `warn` for a link that is broken.
+   *
+   * The split is the difference between "your plan has no squads, so this
+   * screen is empty on purpose" and "no host on this panel names an inbound",
+   * and it matters because `SystemLogsService` floors at `log` in production:
+   * anything `debug` never reaches the Logs page, and anything `warn` reaches
+   * it on every install without the operator changing a setting.
+   */
+  readonly level: 'debug' | 'warn';
+  readonly reason: string;
+}
+
+/**
+ * Which link of the chain came up empty, in one sentence.
+ *
+ * Reads left to right along subscription -> squads -> inbounds -> hosts and
+ * stops at the first break, because the first break explains every one after
+ * it. Counts rather than identifiers: this goes to a log an operator reads,
+ * and host UUIDs would tell them nothing they could act on.
+ *
+ * Exported for the spec, and pure for the same reason as its neighbours.
+ */
+export function explainEmpty(
+  squadUuids: readonly string[],
+  snapshot: PanelSnapshot,
+): EmptyReason {
+  if (squadUuids.length === 0) {
+    // The operator's own doing: a plan with no squads.
+    return { level: 'debug', reason: 'the subscription has no squads (check the plan)' };
+  }
+  if (snapshot.squads.length === 0) {
+    return { level: 'warn', reason: 'the panel returned no internal squads at all' };
+  }
+  const known = snapshot.squads.filter((squad) => squadUuids.includes(squad.uuid));
+  if (known.length === 0) {
+    return {
+      level: 'warn',
+      reason: `none of the ${squadUuids.length} squad(s) on the subscription exist in the panel`,
+    };
+  }
+  const reachable = new Set(known.flatMap((squad) => [...squad.inboundUuids]));
+  if (reachable.size === 0) {
+    return { level: 'warn', reason: `${known.length} squad(s) matched but carry no inbounds` };
+  }
+  if (snapshot.hosts.length === 0) {
+    return { level: 'warn', reason: 'the panel returned no hosts' };
+  }
+  const linked = snapshot.hosts.filter((host) => host.configProfileInboundUuid !== null);
+  if (linked.length === 0) {
+    // The shipped regression, in one line. Nobody configures this.
+    return {
+      level: 'warn',
+      reason: `none of the ${snapshot.hosts.length} host(s) name an inbound`,
+    };
+  }
+  const matching = linked.filter(
+    (host) =>
+      host.configProfileInboundUuid !== null &&
+      reachable.has(host.configProfileInboundUuid),
+  );
+  if (matching.length === 0) {
+    return {
+      level: 'warn',
+      reason: `${linked.length} linked host(s), none on the ${reachable.size} inbound(s) these squads reach`,
+    };
+  }
+  const visible = matching.filter((host) => !host.isHidden && !host.isDisabled);
+  if (visible.length === 0) {
+    // Deliberate again: hiding and disabling are buttons the operator pressed.
+    return {
+      level: 'debug',
+      reason: `${matching.length} matching host(s), all hidden or disabled`,
+    };
+  }
+  return {
+    level: 'debug',
+    reason: `${visible.length} matching host(s), all excluded from these squads`,
+  };
+}
+
+/**
+ * Inbound UUID -> the customer's own squads that reach it.
+ *
+ * A flat set of inbound UUIDs would do if a host could not opt out of a squad.
+ * It can (`excludedInternalSquads`), so "may this customer use this host"
+ * depends on WHICH squad brought them to its inbound, and the answer has to
+ * survive as far as the filter.
+ */
+function squadsByInbound(
+  squadUuids: readonly string[],
+  squads: readonly RemnawaveInternalSquadDetailInterface[],
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const wanted = new Set(squadUuids);
+  const reachedBy = new Map<string, Set<string>>();
+  for (const squad of squads) {
+    if (!wanted.has(squad.uuid)) continue;
+    for (const inbound of squad.inboundUuids) {
+      const existing = reachedBy.get(inbound);
+      if (existing) existing.add(squad.uuid);
+      else reachedBy.set(inbound, new Set([squad.uuid]));
+    }
+  }
+  return reachedBy;
 }
 
 function describeHost(

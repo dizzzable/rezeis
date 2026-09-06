@@ -7,6 +7,7 @@ import { RemnawaveInternalSquadDetailInterface } from '../src/modules/remnawave/
 import { mapInternalSquadDetails } from '../src/modules/remnawave/services/remnawave-squad-mappers';
 import {
   buildServers,
+  explainEmpty,
   pickRecommended,
 } from '../src/modules/remnawave/services/subscriber-servers.service';
 import {
@@ -46,6 +47,7 @@ const host = (over: Partial<RemnawaveHostInterface> = {}): RemnawaveHostInterfac
   configProfileUuid: 'profile-1',
   configProfileInboundUuid: 'inbound-de',
   nodes: ['node-de'],
+  excludedInternalSquads: [],
   ...over,
 });
 
@@ -159,6 +161,57 @@ describe('which servers a subscription reaches', () => {
       ],
     });
     assert.deepEqual(servers.map((s) => s.id), ['mine']);
+  });
+
+  it('drops a host that is excluded from the only squad that reaches it', () => {
+    // Remnawave leaves such a host out of that squad's config entirely, so the
+    // customer cannot connect to it. Reaching its inbound is not the whole
+    // question -- which is why the filter carries the squads, not just a set
+    // of inbound uuids.
+    const servers = buildServers(['squad-eu'], {
+      hosts: [
+        host({ uuid: 'open' }),
+        host({ uuid: 'opted-out', excludedInternalSquads: ['squad-eu'] }),
+      ],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['open']);
+  });
+
+  it('keeps a host excluded from one squad when another of the customer’s squads carries it', () => {
+    // Two squads, one inbound, one exclusion. The host is in the second
+    // squad's config, the customer is in both, so they can use it -- and a
+    // filter that only asked "is this host excluded anywhere" would take it
+    // away from them.
+    const servers = buildServers(['squad-eu', 'squad-eu-2'], {
+      hosts: [host({ uuid: 'shared', excludedInternalSquads: ['squad-eu'] })],
+      nodes: [node()],
+      squads: [squad(), squad({ uuid: 'squad-eu-2' })],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['shared']);
+  });
+
+  it('ignores an exclusion aimed at a squad the customer is not in', () => {
+    const servers = buildServers(['squad-eu'], {
+      hosts: [host({ uuid: 'mine', excludedInternalSquads: ['squad-someone-else'] })],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['mine']);
+  });
+
+  it('drops a host with no inbound at all', () => {
+    // What every host looked like until the mapper was fixed: see
+    // `remnawave-host-mapper.spec.ts`, which guards the cause. This guards the
+    // consequence -- an unlinked host is not a server anybody can reach, and
+    // must not be listed as one just because the field is empty.
+    const servers = buildServers(['squad-eu'], {
+      hosts: [host({ uuid: 'linked' }), host({ uuid: 'unlinked', configProfileInboundUuid: null })],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['linked']);
   });
 
   it('returns nothing when the subscription has no squads', () => {
@@ -359,5 +412,81 @@ describe('what must never reach a customer', () => {
     assert.ok(!(serialized).includes('SECRET-PUBLIC-KEY'));
     assert.ok(!(serialized).includes('rawInbound'));
     assert.ok(!(serialized).includes('VLESS-DE'));
+  });
+});
+
+describe('why the list came back empty', () => {
+  // Seven causes, one sentence on the customer's screen. Until this existed an
+  // operator reporting "no servers" handed us nothing, which is exactly how a
+  // mapper reading the wrong field survived a release.
+  const snapshot = (over: {
+    hosts?: RemnawaveHostInterface[];
+    nodes?: RemnawaveNodeInterface[];
+    squads?: RemnawaveInternalSquadDetailInterface[];
+  } = {}) => ({
+    hosts: over.hosts ?? [host()],
+    nodes: over.nodes ?? [node()],
+    squads: over.squads ?? [squad()],
+  });
+
+  it('blames the plan when the subscription carries no squads, quietly', () => {
+    const { level, reason } = explainEmpty([], snapshot());
+    assert.match(reason, /no squads/);
+    // A choice, not a fault: warning here on every double tap would teach the
+    // operator to ignore the channel.
+    assert.equal(level, 'debug');
+  });
+
+  it('blames the panel when it returned no squads at all', () => {
+    assert.deepEqual(explainEmpty(['squad-eu'], snapshot({ squads: [] })).level, 'warn');
+    assert.match(explainEmpty(['squad-eu'], snapshot({ squads: [] })).reason, /no internal squads/);
+  });
+
+  it('says so when the subscription names squads the panel does not have', () => {
+    const { level, reason } = explainEmpty(['squad-gone'], snapshot());
+    assert.match(reason, /none of the 1 squad/);
+    assert.equal(level, 'warn');
+  });
+
+  it('says so when the matched squads carry no inbounds', () => {
+    const { level, reason } = explainEmpty(
+      ['squad-eu'],
+      snapshot({ squads: [squad({ inboundUuids: [] })] }),
+    );
+    assert.match(reason, /carry no inbounds/);
+    assert.equal(level, 'warn');
+  });
+
+  it('names the case that shipped: hosts that name no inbound', () => {
+    // The regression itself. Had this sentence existed, the report would have
+    // been a five-second read instead of a bisect through seven candidates.
+    const { level, reason } = explainEmpty(['squad-eu'], snapshot({
+      hosts: [host({ configProfileInboundUuid: null }), host({ configProfileInboundUuid: null })],
+    }));
+    assert.match(reason, /none of the 2 host\(s\) name an inbound/);
+    // And it must be loud. `SystemLogsService` floors at `log` in production,
+    // so a `debug` here would be discarded on exactly the install that needed
+    // it -- which is the whole reason this line exists.
+    assert.equal(level, 'warn');
+  });
+
+  it('distinguishes linked hosts that simply sit elsewhere', () => {
+    const { level, reason } = explainEmpty(['squad-eu'], snapshot({
+      hosts: [host({ configProfileInboundUuid: 'inbound-us' })],
+    }));
+    assert.match(reason, /none on the 1 inbound/);
+    assert.equal(level, 'warn');
+  });
+
+  it('distinguishes hidden from excluded, because the fix differs', () => {
+    const hidden = explainEmpty(['squad-eu'], snapshot({ hosts: [host({ isHidden: true })] }));
+    assert.match(hidden.reason, /all hidden or disabled/);
+    const excluded = explainEmpty(['squad-eu'], snapshot({
+      hosts: [host({ excludedInternalSquads: ['squad-eu'] })],
+    }));
+    assert.match(excluded.reason, /all excluded/);
+    // Both are buttons the operator pressed, so neither shouts.
+    assert.equal(hidden.level, 'debug');
+    assert.equal(excluded.level, 'debug');
   });
 });
