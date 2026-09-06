@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Get,
   Header,
+  HttpCode,
   HttpException,
   HttpStatus,
   NotFoundException,
@@ -14,7 +15,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { SupportTicket, SupportTicketMessage } from '@prisma/client';
+import { SupportTicket, SupportTicketMessage, SupportTicketStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
@@ -23,6 +24,8 @@ import {
 } from '../../../common/services/system-events.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
+import { UploadAttachmentDto } from '../dto/attachment.dto';
+import { AttachmentValidationError } from '../utils/support-attachment.util';
 import { SupportAttachmentService } from '../services/support-attachment.service';
 import { SupportTicketsService } from '../services/support-tickets.service';
 
@@ -144,6 +147,69 @@ export class InternalUserSupportController {
     return serializeTicket(await this.supportTicketsService.getById(created.id));
   }
 
+  /**
+   * Attach a file to the customer's own ticket.
+   *
+   * ── Why this did not exist ───────────────────────────────────────────
+   *
+   * Every part of it did. The bytes are validated, sniffed and stored by
+   * `SupportAttachmentService`; the ANONYMOUS guest conversation has had an
+   * upload route since attachments shipped; the cabinet already renders and
+   * streams attachments. The one thing missing was this route — so a customer
+   * who had signed in could SEE files and never send one.
+   *
+   * The visible consequence was the document-request feature: an operator
+   * asks for a receipt, the customer opens the ticket, and there is nothing
+   * to press. The ask went out and nothing ever came back.
+   */
+  @Post(':userRef/tickets/:ticketId/attachments')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Attach a file to the user\'s own ticket' })
+  public async uploadAttachment(
+    @Param('userRef') userRef: string,
+    @Param('ticketId') ticketId: string,
+    @Body() body: UploadAttachmentDto,
+  ): Promise<SerializedTicket> {
+    const userId = await this.resolveUserId(userRef);
+    // Ownership first, and by the same read the reply route uses: an
+    // attachment is a write, and a write onto somebody else's thread must be
+    // impossible rather than merely unlikely.
+    const ticket = await this.prismaService.supportTicket.findFirst({
+      where: { id: ticketId, userId },
+      select: { id: true, status: true },
+    });
+    if (ticket === null) {
+      throw new NotFoundException('Support ticket not found');
+    }
+    if (ticket.status === SupportTicketStatus.CLOSED) {
+      // The cabinet hides the composer on a closed thread; refusing here is
+      // what makes that a rule rather than a suggestion.
+      throw new BadRequestException('Support ticket is closed');
+    }
+
+    try {
+      await this.supportAttachments.storeForMessage({
+        ticketId,
+        authorType: 'USER',
+        authorId: userId,
+        content: body.content,
+        filename: body.filename,
+        declaredMime: body.mimeType,
+        dataBase64: body.dataBase64,
+      });
+    } catch (err: unknown) {
+      throw mapAttachmentError(err);
+    }
+
+    this.systemEvents.info(
+      EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
+      'SUPPORT',
+      'Пользователь прикрепил файл в обращении',
+      { ticketId, userId },
+    );
+    return serializeTicket(await this.supportTicketsService.getById(ticketId));
+  }
+
   @Post(':userRef/tickets/:ticketId/reply')
   @ApiOperation({ summary: 'Append a user reply to the user\'s own ticket' })
   public async reply(
@@ -194,6 +260,7 @@ interface SerializedAttachment {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
+  readonly purgedAt?: Date | string | null;
   readonly createdAt: string;
 }
 
@@ -219,6 +286,7 @@ interface AttachmentRow {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
+  readonly purgedAt?: Date | string | null;
   readonly createdAt: Date;
 }
 
@@ -248,8 +316,23 @@ function serializeTicket(ticket: TicketWithMessages): SerializedTicket {
         filename: a.filename,
         mimeType: a.mimeType,
         sizeBytes: a.sizeBytes,
+        // Purged: the bytes are gone, the record is not. Both surfaces
+        // render this as «файл удалён» rather than a link that 404s.
+        purgedAt: a.purgedAt ?? null,
         createdAt: a.createdAt.toISOString(),
       })),
     })),
   };
+}
+
+/** Map attachment validation failures to 413 (oversize) / 415 (other). */
+function mapAttachmentError(err: unknown): HttpException {
+  if (err instanceof AttachmentValidationError) {
+    if (err.reason === 'too-large') {
+      return new HttpException('Attachment exceeds the size limit', HttpStatus.PAYLOAD_TOO_LARGE);
+    }
+    return new HttpException('Attachment type is not allowed', HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+  }
+  if (err instanceof HttpException) return err;
+  return new HttpException('Attachment could not be stored', HttpStatus.INTERNAL_SERVER_ERROR);
 }

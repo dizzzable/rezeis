@@ -1933,7 +1933,10 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
                     <Switch
                       checked={field.value}
                       onCheckedChange={field.onChange}
-                      disabled={!form.watch('enabled')}
+                      // `enabled` is already watched once for this form; a
+                      // second `watch()` inside the render is what the React
+                      // Compiler refuses to touch.
+                      disabled={!enabled}
                     />
                   </FormControl>
                 </FormItem>

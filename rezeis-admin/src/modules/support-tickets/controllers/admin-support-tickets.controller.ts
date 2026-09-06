@@ -9,6 +9,7 @@ import {
   HttpCode,
   HttpException,
   HttpStatus,
+  Logger,
   NotFoundException,
   Param,
   ParseIntPipe,
@@ -59,6 +60,8 @@ import { AttachmentValidationError } from '../utils/support-attachment.util';
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @Controller('admin/support-tickets')
 export class AdminSupportTicketsController {
+  private readonly logger = new Logger(AdminSupportTicketsController.name);
+
   public constructor(
     private readonly supportTicketsService: SupportTicketsService,
     private readonly blockedIdentityService: BlockedIdentityService,
@@ -239,7 +242,64 @@ export class AdminSupportTicketsController {
   ): Promise<unknown> {
     await this.supportTicketsService.close({ ticketId, closedBy: admin.id });
     await this.audit(admin, req, 'support_ticket.close', { ticketId });
+
+    // Reclaim the disk, when the operator has asked for that.
+    //
+    // Off unless switched on, and deliberately so: erasing a customer's
+    // evidence on a schedule nobody watches is not a default anybody should
+    // inherit. Best-effort — a ticket that closed and then failed to purge is
+    // a ticket that closed, and turning that into a 500 would leave the
+    // operator pressing the button again on an already-closed thread.
+    const limits = await this.settingsService.getSupportLimits();
+    if (limits.purgeAttachmentsOnClose) {
+      try {
+        const result = await this.supportAttachments.purgeForTicket(ticketId);
+        if (result.purged > 0) {
+          await this.audit(admin, req, 'support_ticket.attachments_purged', {
+            ticketId,
+            purged: result.purged,
+            freedBytes: result.freedBytes,
+            reason: 'on-close',
+          });
+        }
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Attachment purge on close failed for ticket ${ticketId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     return serializeTicket(await this.supportTicketsService.getById(ticketId));
+  }
+
+  /**
+   * Delete the files on this ticket now, without waiting for a close.
+   *
+   * `delete` rather than `resolve`: this destroys bytes a customer sent, and
+   * that is a different decision from marking a conversation finished. The
+   * rows stay — the thread goes on saying what was sent and when.
+   */
+  @Post(':ticketId/attachments/purge')
+  @RequirePermission('support_tickets', 'delete')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete the stored files of this ticket, keeping the record' })
+  public async purgeAttachments(
+    @Param('ticketId') ticketId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ): Promise<unknown> {
+    if (await this.supportTicketsService.isArchived(ticketId)) {
+      await this.assertArchivePermission(admin);
+    }
+    const result = await this.supportAttachments.purgeForTicket(ticketId);
+    await this.audit(admin, req, 'support_ticket.attachments_purged', {
+      ticketId,
+      purged: result.purged,
+      freedBytes: result.freedBytes,
+      reason: 'manual',
+    });
+    return { purged: result.purged, freedBytes: result.freedBytes };
   }
 
   /**
@@ -552,6 +612,7 @@ type AttachmentRow = {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
+  readonly purgedAt?: Date | string | null;
   readonly createdAt: Date;
 };
 
@@ -682,6 +743,9 @@ function serializeTicket(ticket: TicketWithRelations): Record<string, unknown> {
         filename: a.filename,
         mimeType: a.mimeType,
         sizeBytes: a.sizeBytes,
+        // Purged: the bytes are gone, the record is not. Both surfaces
+        // render this as «файл удалён» rather than a link that 404s.
+        purgedAt: a.purgedAt ?? null,
         createdAt: a.createdAt,
       })),
     })),

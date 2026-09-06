@@ -1394,6 +1394,7 @@ export class SettingsService {
         guestTokenTtlHours: input.patch.guestTokenTtlHours,
         attachmentMaxMb: input.patch.attachmentMaxMb,
         attachmentMaxPerMsg: input.patch.attachmentMaxPerMsg,
+        purgeAttachmentsOnClose: input.patch.purgeAttachmentsOnClose,
         turnstileSiteKey: input.patch.turnstileSiteKey,
         turnstileSecretEnc: secretEnc,
       });

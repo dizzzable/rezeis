@@ -241,6 +241,7 @@ interface GuestTicketEntity {
       readonly filename: string;
       readonly mimeType: string;
       readonly sizeBytes: number;
+      readonly purgedAt?: Date | string | null;
     }>;
   }>;
 }
@@ -250,6 +251,7 @@ interface SerializedGuestAttachment {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
+  readonly purgedAt?: Date | string | null;
 }
 
 interface SerializedGuestTicket {
@@ -295,6 +297,9 @@ function serializeGuestTicket(ticket: unknown): SerializedGuestTicket {
         filename: a.filename,
         mimeType: a.mimeType,
         sizeBytes: a.sizeBytes,
+        // Purged: the bytes are gone, the record is not. Both surfaces
+        // render this as «файл удалён» rather than a link that 404s.
+        purgedAt: a.purgedAt ?? null,
       })),
     })),
   };

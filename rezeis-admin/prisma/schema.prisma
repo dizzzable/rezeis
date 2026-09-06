@@ -3782,6 +3782,11 @@ model SupportAttachment {
   mimeType   String   @map("mime_type")
   sizeBytes  Int      @map("size_bytes")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// When the BYTES were deleted to reclaim disk. The row survives on
+  /// purpose: a thread whose file chip simply vanished reads as a bug, and
+  /// what was sent, by whom and when is the part worth keeping. A purged
+  /// attachment never streams — it renders as "файл удалён".
+  purgedAt   DateTime? @map("purged_at") @db.Timestamptz(3)
 
   message SupportTicketMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
 

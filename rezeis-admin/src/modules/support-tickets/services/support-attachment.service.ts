@@ -105,6 +105,71 @@ export class SupportAttachmentService {
   }
 
   /**
+   * Delete the BYTES of every attachment on a ticket, keeping the rows.
+   *
+   * ── Why the rows survive ─────────────────────────────────────────────
+   *
+   * A chip that simply vanishes from a conversation reads as a bug, and the
+   * facts worth keeping — what was sent, by whom, when, how big — cost
+   * nothing to keep. `purgedAt` is what lets both surfaces say «файл удалён»
+   * instead of showing a link that 404s. The disk, which is the whole point,
+   * is freed either way.
+   *
+   * Idempotent: a second purge finds nothing left to unlink and stamps
+   * nothing new. Files are removed one by one rather than by dropping the
+   * directory, so a stray file that belongs to no row is left alone rather
+   * than silently taken with them.
+   */
+  public async purgeForTicket(
+    ticketId: string,
+  ): Promise<{ readonly purged: number; readonly freedBytes: number }> {
+    const attachments = await this.prismaService.supportAttachment.findMany({
+      where: { message: { ticketId }, purgedAt: null },
+      select: { id: true, storedName: true, sizeBytes: true },
+    });
+    if (attachments.length === 0) return { purged: 0, freedBytes: 0 };
+
+    const base = path.resolve(resolveAttachmentsDir(), sanitizeSegment(ticketId));
+    let freedBytes = 0;
+    const purgedIds: string[] = [];
+
+    for (const attachment of attachments) {
+      const filePath = path.resolve(base, attachment.storedName);
+      // The same containment check the stream path makes: a stored name is a
+      // random token and cannot escape, but this is the one place that
+      // DELETES, so it verifies rather than assumes.
+      if (filePath !== base && !filePath.startsWith(base + path.sep)) continue;
+      try {
+        await fs.rm(filePath, { force: true });
+        freedBytes += attachment.sizeBytes;
+        purgedIds.push(attachment.id);
+      } catch (err: unknown) {
+        // One unlink that failed must not abandon the rest, and must not
+        // stamp a row whose bytes are still on disk — the stamp is what tells
+        // both surfaces the file is gone.
+        this.logger.warn(
+          `Could not remove attachment ${attachment.id} of ticket ${ticketId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    if (purgedIds.length > 0) {
+      await this.prismaService.supportAttachment.updateMany({
+        where: { id: { in: purgedIds } },
+        data: { purgedAt: new Date() },
+      });
+    }
+    // The ticket directory, only when it is empty. `rmdir` refuses a
+    // non-empty one, which is the behaviour wanted: anything left belongs to
+    // a row this purge did not touch.
+    await fs.rmdir(base).catch(() => undefined);
+
+    return { purged: purgedIds.length, freedBytes };
+  }
+
+  /**
    * Open a read stream for an attachment that belongs to `ticketId`.
    * Returns `null` when the attachment is unknown, not on this ticket, or
    * missing on disk — callers translate that to a uniform 404.
@@ -114,7 +179,11 @@ export class SupportAttachmentService {
     attachmentId: string,
   ): Promise<AttachmentStream | null> {
     const attachment = await this.prismaService.supportAttachment.findFirst({
-      where: { id: attachmentId, message: { ticketId } },
+      // `purgedAt: null` is part of the lookup, not a check after it: a purged
+      // row keeps its name and size so the thread can say what was there, and
+      // a stream that fell through to the disk would answer with whatever
+      // happened to be written at that path next.
+      where: { id: attachmentId, message: { ticketId }, purgedAt: null },
       select: { storedName: true, mimeType: true, filename: true, sizeBytes: true },
     });
     if (attachment === null) return null;

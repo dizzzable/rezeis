@@ -14,6 +14,7 @@ export interface StoredSupportSettings {
   guestTokenTtlHours?: number;
   attachmentMaxMb?: number;
   attachmentMaxPerMsg?: number;
+  purgeAttachmentsOnClose?: boolean;
   turnstileSiteKey?: string;
   turnstileSecretEnc?: string;
 }
@@ -24,6 +25,7 @@ export interface SupportSettingsView {
   readonly guestTokenTtlHours: number;
   readonly attachmentMaxMb: number;
   readonly attachmentMaxPerMsg: number;
+  readonly purgeAttachmentsOnClose: boolean;
   readonly turnstileSiteKey: string;
   readonly turnstileConfigured: boolean;
 }
@@ -34,6 +36,15 @@ export interface SupportLimits {
   readonly guestTokenTtlHours: number;
   readonly attachmentMaxBytes: number;
   readonly attachmentMaxPerMsg: number;
+  /**
+   * Delete the FILES of a ticket's attachments when it is closed.
+   *
+   * Off by default, and it must stay off by default: switching it on erases a
+   * customer's evidence on a schedule nobody is watching, and an install that
+   * upgrades into the option never agreed to that. The rows survive either
+   * way — only the bytes go.
+   */
+  readonly purgeAttachmentsOnClose: boolean;
 }
 
 const DEFAULT_TTL_HOURS = 72;
@@ -57,6 +68,7 @@ function effective(stored: StoredSupportSettings): {
   guestTokenTtlHours: number;
   attachmentMaxMb: number;
   attachmentMaxPerMsg: number;
+  purgeAttachmentsOnClose: boolean;
   turnstileSiteKey: string;
 } {
   return {
@@ -73,6 +85,9 @@ function effective(stored: StoredSupportSettings): {
       typeof stored.attachmentMaxPerMsg === 'number'
         ? stored.attachmentMaxPerMsg
         : envInt('SUPPORT_ATTACHMENT_MAX_PER_MSG', DEFAULT_MAX_PER_MSG),
+    // No env fallback: an operator who never opened the screen has not asked
+    // for their customers' files to be erased.
+    purgeAttachmentsOnClose: stored.purgeAttachmentsOnClose === true,
     turnstileSiteKey:
       typeof stored.turnstileSiteKey === 'string'
         ? stored.turnstileSiteKey
@@ -88,6 +103,7 @@ export function toSupportSettingsView(stored: StoredSupportSettings): SupportSet
     guestTokenTtlHours: e.guestTokenTtlHours,
     attachmentMaxMb: e.attachmentMaxMb,
     attachmentMaxPerMsg: e.attachmentMaxPerMsg,
+    purgeAttachmentsOnClose: e.purgeAttachmentsOnClose,
     turnstileSiteKey: e.turnstileSiteKey,
     turnstileConfigured:
       (typeof stored.turnstileSecretEnc === 'string' && stored.turnstileSecretEnc.length > 0) ||
@@ -102,6 +118,7 @@ export function toSupportLimits(stored: StoredSupportSettings): SupportLimits {
     guestTokenTtlHours: e.guestTokenTtlHours,
     attachmentMaxBytes: e.attachmentMaxMb * 1024 * 1024,
     attachmentMaxPerMsg: e.attachmentMaxPerMsg,
+    purgeAttachmentsOnClose: e.purgeAttachmentsOnClose,
   };
 }
 
@@ -110,6 +127,7 @@ export interface SupportSettingsPatch {
   guestTokenTtlHours?: number;
   attachmentMaxMb?: number;
   attachmentMaxPerMsg?: number;
+  purgeAttachmentsOnClose?: boolean;
   turnstileSiteKey?: string;
   /** Plaintext secret to encrypt (caller supplies the cipher); '' clears it. */
   turnstileSecretEnc?: string | null;

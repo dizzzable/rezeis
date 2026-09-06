@@ -29,6 +29,11 @@ export class UpdateSupportSettingsDto {
   @Max(20)
   public readonly attachmentMaxPerMsg?: number;
 
+  /** Delete attachment FILES when a ticket is closed. Off unless asked for. */
+  @IsOptional()
+  @IsBoolean()
+  public readonly purgeAttachmentsOnClose?: boolean;
+
   @IsOptional()
   @IsString()
   @MaxLength(200)

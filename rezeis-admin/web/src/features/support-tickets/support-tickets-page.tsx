@@ -10,6 +10,7 @@ import {
   Loader2,
   LifeBuoy,
   Paperclip,
+  FileX,
   FileText,
   UserX,
   ShieldAlert,
@@ -52,6 +53,12 @@ interface TicketAttachment {
   filename: string;
   mimeType: string;
   sizeBytes: number;
+  /**
+   * Set once the files were reclaimed. The row survives on purpose — a chip
+   * that simply vanished from a thread reads as a bug, and what was sent, by
+   * whom and when is worth keeping. A purged attachment never streams.
+   */
+  purgedAt?: string | null;
 }
 
 interface TicketMessage {
@@ -264,6 +271,32 @@ export default function SupportTicketsPage() {
    * is the refusal, and it costs an operator reading the conversation and
    * deciding. Hence a button, and hence the confirmation.
    */
+  /**
+   * Reclaim the disk for one ticket.
+   *
+   * `delete` rather than `resolve`: this destroys bytes a customer sent, and
+   * that is a different decision from marking a conversation finished. The
+   * thread keeps saying what was attached and when — only the files go.
+   */
+  const purgeAttachmentsMutation = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<{ purged: number; freedBytes: number }>(
+          `/admin/support-tickets/${selectedTicket}/attachments/purge`,
+        )
+      ).data,
+    onSuccess: (result) => {
+      invalidate();
+      toast.success(
+        t('supportTicketsPage.toast.attachmentsPurged', {
+          count: result.purged,
+          size: formatFreedBytes(result.freedBytes),
+        }),
+      );
+    },
+    onError: () => toast.error(t('supportTicketsPage.toast.attachmentsPurgeFailed')),
+  });
+
   const silenceMutation = useMutation({
     mutationFn: () => api.post(`/admin/support-tickets/${selectedTicket}/silence-device`),
     onSuccess: () => {
@@ -397,6 +430,14 @@ export default function SupportTicketsPage() {
                 if (!window.confirm(t('supportTicketsPage.detail.silenceConfirm'))) return
                 silenceMutation.mutate()
               }}
+              onPurgeAttachments={() => {
+                // Confirmed, because it cannot be undone and the customer sent
+                // those files once. The message says how many go.
+                if (!window.confirm(t('supportTicketsPage.detail.purgeConfirm'))) return
+                purgeAttachmentsMutation.mutate()
+              }}
+              purgePending={purgeAttachmentsMutation.isPending}
+              canPurge={hasPermission('support_tickets', 'delete')}
               onChanged={invalidate}
             />
           ) : null}
@@ -491,6 +532,9 @@ interface TicketDetailProps {
   onClose: () => void;
   onReopen: () => void;
   onSilenceDevice: () => void;
+  onPurgeAttachments: () => void;
+  purgePending: boolean;
+  canPurge: boolean;
   onChanged: () => void;
 }
 
@@ -503,8 +547,19 @@ function TicketDetail({
   onClose,
   onReopen,
   onSilenceDevice,
+  onPurgeAttachments,
+  purgePending,
+  canPurge,
   onChanged,
 }: TicketDetailProps) {
+  // Attachments that still hold bytes. A purged one keeps its row, so counting
+  // rows would offer the button forever on a ticket already reclaimed.
+  const liveAttachments = ticket.messages.reduce(
+    (total, message) =>
+      total + (message.attachments ?? []).filter((att) => !att.purgedAt).length,
+    0,
+  );
+
   const { t } = useTranslation();
   const guest = isGuest(ticket);
   const blobUrls = useAttachmentBlobs(ticket.id, ticket.messages);
@@ -661,6 +716,27 @@ function TicketDetail({
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {statusBadge(ticket.status, t)}
+            {/*
+              Only when there is something to reclaim, and only for a role
+              allowed to destroy it. Offering a button that can do nothing is
+              the pattern this codebase has paid for before.
+            */}
+            {canPurge && liveAttachments > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onPurgeAttachments}
+                disabled={purgePending}
+                title={t('supportTicketsPage.detail.purgeHint')}
+              >
+                {purgePending ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <FileX className="h-4 w-4 mr-1" />
+                )}
+                {t('supportTicketsPage.detail.purge', { count: liveAttachments })}
+              </Button>
+            )}
             {!isClosed ? (
               <Button variant="ghost" size="sm" onClick={onClose}>
                 <X className="h-4 w-4 mr-1" /> {t('supportTicketsPage.detail.close')}
@@ -763,6 +839,24 @@ function MessageBubble({
         {message.attachments && message.attachments.length > 0 && (
           <div className="mt-2 space-y-1">
             {message.attachments.map((att) => {
+              if (att.purgedAt) {
+                return (
+                  <div
+                    key={att.id}
+                    className={cn(
+                      'flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs',
+                      isAdmin ? 'bg-black/15' : 'bg-muted',
+                      'text-muted-foreground',
+                    )}
+                  >
+                    <FileX className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{att.filename}</span>
+                    <span className="shrink-0 opacity-70">
+                      {t('supportTicketsPage.detail.attachmentPurged')}
+                    </span>
+                  </div>
+                )
+              }
               // A screenshot the customer just sent is the point of the whole
               // reply; making the operator download it to see it was the bug.
               const preview = blobUrls.get(att.id)
@@ -975,6 +1069,7 @@ interface SupportConfig {
   guestTokenTtlHours: number;
   attachmentMaxMb: number;
   attachmentMaxPerMsg: number;
+  purgeAttachmentsOnClose: boolean;
   turnstileSiteKey: string;
   turnstileConfigured: boolean;
 }
@@ -1011,6 +1106,7 @@ function SupportConfigDialog({
         guestTokenTtlHours: value.guestTokenTtlHours,
         attachmentMaxMb: value.attachmentMaxMb,
         attachmentMaxPerMsg: value.attachmentMaxPerMsg,
+        purgeAttachmentsOnClose: value.purgeAttachmentsOnClose,
         turnstileSiteKey: value.turnstileSiteKey,
       };
       // Only send the secret when the operator typed one (empty = keep as-is).
@@ -1090,6 +1186,28 @@ function SupportConfigDialog({
               </div>
             </div>
 
+            {/*
+              Off unless switched on, and it must stay that way: this erases a
+              customer's evidence on a schedule nobody is watching, and an
+              install that upgrades into the option never agreed to it. The
+              description says out loud what survives.
+            */}
+            <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
+              <div className="pr-3">
+                <Label htmlFor="support-purge-on-close" className="font-medium">
+                  {t('supportTicketsPage.config.purgeOnClose')}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('supportTicketsPage.config.purgeOnCloseHint')}
+                </p>
+              </div>
+              <Switch
+                id="support-purge-on-close"
+                checked={draft.purgeAttachmentsOnClose}
+                onCheckedChange={(next) => patch({ purgeAttachmentsOnClose: next })}
+              />
+            </div>
+
             <div className="space-y-1.5">
               <Label htmlFor="support-site-key">{t('supportTicketsPage.config.turnstileSiteKey')}</Label>
               <Input
@@ -1140,4 +1258,11 @@ function SupportConfigDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/** Freed disk in the largest unit that still reads as a number, not a wall. */
+function formatFreedBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
