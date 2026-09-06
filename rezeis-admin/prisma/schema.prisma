@@ -4482,8 +4482,15 @@ enum QuestType {
   SUBSCRIBE_CHANNEL
   PARTNER_TASK
   /// Installed the cabinet as an app and opened it once. Detected from
-  /// `User.pwaInstalledAt`, which the cabinet's own surface report stamps
-  /// server-side — the client asserts nothing.
+  /// `User.pwaInstalledAt`, stamped when the cabinet reports its surface.
+  ///
+  /// SELF-ATTESTED, and it has to be: standalone display-mode is a fact only
+  /// the browser holds, so `surface` arrives in the request body and the panel
+  /// merely clamps it to one of three words. A client that posts `pwa` gets
+  /// the stamp without installing anything — which was harmless while this was
+  /// analytics and is not once a reward hangs on it. Cap the payout with
+  /// `maxCompletionsGlobal` and keep the reward proportionate; do not treat
+  /// this as proof of an install.
   INSTALL_PWA
   CUSTOM
 }

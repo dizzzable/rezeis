@@ -126,6 +126,7 @@ export const ru = {
       next: 'Дальше',
       page: '{{page}} из {{pages}}',
       loadFailed: 'Не удалось загрузить список пользователей',
+      forbidden: 'Список пользователей требует права users:view — в нём имена и Telegram ID. Обратитесь к владельцу панели.',
     },
     utm: {
       title: 'Разрез по utm-меткам',

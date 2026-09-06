@@ -272,10 +272,15 @@ export class PaymentWebhookOpsService {
     }
     const state = await runPaymentWebhookReplayJobStateInspectionWithTimeout(() => job.getState());
     if (state === null) {
-      // The inspection timed out or the job vanished mid-read. Treating it as
-      // absent keeps the old behaviour, and the enqueue below is idempotent
-      // on the pending states anyway.
-      return 'absent';
+      // The job IS there — `getJob` just returned it — and only its state could
+      // not be read. Calling that 'absent' is the original defect: `queue.add`
+      // then hands back the retained job, nothing runs, and the operator is
+      // told the replay was scheduled. 'retained' is the safe reading, because
+      // freeing the id first is harmless in every case it might really be in:
+      // a finished job is exactly what should be cleared; a running one refuses
+      // removal, and the enqueue after it is then a no-op on work already in
+      // flight; a waiting one is replaced by an identical waiting one.
+      return 'retained';
     }
     if (
       state === 'waiting' ||

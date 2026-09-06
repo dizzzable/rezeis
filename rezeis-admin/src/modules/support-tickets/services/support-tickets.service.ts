@@ -191,7 +191,20 @@ export class SupportTicketsService {
           orderBy: { createdAt: 'asc' },
           include: {
             attachments: {
-              select: { id: true, filename: true, mimeType: true, sizeBytes: true, createdAt: true },
+              // `purgedAt` belongs here or the whole reclaim feature is
+              // invisible: this is the ONLY loader behind all three detail
+              // surfaces, every serializer writes `a.purgedAt ?? null` over
+              // the row, and an unselected column is simply absent — so the
+              // wire said `null` for every attachment, no tombstone ever
+              // rendered, and the purge button never stopped offering itself.
+              select: {
+                id: true,
+                filename: true,
+                mimeType: true,
+                sizeBytes: true,
+                purgedAt: true,
+                createdAt: true,
+              },
               orderBy: { createdAt: 'asc' },
             },
           },
@@ -341,10 +354,33 @@ export class SupportTicketsService {
     //
     // Writing the same status back when nothing transitions is deliberate:
     // `@updatedAt` fires on the update, so one statement serves both.
-    await this.prismaService.supportTicket.update({
-      where: { id: input.ticketId },
+    //
+    // But the status in hand was read before the message was created, and a
+    // `close()` can commit inside that window — an operator pressing Close
+    // while the customer's reply is in flight is not exotic. A plain write
+    // would then put the ticket back to OPEN while `closedAt`, `closedBy` and
+    // `archivedAt` stayed set: archived by one query, active by another, and
+    // present in neither list correctly. So compare-and-swap on the status we
+    // actually read.
+    const moved = await this.prismaService.supportTicket.updateMany({
+      where: { id: input.ticketId, status: ticket.status },
       data: { status: nextTicketStatus(ticket.status, input.authorType) },
     });
+    if (moved.count === 0) {
+      // Somebody moved it. Decide again from what is stored now — a message
+      // arriving on a just-closed ticket leaves it closed — and touch the row
+      // either way, because the sort order still has to follow the reply.
+      const fresh = await this.prismaService.supportTicket.findUnique({
+        where: { id: input.ticketId },
+        select: { status: true },
+      });
+      if (fresh !== null) {
+        await this.prismaService.supportTicket.update({
+          where: { id: input.ticketId },
+          data: { status: nextTicketStatus(fresh.status, input.authorType) },
+        });
+      }
+    }
     // A user/guest reply satisfies the oldest still-pending document request
     // on the ticket (fulfillment "by a message" — the operator can still
     // cancel or ask again). SYSTEM/ADMIN messages never fulfill.

@@ -102,11 +102,38 @@ export type SubscriberMutableNotificationType =
  * who opens the app should still find out their subscription ended.
  */
 export function isSubscriberNotificationEnabled(prefs: unknown, type: string): boolean {
-  if (!(SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES as readonly string[]).includes(type)) {
-    return true;
-  }
+  // Canonicalize FIRST, exactly as the operator gate above does. An event
+  // fired under a legacy alias (`subscription_expiring_3d` and friends)
+  // renders fine, because `fetchTemplate` canonicalizes too — so without this
+  // the alias would sail past a switch the subscriber had turned off, and the
+  // one delivery a person explicitly asked to stop is the one that arrives.
+  const key = resolveToggleKey(type);
+  if (!isSubscriberMutableType(key)) return true;
   if (prefs === null || typeof prefs !== 'object' || Array.isArray(prefs)) return true;
-  return (prefs as Record<string, unknown>)[type] !== false;
+  return (prefs as Record<string, unknown>)[key] !== false;
+}
+
+/** Whether `key` is one of the switches a subscriber owns. Canonical keys only. */
+function isSubscriberMutableType(key: string): boolean {
+  return (SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES as readonly string[]).includes(key);
+}
+
+/**
+ * Whether a notification of `type` may be sent to a customer's INBOX.
+ *
+ * Deliberately the same closed list the subscriber's switches are built from,
+ * and that is the whole point: most addresses on file were given to sign in,
+ * not to hear from the product. Mail is the one channel a person cannot
+ * dismiss with a swipe, so the product may only use it for messages the
+ * recipient can also switch off — anything else is a letter with no "stop"
+ * on the other end of it.
+ *
+ * Without this the operator's single `notifyUsers` switch opened the inbox to
+ * every active template — cashback, referrals, promo codes, partner payouts,
+ * placement approvals — while the cabinet offered a way to stop exactly five.
+ */
+export function isSubscriberMailableType(type: string): boolean {
+  return isSubscriberMutableType(resolveToggleKey(type));
 }
 
 /**

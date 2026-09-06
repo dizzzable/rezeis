@@ -293,6 +293,7 @@ describe('SettingsController', () => {
       },
       iconColorMode: 'default',
       iconColors: {},
+      iconDecor: {},
       borderRadius: '1rem',
       cornerRadii: { cardPx: 24, itemPx: 14, pillPx: 9999 },
       fontFamily: 'Inter',

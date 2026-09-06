@@ -499,16 +499,26 @@ export class InternalUserEdgeService {
     if (user === null) {
       throw new NotFoundException('User not found');
     }
-    // Narrowed on the way in as well as on the way out: the body comes from a
-    // browser, and a column nobody reads is still a column somebody filled.
-    const next = {
-      ...readSubscriberNotificationPrefs(user.notificationPrefs),
-      ...readSubscriberNotificationPrefs(patch),
-    };
+    // The INCOMING patch is narrowed — the body comes from a browser, and a
+    // column nobody reads is still a column somebody filled. What is already
+    // STORED is not: rezeis runs installs on different panel versions, and
+    // narrowing the base to the switches THIS build knows would delete a newer
+    // panel's switch the first time the subscriber touched any switch on an
+    // older one. A key this build cannot read is still that person's answer.
+    const stored =
+      user.notificationPrefs !== null &&
+      typeof user.notificationPrefs === 'object' &&
+      !Array.isArray(user.notificationPrefs)
+        ? (user.notificationPrefs as Record<string, unknown>)
+        : {};
+    const accepted = readSubscriberNotificationPrefs(patch);
+    const persisted = { ...stored, ...accepted };
     await this.prismaService.user.update({
       where: { id: userId },
-      data: { notificationPrefs: next as Prisma.InputJsonObject },
+      data: { notificationPrefs: persisted as Prisma.InputJsonObject },
     });
+    // The RESPONSE is narrowed again: the cabinet only draws what it knows.
+    const next = { ...readSubscriberNotificationPrefs(stored), ...accepted };
     return { prefs: next, available: [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES] };
   }
 

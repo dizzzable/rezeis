@@ -1168,7 +1168,11 @@ function SupportConfigDialog({
                   id="support-max-mb"
                   type="number"
                   min={1}
-                  max={50}
+                  // 7, not 50. A file rides as base64 inside a JSON body and
+                  // the panel's parser stops at 10 MB, so anything above about
+                  // 7.5 is refused by a parser that runs before any of this
+                  // code and knows nothing about the number typed here.
+                  max={7}
                   value={draft.attachmentMaxMb}
                   onChange={(e) => patch({ attachmentMaxMb: Number(e.target.value) })}
                 />

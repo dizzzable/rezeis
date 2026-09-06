@@ -16,17 +16,28 @@ function makeService(cfg: {
   /** What the row looks like after an inline settle, or `null` for refused. */
   settled?: Record<string, unknown> | null;
 }): QuestQueryService {
+  let wrote = false;
   const prisma = {
     user: {
       findUnique: async () => cfg.user,
       count: async () => (cfg.eligible === false ? 0 : 1),
     },
     quest: { findMany: async () => cfg.quests },
+    // The settled row appears only AFTER a write. Handing it back
+    // unconditionally fabricated the after-state: delete the
+    // `completeForUser` call the inline settle is made of and every case here
+    // stayed green while the customer's quest never completed.
     questCompletion: {
       findMany: async () => cfg.completions,
-      findUnique: async () => cfg.settled ?? null,
-      create: async () => ({ id: 'qc-1' }),
-      update: async () => ({ id: 'qc-1' }),
+      findUnique: async () => (wrote ? (cfg.settled ?? null) : null),
+      create: async () => {
+        wrote = true;
+        return { id: 'qc-1' };
+      },
+      update: async () => {
+        wrote = true;
+        return { id: 'qc-1' };
+      },
     },
   };
   const progress = new QuestProgressService(prisma as never);

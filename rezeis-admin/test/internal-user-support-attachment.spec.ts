@@ -28,6 +28,8 @@ import { AttachmentValidationError } from '../src/modules/support-tickets/utils/
 interface Recorded {
   readonly stored: Array<Record<string, unknown>>;
   readonly events: Array<{ type: string; metadata: Record<string, unknown> }>;
+  /** Every `where` the ownership read was asked with. */
+  readonly ticketQueries: Array<Record<string, unknown>>;
 }
 
 const TICKET = {
@@ -45,12 +47,26 @@ function build(opts: {
   /** Thrown by the store, to exercise the error mapping. */
   readonly storeThrows?: unknown;
 } = {}) {
-  const calls: Recorded = { stored: [], events: [] };
+  const calls: Recorded = { stored: [], events: [], ticketQueries: [] };
   const prismaService = {
     user: { findFirst: async () => ({ id: 'u-1' }), findUnique: async () => ({ id: 'u-1' }) },
     supportTicket: {
-      findFirst: async () =>
-        opts.owned === undefined ? { id: 't-1', status: 'OPEN' } : opts.owned,
+      // The double HONOURS the `where`, and that is the whole point of it.
+      // Answering the same row whatever it is asked makes the ownership clause
+      // unobservable: delete `userId` from the query and every assertion here
+      // still passes, while in production any signed-in customer can upload
+      // into any ticket whose id they can guess. A `where` nobody asserts is a
+      // `where` nobody is guarding.
+      findFirst: async (args: { where: { id: string; userId?: string } }) => {
+        calls.ticketQueries.push(args.where);
+        const row = opts.owned === undefined ? { id: 't-1', status: 'OPEN' } : opts.owned;
+        if (row === null) return null;
+        if (args.where.id !== row.id) return null;
+        // The ticket belongs to `u-1`. A query that does not ask whose it is
+        // gets nothing, because that query is the defect.
+        if (args.where.userId !== 'u-1') return null;
+        return row;
+      },
     },
   };
   const supportTicketsService = {
@@ -114,6 +130,17 @@ describe('InternalUserSupportController.uploadAttachment', () => {
     assert.equal(calls.stored.length, 0);
   });
 
+  it('asks whose ticket it is, not merely whether it exists', async () => {
+    // The refusal above proves `null` becomes a 404. It does NOT prove the
+    // query narrows by owner — a lookup by id alone returns the row just the
+    // same, and the 404 never fires. So assert the clause itself.
+    const { controller, calls } = build();
+    await controller.uploadAttachment('42', 't-1', BODY);
+    assert.equal(calls.ticketQueries.length, 1);
+    assert.equal(calls.ticketQueries[0].userId, 'u-1');
+    assert.equal(calls.ticketQueries[0].id, 't-1');
+  });
+
   it('refuses a closed ticket', async () => {
     // The cabinet hides the composer on a closed thread; this is what makes
     // that a rule rather than a component's opinion.
@@ -126,7 +153,7 @@ describe('InternalUserSupportController.uploadAttachment', () => {
     // The two refusals a person can act on. Collapsed into 500 they become
     // "something went wrong", which is how somebody gives up on sending it.
     const { controller } = build({
-      storeThrows: new AttachmentValidationError('too-large', 'too big'),
+      storeThrows: new AttachmentValidationError('too-large'),
     });
     await assert.rejects(
       () => controller.uploadAttachment('42', 't-1', BODY),
@@ -136,7 +163,7 @@ describe('InternalUserSupportController.uploadAttachment', () => {
 
   it('answers 415 for a type that is not accepted', async () => {
     const { controller } = build({
-      storeThrows: new AttachmentValidationError('type-not-allowed', 'nope'),
+      storeThrows: new AttachmentValidationError('type-not-allowed'),
     });
     await assert.rejects(
       () => controller.uploadAttachment('42', 't-1', BODY),

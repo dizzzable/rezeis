@@ -88,6 +88,10 @@ describe('SupportTicketsService archive lifecycle', () => {
     const updates: Array<Record<string, unknown>> = [];
     const prisma = {
       supportTicket: {
+        // `addMessage` swaps the status conditionally now, so the row is
+        // touched through `updateMany` — without it here the call throws and
+        // the feature under test quietly becomes a no-op.
+        updateMany: async () => ({ count: 1 }),
         findUnique: async ({ select }: { select?: Record<string, unknown> }) => {
           if (select && 'archivedAt' in select) {
             return { archivedAt: new Date(), status: 'CLOSED' };

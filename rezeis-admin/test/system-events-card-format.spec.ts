@@ -433,6 +433,14 @@ describe('an alert whose facts live only in its metadata', () => {
 
     const card = getLastText() ?? '';
     assert.match(card, /DE/, 'the country is missing');
+    // Once, not twice. `countryCodeToFlag` returns the flag AND the code, so
+    // appending the code beside it printed «Страна: 🇩🇪 DE DE» — which a bare
+    // `/DE/` cannot see.
+    assert.equal(
+      (card.match(/\bDE\b/g) ?? []).length,
+      1,
+      'the country code is printed more than once',
+    );
     assert.match(card, /73/, 'the share is missing');
     assert.match(card, /219/, 'the head count is missing');
     assert.match(card, /300/, 'the total is missing');
@@ -491,9 +499,15 @@ describe('an alert whose facts live only in its metadata', () => {
     await flush();
 
     const card = getLastText() ?? '';
-    assert.match(card, /block/, 'the action is missing');
-    assert.match(card, /12/, 'the success count is missing');
-    assert.match(card, /15/, 'the total is missing');
+    // The BLOCK, not the word. `/block/` alone is satisfied by the
+    // `<blockquote>` every card emits, and `/12/` and `/15/` collide with the
+    // rendered timestamp — three assertions that could not fail. Pin the
+    // heading and the line the operator actually reads.
+    assert.match(card, /👥 <b>Массовая операция:<\/b>/, 'the bulk block is missing');
+    assert.match(card, /Действие: <code>block<\/code>/, 'the action is missing');
+    assert.match(card, /Успешно: 12 из 15/, 'the success ratio is missing');
+    assert.match(card, /Ошибок: 2/, 'the failure count is missing');
+    assert.match(card, /Пропущено: 1/, 'the skipped count is missing');
   });
 
   it('leaves a clean bulk run without an error line', async () => {

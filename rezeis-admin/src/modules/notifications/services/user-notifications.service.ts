@@ -14,9 +14,11 @@ import { TelegramDirectQueueService } from './telegram-direct-queue.service';
 import { NotificationTemplatesService } from './notification-templates.service';
 import {
   isNotificationDeliveryEnabled,
+  isSubscriberMailableType,
   isSubscriberNotificationEnabled,
   resolveToggleKey,
 } from '../utils/notification-toggle.util';
+import { renderBroadcastEmailText } from '../../broadcast/utils/broadcast-email-html.util';
 import {
   coerceNotificationLocale,
   resolveTemplateButtons,
@@ -596,28 +598,8 @@ export class UserNotificationsService {
       // (support replies, hints, operator messages) already put real copy in
       // the payload, and their `body` is Telegram HTML — writing that into a
       // field the feed prints would trade a blank card for one full of tags.
-      if (rendered !== null && template !== null) {
+      if (rendered !== null && template !== null && !cabinetLocalizesItself(input.type)) {
         await this.persistRenderedCopy(input.eventId, input.payload, rendered);
-      }
-
-      // ── Email, when the operator asked for it ──────────────────────────
-      //
-      // Gated on THREE things, and each one is a promise to somebody:
-      //
-      //  * `notifyUsers` — the operator's own switch, off by default. Most
-      //    addresses on file were given for signing in; their owners never
-      //    asked to hear from the product in their inbox.
-      //  * a TEMPLATE render — never a `preRenderedText` send. Broadcasts have
-      //    an email leg of their own and would otherwise arrive twice; support
-      //    replies are answered by the support mailer; an operator's one-off
-      //    message is a Telegram/push action.
-      //  * a VERIFIED address. An unverified one belongs to whoever typed it,
-      //    which is not necessarily the customer.
-      //
-      // The subscriber's own switch is already honoured: it returns above,
-      // before any channel runs.
-      if (rendered !== null && template !== null) {
-        await this.deliverEmail(input.userId, input.type, rendered, input.eventId);
       }
 
       // Telegram bot fanout — only for users who haven't blocked us and whose
@@ -677,6 +659,31 @@ export class UserNotificationsService {
           // sends the push without a badge rather than not sending the push.
           ...(badgeCount === undefined ? {} : { badgeCount }),
         });
+      }
+
+      // LAST of the channels, deliberately: where no mail queue is
+      // configured the sender falls through to a live SMTP handshake with
+      // no timeout of its own, and in front of the Telegram and push legs
+      // that puts one slow mail server between a subscriber and the
+      // notification they actually look at.
+      // ── Email, when the operator asked for it ──────────────────────────
+      //
+      // Gated on THREE things, and each one is a promise to somebody:
+      //
+      //  * `notifyUsers` — the operator's own switch, off by default. Most
+      //    addresses on file were given for signing in; their owners never
+      //    asked to hear from the product in their inbox.
+      //  * a TEMPLATE render — never a `preRenderedText` send. Broadcasts have
+      //    an email leg of their own and would otherwise arrive twice; support
+      //    replies are answered by the support mailer; an operator's one-off
+      //    message is a Telegram/push action.
+      //  * a VERIFIED address. An unverified one belongs to whoever typed it,
+      //    which is not necessarily the customer.
+      //
+      // The subscriber's own switch is already honoured: it returns above,
+      // before any channel runs.
+      if (rendered !== null && template !== null) {
+        await this.deliverEmail(input.userId, input.type, rendered, input.eventId);
       }
 
       // Operator mirror — when the operator enabled "mirror user
@@ -969,6 +976,10 @@ export class UserNotificationsService {
   ): Promise<void> {
     try {
       if (this.emailDelivery === undefined) return;
+      // Before the settings read, not after: this rejects most types, and an
+      // install that never mails should not pay a `Settings` query per
+      // notification to find that out.
+      if (!isSubscriberMailableType(type)) return;
       const config = await this.emailDelivery.getSmtpSettings();
       if (!config.enabled || !config.notifyUsers) return;
 
@@ -985,7 +996,10 @@ export class UserNotificationsService {
         templateType: type,
         variables: {},
         rawHtml: rendered.html,
-        text: rendered.body,
+        // The body is a template render, and 28 of the catalogue's bodies carry
+        // `<b>` — so the plain-text alternative was shipping raw tags to the
+        // one reader whose client refused the HTML part.
+        text: renderBroadcastEmailText(null, rendered.body),
         dedupeKey: `notify:${eventId}`,
       });
     } catch (err: unknown) {
@@ -1224,4 +1238,21 @@ function resolveNotificationPushUrl(type: string): string {
   if (t.includes('referral') || t.includes('partner')) return '/referrals';
   if (t.includes('broadcast') || t.includes('news')) return '/settings/notifications/feed';
   return '/dashboard';
+}
+
+/**
+ * Whether the cabinet builds this card's words itself.
+ *
+ * The expiry family carries `daysLeft` and `planName` and no text at all, and
+ * the cabinet composes the sentence from them in the language the reader is
+ * looking at RIGHT NOW. Writing a render into the row would put one language
+ * there permanently — the very thing `renderFromTemplate` refuses to do a few
+ * hundred lines above, and a regression for a subscriber who later switches
+ * the cabinet to the other language.
+ *
+ * The types this patch actually set out to fix ("Трафик исчерпан", cashback,
+ * partner payouts) have no such presenter and keep the stored copy.
+ */
+function cabinetLocalizesItself(type: string): boolean {
+  return type.toLowerCase().includes('expir');
 }

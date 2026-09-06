@@ -78,7 +78,7 @@ export const en = {
       utmEmpty:
         'No marks. They exist only for people who reached the site through a link carrying utm parameters. Arrivals from the Telegram bot or the Mini App never have them — there the source is the ad placement, shown below.',
       utmFromPlacement:
-        'No marks: this user arrived from Telegram, which carries no utm parameters. The source is in the Acquisition block below.',
+        'No marks, but the source is known: the ad placement is shown in the Acquisition block below. Arrivals from the Telegram bot or the Mini App never carry marks at all — see "Registration channel".',
       adTitle: 'Advertising first-touch',
       adHint: 'Immutable acquisition from ad_<code> deep-link (bot / Mini App).',
       adEmpty: 'No advertising placement attributed.',

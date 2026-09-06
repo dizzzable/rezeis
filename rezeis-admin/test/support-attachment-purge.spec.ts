@@ -32,18 +32,39 @@ interface Recorded {
   readonly unlinked: string[];
   readonly stamped: Array<readonly string[]>;
   readonly rmdir: string[];
+  /** Every `where` the purge and the stream were asked with. */
+  readonly queries: Array<Record<string, unknown>>;
 }
+
+/** One row on ticket `t-1`, purged already — the stream must never find it. */
+const PURGED_ROW = { id: 'a-9', storedName: 'cccc.png', sizeBytes: 10, purgedAt: new Date() };
 
 function buildService(opts: {
   readonly attachments: Array<{ id: string; storedName: string; sizeBytes: number }>;
   /** Stored names whose unlink throws. */
   readonly failing?: readonly string[];
 }) {
-  const calls: Recorded = { unlinked: [], stamped: [], rmdir: [] };
+  const calls: Recorded = { unlinked: [], stamped: [], rmdir: [], queries: [] };
   const prisma = {
     supportAttachment: {
-      findMany: async () => opts.attachments,
-      findFirst: async () => null,
+      // The double HONOURS the `where`. Answering the same rows whatever it is
+      // asked makes the scoping unobservable, and the scoping is the whole
+      // safety of this operation: widen `where` to `{}` and the purge stamps
+      // EVERY unpurged attachment in the database — `fs.rm({force:true})` does
+      // not throw on a path that is not there, so every one of them is counted
+      // as freed — while the bytes of other tickets stay on disk and their
+      // threads start claiming the files were deleted.
+      findMany: async (args: { where: Record<string, unknown> }) => {
+        calls.queries.push(args.where);
+        const scope = args.where['message'] as { ticketId?: string } | undefined;
+        if (scope?.ticketId !== 't-1') return [];
+        if (args.where['purgedAt'] !== null) return [...opts.attachments, PURGED_ROW];
+        return opts.attachments;
+      },
+      findFirst: async (args: { where: Record<string, unknown> }) => {
+        calls.queries.push(args.where);
+        return null;
+      },
       updateMany: async (args: { where: { id: { in: string[] } } }) => {
         calls.stamped.push(args.where.id.in);
         return { count: args.where.id.in.length };
@@ -154,6 +175,26 @@ describe('SupportAttachmentService.purgeForTicket', () => {
       await service.purgeForTicket('t-1');
       assert.equal(calls.rmdir.length, 1);
       assert.ok(calls.rmdir[0].includes('t-1'), calls.rmdir[0]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('a purged attachment never streams again', () => {
+  it('asks for it by ticket AND by not-yet-purged', () => {
+    // Named as must-not-go-wrong #2 at the top of this file and guarded by
+    // nothing until now. `purgedAt: null` belongs INSIDE the lookup: a purged
+    // row keeps its stored name, so a stream that fell through to the path
+    // would serve whatever happens to be written there next — and a lookup
+    // scoped only by id would hand a customer another ticket's file.
+    const { service, calls, restore } = buildService({ attachments: [] });
+    try {
+      void service.streamForTicket('t-1', 'a-9');
+      const where = calls.queries[calls.queries.length - 1] ?? {};
+      assert.equal(where['purgedAt'], null, 'a purged row must not be findable by the stream');
+      assert.equal(where['id'], 'a-9');
+      assert.deepEqual(where['message'], { ticketId: 't-1' });
     } finally {
       restore();
     }

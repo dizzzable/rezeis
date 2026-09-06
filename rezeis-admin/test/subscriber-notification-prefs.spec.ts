@@ -28,10 +28,28 @@ import {
 
 function buildService(stored: unknown) {
   const updates: Array<Record<string, unknown>> = [];
+  const writeWheres: Array<Record<string, unknown>> = [];
+  const selects: Array<Record<string, unknown>> = [];
   const prisma = {
     user: {
-      findUnique: async () => ({ id: 'u-1', notificationPrefs: stored }),
-      update: async (args: { data: Record<string, unknown> }) => {
+      // Honours `select`, because the read is half the gate: drop
+      // `notificationPrefs: true` and the column is simply absent, every
+      // subscriber reads as "never chose anything", and all five switches stop
+      // working while nothing throws.
+      findUnique: async (args: {
+        where: Record<string, unknown>;
+        select?: Record<string, unknown>;
+      }) => {
+        selects.push(args.select ?? {});
+        const row: Record<string, unknown> = { id: 'u-1' };
+        if (args.select?.['notificationPrefs'] === true) row['notificationPrefs'] = stored;
+        return row;
+      },
+      update: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        // The write's `where` is recorded separately: addressing the wrong row
+        // overwrites another customer's switches, and a double that ignores it
+        // cannot tell the two apart.
+        writeWheres.push(args.where);
         updates.push(args.data);
         return { id: 'u-1' };
       },
@@ -44,7 +62,7 @@ function buildService(stored: unknown) {
     { info: () => undefined } as never,
     {} as never,
   );
-  return { service, updates };
+  return { service, updates, writeWheres, selects };
 }
 
 describe('reading a subscriber switch', () => {
@@ -156,5 +174,28 @@ describe('the internal preferences route', () => {
     const { service } = buildService({ expired: false });
     const result = await service.updateNotificationPrefs('42', 'nonsense');
     assert.deepEqual(result.prefs, { expired: false });
+  });
+});
+
+describe('the queries behind the switches', () => {
+  it('reads the column it is about to merge into', async () => {
+    // Without `select: { notificationPrefs: true }` the merge base is
+    // `undefined`, every stored answer reads as absent, and the screen quietly
+    // reverts to sending everything while nothing throws.
+    const { service, selects } = buildService({ expired: false });
+    await service.getNotificationPrefs('42');
+    assert.ok(
+      selects.some((select) => select['notificationPrefs'] === true),
+      'the preferences column is not being read',
+    );
+  });
+
+  it('writes to the resolved user, not to the reference it was handed', async () => {
+    // `42` is a telegram id; `u-1` is the row. Writing by the reference would
+    // land on whichever row happened to match it.
+    const { service, writeWheres } = buildService({});
+    await service.updateNotificationPrefs('42', { expired: false });
+    assert.equal(writeWheres.length, 1);
+    assert.deepEqual(writeWheres[0], { id: 'u-1' });
   });
 });

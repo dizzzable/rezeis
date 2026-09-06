@@ -48,7 +48,22 @@ export interface SupportLimits {
 }
 
 const DEFAULT_TTL_HOURS = 72;
-const DEFAULT_MAX_MB = 10;
+/**
+ * The largest attachment the transport can actually carry, in MB.
+ *
+ * A file rides as base64 inside a JSON body, which costs 4 bytes per 3, and
+ * the panel's own body parser stops at 10 MB (`HTTP_BODY_PARSER_LIMIT`). So
+ * the real ceiling is 10 MiB x 3/4 minus the envelope ≈ 7.5 MiB, and every
+ * byte promised above it is a promise the stack cannot keep: the file is
+ * refused by a parser that runs before any of this code, with no reference to
+ * the number the operator typed.
+ *
+ * 7 is under that line with room for the envelope. Phone screenshots run
+ * 0.5–3 MB and receipts less, so nothing an operator asks a customer for is
+ * excluded by it.
+ */
+const MAX_SETTABLE_MB = 7;
+const DEFAULT_MAX_MB = MAX_SETTABLE_MB;
 const DEFAULT_MAX_PER_MSG = 5;
 
 function envInt(name: string, fallback: number): number {
@@ -148,10 +163,13 @@ export function mergeSupportSettings(
     next.guestTokenTtlHours = clampInt(patch.guestTokenTtlHours, 1, 8760, DEFAULT_TTL_HOURS);
   }
   if (patch.attachmentMaxMb !== undefined) {
-    next.attachmentMaxMb = clampInt(patch.attachmentMaxMb, 1, 50, DEFAULT_MAX_MB);
+    next.attachmentMaxMb = clampInt(patch.attachmentMaxMb, 1, MAX_SETTABLE_MB, DEFAULT_MAX_MB);
   }
   if (patch.attachmentMaxPerMsg !== undefined) {
     next.attachmentMaxPerMsg = clampInt(patch.attachmentMaxPerMsg, 1, 20, DEFAULT_MAX_PER_MSG);
+  }
+  if (patch.purgeAttachmentsOnClose !== undefined) {
+    next.purgeAttachmentsOnClose = patch.purgeAttachmentsOnClose;
   }
   if (patch.turnstileSiteKey !== undefined) {
     next.turnstileSiteKey = patch.turnstileSiteKey.trim();

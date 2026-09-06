@@ -292,9 +292,20 @@ function createService(
       },
     },
     user: {
-      findUnique: async (args: unknown) => {
+      // Honours `select`, like the `webAccount` double below. The fanout's
+      // subscriber gate reads `notificationPrefs` off this row; drop the field
+      // from the `select` and the column is simply absent, every subscriber
+      // reads as having chosen nothing, and all five switches stop working
+      // without a single error anywhere.
+      findUnique: async (args: { select?: Record<string, unknown> }) => {
         state.userFindCalls.push(args);
-        return input.user ?? null;
+        if (input.user === undefined || input.user === null) return null;
+        const select = args.select ?? {};
+        const row: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(input.user)) {
+          if (select[key] === true) row[key] = value;
+        }
+        return row;
       },
     },
     settings: {

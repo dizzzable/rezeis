@@ -260,7 +260,7 @@ interface SerializedAttachment {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
-  readonly purgedAt?: Date | string | null;
+  readonly purgedAt: Date | string | null;
   readonly createdAt: string;
 }
 
@@ -286,7 +286,9 @@ interface AttachmentRow {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
-  readonly purgedAt?: Date | string | null;
+  // Required, not optional: an optional field let a missing Prisma `select`
+  // compile clean and ship a feature that did nothing.
+  readonly purgedAt: Date | string | null;
   readonly createdAt: Date;
 }
 

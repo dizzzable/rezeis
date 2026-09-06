@@ -34,6 +34,10 @@ function build() {
 
   const prisma = {
     supportTicket: {
+      // `addMessage` swaps the status conditionally now, so the row is
+      // touched through `updateMany` — without it here the call throws and
+      // the feature under test quietly becomes a no-op.
+      updateMany: async () => ({ count: 1 }),
       findUnique: async () => ({ id: 'tkt1', status: 'OPEN' }),
       update: async () => ({}),
     },

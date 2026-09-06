@@ -2,13 +2,13 @@
   "comment": "DO NOT EDIT files in kit/ by hand — they are vendored from reiwa (web/src/features/media-viewer). Edit there, then: node scripts/sync-landing-kit.mjs",
   "sourceRepo": "dizzzable/reiwa",
   "sourcePath": "web/src/features/media-viewer",
-  "sourceCommit": "54bcbda1cee4efc1ebdea48a7256244941d2e2b7",
-  "syncedAt": "2026-09-02T18:44:18.258Z",
+  "sourceCommit": "9d13fc5e1e5e60157b6c05aef2c30568db48420b-dirty",
+  "syncedAt": "2026-09-06T10:46:55.591Z",
   "files": {
     "media-viewer-gestures.ts": "107ab21f6c1dfc2b8e8970abea9dae0164830acd4272bc7a315413959b3909d6",
     "media-viewer-item.ts": "602533e6ebe56c914b16639640343a387d055efe1b3504861eb9841366f39c14",
     "media-viewer-nav.ts": "dc02a1589013e4cd05bc59a83928c16f257791ca9aecc3137d516656407a222d",
     "media-viewer-zoom.ts": "5479834cbd859a6cfed3b936260c8595608f8a76cb9b7554e2ed5e24c0458fcf",
-    "support-attachments.ts": "c7d0f811467133f1239689af78710ea74591433d032f7b1399f5c9b5e65d6954"
+    "support-attachments.ts": "1759bf50ef1572a9e9f4770331ab46410654fe535953ed50727adc9c510043ed"
   }
 }

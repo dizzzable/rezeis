@@ -68,6 +68,10 @@ function build() {
       },
     },
     supportTicket: {
+      // `addMessage` swaps the status conditionally now, so the row is
+      // touched through `updateMany` — without it here the call throws and
+      // the feature under test quietly becomes a no-op.
+      updateMany: async () => ({ count: 1 }),
       update: async (args: { data: Record<string, unknown> }) => {
         ticketsCalls.ticketUpdates.push(args.data);
         return {};

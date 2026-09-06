@@ -126,6 +126,7 @@ export const en = {
       next: 'Next',
       page: '{{page}} of {{pages}}',
       loadFailed: 'Could not load the user list',
+      forbidden: 'The user list needs the users:view permission — it shows names and Telegram IDs. Ask the panel owner.',
     },
     utm: {
       title: 'UTM breakdown',

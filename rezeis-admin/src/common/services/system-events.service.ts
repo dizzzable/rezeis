@@ -1593,9 +1593,9 @@ export class SystemEventsService {
       lines.push('');
       lines.push('🌍 <b>Концентрация:</b>');
       const geoLines: string[] = [];
-      geoLines.push(
-        `🏴 Страна: ${countryCodeToFlag(meta['country'])} ${escapeHtml(meta['country'])}`,
-      );
+      // `countryCodeToFlag` already returns "🇩🇪 DE" — appending the code again
+      // printed «Страна: 🇩🇪 DE DE». The node block above uses it alone.
+      geoLines.push(`🏴 Страна: ${countryCodeToFlag(meta['country'])}`);
       geoLines.push(`📈 Доля онлайна: ${escapeHtml(meta['percentInCountry'])}%`);
       if (meta['usersInCountry'] !== undefined && meta['totalOnline'] !== undefined) {
         geoLines.push(

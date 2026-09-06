@@ -250,9 +250,14 @@ export class AdminSupportTicketsController {
     // inherit. Best-effort — a ticket that closed and then failed to purge is
     // a ticket that closed, and turning that into a 500 would leave the
     // operator pressing the button again on an already-closed thread.
-    const limits = await this.settingsService.getSupportLimits();
-    if (limits.purgeAttachmentsOnClose) {
-      try {
+    //
+    // The settings READ is inside the try as well. It reaches the database,
+    // and the close above is already committed — letting a settings hiccup
+    // throw here would answer 500 for a ticket that did close, which is the
+    // exact outcome the best-effort wrapper exists to avoid.
+    try {
+      const limits = await this.settingsService.getSupportLimits();
+      if (limits.purgeAttachmentsOnClose) {
         const result = await this.supportAttachments.purgeForTicket(ticketId);
         if (result.purged > 0) {
           await this.audit(admin, req, 'support_ticket.attachments_purged', {
@@ -262,13 +267,13 @@ export class AdminSupportTicketsController {
             reason: 'on-close',
           });
         }
-      } catch (err: unknown) {
-        this.logger.warn(
-          `Attachment purge on close failed for ticket ${ticketId}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
       }
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Attachment purge on close failed for ticket ${ticketId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
     return serializeTicket(await this.supportTicketsService.getById(ticketId));
   }
@@ -612,7 +617,9 @@ type AttachmentRow = {
   readonly filename: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
-  readonly purgedAt?: Date | string | null;
+  // Required, not optional: an optional field let a missing Prisma
+  // `select` compile clean and ship a feature that did nothing.
+  readonly purgedAt: Date | string | null;
   readonly createdAt: Date;
 };
 

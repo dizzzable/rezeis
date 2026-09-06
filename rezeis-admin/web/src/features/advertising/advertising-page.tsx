@@ -522,7 +522,7 @@ function PlacementUsers({ placementId, total }: { placementId: string; total: nu
   const [page, setPage] = useState(0)
   const PAGE_SIZE = 25
 
-  const { data, isLoading, isError, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['admin', 'advertising', 'placement-users', placementId, page],
     queryFn: () => getPlacementUsers(placementId, PAGE_SIZE, page * PAGE_SIZE),
     enabled: open,
@@ -545,6 +545,18 @@ function PlacementUsers({ placementId, total }: { placementId: string; total: nu
 
   if (isLoading && !data) return <Skeleton className="h-24 w-full" />
   if (isError || !data) {
+    // A refusal is not a failure, and a Retry button on one is a button that
+    // can never work. This list needs `users:view` on top of `advertising:view`
+    // — it prints names and Telegram ids — so a media-buyer role gets 403 by
+    // design and deserves to be told which permission is missing.
+    const status = (error as { response?: { status?: number } } | null)?.response?.status
+    if (status === 403) {
+      return (
+        <p className="text-[11px] text-muted-foreground">
+          {t('advertisingPage.users.forbidden')}
+        </p>
+      )
+    }
     return (
       <InlineError message={t('advertisingPage.users.loadFailed')} onRetry={() => void refetch()} />
     )

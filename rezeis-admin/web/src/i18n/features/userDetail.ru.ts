@@ -77,8 +77,12 @@ export const ru = {
       utmHint: 'Параметры из адреса страницы в момент регистрации.',
       utmEmpty:
         'Меток нет. Они появляются только у тех, кто пришёл на сайт по ссылке с utm-параметрами. У переходов из бота и мини-приложения Telegram меток не бывает — там источник это рекламная площадка, она показана ниже.',
+      // Says the source is known, WITHOUT naming a channel. The placement is
+      // stamped for browser registrations too, so "пришёл из Telegram"
+      // contradicted the "Канал регистрации: web" row fifty lines above it — and
+      // disguised a real utm loss on the web funnel as an expected case.
       utmFromPlacement:
-        'Меток нет: этот пользователь пришёл из Telegram, где utm-параметры не передаются. Источник — в блоке «Привлечение» ниже.',
+        'Меток нет, но источник известен: рекламное размещение показано в блоке «Привлечение» ниже. У переходов из бота и мини-приложения Telegram меток не бывает вовсе — см. «Канал регистрации».',
       adTitle: 'Рекламный first-touch',
       adHint: 'Неизменяемая атрибуция из deep-link ad_<код> (бот / Mini App).',
       adEmpty: 'Рекламное размещение не привязано.',

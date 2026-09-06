@@ -13,12 +13,12 @@ import {
   Upload,
   Send,
   Mail,
+  Download,
+  Megaphone,
   Users,
-  Rss,
   Gift,
   Star,
   Link2,
-  Smartphone,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -92,16 +92,25 @@ const REWARD_TYPES: QuestRewardType[] = ['POINTS', 'DAYS', 'PROMOCODE', 'DISCOUN
 const SUB_BUCKETS = ['ACTIVE', 'EXPIRED', 'TRIAL', 'LIMITED', 'NONE'] as const
 const PLATFORM_OPTS = ['telegram', 'miniapp', 'web'] as const
 const CONTACT_OPTS = ['hasTelegram', 'hasEmail', 'hasWebPush'] as const
+/**
+ * The picker, and it must draw what the SUBSCRIBER will see.
+ *
+ * These are a preview of the cabinet's own `PRESET_ICONS`, so a key that
+ * resolves to a different picture there makes the operator choose one icon and
+ * ship another. `channel` and `install` were exactly that — Rss and Smartphone
+ * here, Megaphone and Download in the cabinet. `quest-preset-icon-parity` pins
+ * the pair.
+ */
 const PRESET_ICONS: ReadonlyArray<{ key: string; icon: LucideIcon }> = [
   { key: 'telegram', icon: Send },
   { key: 'email', icon: Mail },
   { key: 'friends', icon: Users },
-  { key: 'channel', icon: Rss },
+  { key: 'channel', icon: Megaphone },
   { key: 'gift', icon: Gift },
   { key: 'star', icon: Star },
   { key: 'trophy', icon: Trophy },
   { key: 'link', icon: Link2 },
-  { key: 'install', icon: Smartphone },
+  { key: 'install', icon: Download },
 ]
 const PRESET_ICON_MAP = new Map(PRESET_ICONS.map((p) => [p.key, p.icon]))
 

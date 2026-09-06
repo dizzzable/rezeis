@@ -12,6 +12,10 @@ import type { SmtpSettingsInterface } from '../src/modules/email/interfaces/emai
 function cfg(partial: Partial<SmtpSettingsInterface>): SmtpSettingsInterface {
   return {
     enabled: true,
+    // Required on the interface, and deliberately off: this fixture is about
+    // the port -> encryption mapping, never about whether mail reaches a
+    // customer.
+    notifyUsers: false,
     host: 'smtp.example.com',
     port: 587,
     username: 'u',

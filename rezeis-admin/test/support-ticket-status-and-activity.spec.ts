@@ -29,7 +29,7 @@ interface Recorded {
   updates: Array<{ where: unknown; data: Record<string, unknown> }>;
 }
 
-function build(current: { status: string }) {
+function build(current: { status: string }, opts: { readonly movedUnderneath?: boolean } = {}) {
   const calls: Recorded = { createdTickets: [], createdMessages: [], updates: [] };
   const tx = {
     supportTicket: {
@@ -48,7 +48,24 @@ function build(current: { status: string }) {
   const prisma = {
     $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
     supportTicket: {
-      findUnique: async () => ({ id: 't-1', status: current.status }),
+      findUnique: async () => ({
+        // After a compare-and-swap miss the service re-reads, and what it
+        // finds is what somebody else wrote. `movedUnderneath` is that race.
+        id: 't-1',
+        status: opts.movedUnderneath === true && calls.updates.length > 0 ? 'CLOSED' : current.status,
+      }),
+      // The status write is a COMPARE-AND-SWAP: it matches only while the row
+      // still holds the status that was read. Modelling that is the point of
+      // this double — a plain `update` here cannot tell "wrote it" from
+      // "wrote over somebody else's close".
+      updateMany: async (args: {
+        where: { status?: string };
+        data: Record<string, unknown>;
+      }) => {
+        calls.updates.push(args);
+        const stillThere = opts.movedUnderneath !== true && args.where.status === current.status;
+        return { count: stillThere ? 1 : 0 };
+      },
       update: async (args: { where: unknown; data: Record<string, unknown> }) => {
         calls.updates.push(args);
         return { id: 't-1', ...args.data };
@@ -194,5 +211,42 @@ describe('SupportTicketsService.addMessage — status and activity', () => {
     });
     assert.equal(calls.updates.length, 1);
     assert.equal(calls.updates[0].data.status, 'OPEN');
+  });
+});
+
+describe('a message racing a close', () => {
+  it('does not reopen a ticket that closed while the reply was in flight', () => {
+    // The status is read before the message row is created, and an operator
+    // pressing Close inside that window is not exotic. Writing the read value
+    // back would return the ticket to OPEN while `closedAt`, `closedBy` and
+    // `archivedAt` stayed set — archived by one query, active by another, and
+    // listed correctly by neither.
+    //
+    // So the write is conditional on the status still being what was read,
+    // and a miss decides again from what is actually stored.
+    const { service, calls } = build({ status: 'OPEN' }, { movedUnderneath: true });
+    return service
+      .addMessage({ ticketId: 't-1', authorType: 'USER', authorId: 'u-1', content: 'hi' })
+      .then(() => {
+        const swap = calls.updates[0] as { where: { status?: string } };
+        assert.equal(
+          swap.where.status,
+          'OPEN',
+          'the write is unconditional — it will overwrite whatever happened underneath it',
+        );
+        const settled = calls.updates[calls.updates.length - 1] as {
+          data: { status?: string };
+        };
+        assert.equal(settled.data.status, 'CLOSED', 'the ticket was reopened by a reply');
+      });
+  });
+
+  it('still touches the row so the reply moves the thread up the queue', () => {
+    const { service, calls } = build({ status: 'OPEN' }, { movedUnderneath: true });
+    return service
+      .addMessage({ ticketId: 't-1', authorType: 'USER', authorId: 'u-1', content: 'hi' })
+      .then(() => {
+        assert.equal(calls.updates.length, 2, 'the missed swap must be followed by a real write');
+      });
   });
 });
