@@ -4868,6 +4868,10 @@ export const ru = {
         effectLabel: 'Эффект и цвет',
         colorLabel: 'Цвет иконки «{{icon}}»',
         reset: 'Сбросить',
+        reducedMotionNotice:
+            'В вашей системе включено «уменьшить движение», поэтому здесь эффекты показаны неподвижно. У подписчиков без этой настройки они анимируются.',
+        reducedMotionShow: 'Показать движение',
+        reducedMotionStop: 'Остановить',
         icons: {
           quests: 'Задания',
           wheel: 'Колесо',

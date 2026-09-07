@@ -4782,6 +4782,10 @@ export const en = {
         effectLabel: 'Effect and colour',
         colorLabel: 'Colour of the "{{icon}}" icon',
         reset: 'Reset',
+        reducedMotionNotice:
+            'Your system asks for reduced motion, so the effects here are shown standing still. Subscribers without that setting see them animate.',
+        reducedMotionShow: 'Show motion',
+        reducedMotionStop: 'Stop',
         icons: {
           quests: 'Quests',
           wheel: 'Wheel',

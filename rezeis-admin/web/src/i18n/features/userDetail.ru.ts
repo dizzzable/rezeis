@@ -278,6 +278,8 @@ export const ru = {
       enableTitle: 'Включить',
       syncTitle: 'Синхронизировать',
       syncing: 'Синхронизация…',
+      syncJobLanded: 'Синхронизация завершена: {{name}}',
+      syncJobFailed: 'Синхронизация не удалась: {{name}}',
       remnawaveProfile: {
         label: 'Профиль Remnawave',
         copied: 'Идентификатор профиля Remnawave скопирован',

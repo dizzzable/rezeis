@@ -37,6 +37,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import type { BrandingIconDecorDraft } from './branding-form-schema'
+import { useIconMotionOverride } from './icon-motion-override'
 
 // The cabinet's own rules, mirrored byte for byte so this preview shows what
 // the subscriber will see rather than something like it. See the file's own
@@ -105,6 +106,7 @@ export function DashboardIconsSection({
   onChange,
 }: DashboardIconsSectionProps): React.JSX.Element {
   const { t } = useTranslation()
+  const motion = useIconMotionOverride()
 
   /**
    * Writes one field, and DROPS the icon's entry when nothing is left on it.
@@ -134,6 +136,29 @@ export function DashboardIconsSection({
       <CardHeader>
         <CardTitle>{t('brandingPage.sections.dashboardIcons.title')}</CardTitle>
         <CardDescription>{t('brandingPage.sections.dashboardIcons.description')}</CardDescription>
+        {/* Only when the system is actually asking for less motion. Shown
+            otherwise it would be a control that visibly does nothing — which is
+            a small version of the very defect it exists to fix. */}
+        {motion.offered ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+            <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+              {t('brandingPage.sections.dashboardIcons.reducedMotionNotice')}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant={motion.enabled ? 'default' : 'outline'}
+              onClick={motion.toggle}
+              aria-pressed={motion.enabled}
+            >
+              {t(
+                motion.enabled
+                  ? 'brandingPage.sections.dashboardIcons.reducedMotionStop'
+                  : 'brandingPage.sections.dashboardIcons.reducedMotionShow',
+              )}
+            </Button>
+          </div>
+        ) : null}
       </CardHeader>
       <CardContent className="space-y-4">
         {DASHBOARD_ICONS.map((def) => {

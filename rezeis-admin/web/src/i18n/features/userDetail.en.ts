@@ -268,6 +268,8 @@ export const en = {
       enableTitle: 'Enable',
       syncTitle: 'Sync',
       syncing: 'Syncing…',
+      syncJobLanded: 'Sync finished: {{name}}',
+      syncJobFailed: 'Sync failed: {{name}}',
       remnawaveProfile: {
         label: 'Remnawave profile',
         copied: 'Remnawave profile identifier copied',

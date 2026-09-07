@@ -10,7 +10,7 @@
  *   • Referral attach
  */
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
@@ -128,9 +128,43 @@ import {
   type ReferralInviteCapacity,
 } from '@/features/referrals/referrals-queries'
 import { presenceDotClass } from './user-presence-dot'
+import { describeSyncSettlements, syncPollInterval } from './subscription-sync-watch'
 
 interface UserDetailPanelProps {
   readonly telegramId: string
+}
+
+/**
+ * Says how a queued sync ended, once, on the render it ends.
+ *
+ * Without this the poll above would only make the chip DISAPPEAR, and "it
+ * vanished" is not an answer to "did it work?" — which is the half of the
+ * report that a reload never fixed either. A landing is quiet-green; a failure
+ * is an error and stays on the card as well, through the notice that already
+ * existed and that nobody could see without reloading.
+ *
+ * Compares against the previous answer rather than tracking presses, so a job
+ * this operator did not start — a plan change, another admin — is reported just
+ * the same. The ref starts undefined, so the first answer of a session
+ * announces nothing: a job already running when the page opened has no
+ * transition to report yet.
+ */
+function useAnnounceSyncSettlements(user: UserDetail | undefined): void {
+  const { t } = useTranslation()
+  const previous = useRef<UserDetail | undefined>(undefined)
+
+  useEffect(() => {
+    const before = previous.current
+    previous.current = user
+    if (before === undefined || user === undefined || before === user) return
+    for (const settled of describeSyncSettlements(before, user)) {
+      if (settled.kind === 'landed') {
+        toast.success(t('userDetailPanel.subscriptions.syncJobLanded', { name: settled.name }))
+        continue
+      }
+      toast.error(t('userDetailPanel.subscriptions.syncJobFailed', { name: settled.name }))
+    }
+  }, [t, user])
 }
 
 export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
@@ -141,7 +175,22 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
     queryKey,
     queryFn: async () => (await api.get<UserDetail>(`/admin/users/${telegramId}`)).data,
     enabled: !!telegramId,
+    // KEEP ASKING WHILE A SYNC IS STILL RUNNING.
+    //
+    // "Синхронизировать все" enqueues `ProfileSyncJob` rows and answers with a
+    // count, not a result. The single invalidate that followed it saw those
+    // jobs as PENDING, drew the "Синхронизация…" chip, and then nobody asked
+    // again — so the chip cleared only on a page reload, minutes after the work
+    // had actually finished.
+    //
+    // Driven off the answer itself rather than off a flag: any live job, from
+    // any source — a limit edit, a plan change, another operator's press —
+    // keeps this alive, and it stops on its own the moment none are left. See
+    // `subscription-sync-watch.ts` for the interval and the back-off.
+    refetchInterval: (query) => syncPollInterval(query.state.data),
   })
+
+  useAnnounceSyncSettlements(user)
 
   if (isLoading) {
     return (
