@@ -176,3 +176,4 @@ jobs:
           test/wheel-cabinet-postgres.spec.ts
           test/contests-postgres.spec.ts
           test/connect-page-postgres.spec.ts
+          test/device-limit-provenance-postgres.spec.ts

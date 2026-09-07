@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
@@ -18,6 +20,7 @@ import {
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { OPERATOR_LIMIT_SOURCE } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from '../src/modules/users/controllers/subscription-sync-refusals';
 
 /**
@@ -1396,6 +1399,8 @@ function editorHarness(options: {
     return { ...row, ...data };
   };
 
+  const settings: Array<{ readonly sql: string; readonly values: readonly unknown[] }> = [];
+
   const controller = new AdminUserSubscriptionsController(
     {
       subscription: {
@@ -1411,6 +1416,13 @@ function editorHarness(options: {
       },
       $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
         callback({
+          // Captured, not ignored: this is where the route tells the trigger
+          // WHO moved the device limit, and the whole anti-fraud excuse for an
+          // operator-set limit hangs off it arriving.
+          $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+            settings.push({ sql: strings.join('?'), values });
+            return 1;
+          },
           subscription: { update: async (input: unknown) => applyUpdate(input, txUpdates) },
           profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
           adminAuditLog: {
@@ -1437,6 +1449,9 @@ function editorHarness(options: {
     },
     get txUpdates() {
       return txUpdates;
+    },
+    get settings() {
+      return settings;
     },
   };
 }
@@ -1568,6 +1583,79 @@ describe('subscription limit edits are recorded', () => {
       (harness.txUpdates[0]?.planSnapshot as { readonly deviceLimit: number }).deviceLimit,
       10,
     );
+  });
+
+  it('tells the trigger that a human set the device limit', async () => {
+    // WHY THE ROUTE SAYS ANYTHING AT ALL. `sharing-detectors.ts` refuses to
+    // excuse a device overage when the limit was reduced FROM "unlimited",
+    // because `0` is the column default and the "never synced" value as much
+    // as it is unlimited — one importer sweep writing `0 → N` would otherwise
+    // hand the entire customer base a fortnight of silence.
+    //
+    // That refusal is about a downgrade the CUSTOMER chose. This route is a
+    // human typing a number, and the devices the customer already held were
+    // not an overage until they typed it. The provenance is the only thing
+    // that tells the two apart, and it travels in a transaction-local setting
+    // the stamping trigger copies.
+    const harness = editorHarness();
+
+    await harness.controller.updateSubscription(
+      'sub-1',
+      { deviceLimit: 2 },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    assert.equal(harness.settings.length, 1, 'the trigger was told nothing');
+    const [setting] = harness.settings;
+    assert.match(setting.sql, /set_config\('rezeis\.device_limit_source'/);
+    assert.deepStrictEqual(setting.values, [OPERATOR_LIMIT_SOURCE]);
+    // Transaction-local. A `false` here leaves the value set on a pooled
+    // connection, and the NEXT writer of any subscription's device limit —
+    // an importer sweep, a renewal — inherits it and is excused as if an
+    // operator had typed it.
+    assert.match(setting.sql, /,\s*true\)/);
+  });
+
+  it('names the setting the trigger in the migration actually reads', () => {
+    // The one half of this agreement that CAN drift. The token is a shared
+    // constant, so the route and the detector cannot disagree about it — but
+    // the GUC name is a string in the route and a string in SQL, and a rename
+    // on either side leaves both halves working and nothing attributed. The
+    // failure is silent in the only direction that matters: every operator-set
+    // limit quietly stops being excused.
+    const migration = readFileSync(
+      join(process.cwd(), 'prisma', 'migrations',
+        '20260907090000_device_limit_reduction_provenance', 'migration.sql'),
+      'utf8',
+    );
+    const route = readFileSync(
+      join(process.cwd(), 'src', 'modules', 'users', 'controllers',
+        'admin-user-subscriptions.controller.ts'),
+      'utf8',
+    );
+    const named = /current_setting\('([^']+)'/.exec(migration);
+    assert.notEqual(named, null, 'the trigger reads no setting at all');
+    assert.ok(
+      route.includes(`set_config('${(named as RegExpExecArray)[1]}'`),
+      `the route sets a different setting than the trigger reads: ${(named as RegExpExecArray)[1]}`,
+    );
+  });
+
+  it('says nothing when the edit does not touch the device limit', async () => {
+    // A traffic edit is not a device-limit change, the trigger will not fire,
+    // and a setting left behind by an unrelated edit is how provenance starts
+    // describing a reduction nobody made.
+    const harness = editorHarness();
+
+    await harness.controller.updateSubscription(
+      'sub-1',
+      { trafficLimit: 500 },
+      ACTING_ADMIN,
+      ACTING_REQUEST,
+    );
+
+    assert.deepStrictEqual(harness.settings, []);
   });
 
   it('records a squad edit made through the squads endpoint', async () => {

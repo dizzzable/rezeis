@@ -5,7 +5,10 @@ import { Logger } from '@nestjs/common';
 import { FraudSignalSeverity } from '@prisma/client';
 import { of } from 'rxjs';
 
-import { SharingDetectors } from '../src/modules/anti-fraud/detectors/sharing-detectors';
+import {
+  OPERATOR_LIMIT_SOURCE,
+  SharingDetectors,
+} from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 import {
@@ -130,6 +133,13 @@ interface SubRow {
   userId: string;
   deviceLimitReducedAt?: Date | null;
   deviceLimitBeforeReduction?: number | null;
+  /**
+   * `Subscription.deviceLimitReductionBy`. Absent === NULL, which is what every
+   * writer but the admin panel records — the importer, a plan change, a
+   * renewal — and therefore what every test written before provenance existed
+   * assumes.
+   */
+  deviceLimitReductionBy?: string | null;
 }
 
 function makeHarness(remna: RemnaMock, subs: SubRow[] = []): Harness {
@@ -781,6 +791,7 @@ describe('SharingDetectors — a downgrade explains only what it explains', () =
     limit: number;
     reducedAt?: Date | null;
     previousLimit?: number | null;
+    reductionBy?: string | null;
   }) {
     return makeDetectors(
       {
@@ -801,6 +812,7 @@ describe('SharingDetectors — a downgrade explains only what it explains', () =
           userId: 'user-1',
           deviceLimitReducedAt: input.reducedAt ?? null,
           deviceLimitBeforeReduction: input.previousLimit ?? null,
+          deviceLimitReductionBy: input.reductionBy ?? null,
         },
       ],
     );
@@ -909,6 +921,93 @@ describe('SharingDetectors — a downgrade explains only what it explains', () =
     assert.equal(candidates.length, 1, '99 devices against a limit of 2 is not explained by a 0');
     assert.equal(candidates[0].code, 'SUBSCRIPTION_SHARING_HWID');
     assert.equal(candidates[0].severity, FraudSignalSeverity.HIGH);
+  });
+
+  // ── The one provenance the refusal above cannot argue with ────────────────
+  //
+  // Everything the `previousLimit <= 0` refusal rests on is about a downgrade
+  // the CUSTOMER chose: a sharer buying a fortnight of silence for the price of
+  // a plan change that costs them nothing. When an OPERATOR types the limit into
+  // the admin panel there is no purchase to make — the customer chose nothing,
+  // their existing devices were not an overage until the operator moved the
+  // line, and naming them for it accuses them of the operator's own action.
+  //
+  // The provenance travels in `rezeis.device_limit_source`, a transaction-local
+  // setting the admin route sets and the trigger copies into the same
+  // assignment block as the stamp. Nothing else sets it, so the fleet-wide
+  // import sweep below still records nothing and is still judged.
+
+  it('excuses an overage from "unlimited" when an operator set the limit by hand', async () => {
+    const detectors = harness({
+      devices: 9,
+      limit: 2,
+      reducedAt: YESTERDAY,
+      previousLimit: 0,
+      reductionBy: OPERATOR_LIMIT_SOURCE,
+    });
+    assert.deepEqual(
+      await detectors.detectHwidOverage(NOW),
+      [],
+      'the operator moved this line themselves a day ago',
+    );
+  });
+
+  it('judges the same overage when nothing says who moved the limit', async () => {
+    // The control, and the case that keeps the importer sweep loud: identical
+    // row, provenance absent.
+    const detectors = harness({
+      devices: 9,
+      limit: 2,
+      reducedAt: YESTERDAY,
+      previousLimit: 0,
+    });
+    assert.equal((await detectors.detectHwidOverage(NOW)).length, 1);
+  });
+
+  it('judges it again once the operator’s window has closed', async () => {
+    // Provenance does not grant permanent silence; it reaches the same 14 days
+    // every other reduction gets, and no further.
+    const detectors = harness({
+      devices: 9,
+      limit: 2,
+      reducedAt: new Date(NOW.getTime() - 15 * 24 * 60 * 60 * 1000),
+      previousLimit: 0,
+      reductionBy: OPERATOR_LIMIT_SOURCE,
+    });
+    assert.equal((await detectors.detectHwidOverage(NOW)).length, 1);
+  });
+
+  it('ignores a provenance that is not the operator’s', async () => {
+    // Only the exact token the admin route writes counts. Anything else — a
+    // future writer, a hand-edited row — falls back to the refusal.
+    for (const source of ['operator', 'IMPORTER', 'OPERATOR ', '']) {
+      const detectors = harness({
+        devices: 9,
+        limit: 2,
+        reducedAt: YESTERDAY,
+        previousLimit: 0,
+        reductionBy: source,
+      });
+      assert.equal(
+        (await detectors.detectHwidOverage(NOW)).length,
+        1,
+        `\`${source}\` must not be read as the operator`,
+      );
+    }
+  });
+
+  it('does not let provenance rescue a sharer whose old limit was finite', async () => {
+    // The bounded excuse is unchanged and still bounded: 9 devices against a
+    // 5 → 2 reduction is five explained and four not, whoever typed the 2.
+    const detectors = harness({
+      devices: 9,
+      limit: 2,
+      reducedAt: YESTERDAY,
+      previousLimit: 5,
+      reductionBy: OPERATOR_LIMIT_SOURCE,
+    });
+    const candidates = await detectors.detectHwidOverage(NOW);
+    assert.equal(candidates.length, 1, 'a finite ceiling still bounds what it explains');
   });
 
   // The specific production shape: an operator turns HWID limits on, the next

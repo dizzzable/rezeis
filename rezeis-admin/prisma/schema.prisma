@@ -1852,6 +1852,23 @@ model Subscription {
   ///           would not have been an overage before we moved the line; a count
   ///           above it is not explained by the reduction at all.
   deviceLimitBeforeReduction Int?               @map("device_limit_before_reduction")
+  /// WHO moved the limit, written by the same trigger and in the same
+  /// assignment block as the two columns above, from the transaction-local
+  /// setting `rezeis.device_limit_source`.
+  ///
+  /// `'OPERATOR'` means a human set this limit by hand in the admin panel.
+  /// `null` means every other writer — the Remnawave importer, a plan change,
+  /// a renewal, a payment — none of which say anything, so their behaviour is
+  /// exactly what it was before this column existed.
+  ///
+  /// It exists because the anti-fraud grace refuses to excuse a reduction FROM
+  /// "unlimited": `0` is the column default and the "never synced" value as
+  /// much as it is unlimited, so excusing it would hand the whole customer base
+  /// 14 days of silence the first time an import rewrites the column. That
+  /// refusal is right for a downgrade the CUSTOMER chose — there is immunity to
+  /// buy. It is wrong for a limit the OPERATOR typed, where nobody chose
+  /// anything and the provenance is not in doubt.
+  deviceLimitReductionBy     String?            @map("device_limit_reduction_by")
   internalSquads             String[]           @default([]) @map("internal_squads")
   externalSquad              String?            @map("external_squad")
   /// The panel's own identity for this profile, as a string. `null` until the

@@ -67,6 +67,7 @@ import { SubscriptionMutationsService } from '../../subscriptions/services/subsc
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from './subscription-sync-refusals';
+import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detectors';
 
 /** A v1–v8 UUID: the identity a Remnawave 2.7.x/2.8.x panel issues. */
 const REMNAWAVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -553,6 +554,24 @@ export class AdminUserSubscriptionsController {
       || body.expiresAt !== undefined
       || body.status !== undefined;
     const outcome = await this.prismaService.$transaction(async (tx) => {
+      if (data.deviceLimit !== undefined) {
+        // WHO IS MOVING THE LIMIT, told to the trigger that stamps the
+        // reduction, through a setting that is local to this transaction.
+        //
+        // The anti-fraud grace refuses to excuse a reduction from "unlimited"
+        // because `0` is the column default and the "never synced" value as
+        // much as it is unlimited — one importer sweep would otherwise silence
+        // the whole customer base. That refusal is about a downgrade the
+        // CUSTOMER chose. This is a human typing a number in the panel, and the
+        // customer's existing devices were not an overage until they did.
+        //
+        // `set_config(..., true)` is transaction-local: it cannot outlive this
+        // statement, cannot be left set on a pooled connection, and cannot be
+        // inherited by the next writer. Every other writer of `device_limit`
+        // sets nothing and records nothing, which is the behaviour that already
+        // existed.
+        await tx.$executeRaw`SELECT set_config('rezeis.device_limit_source', ${OPERATOR_LIMIT_SOURCE}, true)`;
+      }
       const updated = await tx.subscription.update({
         where: { id: subscriptionId },
         data,

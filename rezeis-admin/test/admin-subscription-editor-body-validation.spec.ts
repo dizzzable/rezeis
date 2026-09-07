@@ -86,6 +86,11 @@ function buildEditor(): {
       plan: { findUnique: async () => ({ ...STORED_PLAN }) },
       $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
         callback({
+          // The route tells the trigger WHO moved the device limit through a
+          // transaction-local setting; this double only has to accept it.
+          // `admin-user-subscriptions.controller.spec.ts` is where the call is
+          // actually asserted.
+          $executeRaw: async () => 1,
           subscription: {
             update: async ({ data }: { data: Record<string, unknown> }) => {
               updates.push(data);

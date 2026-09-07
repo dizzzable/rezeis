@@ -319,6 +319,8 @@ export class SharingDetectors {
       const anomalousStamps: string[] = [];
       /** Stamped `before = 0` — "previously unlimited", which is unsizeable. */
       const unsizeableStamps: string[] = [];
+      /** Stamped by a human in the admin panel, which IS a provenance. */
+      const operatorSetLimits: string[] = [];
       for (const offender of offenders) {
         const facts = subscriptionByUuid.get(offender.uuid) ?? null;
         const reducedAt = facts?.deviceLimitReducedAt ?? null;
@@ -344,6 +346,28 @@ export class SharingDetectors {
           // genuinely suppresses. So judge, and say so loudly.
           anomalousStamps.push(offender.username);
           judged.push({ ...offender, reduction: null });
+          continue;
+        }
+        if (previousLimit <= 0 && facts?.deviceLimitReductionBy === OPERATOR_LIMIT_SOURCE) {
+          // AN OPERATOR TYPED THIS LIMIT, and that is the one provenance the
+          // branch below cannot argue with.
+          //
+          // Everything that refusal rests on is about a downgrade the CUSTOMER
+          // chose: a sharer buying 14 days of immunity for the price of a plan
+          // change that costs them nothing. Here there is no purchase to make.
+          // The operator moved the line themselves, a moment ago, in this
+          // panel; the devices the customer already held were not an overage
+          // until they did, and naming the customer for it accuses them of the
+          // operator's own action.
+          //
+          // The window is the same 14 days, and it is bounded by time rather
+          // than by a device count because "previously unlimited" still has no
+          // number to bound it with. The cost, and an operator should know it:
+          // setting an individual limit on a subscription that IS being shared
+          // buys that subscription 14 days of quiet. It is logged for exactly
+          // that reason.
+          operatorSetLimits.push(offender.username);
+          excused.push(offender.username);
           continue;
         }
         if (previousLimit <= 0) {
@@ -415,6 +439,19 @@ export class SharingDetectors {
       // Not an error — this is a reachable, common state — but it must be
       // visible, because it is the operator's only notice that a recorded
       // mitigating fact was deliberately not honoured.
+      if (operatorSetLimits.length > 0) {
+        // Never silent, for the same reason the excuses below are never silent:
+        // a suppressed accusation that logs nothing is indistinguishable from a
+        // detector that found nothing.
+        this.logger.log(
+          `HWID overage: ${operatorSetLimits.length} user(s) EXCUSED because an operator set ` +
+            `their device limit by hand within the last ${HWID_DOWNGRADE_GRACE_DAYS} days ` +
+            `(${operatorSetLimits.join(', ')}). The devices they already held were not an ` +
+            'overage until the limit moved, and the limit moved by your hand, not theirs. ' +
+            'If one of these is a subscription you already suspected of sharing, note that ' +
+            'setting a limit on it buys it quiet until the window closes.',
+        );
+      }
       if (unsizeableStamps.length > 0) {
         this.logger.log(
           `HWID overage: ${unsizeableStamps.length} user(s) carry a device-limit reduction FROM ` +
@@ -1621,6 +1658,7 @@ export class SharingDetectors {
         userId: true,
         deviceLimitReducedAt: true,
         deviceLimitBeforeReduction: true,
+        deviceLimitReductionBy: true,
       },
     });
     for (const row of rows) {
@@ -1628,6 +1666,7 @@ export class SharingDetectors {
         userId: row.userId,
         deviceLimitReducedAt: row.deviceLimitReducedAt ?? null,
         deviceLimitBeforeReduction: row.deviceLimitBeforeReduction ?? null,
+        deviceLimitReductionBy: row.deviceLimitReductionBy ?? null,
       };
       // Keyed by the identity the CALLER asked about, not by `row.remnawaveId`:
       // on a 3.x panel those are different strings for the same profile, and
@@ -1721,6 +1760,13 @@ interface SubscriptionFacts {
    * no reduction at all, or a stamp older than the column).
    */
   readonly deviceLimitBeforeReduction: number | null;
+  /**
+   * `Subscription.deviceLimitReductionBy` — {@link OPERATOR_LIMIT_SOURCE} when
+   * a human typed this limit in the admin panel, `null` for every other writer.
+   * Taken from the same row and the same trigger assignment as the pair above,
+   * so it can never describe a different reduction than the one it gates.
+   */
+  readonly deviceLimitReductionBy: string | null;
 }
 
 /**
@@ -1799,6 +1845,21 @@ const NODE_STABILITY_WINDOW_MINUTES = 30;
  * cannot buy them one device more than that.
  */
 const HWID_DOWNGRADE_GRACE_DAYS = 14;
+
+/**
+ * The value the admin panel writes into `rezeis.device_limit_source`.
+ *
+ * Shared with the route rather than retyped there, so the token itself cannot
+ * drift: renaming it here renames both halves at once.
+ *
+ * The half that CAN drift is the setting's NAME — `rezeis.device_limit_source`
+ * is a string in the route and a string in the migration's SQL, and a rename on
+ * either side leaves both halves running with nothing attributed. That failure
+ * is silent in the only direction that matters: every operator-set limit simply
+ * stops being excused. `admin-user-subscriptions.controller.spec.ts` reads the
+ * migration and the route and compares the two.
+ */
+export const OPERATOR_LIMIT_SOURCE = 'OPERATOR';
 
 /**
  * CONFIDENCE CEILING for an ordinary HWID overage — the most this detector's
