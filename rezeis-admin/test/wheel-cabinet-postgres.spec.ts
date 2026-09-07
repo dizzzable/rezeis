@@ -314,6 +314,15 @@ run('the wheel cabinet contract on PostgreSQL', () => {
     }
   });
 
+/**
+ * The operator's own note on a manual prize, in one place.
+ *
+ * Named rather than repeated so the sector that carries it and the assertions
+ * that refuse it cannot drift apart — a note changed in one and not the other
+ * leaves a guard checking for text nothing ever wrote.
+ */
+const OPERATOR_NOTE = 'Перевести 1000 ₽ на карту, лимит на сегодня исчерпан';
+
   it('does not pass the operator note on with a manual prize', async () => {
     // The instruction is what the operator told themselves to do. Whatever it
     // says — a bank detail, a shortcut, a caveat — it is not a promise made
@@ -322,7 +331,7 @@ run('the wheel cabinet contract on PostgreSQL', () => {
       kind: WheelSectorKind.MANUAL,
       weight: 100,
       order: 0,
-      manualInstructions: 'Перевести 1000 ₽ на карту, лимит на сегодня исчерпан',
+      manualInstructions: OPERATOR_NOTE,
     });
     // The loss sector is required to switch the wheel on at all — the guard
     // caught this test forgetting it, which is the guard working.
@@ -340,7 +349,17 @@ run('the wheel cabinet contract on PostgreSQL', () => {
     const history = await cabinet.history({ userId });
     assert.equal(history.items[0]?.status, WheelSpinStatus.PENDING);
     assert.equal(history.items[0]?.prize, null);
-    assert.doesNotMatch(JSON.stringify(history.items[0]), /1000|лимит/);
+    const serialized = JSON.stringify(history.items[0]);
+    // The whole note first — the definitive check, and the one a partial
+    // fragment list can miss.
+    assert.ok(!serialized.includes(OPERATOR_NOTE), 'the operator note reached the customer');
+    // Then its distinctive words, so a note that arrives REFORMATTED is caught
+    // too. Cyrillic only, and deliberately: this assertion used to include
+    // `1000` and failed in CI on a spin whose cuid happened to contain those
+    // four digits — a guard that fails for a reason unrelated to what it
+    // guards teaches everyone to re-run it. A cuid is lowercase base36, so no
+    // generated id can collide with a Cyrillic word.
+    assert.doesNotMatch(serialized, /Перевести|лимит|карту/);
   });
 
   it('reads back a loss as a loss and a win as what it gave', async () => {
