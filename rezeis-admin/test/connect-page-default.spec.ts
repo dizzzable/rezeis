@@ -112,15 +112,99 @@ describe('the default catalog', () => {
     }
   });
 
-  it('ships no third-party logo in the icon library', () => {
-    // Redistributing a vendor's mark in our default is a trademark question
-    // nobody asked. `iconKey` is nullable and an operator can paste one.
-    assert.deepEqual(Object.keys(DEFAULT_CONNECT_PAGE_CONFIG.icons).sort(), [
-      'download',
-      'link',
-      'monitor',
-      'phone',
-      'rocket',
-    ]);
+  // ── Two kinds of icon, and the difference is load-bearing ──────────────────
+  //
+  // The library used to hold five hand-drawn glyphs and nothing else, guarded by
+  // a test that named all five, because redistributing a vendor's mark in our
+  // default is a trademark question. The owner supplied the marks and asked for
+  // them (08.09.2026), so that guard is gone — but the rule that replaced it is
+  // the one the concepts actually depend on.
+  //
+  // A STEP or PLATFORM glyph is drawn on `currentColor`: it takes the accent of
+  // whatever concept the screen is wearing, which is why the same catalog looks
+  // right on all 104 of them. An APPLICATION MARK carries its own colours,
+  // because a brand mark that changes colour is not that brand's mark.
+  //
+  // Get it the wrong way round and nothing throws: a `currentColor` app mark
+  // turns into a flat silhouette, and a fixed-colour step glyph stays one colour
+  // while every other accent on the screen moves.
+
+  const STEP_AND_PLATFORM_ICONS = [
+    'download',
+    'link',
+    'rocket',
+    'phone',
+    'monitor',
+    'apple',
+    'android',
+    'windows',
+    'macos',
+    'linux',
+    'check',
+    'cloud-download',
+    'external-link',
+    'star',
+  ];
+
+  it('draws every step and platform glyph on currentColor', () => {
+    for (const key of STEP_AND_PLATFORM_ICONS) {
+      const markup = DEFAULT_CONNECT_PAGE_CONFIG.icons[key];
+      assert.ok(markup !== undefined, `${key} is missing from the library`);
+      assert.match(markup, /currentColor/i, `${key} would not take the concept accent`);
+    }
+  });
+
+  it('leaves every application mark its own colours', () => {
+    const marks = Object.keys(DEFAULT_CONNECT_PAGE_CONFIG.icons).filter(
+      (key) => !STEP_AND_PLATFORM_ICONS.includes(key),
+    );
+    // Guards the guard: an empty list would make the loop below watch nothing.
+    assert.ok(marks.length > 10, `only ${marks.length} application marks`);
+    for (const key of marks) {
+      assert.doesNotMatch(
+        DEFAULT_CONNECT_PAGE_CONFIG.icons[key],
+        /currentColor/i,
+        `${key} is an app mark drawn on currentColor; it would render as a silhouette`,
+      );
+    }
+  });
+
+  it('references only icons it actually ships', () => {
+    // An `iconKey` with nothing behind it renders the fallback glyph and looks
+    // like a bug in the app rather than a gap in the catalog.
+    const missing: string[] = [];
+    const check = (key: string | null | undefined, where: string): void => {
+      if (key && DEFAULT_CONNECT_PAGE_CONFIG.icons[key] === undefined) {
+        missing.push(`${where} -> ${key}`);
+      }
+    };
+    for (const platform of DEFAULT_CONNECT_PAGE_CONFIG.platforms) {
+      check(platform.iconKey, platform.id);
+      for (const app of platform.apps) {
+        check(app.iconKey, `${platform.id}/${app.id}`);
+        for (const [index, step] of app.steps.entries()) {
+          check(step.iconKey, `${platform.id}/${app.id}/step${index}`);
+        }
+      }
+    }
+    assert.deepEqual(missing, []);
+  });
+
+  it('gives an app a mark whenever one exists for it', () => {
+    // `iconKey` is nullable and stays that way: an operator adding their own app
+    // usually has no logo for it, and the cabinet draws the app's initial on the
+    // same plate rather than an empty square. So this is not "every app must
+    // have one" — it is "we did not forget one we ship".
+    //
+    // Nekoray is the deliberate exception: there is no mark for it in the
+    // library, and inventing one or fetching a vendor's from the web are both
+    // worse answers than the initial.
+    const bare: string[] = [];
+    for (const platform of DEFAULT_CONNECT_PAGE_CONFIG.platforms) {
+      for (const app of platform.apps) {
+        if (!app.iconKey) bare.push(`${platform.id}/${app.id}`);
+      }
+    }
+    assert.deepEqual(bare, ['linux/nekoray']);
   });
 });

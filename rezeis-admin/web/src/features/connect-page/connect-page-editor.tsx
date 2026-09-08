@@ -44,6 +44,8 @@ import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+
+import { ConnectThemeCard } from './connect-theme-card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -354,6 +356,17 @@ export function ConnectPageEditor(): JSX.Element {
           </CardContent>
         </Card>
       )}
+
+      {/* Appearance before catalog: it is the thing an operator is most likely
+          to be here for after the catalog is once written, and it saves to its
+          own row, so it is not part of the draft below and cannot be lost by
+          discarding one. */}
+      <ConnectThemeCard
+        config={config}
+        sanitized={data?.config.icons ?? {}}
+        theme={data?.config.theme ?? null}
+        canEdit={canEdit}
+      />
 
       {config.platforms.map((platform, index) => (
         <PlatformCard
@@ -848,9 +861,16 @@ function IconLibrary({
                   report-only. A pending icon shows a placeholder until a save
                   has been through the sanitizer. */}
               {sanitized[iconKey] === iconMarkup ? (
+                /* On a plate: an application mark carries its own colours,
+                   and most of the ones shipped are a near-white glyph on
+                   nothing. Against this card's white background in light mode
+                   they were blank squares — the mark exists, the operator sees
+                   an empty box and assumes it does not. Step and platform
+                   glyphs use `currentColor` and lose nothing by sitting on the
+                   same plate. */
                 <span
                   aria-hidden="true"
-                  className="inline-flex h-5 w-5 [&>svg]:h-5 [&>svg]:w-5"
+                  className="inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded border border-white/15 bg-black/80 p-0.5 [&>svg]:h-full [&>svg]:w-full"
                   dangerouslySetInnerHTML={{ __html: iconMarkup }}
                 />
               ) : (

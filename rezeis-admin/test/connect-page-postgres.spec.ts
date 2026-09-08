@@ -32,6 +32,7 @@ const run = testUrl === undefined ? describe.skip : describe;
 const CATALOG_KEY = 'connect-page-v2';
 const ENABLED_KEY = 'connect-page-enabled';
 const V1_KEY = 'default';
+const THEME_KEY = 'connect-page-theme';
 
 let prisma: PrismaService;
 let service: ConnectPageService;
@@ -81,14 +82,14 @@ run('ConnectPageService on PostgreSQL', () => {
     await prisma.$connect();
     service = new ConnectPageService(prisma);
     await prisma.subpageConfig.deleteMany({
-      where: { key: { in: [CATALOG_KEY, ENABLED_KEY, V1_KEY] } },
+      where: { key: { in: [CATALOG_KEY, ENABLED_KEY, V1_KEY, THEME_KEY] } },
     });
   });
 
   after(async () => {
     if (prisma === undefined) return;
     await prisma.subpageConfig
-      .deleteMany({ where: { key: { in: [CATALOG_KEY, ENABLED_KEY, V1_KEY] } } })
+      .deleteMany({ where: { key: { in: [CATALOG_KEY, ENABLED_KEY, V1_KEY, THEME_KEY] } } })
       .catch(() => undefined);
     await prisma.$disconnect();
   });
@@ -167,6 +168,92 @@ run('ConnectPageService on PostgreSQL', () => {
     assert.equal(state.stored, true);
     assert.notEqual(state.corrupted, null);
     assert.ok(state.config.platforms.length > 0, 'the default still serves customers meanwhile');
+  });
+
+  // ── The appearance, in its own row ─────────────────────────────────────────
+  //
+  // Third row on this service, and it exists for the reason the second one
+  // does: picking a concept must not be an edit of the catalog. These check the
+  // part a Prisma fake cannot, because the fake IS the claim under test.
+
+  it('keeps the appearance out of the catalog row', async () => {
+    await service.replaceConfig(catalog());
+    await service.setTheme({
+      presetId: 'concept-ba',
+      tokens: { 'brand-primary': '#FF6B7A' },
+      backgroundImage: 'linear-gradient(145deg, #05070D 0%, #0B0610 100%)',
+      backgroundColor: '#05070D',
+      rail: '#FF6B7A',
+    });
+
+    const [catalogRow, themeRow] = await Promise.all([
+      prisma.subpageConfig.findUnique({ where: { key: CATALOG_KEY } }),
+      prisma.subpageConfig.findUnique({ where: { key: THEME_KEY } }),
+    ]);
+    // A copy in the catalog row could only ever be stale, and a stale palette
+    // in the row an export or a restore carries is a copy that gets believed.
+    assert.equal((catalogRow?.config as Record<string, unknown>)['theme'], null);
+    assert.equal((themeRow?.config as Record<string, unknown>)['presetId'], 'concept-ba');
+  });
+
+  it('serves the theme row over anything the catalog blob carries', async () => {
+    // The shape a pre-existing install is in: a catalog saved while the schema
+    // still accepted `theme` inline. The row wins, always.
+    const current = await service.getEffectiveConfig();
+    await prisma.subpageConfig.update({
+      where: { key: CATALOG_KEY },
+      data: {
+        config: {
+          ...current,
+          theme: { presetId: 'concept-stale', tokens: { 'brand-primary': '#00FF00' } },
+        } as never,
+      },
+    });
+
+    const effective = await service.getEffectiveConfig();
+    assert.equal(effective.theme?.presetId, 'concept-ba');
+  });
+
+  it('saving the catalog does not disturb the appearance', async () => {
+    // The failure this prevents: an operator picks a concept, then edits a step
+    // and presses Save on a draft branched before the pick, and the concept
+    // silently goes back. That is exactly what the switch beside it used to do.
+    await service.replaceConfig(catalog('Renamed'));
+    const effective = await service.getEffectiveConfig();
+    assert.equal(effective.theme?.presetId, 'concept-ba');
+    assert.equal(effective.platforms[0].apps[0].name, 'Renamed');
+  });
+
+  it('clearing deletes the row rather than storing an empty theme', async () => {
+    assert.equal(await service.setTheme(null), null);
+    const row = await prisma.subpageConfig.findUnique({ where: { key: THEME_KEY } });
+    assert.equal(row, null, 'an empty theme reads back as null anyway; keeping the row invents state');
+    assert.equal((await service.getEffectiveConfig()).theme, null);
+  });
+
+  it('refuses a background that is not one, in front of the operator', async () => {
+    // Refused here it is an error message. Refused in the cabinet it is silence
+    // - the concept does not apply and the report is "nothing happened".
+    await assert.rejects(() =>
+      service.setTheme({
+        tokens: { 'brand-primary': '#FF6B7A' },
+        backgroundImage: 'linear-gradient(0deg,#000,#fff), url(a.png)',
+      }),
+    );
+    assert.equal(await prisma.subpageConfig.findUnique({ where: { key: THEME_KEY } }), null);
+  });
+
+  it('answers the cabinet appearance when the stored theme no longer parses', async () => {
+    // A schema change that landed without a migration. Decoration must not be
+    // able to take the catalog down with it.
+    await prisma.subpageConfig.create({
+      data: { key: THEME_KEY, config: { tokens: { 'brand-primary': 'not-a-colour' } } },
+    });
+    assert.equal(await service.readTheme(), null);
+    const effective = await service.getEffectiveConfig();
+    assert.equal(effective.theme, null);
+    assert.ok(effective.platforms.length > 0, 'the catalog still serves');
+    await prisma.subpageConfig.deleteMany({ where: { key: THEME_KEY } });
   });
 
   it('survives two saves racing for the same row', async () => {

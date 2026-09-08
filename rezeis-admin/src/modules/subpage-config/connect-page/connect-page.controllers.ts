@@ -8,6 +8,7 @@ import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import { ConnectPageService } from './connect-page.service';
 import type { ConnectPageConfig, ConnectPageIssue } from './connect-page.schema';
+import type { ConnectPageTheme } from './connect-page.theme';
 
 /**
  * The catalog behind the cabinet's connect screen, from both sides.
@@ -77,6 +78,25 @@ export class AdminConnectPageController {
     return { enabled };
   }
 
+  /**
+   * The appearance, on its own.
+   *
+   * Third endpoint on this controller and the third row behind it, for the same
+   * reason as the switch: picking a concept is not an edit of the catalog. A
+   * `PUT` carrying `{ theme: null }` clears back to the cabinet's own look,
+   * which is what "как в кабинете" in the editor sends and is also the rollback
+   * — no deploy, one choice.
+   */
+  @Put('theme')
+  @RequirePermission('subpage_config', 'edit')
+  @ApiOperation({ summary: 'Set or clear the connect screen appearance' })
+  public async setTheme(@Body() body: unknown): Promise<{ theme: ConnectPageTheme | null }> {
+    const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const theme = await this.connectPage.setTheme(raw['theme'] ?? null);
+    void this.reiwaCache.invalidateConnectPage('connect-screen theme changed');
+    return { theme };
+  }
+
   @Put()
   @RequirePermission('subpage_config', 'edit')
   @ApiOperation({ summary: 'Replace the connect-screen catalog' })
@@ -110,7 +130,7 @@ export class InternalConnectPageController {
   @Get('effective')
   @ApiOperation({ summary: 'Connect-screen catalog consumed by the cabinet' })
   public async getEffective(): Promise<ConnectPageConfig> {
-    return this.connectPage.getEffectiveConfig();
+    return this.connectPage.getCabinetConfig();
   }
 }
 

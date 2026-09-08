@@ -5,6 +5,11 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { DEFAULT_CONNECT_PAGE_CONFIG } from './connect-page.default';
 import {
+  connectPageThemeSchema,
+  isEmptyConnectTheme,
+  type ConnectPageTheme,
+} from './connect-page.theme';
+import {
   auditConnectPageConfig,
   connectPageConfigSchema,
   MAX_ICON_BYTES,
@@ -84,6 +89,20 @@ export class ConnectPageService {
    */
   private static readonly ENABLED_KEY = 'connect-page-enabled';
 
+  /**
+   * The concept the connect screen wears, also in its own row.
+   *
+   * Third row, same reasoning as the second. Picking a theme is not an edit
+   * of the catalog: sending the whole config back to change a palette would
+   * freeze the built-in default into the database on the first pick, and let
+   * an editor draft branched before it silently restore the old apps.
+   *
+   * Absent means the cabinet's own appearance, which is where every install
+   * starts and what most will stay on. Absent is therefore not a failure to
+   * report anywhere.
+   */
+  private static readonly THEME_KEY = 'connect-page-theme';
+
   private readonly logger = new Logger(ConnectPageService.name);
 
   public constructor(private readonly prisma: PrismaService) {}
@@ -93,13 +112,18 @@ export class ConnectPageService {
    * never been edited still has a working catalog.
    */
   public async getEffectiveConfig(): Promise<ConnectPageConfig> {
-    const [row, enabled] = await Promise.all([
+    const [row, enabled, theme] = await Promise.all([
       this.prisma.subpageConfig.findUnique({ where: { key: ConnectPageService.KEY } }),
       this.isEnabled(),
+      this.readTheme(),
     ]);
+    // Both stamped from their own rows, over whatever a stored blob carries.
+    // A config saved while the schema still had these fields inline would
+    // otherwise be able to answer for them.
     const withFlag = (config: ConnectPageConfig): ConnectPageConfig => ({
       ...config,
       connectScreenEnabled: enabled,
+      theme,
     });
     // Normalized on the way out as well as on the way in, so `encode` is
     // present on every deep link the cabinet ever sees — including the default,
@@ -144,6 +168,106 @@ export class ConnectPageService {
     });
     this.logger.log(`Connect screen ${enabled ? 'enabled' : 'disabled'}.`);
     return enabled;
+  }
+
+  /**
+   * What the CABINET gets: the catalog with the icon library trimmed to what it
+   * actually draws.
+   *
+   * The library ships ~50 marks so the editor has something to offer when an
+   * operator adds an app; a customer's phone needs the five or six their own
+   * catalog references. Sending the rest is four-fifths of this payload spent
+   * on icons nothing renders, on every cold cabinet, over mobile data.
+   *
+   * The admin read is deliberately NOT trimmed — that one IS the library.
+   */
+  public async getCabinetConfig(): Promise<ConnectPageConfig> {
+    const config = await this.getEffectiveConfig();
+    const used = new Set<string>();
+    for (const platform of config.platforms) {
+      if (platform.iconKey) used.add(platform.iconKey);
+      for (const app of platform.apps) {
+        if (app.iconKey) used.add(app.iconKey);
+        for (const step of app.steps) {
+          if (step.iconKey) used.add(step.iconKey);
+        }
+      }
+    }
+    const icons: Record<string, string> = {};
+    for (const key of used) {
+      const markup = config.icons[key];
+      // A key with no icon behind it is dropped rather than carried as a hole:
+      // the audit already refuses one on save, so reaching here means a config
+      // written before that rule, and the cabinet's own reader would drop it
+      // anyway.
+      if (markup !== undefined) icons[key] = markup;
+    }
+    return { ...config, icons };
+  }
+
+  /**
+   * The concept the screen wears, or null for the cabinet's own.
+   *
+   * A row that no longer parses answers null rather than throwing: the theme
+   * is decoration, and refusing to serve the catalog because a palette went
+   * bad would take the whole screen down over a colour. It is logged, because
+   * silently reverting an operator's choice with nothing in the log is how
+   * `landing-config` earned its `corrupted` marker.
+   */
+  public async readTheme(): Promise<ConnectPageTheme | null> {
+    const row = await this.prisma.subpageConfig.findUnique({
+      where: { key: ConnectPageService.THEME_KEY },
+    });
+    if (row === null) return null;
+    const parsed = connectPageThemeSchema.safeParse(readJsonObject(row.config));
+    if (!parsed.success) {
+      this.logger.error(
+        `Stored connect-screen theme no longer parses; serving the cabinet's own. First issue: ${
+          parsed.error.issues[0]?.message ?? 'unknown'
+        }`,
+      );
+      return null;
+    }
+    return isEmptyConnectTheme(parsed.data) ? null : parsed.data;
+  }
+
+  /**
+   * Store a concept, or clear back to the cabinet's appearance.
+   *
+   * Clearing DELETES the row rather than writing an empty theme. An empty one
+   * reads back as null anyway, so keeping it would only leave a row that says
+   * nothing and a future reader something extra to be wrong about.
+   */
+  public async setTheme(payload: unknown): Promise<ConnectPageTheme | null> {
+    if (payload === null || payload === undefined) {
+      await this.prisma.subpageConfig.deleteMany({
+        where: { key: ConnectPageService.THEME_KEY },
+      });
+      this.logger.log('Connect-screen theme cleared; the cabinet palette applies.');
+      return null;
+    }
+    const parsed = connectPageThemeSchema.safeParse(payload);
+    if (!parsed.success) {
+      // Refused here, in front of the person who produced it. The same value
+      // refused in the cabinet is silent: the concept does not apply and the
+      // report is "I picked a theme and nothing happened".
+      throw new BadRequestException(
+        parsed.error.issues
+          .slice(0, 5)
+          .map((issue) => `${issue.path.join('.') || 'theme'}: ${issue.message}`),
+      );
+    }
+    if (isEmptyConnectTheme(parsed.data)) return this.setTheme(null);
+    await this.prisma.subpageConfig.upsert({
+      where: { key: ConnectPageService.THEME_KEY },
+      create: {
+        key: ConnectPageService.THEME_KEY,
+        config: parsed.data as unknown as Prisma.InputJsonValue,
+      },
+      update: { config: parsed.data as unknown as Prisma.InputJsonValue },
+    });
+    this.logger.log(`Connect-screen theme set to ${parsed.data.presetId ?? 'a custom palette'}.`);
+    return parsed.data;
   }
 
   /** True once an operator has saved one, as opposed to running the default. */
@@ -231,10 +355,15 @@ export class ConnectPageService {
       });
     }
 
+    // The theme is never written into the catalog row, even though the schema
+    // accepts it there. It is stamped from its own row on every read, so a copy
+    // here could only ever be stale — and a stale palette sitting in the row an
+    // export or a restore would carry is a copy that eventually gets believed.
+    const stored: ConnectPageConfig = { ...config, theme: null };
     await this.prisma.subpageConfig.upsert({
       where: { key: ConnectPageService.KEY },
-      create: { key: ConnectPageService.KEY, config: config as unknown as Prisma.InputJsonValue },
-      update: { config: config as unknown as Prisma.InputJsonValue },
+      create: { key: ConnectPageService.KEY, config: stored as unknown as Prisma.InputJsonValue },
+      update: { config: stored as unknown as Prisma.InputJsonValue },
     });
 
     const enabled = await this.isEnabled();
@@ -244,7 +373,10 @@ export class ConnectPageService {
         0,
       )} app(s).`,
     );
-    return { config: { ...config, connectScreenEnabled: enabled }, cleanedIcons };
+    return {
+      config: { ...config, connectScreenEnabled: enabled, theme: await this.readTheme() },
+      cleanedIcons,
+    };
   }
 
   /**

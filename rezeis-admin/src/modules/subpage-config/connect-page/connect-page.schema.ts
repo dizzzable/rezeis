@@ -54,6 +54,8 @@
  */
 import { z } from 'zod';
 
+import { connectPageThemeSchema } from './connect-page.theme';
+
 // ── Bounds ───────────────────────────────────────────────────────────────────
 //
 // Operator-authored data that ends up in a customer's browser. Every list and
@@ -333,6 +335,17 @@ export const connectPageConfigSchema = z
      * the off position is the rollback: no deploy, one switch.
      */
     connectScreenEnabled: z.boolean().default(false),
+    /**
+     * The concept the screen wears, or `null` for "the cabinet's own".
+     *
+     * Same arrangement as the switch above and for the same reason: it rides to
+     * the cabinet inside this payload, behind one cache and one invalidation,
+     * so the catalog and the look can never disagree for a TTL — but it is
+     * STORED in its own row, and `getEffectiveConfig` stamps the row's value
+     * over whatever a blob happens to carry. Picking a theme is not an edit of
+     * the catalog, and a stale editor draft must not be able to undo one.
+     */
+    theme: connectPageThemeSchema.nullable().default(null),
   })
   .strict();
 

@@ -80,12 +80,33 @@ const platformSchema = z
   .passthrough();
 export type ConnectPlatform = z.infer<typeof platformSchema>;
 
+/**
+ * The appearance the screen wears, as it comes back from the server.
+ *
+ * Loose on purpose, like everything else in this file: the server is the one
+ * that decides what a valid theme is, and a second opinion in the browser is
+ * the one that quietly becomes the more permissive of the two. What the editor
+ * needs from it is the preset id, so the gallery can show the choice, and the
+ * values, so the preview can paint them.
+ */
+export const connectThemeSchema = z
+  .object({
+    presetId: z.string().nullable().catch(null),
+    tokens: z.record(z.string(), z.string()).catch({}),
+    backgroundColor: z.string().nullable().catch(null),
+    backgroundImage: z.string().nullable().catch(null),
+    rail: z.string().nullable().catch(null),
+  })
+  .passthrough();
+export type ConnectTheme = z.infer<typeof connectThemeSchema>;
+
 export const connectPageConfigSchema = z
   .object({
     // Not `z.literal(2)`: a version this editor has not met should not turn the
     // whole page into a permanent skeleton.
     version: z.number(),
     connectScreenEnabled: z.boolean().optional(),
+    theme: connectThemeSchema.nullable().catch(null).optional(),
     icons: z.record(z.string(), z.string()),
     platforms: z.array(platformSchema),
   })
@@ -120,6 +141,21 @@ export const connectPageApi = {
     const response = await api.post('/admin/connect-page/validate', { config });
     return z
       .object({ ok: z.boolean(), issues: z.array(issueSchema) })
+      .parse(response.data);
+  },
+
+  /**
+   * Set or clear the appearance.
+   *
+   * Its own request, hitting its own row. Sending the whole config to change a
+   * palette is how the switch beside it froze the built-in default into the
+   * database on its first flick, and how a stale editor draft could undo a
+   * change nobody made in that draft.
+   */
+  async setTheme(theme: unknown): Promise<{ theme: ConnectTheme | null }> {
+    const response = await api.put('/admin/connect-page/theme', { theme });
+    return z
+      .object({ theme: connectThemeSchema.nullable().catch(null) })
       .parse(response.data);
   },
 

@@ -32,6 +32,10 @@ function fakePrisma(rows: Row[] = []) {
           store.set(where.key, store.has(where.key) ? update.config : create.config);
           return Promise.resolve({ key: where.key, config: store.get(where.key) });
         },
+        deleteMany: ({ where }: { where: { key: string } }) => {
+          const existed = store.delete(where.key);
+          return Promise.resolve({ count: existed ? 1 : 0 });
+        },
       },
     } as unknown as PrismaService,
     store,
@@ -248,6 +252,64 @@ describe('the dry run judges exactly as the save does', () => {
 });
 
 /** The rows a refusal actually carried, or a failure saying it did not refuse. */
+describe('the cabinet gets what it draws, not the whole library', () => {
+  /**
+   * The default ships around fifty application marks so the editor has
+   * something to offer when an operator adds an app. A customer's phone needs
+   * the five or six their own catalog references, and the rest is four fifths
+   * of this payload spent on icons nothing renders — on every cold cabinet,
+   * over mobile data.
+   *
+   * The admin read is the opposite: that one IS the library, and trimming it
+   * would empty the editor's icon picker.
+   */
+  it('drops icons no platform, app or step names', async () => {
+    const { service: svc } = service();
+    const cabinet = await svc.getCabinetConfig();
+    const referenced = new Set<string>();
+    for (const platform of cabinet.platforms) {
+      if (platform.iconKey) referenced.add(platform.iconKey);
+      for (const app of platform.apps) {
+        if (app.iconKey) referenced.add(app.iconKey);
+        for (const step of app.steps) if (step.iconKey) referenced.add(step.iconKey);
+      }
+    }
+    assert.deepEqual(Object.keys(cabinet.icons).sort(), [...referenced].sort());
+  });
+
+  it('keeps every icon the screen actually asks for', async () => {
+    // The failure this catches is the trim going one step too far: a key the
+    // catalog references with nothing behind it renders the fallback glyph,
+    // which reads as a bug in the app rather than a gap in the config.
+    const { service: svc } = service();
+    const cabinet = await svc.getCabinetConfig();
+    for (const platform of cabinet.platforms) {
+      assert.ok(!platform.iconKey || cabinet.icons[platform.iconKey], platform.id);
+      for (const app of platform.apps) {
+        assert.ok(!app.iconKey || cabinet.icons[app.iconKey], `${platform.id}/${app.id}`);
+      }
+    }
+  });
+
+  it('leaves the admin read holding the whole library', async () => {
+    const { service: svc } = service();
+    const [cabinet, admin] = await Promise.all([svc.getCabinetConfig(), svc.getEffectiveConfig()]);
+    assert.ok(
+      Object.keys(admin.icons).length > Object.keys(cabinet.icons).length,
+      'the editor would have nothing to offer for an app the operator adds',
+    );
+  });
+
+  it('trims an operator catalog the same way', async () => {
+    // Not just the default: an operator who saved a config carrying fifty marks
+    // and then deleted half their apps should stop paying for the other half.
+    const { service: svc } = service();
+    await svc.replaceConfig(catalog({ used: '<svg viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>', spare: '<svg viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>' }));
+    const cabinet = await svc.getCabinetConfig();
+    assert.equal(cabinet.icons['spare'], undefined, 'an unreferenced icon still travelled');
+  });
+});
+
 async function refusalOf(run: () => Promise<unknown>): Promise<{ message: string }[]> {
   try {
     await run();
