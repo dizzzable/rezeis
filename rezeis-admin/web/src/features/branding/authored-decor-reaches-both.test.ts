@@ -8,8 +8,9 @@ import {
   getConceptSourceStyle,
   getConceptThemeModeVisual,
   type ConceptPresetDescriptor,
+  type HexColor,
 } from '../../lib/theme/concept-presets'
-import { createConceptReiwaPreset } from './theme-presets'
+import { CONCEPT_THEME_PRESETS, createConceptThemeModeVariants } from './theme-presets'
 
 /**
  * A DECOR WRITTEN FOR A CONCEPT HAS TO REACH BOTH BACKGROUNDS.
@@ -34,13 +35,16 @@ import { createConceptReiwaPreset } from './theme-presets'
  * everything else separately and always will.
  */
 
-function ink(descriptor: ConceptPresetDescriptor) {
+function ink(descriptor: ConceptPresetDescriptor): { foreground: HexColor; background: HexColor } {
   const mode = getConceptSourceMode(descriptor)
   const values = getConceptThemeModeVisual(descriptor, mode).tokens as unknown as Record<
     string,
-    string
+    HexColor
   >
-  return { foreground: values['foreground'] ?? '#ffffff', background: values['background'] ?? '#000000' }
+  return {
+    foreground: values['foreground'] ?? '#ffffff',
+    background: values['background'] ?? '#000000',
+  }
 }
 
 describe('a decor written against the board', () => {
@@ -70,20 +74,18 @@ describe('a decor written against the board', () => {
     // either.
     for (const code of AUTHORED_DECOR_CODES) {
       const descriptor = CONCEPT_PRESETS.find((preset) => preset.code === code)!
-      const source = getConceptSourceMode(descriptor)
-      const opposite = source === 'dark' ? 'light' : 'dark'
-      for (const mode of [source, opposite] as const) {
-        const preset = createConceptReiwaPreset(descriptor, mode) as unknown as {
-          appBackground: { gradient: string }
-        }
-        // The position is the drawing's signature and survives a change of ink
-        // between the two brightnesses, which the exact layer string does not.
-        const marker = /at \d+% \d+%/.exec(
-          (authoredDecorLayers(code, ink(descriptor)) ?? [])[0] ?? '',
-        )?.[0]
-        expect(marker, `${code}: the authored decor draws nothing positioned`).toBeDefined()
+      const preset = CONCEPT_THEME_PRESETS.find((candidate) => candidate.code === code)
+      expect(preset, `${code}: the cabinet has no preset for this concept`).toBeDefined()
+      const variants = createConceptThemeModeVariants(preset!)
+      // The position is the drawing's signature and survives a change of ink
+      // between the two brightnesses, which the exact layer string does not.
+      const marker = /at \d+% \d+%/.exec(
+        (authoredDecorLayers(code, ink(descriptor)) ?? [])[0] ?? '',
+      )?.[0]
+      expect(marker, `${code}: the authored decor draws nothing positioned`).toBeDefined()
+      for (const mode of ['light', 'dark'] as const) {
         expect(
-          preset.appBackground.gradient,
+          variants[mode].appBackground.gradient ?? '',
           `${code}: the cabinet background at ${mode} lost the authored decor`,
         ).toContain(marker!)
       }
@@ -96,8 +98,14 @@ describe('a decor written against the board', () => {
     // would look right on one surface and wrong on the other.
     for (const code of AUTHORED_DECOR_CODES) {
       const descriptor = CONCEPT_PRESETS.find((preset) => preset.code === code)!
-      const pale = authoredDecorLayers(code, { foreground: '#ffffff', background: '#000000' })
-      const dark = authoredDecorLayers(code, { foreground: '#111111', background: '#eeeeee' })
+      const pale = authoredDecorLayers(code, {
+        foreground: '#ffffff' as HexColor,
+        background: '#000000' as HexColor,
+      })
+      const dark = authoredDecorLayers(code, {
+        foreground: '#111111' as HexColor,
+        background: '#eeeeee' as HexColor,
+      })
       expect(pale).not.toEqual(dark)
       expect(getConceptSourceStyle(descriptor)).toBeDefined()
     }
