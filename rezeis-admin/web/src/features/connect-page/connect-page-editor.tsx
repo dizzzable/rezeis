@@ -36,8 +36,9 @@ import {
   Save,
   Star,
   Trash2,
+  Upload,
 } from 'lucide-react';
-import { useMemo, useState, type JSX, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type JSX, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
@@ -46,6 +47,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 import { ConnectThemeCard } from './connect-theme-card';
+import { SubpageImportCard } from './subpage-import-card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -58,6 +60,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+
 import { UnsavedChangesGuard } from '@/components/unsaved-changes-guard';
 import { usePermissionStore } from '@/features/rbac/use-permission-store';
 
@@ -85,6 +88,54 @@ import {
   type ConnectStep,
   type LocalizedText,
 } from './connect-page-api';
+
+/** An SVG bigger than this is artwork, not an icon; the server refuses it anyway. */
+const MAX_ICON_FILE_BYTES = 32 * 1024;
+
+/**
+ * Will this drawing survive the sanitizer with its colours intact?
+ *
+ * ── This was backwards for an hour, and it mattered ─────────────────────────
+ *
+ * The first version listed `defs`, `linearGradient`, `radialGradient`,
+ * `pattern`, `mask`, `clipPath` and every `url(#…)` — the pre-widening
+ * allow-list. The sanitizer then LEARNED all of those except `pattern` and
+ * `mask`, and this warning kept telling operators that the gradient logo they
+ * had just uploaded would be flattened, and to replace it with a flat version.
+ * That is the exact opposite of what the server does with it, and it is advice
+ * to throw away the icons the widening was done for.
+ *
+ * What actually still loses its colours: a `<mask>`, a `<pattern>` or a
+ * `<filter>` — each can carry or fetch an image, so each stays banned — and a
+ * `url()` that is not a local fragment, which is a network request.
+ *
+ * A warning, not a refusal: the server decides, and a flat icon that merely
+ * mentions one of these words in a `<title>` should not be blocked for nothing.
+ */
+/**
+ * `#abc` and `#abcd` widened to the six digits a colour input will accept.
+ *
+ * Returns null for anything that is not a colour, so the caller falls back to a
+ * default rather than showing black.
+ */
+function expandHex(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const body = value.trim().replace('#', '');
+  if (/^[\da-f]{3,4}$/i.test(body)) {
+    return `#${body.slice(0, 3).split('').map((c) => c + c).join('')}`;
+  }
+  if (/^[\da-f]{6}$/i.test(body) || /^[\da-f]{8}$/i.test(body)) return `#${body.slice(0, 6)}`;
+  return null;
+}
+
+function losesItsColours(markup: string): boolean {
+  return (
+    /<(mask|pattern|filter)[\s>/]/i.test(markup) ||
+    // `url(` that is not `url(#local)` — the sanitizer keeps only the fragment
+    // form, and everything else is a fetch.
+    /url\(\s*(?!#)/i.test(markup)
+  );
+}
 
 export function ConnectPageEditor(): JSX.Element {
   const { t } = useTranslation();
@@ -361,6 +412,15 @@ export function ConnectPageEditor(): JSX.Element {
           to be here for after the catalog is once written, and it saves to its
           own row, so it is not part of the draft below and cannot be lost by
           discarding one. */}
+      {/* Above the theme card: an operator arriving with an export wants the
+          catalog in place before they dress it. It replaces the DRAFT only —
+          they read the report, look at what landed below, and save themselves. */}
+      <SubpageImportCard
+        canEdit={canEdit}
+        existingIcons={config.icons}
+        onImported={setDraft}
+      />
+
       <ConnectThemeCard
         config={config}
         sanitized={data?.config.icons ?? {}}
@@ -700,6 +760,44 @@ function StepCard({
         onChange={(iconKey) => onChange({ ...step, iconKey })}
       />
 
+      {/* Empty means the icon follows the theme, which is the default and what
+          keeps one catalog looking right on every appearance concept. The
+          override is here because the external page carries one per step and an
+          operator who used it would otherwise lose it. */}
+      <Field label={t('connectPageEditor.iconColor')}>
+        <div className="flex items-center gap-2">
+          <input
+            type="color"
+            aria-label={t('connectPageEditor.iconColor')}
+            // `<input type="color">` accepts ONLY `#` plus exactly six digits;
+            // anything else is coerced to `#000000`, so a 3- or 4-digit value
+            // showed a black swatch beside a text field holding the real
+            // colour. Expanded rather than truncated.
+            value={expandHex(step.iconColor) ?? '#22c55e'}
+            onChange={(e) => onChange({ ...step, iconColor: e.target.value })}
+            className="h-9 w-12 cursor-pointer rounded-md border border-border bg-transparent p-1"
+          />
+          <Input
+            value={typeof step.iconColor === 'string' ? step.iconColor : ''}
+            placeholder={t('connectPageEditor.iconColorTheme')}
+            onChange={(e) => {
+              const next = e.target.value.trim();
+              onChange({ ...step, iconColor: next.length === 0 ? null : next });
+            }}
+          />
+          {typeof step.iconColor === 'string' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onChange({ ...step, iconColor: null })}
+              title={t('connectPageEditor.iconColorClear')}
+            >
+              {t('connectPageEditor.iconColorClear')}
+            </Button>
+          )}
+        </div>
+      </Field>
+
       <div className="space-y-2">
         {step.buttons.map((button, buttonIndex) => (
           <ButtonRow
@@ -827,6 +925,57 @@ function IconLibrary({
   const { t } = useTranslation();
   const [key, setKey] = useState('');
   const [markup, setMarkup] = useState('');
+  const [fileError, setFileError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+
+  /**
+   * Load one or more `.svg` files straight into the library.
+   *
+   * Pasting markup was the only way in, which means opening the file in an
+   * editor first — for the ordinary case, "I downloaded this app's logo".
+   * Several at once because operators arrive with a folder, not a file.
+   *
+   * The name of the file becomes the key, which is the only sensible guess and
+   * is editable afterwards. Nothing is sanitized here: that happens on the
+   * server, on save, and doing it twice would be a second opinion about what
+   * the markup means. Until then the chip shows a placeholder, exactly as a
+   * pasted icon does.
+   */
+  const loadFiles = async (files: FileList): Promise<void> => {
+    setFileError(null);
+    const next: Record<string, string> = { ...icons };
+    const refused: string[] = [];
+    const flattened: string[] = [];
+    for (const file of Array.from(files)) {
+      if (file.size > MAX_ICON_FILE_BYTES) {
+        refused.push(file.name);
+        continue;
+      }
+      const text = (await file.text()).trim();
+      // Most `.svg` files open with `<?xml …?>`, a doctype, or an editor's
+      // generator comment — Illustrator writes all three. Refusing on the first
+      // byte told an operator their own export was "not an SVG"; the server
+      // skips the same preamble, so this has to as well or the two disagree
+      // about the same file.
+      if (!/^(?:\s*(?:<\?[^>]*\?>|<!DOCTYPE[^>]*>|<!--[\s\S]*?-->))*\s*<svg[\s>]/i.test(text)) {
+        refused.push(file.name);
+        continue;
+      }
+      const base = file.name.replace(/\.svg$/i, '');
+      const existing = Object.keys(next).includes(base);
+      next[existing ? base : slugify(base, Object.keys(next))] = text;
+      if (losesItsColours(text)) flattened.push(file.name);
+    }
+    onChange(next);
+    const problems: string[] = [];
+    if (refused.length > 0) {
+      problems.push(t('connectPageEditor.iconFileRefused', { files: refused.join(', ') }));
+    }
+    if (flattened.length > 0) {
+      problems.push(t('connectPageEditor.iconFileFlattened', { files: flattened.join(', ') }));
+    }
+    setFileError(problems.length > 0 ? problems.join(' ') : null);
+  };
 
   const add = (): void => {
     if (markup.trim().length === 0 || key.trim().length === 0) return;
@@ -913,10 +1062,39 @@ function IconLibrary({
               placeholder="<svg viewBox=&quot;0 0 24 24&quot;>…</svg>"
             />
           </Field>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/svg+xml,.svg"
+            multiple
+            className="sr-only"
+            onChange={(event) => {
+              const chosen = event.target.files;
+              // Cleared so the same file can be picked again after a refusal.
+              event.target.value = '';
+              if (chosen !== null && chosen.length > 0) void loadFiles(chosen);
+            }}
+          />
+          <Button
+            variant="outline"
+            onClick={() => fileInput.current?.click()}
+            title={t('connectPageEditor.iconUploadHint')}
+          >
+            <Upload className="mr-2 h-4 w-4" /> {t('connectPageEditor.iconUpload')}
+          </Button>
           <Button onClick={add} disabled={markup.trim().length === 0 || key.trim().length === 0}>
             <Plus className="mr-2 h-4 w-4" /> {t('connectPageEditor.addIcon')}
           </Button>
         </div>
+        {fileError !== null && (
+          // Said here rather than in a toast: an operator uploading a folder of
+          // logos needs the list of which ones lost their colours to stay on
+          // screen while they replace them.
+          <p className="flex items-start gap-2 text-sm text-destructive">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            {fileError}
+          </p>
+        )}
       </CardContent>
     </Card>
   );

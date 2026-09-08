@@ -171,6 +171,9 @@ export const en = {
     featuredHint: 'The screen opens on it. Exactly one per platform.',
     icon: 'Icon',
     noIcon: 'No icon',
+    iconColor: 'Icon colour',
+    iconColorTheme: 'Empty — the theme colour',
+    iconColorClear: 'Back to the theme',
     step: 'Step {{number}}',
     stepTitle: 'Step title',
     stepBody: 'Description',
@@ -197,6 +200,11 @@ export const en = {
     iconKey: 'Key',
     iconMarkup: 'SVG',
     addIcon: 'Add',
+    iconUpload: 'Upload SVG',
+    iconUploadHint: 'Several files at once is fine — the filename becomes the key',
+    iconFileRefused: 'Not accepted: {{files}} — not an SVG, or larger than 32 KB',
+    iconFileFlattened:
+      'Will lose their colours on save: {{files}}. The panel does not allow gradients or masks, so only the shapes survive. Use a flat version of the logo.',
     removeIcon: 'Remove the icon',
     iconInUse: 'The icon is in use — unlink it first',
     moveUp: 'Move up',
@@ -215,6 +223,18 @@ export const en = {
     retry: 'Retry',
     corruptedTitle: 'The saved catalog cannot be read',
     corruptedHint: 'What is shown below is the built-in default, NOT yours. Saving will overwrite the stored one. Reason: {{reason}}',
+    import: {
+      title: 'Import from the external subscription page',
+      description:
+        'Already built the catalog on the external Remnawave page? Read its export and fill this screen from it.',
+      choose: 'Choose a file',
+      hint: 'A subscription-page JSON export',
+      done: 'Read: {{platforms}} platforms, {{apps}} apps, {{steps}} steps, {{icons}} icons',
+      reviewHint:
+        'The catalog below was replaced but NOT saved. Look it over, then press Save the catalog.',
+      tooLarge: 'That file is too large to be a subscription-page export',
+      unreadable: 'The file does not read as JSON',
+    },
     theme: {
       title: 'Screen appearance',
       description:

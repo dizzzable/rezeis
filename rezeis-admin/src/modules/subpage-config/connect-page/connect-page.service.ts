@@ -437,7 +437,13 @@ export class ConnectPageService {
     const issues: ConnectPageIssue[] = [];
     for (const [key, markup] of Object.entries(source)) {
       try {
-        const result = sanitizeIconMarkup(markup);
+        // The key scopes the ids inside the drawing. Two vendor logos exported
+        // from the same design tool both contain `paint0_linear_11_16637`, and
+        // on one page `url(#paint0_linear_11_16637)` resolves to whichever came
+        // first — so the second logo wears the first one's gradient. Passing
+        // the key also makes the scoping stable across saves, which a hash of
+        // the markup could not be.
+        const result = sanitizeIconMarkup(markup, key);
         // Checked AFTER cleaning, because cleaning GROWS the string: every `&`
         // becomes `&amp;`. An icon just under the ceiling on the way in came out
         // over it, was stored anyway, and then failed to parse on the way out —

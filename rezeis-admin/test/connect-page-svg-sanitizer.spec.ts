@@ -33,19 +33,78 @@ describe('an ordinary icon survives', () => {
     assert.deepEqual(removed, []);
   });
 
-  it('drops the referencing machinery, which was inert and dangerous at once', () => {
-    // `use`, `defs`, gradients, `clipPath` and `mask` used to be allowed. Every
-    // one of them is reachable only through `url(#…)` or an href fragment, and
-    // `url(` is stripped unconditionally — so they drew nothing. Meanwhile ten
-    // nested groups referencing each other through `use` fit in under 2 KB,
-    // pass every ceiling in the file, and expand to ten billion nodes in the
-    // customer's browser.
+  it('keeps a gradient and drops the use that came with it', () => {
+    // `defs` and the gradients were dropped wholesale until it was measured
+    // what that cost: the official INCY mark arrived 4476 bytes and left 1640,
+    // with every fill removed, because a modern vendor logo paints with
+    // `fill="url(#gradient)"`. They are in now.
+    //
+    // `use` is NOT, and never will be: ten nested groups referencing each other
+    // fit in under 2 KB, pass every ceiling in this file, and expand to ten
+    // billion nodes in the customer's browser.
     const { markup } = sanitizeIconMarkup(
-      '<svg viewBox="0 0 24 24"><defs><linearGradient id="g"><stop offset="0"/></linearGradient></defs><use href="#g"/><path d="M0 0"/></svg>',
+      '<svg viewBox="0 0 24 24"><defs><linearGradient id="g"><stop offset="0"/></linearGradient></defs><use href="#g"/><path d="M0 0" fill="url(#g)"/></svg>',
     );
 
-    assert.doesNotMatch(markup, /use|linearGradient|defs/i);
-    assert.match(markup, /<path d="M0 0"\/>/, 'the drawing still survives');
+    assert.doesNotMatch(markup, /<use/i, 'the bomb survived');
+    assert.match(markup, /<defs>/, 'the gradient definition was dropped');
+    assert.match(markup, /<linearGradient /, 'the element name lost its casing');
+    // Definition and reference still name the same thing after both were scoped.
+    const defined = /<linearGradient id="([^"]+)"/.exec(markup);
+    const used = /fill="url\(#([^)]+)\)"/.exec(markup);
+    assert.ok(defined && used, 'the gradient lost either its id or its reference');
+    assert.equal(defined[1], used[1]);
+  });
+
+  it('scopes ids so two icons on one page cannot share a gradient', () => {
+    // THE reason `id` was banned. Every export from the same design tool
+    // contains `paint0_linear_11_16637` — the number is the tool's, not the
+    // brand's — and `url(#paint0_linear_11_16637)` resolves to whichever
+    // definition the browser met first. So the second logo silently wears the
+    // first one's colours.
+    const icon = (d: string) =>
+      `<svg viewBox="0 0 24 24"><defs><linearGradient id="paint0_linear_11_16637"><stop offset="0" stop-color="#fff"/></linearGradient></defs><path d="${d}" fill="url(#paint0_linear_11_16637)"/></svg>`;
+
+    // The KEY is passed, because that is the branch production takes:
+    // `connect-page.service.ts` hands the icon key in. Without it this
+    // exercised the sha1 fallback and could not have seen a regression in the
+    // path that actually runs.
+    const a = sanitizeIconMarkup(icon('M0 0h1v1z'), 'clash-meta').markup;
+    const b = sanitizeIconMarkup(icon('M2 2h3v3z'), 'clash-verge').markup;
+
+    const idOf = (m: string) => /id="([^"]+)"/.exec(m)?.[1];
+    assert.notEqual(idOf(a), idOf(b), 'two different drawings still share an id');
+    assert.doesNotMatch(a, /"paint0_linear_11_16637"/, 'the raw id reached the page');
+  });
+
+  it('is idempotent, because a save re-runs it over its own output', () => {
+    // `connect-page-default.spec` asserts the shipped icons survive unchanged,
+    // and every save re-sanitizes markup a previous save produced. A prefix
+    // taken from the CURRENT ids would grow one layer per pass.
+    const src =
+      '<svg viewBox="0 0 24 24"><defs><linearGradient id="g"><stop offset="0"/></linearGradient></defs><path d="M0 0" fill="url(#g)"/></svg>';
+    const once = sanitizeIconMarkup(src, 'happ').markup;
+    assert.equal(sanitizeIconMarkup(once, 'happ').markup, once, 'the keyed path is not idempotent');
+    // And the unkeyed path, which the marker fallback has to hold up.
+    const bare = sanitizeIconMarkup(src).markup;
+    assert.equal(sanitizeIconMarkup(bare).markup, bare, 'the fallback path is not idempotent');
+  });
+
+  it('refuses a paint reference that reaches outside the icon', () => {
+    // A fragment fetches nothing. Everything else is a request that tells
+    // whoever serves it which customer opened which screen.
+    for (const value of [
+      'url(https://evil.test/x.svg#g)',
+      'url(//evil.test/x.svg#g)',
+      'url(data:image/svg+xml,<svg/>)',
+      "url('#g')",
+      'url(#g) url(https://evil.test)',
+    ]) {
+      const { markup } = sanitizeIconMarkup(
+        `<svg viewBox="0 0 24 24"><path d="M0 0" fill="${value.replace(/"/g, '&quot;')}"/></svg>`,
+      );
+      assert.doesNotMatch(markup, /evil\.test|data:/i, value);
+    }
   });
 
   it('refuses a use bomb outright', () => {
@@ -59,16 +118,18 @@ describe('an ordinary icon survives', () => {
     assert.doesNotMatch(markup, /<use/i);
   });
 
-  it('strips id and class, which are written into a page this markup does not own', () => {
+  it('strips class, which is written into a page this markup does not own', () => {
     // `fixed inset-0 z-50` are real utilities in the cabinet's stylesheet: the
-    // icon would lift out of the flow and cover the screen. An id collides with
-    // the page's own — including with the same icon drawn twice.
+    // icon would lift out of the flow and cover the screen. `id` used to go the
+    // same way and is now kept — but only ever in scoped form, which is what
+    // the tests above are about.
     const { markup, removed } = sanitizeIconMarkup(
-      '<svg viewBox="0 0 24 24" class="fixed inset-0 z-50" id="app"><path d="M0 0" id="p"/></svg>',
+      '<svg viewBox="0 0 24 24" class="fixed inset-0 z-50" id="app"><path d="M0 0"/></svg>',
     );
 
-    assert.doesNotMatch(markup, /class=|id=/);
-    assert.ok(removed.includes('@class') && removed.includes('@id'));
+    assert.doesNotMatch(markup, /class=/);
+    assert.ok(removed.includes('@class'));
+    assert.doesNotMatch(markup, /id="app"/, 'an unscoped id reached the page');
   });
 
   it('escapes a quote so a single-quoted value cannot break out', () => {
@@ -146,10 +207,10 @@ describe('what an icon is not allowed to be', () => {
 
   it('refuses a scheme hidden in an ordinary attribute', () => {
     const { markup } = sanitizeIconMarkup(
-      `<svg viewBox="0 0 24 24"><path d="M0 0" fill="url(#x)" clip-path="javascript:alert(1)"/></svg>`,
+      `<svg viewBox="0 0 24 24"><path d="M0 0" transform="javascript:alert(1)" clip-path="javascript:alert(1)"/></svg>`,
     );
 
-    assert.doesNotMatch(markup, /javascript|url\(/i);
+    assert.doesNotMatch(markup, /javascript/i);
     assert.match(markup, /<path d="M0 0"\/>/);
   });
 
@@ -232,10 +293,84 @@ describe('what it refuses outright', () => {
   });
 
   it('does not choke on a tag whose attribute value contains a bracket', () => {
-    // `>` inside a quoted value is legal and a naive scanner ends the tag early,
-    // which silently truncates the icon instead of refusing it.
-    const { markup } = sanitizeIconMarkup('<svg viewBox="0 0 24 24"><title>a > b</title><path d="M0 0"/></svg>');
+    // The `>` has to be INSIDE a quoted value: in text content it exercises
+    // nothing, because the tokenizer has already left the tag. That is what the
+    // first version of this test did, so `findTagEnd`'s quote tracking — the
+    // thing the name promises — was guarded by nothing.
+    // `>` inside a quoted value is legal, and a naive scanner ends the tag
+    // there — silently truncating the icon instead of refusing it. Whether the
+    // truncation happened is only visible in what comes AFTER the tag, so the
+    // title below is the actual assertion; the earlier version of this test put
+    // the bracket in text content, where the tokenizer has already left the tag
+    // and nothing is exercised at all.
+    const { markup } = sanitizeIconMarkup(
+      '<svg viewBox="0 0 24 24"><path d="M0 0h1v1z" transform="translate(1,2) > "/><title>after</title></svg>',
+    );
 
-    assert.match(markup, /<path d="M0 0"\/>/);
+    assert.match(markup, /<path d="M0 0h1v1z"/);
+    assert.match(markup, /<title>after<\/title>/, 'the tag ended at the bracket inside the value');
+  });
+});
+
+describe('what the widening broke, and what caught it', () => {
+  it('still refuses a file that defines a gradient and draws nothing', () => {
+    // `<line` is a PREFIX of `<linearGradient`, so the "nothing was left to
+    // draw" refusal — a substring check — started passing the moment gradients
+    // were allowed in. A Figma export whose artwork sits in a (still banned)
+    // `<mask>` came through as a definitions-only file and stored as a blank
+    // icon. The controlling case: `radialGradient` was refused, `linearGradient`
+    // was not.
+    for (const element of ['linearGradient', 'radialGradient']) {
+      assert.throws(
+        () =>
+          sanitizeIconMarkup(
+            `<svg viewBox="0 0 24 24"><defs><${element} id="g"><stop stop-color="#fff"/></${element}></defs></svg>`,
+            'vendor',
+          ),
+        /Nothing was left to draw/,
+        element,
+      );
+    }
+  });
+
+  it('drops a paint reference whose definition did not survive', () => {
+    // `<mask>` is still banned. A vendor export defining its gradient inside
+    // one arrives with the definition gone and the reference intact — and
+    // `clip-path="url(#gone)"` clips the whole drawing away, turning a lost
+    // colour into a lost icon.
+    const { markup } = sanitizeIconMarkup(
+      '<svg viewBox="0 0 24 24"><mask id="m"><linearGradient id="g"><stop stop-color="#fff"/></linearGradient></mask><path d="M0 0h1v1z" fill="url(#g)" clip-path="url(#m)"/></svg>',
+      'vendor',
+    );
+    assert.doesNotMatch(markup, /url\(#/, 'a reference outlived its definition');
+    assert.match(markup, /<path d="M0 0h1v1z"\s*\/>/, 'the drawing itself was lost');
+  });
+
+  it('gives two icon keys two prefixes, however similar the keys are', () => {
+    // The prefix was a slug of the key: runs collapsed, `_` became `-`, ends
+    // trimmed. So `clash_meta`, `clash-meta` and `clash--meta` all produced
+    // `iclash-meta` — three icons sharing one gradient, which is the collision
+    // the scoping exists to prevent.
+    const icon = '<svg viewBox="0 0 24 24"><defs><linearGradient id="g"><stop stop-color="#fff"/></linearGradient></defs><path d="M0 0h1v1z" fill="url(#g)"/></svg>';
+    const prefixes = ['clash_meta', 'clash-meta', 'clash--meta', 'clash meta'].map(
+      (key) => /id="([^-]+)-/.exec(sanitizeIconMarkup(icon, key).markup)?.[1],
+    );
+    assert.equal(new Set(prefixes).size, prefixes.length, `collided: ${prefixes.join(', ')}`);
+  });
+
+  it('accepts the preamble a real .svg file starts with', () => {
+    // Illustrator writes a prolog, a doctype AND a generator comment. Refusing
+    // on the first byte told an operator their own export was "not an SVG".
+    const { markup } = sanitizeIconMarkup(
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!-- Generator: Adobe Illustrator -->',
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
+        '<svg viewBox="0 0 24 24"><path d="M0 0h1v1z"/></svg>',
+      ].join('\n'),
+      'vendor',
+    );
+    assert.match(markup, /^<svg /);
+    assert.match(markup, /<path d="M0 0h1v1z"/);
   });
 });

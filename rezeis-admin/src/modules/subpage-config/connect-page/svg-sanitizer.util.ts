@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * svg-sanitizer.util
  * ──────────────────
@@ -56,7 +58,42 @@ const ALLOWED_ELEMENTS = new Set([
   'polygon',
   'title',
   'desc',
+  // ── Paint servers, admitted deliberately ──────────────────────────────────
+  //
+  // These were excluded on the reasoning quoted above: unreachable, because
+  // `url(` was stripped unconditionally, therefore dead weight. That reasoning
+  // was sound and it had a cost nobody had measured — most modern vendor marks
+  // paint with `fill="url(#gradient)"`, so the official INCY icon came through
+  // at 4476 bytes in, 1640 out, with `<defs>`, `clip-path` and EVERY fill
+  // removed: a stack of black rectangles where a logo should be.
+  //
+  // They are admitted with the two things that made them unsafe now handled:
+  // `url()` is allowed ONLY in the `url(#local-fragment)` form and only on the
+  // three attributes that paint, and every `id` is rewritten per icon so two
+  // logos on one page cannot share a gradient (see `idPrefix`).
+  //
+  // `use` stays out — it is the billion-laughs vector, and nothing about
+  // gradients needs it. So do `pattern`, `mask` and `filter`: each can carry or
+  // fetch an image, which is the one thing an icon must never do.
+  'defs',
+  'lineargradient',
+  'radialgradient',
+  'stop',
+  'clippath',
 ]);
+
+/**
+ * Elements whose spelling the browser cares about.
+ *
+ * SVG is case-sensitive where HTML is not: `<lineargradient>` is not an
+ * element, it is an unknown tag that paints nothing. The tokenizer lower-cases
+ * for comparison, so the canonical spelling has to be restored on the way out.
+ */
+const ELEMENT_CASE: Readonly<Record<string, string>> = {
+  lineargradient: 'linearGradient',
+  radialgradient: 'radialGradient',
+  clippath: 'clipPath',
+};
 
 /**
  * Attributes an icon is drawn with.
@@ -102,7 +139,43 @@ const ALLOWED_ATTRIBUTES = new Set([
   'aria-hidden',
   'role',
   'focusable',
+  // Paint-server plumbing. `id` is back, and it is only safe because every one
+  // of them is rewritten per icon before it reaches the page — see `idPrefix`.
+  'id',
+  'clip-path',
+  'clippathunits',
+  'gradientunits',
+  'gradienttransform',
+  'spreadmethod',
+  'fx',
+  'fy',
 ]);
+
+/**
+ * Attributes whose spelling the browser cares about, same reason as elements.
+ */
+const ATTRIBUTE_CASE: Readonly<Record<string, string>> = {
+  viewbox: 'viewBox',
+  clippathunits: 'clipPathUnits',
+  gradientunits: 'gradientUnits',
+  gradienttransform: 'gradientTransform',
+  spreadmethod: 'spreadMethod',
+};
+
+/** The only three attributes that may name a paint server. */
+const PAINT_ATTRIBUTES = new Set(['fill', 'stroke', 'clip-path']);
+
+/**
+ * A reference to something defined inside THIS icon, and nothing else.
+ *
+ * `url(#a)` is a fragment: it resolves in the current document and fetches
+ * nothing. `url(http…)`, `url(//…)`, `url(data:…)` all reach outward, and one
+ * of them in a customer's page is a request that says which customer opened
+ * which screen. The fragment itself is restricted to the characters an id may
+ * hold, so nothing can be smuggled through the parentheses.
+ */
+const LOCAL_PAINT_REFERENCE = /^url\(\s*#([A-Za-z_][\w.:-]*)\s*\)$/;
+const ID_VALUE = /^[A-Za-z_][\w.:-]*$/;
 
 /**
  * Values that may not appear in an attribute.
@@ -114,6 +187,46 @@ const ALLOWED_ATTRIBUTES = new Set([
  * the same icon drawn twice. `href` went with `use`.
  */
 const SCHEME_LIKE = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * Strip paint references whose definition did not survive the same pass.
+ *
+ * ── Why a dangling reference is worse than none ──────────────────────────────
+ *
+ * `fill="url(#gone)"` paints NOTHING — the shape is invisible rather than
+ * black. And `clip-path="url(#gone)"` is worse still: an empty or missing clip
+ * path clips its subject away entirely, so an icon that merely lost its colours
+ * loses its whole drawing instead.
+ *
+ * That happens for real. A `<mask>` is still banned, and a vendor export that
+ * defines its gradient inside one arrives here with the definition dropped and
+ * the reference intact.
+ *
+ * Falling back to no attribute at all is the honest answer: the shape draws in
+ * the inherited colour, which is the same place an icon with no fill lands, and
+ * the operator is told through `removed` rather than shown a blank square.
+ */
+function dropDanglingReferences(markup: string, removed: Set<string>): string {
+  const defined = new Set(
+    Array.from(markup.matchAll(/\sid="([^"]+)"/g), (m) => m[1]),
+  );
+  return markup.replace(
+    /\s(fill|stroke|clip-path)="url\(#([^)"]+)\)"/g,
+    (whole, attribute: string, target: string) => {
+      if (defined.has(target)) return whole;
+      removed.add(`@${attribute}`);
+      return '';
+    },
+  );
+}
+
+/**
+ * `<?xml …?>`, `<!DOCTYPE …>` and comments, in any order, before the drawing.
+ *
+ * Repeated so an export carrying a prolog AND a comment AND a doctype — which
+ * Illustrator produces by default — reaches the same place as a bare `<svg>`.
+ */
+const LEADING_PREAMBLE = /^(?:\s*(?:<\?[^>]*\?>|<!DOCTYPE[^>]*>|<!--[\s\S]*?-->))*\s*/i;
 
 export interface SanitizeIconResult {
   readonly markup: string;
@@ -138,50 +251,118 @@ const MAX_NODES = 2_000;
  * cannot read rather than guessing, because guessing is how a sanitizer and a
  * renderer come to disagree about what a string means.
  */
-export function sanitizeIconMarkup(input: string): SanitizeIconResult {
+/**
+ * A prefix that is unique to this DRAWING and stable across sanitizations.
+ *
+ * ── Why ids have to be rewritten at all ──────────────────────────────────────
+ *
+ * Every icon is injected into ONE page. Two exported vendor logos will both
+ * contain `paint0_linear_11_16637` — the number comes from the design tool, not
+ * from the brand — and `url(#paint0_linear_11_16637)` resolves to whichever
+ * definition the browser met first. So the second logo silently wears the
+ * first one's gradient. That is the reason `id` was banned outright, and it is
+ * a real defect, not a theoretical one.
+ *
+ * Prefixing every id and every reference with a per-drawing string removes it:
+ * two different drawings can no longer name the same thing, and the same
+ * drawing used twice names it identically, which is correct.
+ *
+ * ── Why it has to be idempotent, and how ─────────────────────────────────────
+ *
+ * `connect-page-default.spec` asserts the shipped icons come out of this
+ * byte-for-byte unchanged, and every save re-runs it over markup a previous
+ * save produced. A prefix computed from the markup ITSELF cannot do that: the
+ * first pass rewrites more than the ids, so the second pass hashes a different
+ * string, mints a different prefix, and produces `iBBBB-iAAAA-g`.
+ *
+ * Two answers, in order:
+ *
+ *   1. The icon's own KEY, when the caller has it. That is the icon's identity
+ *      — stable by definition, readable in the output, and the same for the
+ *      same icon on every save.
+ *   2. Failing that, the marker already in the markup. An id that reads
+ *      `i0a1b2c3d-…` was scoped by a previous pass, so that pass's prefix is
+ *      reused rather than a new one stacked on top.
+ *
+ * Only a first pass over an unkeyed, unscoped icon reaches the hash.
+ */
+const SCOPE_MARKER = /[\s"]id\s*=\s*"(i[0-9a-f]{8})-/i;
+
+function idPrefixFor(source: string, scope: string | undefined): string {
+  if (scope !== undefined && scope.trim().length > 0) {
+    // A HASH of the key, not a cleaned-up copy of it. Slugifying collapsed
+    // runs, mapped `_` onto `-` and trimmed the ends, so `clash_meta`,
+    // `clash-meta` and `clash--meta` all became `iclash-meta` — three distinct
+    // icons sharing one prefix, which is the gradient-collision this scoping
+    // exists to prevent. A digest is injective enough and cannot be collapsed.
+    return `i${createHash('sha1').update(scope.trim()).digest('hex').slice(0, 8)}`;
+  }
+  const existing = SCOPE_MARKER.exec(source);
+  if (existing !== null) return existing[1];
+  return `i${createHash('sha1').update(source).digest('hex').slice(0, 8)}`;
+}
+
+export function sanitizeIconMarkup(
+  input: string,
+  /**
+   * The icon's key, when the caller knows it.
+   *
+   * Used to scope the ids inside this drawing so two icons on one page cannot
+   * share a gradient. Optional because the sanitizer is also called on markup
+   * that has no key yet; see `idPrefixFor` for what happens then.
+   */
+  scope?: string,
+): SanitizeIconResult {
   const source = input.trim();
   if (source.length === 0) throw new InvalidIconError('The icon is empty');
   if (Buffer.byteLength(source, 'utf8') > MAX_INPUT_BYTES) {
     throw new InvalidIconError('The icon is too large to be an icon');
   }
-  if (!/^<svg[\s>]/i.test(source)) {
+  // Most `.svg` files on disk open with `<?xml …?>`, a doctype, or an editor's
+  // generator comment. Refusing those told an operator their own export was
+  // "not an SVG" — and the tokenizer below already drops all three, so the
+  // refusal was about the FIRST byte and nothing else. Skipped here so the
+  // check is about whether this is a drawing, not about how it was saved.
+  const drawing = source.replace(LEADING_PREAMBLE, '');
+  if (!/^<svg[\s>]/i.test(drawing)) {
     throw new InvalidIconError('An icon must start with an <svg> element');
   }
 
   const removed = new Set<string>();
+  const idPrefix = idPrefixFor(drawing, scope);
   const out: string[] = [];
   const open: string[] = [];
   let nodes = 0;
   let i = 0;
 
-  while (i < source.length) {
-    const lt = source.indexOf('<', i);
+  while (i < drawing.length) {
+    const lt = drawing.indexOf('<', i);
     if (lt === -1) {
-      appendText(out, source.slice(i));
+      appendText(out, drawing.slice(i));
       break;
     }
-    appendText(out, source.slice(i, lt));
+    appendText(out, drawing.slice(i, lt));
 
     // Comments, CDATA, doctypes and processing instructions carry nothing an
     // icon needs and are the usual smuggling wrappers. Dropped, not parsed.
-    if (source.startsWith('<!--', lt)) {
-      const end = source.indexOf('-->', lt + 4);
+    if (drawing.startsWith('<!--', lt)) {
+      const end = drawing.indexOf('-->', lt + 4);
       if (end === -1) throw new InvalidIconError('The icon has an unterminated comment');
       removed.add('comment');
       i = end + 3;
       continue;
     }
-    if (source.startsWith('<!', lt) || source.startsWith('<?', lt)) {
-      const end = source.indexOf('>', lt);
+    if (drawing.startsWith('<!', lt) || drawing.startsWith('<?', lt)) {
+      const end = drawing.indexOf('>', lt);
       if (end === -1) throw new InvalidIconError('The icon has an unterminated declaration');
       removed.add('declaration');
       i = end + 1;
       continue;
     }
 
-    const gt = findTagEnd(source, lt);
+    const gt = findTagEnd(drawing, lt);
     if (gt === -1) throw new InvalidIconError('The icon has an unterminated tag');
-    const raw = source.slice(lt + 1, gt);
+    const raw = drawing.slice(lt + 1, gt);
     i = gt + 1;
 
     if (raw.startsWith('/')) {
@@ -195,7 +376,7 @@ export function sanitizeIconMarkup(input: string): SanitizeIconResult {
         throw new InvalidIconError(`The icon closes <${raw.slice(1).trim()}> before <${expected}>`);
       }
       open.pop();
-      out.push(`</${closing}>`);
+      out.push(`</${ELEMENT_CASE[closing] ?? closing}>`);
       continue;
     }
 
@@ -217,8 +398,8 @@ export function sanitizeIconMarkup(input: string): SanitizeIconResult {
       continue;
     }
 
-    const attrs = sanitizeAttributes(body.slice(nameMatch[0].length), removed);
-    out.push(`<${canonical}${attrs}${selfClosing ? '/>' : '>'}`);
+    const attrs = sanitizeAttributes(body.slice(nameMatch[0].length), removed, idPrefix);
+    out.push(`<${ELEMENT_CASE[canonical] ?? canonical}${attrs}${selfClosing ? '/>' : '>'}`);
     if (!selfClosing) open.push(canonical);
   }
 
@@ -230,10 +411,10 @@ export function sanitizeIconMarkup(input: string): SanitizeIconResult {
   // gives the operator a library entry that renders as a blank square, and the
   // blankness is indistinguishable from a styling problem — so the refusal
   // happens here, while the paste is still on screen.
-  if (!DRAWING_ELEMENTS.some((el) => markup.includes(`<${el}`))) {
+  if (!DRAWS_SOMETHING.test(markup)) {
     throw new InvalidIconError('Nothing was left to draw after cleaning');
   }
-  return { markup, removed: [...removed].sort() };
+  return { markup: dropDanglingReferences(markup, removed), removed: [...removed].sort() };
 }
 
 /**
@@ -255,8 +436,27 @@ function canonicalElement(name: string): string | null {
   return null;
 }
 
-/** Elements that actually put ink on the canvas. */
+/**
+ * Elements that actually put ink on the canvas.
+ *
+ * Matched as whole tag names, not as substrings. `markup.includes('<line')` was
+ * true for `<linearGradient` the moment gradients were allowed in, so a file
+ * containing nothing but definitions passed the "something was left to draw"
+ * refusal and stored as a blank icon. The controlling case is exact:
+ * `<radialGradient>` alone was refused, `<linearGradient>` alone was not.
+ *
+ * `use` is in the list and is banned everywhere else, so it can never appear —
+ * kept only so this list reads as "what ink looks like" rather than as a
+ * carefully pruned subset.
+ */
 const DRAWING_ELEMENTS = ['path', 'circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon', 'use'];
+// `String.raw`, because `\s` inside an ordinary template literal is a STRING
+// escape and collapses to a bare `s` — the regex then read `[s/>]` and matched
+// nothing, so every icon was refused as "nothing left to draw".
+const DRAWS_SOMETHING = new RegExp(
+  String.raw`<(?:${DRAWING_ELEMENTS.join('|')})[\s/>]`,
+  'i',
+);
 
 // Anchored. Unanchored, `.test(text.slice(at))` copied the rest of the string
 // and scanned all of it for every single `&` — quadratic, and one 32 KB icon of
@@ -315,7 +515,7 @@ function skipSubtree(source: string, from: number, name: string): number {
 
 const ATTRIBUTE = /([a-zA-Z_:][a-zA-Z0-9_:.-]*)\s*=\s*("([^"]*)"|'([^']*)')/g;
 
-function sanitizeAttributes(source: string, removed: Set<string>): string {
+function sanitizeAttributes(source: string, removed: Set<string>, idPrefix: string): string {
   const kept: string[] = [];
   ATTRIBUTE.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -337,11 +537,39 @@ function sanitizeAttributes(source: string, removed: Set<string>): string {
     // guard is the difference between keeping an icon and silently stripping
     // the one attribute every pasted icon carries.
     const isNamespace = lower === 'xmlns' || lower.startsWith('xmlns:');
-    if (!isNamespace && (SCHEME_LIKE.test(value.trim()) || /url\s*\(/i.test(value))) {
+    const trimmed = value.trim();
+
+    // An id, rewritten so it cannot collide with another icon's. Already-
+    // prefixed ids are left alone, which is what makes a second pass a no-op.
+    if (lower === 'id') {
+      if (!ID_VALUE.test(trimmed)) {
+        removed.add('@id');
+        continue;
+      }
+      const scoped = trimmed.startsWith(`${idPrefix}-`) ? trimmed : `${idPrefix}-${trimmed}`;
+      kept.push(` id="${escapeAttribute(scoped)}"`);
+      continue;
+    }
+
+    // A paint server named by fragment. The same rewrite, so the reference and
+    // the definition still point at each other after both were scoped.
+    if (PAINT_ATTRIBUTES.has(lower)) {
+      const reference = LOCAL_PAINT_REFERENCE.exec(trimmed);
+      if (reference !== null) {
+        const target = reference[1];
+        const scoped = target.startsWith(`${idPrefix}-`) ? target : `${idPrefix}-${target}`;
+        kept.push(` ${lower}="url(#${escapeAttribute(scoped)})"`);
+        continue;
+      }
+      // Not a fragment: fall through to the guard below, which refuses every
+      // other shape of `url(` — including the ones that reach the network.
+    }
+
+    if (!isNamespace && (SCHEME_LIKE.test(trimmed) || /url\s*\(/i.test(value))) {
       removed.add(`@${lower}`);
       continue;
     }
-    kept.push(` ${lower === 'viewbox' ? 'viewBox' : name}="${escapeAttribute(value)}"`);
+    kept.push(` ${ATTRIBUTE_CASE[lower] ?? name}="${escapeAttribute(value)}"`);
   }
   return kept.join('');
 }

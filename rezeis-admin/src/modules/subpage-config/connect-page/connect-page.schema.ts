@@ -269,10 +269,42 @@ export type ConnectPageButton = z.infer<typeof buttonSchema>;
 
 // ── Steps, apps, platforms ───────────────────────────────────────────────────
 
+/**
+ * A colour an operator chose for one icon.
+ *
+ * ── Why this is optional and stays optional ──────────────────────────────────
+ *
+ * By default an icon takes the theme: the step and platform glyphs are drawn on
+ * `currentColor`, so they wear whatever accent the cabinet — or the concept
+ * chosen for this screen — is wearing. That is the behaviour the page this
+ * screen replaces has, and it is the one that keeps working when an operator
+ * changes their palette a year from now.
+ *
+ * The override exists because the donor's own export carries one per block
+ * (`svgIconColor`), so operators already colour their steps and would lose that
+ * on the way across. Absent means "follow the theme", and absent is the default
+ * for everything we ship.
+ *
+ * Hex only, and no `currentColor`: writing the keyword here would be a second
+ * way to spell the default, and two spellings of one state is how a config
+ * grows a question nobody can answer from the interface.
+ */
+export const iconColorSchema = z
+  .string()
+  // 3, 4, 6 or 8 — NOT `{3,8}`, which also accepts five and seven digits. Those
+  // are not colours: the browser drops the declaration, so all three guards
+  // agreed on a value that paints nothing.
+  .regex(
+    /^#(?:[\da-fA-F]{3,4}|[\da-fA-F]{6}|[\da-fA-F]{8})$/,
+    'A colour is written as #rgb, #rgba, #rrggbb or #rrggbbaa',
+  );
+
 export const stepSchema = z.strictObject({
   title: localizedTextSchema,
   body: localizedTextSchema.nullable().optional(),
   iconKey: slugSchema.nullable().optional(),
+  /** Absent — the ordinary case — means the icon follows the theme. */
+  iconColor: iconColorSchema.nullable().optional(),
   buttons: z.array(buttonSchema).max(MAX_BUTTONS_PER_STEP),
 });
 

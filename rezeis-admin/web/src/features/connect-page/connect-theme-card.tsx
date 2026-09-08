@@ -475,35 +475,36 @@ function ConnectScreenPreview({
           </div>
 
           {apps.length > 0 && (
-            <div className="grid grid-cols-2 gap-1.5">
+            // Wraps, like the screen and like the page the screen replaces —
+            // not a grid. A grid here would preview a layout the cabinet does
+            // not have the moment an operator adds a fifth app.
+            <div className="flex flex-wrap gap-1.5">
               {apps.map((candidate) => {
                 const active = candidate.id === app?.id;
                 return (
                   <span
                     key={candidate.id}
-                    className={
-                      active
-                        ? 'flex items-center gap-1.5 rounded-full px-2 py-1.5 text-[10px] font-semibold'
-                        : `${sunken} flex items-center gap-1.5 rounded-full px-2 py-1.5 text-[10px]`
-                    }
-                    style={
-                      active
-                        ? {
-                            background: 'var(--brand-primary)',
-                            color: 'var(--brand-primary-fg)',
-                          }
-                        : { color: 'var(--brand-muted-foreground)' }
-                    }
+                    className={`relative flex min-w-0 flex-1 basis-[6rem] items-center gap-1.5 overflow-hidden py-1.5 pl-2 pr-6 text-[10px] ${
+                      active ? 'font-semibold' : sunken
+                    }`}
+                    style={{
+                      borderRadius: 'var(--radius-item)',
+                      ...(active
+                        ? { background: 'var(--brand-primary)', color: 'var(--brand-primary-fg)' }
+                        : { color: 'var(--brand-muted-foreground)' }),
+                    }}
                   >
+                    {/* Behind the label and off the right edge, which is where
+                        the cabinet puts it and where the page it replaces puts
+                        it. Scaled to this frame rather than copied at 56px. */}
                     <Mark
                       markup={safeIcon(config, sanitized, candidate.iconKey)}
-                      className="h-3.5 w-3.5"
-                      letter={candidate.name.slice(0, 1)}
+                      className="pointer-events-none absolute -right-1.5 -top-0.5 h-8 w-8 opacity-25"
                     />
-                    <span className="truncate">{candidate.name}</span>
+                    <span className="relative z-10 truncate">{candidate.name}</span>
                     {candidate.featured && (
                       <span
-                        className="ml-auto h-[4px] w-[4px] shrink-0 rounded-full"
+                        className="relative z-10 ml-auto h-[4px] w-[4px] shrink-0 rounded-full"
                         style={{
                           background: active
                             ? 'var(--brand-primary-fg)'
