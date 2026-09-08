@@ -24,6 +24,7 @@
  */
 
 import {
+  authoredDecorLayers,
   CONCEPT_PRESETS,
   getConceptThemeModeVisual,
   getConceptSourceBackgroundColor,
@@ -1087,13 +1088,26 @@ function buildBackgroundGradient(
       `linear-gradient(145deg, ${canvas} 0%, ${b} 100%)`,
     ].join(', ')
   }
-  return addAppComposition(descriptor, base)
+  return addAppComposition(descriptor, base, canvas)
 }
 
 function addAppComposition(
   descriptor: ConceptPresetDescriptor,
   base: string,
+  canvas: HexColor,
 ): string {
+  // A decor written against the board wins over the family reconstruction, and
+  // it is the SAME drawing the connect screen uses — one definition, in
+  // `concept-presets.ts`. It was not consulted here, so Mono Moonlight Crater's
+  // moon appeared on the connect screen and nowhere else: an operator who chose
+  // that concept for the cabinet got the concept without the thing it is named
+  // after.
+  const authored = authoredDecorLayers(descriptor.code, {
+    foreground: opaqueHex(getConceptSourceStyle(descriptor).foreground),
+    background: canvas,
+  })
+  if (authored !== null) return [...authored, base].join(', ')
+
   const seed = stableSeed(`${descriptor.id}:${descriptor.name}:app`)
   const palette = descriptor.palette.map(opaqueHex)
   const accent = opaqueHex(getConceptSourceStyle(descriptor).accent)

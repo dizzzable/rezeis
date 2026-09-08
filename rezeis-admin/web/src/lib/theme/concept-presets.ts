@@ -908,40 +908,73 @@ function semanticDecorLayers(
  * the generic ellipse, not the moon. A decor written against the board is not a
  * guess, so it is not rationed; it is exactly what it says.
  */
+/**
+ * The two colours an authored decor draws with.
+ *
+ * A hand-written decor needs the concept's ink, not its whole token set,
+ * because it is consumed from TWO places that resolve tokens differently: the
+ * connect-screen composition below, and the cabinet's own app background in
+ * `features/branding/theme-presets.ts`. Narrowing the input to what a drawing
+ * actually needs is what lets one definition serve both.
+ */
+export interface AuthoredDecorInk {
+  readonly foreground: HexColor
+  readonly background: HexColor
+}
+
 const AUTHORED_DECOR: Readonly<
-  Record<string, (values: ThemeTokenValues) => readonly string[]>
+  Record<string, (ink: AuthoredDecorInk) => readonly string[]>
 > = {
   /**
    * AE / Mono Moonlight Crater — the moon, top right.
    *
    * Positioned in percentages rather than pixels so it lands in the same corner
    * on the 390-wide mobile board and the desktop one, which is where the two
-   * artboards both put it. Three layers, brightest first: the body, the halo
-   * spilling down the right edge, and the crater shading inside the body.
+   * artboards both put it. Three layers, painted top-first: the crater, the
+   * core, and the body it sits in.
    *
    * Drawn in the concept's own foreground rather than pure white: this palette
    * is `#F6F7F6`, and a true white moon on it reads as a hole rather than as a
    * light source.
    */
-  AE: (values) => [
+  AE: (ink) => [
     // The crater first, because the first layer paints on TOP: a dimmer patch
     // low and left of the moon's centre, which is what makes it a crater rather
     // than a lamp.
-    `radial-gradient(ellipse 11% 6% at 74% 12%, ${withAlpha(values.background, 0.45)} 0%, transparent 80%)`,
+    `radial-gradient(ellipse 11% 6% at 74% 12%, ${withAlpha(ink.background, 0.45)} 0%, transparent 80%)`,
     // The core. Its brightness is capped, and the cap is not taste: stacked
     // with the body it must stay under the point where
     // `backgroundReadabilityOverlay` decides the foreground needs help and
     // prepends a scrim over the WHOLE background. At 0.386 it did — a 12% black
     // sheet across the concept, which dims the moon it was drawn for and every
     // surface measured against the page. 0.30 stacked clears it with margin.
-    `radial-gradient(ellipse 30% 17% at 84% 5%, ${withAlpha(values.foreground, 0.11)} 0%, transparent 74%)`,
+    `radial-gradient(ellipse 30% 17% at 84% 5%, ${withAlpha(ink.foreground, 0.11)} 0%, transparent 74%)`,
     // The body and its falloff. SIZED, which the first version was not: a bare
     // `circle at 82% 3%` takes its radius from the farthest corner, so 16% of
     // white was spread over the whole screen and read as nothing at all. This
     // is an ellipse in percentages of the element, so it lands in the same
     // corner at 390 and at 960 and stays a disc rather than a wash.
-    `radial-gradient(ellipse 56% 32% at 84% 5%, ${withAlpha(values.foreground, 0.22)} 0%, ${withAlpha(values.foreground, 0.12)} 38%, ${withAlpha(values.foreground, 0.045)} 62%, transparent 84%)`,
+    `radial-gradient(ellipse 56% 32% at 84% 5%, ${withAlpha(ink.foreground, 0.22)} 0%, ${withAlpha(ink.foreground, 0.12)} 38%, ${withAlpha(ink.foreground, 0.045)} 62%, transparent 84%)`,
   ],
+}
+
+/**
+ * The decor written for this concept, or `null` for the great majority that
+ * have none and take the reconstruction instead.
+ *
+ * Exported because the cabinet's OWN background is built on a different path —
+ * `buildBackgroundGradient` in `features/branding/theme-presets.ts`, which
+ * rebuilds from the source style and adds its own family composition. That path
+ * knew nothing about this table, so the moon appeared on the connect screen and
+ * nowhere else: an operator picking Mono Moonlight Crater for the cabinet got
+ * the concept without the thing it is named after. Reported as exactly that.
+ */
+export function authoredDecorLayers(
+  code: string,
+  ink: AuthoredDecorInk,
+): readonly string[] | null {
+  const draw = AUTHORED_DECOR[code]
+  return draw === undefined ? null : draw(ink)
 }
 
 /**
@@ -964,7 +997,10 @@ function buildConceptComposition(
   readonly readabilityOverlay: HexColor
 } {
   const base = buildModeBaseBackground(descriptor, mode, values)
-  const authored = AUTHORED_DECOR[descriptor.code]?.(values)
+  const authored = authoredDecorLayers(descriptor.code, {
+    foreground: values.foreground,
+    background: values.background,
+  })
   const availableDecor = authored ?? semanticDecorLayers(descriptor, values)
   const count = authored?.length ?? decorLayerCount(descriptor, availableDecor.length)
   const layers = availableDecor.slice(0, count)
