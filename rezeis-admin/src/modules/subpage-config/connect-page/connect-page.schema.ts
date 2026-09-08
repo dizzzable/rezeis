@@ -368,6 +368,27 @@ export const connectPageConfigSchema = z
      */
     connectScreenEnabled: z.boolean().default(false),
     /**
+     * The dot that marks the recommended app, when the operator wants a colour
+     * of their own.
+     *
+     * ── Why it is not simply the accent ──────────────────────────────────────
+     *
+     * Because it was, and it disappeared. The chosen chip is FILLED with the
+     * accent, so an accent-coloured dot on it is invisible; on the other chips
+     * it reads as punctuation after the name rather than as a mark. The page
+     * this screen replaces draws it amber for exactly that reason — the mark is
+     * an annotation ON the catalog, not one more thing wearing the brand.
+     *
+     * So `null` means amber, and amber is the default. This exists for the
+     * operator whose palette makes amber wrong, and for nobody else.
+     *
+     * It rides in the catalog rather than in the theme row because it is not
+     * part of a concept: an operator who picks "как в кабинете" still has a
+     * recommended app, and a concept switched a month later must not silently
+     * take their colour with it.
+     */
+    featuredColor: iconColorSchema.nullable().default(null),
+    /**
      * The concept the screen wears, or `null` for "the cabinet's own".
      *
      * Same arrangement as the switch above and for the same reason: it rides to

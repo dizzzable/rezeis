@@ -886,6 +886,74 @@ function semanticDecorLayers(
   return [family[0], ...tagLayers, ...family.slice(1)]
 }
 
+/**
+ * Decor drawn by hand for one concept, because the reconstruction above is a
+ * reconstruction and sometimes it misses what the board is actually about.
+ *
+ * ── Why this exists ──────────────────────────────────────────────────────────
+ *
+ * `semanticDecorLayers` guesses: it takes the concept's visual family, its
+ * decor density and a hash of its code, and produces plausible atmosphere. That
+ * is the right default for a hundred concepts nobody will ever look at closely.
+ * It is the wrong answer for the handful whose board has a SUBJECT — Mono
+ * Moonlight Crater is named after a moon, the moon is the first thing anybody
+ * sees on the artboard, and the generic version rendered a faint smudge in the
+ * opposite corner at a tenth of the brightness.
+ *
+ * ── Why an authored decor is not rationed ────────────────────────────────────
+ *
+ * `decorLayerCount` caps the guesses by density, which is a way of saying "do
+ * not over-decorate a concept we are guessing about". Mono Moonlight Crater is
+ * classified `light`, so its cap is one layer — and the one layer it kept was
+ * the generic ellipse, not the moon. A decor written against the board is not a
+ * guess, so it is not rationed; it is exactly what it says.
+ */
+const AUTHORED_DECOR: Readonly<
+  Record<string, (values: ThemeTokenValues) => readonly string[]>
+> = {
+  /**
+   * AE / Mono Moonlight Crater — the moon, top right.
+   *
+   * Positioned in percentages rather than pixels so it lands in the same corner
+   * on the 390-wide mobile board and the desktop one, which is where the two
+   * artboards both put it. Three layers, brightest first: the body, the halo
+   * spilling down the right edge, and the crater shading inside the body.
+   *
+   * Drawn in the concept's own foreground rather than pure white: this palette
+   * is `#F6F7F6`, and a true white moon on it reads as a hole rather than as a
+   * light source.
+   */
+  AE: (values) => [
+    // The crater first, because the first layer paints on TOP: a dimmer patch
+    // low and left of the moon's centre, which is what makes it a crater rather
+    // than a lamp.
+    `radial-gradient(ellipse 11% 6% at 74% 12%, ${withAlpha(values.background, 0.45)} 0%, transparent 80%)`,
+    // The core. Its brightness is capped, and the cap is not taste: stacked
+    // with the body it must stay under the point where
+    // `backgroundReadabilityOverlay` decides the foreground needs help and
+    // prepends a scrim over the WHOLE background. At 0.386 it did — a 12% black
+    // sheet across the concept, which dims the moon it was drawn for and every
+    // surface measured against the page. 0.30 stacked clears it with margin.
+    `radial-gradient(ellipse 30% 17% at 84% 5%, ${withAlpha(values.foreground, 0.11)} 0%, transparent 74%)`,
+    // The body and its falloff. SIZED, which the first version was not: a bare
+    // `circle at 82% 3%` takes its radius from the farthest corner, so 16% of
+    // white was spread over the whole screen and read as nothing at all. This
+    // is an ellipse in percentages of the element, so it lands in the same
+    // corner at 390 and at 960 and stays a disc rather than a wash.
+    `radial-gradient(ellipse 56% 32% at 84% 5%, ${withAlpha(values.foreground, 0.22)} 0%, ${withAlpha(values.foreground, 0.12)} 38%, ${withAlpha(values.foreground, 0.045)} 62%, transparent 84%)`,
+  ],
+}
+
+/**
+ * Concepts whose decor is written against the board rather than derived.
+ *
+ * Exported so the rationing test can state the rule it is actually checking:
+ * the density cap applies to the GUESSES, and an authored decor is exempt from
+ * it. Without this the test recomputed the cap for all 104 and would fail the
+ * moment a concept was drawn by hand — reporting the improvement as a defect.
+ */
+export const AUTHORED_DECOR_CODES: readonly string[] = Object.keys(AUTHORED_DECOR)
+
 function buildConceptComposition(
   descriptor: ConceptPresetDescriptor,
   mode: ConceptSourceMode,
@@ -896,8 +964,9 @@ function buildConceptComposition(
   readonly readabilityOverlay: HexColor
 } {
   const base = buildModeBaseBackground(descriptor, mode, values)
-  const availableDecor = semanticDecorLayers(descriptor, values)
-  const count = decorLayerCount(descriptor, availableDecor.length)
+  const authored = AUTHORED_DECOR[descriptor.code]?.(values)
+  const availableDecor = authored ?? semanticDecorLayers(descriptor, values)
+  const count = authored?.length ?? decorLayerCount(descriptor, availableDecor.length)
   const layers = availableDecor.slice(0, count)
   if (base !== 'none') layers.push(base)
   const artwork = layers.length > 0 ? layers.join(', ') : 'none'

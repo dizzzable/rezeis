@@ -48,10 +48,11 @@ const service = (rows: Row[] = []) => {
 };
 
 /** A minimal catalog that passes every rule. */
-function catalog(icons: Record<string, string> = {}) {
+function catalog(icons: Record<string, string> = {}, extra: Record<string, unknown> = {}) {
   return {
     version: 2,
     connectScreenEnabled: false,
+    ...extra,
     icons: { happ: '<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>', ...icons },
     platforms: [
       {
@@ -320,3 +321,57 @@ async function refusalOf(run: () => Promise<unknown>): Promise<{ message: string
   }
   throw new Error('expected the save to be refused, and it was not');
 }
+
+describe('what the cabinet is actually handed', () => {
+  /**
+   * THE APPEARANCE HAS TO BE IN THE PAYLOAD THE CABINET READS.
+   *
+   * "Тема выбрана для саб страницы, но не применилась" has two possible causes
+   * and only one of them was the editor. The other is here: the theme lives in
+   * its own row, `getEffectiveConfig` stamps it, and `getCabinetConfig` rebuilds
+   * the object around a trimmed icon library. One `{ ...config }` written as a
+   * pick-list instead of a spread and the concept silently stops travelling —
+   * with the panel still showing it selected, because the ADMIN read has its own
+   * path. Nothing was watching that seam.
+   */
+  const THEME = {
+    presetId: 'concept-ae',
+    tokens: { 'brand-primary': '#F1F3F2', 'color-surface-high': '#141514c7' },
+    backgroundColor: '#050605',
+    backgroundImage: 'linear-gradient(-143deg, #050605 0%, #303432 100%)',
+    rail: '#F1F3F2',
+  };
+
+  it('carries the concept to the cabinet, not only to the editor', async () => {
+    const { service: svc } = service();
+    await svc.setTheme(THEME);
+    const cabinet = await svc.getCabinetConfig();
+    assert.equal(cabinet.theme?.presetId, 'concept-ae');
+    assert.equal(cabinet.theme?.backgroundColor, '#050605');
+  });
+
+  it('carries the recommendation colour too', async () => {
+    const { service: svc } = service();
+    await svc.replaceConfig(catalog({ used: '<svg viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>' }, { featuredColor: '#00FF7F' }));
+    const cabinet = await svc.getCabinetConfig();
+    assert.equal(cabinet.featuredColor, '#00FF7F');
+  });
+
+  it('answers null for the colour when the operator set none', async () => {
+    // Which the cabinet reads as amber. `undefined` would be read the same way,
+    // but only by accident — the field is declared, so it is present.
+    const { service: svc } = service();
+    const cabinet = await svc.getCabinetConfig();
+    assert.equal(cabinet.featuredColor, null);
+  });
+
+  it('keeps the concept when the catalog is saved over it', async () => {
+    // Picking a theme is not an edit of the catalog, and a save must not undo
+    // one. The catalog row stores `theme: null` on purpose; the value comes
+    // from its own row on every read.
+    const { service: svc } = service();
+    await svc.setTheme(THEME);
+    await svc.replaceConfig(catalog({ used: '<svg viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>' }));
+    assert.equal((await svc.getCabinetConfig()).theme?.presetId, 'concept-ae');
+  });
+});

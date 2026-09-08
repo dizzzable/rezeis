@@ -292,6 +292,9 @@ export const DEFAULT_CONNECT_PAGE_CONFIG: ConnectPageConfig = {
   // this and the flag above are stamped from their own rows on every read — the
   // values here are what an install that has never been edited answers with.
   theme: null,
+  // Amber. The mark on the recommended app is an annotation rather than part of
+  // the palette, so it does not follow the accent and does not need to be set.
+  featuredColor: null,
   icons: ICONS,
   platforms: [
     {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen, waitFor } from '@testing-library/react'
+import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { loadFeatureBundle } from '@/i18n/i18n'
@@ -31,6 +31,7 @@ vi.mock('./connect-page-api', async (importOriginal) => {
       get: vi.fn(),
       validate: vi.fn(),
       replace: vi.fn(),
+      setTheme: vi.fn(),
     },
   }
 })
@@ -96,6 +97,7 @@ beforeEach(async () => {
   grant(['subpage_config:view', 'subpage_config:edit'])
   vi.mocked(connectPageApi.get).mockResolvedValue({ config: CONFIG, stored: true, corrupted: null })
   vi.mocked(connectPageApi.validate).mockResolvedValue({ ok: true, issues: [] })
+  vi.mocked(connectPageApi.setTheme).mockResolvedValue({ theme: null })
 })
 
 afterEach(() => {
@@ -250,6 +252,118 @@ describe('a background refetch that fails under a live draft', () => {
 
     // And the guard is still armed once the draft is dirty again.
     await user.type(await screen.findByLabelText('Platform name (ru)'), 'Y')
+    expect(fireBeforeUnload().defaultPrevented).toBe(true)
+  })
+})
+
+describe('a concept picked in the gallery reaches the cabinet', () => {
+  /**
+   * THE REPORT: "тема выбрана для саб страницы, но не применилась."
+   *
+   * The screenshot that came with it showed why. The gallery was open with a
+   * concept ticked and the card's own Apply still on screen, while the loud
+   * primary button — Save, top right, where every editor in this panel puts it
+   * — saved the CATALOG and left the pick behind. Two save buttons on one
+   * screen, and the one an operator reaches for did not save the thing directly
+   * under it.
+   *
+   * The appearance still lives in its own row and still has its own fast path.
+   * What these cases hold in place is that the button at the top now covers it,
+   * that it says so, and that a refused catalog does not leave a half-applied
+   * look behind.
+   */
+  async function pickTheFirstConcept(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    const gallery = await screen.findByTestId('connect-theme-gallery')
+    const tiles = within(gallery).getAllByRole('option')
+    // [0] is "as in the cabinet", which is what a fresh install already has —
+    // picking it would be no change and would test nothing.
+    await user.click(tiles[1]!)
+  }
+
+  it('writes nothing on the click itself', async () => {
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+    await pickTheFirstConcept(user)
+
+    expect(connectPageApi.setTheme).not.toHaveBeenCalled()
+    expect(connectPageApi.replace).not.toHaveBeenCalled()
+  })
+
+  it('says on the button that it will save the theme too', async () => {
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+    expect(await screen.findByRole('button', { name: 'Save the catalog' })).toBeInTheDocument()
+
+    await pickTheFirstConcept(user)
+
+    expect(
+      await screen.findByRole('button', { name: 'Save the catalog and the theme' }),
+    ).toBeInTheDocument()
+  })
+
+  it('applies the pick when the page is saved', async () => {
+    // THE DEFECT, in one case: this used to call `replace` and nothing else.
+    vi.mocked(connectPageApi.replace).mockResolvedValue({ config: CONFIG, cleanedIcons: {} })
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+    await pickTheFirstConcept(user)
+
+    await user.click(screen.getByRole('button', { name: 'Save the catalog and the theme' }))
+
+    await waitFor(() => expect(connectPageApi.setTheme).toHaveBeenCalledTimes(1))
+    // A resolved payload, not an id: the cabinet has no concept book and cannot
+    // turn `concept-ae` into a palette.
+    const sent = vi.mocked(connectPageApi.setTheme).mock.calls[0]?.[0] as {
+      presetId?: unknown
+      tokens?: unknown
+    }
+    expect(sent?.presetId, 'no id came back for the gallery to show').toBeTruthy()
+    expect(sent?.tokens, 'the cabinet was sent an id it cannot resolve').toBeTruthy()
+  })
+
+  it('leaves the theme alone when the catalog is refused', async () => {
+    // The catalog goes first on purpose. A refusal there — a duplicate id, an
+    // app that cannot hand the subscription over — must leave the concept still
+    // pending rather than applied against a catalog that did not save.
+    vi.mocked(connectPageApi.replace).mockRejectedValue(
+      refusal([{ path: 'platforms[0]', message: 'has no recommended app' }]),
+    )
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+    await pickTheFirstConcept(user)
+
+    await user.click(screen.getByRole('button', { name: 'Save the catalog and the theme' }))
+
+    expect(await screen.findByText('has no recommended app')).toBeInTheDocument()
+    expect(connectPageApi.setTheme).not.toHaveBeenCalled()
+    // And the pick is still waiting, so the retry carries it.
+    expect(
+      screen.getByRole('button', { name: 'Save the catalog and the theme' }),
+    ).toBeInTheDocument()
+  })
+
+  it('still has the card`s own Apply, for a theme-only change', async () => {
+    // The fast path stays: changing a look should not have to re-validate a
+    // catalog that has a pre-existing problem in it.
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+    await pickTheFirstConcept(user)
+
+    await user.click(screen.getByRole('button', { name: 'Apply' }))
+
+    await waitFor(() => expect(connectPageApi.setTheme).toHaveBeenCalledTimes(1))
+    expect(connectPageApi.replace).not.toHaveBeenCalled()
+  })
+
+  it('counts an unapplied pick as unsaved work', async () => {
+    // Leaving the page with a concept ticked and unwritten is the same loss as
+    // leaving with a typed-in catalog, and the guard did not see it.
+    renderWithProviders(<ConnectPageEditor />)
+    const user = userEvent.setup()
+    expect(fireBeforeUnload().defaultPrevented).toBe(false)
+
+    await pickTheFirstConcept(user)
+
     expect(fireBeforeUnload().defaultPrevented).toBe(true)
   })
 })

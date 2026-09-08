@@ -47,6 +47,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 import { ConnectThemeCard } from './connect-theme-card';
+import { buildConnectScreenTheme } from './connect-screen-theme';
 import { SubpageImportCard } from './subpage-import-card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -198,12 +199,77 @@ export function ConnectPageEditor(): JSX.Element {
   // builder, which needs a version guard on top only because it seeds its
   // state in an effect and this editor does not.
   const [savedConfig, setSavedConfig] = useState<ConnectPageConfig | null>(null);
-  const unsavedWork = draft !== null && draft !== savedConfig;
+
+  /**
+   * The concept picked in this session but not yet written, in three states.
+   *
+   * `undefined` — nothing picked, so the stored choice stands.
+   * `null`      — "the cabinet's own" was picked, which is a CHOICE and has to
+   *               be distinguishable from not having chosen: it is what clears
+   *               a stored concept.
+   * a string    — that concept was picked.
+   *
+   * ── Why it lives up here rather than in the card ─────────────────────────────
+   *
+   * Because the operator's report was "тема выбрана, но не применилась", and
+   * the screenshot that came with it showed exactly how: the gallery was open
+   * with a concept ticked and its own Apply button still on screen, while the
+   * obvious primary button — Save, top right, where every editor in this panel
+   * puts it — sat above and saved the CATALOG. Two save buttons, and the loud
+   * one did not save the thing directly under it.
+   *
+   * The appearance still writes to its own row and still has its own fast path;
+   * what changed is that this editor now knows a concept is waiting, so Save
+   * covers it and the unsaved-work guard counts it.
+   */
+  const [pendingTheme, setPendingTheme] = useState<string | null | undefined>(undefined);
+  const storedTheme = data?.config.theme?.presetId ?? null;
+  const themeDirty = pendingTheme !== undefined && pendingTheme !== storedTheme;
+  const unsavedWork = (draft !== null && draft !== savedConfig) || themeDirty;
+
+  /**
+   * Write the appearance. Shared by the card's own Apply and by Save above it,
+   * so there is one request and one success path rather than two spellings of
+   * the same write that can drift apart.
+   */
+  const applyTheme = useMutation({
+    mutationFn: (presetId: string | null) =>
+      connectPageApi.setTheme(presetId === null ? null : buildConnectScreenTheme(presetId)),
+    onSuccess: async (result) => {
+      setPendingTheme(undefined);
+      toast.success(
+        result.theme === null
+          ? t('connectPageEditor.theme.clearedToast')
+          : t('connectPageEditor.theme.savedToast'),
+      );
+      await queryClient.invalidateQueries({ queryKey: CONNECT_PAGE_KEYS.all });
+    },
+    onError: () => toast.error(t('connectPageEditor.theme.saveFailed')),
+  });
 
   const save = useMutation({
-    mutationFn: (config: ConnectPageConfig) => connectPageApi.replace(config),
+    mutationFn: async (input: {
+      config: ConnectPageConfig;
+      /** `undefined` when no concept is waiting; see {@link pendingTheme}. */
+      theme: string | null | undefined;
+    }) => {
+      const result = await connectPageApi.replace(input.config);
+      // The catalog first, deliberately. It is the write that can be refused —
+      // a duplicate id, an app that cannot hand the subscription over — and a
+      // refusal there must leave the concept still pending rather than half
+      // applied. The appearance is its own row and its own request, but it is
+      // on the same screen and behind the same button, because a Save that
+      // leaves half the screen unsaved is the defect this exists to fix.
+      if (input.theme !== undefined) {
+        await connectPageApi.setTheme(
+          input.theme === null ? null : buildConnectScreenTheme(input.theme),
+        );
+      }
+      return result;
+    },
     onSuccess: ({ cleanedIcons }, submitted) => {
-      setSavedConfig(submitted);
+      setSavedConfig(submitted.config);
+      setPendingTheme(undefined);
       // The server's copy is NOT written back over the draft. It used to be,
       // and everything typed while the request was in flight vanished under a
       // green "saved" toast — the Save button was disabled, the fields were not.
@@ -358,8 +424,16 @@ export function ConnectPageEditor(): JSX.Element {
           >
             {t('connectPageEditor.check')}
           </Button>
-          <Button onClick={() => save.mutate(config)} disabled={save.isPending || check.isPending}>
-            <Save className="mr-2 h-4 w-4" /> {t('connectPageEditor.save')}
+          {/* The label says what it will actually do. It used to say "Save
+              catalog" while a picked concept sat unwritten below it, which is
+              how a theme could be chosen, previewed, saved and still not
+              applied. */}
+          <Button
+            onClick={() => save.mutate({ config, theme: themeDirty ? pendingTheme : undefined })}
+            disabled={save.isPending || check.isPending || applyTheme.isPending}
+          >
+            <Save className="mr-2 h-4 w-4" />
+            {themeDirty ? t('connectPageEditor.saveWithTheme') : t('connectPageEditor.save')}
           </Button>
         </div>
       </div>
@@ -426,6 +500,14 @@ export function ConnectPageEditor(): JSX.Element {
         sanitized={data?.config.icons ?? {}}
         theme={data?.config.theme ?? null}
         canEdit={canEdit}
+        pending={pendingTheme}
+        onPick={setPendingTheme}
+        applying={applyTheme.isPending || save.isPending}
+        onApply={() => {
+          if (pendingTheme !== undefined) applyTheme.mutate(pendingTheme);
+        }}
+        featuredColor={config.featuredColor ?? null}
+        onFeaturedColorChange={(featuredColor) => patch({ featuredColor })}
       />
 
       {config.platforms.map((platform, index) => (

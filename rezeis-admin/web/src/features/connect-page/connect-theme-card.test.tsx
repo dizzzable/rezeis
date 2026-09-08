@@ -1,4 +1,4 @@
-import { act } from 'react'
+import { act, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -15,28 +15,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
  * choosing the cabinet's own could never count as a change — the Apply button
  * would never appear and a stored concept could never be cleared through the
  * gallery. Three states, not two, and these cases are the reason.
+ *
+ * ── The pick itself now belongs to the editor ────────────────────────────────
+ *
+ * This card is presentational: it is handed the pending pick and hands back the
+ * gesture. The state moved up because the operator's report was "тема выбрана,
+ * но не применилась" — the concept was ticked here while the loud primary
+ * button at the top of the page saved the CATALOG and left it behind. What that
+ * write actually sends is therefore asserted against the real editor, in
+ * `connect-page-editor.test.tsx`; what is asserted here is what this card puts
+ * on screen.
  */
-
-const setTheme = vi.fn(async (theme: unknown) => ({ theme: theme ?? null }))
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }))
-vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
-// Partial: `query-client.ts` reaches for the real `QueryClient` on import, so a
-// bare replacement takes the whole module tree down before a test runs.
-vi.mock('@tanstack/react-query', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
-  useMutation: ({ mutationFn }: { mutationFn: (v: unknown) => Promise<unknown> }) => ({
-    mutate: (value: unknown) => void mutationFn(value),
-    isPending: false,
-  }),
-}))
-vi.mock('./connect-page-api', async () => {
-  const actual = await vi.importActual<Record<string, unknown>>('./connect-page-api')
-  return { ...actual, connectPageApi: { setTheme } }
-})
 
 const { ConnectThemeCard } = await import('./connect-theme-card')
 
@@ -62,23 +55,62 @@ const CONFIG = configWith({}, null)
 
 let root: Root | null = null
 let host: HTMLDivElement | null = null
+/** What the card asked the editor to remember, in call order. */
+let picked: (string | null)[] = []
+let applied = 0
+
+/**
+ * The card with the one piece of state its owner holds.
+ *
+ * A stand-in for the editor rather than a copy of it: it remembers the pick and
+ * nothing else, so these cases can see the gallery react while the question of
+ * WHAT gets written stays where it is actually answered.
+ */
+function Harness({
+  theme,
+  config,
+  sanitized,
+  featuredColor,
+}: {
+  theme: { presetId: string | null } | null
+  config: unknown
+  sanitized: Record<string, string>
+  featuredColor: string | null
+}) {
+  const [pending, setPending] = useState<string | null | undefined>(undefined)
+  return (
+    <ConnectThemeCard
+      config={config as never}
+      sanitized={sanitized}
+      theme={theme as never}
+      canEdit
+      pending={pending}
+      onPick={(next) => {
+        picked.push(next)
+        setPending(next)
+      }}
+      applying={false}
+      onApply={() => {
+        applied += 1
+      }}
+      featuredColor={featuredColor}
+      onFeaturedColorChange={vi.fn()}
+    />
+  )
+}
 
 function render(
   theme: { presetId: string | null } | null,
   config: unknown = CONFIG,
   sanitized: Record<string, string> = {},
+  featuredColor: string | null = null,
 ): HTMLDivElement {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
   act(() =>
     root?.render(
-      <ConnectThemeCard
-        config={config as never}
-        sanitized={sanitized}
-        theme={theme as never}
-        canEdit
-      />,
+      <Harness theme={theme} config={config} sanitized={sanitized} featuredColor={featuredColor} />,
     ),
   )
   return host
@@ -88,12 +120,17 @@ const inheritTile = (el: HTMLElement) =>
   el.querySelector<HTMLButtonElement>("[data-testid='connect-theme-inherit']")
 const conceptTile = (el: HTMLElement) =>
   el.querySelector<HTMLButtonElement>("[role='option']:not([data-testid])")
+const unsavedBar = (el: HTMLElement) =>
+  el.querySelector<HTMLElement>("[data-testid='connect-theme-unsaved']")
 const applyButton = (el: HTMLElement) =>
   [...el.querySelectorAll('button')].find((b) =>
     b.textContent?.includes('connectPageEditor.theme.apply'),
   )
 
-beforeEach(() => setTheme.mockClear())
+beforeEach(() => {
+  picked = []
+  applied = 0
+})
 
 afterEach(() => {
   act(() => root?.unmount())
@@ -117,49 +154,61 @@ describe('the cabinet appearance is one of the options', () => {
   })
 })
 
-describe('picking, and only then saving', () => {
-  it('does not save on the click itself', () => {
-    // A preview is a question. Saving on selection makes every idle click on
-    // the gallery a live change to what customers see.
+describe('picking, and only then applying', () => {
+  it('does not apply on the click itself', () => {
+    // A preview is a question. Applying on selection would make every idle
+    // click on the gallery a live change to what customers see.
     const el = render(null)
     act(() => conceptTile(el)?.click())
-    expect(setTheme).not.toHaveBeenCalled()
-    expect(applyButton(el), 'no way to confirm the pick').toBeDefined()
+    expect(applied).toBe(0)
+    expect(unsavedBar(el), 'nothing says the pick is unsaved').not.toBeNull()
+  })
+
+  it('says out loud that the pick has not been applied', () => {
+    // The gallery is tall enough to scroll a plain button row off the bottom of
+    // the card, and that is how a picked concept ended up looking saved and
+    // being unsaved. The bar is sticky, tinted and worded.
+    const el = render(null)
+    act(() => conceptTile(el)?.click())
+    const bar = unsavedBar(el)
+    expect(bar?.className).toContain('sticky')
+    expect(bar?.textContent).toContain('connectPageEditor.theme.unsaved')
   })
 
   it('offers Apply when the cabinet appearance is picked over a stored concept', () => {
     // The case the two-state version could not express: this pick IS a change,
     // and without it a stored concept can never be cleared from the gallery.
     const el = render({ presetId: 'concept-ba' })
-    expect(applyButton(el)).toBeUndefined()
+    expect(unsavedBar(el)).toBeNull()
     act(() => inheritTile(el)?.click())
-    expect(applyButton(el), 'picking the cabinet appearance counted as no change').toBeDefined()
+    expect(unsavedBar(el), 'picking the cabinet appearance counted as no change').not.toBeNull()
   })
 
-  it('clears the stored theme with null rather than an empty one', () => {
-    // The server treats an empty theme as a clear too, but sending one would
-    // leave a row that says nothing. `null` deletes it.
+  it('hands the pick up as null when the cabinet appearance is chosen', () => {
+    // `null` is the value that deletes the stored row. `undefined` — "nothing
+    // picked" — would leave the concept in place and look identical here.
     const el = render({ presetId: 'concept-ba' })
     act(() => inheritTile(el)?.click())
-    act(() => applyButton(el)?.click())
-    expect(setTheme).toHaveBeenCalledWith(null)
+    expect(picked).toEqual([null])
   })
 
-  it('sends a resolved theme, not a preset id, when a concept is picked', () => {
-    // The cabinet has no concept book — it cannot resolve an id, so an id on
-    // the wire would arrive as an appearance nobody can paint.
+  it('hands the pick up as a preset id when a concept is chosen', () => {
     const el = render(null)
     act(() => conceptTile(el)?.click())
-    act(() => applyButton(el)?.click())
-    const sent = setTheme.mock.calls[0]?.[0] as { tokens?: unknown; presetId?: unknown } | null
-    expect(sent?.presetId, 'no preset id came back for the gallery to show').toBeTruthy()
-    expect(sent?.tokens, 'the cabinet was sent an id it cannot resolve').toBeTruthy()
+    expect(picked[0]).toMatch(/^concept-/)
   })
 
   it('offers nothing to apply when the pick matches what is stored', () => {
     const el = render(null)
     act(() => inheritTile(el)?.click())
-    expect(applyButton(el)).toBeUndefined()
+    expect(unsavedBar(el)).toBeNull()
+  })
+
+  it('asks its owner to write when Apply is pressed', () => {
+    const el = render(null)
+    act(() => conceptTile(el)?.click())
+    act(() => applyButton(el)?.click())
+    expect(applied).toBe(1)
   })
 })
 
@@ -212,5 +261,33 @@ describe('the preview stands for the cabinet, not for the panel', () => {
     const accent = preview?.style.getPropertyValue('--brand-primary')
     expect(accent).toBe('#22c55e')
     expect(accent).not.toContain('var(')
+  })
+})
+
+describe('the recommendation dot in the preview', () => {
+  /** What the browser makes of a colour, so the assertion is not about spelling. */
+  function asRendered(colour: string): string {
+    const probe = document.createElement('div')
+    probe.style.background = colour
+    return probe.style.background
+  }
+
+  it('is amber, not the accent, when the operator has set nothing', () => {
+    // The chosen chip is FILLED with the accent, so an accent-coloured dot on
+    // it is invisible — which is what the cabinet was reported for, and this
+    // preview has to show the same thing or it is worth less than nothing.
+    const el = render(null)
+    const dot = el.querySelector<HTMLElement>("[data-testid='connect-preview-featured']")
+    expect(dot, 'the preview does not mark the recommended app').not.toBeNull()
+    expect(dot?.style.background).toBe(asRendered('#FACC15'))
+  })
+
+  it('follows the operator into the corner they will actually see', () => {
+    const el = render(null, CONFIG, {}, '#00FF7F')
+    const dot = el.querySelector<HTMLElement>("[data-testid='connect-preview-featured']")
+    expect(dot?.style.background).toBe(asRendered('#00FF7F'))
+    expect(dot?.className).toContain('absolute')
+    expect(dot?.className).toContain('left-')
+    expect(dot?.className).toContain('top-')
   })
 })

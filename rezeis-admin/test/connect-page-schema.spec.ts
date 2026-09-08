@@ -328,3 +328,57 @@ describe('what parses perfectly and still shows nothing', () => {
     assert.deepEqual(auditConnectPageConfig(config()), []);
   });
 });
+
+describe('the colour of the recommendation mark', () => {
+  /**
+   * A dot, and the reason it has a setting at all.
+   *
+   * It was drawn in the accent, which made it invisible on the app the operator
+   * recommended — that chip is FILLED with the accent — and made it read as
+   * punctuation after the name on every other chip. The page this screen
+   * replaces marks its recommended app in amber for the same reason: the mark
+   * annotates the catalog, it is not one more thing wearing the brand.
+   *
+   * So `null` means amber, and amber is what every install gets. This field is
+   * for the operator whose palette makes amber wrong.
+   */
+  it('defaults to nothing at all, which the cabinet reads as amber', () => {
+    const parsed = parse(config());
+    assert.equal(parsed.success, true);
+    assert.equal(parsed.success && parsed.data.featuredColor, null);
+  });
+
+  it('accepts a colour the cabinet can paint', () => {
+    for (const colour of ['#fff', '#ffff', '#FACC15', '#FACC1580']) {
+      const parsed = parse(config({ featuredColor: colour } as never));
+      assert.equal(parsed.success, true, `${colour} was refused`);
+    }
+  });
+
+  it('refuses a five- or seven-digit hex, which the browser drops', () => {
+    // The same trap `iconColor` was fixed for: `{3,8}` also matches five and
+    // seven, the declaration is discarded, and the operator's choice silently
+    // does nothing.
+    for (const colour of ['#facc1', '#facc150']) {
+      const parsed = parse(config({ featuredColor: colour } as never));
+      assert.equal(parsed.success, false, `${colour} was accepted`);
+    }
+  });
+
+  it('refuses anything that is not a hex colour', () => {
+    // It lands in a `style` attribute in the cabinet. A keyword or a function
+    // would each be a small grammar with its own escape rules, and a dot does
+    // not need any of them.
+    for (const value of ['red', 'var(--brand-primary)', 'rgb(250,204,21)', 'currentColor']) {
+      const parsed = parse(config({ featuredColor: value } as never));
+      assert.equal(parsed.success, false, `${value} was accepted`);
+    }
+  });
+
+  it('survives normalization, which rewrites every step under it', () => {
+    const normalized = normalizeConnectPageConfig(
+      parse(config({ featuredColor: '#00FF7F' } as never)).data as ConnectPageConfig,
+    );
+    assert.equal(normalized.featuredColor, '#00FF7F');
+  });
+});

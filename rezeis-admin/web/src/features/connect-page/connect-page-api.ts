@@ -100,12 +100,26 @@ export const connectThemeSchema = z
   .passthrough();
 export type ConnectTheme = z.infer<typeof connectThemeSchema>;
 
+/**
+ * The recommendation dot's colour when the operator has not chosen one.
+ *
+ * Amber, and the SAME literal the cabinet falls back to — this is the third
+ * copy of one value across two repositories, so it is asserted rather than
+ * assumed: `connect-featured-colour.test.ts` reads the cabinet's own default
+ * out of its source and compares. The panel needs its own copy because the
+ * preview beside the gallery has to paint the dot the customer will see, and
+ * the panel cannot import from an image it does not ship with.
+ */
+export const DEFAULT_FEATURED_COLOR = '#FACC15';
+
 export const connectPageConfigSchema = z
   .object({
     // Not `z.literal(2)`: a version this editor has not met should not turn the
     // whole page into a permanent skeleton.
     version: z.number(),
     connectScreenEnabled: z.boolean().optional(),
+    /** Amber when absent — see `featuredColor` in the server's schema. */
+    featuredColor: z.string().nullable().catch(null).optional(),
     theme: connectThemeSchema.nullable().catch(null).optional(),
     icons: z.record(z.string(), z.string()),
     platforms: z.array(platformSchema),

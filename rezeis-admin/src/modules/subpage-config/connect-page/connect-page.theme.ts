@@ -54,7 +54,11 @@ export const CONNECT_THEME_COLOR_TOKENS = [
 export const CONNECT_THEME_LENGTH_TOKENS = [
   'radius-card',
   'radius-item',
-  'radius-pill',
+  // No `radius-pill`: the connect screen has two corners, a card and everything
+  // inside it. It used to draw its buttons and its platform control at 9999px,
+  // and on a concept with a 15px card that read as two designs on one screen —
+  // reported as exactly that. The mirror of this list is the cabinet's own
+  // `connect-theme.ts`, and the two are kept in step by hand.
   'glass-blur',
 ] as const;
 

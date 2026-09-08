@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  AUTHORED_DECOR_CODES,
   CONCEPT_PRESETS,
   CONCEPT_REQUIRED_TOKENS,
   createConceptThemeCss,
@@ -86,6 +87,9 @@ describe('concept presets catalog', () => {
     } as const
 
     for (const descriptor of CONCEPT_PRESETS) {
+      // The cap rations the GUESSES. A concept whose decor is written against
+      // its board is not a guess and is not rationed — see AUTHORED_DECOR.
+      if (AUTHORED_DECOR_CODES.includes(descriptor.code)) continue
       const css = createConceptThemeCss(descriptor)
       const expectedLayerCount =
         descriptor.classification.directDecorCount <= 0
@@ -106,6 +110,23 @@ describe('concept presets catalog', () => {
           ),
         ),
       ).toHaveLength(2)
+    }
+  })
+
+  it('draws an authored decor in full rather than rationing it', () => {
+    // The exemption above must not be a hole. A code listed as authored has to
+    // actually put more layers on the page than its density would have allowed,
+    // or the list is just a way of skipping the check.
+    expect(AUTHORED_DECOR_CODES.length).toBeGreaterThan(0)
+    const densityLimit = { none: 0, light: 1, medium: 2, dense: 4 } as const
+    for (const code of AUTHORED_DECOR_CODES) {
+      const descriptor = CONCEPT_PRESETS.find((preset) => preset.code === code)
+      expect(descriptor, `authored decor names a concept that is gone: ${code}`).toBeDefined()
+      const css = createConceptThemeCss(descriptor!)
+      const drawn = Number(/--concept-decor-layer-count: (\d+);/.exec(css)?.[1] ?? '0')
+      expect(drawn).toBeGreaterThan(
+        densityLimit[descriptor!.classification.decorDensity],
+      )
     }
   })
 

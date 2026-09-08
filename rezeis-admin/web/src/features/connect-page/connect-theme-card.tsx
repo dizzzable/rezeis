@@ -31,10 +31,8 @@
  * holding an empty theme.
  */
 import { useMemo, useState, type CSSProperties, type JSX } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Check, Link2, LifeBuoy, Loader2, Palette, Search } from 'lucide-react';
-import { toast } from 'sonner';
+import { AlertTriangle, Check, Link2, LifeBuoy, Loader2, Palette, Search } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -43,8 +41,7 @@ import { Input } from '@/components/ui/input';
 import { CONCEPT_THEME_PRESETS } from '../branding/theme-presets';
 import { buildConnectScreenTheme } from './connect-screen-theme';
 import {
-  CONNECT_PAGE_KEYS,
-  connectPageApi,
+  DEFAULT_FEATURED_COLOR,
   type ConnectPageConfig,
   type ConnectTheme,
 } from './connect-page-api';
@@ -54,6 +51,12 @@ export function ConnectThemeCard({
   sanitized,
   theme,
   canEdit,
+  pending,
+  onPick,
+  applying,
+  onApply,
+  featuredColor,
+  onFeaturedColorChange,
 }: {
   readonly config: ConnectPageConfig;
   /**
@@ -74,28 +77,26 @@ export function ConnectThemeCard({
   readonly sanitized: Record<string, string>;
   readonly theme: ConnectTheme | null;
   readonly canEdit: boolean;
+  /**
+   * The concept picked in this session, in three states — see `pendingTheme` in
+   * the editor, which owns it.
+   *
+   * It is owned there rather than here because the button an operator actually
+   * presses is up there. Held locally, a picked concept was invisible to Save,
+   * and "тема выбрана, но не применилась" is what that looks like from the
+   * other side of the screen.
+   */
+  readonly pending: string | null | undefined;
+  readonly onPick: (presetId: string | null) => void;
+  readonly applying: boolean;
+  readonly onApply: () => void;
+  /** The recommendation dot's colour, or null for amber. Saved with the catalog. */
+  readonly featuredColor: string | null;
+  readonly onFeaturedColorChange: (colour: string | null) => void;
 }): JSX.Element {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [query, setQuery] = useState('');
 
-  /**
-   * What the preview paints, in three states rather than two.
-   *
-   * `undefined` — nothing picked in this session, so the stored choice shows.
-   * `null`      — "the cabinet's own" was picked, which is a CHOICE and has to
-   *               be distinguishable from not having chosen: it is what clears
-   *               a stored concept.
-   * a string    — that concept was picked.
-   *
-   * The two-state version collapsed the middle one into "nothing picked", so
-   * the option that clears a theme could never be dirty and its Apply button
-   * could never appear.
-   *
-   * Local state rather than optimistic cache writes: a preview is a question,
-   * and a question should not look like an answer until it is saved.
-   */
-  const [pending, setPending] = useState<string | null | undefined>(undefined);
   const stored = theme?.presetId ?? null;
   const selectedId = pending === undefined ? stored : pending;
 
@@ -115,25 +116,10 @@ export function ConnectThemeCard({
     );
   }, [query]);
 
-  const save = useMutation({
-    mutationFn: (presetId: string | null) =>
-      connectPageApi.setTheme(presetId === null ? null : buildConnectScreenTheme(presetId)),
-    onSuccess: async (result) => {
-      setPending(undefined);
-      toast.success(
-        result.theme === null
-          ? t('connectPageEditor.theme.clearedToast')
-          : t('connectPageEditor.theme.savedToast'),
-      );
-      await queryClient.invalidateQueries({ queryKey: CONNECT_PAGE_KEYS.all });
-    },
-    onError: () => toast.error(t('connectPageEditor.theme.saveFailed')),
-  });
-
   const dirty = pending !== undefined && pending !== stored;
 
   return (
-    <Card>
+    <Card className={dirty ? 'border-primary/60' : undefined}>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Palette className="h-4 w-4" aria-hidden="true" />
@@ -175,7 +161,7 @@ export function ConnectThemeCard({
               aria-selected={selectedId === null}
               data-testid="connect-theme-inherit"
               disabled={!canEdit}
-              onClick={() => setPending(null)}
+              onClick={() => onPick(null)}
               className={`rounded-lg border p-2 text-left transition ${
                 selectedId === null
                   ? 'border-primary ring-1 ring-primary'
@@ -211,7 +197,7 @@ export function ConnectThemeCard({
                   role="option"
                   aria-selected={active}
                   disabled={!canEdit}
-                  onClick={() => setPending(preset.id)}
+                  onClick={() => onPick(preset.id)}
                   className={`rounded-lg border p-2 text-left transition ${
                     active ? 'border-primary ring-1 ring-primary' : 'border-border hover:bg-muted/50'
                   }`}
@@ -242,33 +228,115 @@ export function ConnectThemeCard({
             )}
           </div>
 
+          {/* Sticky, tinted and worded as a warning, because the thing it is
+              guarding against is somebody NOT SEEING IT. The gallery is tall
+              enough to scroll a plain button row off the bottom of the card,
+              which is how a picked concept ended up saved-looking and unsaved. */}
           {dirty && (
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                disabled={!canEdit || save.isPending || pending === undefined}
-                onClick={() => pending !== undefined && save.mutate(pending)}
-              >
-                {save.isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" aria-hidden="true" />}
+            <div
+              data-testid="connect-theme-unsaved"
+              className="sticky bottom-0 flex flex-wrap items-center gap-2 rounded-md border border-primary/50 bg-primary/10 p-2"
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+              <span className="mr-auto text-xs font-medium">
+                {t('connectPageEditor.theme.unsaved')}
+              </span>
+              <Button type="button" size="sm" disabled={!canEdit || applying} onClick={onApply}>
+                {applying && (
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" aria-hidden="true" />
+                )}
                 {t('connectPageEditor.theme.apply')}
               </Button>
-              <Button type="button" size="sm" variant="ghost" onClick={() => setPending(undefined)}>
+              <Button type="button" size="sm" variant="ghost" onClick={() => onPick(stored)}>
                 {t('common.cancel')}
               </Button>
             </div>
           )}
+
+          {/* The recommendation mark. It is appearance, so it is here — but it
+              is stored in the CATALOG rather than in the concept, because an
+              operator on "как в кабинете" still has a recommended app, and a
+              concept switched a month later must not carry their colour off
+              with it. Saved by the button at the top of the page, like the rest
+              of the catalog; the line below says so rather than leaving them to
+              find out. */}
+          <div className="space-y-1.5 border-t border-border pt-3">
+            <p className="text-xs font-medium">{t('connectPageEditor.theme.featuredTitle')}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="color"
+                aria-label={t('connectPageEditor.theme.featuredTitle')}
+                disabled={!canEdit}
+                // `<input type="color">` accepts ONLY `#` plus exactly six
+                // digits; anything else is coerced to `#000000`, so a 3- or
+                // 4-digit value showed a black swatch beside a text field
+                // holding the real colour.
+                value={expandHex(featuredColor) ?? DEFAULT_FEATURED_COLOR}
+                onChange={(event) => onFeaturedColorChange(event.target.value)}
+                className="h-9 w-12 shrink-0 cursor-pointer rounded-md border border-border bg-transparent p-1"
+              />
+              <Input
+                value={featuredColor ?? ''}
+                disabled={!canEdit}
+                placeholder={t('connectPageEditor.theme.featuredDefault')}
+                onChange={(event) => {
+                  const next = event.target.value.trim();
+                  onFeaturedColorChange(next.length === 0 ? null : next);
+                }}
+                className="w-40"
+              />
+              {featuredColor !== null && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onFeaturedColorChange(null)}
+                >
+                  {t('connectPageEditor.theme.featuredClear')}
+                </Button>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {t('connectPageEditor.theme.featuredHint')}
+            </p>
+          </div>
         </div>
 
         <div className="space-y-2">
           <p className="text-xs font-medium text-muted-foreground">
             {t('connectPageEditor.theme.previewLabel')}
           </p>
-          <ConnectScreenPreview config={config} sanitized={sanitized} theme={previewTheme} />
+          <ConnectScreenPreview
+            config={config}
+            sanitized={sanitized}
+            theme={previewTheme}
+            featuredColor={featuredColor ?? DEFAULT_FEATURED_COLOR}
+          />
         </div>
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * `#abc` and `#abcd` as `#aabbcc`, and anything else as null.
+ *
+ * `<input type="color">` accepts only `#` plus exactly six digits and silently
+ * coerces everything else to black — so a short hex, which the schema does
+ * accept, showed a black swatch next to a field holding the real colour.
+ */
+function expandHex(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const body = value.trim().replace('#', '');
+  if (/^[\da-f]{6}$/i.test(body) || /^[\da-f]{8}$/i.test(body)) return `#${body.slice(0, 6)}`;
+  if (/^[\da-f]{3,4}$/i.test(body)) {
+    return `#${body
+      .slice(0, 3)
+      .split('')
+      .map((digit) => digit + digit)
+      .join('')}`;
+  }
+  return null;
 }
 
 /**
@@ -357,10 +425,13 @@ function ConnectScreenPreview({
   config,
   sanitized,
   theme,
+  featuredColor,
 }: {
   readonly config: ConnectPageConfig;
   readonly sanitized: Record<string, string>;
   readonly theme: PreviewTheme | null;
+  /** Already resolved: amber, or whatever the operator typed. */
+  readonly featuredColor: string;
 }): JSX.Element {
   const { t } = useTranslation();
   const platform = config.platforms[0] ?? null;
@@ -468,7 +539,15 @@ function ConnectScreenPreview({
         <div className={`${raised} space-y-2.5 p-3`}>
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-semibold">{t('connectPageEditor.theme.install')}</p>
-            <span className={`${sunken} flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px]`}>
+            {/* The platform control takes the app chips' corner, not a pill.
+                The cabinet draws it that way, and the reason is the same on
+                both sides: one radius for every surface, chip and button on
+                this screen, because a 9999px control among 15px cards reads as
+                two designs on one screen. */}
+            <span
+              className={`${sunken} flex items-center gap-1.5 px-2 py-1 text-[10px]`}
+              style={{ borderRadius: 'var(--radius-item)' }}
+            >
               <Mark markup={safeIcon(config, sanitized, platform?.iconKey)} className="h-3 w-3" tinted />
               {platform === null ? '—' : (platform.title.ru ?? platform.title.en ?? platform.id)}
             </span>
@@ -502,14 +581,15 @@ function ConnectScreenPreview({
                       className="pointer-events-none absolute -right-1.5 -top-0.5 h-8 w-8 opacity-25"
                     />
                     <span className="relative z-10 truncate">{candidate.name}</span>
+                    {/* Top left, and amber rather than the accent — the corner
+                        the page this screen replaces marks, and the colour it
+                        marks with. In the accent it was invisible on the chosen
+                        chip, which is FILLED with the accent. */}
                     {candidate.featured && (
                       <span
-                        className="relative z-10 ml-auto h-[4px] w-[4px] shrink-0 rounded-full"
-                        style={{
-                          background: active
-                            ? 'var(--brand-primary-fg)'
-                            : 'var(--brand-primary)',
-                        }}
+                        data-testid="connect-preview-featured"
+                        className="absolute left-[4px] top-[4px] z-10 h-[5px] w-[5px] rounded-full ring-[1px] ring-black/30"
+                        style={{ background: featuredColor }}
                       />
                     )}
                   </span>
