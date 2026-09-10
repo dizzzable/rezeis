@@ -1,11 +1,20 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Headers, Post, UseGuards } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString, Length, Matches, MaxLength, MinLength } from 'class-validator';
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import {
+  MODES_THIS_PANEL_KNOWS,
   UserHintDeliveryService,
   type ResolvedHint,
 } from '../services/user-hint-delivery.service';
@@ -41,6 +50,63 @@ class HintAudienceDto {
   @IsOptional()
   @IsIn(['ru', 'en'])
   public readonly locale?: 'ru' | 'en';
+
+}
+
+/**
+ * The header a cabinet declares its drawable pop-up modes in.
+ *
+ * NOT a body field, and the difference is the whole reason this pair can be
+ * deployed in either order. Bodies are validated by the global pipe with
+ * `forbidNonWhitelisted`, so a panel whose DTO has not learned a field does not
+ * ignore it — it answers 400. A cabinet upgraded before its panel would have
+ * had every single hint request rejected, and the cabinet's route swallows that
+ * into `{ hint: null }` at debug level: no hints for anybody, and nothing
+ * anywhere saying why. An unknown header is simply not read.
+ */
+export const HINT_MODES_HEADER = 'x-reiwa-hint-modes';
+
+/**
+ * The modes out of that header, or `null` when it did not say.
+ *
+ * `null` is a distinct value for the same reason `surface` is: the service
+ * resolves silence to what EVERY cabinet can draw, and a guess would turn "it
+ * did not say" into a claim that it can draw something it may not — which costs
+ * a destroyed delivery rather than a missed one.
+ *
+ * Unknown names are kept rather than refused; the service intersects them away
+ * against this panel's own enum (`drawableModesForQuery`). Refusing here would
+ * make an older panel answer 400 to a newer cabinet that claims one more mode,
+ * which is the failure this header exists to avoid.
+ */
+export function parseDrawableModes(header: string | undefined): string[] | null {
+  if (typeof header !== 'string') return null;
+  const named = [
+    ...new Set(
+      header
+        .split(',')
+        .map((mode) => mode.trim().toUpperCase())
+        .filter((mode) => mode.length > 0 && mode.length <= 32),
+    ),
+  ];
+  // KNOWN NAMES FIRST, then the rest, then the cap.
+  //
+  // The cap was 8 and truncated in WIRE ORDER, so a cabinet that listed nine
+  // modes with MODAL last lost modals entirely — its own declaration served it
+  // worse than silence would have. Ordering by what this panel can actually act
+  // on means the cap can only ever discard names the service was going to drop
+  // anyway, which makes the bound free.
+  //
+  // The unknown ones are still carried, deliberately: they cost nothing here,
+  // they are what a newer cabinet is telling us, and refusing them in this
+  // function is what would make an older panel answer 400 to a newer cabinet —
+  // the failure this header exists to avoid.
+  const known = named.filter((mode) => MODES_THIS_PANEL_KNOWS.includes(mode));
+  const rest = named.filter((mode) => !MODES_THIS_PANEL_KNOWS.includes(mode));
+  // Bounded, because it arrives from the network: a header with ten thousand
+  // comma-separated names must not become a ten-thousand-item list.
+  const modes = [...known, ...rest].slice(0, 32);
+  return modes.length === 0 ? null : modes;
 }
 
 /**
@@ -96,7 +162,10 @@ export class InternalUserHintsController {
    * common answer and costs one indexed read.
    */
   @Post('next')
-  public async next(@Body() dto: HintAudienceDto): Promise<{ hint: ResolvedHint | null }> {
+  public async next(
+    @Body() dto: HintAudienceDto,
+    @Headers(HINT_MODES_HEADER) modesHeader?: string,
+  ): Promise<{ hint: ResolvedHint | null }> {
     const userId = await this.resolveUserId(dto);
     if (userId === null) return { hint: null };
     const hint = await this.deliveries.nextFor({
@@ -116,6 +185,16 @@ export class InternalUserHintsController {
         // answer" and was silently reclassified as a browser.
         surface: dto.surface ?? null,
         formFactor: dto.formFactor ?? null,
+        // Same reasoning one more time, for the mode: a cabinet that says
+        // nothing gets what every cabinet has always been able to draw.
+        //
+        // A HEADER, not a body field, and that is what makes the pair safe to
+        // deploy in either order. The body is validated with
+        // `forbidNonWhitelisted`, so a panel whose DTO has not learned a field
+        // answers 400 to every request carrying it — a newer cabinet would have
+        // had every hint request rejected and shown nobody anything. An unknown
+        // header is simply not read.
+        modes: parseDrawableModes(modesHeader),
       },
     });
     return { hint };

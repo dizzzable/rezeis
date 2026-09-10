@@ -179,3 +179,220 @@ describe('what is deliberately not a collision', () => {
     expect(found).toEqual([])
   })
 })
+
+describe('two rules on the same trigger', () => {
+  /**
+   * THE PAIRS THIS PANEL PROMISES TO WARN ABOUT.
+   *
+   * The library ships four deliberate alternatives that share a trigger — two
+   * answers to a failed payment, a loud and a quiet expiry warning, a renewal
+   * prompt and a win-back offer, a modal and a toast for a promo code — and the
+   * map offers the second right beside the first, so enabling both is an
+   * ordinary mistake.
+   *
+   * They fire together by definition, needing no coincident group at all. The
+   * warning was built only out of the OTHER events in a group, so a rule whose
+   * trigger equalled the draft's was never even a candidate, and all four pairs
+   * were silent while a template description said the panel "says so out loud".
+   */
+  const hint = (over: Partial<UserHint> = {}): UserHint =>
+    ({
+      id: 'h1',
+      key: 'tpl-payment-failed',
+      titleRu: 'Оплата не прошла',
+      groupKey: null,
+      isActive: true,
+      ...over,
+    }) as UserHint
+
+  const rule = (over: Record<string, unknown> = {}) =>
+    ({
+      id: 'rule-other',
+      name: 'Второе окно',
+      isEnabled: true,
+      triggerKind: 'REALTIME',
+      triggerSpec: 'payment.failed',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed-method' } }],
+      ...over,
+    }) as never
+
+  it('warns, even with no coincident group between them', () => {
+    const collisions = findHintCollisions({
+      draft: {
+        id: 'rule-mine',
+        triggerKind: 'REALTIME',
+        triggerSpec: 'payment.failed',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed' } }],
+      },
+      rules: [rule()],
+      hints: [hint(), hint({ id: 'h2', key: 'tpl-payment-failed-method' })],
+      coincidentEventGroups: [],
+    })
+
+    expect(collisions).toHaveLength(1)
+    expect(collisions[0].ruleName).toBe('Второе окно')
+  })
+
+  it('does not warn about the rule being edited itself', () => {
+    // The draft is in the saved list too, once it has been saved once. Warning
+    // about itself would put a permanent warning under every rule.
+    const collisions = findHintCollisions({
+      draft: {
+        id: 'rule-mine',
+        triggerKind: 'REALTIME',
+        triggerSpec: 'payment.failed',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed' } }],
+      },
+      rules: [rule({ id: 'rule-mine' })],
+      hints: [hint(), hint({ id: 'h2', key: 'tpl-payment-failed-method' })],
+      coincidentEventGroups: [],
+    })
+
+    expect(collisions).toEqual([])
+  })
+
+  it('warns when the key it names is stored with a trailing space', () => {
+    // EVERY OTHER READER OF THIS FIELD TRIMS IT. The engine's `readString`
+    // trims before it looks the hint up, so the rule fires; `trigger-map.ts`
+    // trims, so the map draws it green. This one did not, found no hint under
+    // `"tpl-payment-failed-method "`, and dropped the rule — so the pop-up that
+    // will genuinely open beside the draft was the one the warning could not
+    // see.
+    const collisions = findHintCollisions({
+      draft: {
+        id: 'rule-mine',
+        triggerKind: 'REALTIME',
+        triggerSpec: 'payment.failed',
+        actions: [{ type: 'show_hint', params: { hintKey: '  tpl-payment-failed ' } }],
+      },
+      rules: [rule({ actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed-method\t' } }] })],
+      hints: [hint(), hint({ id: 'h2', key: 'tpl-payment-failed-method' })],
+      coincidentEventGroups: [],
+    })
+
+    expect(collisions).toHaveLength(1)
+    expect(collisions[0].ruleName).toBe('Второе окно')
+  })
+
+  it('still says nothing when the two share a group', () => {
+    // Supersession handles that, and warning about a case the system already
+    // handles is how a warning stops being read.
+    const collisions = findHintCollisions({
+      draft: {
+        id: 'rule-mine',
+        triggerKind: 'REALTIME',
+        triggerSpec: 'payment.failed',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed' } }],
+      },
+      rules: [rule()],
+      hints: [
+        hint({ groupKey: 'payment-attempt' }),
+        hint({ id: 'h2', key: 'tpl-payment-failed-method', groupKey: 'payment-attempt' }),
+      ],
+      coincidentEventGroups: [],
+    })
+
+    expect(collisions).toEqual([])
+  })
+})
+
+describe('a rule that reaches the same event through a wildcard', () => {
+  /**
+   * THE HOLE THE WARNING WAS BLIND TO.
+   *
+   * The bridge selects rules with `matchEventPattern`, so `payment.*` fires for
+   * `payment.failed` and `*` fires for everything — and the editor's own help
+   * text advertises both. This module compared the two SPECS as strings, which
+   * answers "different event" for every pair where one of them is a wildcard.
+   *
+   * So the operator with a `*` rule already delivering a pop-up on every event
+   * in the product added a second one on a concrete trigger, got two windows
+   * for one act, and the one panel built to say so said nothing.
+   */
+  const wildHint = (over: Partial<UserHint> = {}): UserHint =>
+    ({
+      id: 'h1',
+      key: 'tpl-payment-failed',
+      titleRu: 'Оплата не прошла',
+      groupKey: null,
+      isActive: true,
+      ...over,
+    }) as UserHint
+
+  const wildRule = (over: Record<string, unknown> = {}) =>
+    ({
+      id: 'rule-other',
+      name: 'Второе окно',
+      isEnabled: true,
+      triggerKind: 'REALTIME',
+      triggerSpec: 'payment.*',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed-method' } }],
+      ...over,
+    }) as never
+
+  const both = () => [wildHint(), wildHint({ id: 'h2', key: 'tpl-payment-failed-method' })]
+
+  function collide(draftSpec: string, ruleSpec: string, groups: string[][] = []) {
+    return findHintCollisions({
+      draft: {
+        id: 'rule-mine',
+        triggerKind: 'REALTIME',
+        triggerSpec: draftSpec,
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-payment-failed' } }],
+      },
+      rules: [wildRule({ triggerSpec: ruleSpec })],
+      hints: both(),
+      coincidentEventGroups: groups,
+    })
+  }
+
+  it('warns when the SAVED rule is the wildcard', () => {
+    expect(collide('payment.failed', 'payment.*')).toHaveLength(1)
+  })
+
+  it('warns when the DRAFT is the wildcard', () => {
+    // The other direction, and the one an operator is least likely to catch
+    // unaided: they are looking at `payment.*` and the concrete rule is
+    // somewhere down a list.
+    expect(collide('payment.*', 'payment.failed')).toHaveLength(1)
+  })
+
+  it('warns about a rule bound to everything', () => {
+    // `*` is the wildcard the rule editor's own help text advertises, and it
+    // collides with every pop-up rule in the install.
+    expect(collide('subscription.created', '*')).toHaveLength(1)
+    expect(collide('*', 'subscription.created')).toHaveLength(1)
+  })
+
+  it('warns about two namespaces where one contains the other', () => {
+    expect(collide('payment.*', 'payment.gateway.*')).toHaveLength(1)
+  })
+
+  it('follows a wildcard into the events that arrive beside the one it selects', () => {
+    // `payment.*` selects `payment.completed`, so everything declared to arrive
+    // beside a purchase arrives beside this rule too — the coincident groups
+    // have to be reached through the pattern, not by looking the spec up in
+    // them verbatim.
+    expect(
+      collide('payment.*', 'subscription.created', [
+        ['payment.completed', 'subscription.created'],
+      ]),
+    ).toHaveLength(1)
+  })
+
+  it('says nothing about a namespace it has no event in common with', () => {
+    // Anti-vacuity: an overlap test that answered "yes" to everything would
+    // satisfy every case above and put a permanent warning under every rule.
+    expect(collide('payment.failed', 'referral.*')).toEqual([])
+    expect(collide('referral.*', 'payment.failed')).toEqual([])
+    expect(collide('payment.*', 'subscription.*')).toEqual([])
+  })
+
+  it('says nothing for a rule with no trigger at all', () => {
+    // An empty pattern selects nothing at run time, so it cannot be a second
+    // window — and reading it as "matches everything" would warn about every
+    // half-typed rule in the list.
+    expect(collide('payment.failed', '   ')).toEqual([])
+    expect(collide('   ', 'payment.failed')).toEqual([])
+  })
+})

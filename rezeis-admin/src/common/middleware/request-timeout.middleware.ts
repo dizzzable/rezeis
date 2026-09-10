@@ -18,6 +18,13 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 120_000;
 
 const LONG_TIMEOUT_PATTERNS = [
+  // THE FULL CUSTOMER EXPORT. Up to 20 000 rows across 41 columns, plus a walk
+  // of the panel's whole device inventory when a device column is ticked. That
+  // does not finish in thirty seconds on a real base, and what the operator got
+  // instead was a 408 JSON body served under a `text/csv` disposition — while
+  // the server kept working and the audit row recorded a successful export they
+  // never received.
+  /\/admin\/users\/export\//,
   /\/admin\/imports\//,
   /\/admin\/broadcast\/upload-media/,
   /\/admin\/faq\/uploads(?:[/?]|$)/,

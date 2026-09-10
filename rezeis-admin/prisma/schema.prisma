@@ -728,6 +728,14 @@ model AdminAuditLog {
   @@index([action])
   @@index([adminUserId])
   @@index([createdAt])
+  /// The event catalogue groups this table by `action` inside a retention
+  /// window, and neither single-column index can serve that: `action` alone
+  /// cannot be range-scanned by `created_at`, and a plain btree on a text
+  /// column cannot answer `LIKE 'event.%'` unless the cluster collates as C —
+  /// stock `postgres:17-alpine` does not. Without this the query is a
+  /// sequential scan of the busiest table in the schema, on a page an operator
+  /// opens routinely.
+  @@index([action, createdAt], map: "admin_audit_log_action_created_at_idx")
   @@map("admin_audit_log")
 }
 

@@ -66,12 +66,15 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { listUserHints } from '@/features/user-hints/user-hints-api';
 import { findHintCollisions } from './hint-collision';
+import { getEventCatalog } from './event-catalog-api';
+import { TriggerCatalogHint } from './trigger-catalog-hint';
+import { TriggerMapCard } from './trigger-map-card';
 import { useTabSync } from '@/lib/use-tab-sync';
 import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { formatDateTime } from '@/lib/utils';
-import { getErrorMessage } from '@/lib/http-errors';
+import { translateApiError } from '@/lib/translate-error';
 import {
   type AutomationActionDef,
   type AutomationActionType,
@@ -106,8 +109,15 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
  * a draft (not saved until the operator reviews + presses Create). `textKey`
  * lets the seed Telegram message be localized at apply time.
  */
-import { HINT_TEMPLATES, buildHint, buildHintAction, type HintTemplate } from './hint-templates';
+import {
+  HINT_TEMPLATES,
+  HINT_TEMPLATE_STAGES,
+  buildHint,
+  buildHintAction,
+  type HintTemplate,
+} from './hint-templates';
 import { createUserHint, updateUserHint } from '@/features/user-hints/user-hints-api';
+import { useHasPermission } from '@/features/rbac/permission-gate';
 
 interface RuleTemplate {
   readonly id: string;
@@ -155,11 +165,26 @@ const RULE_TEMPLATES: readonly RuleTemplate[] = [
 
 export default function AutomationsPage() {
   const { t } = useTranslation();
+  // A POP-UP NEEDS TWO GRANTS AND THE PANEL HANDS THEM OUT SEPARATELY.
+  //
+  // `user_hints:create` writes the text; `automations:create` writes the rule
+  // that shows it. A role with the first and not the second could press "use
+  // template", watch the text row be written, watch the draft rule open — and
+  // then get a 403 from Create, leaving a hint on the Hints tab that nothing
+  // fires and that they cannot finish. The order made it worse: the half that
+  // succeeds runs first, so the failure always arrives after the damage.
+  const mayWriteHint = useHasPermission('user_hints', 'create');
+  const mayWriteRule = useHasPermission('automations', 'create');
+  const mayEditHint = useHasPermission('user_hints', 'edit');
   // Two page-level tabs, synced to the hash so a shared link lands where it was
   // sent. Hints live here rather than on a page of their own because an
   // operator reaches for them while thinking about triggers — but their editor
   // is a separate file, since this one is already long enough.
-  const { activeTab, setTab } = useTabSync(['rules', 'hints'] as const, 'rules');
+  // Three tabs, and the map is a peer of the other two rather than a panel
+  // inside them: an operator opens it with a MOMENT in mind — "somebody is
+  // about to run out and I want to say something" — not with a rule or a
+  // hint in mind, which is exactly why neither of the other two could show it.
+  const { activeTab, setTab } = useTabSync(['rules', 'hints', 'map'] as const, 'rules');
   const queryClient = useQueryClient();
   const rulesQuery = useQuery({
     queryKey: RULES_KEY,
@@ -211,9 +236,40 @@ export default function AutomationsPage() {
    */
   const applyHintTemplate = useMutation({
     mutationFn: async (template: HintTemplate) => {
+      // Checked before the first write, not after it. The server still refuses
+      // on its own — this is the difference between being told now and being
+      // told once there is a stray row to clean up.
+      if (!mayWriteRule) {
+        throw new Error(
+          t('automationsPage.hintTemplates.needsBoth', { missing: 'automations:create' }),
+        );
+      }
+
       const payload = buildHint(template, (key) => String(t(key)));
       const existing = (await listUserHints()).find((hint) => hint.key === template.hintKey);
-      if (existing === undefined) return createUserHint(payload);
+
+      // WHICH GRANT DEPENDS ON WHICH BRANCH, and the first version of this
+      // check only knew about one of them. Writing a new hint is
+      // `user_hints:create`; refreshing one that already exists is
+      // `user_hints:edit`, because it goes out as a PUT.
+      //
+      // The button that exists ONLY for the second branch is the amber
+      // "text ready, no rule" one on the map — so a role holding every grant
+      // the old check asked for pressed the one button meant for it, got a
+      // bare server refusal, and could never finish. The branch is known by
+      // now, so the check belongs here rather than up front.
+      const needed = existing === undefined ? 'user_hints:create' : 'user_hints:edit';
+      if (!(existing === undefined ? mayWriteHint : mayEditHint)) {
+        throw new Error(t('automationsPage.hintTemplates.needsBoth', { missing: needed }));
+      }
+      // WHICH BRANCH RAN IS CARRIED OUT, not re-derived in `onSuccess`.
+      //
+      // The two branches leave the operator in genuinely different places and
+      // the toast is the only thing that says which — see the comment on the
+      // `existed` flag where it is read. Re-checking `listUserHints()` from
+      // `onSuccess` would ask the question a second time, after the write that
+      // changes the answer.
+      if (existing === undefined) return { hint: await createUserHint(payload), existed: false };
       // Refresh the WORDS, keep the operator's aiming.
       //
       // This branch was unreachable until the keys were fixed, and the first
@@ -223,16 +279,42 @@ export default function AutomationsPage() {
       // stacking — was cleared, and a hint the operator had switched OFF was
       // switched back on for customers. Applying a template twice means "give
       // me the stock text back", not "forget who I aimed it at".
-      return updateUserHint(existing.id, {
+      // "REFRESH THE WORDS" MEANS THE WORDS. The spread kept the audience and
+      // the on/off switch and then quietly reset everything else the operator
+      // had touched: where the button points, how long the pop-up stays
+      // showable, whether it may arrive more than once, and whether it is a
+      // modal or a toast. `ctaTarget` is aiming as surely as `surfaces` is —
+      // an operator who repointed the expiry pop-up at /plans and raised its
+      // window to 72 hours lost both by pressing the one button the map offers
+      // them for resuming a half-built pop-up.
+      const hint = await updateUserHint(existing.id, {
         ...payload,
         surfaces: existing.surfaces,
         formFactors: existing.formFactors,
         ...(existing.groupKey === null ? {} : { groupKey: existing.groupKey }),
         isActive: existing.isActive,
+        mode: existing.mode,
+        tone: existing.tone,
+        ttlHours: existing.ttlHours,
+        isRepeatable: existing.isRepeatable,
+        ...(existing.ctaTarget === null
+          ? {}
+          : { ctaKind: existing.ctaKind, ctaTarget: existing.ctaTarget }),
       });
+      return { hint, existed: true };
     },
-    onSuccess: (hint, template) => {
+    onSuccess: ({ hint, existed }, template) => {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'user-hints'] });
+      // THE DRAFT OPENS ON THE RULES TAB, because that is the only tab that
+      // renders the rule editor.
+      //
+      // The template buttons exist on two tabs. Pressed from the MAP — the tab
+      // built for exactly this — the hint was written, the toast said "review
+      // the rule and press Create", and there was no rule anywhere on screen to
+      // review: the editor lives inside `activeTab === 'rules'`. The map then
+      // redrew the same button, now amber, and pressing it again repeated the
+      // whole loop for ever.
+      setTab('rules');
       openDraft({
         name: t(`automationsPage.hintTemplates.${template.id}.name`),
         description: t(`automationsPage.hintTemplates.${template.id}.description`),
@@ -240,16 +322,41 @@ export default function AutomationsPage() {
         triggerSpec: template.triggerSpec,
         actions: buildHintAction(template),
       });
-      toast.success(t('automationsPage.hintTemplates.created', { title: hint.titleRu }));
+      // ONE BUTTON, TWO OUTCOMES, AND ONLY ONE OF THEM WAITS FOR ANYTHING.
+      //
+      // Both branches used to end on `created`, which says the text was created
+      // and asks the operator to review the rule and press Create. On the update
+      // branch every clause of that is false: nothing was created, the PUT above
+      // has already landed, and if an enabled rule is showing the hint the new
+      // words are in front of customers before the toast finishes fading. The
+      // draft that opens under it would add a SECOND rule for a key that already
+      // has one — so an operator following the sentence does the one thing the
+      // situation does not want.
+      //
+      // `updated` says that instead. It is a different sentence in both
+      // dictionaries, not a rename of the same one.
+      toast.success(
+        t(
+          existed
+            ? 'automationsPage.hintTemplates.updated'
+            : 'automationsPage.hintTemplates.created',
+          { title: hint.titleRu },
+        ),
+      );
     },
-    // The server's own sentence, not just "could not create the pop-up". A
-    // rejected payload comes back from `ValidationPipe` as one line per field —
-    // `getErrorMessage` joins them — and those lines are the whole diagnosis:
-    // every template shipped with a key the server refuses, and the toast said
-    // only that something went wrong, so the feature looked broken rather than
-    // wrong in a specific, fixable way.
-    onError: (error) =>
-      toast.error(getErrorMessage(error, t('automationsPage.hintTemplates.failed'))),
+    // The server's own sentence, IN THE OPERATOR'S LANGUAGE. A rejected payload
+    // comes back from `ValidationPipe` as one line per field and those lines are
+    // the whole diagnosis: every template once shipped with a key the server
+    // refuses, and a toast that said only "something went wrong" made the
+    // feature look broken rather than wrong in a specific, fixable way.
+    //
+    // `getErrorMessage` got the sentence onto the screen and left it in English:
+    // it is a pure extractor and does no dictionary lookup at all, so a Russian
+    // operator read the server's raw wire copy. `translateApiError` runs the
+    // same extraction through `errors.<sentence>` and, for a request that never
+    // reached the server, says so rather than reporting a dead host as a
+    // refusal. Its own generic replaces the fallback that used to be passed in.
+    onError: (error) => toast.error(translateApiError(t, error)),
   });
 
   function useTemplate(template: RuleTemplate) {
@@ -303,10 +410,18 @@ export default function AutomationsPage() {
         <TabsList>
           <TabsTrigger value="rules">{t('automationsPage.tabs.rules')}</TabsTrigger>
           <TabsTrigger value="hints">{t('automationsPage.tabs.hints')}</TabsTrigger>
+          <TabsTrigger value="map">{t('automationsPage.tabs.map')}</TabsTrigger>
         </TabsList>
       </Tabs>
 
       {activeTab === 'hints' && <UserHintsTab />}
+
+      {activeTab === 'map' && (
+        <TriggerMapCard
+          onUseTemplate={(template) => applyHintTemplate.mutate(template)}
+          templatePending={applyHintTemplate.isPending}
+        />
+      )}
 
       {activeTab === 'rules' && (
         <HelpAndTemplates
@@ -336,7 +451,12 @@ export default function AutomationsPage() {
                 queryClient.invalidateQueries({ queryKey: RULES_KEY });
               })
               .catch((err) => {
-                toast.error(getErrorMessage(err, t('automationsPage.toast.toggleFailed')));
+                // Same lookup as every other refusal on this page. The switch is
+                // the one control an operator reaches for while something is
+                // already going wrong, and `getErrorMessage` handed them the
+                // server's English — 'Rule not found', 'Forbidden resource' —
+                // under a Russian interface.
+                toast.error(translateApiError(t, err));
                 // Refetch to revert any optimistic Switch UI back to source of truth.
                 queryClient.invalidateQueries({ queryKey: RULES_KEY });
               });
@@ -505,31 +625,49 @@ function HelpAndTemplates({
               <p className="text-[11px] text-muted-foreground">
                 {t('automationsPage.hintTemplates.subtitle')}
               </p>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {HINT_TEMPLATES.map((tpl) => (
-                  <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
-                    <p className="text-xs font-medium">
-                      {t(`automationsPage.hintTemplates.${tpl.id}.name`)}
+              {/* GROUPED BY MOMENT, not listed.
+
+                  Eight cards read as a list. Twenty-one read as nothing at all
+                  unless the moments they belong to are visible — and the moment
+                  is what an operator is shopping for, not the event name. The
+                  stages are the customer's life in the order it happens, and
+                  they are the same lanes the trigger map draws. */}
+              {HINT_TEMPLATE_STAGES.map((stage) => {
+                const inStage = HINT_TEMPLATES.filter((tpl) => tpl.stage === stage);
+                if (inStage.length === 0) return null;
+                return (
+                  <div key={stage} className="space-y-1.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t(`automationsPage.hintTemplates.stages.${stage}`)}
                     </p>
-                    <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
-                      {t(`automationsPage.hintTemplates.${tpl.id}.description`)}
-                    </p>
-                    <code className="mb-2 truncate text-[10px] text-muted-foreground">
-                      {tpl.triggerSpec}
-                    </code>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      disabled={hintTemplatePending}
-                      onClick={() => onUseHintTemplate(tpl)}
-                    >
-                      <Plus className="mr-1.5 h-3.5 w-3.5" />
-                      {t('automationsPage.help.useTemplate')}
-                    </Button>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {inStage.map((tpl) => (
+                        <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
+                          <p className="text-xs font-medium">
+                            {t(`automationsPage.hintTemplates.${tpl.id}.name`)}
+                          </p>
+                          <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
+                            {t(`automationsPage.hintTemplates.${tpl.id}.description`)}
+                          </p>
+                          <code className="mb-2 truncate text-[10px] text-muted-foreground">
+                            {tpl.triggerSpec}
+                          </code>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs"
+                            disabled={hintTemplatePending}
+                            onClick={() => onUseHintTemplate(tpl)}
+                          >
+                            <Plus className="mr-1.5 h-3.5 w-3.5" />
+                            {t('automationsPage.help.useTemplate')}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
           </CardContent>
         </CollapsibleContent>
@@ -683,7 +821,28 @@ function RuleEditor({
       toast.success(isNew ? t('automationsPage.toast.created') : t('automationsPage.toast.updated'));
       onSaved(rule);
     },
-    onError: (err) => toast.error(t('automationsPage.toast.saveFailed', { message: (err as Error).message })),
+    // `translateApiError`, not `.message` and not `getErrorMessage`.
+    //
+    // An axios rejection's own message for a non-2xx is the literal string
+    // "Request failed with status code 400", and the interceptor re-rejects the
+    // original error unchanged for anything that is not a 401 — so every
+    // refusal the server spends its design budget wording arrived as that
+    // sentence. The save-time pop-up check names the events an operator can
+    // bind to, and none of them reached anybody.
+    //
+    // `getErrorMessage` fixed that half and left the other: it falls through to
+    // `.message` BEFORE its fallback, and every axios rejection has one, so the
+    // translated fallback could never be reached and a Russian operator whose
+    // backend was down read "Network Error". `translateApiError` decides in the
+    // right order — the server's sentence first, then transport copy naming the
+    // connection and the reverse proxy, then the generic — and looks the
+    // server's own sentence up in the dictionary on the way past.
+    onError: (err) =>
+      toast.error(
+        t('automationsPage.toast.saveFailed', {
+          message: translateApiError(t, err),
+        }),
+      ),
   });
 
   const deleteMutation = useMutation({
@@ -692,7 +851,12 @@ function RuleEditor({
       toast.success(t('automationsPage.toast.deleted'));
       onDeleted();
     },
-    onError: (err) => toast.error(t('automationsPage.toast.deleteFailed', { message: (err as Error).message })),
+    onError: (err) =>
+      toast.error(
+        t('automationsPage.toast.deleteFailed', {
+          message: translateApiError(t, err),
+        }),
+      ),
   });
 
   const runMutation = useMutation({
@@ -701,7 +865,12 @@ function RuleEditor({
       toast.success(t('automationsPage.toast.runFinished', { status: result.status }));
       queryClient.invalidateQueries({ queryKey: ['admin', 'automations'] });
     },
-    onError: (err) => toast.error(t('automationsPage.toast.runFailed', { message: (err as Error).message })),
+    onError: (err) =>
+      toast.error(
+        t('automationsPage.toast.runFailed', {
+          message: translateApiError(t, err),
+        }),
+      ),
   });
 
   if (!draft) {
@@ -831,6 +1000,21 @@ function ConfigEditor({
   ruleId?: string;
 }) {
   const { t } = useTranslation();
+  // Read HERE rather than threaded down from the page: nothing above the field
+  // decides anything about it, and a sixth prop for one query would put the
+  // catalogue's lifetime in a component that never looks at it.
+  const eventCatalogQuery = useQuery({
+    queryKey: ['admin', 'automations', 'events'],
+    queryFn: getEventCatalog,
+    // ONLY FOR A REALTIME RULE. The hint is drawn for no other kind, and this
+    // query groups over the audit log — the busiest table in the schema. Firing
+    // it while somebody edits a nightly cron is a full scan for an answer the
+    // page will not show.
+    enabled: draft.triggerKind === 'REALTIME',
+    // The answer moves slowly, being a retention-window count.
+    staleTime: 10 * 60 * 1000,
+  });
+  const eventCatalog = eventCatalogQuery.data;
   const conditionsText = useMemo(
     () => (draft.conditions ? JSON.stringify(draft.conditions, null, 2) : ''),
     [draft.conditions],
@@ -893,6 +1077,17 @@ function ConfigEditor({
             }
             maxLength={256}
           />
+          {/* WHAT THIS TRIGGER HAS ACTUALLY DONE HERE. The field is free text
+              against a panel that declares 115 event types and emits fewer, and
+              a rule bound to one nothing emits fails in perfect silence — no
+              execution row, no error, no log line, "enabled" for ever. */}
+          {draft.triggerKind === 'REALTIME' && (
+            <TriggerCatalogHint
+              spec={draft.triggerSpec}
+              events={eventCatalog?.events ?? []}
+              windowDays={eventCatalog?.windowDays ?? 0}
+            />
+          )}
           <p className="text-xs text-muted-foreground">
             {draft.triggerKind === 'REALTIME'
               ? t('automationsPage.config.eventPatternHint')

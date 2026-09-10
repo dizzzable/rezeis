@@ -28,7 +28,23 @@ export type AutomationActionType = (typeof AUTOMATION_ACTION_TYPES)[number];
 /** Maximum size of the trigger payload retained on `automation_executions`. */
 export const AUTOMATION_PAYLOAD_TRUNCATE_BYTES = 8 * 1024;
 
-/** Hard cap on how many rules can be evaluated against a single event. */
+/**
+ * Hard cap on how many rules may FIRE on a single event.
+ *
+ * It used to be a `take` on the query that loads enabled realtime rules — that
+ * is, a cap on how many were LOADED, applied before the pattern filter ran and
+ * with no `orderBy` to decide which. Past 64 enabled realtime rules the
+ * database returned an arbitrary 64 of them and every rule outside that slice
+ * silently stopped firing; and because `persistExecution` updates a rule row on
+ * every run, the arbitrary slice reshuffled as other rules fired. Nothing
+ * logged it, nothing told the operator, and the only symptom was a rule with
+ * `lastRunAt: null` and no explanation.
+ *
+ * A ready-made template library plus a trigger map is exactly what pushes an
+ * install past that line, which is why it is a cap on MATCHES now: it is
+ * reached only when 64 rules genuinely want the same event, it is applied in a
+ * defined order, and reaching it is logged with the event that did it.
+ */
 export const AUTOMATION_RULES_PER_EVENT_LIMIT = 64;
 
 /**
@@ -67,10 +83,34 @@ export const COINCIDENT_EVENT_GROUPS: readonly (readonly string[])[] = [
   ['payment.completed', 'subscription.renewed'],
   // An upgrade.
   ['payment.completed', 'subscription.upgraded'],
-  // Arriving for the first time. Which of the two fires depends on the door
-  // the customer came through, but a rule usually wants both.
-  ['user.registered', 'user.web_registered'],
   // The trial, which grants a subscription without a payment.
   ['subscription.trial_granted', 'subscription.created'],
+  // Connecting for the first time. Remnawave notices it and so do we, inside
+  // one webhook handler — `user.first_traffic` is emitted and then
+  // `remnawave.user.first_connected`, seconds apart at most.
+  ['user.first_traffic', 'remnawave.user.first_connected'],
+  // Running out, then running out. The panel forwards a bandwidth threshold and
+  // then the limit itself; a customer who crosses the last threshold and
+  // exhausts the allowance in one session gets both.
+  ['remnawave.user.bandwidth_threshold', 'remnawave.user.limited'],
+  // Ending. Which of these a panel emits depends on how it is configured to
+  // handle an expired profile — some disable it, some let it expire — and an
+  // install that does both sends a customer whose subscription simply ran out
+  // into the support queue with "your access is suspended".
+  ['remnawave.user.expired', 'remnawave.user.disabled'],
+  // A card that keeps failing is also what opens the fraud signal that names
+  // exactly one person, which is the only shape that reaches a customer.
+  ['payment.failed', 'fraud.signal_opened'],
 ]
+
+// `['user.registered', 'user.web_registered']` USED TO BE HERE and is gone.
+//
+// The comment beside it said which of the two fires depends on the door the
+// customer came through — that is, they never co-occur — while the file's own
+// rule two paragraphs up is that collapsing events into a group "would warn
+// about a pair that never co-occurs". Applying the library's first two cards,
+// `welcome` and `welcome_web`, therefore produced a mutual collision warning
+// for two rules that cannot both fire for one person. It was the first warning
+// a new operator ever saw, and it was wrong, which teaches them to dismiss the
+// ones that are right.
 

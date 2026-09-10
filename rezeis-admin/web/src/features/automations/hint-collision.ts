@@ -1,3 +1,4 @@
+import { matchEventPattern } from './trigger-map'
 import type { AutomationRule } from './automations-api'
 import type { UserHint } from '@/features/user-hints/user-hints-api'
 
@@ -32,11 +33,72 @@ interface CollisionInput {
   readonly coincidentEventGroups: readonly (readonly string[])[]
 }
 
+/**
+ * The hint keys a rule's actions name.
+ *
+ * TRIMMED, like every other reader of the same field. The engine's own
+ * `readString` (`src/modules/automations/actions/action-registry.ts`) trims
+ * before it looks the hint up, and so does `hintKeysOf` in `trigger-map.ts` —
+ * so a key stored as `"tpl-payment-failed "` fires perfectly at run time and is
+ * drawn on the trigger map, while THIS function handed back the untrimmed
+ * string, found no hint under it, and dropped the rule out of the comparison.
+ * The one warning that exists to say "two windows will open" went silent for
+ * exactly the rule that will open one.
+ */
 function hintKeysOf(actions: CollisionInput['draft']['actions']): string[] {
   return actions
     .filter((action) => action.type === 'show_hint')
-    .map((action) => (typeof action.params?.hintKey === 'string' ? action.params.hintKey : ''))
+    .map((action) =>
+      typeof action.params?.hintKey === 'string' ? action.params.hintKey.trim() : '',
+    )
     .filter((key) => key.length > 0)
+}
+
+/**
+ * Whether two trigger patterns can be selected by one and the same event.
+ *
+ * ── Why exact string equality was not enough ──────────────────────────────
+ *
+ * The bridge selects rules with `matchEventPattern`, so `payment.*` fires for
+ * `payment.failed` and `*` fires for everything. Comparing the two SPECS as
+ * strings therefore answered "no" for every pair where one of them is a
+ * wildcard: an operator adding a second pop-up on `payment.failed` beside an
+ * existing `payment.*` rule — or a `*` rule, which the editor's own help text
+ * advertises — got two windows for one act and a panel that said nothing.
+ *
+ * BOTH DIRECTIONS MATTER. The draft may be the wildcard or the saved rule may
+ * be, and only one of those two is the shape an operator notices unaided.
+ *
+ * `matchEventPattern` is the browser-side copy of the bridge's grammar, pinned
+ * to the server's by `trigger-map.test.ts` — imported rather than restated,
+ * because a third opinion about what a pattern means is the defect class this
+ * subsystem keeps paying for.
+ */
+function triggersOverlap(left: string, right: string): boolean {
+  const a = left.trim()
+  const b = right.trim()
+  // An unfinished rule selects nothing, and the engine agrees: an empty pattern
+  // never matches.
+  if (a.length === 0 || b.length === 0) return false
+  if (a === '*' || b === '*') return true
+
+  const aNamespace = a.endsWith('.*')
+  const bNamespace = b.endsWith('.*')
+  if (!aNamespace && !bNamespace) return a === b
+  if (aNamespace !== bNamespace) {
+    // One concrete event, one namespace: the runtime's own answer.
+    return aNamespace ? matchEventPattern(a, b) : matchEventPattern(b, a)
+  }
+
+  // Two namespaces overlap when one contains the other — `payment.*` and
+  // `payment.gateway.*` both select `payment.gateway.timeout`.
+  const aPrefix = a.slice(0, -2)
+  const bPrefix = b.slice(0, -2)
+  return (
+    aPrefix === bPrefix ||
+    aPrefix.startsWith(`${bPrefix}.`) ||
+    bPrefix.startsWith(`${aPrefix}.`)
+  )
 }
 
 /**
@@ -81,13 +143,30 @@ export function findHintCollisions(input: CollisionInput): HintCollision[] {
   // The events that arrive alongside this rule's own trigger. A trigger can sit
   // in more than one group — `payment.completed` belongs to a purchase and to a
   // renewal — so every group it appears in contributes.
+  //
+  // Membership is asked by OVERLAP rather than by equality, because a wildcard
+  // draft names none of these events and reaches all of them: `payment.*`
+  // selects `payment.completed`, so everything that arrives beside a purchase
+  // arrives beside that rule too.
   const coincident = new Set<string>()
   for (const group of coincidentEventGroups) {
-    if (!group.includes(draft.triggerSpec)) continue
-    for (const event of group) {
-      if (event !== draft.triggerSpec) coincident.add(event)
-    }
+    if (!group.some((event) => triggersOverlap(draft.triggerSpec, event))) continue
+    for (const event of group) coincident.add(event)
   }
+
+  // THE RULE'S OWN TRIGGER IS A COLLISION SOURCE TOO, and leaving it out was
+  // the bigger hole. Two rules on the SAME event fire together by definition —
+  // no coincident group required — and the library ships four deliberate pairs
+  // of alternatives that share a trigger: two answers to a failed payment, a
+  // loud and a quiet expiry warning, a renewal prompt and a win-back offer, a
+  // modal and a toast for a promo code.
+  //
+  // Enabling both halves is a reasonable mistake to make: the map offers the
+  // second right beside the first. It produced two pop-ups for one act, in
+  // silence, while the template's own description promised this panel would
+  // say so out loud.
+  coincident.add(draft.triggerSpec)
+
   if (coincident.size === 0) return []
 
   const collisions: HintCollision[] = []
@@ -95,7 +174,10 @@ export function findHintCollisions(input: CollisionInput): HintCollision[] {
     if (rule.id === draft.id) continue
     if (!rule.isEnabled) continue
     if (rule.triggerKind !== 'REALTIME') continue
-    if (!coincident.has(rule.triggerSpec)) continue
+    // OVERLAP, NOT EQUALITY — the other half of the wildcard hole. A saved
+    // `payment.*` rule fires beside a concrete draft and named none of the
+    // events in the set above.
+    if (![...coincident].some((event) => triggersOverlap(rule.triggerSpec, event))) continue
 
     for (const key of hintKeysOf(rule.actions)) {
       const hint = byKey.get(key)

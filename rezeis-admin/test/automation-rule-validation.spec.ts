@@ -107,3 +107,161 @@ describe('an action that picks its own recipients cannot ride an event', () => {
     );
   });
 });
+
+
+describe('a pop-up bound to an event that cannot carry one', () => {
+  /**
+   * THE QUIETEST FAILURE THIS SUBSYSTEM HAS.
+   *
+   * A rule whose trigger names an event nothing emits is never selected by the
+   * pattern filter. Not refused — never seen. There is no execution row, no
+   * error and no log line, and the rule reads "enabled" in the operator's list
+   * for ever. Four of the eight ready-made pop-ups shipped in that state, and
+   * the only symptom available to anybody was that customers never mentioned
+   * seeing them.
+   *
+   * Save time is the only place this can be said, and these cases are what
+   * makes it get said.
+   */
+  const popup = (triggerSpec: string) =>
+    dto({
+      triggerKind: AutomationTriggerKind.REALTIME,
+      triggerSpec,
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+    });
+
+  it('refuses a type that is declared and emitted from nowhere', async () => {
+    const { service, created } = buildService();
+
+    await assert.rejects(
+      () => service.createRule(popup('subscription.expired'), 'admin-1'),
+      /cannot show a pop-up/,
+    );
+    assert.deepStrictEqual(created, []);
+  });
+
+  it('refuses a name that is not an event type at all', async () => {
+    // `user.expire_soon` is a KEY of Remnawave's own webhook map. The panel
+    // forwards it as `remnawave.user.expire_soon`, so a rule bound to the raw
+    // name matches nothing, for ever. Two shipped templates carried it.
+    const { service } = buildService();
+
+    await assert.rejects(
+      () => service.createRule(popup('user.expire_soon'), 'admin-1'),
+      /cannot show a pop-up/,
+    );
+  });
+
+  it('refuses a pop-up on a schedule, which names nobody', async () => {
+    // THE OTHER DOOR TO THE SAME MISTAKE. The check above was gated on
+    // REALTIME, and the action picker offers "show a hint" for every trigger
+    // kind — so an operator could pick it, switch the trigger to a nightly
+    // cron, and save. The cron dispatcher builds `triggerData` as
+    // `{ firedAt, spec }`; there is no customer in it and there cannot be,
+    // because a schedule is not about anybody. Every 03:00 run then wrote a
+    // FAILED execution row.
+    const { service, created } = buildService();
+
+    await assert.rejects(
+      () =>
+        service.createRule(
+          dto({
+            triggerKind: AutomationTriggerKind.CRON,
+            triggerSpec: '0 3 * * *',
+            actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+          }),
+          'admin-1',
+        ),
+      /needs somebody to show it to/,
+    );
+    assert.deepStrictEqual(created, []);
+  });
+
+  it('still allows a pop-up on a manual run, where the operator names the person', async () => {
+    // Not symmetrical, and deliberately so: a manual run carries the
+    // admin-supplied trigger data, and `params.userId` names the target on
+    // purpose. That is how an operator sends one pop-up to one customer, and a
+    // rule refusing it would take the feature away.
+    const { service, created } = buildService();
+
+    await service.createRule(
+      dto({
+        triggerKind: AutomationTriggerKind.MANUAL,
+        triggerSpec: '',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+      }),
+      'admin-1',
+    );
+
+    assert.equal(created.length, 1);
+  });
+
+  it('names what an operator can use instead', async () => {
+    // A refusal an operator cannot act on is a different kind of dead end.
+    const { service } = buildService();
+
+    await assert.rejects(
+      () => service.createRule(popup('user.expire_soon'), 'admin-1'),
+      /remnawave\.user\.expire_soon/,
+    );
+  });
+
+  it('accepts every event the panel says can carry one', async () => {
+    for (const trigger of [
+      'user.registered',
+      'payment.failed',
+      'subscription.trial_granted',
+      'remnawave.user.expire_soon',
+      'remnawave.user.bandwidth_threshold',
+    ]) {
+      const { service, created } = buildService();
+      await service.createRule(popup(trigger), 'admin-1');
+      assert.equal(created.length, 1, `${trigger} was refused`);
+    }
+  });
+
+  it('accepts a namespace wildcard that covers a capable event', async () => {
+    // The runtime matches `ns.*`, and a map will lean on it. The action refuses
+    // the events under it that name nobody — loudly, at run time, which is the
+    // right place for a choice the operator made on purpose.
+    const { service, created } = buildService();
+
+    await service.createRule(popup('remnawave.user.*'), 'admin-1');
+
+    assert.equal(created.length, 1);
+  });
+
+  it('leaves rules without a pop-up alone', async () => {
+    // The vocabulary stays open for everything else: rules chain by emitting
+    // custom types that other rules match on, and that is deliberate.
+    const { service, created } = buildService();
+
+    await service.createRule(
+      dto({
+        triggerKind: AutomationTriggerKind.REALTIME,
+        triggerSpec: 'anything.at.all',
+        actions: [{ type: 'system_event', params: { type: 'automation.custom' } }],
+      }),
+      'admin-1',
+    );
+
+    assert.equal(created.length, 1);
+  });
+
+  it('leaves a scheduled pop-up alone', async () => {
+    // A CRON rule carries a cron expression, not an event name, and the
+    // audience action is what picks its recipients.
+    const { service, created } = buildService();
+
+    await service.createRule(
+      dto({
+        triggerKind: AutomationTriggerKind.CRON,
+        triggerSpec: '0 3 * * *',
+        actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'connect' } }],
+      }),
+      'admin-1',
+    );
+
+    assert.equal(created.length, 1);
+  });
+})

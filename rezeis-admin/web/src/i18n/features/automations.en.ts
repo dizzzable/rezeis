@@ -11,8 +11,14 @@ export const en = {
     subtitle: "React to events, run things on a schedule, fire ad-hoc workflows. Each rule is evaluated independently — failures of one action don't abort the rest.",
     newRule: 'New rule',
     hintCollision: {
-      title: 'The customer will see more than one window',
-      body: '{{count}} other enabled rule shows a hint on an event that arrives alongside this one. A single purchase emits several events within seconds, and the customer gets window after window.',
+      title: 'The customer will see one hint after another',
+      // Pluralised. One fixed form read "2 other enabled rule shows", and two
+      // or more is the ordinary case here: the template library deliberately
+      // ships pairs of alternatives on one trigger. Russian needs `_few` and
+      // `_many` on top of these two; that is what the parity guard's CLDR
+      // exemption is for.
+      body_one: '{{count}} other enabled rule shows a hint on an event that arrives alongside this one. A single purchase emits several events within seconds, and the customer gets hint after hint.',
+      body_other: '{{count}} other enabled rules show a hint on an event that arrives alongside this one. A single purchase emits several events within seconds, and the customer gets hint after hint.',
       fix: 'If that is not deliberate, give both hints the same group — then only the newest is shown.',
     },
     audiences: {
@@ -21,6 +27,7 @@ export const en = {
     tabs: {
       rules: 'Rules',
       hints: 'Hints',
+      map: 'Map',
     },
     untitledRule: 'Untitled rule',
     selectPrompt: 'Pick a rule on the left or create a new one.',
@@ -57,6 +64,16 @@ export const en = {
       cronExpression: 'Cron expression',
       eventPatternPlaceholder: 'payment.failed or fraud.*',
       cronPlaceholder: '0 3 * * *',
+      triggerUnknown: 'The panel does not know this event. It may be your own — one you post to /api/internal/events — but if it is a typo the rule will never fire and nothing anywhere will say so.',
+      triggerWindowDays_one: '{{count}} day',
+      triggerWindowDays_other: '{{count}} days',
+      triggerMatchedTypes_one: '{{count}} event type matched',
+      triggerMatchedTypes_other: '{{count}} event types matched',
+      triggerNeverFired_one: 'This event has not happened here once in the last {{count}} day. The rule saves only if the panel accepts its actions: a hint on an event that names no customer is refused. And it fires only once the event starts happening.',
+      triggerNeverFired_other: 'This event has not happened here once in the last {{count}} days. The rule saves only if the panel accepts its actions: a hint on an event that names no customer is refused. And it fires only once the event starts happening.',
+      triggerFired_one: 'Happened {{count}} time in {{window}} ({{matched}})',
+      triggerFired_other: 'Happened {{count}} times in {{window}} ({{matched}})',
+      triggerPopupCapable: 'a hint can be shown on it',
       eventPatternHint: 'Match an event type. Wildcards: "*" matches anything, "payment.*" matches the namespace.',
       cronHint: 'Standard 5-field cron expression evaluated in UTC.',
       conditionsLabel: 'Conditions (JSON-logic-ish, optional)',
@@ -70,7 +87,7 @@ export const en = {
       pickHint: 'Pick a hint',
       pickAudience: 'Whom to pick',
       audienceNeedsCron: 'This action picks its own recipients, so the rule needs a scheduled trigger rather than an event one. Once a day is plenty: a hint is never delivered to the same person twice.',
-      hintNeedsCustomer: 'A hint is addressed to somebody, so the trigger must name a customer. System events — a node going offline, a promo code running out — will not do.',
+      hintNeedsCustomer: 'A hint can only go on an event the panel actually emits and that names a customer. The list is closed: if the event you want is not on it, saving is refused and the refusal names the ones that work.',
       heading: 'Actions',
       add: 'Add action',
       required: 'At least one action is required.',
@@ -104,7 +121,6 @@ export const en = {
       deleteFailed: 'Delete failed: {{message}}',
       runFinished: 'Run finished: {{status}}',
       runFailed: 'Run failed: {{message}}',
-      toggleFailed: 'Failed to toggle rule',
     },
     help: {
       title: 'How it works — examples & templates',
@@ -150,12 +166,57 @@ export const en = {
       templatesTitle: 'Ready-made templates (one click)',
       useTemplate: 'Use',
     },
+    triggerMap: {
+      title: 'Map: from an event to a hint',
+      subtitle: 'One row per event, and what stands between it and the customer’s screen. A showing is two rows in two tables — a rule and a hint text — and this is the link between them, which neither the Rules tab nor the Hints tab shows anywhere.',
+      loadFailed: 'Rules or hints could not be loaded, so the map is incomplete.',
+      counts: {
+        live_one: '{{count}} live',
+        live_other: '{{count}} live',
+        paused_one: '{{count}} switched off',
+        paused_other: '{{count}} switched off',
+        broken_one: '{{count}} will not fire',
+        broken_other: '{{count}} will not fire',
+        unused_one: '{{count}} ready-made hint unused',
+        unused_other: '{{count}} ready-made hints unused',
+      },
+      viaWildcard_one: 'plus {{count}} rule via a wildcard',
+      viaWildcard_other: 'plus {{count}} rules via a wildcard',
+      noSuchHint: 'no hint named "{{key}}"',
+      nothingHere: 'nothing set up',
+      orphans: 'Hints nothing points at',
+      conditional: 'only when the rule conditions match',
+      offerHalfBuilt: 'text ready, no rule',
+      offerHalfBuiltHint:
+        'The hint text "{{key}}" already exists on the Hints tab — a template was applied and the rule was never created, so nothing fires it. Press to restore the stock text and re-open the draft rule.',
+      orphansHint: 'They are written, but no rule calls them, so no customer will ever see them. From the Hints tab they look finished.',
+      off: '(off)',
+    },
     hintTemplates: {
-      title: 'Ready-made pop-ups',
+      title: 'Ready-made hints',
       subtitle:
-        'The moment each one appears is already decided. The text is created straight away and can be edited on the Hints tab; the rule opens as a draft, so nothing reaches a customer until you press Create.',
-      created: 'Pop-up "{{title}}" created. Review the rule and press Create.',
-      failed: 'Could not create the pop-up',
+        'The moment each one appears is already decided. Some are a window over the screen, some a line that does not take it; the description says which. The text is created straight away and can be edited on the Hints tab. The rule opens as a draft AND switched off: Create saves it switched off, and switching it on is a separate step. And if a rule with this key already exists and is on, the text reaches customers at once.',
+      created: 'The hint text "{{title}}" is created. The rule opened as a draft: Create saves it switched off, and switching it on is a separate step. If a rule with this key already exists and is on, the text is with customers already.',
+      // The SECOND branch of the same button, and it creates nothing: the
+      // template's words replace the words of a hint that already exists, by
+      // PUT, at once. Everything the operator aimed — where the button goes,
+      // window or line, the window of time, whether it repeats, where it may
+      // appear — is preserved, so the only thing that changes is the text, and
+      // it changes for whoever an enabled rule is already showing it to.
+      // Nothing here waits on Create.
+      updated: 'The text of "{{title}}" is back to the stock wording; every other setting is kept. If an enabled rule already shows it, the customer sees the new text right now — there is nothing to press Create for, and the draft that opened would add a second rule.',
+      failed: 'Could not create the hint',
+      needsBoth:
+        'A hint is a text and a rule that shows it. Your role is missing: {{missing}}. Nothing was created — ask for that access first.',
+      stages: {
+        arrival: 'Arrival',
+        start: 'From purchase to first connection',
+        payment: 'Payment',
+        retention: 'Retention',
+        limits: 'Limits and access',
+        rewards: 'Rewards',
+        security: 'Security',
+      },
       payment_failed: {
         name: 'Payment failed',
         description: 'Shows a pop-up to whoever the payment failed for, with a button to the plans.',
@@ -226,13 +287,143 @@ export const en = {
         ctaRu: 'К тарифам',
         ctaEn: 'See plans',
       },
+      welcome_web: {
+        name: 'First visit from the web',
+        description: 'Greets somebody who signed up on the site rather than through Telegram. Browser and installed app only.',
+        titleRu: 'Добро пожаловать',
+        bodyRu: 'Аккаунт создан. Выберите тариф — на подключение уйдёт пара минут, приложение подойдёт любое из списка.',
+        titleEn: 'Welcome',
+        bodyEn: 'Your account is ready. Pick a plan — connecting takes a couple of minutes, and any app from the list will do.',
+        ctaRu: 'К тарифам',
+        ctaEn: 'See plans',
+      },
+      first_connected: {
+        name: 'First connection',
+        description: 'A short confirmation that the subscription really works. Once per customer.',
+        titleRu: 'Подключение работает',
+        bodyRu: 'Первое соединение прошло. Дальше приложение подключается само.',
+        titleEn: 'You are connected',
+        bodyEn: 'The first connection went through. From here the app connects on its own.',
+        ctaRu: '',
+        ctaEn: '',
+      },
+      first_traffic_devices: {
+        name: 'First connection, with a devices button',
+        description: 'The same moment, pointed at the device list. An alternative to the one above — enable one of the two.',
+        titleRu: 'Подключение работает',
+        bodyRu: 'Устройства, с которых вы заходите, видны в кабинете — там же можно отвязать лишнее.',
+        titleEn: 'You are connected',
+        bodyEn: 'The devices you connect from are listed in your account, and you can unlink any of them there.',
+        ctaRu: 'Мои устройства',
+        ctaEn: 'My devices',
+      },
+      payment_completed: {
+        name: 'Payment went through',
+        description: 'A quiet confirmation. The customer is already looking at the screen, so not a modal.',
+        titleRu: 'Оплата прошла',
+        bodyRu: 'Подписка обновлена, всё готово к работе.',
+        titleEn: 'Payment received',
+        bodyEn: 'Your subscription is up to date and ready to use.',
+        ctaRu: 'К подписке',
+        ctaEn: 'Open subscription',
+      },
+      payment_failed_method: {
+        name: 'Payment failed — change the method',
+        description: 'The same moment, pointed at payment methods. An alternative to "The payment did not go through".',
+        titleRu: 'Оплата не прошла',
+        bodyRu: 'Деньги не списались, подписка не изменилась. Чаще всего помогает другая карта или другой способ оплаты.',
+        titleEn: 'The payment did not go through',
+        bodyEn: 'Nothing was charged and your subscription is unchanged. A different card or payment method usually does the trick.',
+        ctaRu: 'Способы оплаты',
+        ctaEn: 'Payment methods',
+      },
+      expire_soon_quiet: {
+        name: 'Subscription ending soon — quietly',
+        description: 'The same warning without taking the screen. An alternative to the modal, not a companion to it.',
+        titleRu: 'Подписка скоро закончится',
+        bodyRu: 'Продлите заранее, чтобы подключение не прервалось.',
+        titleEn: 'Your subscription ends soon',
+        bodyEn: 'Renew ahead of time so your connection is not interrupted.',
+        ctaRu: 'Продлить',
+        ctaEn: 'Renew',
+      },
+      expired_comeback: {
+        name: 'Expired — invite them back',
+        description: 'For a win-back campaign: points at offers rather than renewal. Lives for a week.',
+        titleRu: 'Мы вас ждём',
+        bodyRu: 'Подписка закончилась, но аккаунт и настройки на месте. Загляните в раздел с предложениями — там бывает что-то на возвращение.',
+        titleEn: 'We kept your place',
+        bodyEn: 'Your subscription has ended, but your account and settings are still here. Have a look at the offers — there is often something for coming back.',
+        ctaRu: 'Посмотреть предложения',
+        ctaEn: 'See offers',
+      },
+      traffic_exhausted: {
+        name: 'Traffic used up',
+        description: 'Takes the screen — the connection has already stopped. Points at add-ons.',
+        titleRu: 'Трафик закончился',
+        bodyRu: 'Лимит на этот период исчерпан, поэтому подключение не работает. Можно добавить трафик или дождаться обновления счётчика.',
+        titleEn: 'You are out of traffic',
+        bodyEn: 'Your limit for this period is used up, so the connection is not working. You can add more traffic or wait for the counter to reset.',
+        ctaRu: 'Добавить трафик',
+        ctaEn: 'Add traffic',
+      },
+      traffic_reset: {
+        name: 'Traffic counter reset',
+        description: 'One line. Somebody cut off yesterday has no other way to learn that they are not any more.',
+        titleRu: 'Трафик снова доступен',
+        bodyRu: 'Счётчик обновился — можно подключаться.',
+        titleEn: 'Your traffic is back',
+        bodyEn: 'The counter has reset — you can connect again.',
+        ctaRu: '',
+        ctaEn: '',
+      },
+      access_paused: {
+        name: 'Access paused',
+        description: 'Fires for an operator switching a profile off by hand too, so the copy names no reason and points at support.',
+        titleRu: 'Доступ приостановлен',
+        bodyRu: 'Подключение сейчас недоступно. Если это неожиданно — напишите нам, разберёмся.',
+        titleEn: 'Your access is paused',
+        bodyEn: 'The connection is unavailable right now. If that is unexpected, write to us and we will sort it out.',
+        ctaRu: 'Написать в поддержку',
+        ctaEn: 'Contact support',
+      },
+      access_restored: {
+        name: 'Access restored',
+        description: 'Supersedes an unread "access paused" — mentioning a suspension after it is lifted is worse than saying nothing.',
+        titleRu: 'Доступ восстановлен',
+        bodyRu: 'Подключение снова работает.',
+        titleEn: 'Your access is back',
+        bodyEn: 'The connection is working again.',
+        ctaRu: '',
+        ctaEn: '',
+      },
+      promocode_activated_quiet: {
+        name: 'Promo code applied — quietly',
+        description: 'The customer typed the code and is watching the screen. Keep the modal for offers worth stopping for.',
+        titleRu: 'Промокод применён',
+        bodyRu: 'Награда по промокоду начислена.',
+        titleEn: 'Promo code applied',
+        bodyEn: 'Your promo code reward has been credited.',
+        ctaRu: '',
+        ctaEn: '',
+      },
+      fraud_signal: {
+        name: 'Unusual activity',
+        description: 'Only reaches anybody when the signal names one person. A shared device or several accounts will not fire it, and that is correct.',
+        titleRu: 'Мы заметили необычную активность',
+        bodyRu: 'На всякий случай проверьте, всё ли в порядке с аккаунтом. Если вопросов нет — ничего делать не нужно.',
+        titleEn: 'We noticed something unusual',
+        bodyEn: 'Just in case, have a look at your account. If everything seems fine, there is nothing you need to do.',
+        ctaRu: 'Написать в поддержку',
+        ctaEn: 'Contact support',
+      },
       promocode_activated: {
         name: 'Promo code applied',
         description: 'A short confirmation after a promo code is used.',
         titleRu: 'Промокод применён',
-        bodyRu: 'Скидка уже учтена.',
+        bodyRu: 'Награда по промокоду начислена. Что именно — видно в кабинете.',
         titleEn: 'Promo code applied',
-        bodyEn: 'The discount is already counted.',
+        bodyEn: 'Your promo code reward has been credited. What it is shows in your account.',
         ctaRu: '',
         ctaEn: '',
       },
@@ -264,7 +455,20 @@ export const en = {
     },
   },
   userHints: {
-    intro: 'A hint is a window over a page somebody opened for their own reasons. Every setting below is about one thing: when interrupting them is worth it.',
+    // ── One library, two presentations ────────────────────────────────────
+    //
+    // "A window" was true of exactly what this tab creates: the form
+    // (`features/user-hints/user-hints-tab.tsx`, `emptyDraft`) hard-codes
+    // `mode: 'MODAL'` and offers no mode selector. But the ready-made
+    // templates put their hints in THIS SAME library, and some of them are a
+    // line in the corner rather than a window; they open in this same form
+    // and keep their own mode. The operator read "a hint is a window" over a
+    // list where a good share of the rows are not one.
+    //
+    // How many of each is read from `HINT_TEMPLATES`, not restated here —
+    // `automations-hint-copy.test.ts` takes the modes from the data, so a
+    // template changing mode breaks this sentence loudly rather than quietly.
+    intro: 'A hint meets somebody on a page they opened for their own reasons: one takes the screen as a window, another passes as a line in the corner. The form below creates a window; the ones that arrive as a line come from the ready-made templates, and they are edited here too. Every setting below is about one thing: when interrupting them is worth it.',
     new: 'New hint',
     editing: 'Edit hint',
     listTitle: 'Library',
@@ -301,7 +505,8 @@ export const en = {
       surfaces: 'Where to show it',
       surfacesHint: 'Nothing ticked means everywhere, which is the common case. Tick only when the hint is actively wrong elsewhere: "install the app" to somebody already in it.',
       groupKey: 'Group',
-      groupKeyHint: 'Hints in one group supersede each other. A single purchase emits several events; a shared group leaves one window instead of four.',
+      groupKeyHint:
+        'Hints in one group supersede each other: anything not yet shown lapses when the next one arrives. A single purchase emits several events, so a shared group leaves one hint instead of four. A name extended with a hyphen is a sub-group: “payment-attempt” lapses “payment-attempt-method”, never the other way round.',
       isActive: 'Show it',
       isRepeatable: 'May be shown more than once',
     },

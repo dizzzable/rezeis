@@ -12,6 +12,7 @@ import { AutomationProcessor } from './automation.processor';
 import { AutomationQueueService } from './automation-queue.service';
 import { AutomationsController } from './automations.controller';
 import { AutomationsService } from './automations.service';
+import { EventCatalogService } from './services/event-catalog.service';
 import { AUTOMATION_QUEUE } from './automations.constants';
 
 /**
@@ -50,6 +51,7 @@ import { AUTOMATION_QUEUE } from './automations.constants';
     AutomationQueueService,
     AutomationProcessor,
     AutomationEventBridgeService,
+    EventCatalogService,
   ],
   exports: [AutomationsService, AutomationQueueService],
 })

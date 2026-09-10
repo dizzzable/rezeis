@@ -1928,6 +1928,24 @@ export const en = {
       'More than one user matches this email. Use a more specific identifier.',
     'Exactly one identifier must be provided: userId, telegramId, email, login, or referralCode':
       'Provide exactly one identifier: user ID, Telegram ID, email, web login, or referral code.',
+    // ── The refusals an automation save can come back with ──────────────────
+    //
+    // `AutomationsService` throws these as plain `BadRequestException(...)`
+    // with no code — `SAFE_PRODUCT_CODES` carries none for automations — so the
+    // response body holds free text and nothing else. This exact-sentence table
+    // is the only way to reach it, and only sentences with NO full stop and NO
+    // colon can be reached at all: i18next splits the key on '.' and on ':'
+    // before it looks anything up. The module's other refusals ("Unknown action
+    // type: …", "Invalid cron expression: …", "Missing permission: …", both
+    // pop-up sentences) are split exactly there and arrive as a fragment; that
+    // is fixed in `lib/translate-error.ts` (`nsSeparator: false`), not here.
+    'At least one action is required': 'A rule needs at least one action.',
+    'REALTIME triggers require an event-type pattern':
+      'An event trigger needs an event-type pattern — payment.failed, or payment.*',
+    'CRON triggers require an expression': 'A scheduled trigger needs a cron expression.',
+    'MANUAL triggers must have an empty triggerSpec':
+      'A manual trigger must leave the event field empty.',
+    'Rule not found': 'No such rule — it may have been deleted in another tab.',
   },
   auth: {
     sessionCheckTitle: 'Checking admin session',
@@ -2592,6 +2610,71 @@ export const en = {
       registration: 'Export registration CSV',
       registrationSuccess: 'Registration export downloaded',
       registrationError: 'Failed to export registration data',
+      users: 'Export users',
+      usersSuccess: 'User export downloaded',
+      dialogTitle: 'Export users',
+      dialogSubtitle: 'Exports what the list currently shows, with the same filters. Every column is ticked to begin with — untick the ones you do not need.',
+      selectAll: 'all',
+      selectNone: 'none',
+      download: 'Download CSV',
+      chosenCount: '{{picked}} of {{total}} columns selected',
+      lockedHint: 'Needs the users:export_registration permission',
+      panelSlowHint: 'The device columns are read from the Remnawave panel, so the export takes noticeably longer. If the panel does not answer, those cells are left empty rather than zero.',
+      truncatedWarning: 'This file is incomplete. The export stops at a row ceiling, so it holds the oldest customers only and the rest are missing from it. Narrow the filters on the list and export again.',
+      truncatedRows: 'Rows in the downloaded file: {{rows}}.',
+      groups: {
+        identity: 'Who they are',
+        status: 'Status',
+        usage: 'How they use it',
+        subscription: 'Subscription',
+        devices: 'Devices and apps',
+        acquisition: 'Where they came from',
+        registration: 'Registration snapshot',
+      },
+      columns: {
+        reiwa_id: 'Reiwa ID',
+        telegram_id: 'Telegram ID',
+        username: 'Username',
+        name: 'Name',
+        email: 'Email',
+        language: 'Language',
+        role: 'Role',
+        referral_code: 'Referral code',
+        is_blocked: 'Blocked',
+        is_bot_blocked: 'Blocked the bot',
+        created_at: 'Registered',
+        last_seen_at: 'Last seen',
+        points: 'Points',
+        personal_discount: 'Personal discount',
+        pwa_installed: 'Ever opened from the installed app (PWA)',
+        pwa_installed_at: 'First opened from the installed app',
+        last_surface: 'Surface (Telegram / PWA / browser)',
+        last_form_factor: 'Form factor',
+        last_os: 'Operating system',
+        onboarding_completed_at: 'Finished the tour',
+        first_traffic_at: 'First traffic',
+        subscription_status: 'Subscription status',
+        subscription_plan: 'Plan',
+        subscription_expires_at: 'Subscription ends',
+        subscription_is_trial: 'Trial',
+        subscription_traffic_limit_gb: 'Traffic limit, GB',
+        subscription_device_limit: 'Device limit',
+        subscriptions_total: 'Subscriptions in total',
+        device_count: 'Devices',
+        device_hwids: 'Device HWIDs',
+        device_apps: 'Client app (Happ, INCY, FlClash…)',
+        device_user_agents: 'Device user agents',
+        device_platforms: 'Device platforms',
+        device_models: 'Device models',
+        device_last_seen_at: 'Device last connected',
+        registration_channel: 'Registration channel',
+        acquisition_placement_id: 'Ad placement',
+        acquisition_at: 'First ad touch',
+        registration_ip: 'Registration IP',
+        registration_user_agent: 'Registration user agent',
+        registration_referer: 'Registration referer',
+        registration_utm: 'UTM tags',
+      },
     },
     tabs: {
       list: 'List',

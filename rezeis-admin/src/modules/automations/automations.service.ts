@@ -12,6 +12,7 @@ import {
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AutomationExecutorService } from './automation-executor.service';
+import { POPUP_CAPABLE_EVENTS, canCarryPopup } from './popup-capable-events';
 import {
   AUTOMATION_ACTION_TYPES,
 } from './automations.constants';
@@ -56,7 +57,7 @@ export class AutomationsService {
     dto: UpsertAutomationRuleDto,
     createdById: string | null,
   ): Promise<AutomationRuleInterface> {
-    this.assertActionsValid(dto.actions, dto.triggerKind);
+    this.assertActionsValid(dto.actions, dto.triggerKind, dto.triggerSpec);
     this.assertTriggerSpecValid(dto.triggerKind, dto.triggerSpec);
 
     const created = await this.prismaService.automationRule.create({
@@ -80,7 +81,7 @@ export class AutomationsService {
   ): Promise<AutomationRuleInterface> {
     const existing = await this.prismaService.automationRule.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Rule not found');
-    this.assertActionsValid(dto.actions, dto.triggerKind);
+    this.assertActionsValid(dto.actions, dto.triggerKind, dto.triggerSpec);
     this.assertTriggerSpecValid(dto.triggerKind, dto.triggerSpec);
 
     const updated = await this.prismaService.automationRule.update({
@@ -200,6 +201,7 @@ export class AutomationsService {
   private assertActionsValid(
     actions: readonly { type: string }[],
     triggerKind: AutomationTriggerKind,
+    triggerSpec: string,
   ): void {
     if (actions.length === 0) {
       throw new BadRequestException('At least one action is required');
@@ -215,6 +217,57 @@ export class AutomationsService {
         throw new BadRequestException(
           `Action "${action.type}" picks its own recipients, so it cannot run on an event. ` +
             `Use a scheduled trigger.`,
+        );
+      }
+      // ── A pop-up on an event that cannot carry one ──────────────────────
+      //
+      // This is refused HERE because there is nowhere later that can say it.
+      // A rule bound to an event nothing emits is never selected by the
+      // pattern filter, so it produces no execution row, no error and no log
+      // line — it reads "enabled" in the list for ever. Four of the eight
+      // ready-made pop-ups shipped in exactly that state, and the only way an
+      // operator could have found out was that customers never mentioned it.
+      //
+      // The list is closed on purpose, and that is a real cost: a custom type
+      // raised through `POST /api/internal/events` carrying a `userId` WOULD
+      // work at run time, and this refuses it. The trade is deliberate — an
+      // event worth binding a pop-up to is worth an entry in
+      // `POPUP_CAPABLE_EVENTS`, where a spec proves it is emitted and does
+      // name a customer. Silence is the thing being bought out.
+      if (
+        action.type === 'show_hint' &&
+        triggerKind === AutomationTriggerKind.REALTIME &&
+        !canCarryPopup(triggerSpec)
+      ) {
+        throw new BadRequestException(
+          `"${triggerSpec.trim()}" cannot show a pop-up: it is either never emitted or it does ` +
+            'not name a customer, and a rule bound to it would fail silently. ' +
+            `Events that can: ${POPUP_CAPABLE_EVENTS.map((event) => event.type).join(', ')}`,
+        );
+      }
+      // ── A pop-up on a schedule has nobody to show it to ─────────────────
+      //
+      // The check above was gated on REALTIME alone, which let the same
+      // mistake through the other door: the action picker offers "show a hint"
+      // for every trigger kind, so an operator could pick it, switch the
+      // trigger to a nightly cron, and save. The cron dispatcher builds
+      // `triggerData` as `{ firedAt, spec }` — there is no customer in it and
+      // there cannot be, because a schedule is not about anybody — so every
+      // 03:00 run writes a FAILED execution row.
+      //
+      // Louder than the silent case, and still worth refusing up front: the
+      // operator is on the page that could tell them.
+      //
+      // MANUAL is deliberately not refused. A manual run carries the
+      // admin-supplied `triggerData`, and `params.userId` names the person on
+      // purpose — that is how an operator sends one pop-up to one customer.
+      if (
+        action.type === 'show_hint' &&
+        triggerKind === AutomationTriggerKind.CRON
+      ) {
+        throw new BadRequestException(
+          'A pop-up needs somebody to show it to, and a schedule names nobody. ' +
+            'Bind this rule to an event about a customer, or run it manually with a user id.',
         );
       }
     }

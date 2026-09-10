@@ -25,6 +25,12 @@ export const RBAC_ACTIONS = [
   'bulk_operations',
   'resolve',
   'run',
+  /// Also carried by `users`, for the full customer export: any column an
+  /// operator ticks, filtered the same way the list is. Deliberately NOT the
+  /// same permission as `users:export_registration`, in both directions — this
+  /// one carries no registration snapshot, and a role that may dump IP and user
+  /// agent should not thereby be the only one that can pull a list of expiry
+  /// dates for a mailing.
   'export',
   /// Phase 8 — separate from `create` because import-style writes can
   /// touch many rows and are higher-risk (a misconfigured payload can
@@ -89,6 +95,7 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
     'bulk_operations',
     'merge',
     'view_registration',
+    'export',
     'export_registration',
   ],
   subscriptions: ['view', 'create', 'edit', 'delete'],

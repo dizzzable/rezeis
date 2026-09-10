@@ -1966,6 +1966,25 @@ export const ru = {
       'Этому email соответствует несколько пользователей. Укажите более точный идентификатор.',
     'Exactly one identifier must be provided: userId, telegramId, email, login, or referralCode':
       'Укажите ровно один идентификатор: user ID, Telegram ID, email, web login или referral code.',
+    // ── Отказы, которыми панель встречает сохранение автоматизации ──────────
+    //
+    // `AutomationsService` бросает их как обычный `BadRequestException(...)`,
+    // без кода: `SAFE_PRODUCT_CODES` не содержит ни одного кода автоматизаций,
+    // поэтому в теле ответа есть только свободный текст. Единственный способ
+    // показать его по-русски — вот эта таблица точных предложений, и в неё
+    // попадают ТОЛЬКО те, в которых нет ни точки, ни двоеточия: i18next режет
+    // ключ по '.' и по ':' раньше, чем ищет его. Остальные отказы этого модуля
+    // — «Unknown action type: …», «Invalid cron expression: …», «Missing
+    // permission: …», обе фразы про показ подсказки — режутся именно так и
+    // доходят до оператора обрубком; лечится это не здесь, а в
+    // `lib/translate-error.ts` (нужен `nsSeparator: false`).
+    'At least one action is required': 'Правилу нужно хотя бы одно действие.',
+    'REALTIME triggers require an event-type pattern':
+      'Для триггера по событию нужен шаблон типа события — например payment.failed или payment.*',
+    'CRON triggers require an expression': 'Для триггера по расписанию нужно cron-выражение.',
+    'MANUAL triggers must have an empty triggerSpec':
+      'У ручного триггера поле события должно быть пустым.',
+    'Rule not found': 'Правило не найдено — возможно, его удалили в другой вкладке.',
   },
   auth: {
     sessionCheckTitle: 'Проверка сессии администратора',
@@ -2639,6 +2658,71 @@ export const ru = {
       registration: 'Экспорт регистрации (CSV)',
       registrationSuccess: 'CSV с регистрациями скачан',
       registrationError: 'Не удалось экспортировать данные регистрации',
+      users: 'Экспорт пользователей',
+      usersSuccess: 'Файл с пользователями скачан',
+      dialogTitle: 'Экспорт пользователей',
+      dialogSubtitle: 'Выгружается то, что сейчас в списке — с теми же фильтрами. По умолчанию отмечены все колонки; снимите лишние, если нужна узкая выборка.',
+      selectAll: 'все',
+      selectNone: 'снять',
+      download: 'Выгрузить CSV',
+      chosenCount: 'Выбрано колонок: {{picked}} из {{total}}',
+      lockedHint: 'Нужно право users:export_registration',
+      panelSlowHint: 'Колонки устройств читаются из панели Remnawave — выгрузка займёт заметно больше времени. Если панель не ответит, эти ячейки будут пустыми, а не нулевыми.',
+      truncatedWarning: 'Файл неполный. Экспорт упирается в потолок строк, поэтому в него попали только самые старые клиенты, а остальные — нет. Сузьте фильтры в списке и выгрузите ещё раз.',
+      truncatedRows: 'Строк в скачанном файле: {{rows}}.',
+      groups: {
+        identity: 'Кто это',
+        status: 'Состояние',
+        usage: 'Чем пользуется',
+        subscription: 'Подписка',
+        devices: 'Устройства и приложения',
+        acquisition: 'Откуда пришёл',
+        registration: 'Снимок регистрации',
+      },
+      columns: {
+        reiwa_id: 'Reiwa ID',
+        telegram_id: 'Telegram ID',
+        username: 'Юзернейм',
+        name: 'Имя',
+        email: 'Почта',
+        language: 'Язык',
+        role: 'Роль',
+        referral_code: 'Реферальный код',
+        is_blocked: 'Заблокирован',
+        is_bot_blocked: 'Заблокировал бота',
+        created_at: 'Зарегистрирован',
+        last_seen_at: 'Последняя активность',
+        points: 'Баллы',
+        personal_discount: 'Персональная скидка',
+        pwa_installed: 'Открывал из установленного приложения (PWA)',
+        pwa_installed_at: 'Когда впервые открыл из приложения',
+        last_surface: 'Откуда заходит (Telegram / PWA / браузер)',
+        last_form_factor: 'Устройство (телефон / планшет / компьютер)',
+        last_os: 'Операционная система',
+        onboarding_completed_at: 'Прошёл знакомство с кабинетом',
+        first_traffic_at: 'Первый трафик',
+        subscription_status: 'Статус подписки',
+        subscription_plan: 'Тариф',
+        subscription_expires_at: 'Подписка заканчивается',
+        subscription_is_trial: 'Пробный период',
+        subscription_traffic_limit_gb: 'Лимит трафика, ГБ',
+        subscription_device_limit: 'Лимит устройств',
+        subscriptions_total: 'Всего подписок',
+        device_count: 'Сколько устройств',
+        device_hwids: 'HWID устройств',
+        device_apps: 'Приложение (Happ, INCY, FlClash…)',
+        device_user_agents: 'User-Agent устройств',
+        device_platforms: 'Платформы устройств',
+        device_models: 'Модели устройств',
+        device_last_seen_at: 'Последнее подключение устройства',
+        registration_channel: 'Канал регистрации',
+        acquisition_placement_id: 'Рекламное размещение',
+        acquisition_at: 'Первое касание рекламы',
+        registration_ip: 'IP при регистрации',
+        registration_user_agent: 'User-Agent при регистрации',
+        registration_referer: 'Referer при регистрации',
+        registration_utm: 'UTM-метки',
+      },
     },
     tabs: {
       list: 'Список',

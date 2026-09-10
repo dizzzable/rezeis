@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import { loadFeatureBundle } from '@/i18n/i18n';
+import { i18n, i18nReady, loadFeatureBundle } from '@/i18n/i18n';
 import { renderWithProviders } from '@/test/test-utils';
 import AutomationsPage from './automations-page';
 import {
@@ -28,6 +28,28 @@ vi.mock('./automations-api', () => ({
   toggleRule: vi.fn(),
   updateRule: vi.fn(),
 }))
+
+/**
+ * The sentence a key renders right now — looked up, never restated.
+ *
+ * Not one string in this file is a claim about wording. They are LOCATORS: find
+ * the destructive button, find the dialog it opens, find the field labelled for
+ * the screen reader. Typed out, they put a second owner on copy that already has
+ * one in `i18n/features/automations-copy-truth.test.ts` — nine sentences over
+ * twelve places, so a single label correction turns both cases here red for a
+ * reason they have nothing to do with, and the pressure that creates is to
+ * loosen the matcher rather than to fix it.
+ *
+ * `not.toBe(key)` is the half that matters most. i18next answers a miss with the
+ * key path, so a RENAMED key would otherwise hand `getByRole` a name nothing on
+ * screen carries — and a locator that matches nothing is how an accessibility
+ * case stops being an accessibility case without going red anywhere.
+ */
+function says(key: string, values?: Record<string, unknown>): string {
+  const sentence = String(i18n.t(key, values ?? {}))
+  expect(sentence, `${key} is missing from the loaded bundles`).not.toBe(key)
+  return sentence
+}
 
 describe('AutomationsPage accessibility', () => {
   beforeEach(() => {
@@ -85,22 +107,32 @@ describe('AutomationsPage accessibility', () => {
   it('uses an accessible alert dialog before deleting a rule', async () => {
     const user = userEvent.setup()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    // `common.cancel` lives in the core locale chunk, not the automations
+    // bundle, and it arrives through a dynamic import that nothing here awaited.
+    await i18nReady
     await loadFeatureBundle('automations')
 
     renderWithProviders(<AutomationsPage />)
 
     await screen.findByDisplayValue('Payment failure alert')
-    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    const destructive = says('automationsPage.editor.delete')
+    await user.click(screen.getByRole('button', { name: destructive }))
 
-    const dialog = await screen.findByRole('alertdialog', { name: 'Delete' })
-    expect(dialog).toHaveTextContent('Delete rule "Payment failure alert"?')
+    const dialog = await screen.findByRole('alertdialog', { name: destructive })
+    // The rule's own name, interpolated: "Delete this rule?" on a page listing
+    // several is a question an operator cannot answer.
+    expect(dialog).toHaveTextContent(
+      says('automationsPage.editor.deleteConfirm', { name: 'Payment failure alert' }),
+    )
     expect(deleteRule).not.toHaveBeenCalled()
 
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(dialog).getByRole('button', { name: says('common.cancel') }))
     expect(deleteRule).not.toHaveBeenCalled()
 
-    await user.click(screen.getByRole('button', { name: 'Delete' }))
-    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: destructive }))
+    await user.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: destructive }),
+    )
 
     await waitFor(() => {
       expect(deleteRule).toHaveBeenCalledWith('rule-1')
@@ -109,15 +141,30 @@ describe('AutomationsPage accessibility', () => {
   })
 
   it('names automation editor configuration controls', async () => {
+    await i18nReady
     await loadFeatureBundle('automations')
 
     renderWithProviders(<AutomationsPage />)
 
-    expect(await screen.findByRole('textbox', { name: 'Name' })).toHaveValue('Payment failure alert')
-    expect(screen.getByRole('combobox', { name: 'Trigger' })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Description' })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Event pattern' })).toHaveValue('payment.failed')
-    expect(screen.getByRole('textbox', { name: 'Conditions (JSON-logic-ish, optional)' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: 'Actions 1' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('textbox', { name: says('automationsPage.config.name') }),
+    ).toHaveValue('Payment failure alert')
+    expect(
+      screen.getByRole('combobox', { name: says('automationsPage.config.trigger') }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('textbox', { name: says('automationsPage.config.description') }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('textbox', { name: says('automationsPage.config.eventPattern') }),
+    ).toHaveValue('payment.failed')
+    expect(
+      screen.getByRole('textbox', { name: says('automationsPage.config.conditionsLabel') }),
+    ).toBeInTheDocument()
+    // Composed exactly as the page composes it — heading plus a 1-based index —
+    // rather than as the finished string, so the index stays part of the claim.
+    expect(
+      screen.getByRole('combobox', { name: `${says('automationsPage.actions.heading')} 1` }),
+    ).toBeInTheDocument()
   })
 })

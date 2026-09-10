@@ -15,6 +15,111 @@ import { coerceNotificationLocale } from '../../notifications/utils/notification
  */
 export const HINT_FEED_NOTIFICATION_TYPE = 'hint';
 
+/**
+ * What a cabinet that tells us nothing about itself can put on screen.
+ *
+ * Every cabinet ever shipped draws a MODAL; TOAST arrived later and says so.
+ * This is the floor, not a default in the ordinary sense — assuming any more
+ * of a silent client is assuming it can draw something it may not, and the
+ * cost of that assumption is a destroyed delivery rather than a missed one.
+ */
+const MODES_ANY_CABINET_DRAWS: readonly string[] = ['MODAL'];
+
+/**
+ * The mode names this panel's schema actually has.
+ *
+ * `{ mode: { in: [...] } }` is a Prisma ENUM filter, and Prisma refuses a value
+ * outside the enum — it throws `PrismaClientValidationError` before the query
+ * reaches the database rather than matching no row. The header parser keeps
+ * unknown names on purpose (refusing there would make an older panel answer 400
+ * to a newer cabinet, which is the whole reason the declaration is a header),
+ * so the intersection has to happen HERE, and it was not happening at all.
+ *
+ * What that cost: one cabinet claiming a mode this panel has never heard of
+ * made `nextFor` throw, Nest answered 500, and the cabinet's route swallows a
+ * failed ask into `{ hint: null }` at debug level. Every customer stops getting
+ * every hint, for as long as that cabinet keeps asking, with nothing on any
+ * screen saying why — the exact outage the header was introduced to prevent,
+ * one layer further down.
+ *
+ * Spelled out rather than imported from `@prisma/client` so this list is
+ * greppable beside the reasoning, and pinned to the schema by
+ * `user-hint-mode-vocabulary.spec.ts`.
+ */
+export const MODES_THIS_PANEL_KNOWS: readonly string[] = [
+  'MODAL',
+  'DRAWER',
+  'TOAST',
+  'INLINE',
+  'SPOTLIGHT',
+];
+
+/**
+ * What to actually filter on, for a cabinet that declared its modes.
+ *
+ * An empty result is a real answer, not a fallback: a cabinet that draws only
+ * modes this panel does not have gets NO hint rather than a modal it cannot
+ * draw. Holding a delivery is recoverable; handing it to a cabinet that closes
+ * it as a dismissal is not — `raise()` counts a dismissed row as a prior
+ * delivery, and a once-only hint can never be queued again.
+ */
+export function drawableModesForQuery(declared: readonly string[] | null): string[] {
+  if (declared === null) return [...MODES_ANY_CABINET_DRAWS];
+  return declared.filter((mode) => MODES_THIS_PANEL_KNOWS.includes(mode));
+}
+
+/**
+ * The pattern that finds a group's SUB-GROUPS, or `null` when it has none.
+ *
+ * ── What a sub-group is ───────────────────────────────────────────────────
+ *
+ * A group key that extends another across a `-` boundary. `payment-attempt` is
+ * the parent of `payment-attempt-method`; `payment-attempts` is the sub-group
+ * of nothing, because the boundary is part of the rule rather than decoration.
+ *
+ * The relation is ONE-WAY, and that is the whole of its value. Delivering the
+ * parent lapses an unshown child; delivering the child leaves the parent alone.
+ * `payment_failed` and `payment_failed_method` are two ALTERNATIVE pop-ups on
+ * one `payment.failed`, and `hint-templates.ts` keeps them in separate groups
+ * precisely so neither can destroy the other on a coin toss — the bridge
+ * schedules each event on its own `setImmediate`, so a symmetric rule decides
+ * which half survives at random. Exact-equal supersession left the other half
+ * of that defect standing: a customer who retried on a different card and PAID
+ * still had an unshown "change your payment method" modal waiting, because
+ * `payment-attempt` and `payment-attempt-method` are different strings. The
+ * parent-lapses-child direction closes that without handing the pair back the
+ * symmetry that made sharing a group dangerous.
+ *
+ * ── Why the value is escaped ──────────────────────────────────────────────
+ *
+ * `startsWith` is not a string operation. Prisma 7.9's postgres query compiler
+ * emits
+ *
+ *     "group_key"::text LIKE ($1 || '%')
+ *
+ * binding the value VERBATIM and emitting no `ESCAPE` clause — read off the
+ * generated SQL rather than assumed. So `%` and `_` inside a group key are LIKE
+ * wildcards, and a group key is free text an operator types by hand: a group
+ * named `%` would compile to `LIKE '%-%'` and lapse every pending hint whose
+ * group contains a hyphen. Postgres's default LIKE escape is a backslash, so
+ * the three characters that mean anything are escaped here. For a key
+ * containing none of them — every template key, and any sane hand-typed one —
+ * this returns the string unchanged.
+ *
+ * ── A BLANK GROUP IS NOT A GROUP ──────────────────────────────────────────
+ *
+ * Returning `null` for one switches supersession off for that hint entirely,
+ * exact match included. It cannot be written through the DTO — `groupKey` is
+ * trimmed and an empty string is stored as NULL — so this only ever meets a row
+ * some other hand put there, and the two readings of such a row are "it is in
+ * the group of everything blank" and "it has no group". The second is the one
+ * that cannot silently destroy a queue.
+ */
+export function subGroupPrefix(groupKey: string): string | null {
+  if (groupKey.trim().length === 0) return null;
+  return `${groupKey.replace(/[\\%_]/g, (char) => `\\${char}`)}-`;
+}
+
 /** What the cabinet reports about itself when it asks for pending hints. */
 export interface HintAudience {
   /**
@@ -29,6 +134,15 @@ export interface HintAudience {
   readonly surface: string | null;
   /** `mobile` | `tablet` | `desktop`, or `null` when it did not say. */
   readonly formFactor: string | null;
+  /**
+   * The pop-up modes the asking cabinet can draw, or `null` when it did not
+   * say — which means a cabinet older than this field, and therefore MODAL.
+   *
+   * Unlike surface and form factor, getting this wrong does not merely show
+   * the wrong hint: the cabinet CLOSES a mode it cannot draw, as dismissed,
+   * and a dismissed delivery never comes back.
+   */
+  readonly modes: readonly string[] | null;
 }
 
 /** One hint, resolved for one viewer. */
@@ -109,7 +223,12 @@ export class UserHintDeliveryService {
     // dropped. Already-shown rows are left alone — they are history, and
     // rewriting history to tidy a queue is how a delivery log stops being
     // evidence.
-    if (hint.groupKey !== null) {
+    //
+    // A group also lapses its SUB-GROUPS — `payment-attempt` lapses
+    // `payment-attempt-method`, and never the other way about. See
+    // `subGroupPrefix` for why that direction exists and why it is one-way.
+    const subGroups = hint.groupKey === null ? null : subGroupPrefix(hint.groupKey);
+    if (hint.groupKey !== null && subGroups !== null) {
       // LAPSED, NOT DELETED — and the difference was a defect in this method.
       //
       // The once-only rule above counts prior deliveries. Deleting a superseded
@@ -126,6 +245,18 @@ export class UserHintDeliveryService {
         where: {
           userId: input.userId,
           shownAt: null,
+          // ALL THREE, to mean the same "pending" `nextFor` means.
+          //
+          // `shownAt: null` alone is not that. The cabinet stamps "shown"
+          // fire-and-forget and swallows the failure, so a delivery the
+          // customer read and dismissed can carry a null `shownAt` for ever —
+          // which is exactly why `nextFor` carries these two terms as well.
+          // Without them here, supersession rewrote `expiresAt` on deliveries
+          // that were already closed history: no outcome changed, because
+          // `nextFor` had excluded them anyway, but the log line counted them
+          // and the delivery record stopped being evidence of what happened.
+          dismissedAt: null,
+          actedAt: null,
           expiresAt: { gt: now },
           hint: { groupKey: hint.groupKey },
         },
@@ -135,6 +266,38 @@ export class UserHintDeliveryService {
         this.logger.debug(
           `Hint group "${hint.groupKey}": lapsed ${superseded.count} unshown delivery(ies) ` +
             `in favour of "${hint.key}"`,
+        );
+      }
+
+      // ── And everything BELOW it ──────────────────────────────────────
+      //
+      // A second statement rather than an `OR` folded into the one above, and
+      // the two conditions are why: one is identity on a column, the other a
+      // LIKE over free text an operator typed. Kept apart, the exact-match
+      // path that every existing delivery already depends on stays exactly
+      // what it was, and a sub-group lapse is separately countable in the log
+      // — which is the difference between "the new rule fired" and "the old
+      // one did" when somebody comes to read why a hint vanished. The two
+      // cannot overlap: a row is either exactly this group or strictly below
+      // it, never both, so the counts add rather than double-count.
+      //
+      // The pending terms are the same three as above and mean the same thing;
+      // the reasoning for each is written out there.
+      const supersededBelow = await this.prismaService.userHintDelivery.updateMany({
+        where: {
+          userId: input.userId,
+          shownAt: null,
+          dismissedAt: null,
+          actedAt: null,
+          expiresAt: { gt: now },
+          hint: { groupKey: { startsWith: subGroups } },
+        },
+        data: { expiresAt: now },
+      });
+      if (supersededBelow.count > 0) {
+        this.logger.debug(
+          `Hint group "${hint.groupKey}": lapsed ${supersededBelow.count} unshown delivery(ies) ` +
+            `in its sub-groups in favour of "${hint.key}"`,
         );
       }
     }
@@ -307,6 +470,15 @@ export class UserHintDeliveryService {
                 { formFactors: { has: audience.formFactor } },
               ],
             },
+        // THE MODE THE CABINET ASKING CAN DRAW.
+        //
+        // Not a preference — a capability, and the only one of the three whose
+        // mismatch is destructive. Silence resolves to what a cabinet predating
+        // the header can do; a name this panel's enum does not have is dropped
+        // by `drawableModesForQuery`, because handing it to Prisma throws.
+        // A hint skipped here stays queued for the next ask, so an upgraded
+        // cabinet still gets it, TTL permitting.
+        { mode: { in: drawableModesForQuery(audience.modes ?? null) } },
       ],
     };
   }

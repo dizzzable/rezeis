@@ -36,6 +36,11 @@ import {
 } from './interfaces/automation-rule.interface';
 import { AutomationsService } from './automations.service';
 import {
+  EVENT_CATALOG_WINDOW_DAYS,
+  EventCatalogService,
+  type CatalogEvent,
+} from './services/event-catalog.service';
+import {
   AUTOMATION_ACTION_TYPES,
   AutomationActionType,
   COINCIDENT_EVENT_GROUPS,
@@ -76,7 +81,10 @@ interface ManualRunResponse {
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @Controller('admin/automations')
 export class AutomationsController {
-  public constructor(private readonly automationsService: AutomationsService) {}
+  public constructor(
+    private readonly automationsService: AutomationsService,
+    private readonly eventCatalogService: EventCatalogService,
+  ) {}
 
   // ── Resource catalog (UI dropdowns) ────────────────────────────────────
 
@@ -87,6 +95,24 @@ export class AutomationsController {
     return {
       actionTypes: AUTOMATION_ACTION_TYPES,
       coincidentEventGroups: COINCIDENT_EVENT_GROUPS,
+    };
+  }
+
+  /**
+   * Every event a rule could be bound to, and whether it has fired HERE.
+   *
+   * Kept off `catalog` deliberately: that one is a constant this process
+   * already holds and answers instantly, while this one groups over the audit
+   * log. Folding them together would put a database read on every load of a
+   * page that mostly does not need it.
+   */
+  @Get('events')
+  @RequirePermission('automations', 'view')
+  @ApiOperation({ summary: 'Event catalogue with per-installation activity' })
+  public async events(): Promise<{ events: readonly CatalogEvent[]; windowDays: number }> {
+    return {
+      events: await this.eventCatalogService.listEvents(),
+      windowDays: EVENT_CATALOG_WINDOW_DAYS,
     };
   }
 

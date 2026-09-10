@@ -24,6 +24,7 @@ import {
 } from '../../user-hints/services/hint-audience.service';
 import { UserHintDeliveryService } from '../../user-hints/services/user-hint-delivery.service';
 import { AUTOMATION_ACTION_TYPES, AutomationActionType } from '../automations.constants';
+import { chainMetadata } from '../chain-depth';
 
 /**
  * Pure execution surface: takes `(context, action)` and produces a
@@ -150,11 +151,7 @@ export class AutomationActionRegistry {
       EVENT_TYPES.AUTOMATION_TELEGRAM_NOTIFY,
       'SYSTEM',
       text,
-      {
-        ruleId: context.ruleId,
-        ruleName: context.ruleName,
-        trigger: context.trigger,
-      },
+      chainMetadata(context),
     );
     // "raised", not "queued": the event is on the bus, and what happens after
     // that is the notification settings' business, not this action's to claim.
@@ -283,9 +280,7 @@ export class AutomationActionRegistry {
       `User blocked by automation "${context.ruleName}"`,
       {
         userId,
-        ruleId: context.ruleId,
-        ruleName: context.ruleName,
-        trigger: context.trigger,
+        ...chainMetadata(context),
         // What the cascade actually managed. An unattended block that fell
         // short has to be visible in the event stream, not only in a log line
         // nobody is reading at 03:00.
@@ -462,11 +457,7 @@ export class AutomationActionRegistry {
       category,
       severity,
       message,
-      metadata: {
-        ruleId: context.ruleId,
-        ruleName: context.ruleName,
-        trigger: context.trigger,
-      },
+      metadata: chainMetadata(context),
     });
     return `emitted ${type}`;
   }

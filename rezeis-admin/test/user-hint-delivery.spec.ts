@@ -220,14 +220,20 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
           .map((d) => ({ ...d, hint: hints.find((h) => h.id === d.hintId)! }))
           .filter((d) => d.hint.isActive === w.hint.isActive)
           .filter((d) =>
-            (w.hint.AND ?? []).every((term) =>
-              termMatches(
+            (w.hint.AND ?? []).every((term) => {
+              // The mode term is a plain `in`, not the empty-or-has shape the
+              // two audience terms share, so it is matched on its own. An
+              // unrecognised term must not silently pass: a filter this fake
+              // does not understand is a filter nothing here is testing.
+              const mode = term.mode as { in?: readonly string[] } | undefined;
+              if (mode !== undefined) return (mode.in ?? []).includes(d.hint.mode);
+              return termMatches(
                 term,
                 JSON.stringify(term).includes('surfaces')
                   ? d.hint.surfaces
                   : d.hint.formFactors,
-              ),
-            ),
+              );
+            }),
           )
           .sort((a, b) => {
             const delta = a.createdAt.getTime() - b.createdAt.getTime();
@@ -241,7 +247,14 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
   return { service, deliveries, prisma, feedRows };
 }
 
-const AUDIENCE = { surface: 'browser', formFactor: 'mobile' };
+/**
+ * A cabinet that can draw both modes — the current one.
+ *
+ * `modes` is not optional on `HintAudience` on purpose: a caller that forgets
+ * it should not silently inherit "everything", because the whole point of the
+ * field is that silence means the OLD cabinet, not the new one.
+ */
+const AUDIENCE = { surface: 'browser', formFactor: 'mobile', modes: ['MODAL', 'TOAST'] };
 
 describe('raising a hint', () => {
   it('queues it with an expiry resolved from the hint TTL', async () => {
@@ -450,7 +463,7 @@ describe('a hint shown in the wrong place is worse than none', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: 'tma', formFactor: 'mobile' },
+      audience: { surface: 'tma', formFactor: 'mobile', modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -464,7 +477,7 @@ describe('a hint shown in the wrong place is worse than none', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: 'browser', formFactor: 'mobile' },
+      audience: { surface: 'browser', formFactor: 'mobile', modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -478,7 +491,7 @@ describe('a hint shown in the wrong place is worse than none', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: 'tma', formFactor: 'desktop' },
+      audience: { surface: 'tma', formFactor: 'desktop', modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -492,7 +505,7 @@ describe('a hint shown in the wrong place is worse than none', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: 'browser', formFactor: 'desktop' },
+      audience: { surface: 'browser', formFactor: 'desktop', modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -512,7 +525,7 @@ describe('a hint shown in the wrong place is worse than none', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: 'tma', formFactor: 'mobile' },
+      audience: { surface: 'tma', formFactor: 'mobile', modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -662,7 +675,7 @@ describe('the defects a review found, pinned', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: null, formFactor: null },
+      audience: { surface: null, formFactor: null, modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -677,7 +690,7 @@ describe('the defects a review found, pinned', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: null, formFactor: null },
+      audience: { surface: null, formFactor: null, modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -702,7 +715,7 @@ describe('the defects a review found, pinned', () => {
     const next = await service.nextFor({
       userId: 'u1',
       locale: 'ru',
-      audience: { surface: 'browser', formFactor: 'mobile' },
+      audience: { surface: 'browser', formFactor: 'mobile', modes: ['MODAL', 'TOAST'] },
       now: NOW,
     });
 
@@ -826,5 +839,134 @@ describe('the words survive the popup being closed', () => {
 
     assert.equal(h.feedRows[0]?.payload['title'], 'Welcome');
     assert.equal(h.feedRows[0]?.payload['text'], 'Текст');
+  });
+});
+
+describe('a mode the asking cabinet cannot draw', () => {
+  /**
+   * THE PAIRING DEFECT THIS FIELD EXISTS FOR.
+   *
+   * The panel and the cabinet ship as separate images on separate upgrade
+   * schedules, so a panel that has learned a mode meets cabinets that have not.
+   * The shipped cabinet does not defer a mode it cannot draw — it CLOSES it, as
+   * dismissed, deliberately, because leaving it queued starves every hint
+   * behind it. So a `TOAST` sent to an older cabinet is a delivery destroyed
+   * unshown, and for a `repeatable: false` hint such as "your trial has
+   * started" it is destroyed permanently: `raise` counts the closed row and
+   * never queues another.
+   *
+   * Nothing anywhere told the operator, and nothing could: the panel has no
+   * delivery-outcome view, and the customer sees no error because there is no
+   * error — every write succeeded.
+   */
+  const OLD_CABINET = { surface: 'browser', formFactor: 'mobile', modes: null };
+  const SILENT = { surface: null, formFactor: null, modes: null };
+
+  it('is not handed to a cabinet that did not claim it', async () => {
+    const { service } = build([hint({ key: 'trial', mode: 'TOAST' })]);
+    await service.raise({ userId: 'u1', hintKey: 'trial', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: OLD_CABINET,
+      now: NOW,
+    });
+
+    assert.equal(next, null, 'a toast was handed to a cabinet that would destroy it');
+  });
+
+  it('is handed to one that did', async () => {
+    // The other half, and the one that makes the case above mean something: a
+    // filter that answered null for everybody would also pass it.
+    const { service } = build([hint({ key: 'trial', mode: 'TOAST' })]);
+    await service.raise({ userId: 'u1', hintKey: 'trial', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: AUDIENCE,
+      now: NOW,
+    });
+
+    assert.equal(next?.key, 'trial');
+  });
+
+  it('waits rather than dies, so the upgrade still delivers it', async () => {
+    // THE WHOLE POINT OF SKIPPING RATHER THAN CLOSING. The delivery is left
+    // alone by the older cabinet's ask, so the same row is still there when a
+    // cabinet that can draw it comes along.
+    const { service, deliveries } = build([hint({ key: 'trial', mode: 'TOAST' })]);
+    await service.raise({ userId: 'u1', hintKey: 'trial', source: 's', now: NOW });
+
+    await service.nextFor({ userId: 'u1', locale: 'ru', audience: OLD_CABINET, now: NOW });
+    const afterUpgrade = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: AUDIENCE,
+      now: NOW,
+    });
+
+    assert.equal(afterUpgrade?.key, 'trial');
+    // The SAME row, still unexpired. The two assertions this replaces —
+    // `dismissedAt === null` and `shownAt === null` — could not fail: `nextFor`
+    // is a pure read, only `markShown` and `close` write those columns, and the
+    // fake starts both at null. They described something the panel cannot do at
+    // all (closing is the CABINET's action, against a different endpoint) and
+    // stayed green under two mutations that broke the mode filter outright.
+    assert.equal(deliveries.length, 1, 'the older ask queued or dropped a row');
+    assert.equal(afterUpgrade?.deliveryId, deliveries[0]?.id);
+    assert.ok(deliveries[0].expiresAt > NOW, 'the older ask lapsed the delivery');
+  });
+
+  it('does not block the modal queued behind it', async () => {
+    // The starvation the cabinet's own close was written to avoid, which this
+    // filter must not reintroduce on the server: an undrawable row sits at the
+    // head of a `createdAt`-ascending queue, and everything after it — a failed
+    // payment among them — has to keep flowing past.
+    const { service } = build([
+      hint({ key: 'trial', id: 'h1', mode: 'TOAST' }),
+      hint({ key: 'declined', id: 'h2', mode: 'MODAL' }),
+    ]);
+    await service.raise({ userId: 'u1', hintKey: 'trial', source: 's', now: NOW });
+    await service.raise({ userId: 'u1', hintKey: 'declined', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: OLD_CABINET,
+      now: NOW,
+    });
+
+    assert.equal(next?.key, 'declined');
+  });
+
+  it('still hands over a modal when the cabinet says nothing at all', async () => {
+    // Silence must not mean "nothing you can draw". Every cabinet ever shipped
+    // draws a modal, and a filter that read an absent list as an empty one
+    // would stop hints reaching every cabinet older than this field — a much
+    // larger outage than the one it was written to prevent.
+    const { service } = build([hint({ key: 'declined', mode: 'MODAL' })]);
+    await service.raise({ userId: 'u1', hintKey: 'declined', source: 's', now: NOW });
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: SILENT, now: NOW });
+
+    assert.equal(next?.key, 'declined');
+  });
+
+  it('ignores a mode name it has never heard of', async () => {
+    // A newer cabinet claiming `BANNER` must not make this panel throw or
+    // answer nothing — the unknown name simply matches no row.
+    const { service } = build([hint({ key: 'declined', mode: 'MODAL' })]);
+    await service.raise({ userId: 'u1', hintKey: 'declined', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: { surface: null, formFactor: null, modes: ['MODAL', 'BANNER'] },
+      now: NOW,
+    });
+
+    assert.equal(next?.key, 'declined');
   });
 });

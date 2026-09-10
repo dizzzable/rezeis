@@ -16,7 +16,9 @@ import * as webpush from 'web-push';
 
 import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admin-auth.guard';
 import { InternalPushController } from '../src/modules/push/internal-push.controller';
-import { WebPushService } from '../src/modules/push/services/web-push.service';
+import { PUSH_TTL_SECONDS,
+  PUSH_TTL_TRANSIENT_SECONDS,
+  WebPushService } from '../src/modules/push/services/web-push.service';
 
 const requireWebPush = createRequire(__filename);
 const mutableWebPush = requireWebPush('web-push') as typeof webpush;
@@ -281,7 +283,7 @@ describe('WebPushService', () => {
         keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
       },
       JSON.stringify({ title: 'Hello', body: 'World', url: '/notifications' }),
-      { TTL: 60, vapidDetails: TEST_VAPID_DETAILS },
+      { TTL: PUSH_TTL_SECONDS, vapidDetails: TEST_VAPID_DETAILS },
     ]);
     assert.equal(state.updateCalls.length, 1);
     assert.deepStrictEqual(state.updateCalls[0], {
@@ -817,3 +819,53 @@ function clearVapidEnv(): void {
   delete process.env.VAPID_PRIVATE_KEY;
   delete process.env.VAPID_CONTACT_EMAIL;
 }
+
+describe('how long a push may wait for a closed browser', () => {
+  /**
+   * THE REPORTED BUG, AND WHY IT LOOKED LIKE A PWA-ONLY FEATURE.
+   *
+   * RFC 8030's TTL is how long the push service may HOLD a message for a user
+   * agent that is not reachable. Every push went out with `TTL: 60`, so a
+   * browser that was closed at that moment never got it — discarded, no retry —
+   * and the push service still answered 201, so this service recorded a
+   * successful delivery and refreshed `lastSeenAt`.
+   *
+   * That is invisible for anything sent while somebody is looking at the screen
+   * and fatal for the one class that is not: expiry warnings, fired by a
+   * per-minute cron whenever a subscription crosses its window, at whatever
+   * hour that falls. An installed PWA keeps a push connection alive; a closed
+   * browser does not. Same code, same row, opposite outcome.
+   */
+
+  /** The TTL the provider was actually handed, for one send. */
+  async function ttlOf(input: { readonly ttlSeconds?: number }): Promise<number | undefined> {
+    const options: Array<{ TTL?: number }> = [];
+    const { service } = createService({
+      subscriptions: [createSubscription({ id: 'subscription-1' })],
+      webPushConfig: TEST_VAPID,
+    });
+    setWebPushSendNotification(async (_target, _payload, sendOptions) => {
+      options.push((sendOptions ?? {}) as { TTL?: number });
+      return {} as webpush.SendResult;
+    });
+
+    await service.sendToUser({ userId: 'user-1', title: 'Hello', body: 'World', ...input });
+
+    assert.equal(options.length, 1, 'the provider was not called exactly once');
+    return options[0]?.TTL;
+  }
+
+  it('holds a customer notification for a day, not a minute', async () => {
+    assert.equal(await ttlOf({}), PUSH_TTL_SECONDS);
+    assert.ok(
+      PUSH_TTL_SECONDS >= 60 * 60,
+      'a TTL under an hour cannot survive a browser being closed overnight',
+    );
+  });
+
+  it('lets a caller ask for a message that is worthless when stale', async () => {
+    // The operator's "send a test" exists to answer "did that arrive"; one that
+    // turns up the next morning answers nothing.
+    assert.equal(await ttlOf({ ttlSeconds: PUSH_TTL_TRANSIENT_SECONDS }), PUSH_TTL_TRANSIENT_SECONDS);
+  });
+});

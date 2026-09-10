@@ -49,8 +49,38 @@ export interface UserRealtimeEventInterface {
 export interface UserEventProjection {
   readonly category: UserRealtimeCategory;
   readonly severity?: SystemEventSeverity;
-  /** Optional fixed end-user message when the admin event text is not public-safe. */
-  readonly message?: string;
+  /**
+   * WHAT THE CUSTOMER READS. Required, and that is the fix.
+   *
+   * It was optional, described as being for "when the admin event text is not
+   * public-safe" — which assumed the admin text usually is. It is not. Eleven
+   * of the twelve whitelisted events had no override, so
+   * `projection.message ?? event.message` forwarded the operator's own sentence
+   * to a customer's screen as a toast, and those sentences are written for an
+   * operator's feed:
+   *
+   *   "Remnawave profile created: rz_<their login>_vpn" — the operator's
+   *   configured profile naming scheme, wrapped around the customer's own
+   *   identifier.
+   *
+   *   "Payment completed for a BLOCKED customer: SUBSCRIPTION" — telling the
+   *   customer they are blocked, with an internal purchase type.
+   *
+   *   "Promocode X reward synced with delay (enqueue failed: …)" — an internal
+   *   queue failure, reason included.
+   *
+   * Required means a new entry cannot arrive without somebody deciding what a
+   * customer should see, which is the only thing that stops this recurring.
+   *
+   * ── Why these strings are English ────────────────────────────────────────
+   *
+   * The cabinet localises by TYPE and falls back to this string, so an upgraded
+   * cabinet shows the customer their own language and never renders these at
+   * all. They exist for a cabinet that predates that — and those cabinets show
+   * English today, so English here is the one choice that regresses nobody
+   * while removing the leak.
+   */
+  readonly message: string;
   /**
    * Decide whether the admin event belongs to the user identified by
    * `userId` / `telegramId`. Return the sanitised metadata to ship, or
@@ -113,6 +143,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
 
   // Subscription lifecycle
   'subscription.created': {
+    message: 'Your subscription is ready',
     category: 'SUBSCRIPTION',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -124,6 +155,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'subscription.renewed': {
+    message: 'Your subscription has been extended',
     category: 'SUBSCRIPTION',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -135,6 +167,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'subscription.expired': {
+    message: 'Your subscription has ended',
     category: 'SUBSCRIPTION',
     severity: 'WARNING',
     project: (metadata, target) => {
@@ -146,6 +179,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'subscription.deleted': {
+    message: 'Your subscription has been removed',
     category: 'SUBSCRIPTION',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -155,6 +189,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'subscription.upgraded': {
+    message: 'Your subscription has been upgraded',
     category: 'SUBSCRIPTION',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -164,17 +199,28 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
       };
     },
   },
-  'subscription.trial_granted': {
-    category: 'SUBSCRIPTION',
-    project: (metadata, target) => {
-      if (!matchesUser(metadata, target)) return null;
-      return {
-        subscriptionId: asString(metadata, 'subscriptionId'),
-        planName: asString(metadata, 'planName'),
-      };
-    },
-  },
+  // `subscription.trial_granted` IS DELIBERATELY NOT HERE.
+  //
+  // It was, while nothing emitted it — the entry was written ahead of an event
+  // that did not exist. Giving it an emitter made the entry live, and it
+  // carried two defects at once.
+  //
+  // The message. `message: projection.message ?? event.message` forwards the
+  // event's own sentence when a projection does not override it, and this
+  // event's sentence is written for the operator's feed: English, and naming
+  // the Remnawave profile — the operator's configured prefix and suffix around
+  // the customer's own identifier. A customer has no business reading their
+  // provider's profile naming scheme, in a language they may not have chosen.
+  //
+  // The duplication. `subscription.created` is emitted one line before it for
+  // the same act, and is on this list. The customer would be told twice.
+  //
+  // The customer's channel for this moment is the POP-UP: the ready-made
+  // `tpl-trial-granted` template, in their own language, with a button to the
+  // connect screen. Adding this back means writing a `message` override here
+  // AND deciding what the second notification is for.
   'user_hwid_revoked': {
+    message: 'A device has been unlinked from your subscription',
     category: 'SUBSCRIPTION',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -187,6 +233,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
 
   // Payment lifecycle
   'payment.completed': {
+    message: 'Payment received',
     category: 'PAYMENT',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -199,6 +246,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'payment.failed': {
+    message: 'The payment did not go through',
     category: 'PAYMENT',
     severity: 'WARNING',
     project: (metadata, target) => {
@@ -212,6 +260,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
 
   // Promocode + referral feedback
   'promocode.activated': {
+    message: 'Your promo code has been applied',
     category: 'PROMOCODE',
     project: (metadata, target) => {
       if (!matchesUser(metadata, target)) return null;
@@ -221,6 +270,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'referral.qualified': {
+    message: 'Your referral has been confirmed',
     category: 'REFERRAL',
     project: (metadata, target) => {
       // Only the referrer should see this — match by referrerId, not the
@@ -235,6 +285,7 @@ export const USER_EVENT_WHITELIST: Readonly<Record<string, UserEventProjection>>
     },
   },
   'referral.reward_issued': {
+    message: 'A referral reward has been credited',
     category: 'REFERRAL',
     project: (metadata, target) => {
       const referrerId = asString(metadata, 'referrerId');

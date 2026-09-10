@@ -177,3 +177,4 @@ jobs:
           test/contests-postgres.spec.ts
           test/connect-page-postgres.spec.ts
           test/device-limit-provenance-postgres.spec.ts
+          test/subscription-device-limit-reduction.spec.ts

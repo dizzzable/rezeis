@@ -155,8 +155,65 @@ function stringifyUtm(utm: unknown): string {
 
 const BOM = '\ufeff';
 
-function renderCsv(header: readonly string[], rows: ReadonlyArray<readonly string[]>): string {
-  const lines: string[] = [];
+/**
+ * The first LINE of the file, and the reason it exists is a Russian keyboard.
+ *
+ * Excel does not split a CSV on the comma. It splits on the WINDOWS LIST
+ * SEPARATOR, which is `;` on a ru-RU install — so a comma-delimited file opened
+ * by double-click on the operator's own laptop arrives as ONE COLUMN, with each
+ * row's whole text crammed into cell A. Nothing about it looks like an error:
+ * the file downloaded, it opened, and the data is "there".
+ *
+ * `sep=,` is Excel's own escape hatch for exactly this, honoured in every
+ * locale, and it has to be the first line of the DECODED TEXT — after the BOM,
+ * which marks the bytes' encoding rather than being a line, and before the
+ * header. Get that order wrong and Excel either mis-reads the Cyrillic (BOM not
+ * first) or takes `sep=,` for the header row (`sep=` after the header).
+ *
+ * ── THE TRADE-OFF, stated here rather than discovered later ──────────────────
+ *
+ * `sep=,` is an Excel extension, not RFC 4180. The file stays parseable — every
+ * line is still well-formed, the quoting rule is unchanged, and the delimiter is
+ * still the standard comma — but a non-Excel reader sees one extra leading row,
+ * so `pandas.read_csv(path, skiprows=1)` rather than a bare `read_csv`.
+ *
+ * The alternative was emitting `;` as the delimiter, and it is worse twice over:
+ * it fixes ru-RU by breaking en-US, whose list separator IS the comma, and it
+ * puts a non-standard delimiter in front of every script as well. This way the
+ * one concession is a documented first line, and only Excel needs it.
+ */
+const EXCEL_SEPARATOR_HINT = 'sep=,';
+
+/**
+ * A run of digits long enough that Excel loses some of them.
+ *
+ * Excel holds every number as a double and rounds anything longer to FIFTEEN
+ * significant decimal digits. A 19-digit Telegram id therefore does not merely
+ * *display* as `4.5E+18` — the cell no longer holds the id, and widening the
+ * column or reformatting it as a number cannot bring the missing digits back.
+ * The operator copies it into a support ticket and it addresses nobody.
+ *
+ * 16 and up, because 15 is the last length Excel keeps exactly. Shorter runs
+ * can still show in scientific notation on a narrow column, but the value
+ * underneath is intact — and decorating those as well would put `="…"` in front
+ * of far more cells than the defect warrants.
+ */
+const EXCEL_LOSES_DIGITS = /^\d{16,}$/;
+
+/**
+ * The one CSV writer in this module, exported so the full user export uses it
+ * rather than growing a second one.
+ *
+ * A second writer would be a second answer to the questions this one has
+ * already settled and paid for: the BOM Excel needs to read UTF-8, CRLF line
+ * endings, the `sep=,` line a ru-RU Excel needs to find the columns at all, the
+ * text-forcing of ids Excel would otherwise round away, and — the one that
+ * matters most — defanging a value that starts like a spreadsheet formula. A
+ * username beginning with `=`, `+`, `-` or `@` is a formula to Excel, and it
+ * runs when the operator opens the file. The customer chose that username.
+ */
+export function renderCsv(header: readonly string[], rows: ReadonlyArray<readonly string[]>): string {
+  const lines: string[] = [EXCEL_SEPARATOR_HINT];
   lines.push(header.map(quote).join(','));
   for (const row of rows) {
     lines.push(row.map(quote).join(','));
@@ -170,6 +227,23 @@ function quote(value: string): string {
   // whitespace / control characters (tab, CR, LF, NUL, etc.).
   if (hasLeadingFormulaRisk(v)) {
     v = `'${v}`;
+  } else if (EXCEL_LOSES_DIGITS.test(v)) {
+    // `="…"` IS a formula, and that is not a hole in the branch above.
+    //
+    // It is the only in-file way to tell Excel "this cell is text", and it is
+    // reachable ONLY for a value this writer has just proved is nothing but
+    // digits — so there is no payload to smuggle through it. Anything that
+    // ARRIVES looking like a formula still belongs to the defang branch; this
+    // one is a literal the writer composes around input it has checked.
+    //
+    // The `else` is not an optimisation. The two branches are mutually
+    // exclusive by construction — `^\d{16,}$` cannot start with `=`, `+`, `-`
+    // or `@` — and saying so keeps a later edit from running them the other way
+    // round and defanging a wrapper this file wrote itself.
+    //
+    // Cost to a non-Excel reader: the cell reads `="4593…"` instead of the bare
+    // digits. That is recoverable with a strip; a rounded id is not.
+    v = `="${v}"`;
   }
   if (/[",\r\n]/.test(v)) {
     return `"${v.replace(/"/g, '""')}"`;

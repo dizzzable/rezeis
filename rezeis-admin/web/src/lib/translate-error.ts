@@ -35,10 +35,40 @@ const SERVER_ERROR_PREFIX = 'errors.'
  * A sentence containing a '.' cannot resolve at all, because i18next splits
  * keys on it. That is a fallback rather than a fault: those arrive as the
  * server's own words, which is what the operator would have seen anyway.
+ *
+ * ── Why `nsSeparator: false` ────────────────────────────────────────────────
+ *
+ * A ':' was NOT that kind of fallback. i18next's default `nsSeparator` is ':',
+ * so before the key is looked up it is cut in two at the FIRST colon and the
+ * left half is taken for a namespace. This app registers exactly one namespace
+ * ('translation', in `i18n/i18n.ts`) and never names one in a `t()` call, so
+ * that half can only ever miss — and the miss does not hand the sentence back.
+ * It hands back the RIGHT half, which is the wrong end of a mutilated string:
+ *
+ *   'Missing permission: automations:create'  ->  ' automations.create'
+ *   'Unknown action type: frobnicate'         ->  ' frobnicate'
+ *   'Invalid cron expression: 99 * * * *'     ->  ' 99 * * * *'
+ *
+ * The compare above cannot catch it either, because what comes back is neither
+ * the key nor a translation. Every colon-bearing server sentence in the panel
+ * reached the operator as a fragment starting with a space, and the one
+ * dictionary entry written WITH a colon in it -- the 'Exactly one identifier
+ * must be provided: …' row both bundles carry -- had never resolved once since
+ * it was written.
+ *
+ * Turning the separator off for this ONE lookup is the whole fix. It is a
+ * per-call option, so nothing else in the panel is touched, and there is no
+ * namespace to lose: an `errors.<sentence>` key is a path, never `ns:key`.
+ *
+ * `keySeparator: false` must NOT be added alongside it. The entries live
+ * NESTED, under an `errors: {…}` object, so the '.' in the prefix is
+ * load-bearing: switching it off makes `errors.Invalid login or password` a
+ * single flat key that exists in neither bundle, and every lookup here starts
+ * missing -- including the ones that work today.
  */
 export function translateServerSentence(t: TFunction, sentence: string): string {
   const key = `${SERVER_ERROR_PREFIX}${sentence}`
-  const translated: string = t(key)
+  const translated: string = t(key, { nsSeparator: false })
   return translated === key ? sentence : translated
 }
 

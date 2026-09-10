@@ -3640,3 +3640,206 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
     assert.deepEqual(attempt.errorEvents, []);
   });
 });
+
+describe('provisioning a trial', () => {
+  /**
+   * THE EVENT THE READY-MADE "YOUR TRIAL HAS STARTED" POP-UP FIRES ON.
+   *
+   * `subscription.trial_granted` was declared, presented in the card catalogue,
+   * referenced by a coincident-event group and by a shipped template — and
+   * emitted from nowhere, so that template could never fire. It is emitted here
+   * now, and until these cases existed nothing proved it: the whole panel suite
+   * stayed green with the emit deleted, because the only check on it read the
+   * source for a string.
+   *
+   * The second case is the one that matters more. `handleCreate` does not mean
+   * "a trial was granted" — it means "this row has no panel profile", which is
+   * also true of every row an import writes and of a profile somebody deleted
+   * in Remnawave. Gated on `isTrial` alone, an operator pressing "sync with
+   * panel" after a migration tells thousands of people their trial has just
+   * started.
+   */
+  function buildProcessor(options: {
+    readonly isTrial: boolean;
+    readonly source: string;
+    readonly emitted: unknown[];
+  }) {
+    return new ProfileSyncProcessor(
+      {
+        profileSyncJob: {
+          findUnique: async () => ({
+            id: 'sync-job-1',
+            action: SyncAction.CREATE,
+            status: SyncJobStatus.PENDING,
+            attempts: 0,
+            payload: { source: options.source },
+            subscription: {
+              id: 'subscription-1',
+              userId: 'user-1',
+              remnawaveId: null,
+              trafficLimit: 5,
+              deviceLimit: -1,
+              internalSquads: ['internal-b'],
+              externalSquad: null,
+              expiresAt: new Date('2099-02-01T00:00:00.000Z'),
+              planSnapshot: { name: 'Trial', tag: 'trial', trafficLimitStrategy: 'NO_RESET' },
+              isTrial: options.isTrial,
+            },
+          }),
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+        },
+        subscription: { update: async () => undefined },
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
+          $executeRaw: async () => 1,
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          subscription: { update: async () => undefined },
+          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
+          profileSyncJob: {
+            findMany: async () => [],
+            create: async () => ({ id: 'unused-delete-job' }),
+          },
+        }),
+      } as never,
+      {
+        getUserByUsername: async () => panelMissing(),
+        createUser: async () =>
+          panelOk({
+            id: 4471,
+            username: 'rz_subscription_1',
+            subscriptionUrl: 'https://sub.example/created',
+            createdAt: new Date('2026-01-15T12:30:00.000Z'),
+          }),
+      } as never,
+      {
+        generateProfileName: async () => ({
+          username: 'rz_subscription_1',
+          description: 'profile description',
+        }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      {
+        error: () => undefined,
+        info: () => undefined,
+        // `emit`, which the other fakes in this file do not have — the trial
+        // event needs `skipTelegram`, and only the object form carries it.
+        emit: (event: unknown) => {
+          options.emitted.push(event);
+        },
+      } as never,
+    );
+  }
+
+  it('announces the trial, naming the customer', async () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const processor = buildProcessor({ isTrial: true, source: 'TRIAL_GRANT', emitted });
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    const trial = emitted.find((event) => event['type'] === 'subscription.trial_granted');
+    assert.ok(trial, 'the trial was provisioned and nothing announced it');
+    const metadata = trial['metadata'] as Record<string, unknown>;
+    // Without the customer the pop-up action refuses the event at firing time,
+    // which is the failure this whole event exists to avoid.
+    assert.equal(metadata['userId'], 'user-1');
+    assert.equal(metadata['subscriptionId'], 'subscription-1');
+    // The operator is already told by `subscription.created` on the same grant.
+    assert.equal(trial['skipTelegram'], true);
+  });
+
+  it('says nothing when a paid purchase provisions a non-trial row', async () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const processor = buildProcessor({ isTrial: false, source: 'PAYMENT_COMPLETION', emitted });
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    assert.equal(
+      emitted.some((event) => event['type'] === 'subscription.trial_granted'),
+      false,
+    );
+  });
+
+  it('says nothing when an import provisions a trial granted long ago', async () => {
+    // THE CASE THE GATE EXISTS FOR. An importer writes `isTrial` straight from
+    // the donor with no panel id, so the operator's "sync with panel" button
+    // provisions every one of them through this same path. Announcing those
+    // would tell thousands of migrated customers that their trial has just
+    // started — and a non-repeatable hint does not absorb it, because none of
+    // them has a prior delivery to be blocked by.
+    const emitted: Array<Record<string, unknown>> = [];
+    const processor = buildProcessor({ isTrial: true, source: 'IMPORT_SYNC', emitted });
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    assert.equal(
+      emitted.some((event) => event['type'] === 'subscription.trial_granted'),
+      false,
+      'an import re-announced a trial that was granted months ago',
+    );
+  });
+
+  it('says nothing when a deleted profile is re-minted', async () => {
+    // Somebody deletes the profile in Remnawave; the next sync re-provisions
+    // through the same CREATE path. The customer has had this trial for weeks.
+    const emitted: Array<Record<string, unknown>> = [];
+    const processor = buildProcessor({
+      isTrial: true,
+      source: 'OPERATOR_FORCE_RECONCILE',
+      emitted,
+    });
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    assert.equal(
+      emitted.some((event) => event['type'] === 'subscription.trial_granted'),
+      false,
+    );
+  });
+
+  it('says nothing a second time when the profile is re-minted through UPDATE', async () => {
+    // THE PATH THE SOURCE GATE CANNOT SEE. `reprovisionThroughCreate` reloads
+    // THE SAME job row — source `TRIAL_GRANT` and all — so the gate reads
+    // exactly what it read the first time and says yes again.
+    //
+    // It is reached whenever a profile that existed goes missing: somebody
+    // deletes it in Remnawave, a panel is restored from a backup older than the
+    // mint, or the worker dies between minting the profile and persisting the
+    // link and the sweep re-drives the job. The customer-facing half is absorbed
+    // — the hint is `repeatable: false` — but the duplicate still costs an
+    // execution row, an audit row and an outbound webhook, and it is not
+    // absorbed at all for a rule that grants days or sends a message.
+    const emitted: Array<Record<string, unknown>> = [];
+    const processor = buildProcessor({ isTrial: true, source: 'TRIAL_GRANT', emitted });
+
+    // Straight at the re-provision entry point, with the linked row an UPDATE
+    // job carries — which is what makes this a re-mint rather than a first one.
+    await (processor as unknown as {
+      reprovisionThroughCreate: (
+        job: unknown,
+        subscription: unknown,
+        detail: string,
+      ) => Promise<void>;
+    }).reprovisionThroughCreate(
+      { id: 'sync-job-1' },
+      { id: 'subscription-1', remnawaveId: null },
+      'profile 404 on update',
+    );
+
+    assert.equal(
+      emitted.some((event) => event['type'] === 'subscription.trial_granted'),
+      false,
+      'a trial granted long ago was announced again because its profile was re-minted',
+    );
+  });
+
+  it('still announces the ordinary grant, so the gate above is not a mute button', async () => {
+    // The other half. Three of the five cases here assert silence, and a
+    // `return` at the top of `announceTrialGranted` would satisfy all three.
+    const emitted: Array<Record<string, unknown>> = [];
+    const processor = buildProcessor({ isTrial: true, source: 'TRIAL_GRANT', emitted });
+
+    await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
+
+    assert.ok(emitted.some((event) => event['type'] === 'subscription.trial_granted'));
+  });
+});

@@ -77,6 +77,33 @@ function toEnumArray<T extends string>(value: unknown, allowed: readonly T[]): T
 }
 
 /**
+ * A repeated query key, flattened back to the one string this DTO declares.
+ *
+ * `?columns=a&columns=b` does NOT arrive as `'a,b'`. Express hands a repeated
+ * key to the handler as `['a', 'b']`, and `@IsString()` then refuses the whole
+ * request:
+ *
+ *   400 ["columns must be longer than or equal to 0 and shorter than or equal
+ *        to 2048 characters", "columns must be a string"]
+ *
+ * — which is what an operator sees for a bookmarked or hand-edited export URL,
+ * and the two messages together read as if the column list were too long. The
+ * shape is a transport artefact, not a different request: both halves name
+ * catalogue ids, so joining them is the same list the single-key form sends.
+ *
+ * Validation runs BEFORE the handler, so the `String(query.columns)` in the
+ * controller could never have rescued this — the request never reached it.
+ *
+ * A non-string member is dropped rather than stringified: `?columns[x]=a` puts
+ * an object here, and `String({})` would smuggle `[object Object]` into the
+ * catalogue lookup as an id.
+ */
+function toCommaJoined(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.filter((entry): entry is string => typeof entry === 'string').join(',');
+}
+
+/**
  * `?flag=false` is the string "false", which is truthy.
  *
  * This is the trap that has bitten this codebase before: a bare `Boolean(value)`
@@ -186,4 +213,31 @@ export class AdminUserListQueryDto {
   @IsInt()
   @Min(0)
   public offset?: number;
+}
+
+/**
+ * The list's filters PLUS what only the export takes.
+ *
+ * A subclass rather than two `@Query()` decorators on one handler, and the
+ * difference is not stylistic: the global pipe runs with
+ * `forbidNonWhitelisted`, so an unnamed `@Query()` validates the WHOLE query
+ * string against its DTO and rejects any key that DTO does not declare. The
+ * export route carried `@Query() query: AdminUserListQueryDto` beside
+ * `@Query('columns')`, which meant every export answered
+ * `property columns should not exist` — a 400 on every press of the button,
+ * on a route whose own tests never called it over HTTP.
+ */
+export class AdminUserExportQueryDto extends AdminUserListQueryDto {
+  /** Catalogue ids, comma-separated. Absent means everything the caller may have. */
+  @IsOptional()
+  @Transform(({ value }) => toCommaJoined(value))
+  @IsString()
+  @Length(0, 2048)
+  public columns?: string;
+
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(1)
+  public rowLimit?: number;
 }

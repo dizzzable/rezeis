@@ -70,7 +70,7 @@ export function mapHwidTopUser(raw: unknown): RemnawaveHwidTopUserInterface {
  * allow-list, because an allow-list would silently label every client it has
  * not heard of as unknown, and this value is display-only.
  */
-function deriveClientType(userAgent: string | null): string | null {
+export function deriveClientType(userAgent: string | null): string | null {
   if (userAgent === null) return null;
   const token = userAgent.trim().split(/[\s/]/, 1)[0];
   return token !== undefined && token.length > 0 ? token.slice(0, 40) : null;

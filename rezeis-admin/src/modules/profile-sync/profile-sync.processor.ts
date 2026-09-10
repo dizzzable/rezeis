@@ -319,6 +319,9 @@ export class ProfileSyncProcessor extends WorkerHost {
             expiresAt: true,
             planSnapshot: true,
             status: true,
+            // Read for the trial event beside `subscription.created`. One
+            // boolean on a row already being selected — see `announceCreated`.
+            isTrial: true,
           },
         },
       },
@@ -725,7 +728,23 @@ export class ProfileSyncProcessor extends WorkerHost {
     });
   }
 
-  private async handleCreate(syncJob: SyncJobRecord): Promise<void> {
+  private async handleCreate(
+    syncJob: SyncJobRecord,
+    /**
+     * True when this CREATE is RE-minting a profile that existed and vanished,
+     * rather than provisioning one for the first time.
+     *
+     * It reaches only the trial announcement, and it has to:
+     * `reprovisionThroughCreate` reloads THE SAME job row, source and all, so a
+     * trial granted months ago is re-announced whenever somebody deletes the
+     * profile in Remnawave, or a worker dies between minting the profile and
+     * persisting the link. The source gate cannot see it — the source really
+     * was `TRIAL_GRANT` — and neither can the once-only hint, which absorbs the
+     * customer-facing half but not the execution row, the audit row or the
+     * outbound webhook.
+     */
+    reprovision = false,
+  ): Promise<void> {
     const subscription = syncJob.subscription;
     if (subscription.remnawaveId !== null) {
       // Already provisioned — treat as update instead
@@ -885,6 +904,12 @@ export class ProfileSyncProcessor extends WorkerHost {
           ? { deviceLimit: subscription.deviceLimit }
           : {}),
       });
+      if (!reprovision) this.announceTrialGranted(
+        syncJob,
+        panelUsername,
+        readOptionalString(planSnapshot, 'name'),
+        expireAt,
+      );
       return;
     }
 
@@ -997,6 +1022,82 @@ export class ProfileSyncProcessor extends WorkerHost {
       ...(typeof subscription.deviceLimit === 'number'
         ? { deviceLimit: subscription.deviceLimit }
         : {}),
+    });
+    if (!reprovision) this.announceTrialGranted(syncJob, panelUsername, planName, expireAt);
+  }
+
+
+  /**
+   * The trial, as its own event.
+   *
+   * `subscription.trial_granted` has been declared, presented and referenced
+   * by a coincident-event group since the automations module landed, and it was
+   * emitted from nowhere — so the ready-made "your trial has started" pop-up
+   * pointed at a name that never arrives. A rule bound to a type nothing emits
+   * is the quietest failure this subsystem has: it is never selected by the
+   * pattern filter, so there is no execution row, no error and no log line, and
+   * the rule sits in the operator's list saying "enabled" for ever.
+   *
+   * It rides beside `subscription.created` rather than in `grantTrial`, which
+   * is where a reader would look first, for two reasons: the mutation service
+   * holds no events dependency and provisioning is what makes the subscription
+   * real to the customer — a trial row whose panel profile failed to mint is
+   * not a trial anybody received.
+   *
+   * ── WHY THE JOB'S SOURCE IS THE GATE, and `isTrial` alone is not ──────────
+   *
+   * `handleCreate` does not mean "a trial was just granted". It means "this row
+   * has no panel profile", and a dozen paths enqueue a CREATE on exactly that
+   * condition for rows that are years old: an import writes `isTrial` straight
+   * from the donor with `remnawaveId: null` so the operator's "sync with panel"
+   * button provisions them, and a profile deleted in Remnawave is re-minted
+   * through `reprovisionThroughCreate`. Gated on `isTrial` alone, pressing that
+   * button after migrating five thousand customers tells every one of them
+   * their trial has just started — and `repeatable: false` does not absorb it,
+   * because none of them has a prior delivery to be blocked by.
+   *
+   * So the gate is the job's own `source`, which already distinguishes these:
+   * only a grant and a paid fulfilment mint a trial. Everything else —
+   * `IMPORT_SYNC`, the reward paths, the boundary sweeps, `ACCOUNT_MERGE`, the
+   * operator's reconcile button — provisions in silence. The same file already
+   * reads the payload this way for `USER_UNBLOCK`.
+   *
+   * `skipTelegram` because the operator is already being told. The card for
+   * `subscription.created` goes out on the same grant with the same facts, and
+   * two cards per trial is how a topic stops being read. The audit log, the
+   * realtime stream, the outbound webhook and the automation bridge all still
+   * see it — the bridge being the whole point.
+   */
+  private announceTrialGranted(
+    syncJob: SyncJobRecord,
+    panelUsername: string,
+    // Both of these arrive as `string | null` from the snapshot reader and the
+    // row: a plan with no name and a subscription with no end date are ordinary
+    // states, and the metadata omits the key rather than carrying a null that
+    // nothing downstream reads.
+    planName: string | null | undefined,
+    // `null` is what the row holds for a subscription with no end date, and it
+    // arrives here as such from both call sites.
+    expireAt: string | null | undefined,
+  ): void {
+    const subscription = syncJob.subscription;
+    if (!subscription.isTrial) return;
+    if (!TRIAL_GRANTING_SYNC_SOURCES.has(readOptionalString(readRecord(syncJob.payload), 'source') ?? '')) {
+      return;
+    }
+    this.events.emit({
+      type: EVENT_TYPES.SUBSCRIPTION_TRIAL_GRANTED,
+      category: 'SUBSCRIPTION',
+      severity: 'INFO',
+      message: `Trial subscription provisioned: ${panelUsername}`,
+      skipTelegram: true,
+      metadata: {
+        subscriptionId: subscription.id,
+        userId: subscription.userId,
+        remnawaveUsername: panelUsername,
+        ...(planName !== undefined && planName !== null ? { planName } : {}),
+        ...(expireAt !== undefined && expireAt !== null ? { expireAt } : {}),
+      },
     });
   }
 
@@ -1424,7 +1525,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       `Remnawave profile for subscription ${subscription.id} was missing (${detail}); ` +
         're-provisioning via CREATE',
     );
-    await this.handleCreate(refreshed);
+    await this.handleCreate(refreshed, true);
   }
 
   /**
@@ -2407,6 +2508,16 @@ function panelTimestamp(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/**
+ * The two job sources that actually MINT a trial.
+ *
+ * Everything else that reaches `handleCreate` is provisioning a row that
+ * already existed — an import, a re-mint after somebody deleted the profile in
+ * Remnawave, a boundary sweep, an operator pressing reconcile. See
+ * `announceTrialGranted` for what announcing those would do.
+ */
+const TRIAL_GRANTING_SYNC_SOURCES = new Set(['TRIAL_GRANT', 'PAYMENT_COMPLETION']);
+
 type SyncJobRecord = NonNullable<
   Awaited<
     ReturnType<PrismaService['profileSyncJob']['findUnique']>
@@ -2427,6 +2538,7 @@ type SyncJobRecord = NonNullable<
     expiresAt: Date | null;
     planSnapshot: unknown;
     status: SubscriptionStatus;
+    isTrial: boolean;
   };
 };
 

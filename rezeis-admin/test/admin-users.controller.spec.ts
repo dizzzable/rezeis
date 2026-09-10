@@ -32,13 +32,17 @@ describe('AdminUsersController', () => {
     ]);
 
     // Read off the class instead of remembered here. The two routes described
-    // below are not the whole controller: `resolveUser` and, more sharply,
-    // `exportRegistrationCsv` — a bulk dump of registration IP/UA/UTM — are
-    // also mounted on `admin/users`, and this spec never noticed either being
-    // added. Pinning the set does not describe them, but it does mean the next
-    // route cannot arrive in silence.
+    // below are not the whole controller: `resolveUser` and, more sharply, the
+    // three exports — a bulk dump of registration IP/UA/UTM, the full customer
+    // export and its column catalogue — are also mounted on `admin/users`, and
+    // this spec never noticed the first of them being added. Pinning the set
+    // does not describe them, but it does mean the next route cannot arrive in
+    // silence, which is how `exportUsersCsv` and `exportColumns` came to be
+    // listed here at all.
     assertRouteHandlers(AdminUsersController, [
       'listUsers',
+      'exportColumns',
+      'exportUsersCsv',
       'exportRegistrationCsv',
       'searchUser',
       'resolveUser',
@@ -140,7 +144,12 @@ describe('AdminUsersController', () => {
           return searchResult;
         },
       } as never,
-      // RegistrationExportService + PrismaService (export route deps; unused here)
+      // The export routes' collaborators — RegistrationExportService,
+      // UserExportService, RbacService, PrismaService. Unused by the two reads
+      // this case exercises, and listed rather than spread so that adding a
+      // fifth reddens this file instead of failing at run time in production.
+      {} as never,
+      {} as never,
       {} as never,
       {} as never,
     );

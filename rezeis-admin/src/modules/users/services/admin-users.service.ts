@@ -186,7 +186,16 @@ export class AdminUsersService {
  * not a narrowing: no row's `telegramId` can equal a value the column cannot
  * store, so the clause could never have matched.
  */
-function buildUserListWhere(
+/**
+ * EXPORTED, so the export filters exactly the way the list does.
+ *
+ * The operator picks their filters on the list, sees a count, and exports what
+ * they are looking at. A second where-builder would make "what I see" and "what
+ * I downloaded" two different populations that agree most of the time — which
+ * is the worst kind of disagreement, because it is noticed only when a campaign
+ * reaches the wrong people.
+ */
+export function buildUserListWhere(
   query: AdminUserListQueryDto,
   now: Date = new Date(),
 ): Prisma.UserWhereInput {

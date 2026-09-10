@@ -52,7 +52,17 @@ describe('UserNotificationsService', () => {
     assert.deepStrictEqual(state.webPushCalls, [
       // `badgeCount` is the unread total the icon draws — it rides on every
       // templated push, so a closed app still learns the number.
-      { userId: 'user-1', title: 'Reiwa', body: 'Manual message', url: '/dashboard', badgeCount: 3 },
+      {
+        userId: 'user-1',
+        title: 'Reiwa',
+        body: 'Manual message',
+        url: '/dashboard',
+        // Identity, so an operator's second message cannot erase the first in
+        // the tray. No `type` alongside it: the class alone is not a safe
+        // collapse key for a message somebody typed by hand.
+        tag: 'ADMIN_MESSAGE:notification-1',
+        badgeCount: 3,
+      },
     ]);
     // The Telegram leg went to the durable queue, not to the one-shot client.
     // Asserting the payload alone would pass either way — both stubs record
@@ -116,6 +126,10 @@ describe('UserNotificationsService', () => {
         title: 'Expires soon',
         body: 'Hello Nina, 3 day(s) left',
         url: '/renew',
+        // The five expiry stages are one fact retold, so they share a family
+        // key and the newest one replaces the rest in the tray.
+        tag: 'subscription-deadline',
+        type: 'expires_in_3_days',
         badgeCount: 3,
       },
     ]);
@@ -133,7 +147,14 @@ describe('UserNotificationsService', () => {
 
     assert.deepStrictEqual(state.notifyUserCalls, []);
     assert.deepStrictEqual(state.webPushCalls, [
-      { userId: 'user-1', title: 'Title', body: 'Body', url: '/dashboard', badgeCount: 3 },
+      {
+        userId: 'user-1',
+        title: 'Title',
+        body: 'Body',
+        url: '/dashboard',
+        tag: 'custom:notification-1',
+        badgeCount: 3,
+      },
     ]);
   });
 });

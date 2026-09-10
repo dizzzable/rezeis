@@ -155,6 +155,134 @@ interface CreateUserNotificationInput {
  * fire-and-forget. If Telegram is down, the user still sees the
  * notification in the cabinet on next visit.
  */
+/**
+ * How long a push service may hold THIS notification, in seconds.
+ *
+ * The default is a day, because a notification is worth delivering late
+ * unless being late makes it WRONG. Two kinds are wrong when late, and both
+ * are about a deadline:
+ *
+ *  • the last expiry warning. "Your subscription ends tomorrow" held for a
+ *    full day can surface AFTER it ended, which is the same mistake the
+ *    pop-up library made with a 48-hour window on a 24-hour warning. Half the
+ *    window leaves the customer time to act on what they are being told.
+ *
+ *  • "your traffic has run out". True when sent, false the moment the
+ *    customer tops up or the counter resets — and the customer who topped up
+ *    is precisely the one who does not need to be told again.
+ *
+ * Everything else — a receipt, a support reply, a reward, a device unbound,
+ * an expiry warning still days out — is as true tomorrow as it was when it
+ * was sent, and a customer who opens their laptop on Monday should get it.
+ *
+ * This is what makes `ttlSeconds` a real parameter rather than an unused one:
+ * before this, every customer push took the default and the short constant
+ * lived only on the operator path.
+ */
+const PUSH_TTL_BY_TYPE: Readonly<Record<string, number>> = {
+  // Twelve hours: sent at the one-day mark, so half the window is what is
+  // left to act in.
+  expires_in_1_days: 12 * 60 * 60,
+  // A statement about right now, in both directions.
+  limited: 60 * 60,
+};
+
+function pushTtlForType(type: string): number | undefined {
+  return PUSH_TTL_BY_TYPE[type];
+}
+
+/**
+ * WHICH NOTIFICATIONS ARE ALLOWED TO REPLACE EACH OTHER IN THE TRAY.
+ *
+ * A browser notification carries a `tag`, and two notifications sharing one
+ * are ONE notification: the second replaces the first and the first is never
+ * read. The cabinet has to choose a tag for every push, and until now the
+ * payload carried no identity at all, so its only material was the destination
+ * plus a digest of the words — and `resolveNotificationPushUrl` below maps many
+ * types onto six URLs. `/renew` alone serves `expires_in_3_days`,
+ * `expires_in_1_days`, `expired`, `expired_1_day_ago` and `limited`.
+ *
+ * That cost nothing while every push went out with `TTL: 60`, because a closed
+ * browser could never have more than one message waiting. `PUSH_TTL_SECONDS`
+ * is now a day; messages genuinely queue, and a weekend's worth arrived as one
+ * banner.
+ *
+ * ── Why a table and not a unique id per push ──────────────────────────────
+ *
+ * A unique id everywhere is the safe-looking answer and it is wrong for the
+ * one family that matters most. `expires_in_3_days` followed by
+ * `expires_in_1_days` followed by `expired` are three restatements of ONE
+ * fact — where this customer's deadline stands — and the customer needs the
+ * current state, not a history of it. Three banners for one subscription is
+ * the noise that gets notifications switched off.
+ *
+ * So: an entry here means "every notification of this type belongs to this
+ * family, and the newest member replaces the rest". No entry means the
+ * opposite and is the DEFAULT — each notification is its own message, tagged
+ * with the `UserNotificationEvent` row id, because two support replies on two
+ * different tickets, two cashback credits and two broadcasts are not
+ * restatements of anything and collapsing them loses a message the customer
+ * needed.
+ *
+ * Same shape, and for the same reason, as `PUSH_TTL_BY_TYPE` above: a small
+ * explicit table of the exceptions, a default for everything else, and the
+ * decision written down where the emitters can be read beside it.
+ *
+ * Keys are CANONICAL types (`resolveToggleKey`), so a legacy alias like
+ * `subscription_expiring_3d` lands in the family its modern spelling does —
+ * the same trap `isSubscriberNotificationEnabled` documents.
+ */
+const PUSH_TAG_FAMILY_BY_TYPE: Readonly<Record<string, string>> = {
+  // ONE fact — where this subscription's deadline stands — restated five
+  // times as it approaches and passes. The later message is the true one, and
+  // the emitter already agrees: `AutoRenewService.createExpiryWarnings`
+  // excludes users notified in the last 20 hours and dedups per USER within a
+  // batch, so this family never fires twice for one person in one window.
+  expires_in_3_days: 'subscription-deadline',
+  expires_in_2_days: 'subscription-deadline',
+  expires_in_1_days: 'subscription-deadline',
+  expired: 'subscription-deadline',
+  expired_1_day_ago: 'subscription-deadline',
+  // A statement about right now, and DELIBERATELY NOT the family above even
+  // though both land on `/renew`. "Your subscription expires" and "your
+  // traffic ran out" are different facts about different things; a customer
+  // whose traffic ran out three days before their subscription ends needs to
+  // read both. Its own family, so a newer traffic statement supersedes an
+  // older one — the same reading of this type that gave it a one-hour TTL
+  // above — without ever touching an expiry warning.
+  limited: 'subscription-traffic',
+};
+
+/**
+ * The tag for ONE notification: its family when it has one, otherwise its type
+ * plus the row id that makes it this notification and no other.
+ *
+ * The type stays in the per-notification form on purpose. It costs a few bytes
+ * of a 4 KB budget and it is what makes a tag readable in a log or a devtools
+ * payload — `support_reply:clx…` says what collapsed, where a bare id says
+ * nothing.
+ */
+function pushTagForNotification(type: string, eventId: string): string {
+  const key = resolveToggleKey(type);
+  return PUSH_TAG_FAMILY_BY_TYPE[key] ?? `${key}:${eventId}`;
+}
+
+/**
+ * The `type` to put on the payload, or `undefined` to leave it off.
+ *
+ * The cabinet reads `data.tag` first and `data.type` only as a fallback, and a
+ * fallback that is WRONG is worse than none: `type` collapses a whole class
+ * into one banner, which is right for the families above and is exactly the
+ * defect being fixed for everything else. Two support replies share a type.
+ *
+ * So this is sent only where the class is itself a correct collapse key. Where
+ * it is omitted the cabinet falls back to destination-plus-digest, which at
+ * least keeps two different sentences apart.
+ */
+function pushTypeForNotification(type: string): string | undefined {
+  const key = resolveToggleKey(type);
+  return PUSH_TAG_FAMILY_BY_TYPE[key] === undefined ? undefined : key;
+}
 @Injectable()
 export class UserNotificationsService {
   private readonly logger = new Logger(UserNotificationsService.name);
@@ -343,7 +471,7 @@ export class UserNotificationsService {
       outcomes.push(
         channel === 'telegram'
           ? await this.deliverOperatorTelegram(event.id, input.userId, input.text)
-          : await this.deliverOperatorWebPush(input.userId, input.text),
+          : await this.deliverOperatorWebPush(event.id, input.userId, input.text),
       );
     }
 
@@ -440,7 +568,11 @@ export class UserNotificationsService {
     }
   }
 
-  private async deliverOperatorWebPush(userId: string, text: string): Promise<ChannelOutcome> {
+  private async deliverOperatorWebPush(
+    eventId: string,
+    userId: string,
+    text: string,
+  ): Promise<ChannelOutcome> {
     try {
       // The badge total travels on THIS push too. Without it the operator's
       // own message moved the bell and left the home-screen icon behind, so the
@@ -453,6 +585,12 @@ export class UserNotificationsService {
         title: 'Reiwa',
         body: stripHtml(text),
         url: resolveNotificationPushUrl('ADMIN_MESSAGE'),
+        // A person wrote to this person, and a second message is a second
+        // message — never a correction of the first. `ADMIN_MESSAGE` is not in
+        // `PUSH_TAG_FAMILY_BY_TYPE`, so this takes the per-notification
+        // default and two operator messages stay two banners. The row id is
+        // written before any channel runs, so it is here to be used.
+        tag: pushTagForNotification('ADMIN_MESSAGE', eventId),
         ...(badgeCount === undefined ? {} : { badgeCount }),
       });
       if (result.disabled) {
@@ -649,6 +787,22 @@ export class UserNotificationsService {
           // cabinet's `resolveNotificationTarget` so PWA pushes and the
           // in-app bell agree on destinations.
           url: resolveNotificationPushUrl(input.type),
+          // WHICH notification this is. The url above is a destination and
+          // many types share one, so without this the cabinet had to guess a
+          // collapse key from the url and the words — and a queued weekend of
+          // pushes arrived as a single banner. See `PUSH_TAG_FAMILY_BY_TYPE`
+          // for what is allowed to replace what, and why the default is one
+          // banner per notification rather than one per type.
+          tag: pushTagForNotification(input.type, input.eventId),
+          ...(pushTypeForNotification(input.type) === undefined
+            ? {}
+            : { type: pushTypeForNotification(input.type) as string }),
+          // A DEADLINE THAT MAY NOT OUTLIVE ITSELF. Most notifications
+          // take the day-long default; see `PUSH_TTL_BY_TYPE` for the two
+          // that must not.
+          ...(pushTtlForType(input.type) === undefined
+            ? {}
+            : { ttlSeconds: pushTtlForType(input.type) as number }),
           // The number for the home-screen icon, counted HERE because this is
           // the only side that knows it. The service worker cannot: it sees one
           // push, not an inbox, and anything it counted for itself would drift

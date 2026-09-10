@@ -80,11 +80,34 @@ export const HINT_FORM_FACTORS = ['mobile', 'tablet', 'desktop'] as const;
  *
  * The enum declares five so that adding one later is a guarded `ALTER TYPE`
  * rather than a schema change. This list is the shorter, truthful one: an
- * operator must not be able to pick a mode that renders as nothing. Widen it
- * in the same commit that teaches the cabinet to draw the new mode, never
- * before.
+ * operator must not be able to pick a mode that renders as nothing.
+ *
+ * ── Widening this is a RELEASE-ORDER decision, not an edit ───────────────────
+ *
+ * The cabinet closes a delivery it cannot draw — it does not defer it. That is
+ * deliberate and the alternative is worse: an undrawable hint left unshown sits
+ * at the head of a queue ordered by `createdAt` and starves every hint behind
+ * it for up to ninety days. But it means a mode added here reaches customers
+ * running a CACHED BUNDLE that predates the render support, and each of them
+ * destroys that delivery and records a dismissal they never made.
+ *
+ * ── That is no longer the rule, and this is what replaced it ────────────────
+ *
+ * The cabinet now DECLARES what it can draw, in the `x-reiwa-hint-modes`
+ * header on every ask, and `nextFor` filters on it in SQL beside `surfaces`
+ * and `formFactors`. Silence resolves to MODAL — exactly what a cabinet older
+ * than the header can do — so a mode added here is held back for the customers
+ * whose cabinet cannot draw it, and delivered once it can, TTL permitting.
+ *
+ * Widening this is therefore an ordinary edit again. What it is NOT is a
+ * licence to skip the release notes: a hint raised while the cabinets are still
+ * old waits, and a `repeatable: false` one with a short TTL can expire while it
+ * waits. Ship the cabinet first and the window does not exist.
  */
-export const RENDERABLE_HINT_MODES: readonly UserHintMode[] = [UserHintMode.MODAL];
+export const RENDERABLE_HINT_MODES: readonly UserHintMode[] = [
+  UserHintMode.MODAL,
+  UserHintMode.TOAST,
+];
 
 function trimmed(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;

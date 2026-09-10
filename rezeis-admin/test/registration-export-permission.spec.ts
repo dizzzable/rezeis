@@ -15,6 +15,7 @@ import { RbacService } from '../src/modules/rbac/services/rbac.service';
 import { AdminUsersController } from '../src/modules/users/controllers/admin-users.controller';
 import { AdminUsersService } from '../src/modules/users/services/admin-users.service';
 import { RegistrationExportService } from '../src/modules/users/services/registration-export.service';
+import { UserExportService } from '../src/modules/users/services/user-export.service';
 
 /**
  * S7 elevated export: real RbacService + real RbacGuard paths.
@@ -155,6 +156,24 @@ describe('Registration export permission (RbacService + HTTP)', () => {
                   to: null,
                 };
               },
+            },
+          },
+          {
+            // The full user export's collaborators. Stubbed rather than
+            // omitted: Nest injects by position, so a missing provider does not
+            // fail to resolve — it shifts every later one and the controller's
+            // FIRST dependency comes back undefined.
+            //
+            // `RbacService` is the REAL one here, because this file is about
+            // what a bare ADMIN may and may not export.
+            provide: UserExportService,
+            useValue: {
+              exportCsv: async () => ({
+                csv: '',
+                rowCount: 0,
+                usersWithoutDevices: 0,
+                devicesComplete: null,
+              }),
             },
           },
           {

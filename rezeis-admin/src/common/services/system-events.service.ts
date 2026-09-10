@@ -38,6 +38,9 @@ import { readAdminBotToken, readEnvBotToken } from '../utils/admin-bot-token.uti
 import { buildWebhookSignature } from '../http/webhook-signature.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../../modules/realtime/realtime.gateway';
+// Pure module, no Nest dependencies — see `chain-depth.ts` for why a delivery
+// job has to carry an automation hop count.
+import { chainDepthMetadata } from '../../modules/automations/chain-depth';
 import {
   resolveTelegramDeliveryTarget,
   isEventTelegramAllowed,
@@ -1190,10 +1193,31 @@ export class SystemEventsService {
     systemEventType: string,
     relayEvent: ReiwaRelayEvent,
     metadata: Record<string, unknown>,
+    /**
+     * The metadata of the event being relayed, for its automation hop count.
+     *
+     * ── Why a delivery job carries an automation counter ──────────────────
+     *
+     * Because losing it here reset the loop guard. A `notify_telegram` action
+     * emits a correctly stamped event; that event queues a relay job; the job
+     * exhausts its attempts and emits `reiwa.relay_undelivered` — built from
+     * scratch, at depth zero. A rule bound to that event (`notify_telegram`
+     * on "tell me when the relay breaks" is the obvious one to write) then had
+     * a fresh four-hop budget on every generation, and with the cabinet down
+     * it never terminated.
+     *
+     * `isRelayLoopGuardedEvent` exists for this loop shape and does not catch
+     * it: it breaks only `reiwa.relay_undelivered` re-queuing ITSELF, and the
+     * automation hop launders the event into a different type on the way past.
+     */
+    sourceMetadata?: Record<string, unknown> | null,
   ): Promise<void> {
     const queue = this.resolveRelayQueue();
     if (queue !== null && !isRelayLoopGuardedEvent(systemEventType)) {
-      await queue.enqueue(relayEvent, metadata);
+      await queue.enqueue(relayEvent, {
+        ...metadata,
+        ...chainDepthMetadata(sourceMetadata),
+      });
       return;
     }
     const notifier = this.resolveBotNotifier();
@@ -1236,14 +1260,14 @@ export class SystemEventsService {
           content: txt,
           caption: clipHtmlCard(html, TELEGRAM_CAPTION_LIMIT),
           parseMode: 'HTML',
-        });
+        }, event.metadata);
       } else {
         // Non-error events (or txt attachment disabled): inline card only.
         await this.relaySystemEvent(event.type, 'reiwa.dev.notify', {
           eventId: buildRelayEventId(event, 'dev'),
           text: clipHtmlCard(html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
-        });
+        }, event.metadata);
       }
     } catch (err) {
       this.logger.warn(`Dev-fallback notify failed: ${(err as Error).message}`);
@@ -1316,7 +1340,7 @@ export class SystemEventsService {
           content: formatErrorReportTxt(opts.reportEvent, getRezeisBuildInfo()),
           caption: clipHtmlCard(opts.html, TELEGRAM_CAPTION_LIMIT),
           parseMode: 'HTML',
-        });
+        }, event.metadata);
       } else {
         // Clipped for the reason spelt out on the document branch above.
         await this.relaySystemEvent(event.type, 'reiwa.channel.broadcast', {
@@ -1325,7 +1349,7 @@ export class SystemEventsService {
           topicThreadId: opts.topicId ?? undefined,
           text: clipHtmlCard(opts.html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
-        });
+        }, event.metadata);
       }
     } catch (err) {
       this.logger.warn(`Reiwa broadcast relay failed: ${(err as Error).message}`);

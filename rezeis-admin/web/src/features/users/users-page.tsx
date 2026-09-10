@@ -28,6 +28,7 @@ import { api } from '@/lib/api'
 import { toast } from 'sonner'
 import { PermissionGate } from '@/features/rbac'
 import { downloadCsv } from '@/features/partners/csv-download'
+import { UserExportDialog } from './user-export-dialog'
 import { UsersFilterPanel } from './users-filter-panel'
 
 // Ленивый, как и на прежнем месте: вкладка со списком заблокированных
@@ -140,6 +141,7 @@ export default function UsersPage() {
   const { t } = useTranslation()
   const { activeTab, setTab: handleTabChange } = useTabSync<UsersTab>(ALLOWED_TABS, 'list')
   const [exporting, setExporting] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
 
   const exportRegistration = async () => {
     setExporting(true)
@@ -166,19 +168,39 @@ export default function UsersPage() {
             {t('usersPage.subtitle')}
           </p>
         </div>
-        <PermissionGate resource="users" action="export_registration">
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => void exportRegistration()}
-            disabled={exporting}
-            data-testid="export-registration-csv"
-          >
-            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            {t('usersPage.export.registration')}
-          </Button>
-        </PermissionGate>
+        <div className="flex flex-wrap gap-2">
+          {/* Two exports, and they are not the same thing. This one is the
+              whole customer base with whatever columns the operator picks; the
+              registration one beside it is the raw IP/UA/Referer/UTM snapshot,
+              behind its own permission. Folding them into one button would
+              have meant either handing the snapshot to everyone who can pull a
+              mailing list, or hiding the mailing list behind a PII right. */}
+          <PermissionGate resource="users" action="export">
+            <Button
+              variant="default"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => setExportOpen(true)}
+              data-testid="export-users"
+            >
+              <Download className="h-4 w-4" />
+              {t('usersPage.export.users')}
+            </Button>
+          </PermissionGate>
+          <PermissionGate resource="users" action="export_registration">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => void exportRegistration()}
+              disabled={exporting}
+              data-testid="export-registration-csv"
+            >
+              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              {t('usersPage.export.registration')}
+            </Button>
+          </PermissionGate>
+        </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>
@@ -234,6 +256,8 @@ export default function UsersPage() {
           </Suspense>
         </TabsContent>
       </Tabs>
+
+      <UserExportDialog open={exportOpen} onOpenChange={setExportOpen} />
     </div>
   )
 }

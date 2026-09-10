@@ -61,7 +61,7 @@ describe('AdminUserManagementController notify channels', () => {
 
     assert.deepStrictEqual(harness.state.relayCalls, []);
     assert.deepStrictEqual(harness.state.webPushSends, [
-      { userId: 'user-1', title: 'Reiwa', body: 'Push only', url: '/dashboard' },
+      { userId: 'user-1', title: 'Reiwa', body: 'Push only', url: '/dashboard', tag: 'ADMIN_MESSAGE:event-1' },
     ]);
   });
 

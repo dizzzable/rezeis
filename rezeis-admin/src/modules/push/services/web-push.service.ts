@@ -70,8 +70,53 @@ export interface WebPushSendResult {
   readonly disabled: boolean;
 }
 
+/**
+ * How long a push service may HOLD a message for a device that is not
+ * connected, in seconds — RFC 8030's TTL.
+ *
+ * ── Sixty seconds was the bug ────────────────────────────────────────────────
+ *
+ * Every push went out with `TTL: 60`, which tells FCM/Mozilla/Apple to DISCARD
+ * the message if the user agent is not reachable within the minute. No retry,
+ * no queue — and the push service still answers 201, so this service recorded a
+ * successful delivery and refreshed `lastSeenAt` for a notification nobody
+ * would ever see.
+ *
+ * That is invisible for anything sent while somebody is looking at the screen —
+ * a payment confirmation, an operator's test — and fatal for the one class that
+ * is not: the expiry warnings, which a per-minute cron fires whenever a
+ * subscription crosses its window, at whatever hour of the day that falls. An
+ * INSTALLED PWA keeps a push connection alive with the browser; a plain tab in
+ * a browser that has been closed does not. Same code, same subscription row,
+ * opposite outcome — which is exactly the asymmetry that was reported as "push
+ * works on the PWA and not in the browser".
+ *
+ * ── Why the default is long and the exception is short ───────────────────────
+ *
+ * A notification is worth delivering late unless being late makes it WRONG.
+ * "Your subscription ends in three days" read six hours after it was sent is
+ * still true and still actionable; a test push arriving tomorrow is confusing.
+ * So the default is a day, and a caller that would rather drop the message than
+ * deliver it stale says so.
+ */
+export const PUSH_TTL_SECONDS = 24 * 60 * 60;
+
+/**
+ * For a message that is only true right now.
+ *
+ * The operator's "send a test" is the case: it exists to answer "did that
+ * arrive", and one that turns up the next morning answers nothing.
+ */
+export const PUSH_TTL_TRANSIENT_SECONDS = 60;
+
 interface SendInput {
   readonly userId: string;
+  /**
+   * Seconds the push service may hold this message. Defaults to
+   * {@link PUSH_TTL_SECONDS}; pass {@link PUSH_TTL_TRANSIENT_SECONDS} for a
+   * message that is worthless once the moment has passed.
+   */
+  readonly ttlSeconds?: number;
   readonly title: string;
   readonly body: string;
   /**
@@ -79,6 +124,42 @@ interface SendInput {
    * Defaults to `/dashboard` so a tap always lands somewhere useful.
    */
   readonly url?: string;
+  /**
+   * The COLLAPSE KEY, and the reason this field exists at all.
+   *
+   * Two browser notifications carrying the same tag are one notification: the
+   * second silently replaces the first in the tray and the first is never
+   * read. The cabinet's service worker has to pick a tag for every push, and
+   * with nothing identifying in the payload its only material was the URL plus
+   * a digest of the words — and `resolveNotificationPushUrl` maps MANY types
+   * onto six URLs (`/renew` alone serves the whole expiry family and
+   * `limited`). So the side that knows which notification this is says so
+   * here, and the cabinet honours it verbatim.
+   *
+   * NOT necessarily unique per notification. Whether a second message of a
+   * kind should replace the first or stand beside it is a product decision per
+   * type, and it is made in `PUSH_TAG_FAMILY_BY_TYPE`
+   * (`user-notifications.service.ts`) — the same shape, and for the same
+   * reason, as the per-type TTL table next to it. This service transports the
+   * answer; it does not make it.
+   *
+   * The cabinet prefixes what arrives (`reiwa-notification:<tag>`), so this is
+   * the bare key. Absent or empty means "you decide", which is what every
+   * push did before and what an older panel still does.
+   */
+  readonly tag?: string;
+  /**
+   * The notification's canonical type, e.g. `expires_in_3_days`. The cabinet's
+   * SECOND choice of collapse key, consulted only when `tag` is absent.
+   *
+   * Sent only where the type is by itself a correct collapse key — i.e. where
+   * every notification of that type supersedes the last. Two support replies
+   * on two different tickets share a type, so a `type` on that push would be a
+   * fallback that loses one of them; omitting it leaves the cabinet's
+   * URL-plus-digest fallback, which at least keeps two different sentences
+   * apart. The panel never sends a key that would be wrong on its own.
+   */
+  readonly type?: string;
   /**
    * Unread total for the home-screen icon badge, counted by the caller.
    *
@@ -607,11 +688,25 @@ export class WebPushService implements OnModuleInit {
       title: input.title.trim().length > 0 ? input.title : brand.brandName,
       body: input.body,
       url: input.url ?? '/dashboard',
+      // WHICH notification this is, so the tray does not collapse it onto an
+      // unrelated one that happens to share a destination. Both fields are
+      // omitted rather than sent blank: the cabinet treats an empty string as
+      // absent, so a blank one would be a no-op that still costs payload
+      // budget — and an omitted field is what an older panel sends, which is
+      // the case the cabinet's own fallback already handles.
+      ...(typeof input.tag === 'string' && input.tag.trim().length > 0
+        ? { tag: input.tag.trim() }
+        : {}),
+      ...(typeof input.type === 'string' && input.type.trim().length > 0
+        ? { type: input.type.trim() }
+        : {}),
       ...(brand.icon === null ? {} : { icon: brand.icon }),
       ...(typeof input.badgeCount === 'number' ? { badgeCount: input.badgeCount } : {}),
     });
     const outcomes = await Promise.all(
-      subs.map((sub) => this.deliverOne(sub, payload, vapidDetails)),
+      subs.map((sub) =>
+        this.deliverOne(sub, payload, vapidDetails, input.ttlSeconds ?? PUSH_TTL_SECONDS),
+      ),
     );
     const delivered = outcomes.filter((ok) => ok).length;
     return {
@@ -846,7 +941,12 @@ export class WebPushService implements OnModuleInit {
       keys: { p256dh: sub.p256dhKey, auth: sub.authKey },
     };
     try {
-      await webpush.sendNotification(target, payload, { TTL: 60, vapidDetails });
+      // The operator is at their desk when these are sent — an alert about a
+      // node that went down two hours ago is worse than none.
+      await webpush.sendNotification(target, payload, {
+        TTL: PUSH_TTL_TRANSIENT_SECONDS,
+        vapidDetails,
+      });
       await this.prismaService.adminWebPushSubscription.update({
         where: { id: sub.id },
         data: { failureCount: 0, lastSeenAt: new Date() },
@@ -881,14 +981,20 @@ export class WebPushService implements OnModuleInit {
     sub: WebPushSubscription,
     payload: string,
     vapidDetails: webpush.RequestOptions['vapidDetails'],
+    ttlSeconds: number,
   ): Promise<boolean> {
     const target: PushSubscriptionPayload = {
       endpoint: sub.endpoint,
       keys: { p256dh: sub.p256dhKey, auth: sub.authKey },
     };
     try {
-      await webpush.sendNotification(target, payload, { TTL: 60, vapidDetails });
+      await webpush.sendNotification(target, payload, { TTL: ttlSeconds, vapidDetails });
       // Successful delivery — reset failure count, refresh lastSeenAt.
+      //
+      // "Delivered" here means the PUSH SERVICE accepted it, not that a person
+      // saw it. That is all this side can know, and it is why the TTL above
+      // matters: a message the service was allowed to drop is indistinguishable
+      // from one it delivered, on this row and in the log.
       await this.prismaService.webPushSubscription.update({
         where: { id: sub.id },
         data: { failureCount: 0, lastSeenAt: new Date() },

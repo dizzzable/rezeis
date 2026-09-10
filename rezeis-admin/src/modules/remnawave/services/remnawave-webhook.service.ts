@@ -532,9 +532,28 @@ export class RemnawaveWebhookService {
     // Forward curated events to the system-event bus (audit log + realtime +
     // Telegram cards). Unmapped/noisy events are stored only — no Telegram
     // spam. Best-effort: emit() is fire-and-forget and never throws.
+    const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
     const hasTrafficUsage = normalized.startsWith('user.') && this.hasPositiveTrafficUsage(payload);
+    // ── The customer, for every user-scoped event we forward ────────────────
+    //
+    // This used to resolve only for `user.first_connected` and for a payload
+    // carrying traffic, and the consequence reached much further than the card
+    // it was written for. The panel's own metadata for these events names the
+    // profile — `remnawaveId`, `telegramId` — and nothing else, so an
+    // automation rule bound to "expires soon", "expired", "traffic limit
+    // reached" could never show that person a pop-up: `resolveTriggerUserId`
+    // reads neither of those keys and `show_hint` refuses an event that does
+    // not name a customer. Three of the eight shipped pop-up templates were
+    // aimed at exactly these moments and none of them could ever fire.
+    //
+    // The resolve is ONE indexed query — subscription by panel identity, then
+    // user by telegram id — and it already existed for the other branch. It is
+    // best-effort: a profile we cannot place locally leaves the metadata as it
+    // was, which is what every one of these events carried until now.
+    const wantsCustomer =
+      hasTrafficUsage || (mapped !== undefined && normalized.startsWith('user.'));
     let userContext: LocalUserContext | null = null;
-    if (hasTrafficUsage || normalized === 'user.first_connected') {
+    if (wantsCustomer) {
       try {
         userContext = await this.resolveLocalUserContext(payload);
       } catch (err: unknown) {
@@ -553,11 +572,14 @@ export class RemnawaveWebhookService {
         );
       }
     }
-    const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
     if (mapped) {
       let metadata = this.extractEventMetadata(eventType, payload);
-      if (normalized === 'user.first_connected') {
+      // Every user-scoped event carries the customer now; only the first
+      // connection carries the traffic counter, which is a card detail.
+      if (normalized.startsWith('user.')) {
         metadata = this.enrichUserMetadata(metadata, userContext);
+      }
+      if (normalized === 'user.first_connected') {
         metadata = await this.enrichConnectionTraffic(metadata);
       }
       this.systemEvents.emit({

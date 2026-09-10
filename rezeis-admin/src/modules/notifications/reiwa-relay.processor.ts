@@ -21,6 +21,7 @@ import { isRelayDelivered, shouldAlertOperator } from './reiwa-relay.policy';
 import { BotNotifierClient, type NotifyDeliveryResult } from './services/bot-notifier.client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { BROADCAST_CHANNEL_EVENT_PREFIX } from '../broadcast/broadcast.constants';
+import { chainDepthMetadata } from '../automations/chain-depth';
 
 /**
  * Five at a time. The relay is one HTTP hop into a single cabinet process
@@ -226,6 +227,17 @@ export class ReiwaRelayProcessor extends WorkerHost {
         attemptsMade: job.attemptsMade + 1,
         attempts: job.opts?.attempts ?? 1,
         ...(eventId !== null ? { relayEventId: eventId } : {}),
+        // THE HOP COUNT, CARRIED THROUGH.
+        //
+        // This event is emitted from scratch, and building it without the count
+        // reset the automation loop guard once per relay generation: an action
+        // emits a stamped event, that event queues a relay job, the job
+        // exhausts, and this line put a fresh depth-zero event back on the bus.
+        // A rule bound to it — "tell me on Telegram when the relay breaks" —
+        // then re-armed itself for ever, four laps at a time, while the cabinet
+        // was down. `relaySystemEvent` copies the depth onto the job precisely
+        // so this can hand it back.
+        ...chainDepthMetadata(metadata),
       },
     );
   }

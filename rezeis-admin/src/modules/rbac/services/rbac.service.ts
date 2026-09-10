@@ -101,6 +101,13 @@ const LEGACY_ADMIN_ALLOWED_RESOURCES: ReadonlySet<string> = new Set([
  */
 const LEGACY_ADMIN_DENIED_TOKENS: ReadonlySet<string> = new Set([
   'users:export_registration',
+  // The FULL customer export, and the same trap one release later. `users` is
+  // an allowed resource, so adding the `export` action to the catalog handed
+  // every pre-RBAC admin — an account with "No role", which could not export
+  // anything the day before — the email, Telegram id, name, plan and expiry of
+  // every customer, plus the elevated columns, on the upgrade. Denied here for
+  // exactly the reason its narrower sibling above is.
+  'users:export',
   'payments:refund',
   'payment_gateways:view_secrets',
 ]);
