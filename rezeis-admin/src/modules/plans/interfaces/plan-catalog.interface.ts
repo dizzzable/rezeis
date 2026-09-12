@@ -51,8 +51,23 @@ export interface PlanCatalogPlanInterface {
   readonly trafficLimit: number | null;
   readonly deviceLimit: number;
   readonly trafficLimitStrategy: TrafficLimitStrategyValue;
-  readonly internalSquads: readonly string[];
-  readonly externalSquad: string | null;
+  /*
+   * NO SQUADS HERE, and this gap is the point.
+   *
+   * A plan carries `internalSquads` and `externalSquad` — the operator's own
+   * Remnawave squad identifiers — and both used to be copied into this shape.
+   * This shape is the PUBLIC catalog: the cabinet serves it at `/api/v1/plans`
+   * behind an OPTIONAL session, so anyone who opens the site, signed in or not,
+   * received the operator's internal naming of their own infrastructure. Not a
+   * credential, and nothing could be done with it, but it is ours and it was
+   * being handed out to the street for no reason at all: neither field was ever
+   * read — not by the cabinet, not by its bot, not by the panel's own SPA. The
+   * cabinet declared them in its types and never touched them.
+   *
+   * What a customer needs to choose a plan is what a customer gets. Which
+   * servers that plan reaches is answered later, by the subscriber server list,
+   * from the subscription they actually own.
+   */
   /** True when this is a trial-availability plan. Trials always create an
    *  `isTrial` subscription. A free trial (`trialFree`) is claimed via the
    *  dedicated trial action; a paid trial is bought through the normal flow. */

@@ -60,8 +60,6 @@ describe('PlanCatalogService', () => {
       },
     ]);
     assert.equal(actual[0]?.trafficLimitStrategy, 'NO_RESET');
-    assert.deepStrictEqual(actual[0]?.internalSquads, []);
-    assert.equal(actual[0]?.externalSquad, null);
     // Gateway-independent display prices expose every configured duration
     // price so the catalog card can render "от X" without an active gateway.
     assert.deepStrictEqual(actual[0]?.displayPrices, [
@@ -231,12 +229,87 @@ describe('PlanCatalogService', () => {
       assert.ok(actual.some((plan) => plan.id === 'plan-all'));
     });
   }
+
+  it('never puts the operator\'s squad identifiers in the public catalog', async () => {
+    /*
+     * THE CATALOG IS PUBLIC. The cabinet serves it at `/api/v1/plans` behind an
+     * OPTIONAL session, so this payload reaches anyone who opens the site,
+     * signed in or not. It used to carry `internalSquads` and `externalSquad`
+     * straight off the plan row — the operator's own Remnawave squad
+     * identifiers — and nothing anywhere read them.
+     *
+     * Two assertions rather than one, because they fail on different mistakes.
+     * The key set catches the field coming back under its own name, including
+     * by autocomplete when someone adds the next field to the mapper. The value
+     * scan catches it coming back under a DIFFERENT name, which the key set
+     * cannot see and which is exactly what a well-meaning rename would do.
+     */
+    const squads = ['8f1c0a3e-0000-4000-8000-000000000001', '8f1c0a3e-0000-4000-8000-000000000002'];
+    const external = '8f1c0a3e-0000-4000-8000-0000000000ff';
+    const prismaService = {
+      paymentGateway: { findMany: async () => [] },
+      plan: {
+        findMany: async () => [
+          createPlanRecord({
+            id: 'plan-all',
+            availability: PlanAvailability.ALL,
+            internalSquads: squads,
+            externalSquad: external,
+          }),
+        ],
+      },
+      user: { findUnique: async () => null },
+      subscription: { findFirst: async () => null },
+      referral: { findFirst: async () => null },
+      partner: { findUnique: async () => null },
+      userPendingDiscount: { findMany: async () => [] },
+    };
+
+    const service = new PlanCatalogService(prismaService as never, new PricingService(), {
+      loadConfig: async () => ({ enabled: false, percent: 0, defaultCurrency: 'RUB' }),
+    } as never);
+    const actual = await service.getCatalogPlans({ channel: PurchaseChannel.WEB });
+
+    assert.equal(actual.length, 1, 'the plan itself must still be served');
+    assert.deepStrictEqual(
+      Object.keys(actual[0] ?? {}).sort(),
+      [
+        'availability',
+        'description',
+        'deviceLimit',
+        'displayPrices',
+        'durations',
+        'icon',
+        'id',
+        'isTrial',
+        'name',
+        'orderIndex',
+        'tag',
+        'trafficLimit',
+        'trafficLimitStrategy',
+        'trialFree',
+        'type',
+      ],
+      'a new field in the public catalog is a decision, not an accident — if you meant it, add it here',
+    );
+
+    const serialized = JSON.stringify(actual);
+    for (const secret of [...squads, external]) {
+      assert.ok(
+        !serialized.includes(secret),
+        `squad identifier ${secret} reached the public catalog payload`,
+      );
+    }
+  });
 });
 
 function createPlanRecord(input: {
   readonly id: string;
   readonly availability: PlanAvailability;
   readonly allowedUserIds?: readonly string[];
+  /** Set by the leak guard below. Every other case leaves the plan squadless. */
+  readonly internalSquads?: readonly string[];
+  readonly externalSquad?: string | null;
 }) {
   return {
     id: input.id,
@@ -252,8 +325,8 @@ function createPlanRecord(input: {
     trafficLimit: 1024,
     deviceLimit: 1,
     trafficLimitStrategy: 'NO_RESET',
-    internalSquads: [],
-    externalSquad: null,
+    internalSquads: [...(input.internalSquads ?? [])],
+    externalSquad: input.externalSquad ?? null,
     upgradeToPlanIds: [],
     replacementPlanIds: [],
     allowedUserIds: [...(input.allowedUserIds ?? [])],

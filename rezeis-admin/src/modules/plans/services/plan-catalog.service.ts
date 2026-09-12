@@ -249,8 +249,10 @@ export class PlanCatalogService {
       trafficLimit: plan.trafficLimit,
       deviceLimit: plan.deviceLimit,
       trafficLimitStrategy: plan.trafficLimitStrategy,
-      internalSquads: [...plan.internalSquads],
-      externalSquad: plan.externalSquad,
+      // `plan.internalSquads` and `plan.externalSquad` are deliberately NOT
+      // copied — see the note on `PlanCatalogPlanInterface`. The key set of
+      // this object is pinned by a test, so adding a field here is a decision
+      // someone has to make on purpose rather than by autocomplete.
       isTrial: plan.availability === PlanAvailability.TRIAL,
       trialFree: readTrialSettings(plan.trialSettings).free,
       durations: plan.durations.map((duration) => {
