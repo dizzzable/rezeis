@@ -87,25 +87,113 @@ describe('mapHost', () => {
     }
   });
 
-  it('keeps the squads a host is excluded from', () => {
+  it('keeps the squads a host is excluded from, the way panels before 3.4 say it', () => {
     // A host reaches a squad through its inbound EXCEPT for these. Listing one
     // of them would tell a customer they can use a server that is not in their
     // config at all.
     const host = mapHost(rawHost({ excludedInternalSquads: ['squad-b', 'squad-c'] }));
-    assert.deepEqual(host.excludedInternalSquads, ['squad-b', 'squad-c']);
+    assert.deepEqual(host.internalSquads, { mode: 'exclude', squads: ['squad-b', 'squad-c'] });
   });
 
-  it('treats a missing exclusion list as no exclusions', () => {
-    // Which is how a panel version that does not send the field behaves.
+  it('reads the 3.4 shape, in both of its directions', () => {
+    // 3.4 renamed the field and gave it a mode. `ALLOW_ONLY` is the direction
+    // that did not exist before: the listed squads are the ONLY ones served,
+    // so reading it as the old array would show the host to everyone else.
+    assert.deepEqual(
+      mapHost(rawHost({ internalSquads: { mode: 'ALLOW_ONLY', squads: ['squad-vip'] } }))
+        .internalSquads,
+      { mode: 'allow-only', squads: ['squad-vip'] },
+    );
+    assert.deepEqual(
+      mapHost(rawHost({ internalSquads: { mode: 'EXCLUDE', squads: ['squad-b'] } })).internalSquads,
+      { mode: 'exclude', squads: ['squad-b'] },
+    );
+    // Junk inside the object is dropped exactly as it is in the flat array.
+    assert.deepEqual(
+      mapHost(rawHost({ internalSquads: { mode: 'ALLOW_ONLY', squads: ['a', '', null, 7, 'b'] } }))
+        .internalSquads,
+      { mode: 'allow-only', squads: ['a', 'b'] },
+    );
+  });
+
+  it('prefers the 3.4 shape when a row carries both, and reads an unknown mode as an exclusion', () => {
+    // Both at once is not a panel we ship against, but the newer field is what
+    // a newer panel means, so it wins.
+    assert.deepEqual(
+      mapHost(
+        rawHost({
+          internalSquads: { mode: 'ALLOW_ONLY', squads: ['squad-vip'] },
+          excludedInternalSquads: ['squad-b'],
+        }),
+      ).internalSquads,
+      { mode: 'allow-only', squads: ['squad-vip'] },
+    );
+    // A direction Remnawave has not shipped yet can only be guessed at, and
+    // the two guesses are not equally safe: read as an exclusion it may show a
+    // server to a squad that should not have it, read as an allow list it
+    // hides a working server from everyone else.
+    assert.deepEqual(
+      mapHost(rawHost({ internalSquads: { mode: 'SOMETHING_NEW', squads: ['squad-b'] } }))
+        .internalSquads,
+      { mode: 'exclude', squads: ['squad-b'] },
+    );
+  });
+
+  it('reads an ALLOW_ONLY with an empty list as "nobody", not as "no restriction"', () => {
+    // THE FRIENDLY GUESS THIS FILE EXISTS TO FORBID. Collapsing an empty allow
+    // list to `exclude` is the reading that looks kind and is wrong: the host
+    // would then be shown to every customer, when its operator listed nobody.
+    // Remnawave's own query answers false for every squad here. Note the
+    // fixture also carries `excludedInternalSquads: []`, so a mapper that let
+    // this fall through to the legacy branch would produce the same `squads`
+    // and differ only in `mode` — which is exactly what is asserted.
+    assert.deepEqual(
+      mapHost(rawHost({ internalSquads: { mode: 'ALLOW_ONLY', squads: [] } })).internalSquads,
+      { mode: 'allow-only', squads: [] },
+    );
+  });
+
+  it('falls back to the legacy array when the 3.4 rule arrives in half', () => {
+    // 3.4 marks BOTH keys required, so half a rule is not something a newer
+    // panel sent — it is a proxy that dropped a key, or a row edited by hand.
+    // The legacy array is then the only rule we actually received, and keeping
+    // it beats inventing one. The direction matters most for the first case:
+    // `ALLOW_ONLY` paired with a list we cannot read would otherwise mean
+    // "allowed to nobody" and hide a working server from EVERY customer.
+    const legacy = ['squad-b'];
+    for (const internalSquads of [
+      { mode: 'ALLOW_ONLY' },
+      { mode: 'ALLOW_ONLY', squads: null },
+      { mode: 'ALLOW_ONLY', squads: 'squad-vip' },
+      { squads: ['squad-vip'] },
+      {},
+      [],
+      null,
+      'ALLOW_ONLY',
+    ]) {
+      assert.deepEqual(
+        mapHost(rawHost({ internalSquads, excludedInternalSquads: legacy })).internalSquads,
+        { mode: 'exclude', squads: legacy },
+        `\`internalSquads: ${JSON.stringify(internalSquads) ?? 'undefined'}\` is not a rule`,
+      );
+    }
+  });
+
+  it('treats a missing rule as no restriction', () => {
+    // Which is how a panel version that sends neither shape behaves, and what
+    // Remnawave's own column defaults to: EXCLUDE with nothing listed.
     for (const value of [undefined, null, 'squad-b', { squad: 'b' }]) {
-      assert.deepEqual(mapHost(rawHost({ excludedInternalSquads: value })).excludedInternalSquads, []);
+      assert.deepEqual(mapHost(rawHost({ excludedInternalSquads: value })).internalSquads, {
+        mode: 'exclude',
+        squads: [],
+      });
     }
     // And entries that are not usable squad uuids are dropped rather than kept,
     // because a non-string in that set would never match a squad uuid anyway
     // and only invites a `.has(undefined)` somewhere downstream.
     assert.deepEqual(
       mapHost(rawHost({ excludedInternalSquads: ['squad-b', '', null, 7, 'squad-c'] }))
-        .excludedInternalSquads,
+        .internalSquads.squads,
       ['squad-b', 'squad-c'],
     );
   });
@@ -142,7 +230,7 @@ describe('mapHost', () => {
       const host = mapHost(value);
       assert.equal(host.uuid, '');
       assert.equal(host.configProfileInboundUuid, null);
-      assert.deepEqual(host.excludedInternalSquads, []);
+      assert.deepEqual(host.internalSquads, { mode: 'exclude', squads: [] });
     }
   });
 });

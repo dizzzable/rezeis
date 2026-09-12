@@ -637,6 +637,21 @@ export type PanelHealth = z.infer<typeof GetRemnawaveHealthCommand.ResponseSchem
 export type PanelMetadata = z.infer<typeof GetMetadataCommand.ResponseSchema>['response'];
 
 export type PanelNode = z.infer<typeof GetNodesCommand.ResponseSchema>['response'][number];
+/**
+ * STALE ON ONE FIELD, deliberately left so rather than silently bumped.
+ *
+ * The pin is `@remnawave/backend-contract@3.4.2`, and the host squad rename
+ * landed in `3.4.3`: this type therefore still says `excludedInternalSquads`,
+ * a field panel 3.4 does not send, and lacks `internalSquads`, the one it does.
+ * Panel 3.4.1's own OpenAPI already carries the new shape, so the npm package
+ * simply trailed the panel by a patch.
+ *
+ * `mapHost` is the authority for a host row, not this type — it reads both
+ * shapes and is tested against the dumps in `icon/`. Bumping the pin is a
+ * one-line change, but it also moves every OTHER schema these three clients
+ * execute at runtime, so it belongs in a change of its own with its own
+ * verification rather than riding along with a subscriber-list fix.
+ */
 export type PanelHost = z.infer<typeof GetHostsCommand.ResponseSchema>['response'][number];
 export type PanelNodeUsersBandwidth = z.infer<
   typeof GetStatsNodesUsersUsageCommand.ResponseSchema

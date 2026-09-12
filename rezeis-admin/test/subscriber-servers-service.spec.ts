@@ -43,7 +43,7 @@ const host = (over: Partial<RemnawaveHostInterface> = {}): RemnawaveHostInterfac
   configProfileUuid: 'profile-1',
   configProfileInboundUuid: 'inbound-de',
   nodes: ['node-de'],
-  excludedInternalSquads: [],
+  internalSquads: { mode: 'exclude', squads: [] },
   ...over,
 });
 

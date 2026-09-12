@@ -12,19 +12,27 @@
  * future panel release fails a test here instead of failing silently against a
  * live panel.
  *
- * WHY THE VENDOR PACKAGE IS NOT IMPORTED HERE. The sentence that used to stand
- * in this spot ("it is a devDependency… production ships nothing extra") was
- * false in both halves, three lines from a counterexample; the sentence that
- * replaced it said so plainly and left the counterexample standing. It is now
- * true, and it is true because the counterexample was removed:
+ * WHY THE VENDOR PACKAGE IS NOT IMPORTED HERE. This spot has held a claim about
+ * the vendor packages twice, and both times the claim drifted out of true while
+ * nobody was reading it. Checked again 12.09.2026, and it had drifted again —
+ * so what follows is what `package.json` and `Dockerfile` actually say, and the
+ * one part of it that needs a decision is named as needing one rather than
+ * written up as settled:
  *
- *   • EVERY `@remnawave/*` contract package is a devDependency — the 2.7 line
+ *   • THREE of the four contract packages are devDependencies — the 2.7 line
  *     (`@remnawave/backend-contract`, 2.7.3), the 2.8 line
- *     (`@remnawave/contract-v28`, 2.8.35) and the 3.x lines
- *     (`@remnawave/contract-v3` 3.2.3, `@remnawave/contract-v34` 3.4.2, the pin
- *     matching panel 3.3.2). None is imported from `src/`. `Dockerfile` stage 1
- *     runs `npm ci --omit=dev`, so none of them ships in the image, and the
- *     AGPL-3.0-only licence they carry stays out of the distributed artefact.
+ *     (`@remnawave/contract-v28`, 2.8.35) and `@remnawave/contract-v3` (3.2.3,
+ *     the pin matching panel 3.3.2). None of the three is imported from `src/`,
+ *     `Dockerfile` stage 1 runs `npm ci --omit=dev`, and so none of the three
+ *     reaches the image.
+ *   • `@remnawave/contract-v34` (3.4.2) IS DIFFERENT and the sentence above does
+ *     not cover it: it sits in `dependencies`, and `panel-infra.client.ts`,
+ *     `panel-devices.client.ts` and `panel-users.client.ts` import VALUES from
+ *     it, not just types. `--omit=dev` therefore keeps it, and it ships inside
+ *     the published image carrying its AGPL-3.0-only licence. Whether that is
+ *     acceptable is a licensing question for the owner, not a code question,
+ *     and it is open — recorded here so the next reader finds the fact rather
+ *     than a comforting sentence about it.
  *   • They remain the CI ORACLE for both eras, executed by the guard specs —
  *     including the URLs immediately below, which
  *     `test/remnawave-squad-status-era-decode.spec.ts` pins against all four

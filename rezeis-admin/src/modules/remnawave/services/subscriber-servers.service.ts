@@ -159,7 +159,33 @@ export class SubscriberServersService {
   }
 }
 
-const SNAPSHOT_CACHE_KEY = 'remnawave:subscriber-servers:snapshot';
+/**
+ * The snapshot cache key, and the `:v2` on the end is load-bearing.
+ *
+ * What is stored under it is the POST-mapper snapshot — `RemnawaveHostInterface`
+ * objects, serialised with `JSON.stringify` and read back with an unchecked
+ * `JSON.parse(...) as T`. That makes this key a wire format between panel
+ * VERSIONS, not just a cache: the Redis container is not recreated when the
+ * panel image is replaced, so for the rest of the TTL a freshly upgraded panel
+ * reads rows written by the previous one.
+ *
+ * 3.4 support replaced `excludedInternalSquads` with `internalSquads`, so rows
+ * from before that change are a different shape, and the two versions must not
+ * meet. Bumping the suffix separates them: each version reads only what it
+ * wrote, both while an upgrade settles and in a blue/green deployment where
+ * both are live against one Redis at once. Rolling back is symmetric.
+ *
+ * **Change the shape of `PanelSnapshot`, bump this suffix.** Nothing enforces
+ * it — a stale row deserialises silently, which is the whole problem.
+ */
+const SNAPSHOT_CACHE_KEY = 'remnawave:subscriber-servers:snapshot:v2';
+
+/**
+ * What a host's squad rule means when it is absent — no restriction, which is
+ * what Remnawave's own column defaults to and how every panel before 3.4
+ * behaved. Only reachable from a payload this version's mapper did not build.
+ */
+const NO_SQUAD_RULE = { mode: 'exclude', squads: [] } as const;
 /**
  * Short enough that a node going down shows up while the customer is still
  * looking; long enough that a burst of double taps is three calls, not three
@@ -232,14 +258,27 @@ export function buildServers(
       if (host.configProfileInboundUuid === null) return false;
       const squads = reachedBy.get(host.configProfileInboundUuid);
       if (squads === undefined) return false;
-      // Reaching the inbound is not enough: the host can opt out of individual
-      // squads, and Remnawave then leaves it out of THOSE squads' configs. It
-      // belongs in this list while at least one squad that got the customer
-      // here still carries it -- a customer in two squads keeps a host the
-      // second one excludes.
-      const excluded = new Set(host.excludedInternalSquads);
+      // Reaching the inbound is not enough: the host names squads, and what
+      // that naming MEANS is its mode. Remnawave settles both directions with
+      // one equality, and this is the same one: a squad carries the host when
+      // "this squad is named" equals "the mode is allow-only". Exclusions and
+      // an allow list are that test read in two directions. The host belongs
+      // in this list while at least one squad that got the customer here
+      // carries it — a customer in two squads keeps a host the second one
+      // excludes, and keeps one that allows only the first.
+      // `?? NO_SQUAD_RULE` is not defensive programming for its own sake: the
+      // snapshot below is cached in Redis as JSON, so a panel that has just
+      // been upgraded can read a snapshot written by the version before it, in
+      // which this field does not exist. The cache key carries a shape version
+      // for exactly that reason and this should now be unreachable — but an
+      // unguarded destructure turns one stale key into a 500 on the only screen
+      // whose whole job is to answer "which servers do I have", for every
+      // subscriber at once, and the guard costs nothing.
+      const { mode, squads: named } = host.internalSquads ?? NO_SQUAD_RULE;
+      const listed = new Set(named);
+      const allowOnly = mode === 'allow-only';
       for (const squad of squads) {
-        if (!excluded.has(squad)) return true;
+        if (listed.has(squad) === allowOnly) return true;
       }
       return false;
     })
@@ -334,7 +373,7 @@ export function explainEmpty(
   }
   return {
     level: 'debug',
-    reason: `${delivered.length} matching host(s), all excluded from these squads`,
+    reason: `${delivered.length} matching host(s), none of them served to these squads`,
   };
 }
 
@@ -342,7 +381,7 @@ export function explainEmpty(
  * Inbound UUID -> the customer's own squads that reach it.
  *
  * A flat set of inbound UUIDs would do if a host could not opt out of a squad.
- * It can (`excludedInternalSquads`), so "may this customer use this host"
+ * It can (`internalSquads`), so "may this customer use this host"
  * depends on WHICH squad brought them to its inbound, and the answer has to
  * survive as far as the filter.
  */

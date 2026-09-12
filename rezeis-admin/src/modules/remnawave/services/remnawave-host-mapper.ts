@@ -49,7 +49,7 @@ export function mapHost(raw: unknown): RemnawaveHostInterface {
     configProfileInboundUuid:
       str(inbound['configProfileInboundUuid']) ?? str(r['configProfileInboundUuid']),
     nodes: normalizeNodes(r['nodes']),
-    excludedInternalSquads: normalizeStringList(r['excludedInternalSquads']),
+    internalSquads: normalizeInternalSquads(r['internalSquads'], r['excludedInternalSquads']),
     excludeFromSubscriptionTypes: normalizeStringList(r['excludeFromSubscriptionTypes']),
   };
 }
@@ -66,6 +66,48 @@ function normalizeTags(tagsValue: unknown, legacyTag: unknown): string[] {
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+/**
+ * The host's squad rule from either shape: 3.4's `{ mode, squads }` or the
+ * `excludedInternalSquads` array every earlier version sends.
+ *
+ * Only a COMPLETE 3.4 rule wins: a mode we were given, paired with a list that
+ * is actually a list. Both are `required` in the 3.4 contract, so a half of one
+ * is not a rule a newer panel sent — it is a proxy that dropped a key or a row
+ * edited by hand, and the legacy array is then the better answer because it is
+ * the only rule we did receive.
+ *
+ * Every remaining judgement call leans the same way, and the reason is always
+ * the same: showing a host to a squad that should not have it costs a confused
+ * customer, hiding one costs a paying customer a server that works.
+ *
+ *   • an unknown mode (a direction Remnawave has not shipped) reads as
+ *     `exclude`, not as an allow list;
+ *   • `squads` that is not an array reads as "no rule", not as "allowed to
+ *     nobody", which is what an empty allow list would otherwise mean.
+ *
+ * An allow list that is genuinely EMPTY is the one case read literally — see
+ * `InternalSquadAccessInterface`, which explains why that is not a guess.
+ */
+function normalizeInternalSquads(
+  value: unknown,
+  legacy: unknown,
+): { readonly mode: 'exclude' | 'allow-only'; readonly squads: readonly string[] } {
+  const fresh = record(value);
+  const squads = fresh['squads'];
+  // An own-property test, not `in`: `in` walks the prototype chain, so a
+  // polluted `Object.prototype.mode` would turn every pre-3.4 row into a 3.4
+  // one and drop its exclusions. No vector reaches here today; the guard is
+  // free. (`Object.hasOwn` would read better and is ES2022; this project
+  // targets ES2021.)
+  if (Object.prototype.hasOwnProperty.call(fresh, 'mode') && Array.isArray(squads)) {
+    return {
+      mode: fresh['mode'] === 'ALLOW_ONLY' ? 'allow-only' : 'exclude',
+      squads: normalizeStringList(squads),
+    };
+  }
+  return { mode: 'exclude', squads: normalizeStringList(legacy) };
 }
 
 /** A string array, dropping anything that is not a non-empty string. */

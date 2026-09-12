@@ -47,7 +47,7 @@ const host = (over: Partial<RemnawaveHostInterface> = {}): RemnawaveHostInterfac
   configProfileUuid: 'profile-1',
   configProfileInboundUuid: 'inbound-de',
   nodes: ['node-de'],
-  excludedInternalSquads: [],
+  internalSquads: { mode: 'exclude', squads: [] },
   ...over,
 });
 
@@ -171,7 +171,7 @@ describe('which servers a subscription reaches', () => {
     const servers = buildServers(['squad-eu'], {
       hosts: [
         host({ uuid: 'open' }),
-        host({ uuid: 'opted-out', excludedInternalSquads: ['squad-eu'] }),
+        host({ uuid: 'opted-out', internalSquads: { mode: 'exclude', squads: ['squad-eu'] } }),
       ],
       nodes: [node()],
       squads: [squad()],
@@ -185,7 +185,7 @@ describe('which servers a subscription reaches', () => {
     // filter that only asked "is this host excluded anywhere" would take it
     // away from them.
     const servers = buildServers(['squad-eu', 'squad-eu-2'], {
-      hosts: [host({ uuid: 'shared', excludedInternalSquads: ['squad-eu'] })],
+      hosts: [host({ uuid: 'shared', internalSquads: { mode: 'exclude', squads: ['squad-eu'] } })],
       nodes: [node()],
       squads: [squad(), squad({ uuid: 'squad-eu-2' })],
     });
@@ -194,11 +194,89 @@ describe('which servers a subscription reaches', () => {
 
   it('ignores an exclusion aimed at a squad the customer is not in', () => {
     const servers = buildServers(['squad-eu'], {
-      hosts: [host({ uuid: 'mine', excludedInternalSquads: ['squad-someone-else'] })],
+      hosts: [host({ uuid: 'mine', internalSquads: { mode: 'exclude', squads: ['squad-someone-else'] } })],
       nodes: [node()],
       squads: [squad()],
     });
     assert.deepEqual(servers.map((s) => s.id), ['mine']);
+  });
+
+  it('drops a host that allows only squads the customer is not in', () => {
+    // Remnawave 3.4 added this direction, and until it was read the host was
+    // shown to EVERY subscriber whose squad reached its inbound — the operator
+    // had restricted it to one squad and the rest saw a server they are not in
+    // the config of. The rule is Remnawave's own: in this mode being listed is
+    // what grants the squad, not what takes it away.
+    const servers = buildServers(['squad-eu'], {
+      hosts: [
+        host({ uuid: 'open' }),
+        host({ uuid: 'vip-only', internalSquads: { mode: 'allow-only', squads: ['squad-vip'] } }),
+      ],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['open']);
+  });
+
+  it('keeps a host that allows only a squad the customer IS in', () => {
+    const servers = buildServers(['squad-eu'], {
+      hosts: [host({ uuid: 'vip-only', internalSquads: { mode: 'allow-only', squads: ['squad-eu'] } })],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['vip-only']);
+  });
+
+  it('keeps a host allowed to the second of the customer’s two squads', () => {
+    // The mirror of the exclusion case above: one squad is enough, and a
+    // filter that asked "is this host allowed to ALL of them" would take it
+    // away from someone who can plainly use it.
+    const servers = buildServers(['squad-eu', 'squad-eu-2'], {
+      hosts: [host({ uuid: 'shared', internalSquads: { mode: 'allow-only', squads: ['squad-eu-2'] } })],
+      nodes: [node()],
+      squads: [squad(), squad({ uuid: 'squad-eu-2' })],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['shared']);
+  });
+
+  it('drops a host that allows nobody', () => {
+    // `ALLOW_ONLY` with an empty list: Remnawave's create schema refuses one
+    // and its query serves it to no squad, so a row like this is read
+    // literally rather than as "no restriction". The `open` host is the
+    // control — without it this case would also pass if `buildServers` were
+    // broken outright and returned nothing at all.
+    const servers = buildServers(['squad-eu'], {
+      hosts: [
+        host({ uuid: 'nobody', internalSquads: { mode: 'allow-only', squads: [] } }),
+        host({ uuid: 'open' }),
+      ],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((s) => s.id), ['open']);
+  });
+
+  it('survives a host from a snapshot written before this panel version', () => {
+    // NOT a hypothetical. The snapshot is cached in Redis as JSON and the Redis
+    // container outlives the panel container, so for one TTL after an upgrade
+    // this code reads rows the PREVIOUS version wrote — rows with no
+    // `internalSquads` at all. An unguarded destructure answers
+    // `TypeError: Cannot destructure property 'mode' of 'host.internalSquads'`,
+    // which is a 500 on the one screen that exists to say which servers you
+    // have, for every subscriber at once. The cache key carries a shape version
+    // so this should be unreachable; belt and braces, because the cost of the
+    // belt is one `??` and the cost of being wrong is an outage.
+    const stale = { ...host({ uuid: 'stale' }) } as Record<string, unknown>;
+    delete stale['internalSquads'];
+    const servers = buildServers(['squad-eu'], {
+      hosts: [stale as unknown as RemnawaveHostInterface],
+      nodes: [node()],
+      squads: [squad()],
+    });
+    // Absent means unrestricted — Remnawave's own default, and how every panel
+    // before 3.4 behaved. Hiding it instead would take a working server away
+    // from a paying customer on the strength of a missing field.
+    assert.deepEqual(servers.map((s) => s.id), ['stale']);
   });
 
   it('drops a host with no inbound at all', () => {
@@ -593,9 +671,9 @@ describe('why the list came back empty', () => {
     const hidden = explainEmpty(['squad-eu'], snapshot({ hosts: [host({ isHidden: true })] }));
     assert.match(hidden.reason, /all hidden or disabled/);
     const excluded = explainEmpty(['squad-eu'], snapshot({
-      hosts: [host({ excludedInternalSquads: ['squad-eu'] })],
+      hosts: [host({ internalSquads: { mode: 'exclude', squads: ['squad-eu'] } })],
     }));
-    assert.match(excluded.reason, /all excluded/);
+    assert.match(excluded.reason, /none of them served to these squads/);
     // Both are buttons the operator pressed, so neither shouts.
     assert.equal(hidden.level, 'debug');
     assert.equal(excluded.level, 'debug');
@@ -613,6 +691,24 @@ describe('why the list came back empty', () => {
     }));
     assert.match(reason, /all kept out of every subscription format/);
     assert.equal(level, 'debug');
+  });
+
+  it('blames the subscription formats before the squads when a host is both', () => {
+    // The two reasons are checked in an order, and the order is a decision:
+    // "kept out of every format" is one checkbox the operator can see on the
+    // host, while "served to no squad of this customer" sends them off to
+    // compare squad membership. The specific cause wins. Swap the two blocks
+    // in `explainEmpty` and this goes red; nothing else notices.
+    const { reason } = explainEmpty(['squad-eu'], snapshot({
+      hosts: [
+        host({
+          internalSquads: { mode: 'exclude', squads: ['squad-eu'] },
+          excludeFromSubscriptionTypes: ['XRAY_JSON', 'XRAY_BASE64', 'MIHOMO', 'STASH', 'CLASH', 'SINGBOX'],
+        }),
+      ],
+    }));
+    assert.match(reason, /all kept out of every subscription format/);
+    assert.doesNotMatch(reason, /served to these squads/);
   });
 });
 
