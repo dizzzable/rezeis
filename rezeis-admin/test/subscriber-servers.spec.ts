@@ -233,6 +233,29 @@ describe('which servers a subscription reaches', () => {
     assert.deepEqual(servers.map((s) => s.id), ['visible']);
   });
 
+  it('drops a host kept out of every subscription format — and only then', () => {
+    // Remnawave builds each format without the hosts the operator unticked it
+    // on. Out of all six, no app receives the host: hidden in all but name.
+    // Out of all but one, that one format's apps still do — and nothing here
+    // knows which app a customer uses — so it stays. One host per format, so
+    // a format missing from the list goes red by name.
+    const ALL = ['XRAY_JSON', 'XRAY_BASE64', 'MIHOMO', 'STASH', 'CLASH', 'SINGBOX'];
+    const hosts = [
+      host({ uuid: 'everywhere' }),
+      host({ uuid: 'nowhere', excludeFromSubscriptionTypes: ALL }),
+      ...ALL.map((kept) =>
+        host({ uuid: `only-${kept}`, excludeFromSubscriptionTypes: ALL.filter((f) => f !== kept) }),
+      ),
+      // A format this panel has never heard of excludes nothing it knows about.
+      host({ uuid: 'unknown-format', excludeFromSubscriptionTypes: ['OUTLINE'] }),
+    ];
+    const servers = buildServers(['squad-eu'], { hosts, nodes: [node()], squads: [squad()] });
+    assert.deepEqual(
+      servers.map((s) => s.id),
+      ['everywhere', ...ALL.map((kept) => `only-${kept}`), 'unknown-format'],
+    );
+  });
+
   it('keeps the operator’s own ordering', () => {
     const servers = buildServers(['squad-eu'], {
       hosts: [
@@ -286,6 +309,94 @@ describe('what each server reports', () => {
 
   it('ignores disabled nodes when deciding the state', () => {
     assert.equal(oneHost([node({ isDisabled: true, isConnected: false })]).status, 'unknown');
+  });
+
+  // ── A host whose explicit node link is empty or points nowhere ────────────
+  //
+  // The owner's case, from production: a restored server whose VPN client
+  // connected at 101 ms while this list said "no data". The client connects to
+  // `host.address` and never reads `host.nodes`, so that link is free to be
+  // empty or stale — and after a node is recreated it names a UUID that no
+  // longer exists. Nodes come and go routinely; the list has to find the one
+  // actually serving the host.
+
+  it('finds the serving node by address when the host names none', () => {
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: [], address: '2.26.199.173' })],
+      nodes: [node({ uuid: 'node-restored', address: '2.26.199.173', xrayUptime: 3_600 })],
+      squads: [squad()],
+    });
+    assert.equal(server.status, 'online');
+    assert.equal(server.uptimeSeconds, 3_600);
+  });
+
+  it('finds it when the host still names the UUID of a node that was recreated', () => {
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: ['node-deleted-long-ago'], address: '2.26.199.173' })],
+      nodes: [node({ uuid: 'node-recreated', address: '2.26.199.173' })],
+      squads: [squad()],
+    });
+    assert.equal(server.status, 'online');
+  });
+
+  it('matches the host address against the node IPs too, not only its address', () => {
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: [], address: '203.0.113.10' })],
+      nodes: [
+        node({ uuid: 'n', address: 'node.internal', ips: [{ ip: '203.0.113.10', status: 'ACTIVE' }] }),
+      ],
+      squads: [squad()],
+    });
+    assert.equal(server.status, 'online');
+  });
+
+  it('does not guess when two nodes share the address', () => {
+    // Reporting the state of the wrong server would be worse than saying
+    // nothing, so the ambiguous case stays unknown.
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: [], address: '2.26.199.173' })],
+      nodes: [
+        node({ uuid: 'a', address: '2.26.199.173' }),
+        node({ uuid: 'b', address: '2.26.199.173' }),
+      ],
+      squads: [squad()],
+    });
+    assert.equal(server.status, 'unknown');
+  });
+
+  it('keeps an explicit link to a node that exists, even a disabled one', () => {
+    // Pointing a host at a switched-off node is a deliberate act; the address
+    // must not overrule it with some other node that happens to live there.
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: ['switched-off'], address: '2.26.199.173' })],
+      nodes: [
+        node({ uuid: 'switched-off', isDisabled: true, isConnected: false, address: '10.9.9.9' }),
+        node({ uuid: 'other', address: '2.26.199.173' }),
+      ],
+      squads: [squad()],
+    });
+    assert.equal(server.status, 'unknown');
+  });
+
+  it('resolves no DNS, so a host addressed by name stays apart from a node addressed by IP', () => {
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: [], address: 'de1.example.com' })],
+      nodes: [node({ uuid: 'n', address: '2.26.199.173', ips: [] })],
+      squads: [squad()],
+    });
+    assert.equal(server.status, 'unknown');
+  });
+
+  it('never sends the address it matched on', () => {
+    // The match reads addresses; the answer must still carry none of them.
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ nodes: [], address: '2.26.199.173' })],
+      nodes: [node({ uuid: 'n', address: '2.26.199.173', name: 'Germany NUXT CLOUDE' })],
+      squads: [squad()],
+    });
+    const serialized = JSON.stringify(server);
+    assert.equal(serialized.includes('2.26.199.173'), false);
+    assert.equal(serialized.includes('NUXT'), false);
   });
 });
 
@@ -488,5 +599,91 @@ describe('why the list came back empty', () => {
     // Both are buttons the operator pressed, so neither shouts.
     assert.equal(hidden.level, 'debug');
     assert.equal(excluded.level, 'debug');
+  });
+
+  it('names a host kept out of every subscription format as its own reason', () => {
+    // Otherwise the empty list would be blamed on squad exclusions, which the
+    // operator would go and check, and find nothing.
+    const { level, reason } = explainEmpty(['squad-eu'], snapshot({
+      hosts: [
+        host({
+          excludeFromSubscriptionTypes: ['XRAY_JSON', 'XRAY_BASE64', 'MIHOMO', 'STASH', 'CLASH', 'SINGBOX'],
+        }),
+      ],
+    }));
+    assert.match(reason, /all kept out of every subscription format/);
+    assert.equal(level, 'debug');
+  });
+});
+
+describe('the name a customer reads', () => {
+  // The owner's call, 11.09.2026: take it from the Remnawave host. The host
+  // carries two strings — `remark`, the operator's own naming ("Germany 07 D"),
+  // and `serverDescription`, the line written for customers (what Happ shows).
+  const nameOf = (hostOver: Partial<RemnawaveHostInterface>): string | undefined =>
+    buildServers(['squad-eu'], { hosts: [host(hostOver)], nodes: [node()], squads: [squad()] })[0]
+      ?.name;
+
+  it('is the description the operator wrote for customers, when there is one', () => {
+    assert.equal(nameOf({ remark: 'Germany 07 D', serverDescription: 'Германия' }), 'Германия');
+  });
+
+  it('falls back to the remark when the description is absent, empty or blank', () => {
+    // An operator who never filled the field in must see no change at all.
+    assert.equal(nameOf({ remark: 'Germany 07 D' }), 'Germany 07 D');
+    for (const serverDescription of [null, '', '   ']) {
+      assert.equal(
+        nameOf({ remark: 'Germany 07 D', serverDescription }),
+        'Germany 07 D',
+        `serverDescription = ${JSON.stringify(serverDescription)}`,
+      );
+    }
+  });
+
+  it('trims the description rather than showing its padding', () => {
+    assert.equal(nameOf({ remark: 'x', serverDescription: '  Германия  ' }), 'Германия');
+  });
+
+  it('still takes the flag from the remark, where operators put it', () => {
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ remark: 'Frankfurt 🇩🇪', serverDescription: 'Франкфурт' })],
+      nodes: [node({ countryCode: '' })],
+      squads: [squad()],
+    });
+    assert.equal(server.name, 'Франкфурт');
+    assert.equal(server.flag, '🇩🇪');
+  });
+
+  // ── and the other way round ───────────────────────────────────────
+  //
+  // The cabinet draws the flag from `countryCode` and strips it back out of
+  // `name` so that it is not shown twice (`nameWithoutFlag`). So an operator
+  // who writes the flag into the line meant FOR customers — now that the line
+  // meant for customers is the one they read — used to lose it twice over: cut
+  // off the name, and redrawn from whatever the internal remark or a node said
+  // instead.
+
+  it('takes the flag from the description when that is where the operator put it', () => {
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ remark: 'ams-03', serverDescription: '🇳🇱 Амстердам', nodes: ['node-nl'] })],
+      nodes: [node({ uuid: 'node-nl', countryCode: 'DE' })],
+      squads: [squad()],
+    });
+    assert.equal(server.name, '🇳🇱 Амстердам');
+    assert.equal(server.flag, '🇳🇱');
+    assert.equal(server.countryCode, 'NL');
+  });
+
+  it('still does, for a host that resolves to no node at all', () => {
+    // Nothing in the remark and nothing from a node: the flag the operator
+    // wrote was the only one there was, and the customer read a bare name
+    // beside an empty badge.
+    const [server] = buildServers(['squad-eu'], {
+      hosts: [host({ remark: 'ams-03', serverDescription: '🇳🇱 Амстердам', nodes: [], address: '' })],
+      nodes: [],
+      squads: [squad()],
+    });
+    assert.equal(server.flag, '🇳🇱');
+    assert.equal(server.countryCode, 'NL');
   });
 });

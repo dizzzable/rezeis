@@ -4535,6 +4535,7 @@ export const en = {
       planCards: 'Tariff cards',
       nav: 'Navigation',
       servers: 'Servers',
+      qr: 'QR codes',
     },
     servers: {
       title: 'Server map',
@@ -4563,6 +4564,53 @@ export const en = {
           note: 'Drawn without WebGL — the lightest on weak phones.',
         },
       },
+    },
+    qr: {
+      title: 'QR code style',
+      description:
+        'How the QR codes a subscriber shows to other people look. By default the code is plain: black on white.',
+      appliesTo:
+        'The style applies to the referral link code (the "Referrals" section) and to the partner advertising codes (the "Advertising" section — one for the bot, one for the web).',
+      connectPlain:
+        'The connect code always stays plain: VPN apps read it, and their scanners are the strictest.',
+      presetsLabel: 'Ready-made styles',
+      presets: {
+        plain: 'Plain',
+        rounded: 'Rounded',
+        dots: 'Dots',
+        roundedColour: 'Rounded in colour',
+      },
+      modulesLabel: 'Module shape',
+      modules: {
+        square: 'Squares',
+        rounded: 'Rounded squares',
+        dots: 'Dots',
+      },
+      dotsNote:
+        'Dots need a large code: where it is shown small they are drawn as rounded squares, which a camera reads more reliably. The cabinet always shows the partner advertising codes small, so dots never appear on them.',
+      eyesLabel: 'Corner squares',
+      eyesHint:
+        'The three large squares in the corners are how a camera finds the code. Only their corners are rounded.',
+      eyes: {
+        square: 'Square corners',
+        rounded: 'Rounded corners',
+      },
+      colourLabel: 'Code colour',
+      colourPicker: 'Pick the code colour',
+      colourHint:
+        'The background is always white. A colour that is too light will not save: a camera stops telling it apart from the background.',
+      colourInvalid: 'Enter a colour as #rrggbb or #rgb',
+      contrastOk: 'Contrast with white {{ratio}}:1 — enough, at least 7:1 is needed',
+      contrastTooLight:
+        'Contrast with white {{ratio}}:1 — too little: the colour is too light. At least 7:1 is needed, or it will not save',
+      tooLight: 'The QR code colour is too light: it needs at least 7:1 contrast with white',
+      reset: 'Reset to plain',
+      previewLabel: 'How it looks',
+      previewReferral: 'Referral invite',
+      previewConnect: 'Connect code — always plain',
+      previewRefused: 'This colour will not save, so the sample is drawn in black.',
+      previewHint:
+        'The sample is exactly the image the cabinet will build, at the size a subscriber opens the invite at.',
     },
     sections: {
       nav: {

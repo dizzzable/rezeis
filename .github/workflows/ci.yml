@@ -162,8 +162,14 @@ jobs:
       # properties no unit test can reach: two spins racing for the last
       # prize, a ceiling under concurrent claims, a refused edit rolling back,
       # a key handed to exactly one winner, a contest drawn exactly once.
+      # ONE FILE AT A TIME. These specs share a single database and two of
+      # them clear the whole wheel tables (`wheelSector.deleteMany({})`), so
+      # concurrent files delete each other’s rows: on a 16-thread machine the
+      # same 14 files give 6 failures and one aborted file, and pass 161/161
+      # serially. Node defaults to cores-1 files at once, so CI four vCPUs made
+      # it rare rather than impossible — this makes the job deterministic.
       - run: >-
-          node --require ts-node/register/transpile-only --test
+          node --require ts-node/register/transpile-only --test --test-concurrency=1
           test/add-on-entitlement-postgres-concurrency.spec.ts
           test/subscription-index-migration.spec.ts
           test/points-wallet-postgres.spec.ts

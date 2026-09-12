@@ -729,6 +729,57 @@ export interface ServersGlobeSettings {
   readonly props: Record<string, string | number | boolean>;
 }
 
+/**
+ * The operator's QR-code style, as stored.
+ *
+ * WHICH CODES. The referral invite and the partner's advertising code, both
+ * read by a phone camera. NEVER the connect code: VPN clients read that one
+ * with their own in-app scanners, the least forgiving readers in the chain, so
+ * the cabinet draws it plain whatever is stored here. The cabinet's renderer
+ * (`reiwa/web/src/lib/qr-style.ts`, vendored into the panel for its preview)
+ * takes the style as an explicit argument at each call site for that reason:
+ * a renderer that looked the style up itself would style the connect code
+ * without anyone deciding to.
+ *
+ * THE DEFAULT IS TODAY'S CODE. `QR_STYLE_PLAIN` is what the cabinet drew
+ * before this setting existed, and the cabinet keeps drawing it through the
+ * untouched `qrcode` writer for every installation that never opened the tab.
+ * Styling appears only where an operator turned it on — never a subscriber's
+ * choice, never a new default.
+ *
+ * ONE BLOCK, REPLACED WHOLE. The three members are one decision. The DTO
+ * requires all three and `mergeBrandingSettings` replaces the stored block
+ * rather than merging a partial one over it, so there is no request that
+ * changes the shape and quietly keeps — or quietly drops — a colour.
+ *
+ * `dark` is `#rgb` or `#rrggbb` and at least 7:1 against white. Why seven and
+ * not WCAG's 4.5 is written down in `utils/branding-qr-style.util.ts`.
+ */
+export const QR_MODULE_SHAPES = ['square', 'rounded', 'dots'] as const;
+export type QrModuleShape = (typeof QR_MODULE_SHAPES)[number];
+
+/**
+ * The three finder patterns. `rounded` rounds their CORNERS only; the lines
+ * through their centres, which a decoder's 1:1:3:1:1 test reads, keep their
+ * exact widths.
+ */
+export const QR_EYE_SHAPES = ['square', 'rounded'] as const;
+export type QrEyeShape = (typeof QR_EYE_SHAPES)[number];
+
+export interface QrStyleSettings {
+  readonly modules: QrModuleShape;
+  readonly eyes: QrEyeShape;
+  /** Dark modules and eyes. The field under them is always opaque white. */
+  readonly dark: string;
+}
+
+/** The plain code — the cabinet's `QR_STYLE_PLAIN`, member for member. */
+export const QR_STYLE_PLAIN: QrStyleSettings = {
+  modules: 'square',
+  eyes: 'square',
+  dark: '#000000',
+};
+
 export interface BrandingSettingsInterface {
   /**
    * Stable id of the ready-made theme currently applied by WEB Reiwa.
@@ -967,6 +1018,14 @@ export interface BrandingSettingsInterface {
    */
   readonly serversGlobe: ServersGlobeSettings;
 
+  /**
+   * The operator's QR-code style for the referral invite and the partner's
+   * advertising code — never the connect code, which the cabinet always draws
+   * plain. Defaults to the plain code every installation drew before this
+   * setting existed. See `QrStyleSettings`.
+   */
+  readonly qrStyle: QrStyleSettings;
+
   /** Tailwind-friendly border-radius token (e.g. `rounded-2xl`). */
   readonly borderRadius: string;
   /** Exact, independently editable Reiwa corner radii. */
@@ -1091,6 +1150,9 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
   iconColors: {},
   iconDecor: {},
   serversGlobe: { enabled: true, variant: 'globe', props: {} },
+  // Plain black on white: the code every installation drew before this
+  // setting existed. Styling appears only where an operator turns it on.
+  qrStyle: QR_STYLE_PLAIN,
   borderRadius: 'rounded-2xl',
   cornerRadii: {
     cardPx: 24,

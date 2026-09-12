@@ -37,6 +37,7 @@ export function mapHost(raw: unknown): RemnawaveHostInterface {
     uuid: str(r['uuid']) ?? '',
     viewPosition: num(r['viewPosition']),
     remark: str(r['remark']) ?? '',
+    serverDescription: str(r['serverDescription']) ?? null,
     address: str(r['address']) ?? '',
     port: num(r['port']),
     isDisabled: Boolean(r['isDisabled']),
@@ -49,6 +50,7 @@ export function mapHost(raw: unknown): RemnawaveHostInterface {
       str(inbound['configProfileInboundUuid']) ?? str(r['configProfileInboundUuid']),
     nodes: normalizeNodes(r['nodes']),
     excludedInternalSquads: normalizeStringList(r['excludedInternalSquads']),
+    excludeFromSubscriptionTypes: normalizeStringList(r['excludeFromSubscriptionTypes']),
   };
 }
 

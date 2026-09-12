@@ -13,7 +13,7 @@ import {
   SubscriberServerInterface,
   SubscriberServersInterface,
 } from '../interfaces/subscriber-server.interface';
-import { resolveHostCountry } from '../utils/host-flag.util';
+import { extractFlag, resolveHostCountry } from '../utils/host-flag.util';
 import { RemnawaveApiService } from './remnawave-api.service';
 
 /**
@@ -177,6 +177,34 @@ interface PanelSnapshot {
 }
 
 /**
+ * Every format Remnawave builds a subscription in. The same six on every
+ * version this panel talks to — the 2.7.4, 2.8.0 and 3.x contracts enumerate
+ * exactly these — and each of its config generators skips a host whose
+ * `excludeFromSubscriptionTypes` names that generator's own format.
+ */
+const SUBSCRIPTION_FORMATS = [
+  'XRAY_JSON',
+  'XRAY_BASE64',
+  'MIHOMO',
+  'STASH',
+  'CLASH',
+  'SINGBOX',
+] as const;
+
+/**
+ * True when the operator kept this host out of every subscription format, so
+ * that no app receives it: hidden in all but name.
+ *
+ * Out of SOME formats is deliberately not enough. An app on one of the others
+ * still gets the host, and nothing here knows which app a customer uses — so
+ * the host stays in their list rather than vanishing for everyone.
+ */
+function reachesNoApp(host: RemnawaveHostInterface): boolean {
+  const excluded = new Set(host.excludeFromSubscriptionTypes ?? []);
+  return SUBSCRIPTION_FORMATS.every((format) => excluded.has(format));
+}
+
+/**
  * Filters the snapshot down to what these squads reach, and describes each one.
  *
  * Exported for the spec: the interesting behaviour is all in here, and testing
@@ -198,6 +226,9 @@ export function buildServers(
       // one of their servers — the list says "available", and showing an
       // unreachable entry as merely "offline" would be a different claim.
       if (host.isHidden || host.isDisabled) return false;
+      // The same claim one step on: a host kept out of every subscription
+      // format is in no app's config either.
+      if (reachesNoApp(host)) return false;
       if (host.configProfileInboundUuid === null) return false;
       const squads = reachedBy.get(host.configProfileInboundUuid);
       if (squads === undefined) return false;
@@ -292,9 +323,18 @@ export function explainEmpty(
       reason: `${matching.length} matching host(s), all hidden or disabled`,
     };
   }
+  const delivered = visible.filter((host) => !reachesNoApp(host));
+  if (delivered.length === 0) {
+    // The operator's own doing too, and a different fix from unhiding: the
+    // formats are unticked on the host itself.
+    return {
+      level: 'debug',
+      reason: `${visible.length} matching host(s), all kept out of every subscription format`,
+    };
+  }
   return {
     level: 'debug',
-    reason: `${visible.length} matching host(s), all excluded from these squads`,
+    reason: `${delivered.length} matching host(s), all excluded from these squads`,
   };
 }
 
@@ -323,16 +363,91 @@ function squadsByInbound(
   return reachedBy;
 }
 
+/**
+ * The nodes that actually carry a host's traffic.
+ *
+ * FIRST the explicit link: `host.nodes`, the list the operator keeps on the
+ * host in Remnawave. When it resolves to at least one node that exists, it is
+ * the answer — including when that node is disabled, because pointing a host
+ * at a switched-off node is a deliberate act and this list must not
+ * second-guess it.
+ *
+ * THEN, and only when that link resolves to NOTHING, the address. The link is
+ * optional in Remnawave: a customer's VPN client connects to `host.address`
+ * and never consults `host.nodes`, so a host whose list was never filled in —
+ * or still names the UUID of a node that was deleted and recreated — carries
+ * traffic perfectly well while this screen used to report it as "no data".
+ * Reported from production on a restored server: the client connected at
+ * 101 ms, the node was online, and the customer's list said nothing was known.
+ * Nodes come and go as a matter of course — a restore, a move to another
+ * provider, a rebuild — so an identity only the explicit link can supply is
+ * not one this list can depend on. The node at the host's address is the one
+ * serving it.
+ *
+ * Ambiguity is not an answer: if two nodes share the address, neither is
+ * chosen, because reporting the state of the wrong server would be worse than
+ * saying nothing. No DNS is resolved either — a host addressed by name and a
+ * node addressed by IP stay unmatched rather than being joined by a lookup
+ * this hot path has no business making.
+ *
+ * The addresses are read here and never emitted: `describeHost` still returns
+ * the same seven fields, and none of them is an address.
+ */
+function nodesServing(
+  host: RemnawaveHostInterface,
+  nodesByUuid: ReadonlyMap<string, RemnawaveNodeInterface>,
+): RemnawaveNodeInterface[] {
+  const linked = host.nodes
+    .map((uuid) => nodesByUuid.get(uuid))
+    .filter((node): node is RemnawaveNodeInterface => node !== undefined);
+  if (linked.length > 0) return linked;
+
+  const address = normalizeAddress(host.address);
+  if (address === '') return [];
+  const atAddress = [...nodesByUuid.values()].filter(
+    (node) =>
+      normalizeAddress(node.address) === address ||
+      node.ips.some((entry) => normalizeAddress(entry.ip) === address),
+  );
+  return atAddress.length === 1 ? atAddress : [];
+}
+
+/** Case, surrounding whitespace and IPv6 brackets are not part of an address. */
+function normalizeAddress(value: string): string {
+  return value.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+}
+
 function describeHost(
   host: RemnawaveHostInterface,
   nodesByUuid: ReadonlyMap<string, RemnawaveNodeInterface>,
 ): SubscriberServerInterface {
-  const nodes = host.nodes
-    .map((uuid) => nodesByUuid.get(uuid))
-    .filter((node): node is RemnawaveNodeInterface => node !== undefined);
+  const nodes = nodesServing(host, nodesByUuid);
+
+  // What the customer reads. `serverDescription` is the line the operator
+  // writes FOR customers on the host in Remnawave (at most 30 characters, and
+  // what Happ shows), while `remark` is the operator's own naming — "Germany
+  // 07 D", "Latvia 03 M" — which used to reach the customer verbatim. The
+  // owner's call, 11.09.2026: take the name from the Remnawave host. Prefer
+  // the description; fall back to the remark, so an operator who never filled
+  // the field in sees no change at all.
+  const name = host.serverDescription?.trim() || host.remark;
 
   const { flag, countryCode } = resolveHostCountry(
-    host.remark,
+    // The flag has to be the one in the name the CUSTOMER reads. The cabinet
+    // draws the flag from `countryCode` and strips it back out of `name` so
+    // that it is not shown twice (`nameWithoutFlag` — and on Windows the
+    // emoji has no glyph at all, so a flag left in the name reads as two
+    // stray letters). A flag typed into `serverDescription`, the field this
+    // list has only just started reading and therefore the one an operator
+    // now writes it into, used to lose both ways: cut off the name here, and
+    // replaced by whatever the internal remark — or a node — happened to say.
+    // Where the host resolves to no node it was replaced by nothing at all,
+    // and the customer read a bare name beside an empty badge.
+    //
+    // Prefer the flag in the displayed name; fall back to the remark, where
+    // operators have always put it, and then to the nodes — unchanged for
+    // every host whose description carries no flag of its own.
+    extractFlag(name) === null ? host.remark : name,
     nodes.map((node) => node.countryCode),
   );
 
@@ -341,7 +456,7 @@ function describeHost(
 
   return {
     id: host.uuid,
-    name: host.remark,
+    name,
     flag,
     countryCode,
     status: resolveStatus(live, connected),

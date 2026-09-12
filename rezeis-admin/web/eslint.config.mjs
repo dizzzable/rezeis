@@ -34,6 +34,8 @@ export default tseslint.config(
       'src/features/landing-builder/live/**',
       // Same deal for the vendored media-viewer kit.
       'src/components/media/kit/**',
+      // …and for the vendored QR renderer the branding QR tab previews with.
+      'src/lib/qr/kit/**',
     ],
   },
   js.configs.recommended,

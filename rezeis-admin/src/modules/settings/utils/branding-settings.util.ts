@@ -50,6 +50,12 @@ import {
   PlanCardTextSettings,
   PLAN_CARD_TEXT_MODES,
   ProfileNamingSettings,
+  QR_EYE_SHAPES,
+  QR_MODULE_SHAPES,
+  QR_STYLE_PLAIN,
+  QrEyeShape,
+  QrModuleShape,
+  QrStyleSettings,
   SubscriptionCardTextMode,
   SubscriptionCardTextSettings,
   SubscriptionCardGlassSettings,
@@ -60,6 +66,7 @@ import {
   isSafeBrandingGradient,
   isSafeBrandingGradientOrNone,
 } from './branding-css.util';
+import { isUsableQrDark } from './branding-qr-style.util';
 /** Hex colour validation: 3, 4, 6 or 8 hex chars after a leading `#`. */
 const HEX_PATTERN = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 const OPAQUE_HEX_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
@@ -137,6 +144,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     iconColors: readHexMap(record, 'iconColors'),
     iconDecor: readIconDecorMap(record, 'iconDecor'),
     serversGlobe: readServersGlobe(record, 'serversGlobe'),
+    qrStyle: readQrStyle(record),
     borderRadius: readBorderRadius(record),
     cornerRadii: readCornerRadii(record),
     fontFamily: readString(record, 'fontFamily', DEFAULT_BRANDING.fontFamily),
@@ -221,6 +229,13 @@ export function mergeBrandingSettings(input: {
           ...current.profileNaming,
           ...readRecord(value),
         };
+      } else if (key === 'qrStyle') {
+        // Replaced WHOLE, never merged over the stored block. The DTO refuses
+        // a partial block, so what arrives is always the operator's complete
+        // decision; filling gaps from the stored style would let a client that
+        // sent only a shape keep a colour it never looked at, and filling them
+        // from the default would wipe one it did.
+        merged[key] = readQrStyle({ qrStyle: value });
       } else {
         merged[key] = value;
       }
@@ -1052,6 +1067,41 @@ function readServersGlobe(record: Record<string, unknown>, key: string): Servers
     enabled: source['enabled'] === undefined ? fallback.enabled : source['enabled'] !== false,
     variant,
     props,
+  };
+}
+
+/**
+ * Reads the stored QR style. Total: every input answers with a style the
+ * cabinet draws as stored, and whatever is unusable falls back — member by
+ * member, as the cabinet's own `resolveQrStyle` does — to the plain code. So
+ * what the panel shows after a reload is what subscribers are shown.
+ *
+ * The rules are the DTO's, from the same place: `QR_MODULE_SHAPES`,
+ * `QR_EYE_SHAPES` and `isUsableQrDark`, trimming once exactly as `QrStyleDto`
+ * trims. A reader stricter than the DTO turns an accepted save into `200 OK`
+ * and a style that reverts on the next read; one looser than it lets a row the
+ * DTO would refuse — a restored backup, a direct edit — reach the cabinet,
+ * which then draws black where the panel shows a colour.
+ * `test/branding-qr-style.spec.ts` holds the two stages to the same colours.
+ *
+ * `dark` keeps the case the operator wrote, like every other colour in this
+ * file; the cabinet reads `#1E3A8A` and `#1e3a8a` alike.
+ */
+function readQrStyle(record: Record<string, unknown>): QrStyleSettings {
+  const value = readRecord(record['qrStyle']);
+  const modules = value['modules'];
+  const eyes = value['eyes'];
+  const dark = typeof value['dark'] === 'string' ? value['dark'].trim() : null;
+  return {
+    modules:
+      typeof modules === 'string' && (QR_MODULE_SHAPES as readonly string[]).includes(modules)
+        ? (modules as QrModuleShape)
+        : QR_STYLE_PLAIN.modules,
+    eyes:
+      typeof eyes === 'string' && (QR_EYE_SHAPES as readonly string[]).includes(eyes)
+        ? (eyes as QrEyeShape)
+        : QR_STYLE_PLAIN.eyes,
+    dark: isUsableQrDark(dark) ? dark : QR_STYLE_PLAIN.dark,
   };
 }
 

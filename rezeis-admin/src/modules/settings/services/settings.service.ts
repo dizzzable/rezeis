@@ -1898,6 +1898,7 @@ export function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): re
     'iconColors',
     'iconDecor',
     'serversGlobe',
+    'qrStyle',
     'borderRadius',
     'cornerRadii',
     'fontFamily',

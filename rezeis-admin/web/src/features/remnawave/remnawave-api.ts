@@ -182,6 +182,12 @@ export interface RemnawaveSubscriptionTemplate {
 
 export interface RemnawaveHwidStats {
   byPlatform: { platform: string; count: number }[];
+  /**
+   * Devices per client app, summed across platforms by the panel — which reads
+   * both shapes Remnawave has used for this and never counts a device twice.
+   * Optional, so a partial answer degrades to "no data" instead of a crash.
+   */
+  apps?: { app: string; count: number }[];
   stats: {
     totalUniqueDevices: number;
     totalHwidDevices: number;

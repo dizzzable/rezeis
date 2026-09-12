@@ -32,6 +32,18 @@
  * whose paging or pan limits differ between the two would be two viewers, and
  * this workspace has already paid for that kind of drift more than once.
  *
+ * ── The QR renderer → `src/lib/qr/kit/` ───────────────────────────────────
+ *
+ * Two files out of reiwa's `web/src/lib/`: `qr-style.ts`, which draws a styled
+ * QR code from the matrix, and the `qr-options.ts` it imports. The operator
+ * picks a QR style on the branding page and the cabinet draws it; the page's
+ * preview and its contrast verdict run this copy, so what the operator
+ * approves is what subscribers are shown, refused or accepted by the same
+ * colour rule. The source is a shared directory of unrelated modules, so this
+ * kit names what it TAKES (`include`) instead of what it leaves behind: a new
+ * file in reiwa's `lib/` is not this panel's business, and an exclude list
+ * would vendor it silently. `src/lib/qr/qr-kit-manifest.test.ts` freezes it.
+ *
  * Usage:  node scripts/sync-landing-kit.mjs [--check] [--kit <name>]
  *                                           [--source <reiwa-root>]
  *   --check   verify only (exit 1 on drift), copy nothing
@@ -84,6 +96,17 @@ const KITS = [
     // The two viewer components and the hook that opens them: same rules, two
     // design systems, so each app writes its own and shares the arithmetic.
     exclude: new Set(['media-viewer.tsx', 'use-media-viewer.tsx']),
+    note: 'DO NOT EDIT files in kit/ by hand — they are vendored from reiwa',
+  },
+  {
+    name: 'qr',
+    sourcePath: 'web/src/lib',
+    dst: join(webRoot, 'src', 'lib', 'qr', 'kit'),
+    manifest: 'qr-kit.manifest.json',
+    exclude: new Set(),
+    // The source is reiwa's whole `lib/`, so this kit names what it TAKES.
+    // Keep in step with `src/lib/qr/qr-kit-manifest.test.ts`.
+    include: new Set(['qr-options.ts', 'qr-style.ts']),
     note: 'DO NOT EDIT files in kit/ by hand — they are vendored from reiwa',
   },
 ]
@@ -142,7 +165,9 @@ async function syncKit(kit) {
 
   let files
   try {
-    files = await listKitFiles(src, kit.exclude)
+    files = (await listKitFiles(src, kit.exclude)).filter(
+      (rel) => kit.include === undefined || kit.include.has(rel),
+    )
   } catch (err) {
     console.error(`${tag} cannot read kit source ${src}: ${err.message}`)
     console.error(`${tag} pass --source <reiwa-root> or set REIWA_ROOT`)
@@ -150,6 +175,13 @@ async function syncKit(kit) {
   }
   if (files.length === 0) {
     console.error(`${tag} kit source ${src} is empty — refusing to sync`)
+    process.exit(1)
+  }
+  // A kit that names its files gets every one of them or none. Without this,
+  // an upstream rename would vendor the survivors alone and call it a sync.
+  const absent = [...(kit.include ?? [])].filter((rel) => !files.includes(rel))
+  if (absent.length > 0) {
+    console.error(`${tag} kit source ${src} has no ${absent.join(', ')} — refusing to sync part of a kit`)
     process.exit(1)
   }
 

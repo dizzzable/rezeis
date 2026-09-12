@@ -178,6 +178,15 @@ export const en = {
       expired: 'Expired',
       expiring: 'Expiring (7d)',
     },
+    clientAppsChart: {
+      title: 'Client apps',
+      description: 'Devices: {{total}}',
+      other: 'Other',
+      unknown: 'Not identified',
+      empty: 'No device has reported an HWID yet.',
+      unavailable: 'Device statistics are unavailable right now.',
+      note: 'Counts devices, not subscription fetches. Clients that send no HWID are not included.',
+    },
     systemHealth: {
       title: 'System monitoring',
       description: 'Rezeis and Reiwa servers in real-time',

@@ -110,6 +110,19 @@ describe('mapHost', () => {
     );
   });
 
+  it('keeps the subscription formats a host is kept out of', () => {
+    // Out of all six, the host reaches no app and leaves the customer's list;
+    // a panel version that does not send the field excludes nothing.
+    const host = mapHost(rawHost({ excludeFromSubscriptionTypes: ['SINGBOX', 'CLASH'] }));
+    assert.deepEqual(host.excludeFromSubscriptionTypes, ['SINGBOX', 'CLASH']);
+    for (const value of [undefined, null, 'SINGBOX', { SINGBOX: true }]) {
+      assert.deepEqual(
+        mapHost(rawHost({ excludeFromSubscriptionTypes: value })).excludeFromSubscriptionTypes,
+        [],
+      );
+    }
+  });
+
   it('keeps reading everything else off the top level', () => {
     // The nesting is one pair of fields, not the whole row — a "fix" that moved
     // the rest under `inbound` too would break the host table instead.
@@ -131,5 +144,18 @@ describe('mapHost', () => {
       assert.equal(host.configProfileInboundUuid, null);
       assert.deepEqual(host.excludedInternalSquads, []);
     }
+  });
+});
+
+describe('mapHost — the customer-facing description', () => {
+  it('reads the line the operator wrote for customers', () => {
+    const host = mapHost({ uuid: 'h', remark: 'Germany 07 D', serverDescription: 'Германия' });
+    assert.equal(host.serverDescription, 'Германия');
+    assert.equal(host.remark, 'Germany 07 D');
+  });
+
+  it('maps a missing or non-string description to null rather than inventing one', () => {
+    assert.equal(mapHost({ uuid: 'h', remark: 'x' }).serverDescription, null);
+    assert.equal(mapHost({ uuid: 'h', remark: 'x', serverDescription: 42 }).serverDescription, null);
   });
 });

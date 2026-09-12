@@ -295,6 +295,7 @@ describe('SettingsController', () => {
       iconColors: {},
       iconDecor: {},
   serversGlobe: { enabled: true, variant: 'globe', props: {} },
+      qrStyle: { modules: 'square', eyes: 'square', dark: '#000000' },
       borderRadius: '1rem',
       cornerRadii: { cardPx: 24, itemPx: 14, pillPx: 9999 },
       fontFamily: 'Inter',

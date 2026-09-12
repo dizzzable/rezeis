@@ -17,8 +17,8 @@ export function Sparkline({
   values,
   width = 80,
   height = 24,
-  stroke = 'hsl(var(--primary))',
-  fill = 'hsl(var(--primary) / 0.15)',
+  stroke = 'var(--primary)',
+  fill = 'color-mix(in oklab, var(--primary) 15%, transparent)',
   className,
 }: SparklineProps) {
   const { linePath, areaPath } = useMemo(() => buildPaths(values, width, height), [values, width, height])

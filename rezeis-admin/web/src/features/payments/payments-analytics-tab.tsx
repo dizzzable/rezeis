@@ -416,14 +416,14 @@ function ProviderRow({ provider }: { readonly provider: ProviderDetail }): JSX.E
                   <AreaChart data={[...provider.daily]}>
                     <defs>
                       <linearGradient id={`grad-${provider.gatewayType}`} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.4} />
-                        <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                        <stop offset="0%" stopColor="var(--primary)" stopOpacity={0.4} />
+                        <stop offset="100%" stopColor="var(--primary)" stopOpacity={0} />
                       </linearGradient>
                     </defs>
                     <Area
                       type="monotone"
                       dataKey="revenue"
-                      stroke="hsl(var(--primary))"
+                      stroke="var(--primary)"
                       strokeWidth={1.5}
                       fill={`url(#grad-${provider.gatewayType})`}
                       isAnimationActive={false}
@@ -587,23 +587,23 @@ function ProviderDetailPanel({ provider }: { readonly provider: ProviderDetail }
             <AreaChart data={[...provider.daily]} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
               <defs>
                 <linearGradient id={`gradFull-${provider.gatewayType}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.5} />
-                  <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0.05} />
+                  <stop offset="0%" stopColor="var(--primary)" stopOpacity={0.5} />
+                  <stop offset="100%" stopColor="var(--primary)" stopOpacity={0.05} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
               <XAxis dataKey="day" tick={{ fontSize: 10 }} stroke="currentColor" strokeOpacity={0.4} />
               <YAxis tick={{ fontSize: 10 }} stroke="currentColor" strokeOpacity={0.4} width={50} />
               <Tooltip
-                contentStyle={{ background: 'hsl(var(--popover))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 12 }}
-                labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
+                contentStyle={{ background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: 'var(--muted-foreground)' }}
                 formatter={(value, key) => [formatMoney(Number(value ?? 0)), String(key)]}
               />
               <Area
                 type="monotone"
                 dataKey="revenue"
                 name={t('paymentsAnalytics.providers.revenue')}
-                stroke="hsl(var(--primary))"
+                stroke="var(--primary)"
                 fill={`url(#gradFull-${provider.gatewayType})`}
                 isAnimationActive={false}
               />

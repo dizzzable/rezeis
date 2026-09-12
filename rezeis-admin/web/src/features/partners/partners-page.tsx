@@ -273,11 +273,11 @@ function StatCard({
             {sparkline && sparkline.length > 1 && (
               <Sparkline
                 values={sparkline}
-                stroke={accent === 'warning' ? '#facc15' : 'hsl(var(--primary))'}
+                stroke={accent === 'warning' ? '#facc15' : 'var(--primary)'}
                 fill={
                   accent === 'warning'
                     ? 'hsl(48 95% 60% / 0.15)'
-                    : 'hsl(var(--primary) / 0.15)'
+                    : 'color-mix(in oklab, var(--primary) 15%, transparent)'
                 }
               />
             )}

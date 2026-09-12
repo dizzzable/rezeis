@@ -9,6 +9,17 @@
 #    powershell -File rezeis/e2e/run-e2e.ps1
 #    powershell -File rezeis/e2e/run-e2e.ps1 -KeepAlive    # don't tear down
 #    powershell -File rezeis/e2e/run-e2e.ps1 -Reset        # nuke volumes first
+#
+#  NO EM DASH INSIDE A DOUBLE-QUOTED STRING IN THIS FILE. It is UTF-8 with no
+#  BOM, and Windows PowerShell 5.1 reads a BOM-less script as the ANSI code
+#  page: the three bytes of an em dash decode to three characters, the last of
+#  which is U+201D, and PowerShell accepts a curly double quote as a string
+#  TERMINATOR. The string ends at the dash, the rest of the line runs on, and
+#  the error surfaces as "missing the terminator" tens of lines further down.
+#  Comments and single-quoted strings are safe; the box-drawing characters
+#  below carry the same byte and survive only because they come in pairs.
+#  Check a change with:
+#    [System.Management.Automation.Language.Parser]::ParseFile($p,[ref]$t,[ref]$e)
 # ════════════════════════════════════════════════════════════════════════════
 
 param(
@@ -39,6 +50,11 @@ function Ensure-DockerOnline {
 function Bring-StackUp {
   if ($Reset) {
     Step 'Reset: tearing down old stack + volumes'
+    # Runs of the script BEFORE reiwa moved into the compose project left a
+    # standalone `reiwa-e2e-api`. It is not in the project, so `compose down`
+    # neither removes it nor can drop the network it is still attached to —
+    # and the reset then silently leaves the old network and its volumes.
+    cmd /c "docker rm -f -v reiwa-e2e-api 2>nul"
     docker compose -p $projectName -f $composeFile down -v --remove-orphans 2>$null | Out-Null
   }
   Step 'Building images (rezeis-admin + reiwa)'
@@ -142,26 +158,17 @@ function Bootstrap-AdminAndIssueToken {
 function Start-Reiwa {
   param([string]$RezeisToken)
   Step 'Starting reiwa with the freshly-minted token'
-  $env:REZEIS_TOKEN_OVERRIDE = $RezeisToken
-  # Recreate the reiwa container with the new env var. The compose file
-  # has its own `reiwa-e2e-api` definition which we ignore — we run a
-  # standalone container instead so the env var can be substituted at
-  # invocation time without re-templating compose.
-  cmd /c "docker rm -f reiwa-e2e-api 2>nul"
-  & docker run -d `
-    --name reiwa-e2e-api `
-    --hostname reiwa-e2e-api `
-    --network rezeis-e2e `
-    -p 127.0.0.1:15000:5000 `
-    -e NODE_ENV=production `
-    -e PORT=5000 `
-    -e REZEIS_HOST=rezeis-e2e-admin `
-    -e REZEIS_PORT=8000 `
-    -e REZEIS_TOKEN=$RezeisToken `
-    -e REDIS_URL=redis://reiwa-e2e-redis:6379 `
-    -e REIWA_COOKIE_SECRET=e2e-cookie-secret-please-change-me `
-    -e REIWA_PUBLIC_WEB_URL=http://localhost:5500 `
-    reiwa:e2e | Out-Null
+  # The token reaches the container through compose interpolation
+  # (`REZEIS_TOKEN: ${REZEIS_E2E_TOKEN:-e2e-placeholder}`) instead of a
+  # hand-written `docker run`. That run was a SECOND copy of reiwa's env
+  # block with nothing keeping the two in step, and it produced a container
+  # OUTSIDE the compose project — so `compose down` could not remove it and
+  # every teardown depended on remembering to name it separately.
+  $env:REZEIS_E2E_TOKEN = $RezeisToken
+  # A container left behind by a run of the older script holds the name and
+  # is not ours to recreate.
+  cmd /c "docker rm -f -v reiwa-e2e-api 2>nul"
+  docker compose -p $projectName -f $composeFile up -d reiwa-e2e-api
   if ($LASTEXITCODE -ne 0) { throw 'Failed to start reiwa' }
 
   Step 'Waiting for reiwa /api/v1/health (max 60s)'
@@ -179,6 +186,53 @@ function Start-Reiwa {
     throw 'reiwa health did not respond in time'
   }
   Write-Host '  reiwa is up.' -ForegroundColor Green
+}
+
+# Every container this stack declares, and whether it is expected to carry a
+# health probe. Kept next to the compose file it mirrors.
+$ExpectedContainers = @(
+  'rezeis-e2e-db',
+  'rezeis-e2e-redis',
+  'rezeis-e2e-admin',
+  'rezeis-e2e-worker',
+  'reiwa-e2e-redis',
+  'reiwa-e2e-api'
+)
+
+function Assert-StackHealthy {
+  # Only the admin and reiwa are reachable from the runner, so a container
+  # that exits at boot is INVISIBLE to every scenario: the worker publishes
+  # no port and nothing depends_on it, and both redises are only ever
+  # touched through the two APIs. A missing env var there used to read as a
+  # clean 15/15. This is the step that looks.
+  Step 'Verifying every container is up (max 90s)'
+  $deadline = (Get-Date).AddSeconds(90)
+  $bad = @()
+  while ($true) {
+    $bad = @()
+    foreach ($name in $ExpectedContainers) {
+      $raw = (& cmd.exe /c "docker inspect --format ""{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"" $name 2>&1" | Out-String).Trim()
+      if ($raw -notmatch '^[a-z]+\|') { $bad += "${name}: not created"; continue }
+      $parts  = $raw.Split('|')
+      $status = $parts[0]
+      $health = $parts[1]
+      if ($status -ne 'running') { $bad += "${name}: ${status}"; continue }
+      if ($health -ne 'none' -and $health -ne 'healthy') { $bad += "${name}: ${health}" }
+    }
+    if ($bad.Count -eq 0) { break }
+    if ((Get-Date) -gt $deadline) { break }
+    Start-Sleep -Seconds 3
+  }
+  if ($bad.Count -gt 0) {
+    foreach ($name in $ExpectedContainers) {
+      if (($bad -join ' ') -match [regex]::Escape($name)) {
+        Write-Host "── logs: $name ──" -ForegroundColor Yellow
+        cmd /c "docker logs $name --tail 40 2>&1"
+      }
+    }
+    throw "Containers not up: $($bad -join '; ')"
+  }
+  Write-Host "  $($ExpectedContainers.Count)/$($ExpectedContainers.Count) containers running." -ForegroundColor Green
 }
 
 function Run-Tests {
@@ -199,6 +253,25 @@ function Run-Tests {
   }
 }
 
+# Anything of ours still on the daemon. Every filter is anchored to a name
+# this stack owns or to the compose project label, so an unrelated container
+# on the same daemon is never in scope.
+function Get-Stragglers {
+  $left = @()
+  foreach ($name in $ExpectedContainers) {
+    $id = (& cmd.exe /c "docker ps -aq --filter ""name=^/?${name}$"" 2>nul" | Out-String).Trim()
+    if ($id) { $left += "container $name" }
+  }
+  $net = (& cmd.exe /c "docker network ls -q --filter ""name=^rezeis-e2e$"" 2>nul" | Out-String).Trim()
+  if ($net) { $left += 'network rezeis-e2e' }
+  # The database keeps its state in an ANONYMOUS volume (postgres:17-alpine
+  # declares one). `down` alone leaves it; only `down -v` takes it, and the
+  # next run would otherwise find an admin already bootstrapped.
+  $vols = (& cmd.exe /c "docker volume ls -q --filter ""label=com.docker.compose.project=$projectName"" 2>nul" | Out-String).Trim()
+  if ($vols) { $left += "volume(s) $($vols -replace '\r?\n', ' ')" }
+  return ,$left
+}
+
 function Tear-Down {
   if ($KeepAlive) {
     Write-Host ''
@@ -208,11 +281,35 @@ function Tear-Down {
     return
   }
   Step 'Tearing down stack'
-  cmd /c "docker rm -f reiwa-e2e-api 2>nul"
+  # Legacy: reiwa used to be started outside the project by `docker run`.
+  cmd /c "docker rm -f -v reiwa-e2e-api 2>nul"
   cmd /c "docker compose -p $projectName -f `"$composeFile`" down -v --remove-orphans 2>nul"
+
+  # The exit code of that line was discarded along with its output, so a
+  # teardown that removed NOTHING printed the same thing as one that removed
+  # everything — and the next run inherited a database with an admin already
+  # in it. Assert the daemon instead of trusting the command.
+  $left = Get-Stragglers
+  if ($left.Count -gt 0) {
+    Write-Host "  still present: $($left -join ', '), retrying" -ForegroundColor Yellow
+    cmd /c "docker compose -p $projectName -f `"$composeFile`" down -v --remove-orphans 2>&1"
+    $left = Get-Stragglers
+  }
+  if ($left.Count -gt 0) {
+    $script:teardownIncomplete = $true
+    Write-Host ''
+    Write-Host '  TEARDOWN INCOMPLETE — these survived the run:' -ForegroundColor Red
+    foreach ($item in $left) { Write-Host "    $item" -ForegroundColor Red }
+    Write-Host "  remove by hand: docker compose -p $projectName -f ""$composeFile"" down -v" -ForegroundColor Red
+    return
+  }
+  Write-Host '  Nothing of this stack is left on the daemon.' -ForegroundColor Green
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────
+
+$script:teardownIncomplete = $false
+$runFailed = $false
 
 try {
   Ensure-DockerOnline
@@ -221,6 +318,7 @@ try {
   Start-AdminAndWait
   $token = Bootstrap-AdminAndIssueToken
   Start-Reiwa -RezeisToken $token
+  Assert-StackHealthy
   Run-Tests
   Write-Host ''
   Write-Host '════════════════════════════════════════════════════' -ForegroundColor Green
@@ -233,9 +331,17 @@ catch {
   Write-Host '  E2E FAILED' -ForegroundColor Red
   Write-Host "  $_" -ForegroundColor Red
   Write-Host '════════════════════════════════════════════════════' -ForegroundColor Red
-  if (-not $KeepAlive) { Tear-Down }
-  exit 1
+  $runFailed = $true
 }
 finally {
+  # Once. The old shape called Tear-Down from the catch AND from here, so a
+  # failed run tore the stack down twice and the second `compose down` — a
+  # no-op against an empty project — was the one whose output a reader saw.
   Tear-Down
 }
+
+# A stack that outlives a failed run poisons the next one: the database
+# already has an admin, so `hasAdmins` takes the other branch. Surviving
+# containers are a failure in their own right, not a footnote.
+if ($runFailed -or $script:teardownIncomplete) { exit 1 }
+exit 0

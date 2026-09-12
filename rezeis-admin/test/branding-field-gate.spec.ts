@@ -69,6 +69,15 @@ describe('branding update gate', () => {
     assert.deepEqual(extractUpdatedBrandingFields(dto), ['serversGlobe']);
   });
 
+  it('counts the QR style, so a QR-only save is written and not answered 200 with nothing', () => {
+    // The sweep above reaches `qrStyle` too, but only while the interface and
+    // the DTO BOTH carry it; this names the one field the QR tab saves.
+    const dto = plainToInstance(UpdateBrandingSettingsDto, {
+      qrStyle: { modules: 'dots', eyes: 'rounded', dark: '#1e3a8a' },
+    });
+    assert.deepEqual(extractUpdatedBrandingFields(dto), ['qrStyle']);
+  });
+
   it('counts nothing when nothing was sent', () => {
     // The early return this gate feeds is correct behaviour for an empty patch;
     // it is only wrong when a real change reads as empty.

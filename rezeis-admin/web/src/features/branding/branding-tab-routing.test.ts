@@ -61,6 +61,14 @@ describe('branding tab routing', () => {
     expect(tabForBrandingField('serversGlobe')).toBe('servers')
   })
 
+  it('routes the QR style to its own tab, not to the fallback', () => {
+    // Its own tab rather than 'brand': 'brand' IS the fallback, and a field
+    // living there is indistinguishable from one that fell through the chain.
+    // Without this, a too-light colour refused on Save would jump to 'brand'
+    // and mark nothing — the colour input lives on the QR tab only.
+    expect(tabForBrandingField('qrStyle')).toBe('qr')
+  })
+
   it('keeps the tabs it already routed to', () => {
     // A spot check that the chain still means what it says, so a refactor that
     // reorders the `if`s cannot pass on the fallback test alone.

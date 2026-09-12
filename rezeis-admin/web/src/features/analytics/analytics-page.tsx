@@ -561,7 +561,7 @@ function RetentionTab() {
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                 <XAxis dataKey="bound" className="text-xs" />
                 <YAxis className="text-xs" allowDecimals={false} />
-                <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))' }} />
+                <Tooltip contentStyle={{ background: 'var(--card)', border: '1px solid var(--border)' }} />
                 <Area type="monotone" dataKey="users" stroke="#10b981" fill="#10b981" fillOpacity={0.3} />
               </AreaChart>
             </ResponsiveContainer>
@@ -655,7 +655,7 @@ function DailyChart({ daily }: { daily: readonly { date: string; revenue: number
             <XAxis dataKey="label" className="text-xs" />
             <YAxis yAxisId="left" className="text-xs" />
             <YAxis yAxisId="right" orientation="right" className="text-xs" />
-            <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))' }} />
+            <Tooltip contentStyle={{ background: 'var(--card)', border: '1px solid var(--border)' }} />
             <Bar yAxisId="left" dataKey="revenue" fill="#3b82f6" radius={[4, 4, 0, 0]} />
             <Line yAxisId="right" type="monotone" dataKey="newUsers" stroke="#10b981" strokeWidth={2} dot={false} />
             <Line yAxisId="right" type="monotone" dataKey="newSubscriptions" stroke="#f59e0b" strokeWidth={2} dot={false} />

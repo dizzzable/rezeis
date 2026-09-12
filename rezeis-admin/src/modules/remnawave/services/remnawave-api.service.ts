@@ -69,6 +69,7 @@ import {
 import { normalizeBandwidthStats } from './remnawave-bandwidth-stats.normalizer';
 import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
 import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
+import { withHwidApps } from './remnawave-hwid-stats-mapper';
 import { RemnawaveHwidStatsInterface } from '../interfaces/remnawave-hwid-stats.interface';
 import { RemnawaveConfigProfileInterface } from '../interfaces/remnawave-config-profile.interface';
 import {
@@ -2288,7 +2289,14 @@ export class RemnawaveApiService {
           method: 'get',
           url: path,
         });
-        return response.response ?? (response as unknown as RemnawaveHwidStatsInterface);
+        // `apps` is added here, beside what the panel sent, for the dashboard's
+        // client-apps ring: `byApp` sits at the top level on 2.7.x and inside
+        // every platform from 2.8 on, and `withHwidApps` reads both without
+        // ever counting a device twice. Nothing Remnawave sent is reshaped —
+        // the fraud detector reads `byPlatform` verbatim, through its own call.
+        return withHwidApps(
+          response.response ?? (response as unknown as RemnawaveHwidStatsInterface),
+        );
       } catch {
         continue;
       }

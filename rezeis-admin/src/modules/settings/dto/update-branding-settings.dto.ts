@@ -50,11 +50,21 @@ import {
   BrandPaletteSource,
   CARD_GRADIENT_SOURCES,
   CardGradientSource,
+  QR_EYE_SHAPES,
+  QR_MODULE_SHAPES,
+  QrEyeShape,
+  QrModuleShape,
 } from '../interfaces/branding-settings.interface';
 import {
   isSafeBrandingGradient,
   isSafeBrandingGradientOrNone,
 } from '../utils/branding-css.util';
+import {
+  QR_DARK_HEX_PATTERN,
+  QR_MIN_CONTRAST,
+  isUsableQrDark,
+  qrContrastAgainstWhite,
+} from '../utils/branding-qr-style.util';
 
 /**
  * Relative branding assets are intentionally confined to the one upload
@@ -791,6 +801,71 @@ export class CardLogoStyleDto {
   public opacity?: number;
 }
 
+/**
+ * `qrStyle.dark` must contrast at least 7:1 against the white field.
+ *
+ * Refused here, with the measured ratio in the message, rather than stored and
+ * quietly drawn black by the cabinet: the panel is where there is an operator
+ * to tell. The rule is `isUsableQrDark`, shared with the reader, so the two
+ * stages accept exactly the same colours. A value that is not a hex colour at
+ * all is `@Matches`'s to report, so this answers `true` for it — each
+ * validator judges one thing, and the operator is told the one that is wrong.
+ */
+function IsUsableQrDark(validationOptions?: ValidationOptions): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isUsableQrDark',
+      validator: {
+        validate: (value: unknown): boolean =>
+          typeof value !== 'string' ||
+          !QR_DARK_HEX_PATTERN.test(value) ||
+          isUsableQrDark(value),
+        defaultMessage: (args?: ValidationArguments): string => {
+          const value = args?.value;
+          // Floored, so a colour at 6.996:1 is never reported as "7.00:1" in
+          // the same breath as its refusal.
+          const measured =
+            typeof value === 'string' && QR_DARK_HEX_PATTERN.test(value)
+              ? ` at ${(Math.floor(qrContrastAgainstWhite(value) * 100) / 100).toFixed(2)}:1`
+              : '';
+          return `$property must contrast at least ${QR_MIN_CONTRAST}:1 against the white field or a camera cannot tell it from the background (#595959 is the palest grey allowed); received ${describeRejectedValue(value)}${measured}`;
+        },
+      },
+    },
+    validationOptions,
+  );
+}
+
+/**
+ * The QR style block — a flat nested class like `BrandLogoDto`, NOT a bare
+ * record checked by hand like `serversGlobe`. Declared members are what lets
+ * `forbidNonWhitelisted` reach inside the block: a key that is not one of the
+ * three is an honest 400 that names it, and class-transformer drops
+ * `constructor` and `__proto__` before anything reads them.
+ *
+ * ALL THREE MEMBERS ARE REQUIRED. The stored block is replaced whole (see
+ * `mergeBrandingSettings`), so a partial block would put every member it left
+ * out back to plain — an operator's colour gone because a client sent only a
+ * shape. A 400 is the one outcome of that request anybody can see and act on.
+ */
+export class QrStyleDto {
+  @IsIn(QR_MODULE_SHAPES as readonly string[])
+  public modules!: QrModuleShape;
+
+  @IsIn(QR_EYE_SHAPES as readonly string[])
+  public eyes!: QrEyeShape;
+
+  // Trimmed once, exactly as the reader trims, so both stages judge the same
+  // string.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Matches(QR_DARK_HEX_PATTERN, {
+    message: '$property must be an opaque hexadecimal colour with a leading # (#rgb or #rrggbb)',
+  })
+  @IsUsableQrDark()
+  public dark!: string;
+}
+
 /** Explicit subscription-card foreground policy, separate from primary UI text. */
 export class SubscriptionCardTextDto {
   @IsIn(SUBSCRIPTION_CARD_TEXT_MODES as readonly string[])
@@ -1152,6 +1227,22 @@ export class UpdateBrandingSettingsDto {
     variant?: string;
     props?: Record<string, string | number | boolean>;
   };
+
+  /**
+   * The operator's QR style for the referral invite and the partner's
+   * advertising code — never the connect code, which the cabinet always draws
+   * plain. One block with all three members required; see `QrStyleDto`.
+   *
+   * `@ValidateIf` rather than `@IsOptional()`: `@IsOptional()` waves `null`
+   * past every validator below it, the gate then counts `{ qrStyle: null }` as
+   * a change, and the merge would have to invent what `null` means. It is not
+   * a style, so it is a 400 like any other non-object.
+   */
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QrStyleDto)
+  public qrStyle?: QrStyleDto;
 
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))

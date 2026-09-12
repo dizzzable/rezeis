@@ -71,6 +71,7 @@ import {
 } from "./branding-form-schema";
 import { CardEffectSection } from "./card-effect-section";
 import { ServersGlobeSection } from "./servers-globe-section";
+import { QrStyleSection } from "./qr-style-section";
 import { AppBackgroundSection } from "./app-background-section";
 import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots-section";
 import { GradientBuilder } from "./gradient-builder";
@@ -116,6 +117,7 @@ const BRANDING_TABS = [
   'planCards',
   'nav',
   'servers',
+  'qr',
 ] as const;
 type BrandingTab = (typeof BRANDING_TABS)[number];
 
@@ -204,6 +206,7 @@ export function tabForBrandingField(field: string): BrandingTab {
   if (field === 'planCardStyles') return 'planCards';
   if (field.startsWith('nav')) return 'nav';
   if (field === 'serversGlobe') return 'servers';
+  if (field === 'qrStyle') return 'qr';
   return 'brand';
 }
 
@@ -241,6 +244,7 @@ export default function WebReiwaPage() {
     hexInvalid: t('brandingPage.invalidHex'),
     imageUrlInvalid: t('brandingPage.invalidImageUrl'),
     gradientInvalid: t('brandingPage.invalidGradient'),
+    qrDarkTooLight: t('brandingPage.qr.tooLight'),
   }), [t]);
   const brandingSchema = useMemo(
     () => createBrandingFormSchema(validationMessages),
@@ -2194,6 +2198,35 @@ export default function WebReiwaPage() {
                     active
                     value={field.value ?? DEFAULT_SERVERS_GLOBE}
                     onChange={(next) => field.onChange(next)}
+                  />
+                ) : (
+                  <></>
+                )
+              }
+            />
+          </div>
+
+          {/* ── QR codes tab ──────────────────────────────────────────── */}
+          <div className={gate('qr')}>
+            <Controller
+              name="qrStyle"
+              control={form.control}
+              render={({ field }) =>
+                // Mounted only while its own tab is showing, like the globe: it
+                // draws its samples on mount. A refused save switches here
+                // first (`tabForBrandingField`), so the error it is handed is
+                // always read by a mounted section.
+                tab === 'qr' ? (
+                  <QrStyleSection
+                    value={field.value}
+                    onChange={(next) => {
+                      // From here on the live contrast line speaks; a refusal
+                      // about a colour the operator has since changed would
+                      // only contradict it.
+                      form.clearErrors('qrStyle');
+                      field.onChange(next);
+                    }}
+                    darkError={form.formState.errors.qrStyle?.dark?.message}
                   />
                 ) : (
                   <></>

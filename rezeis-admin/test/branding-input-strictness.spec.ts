@@ -3,6 +3,7 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate, type ValidationError } from 'class-validator';
 
@@ -554,6 +555,156 @@ describe('branding PATCH — dictionary payloads', () => {
         }),
       ),
       [],
+    );
+  });
+});
+
+describe('branding PATCH — qrStyle is one whole style a camera can read', () => {
+  /** The cabinet decode test's own "brand navy" case: dots, rounded eyes. */
+  const NAVY_DOTS = { modules: 'dots', eyes: 'rounded', dark: '#1e3a8a' } as const;
+
+  it('accepts a full valid block', async () => {
+    assert.deepEqual(failedPaths(await validatePatch({ qrStyle: NAVY_DOTS })), []);
+    assert.deepEqual(
+      failedPaths(
+        await validatePatch({ qrStyle: { modules: 'square', eyes: 'square', dark: '#000000' } }),
+      ),
+      [],
+    );
+  });
+
+  it('refuses a partial block rather than letting the whole-block merge wipe the rest', async () => {
+    // The stored block is replaced whole, so a block missing a member would
+    // put that member back to plain: `{ modules: 'dots' }` alone would cost
+    // the operator their colour and their eyes, and be answered 200.
+    const cases: ReadonlyArray<readonly [Record<string, unknown>, readonly string[]]> = [
+      [{ modules: 'dots' }, ['qrStyle.eyes', 'qrStyle.dark']],
+      [{ modules: 'dots', eyes: 'rounded' }, ['qrStyle.dark']],
+      [{ dark: '#1e3a8a' }, ['qrStyle.modules', 'qrStyle.eyes']],
+      [{}, ['qrStyle.modules', 'qrStyle.eyes', 'qrStyle.dark']],
+    ];
+    for (const [qrStyle, expected] of cases) {
+      assert.deepEqual(
+        [...failedPaths(await validatePatch({ qrStyle }))].sort(),
+        [...expected].sort(),
+        JSON.stringify(qrStyle),
+      );
+    }
+  });
+
+  it('refuses a shape the cabinet does not draw', async () => {
+    assert.deepEqual(
+      failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, modules: 'diamonds' } })),
+      ['qrStyle.modules'],
+    );
+    assert.deepEqual(
+      failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, eyes: 'dots' } })),
+      ['qrStyle.eyes'],
+    );
+  });
+
+  it("refuses WCAG's 4.5:1 grey, #767676 — under the 7:1 a QR code needs — and says so", async () => {
+    const errors = await validatePatch({ qrStyle: { ...NAVY_DOTS, dark: '#767676' } });
+    assert.deepEqual(failedPaths(errors), ['qrStyle.dark']);
+    const message = allMessages(errors).join(' | ');
+    assert.match(message, /at least 7:1/, message);
+    assert.match(message, /at 4\.54:1/, message);
+  });
+
+  it('never reports a refused colour as 7.00:1 in the same breath as refusing it', async () => {
+    // 6.999258:1. The refusal and the measurement are one sentence, so a
+    // measurement ROUNDED to two places would read "must contrast at least
+    // 7:1 … at 7.00:1" and leave the operator with nothing to act on. No grey
+    // lands this close to the line — #595959 and #5a5a5a straddle it — so
+    // #5a5a5a alone would let a switch to rounding through unnoticed here.
+    const errors = await validatePatch({ qrStyle: { ...NAVY_DOTS, dark: '#0050ca' } });
+    assert.deepEqual(failedPaths(errors), ['qrStyle.dark']);
+    const message = allMessages(errors).join(' | ');
+    assert.match(message, /at 6.99:1/, message);
+    assert.doesNotMatch(message, /7.00:1/, message);
+  });
+
+  it('accepts #595959, the palest grey at 7:1, and refuses #5a5a5a just under it', async () => {
+    assert.deepEqual(
+      failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, dark: '#595959' } })),
+      [],
+    );
+    assert.deepEqual(
+      failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, dark: '#5a5a5a' } })),
+      ['qrStyle.dark'],
+    );
+  });
+
+  it('refuses a colour the reader would silently replace with black', async () => {
+    for (const dark of ['#00000080', '#0000', '000000', 'black', '#12345', 42, null]) {
+      assert.deepEqual(
+        failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, dark } })),
+        ['qrStyle.dark'],
+        JSON.stringify(dark),
+      );
+    }
+  });
+
+  it('refuses an unknown key inside the block, and names it', async () => {
+    assert.deepEqual(
+      failedPaths(
+        await validatePatch({ qrStyle: { ...NAVY_DOTS, logo: 'https://x.example/l.png' } }),
+      ),
+      ['qrStyle.logo'],
+    );
+  });
+
+  it('refuses null and every other non-object instead of resetting the style', async () => {
+    for (const qrStyle of [null, 'dots', 42, true, []]) {
+      assert.equal(
+        failedPaths(await validatePatch({ qrStyle })).includes('qrStyle'),
+        true,
+        JSON.stringify(qrStyle),
+      );
+    }
+  });
+
+  it('meets a constructor key in the block through the real pipe with a 400 or a clean pass — never a 500', async () => {
+    // The global pipe, configured exactly as `main.ts` configures it. Anything
+    // it throws that is not a BadRequestException reaches the global filter
+    // as a 500.
+    const pipe = new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true });
+    const run = async (raw: string): Promise<unknown> => {
+      try {
+        return await pipe.transform(JSON.parse(raw), {
+          type: 'body',
+          metatype: UpdateBrandingSettingsDto,
+          data: '',
+        });
+      } catch (error) {
+        return error;
+      }
+    };
+    const escaped = (outcome: unknown): boolean =>
+      outcome instanceof Error && !(outcome instanceof BadRequestException);
+
+    // Beside a full block: dropped before any validator reads it, so the style
+    // is exactly the three members the operator sent — and a `__proto__` key
+    // cannot smuggle a paler colour in underneath them.
+    for (const raw of [
+      '{"qrStyle":{"modules":"dots","eyes":"rounded","dark":"#1e3a8a","constructor":{}}}',
+      '{"qrStyle":{"modules":"dots","eyes":"rounded","dark":"#1e3a8a","constructor":1}}',
+      '{"qrStyle":{"modules":"dots","eyes":"rounded","dark":"#1e3a8a","__proto__":{"dark":"#ffffff"}}}',
+    ]) {
+      const outcome = await run(raw);
+      assert.equal(escaped(outcome), false, `${raw} escaped the pipe as ${String(outcome)}`);
+      assert.equal(outcome instanceof Error, false, `${raw} was refused: ${String(outcome)}`);
+      assert.deepEqual({ ...(outcome as UpdateBrandingSettingsDto).qrStyle }, NAVY_DOTS, raw);
+    }
+
+    // Instead of a block: a block with no members, so a 400 — not a pass that
+    // the merge would read as "reset the operator's style to plain".
+    const memberless = await run('{"qrStyle":{"constructor":{}}}');
+    assert.equal(escaped(memberless), false, `escaped the pipe as ${String(memberless)}`);
+    assert.equal(
+      memberless instanceof BadRequestException,
+      true,
+      `expected a 400, got ${JSON.stringify(memberless)}`,
     );
   });
 });

@@ -1,15 +1,20 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #  E2E test stack: rezeis-admin (NestJS + worker) ↔ reiwa (BFF + bot)
 #
-#  Architecture mirrors production with one exception: reiwa-bot is started
-#  WITHOUT a real BOT_TOKEN, so grammy stays in degraded mode and doesn't
-#  attempt to talk to api.telegram.org. That keeps the test offline-safe.
+#  Architecture mirrors production: one API process and one worker process off
+#  the SAME rezeis-admin image, split by RUID_PROCESS_ROLE exactly as
+#  rezeis-admin/docker-compose.yml splits them, plus reiwa's BFF API.
+#
+#  There is deliberately NO reiwa-bot service. grammy would need a BOT_TOKEN
+#  and a route to api.telegram.org, and nothing in e2e-runner.ts exercises the
+#  bot — an earlier version of this header described a bot container that was
+#  never declared here.
 #
 #  Containers
 #    - rezeis-e2e-db        Postgres 17  (admin source of truth)
 #    - rezeis-e2e-redis     Valkey 9     (admin BullMQ + cache)
-#    - rezeis-e2e-admin     rezeis-admin NestJS HTTP server
-#    - rezeis-e2e-worker    rezeis-admin background worker (same image)
+#    - rezeis-e2e-admin     rezeis-admin NestJS HTTP server  (role: api)
+#    - rezeis-e2e-worker    rezeis-admin background worker   (role: worker)
 #    - reiwa-e2e-redis      Valkey 9     (reiwa session store)
 #    - reiwa-e2e-api        reiwa BFF API
 #
@@ -77,6 +82,24 @@ services:
       REMNAWAVE_HOST: localhost
       REMNAWAVE_PORT: 3001
       REMNAWAVE_TOKEN: e2e-placeholder
+      # Production refuses to boot without at least one trusted admin origin
+      # (src/common/http/cors-origin.ts): the container exits on env
+      # validation before Nest starts.
+      ADMIN_CORS_ORIGINS: http://localhost:18000
+      # Must equal reiwa’s: reiwa signs internal calls with it and the panel
+      # verifies the HMAC. Test value, and the only place it exists.
+      REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
+      # Production splits the one image into two processes by this variable
+      # (rezeis-admin/docker-compose.yml: `api` here, `worker` below). Unset,
+      # getProcessRole() falls back to `all` — so BOTH containers ran every
+      # @Cron job and every tick fired twice, which is the exact double-firing
+      # the split exists to prevent. The stack was not mirroring production.
+      RUID_PROCESS_ROLE: api
+      # Defaults to http://reiwa:5000 (env.schema.ts), a host that does not
+      # exist on this network: every cabinet push would dial nowhere. Dialled
+      # only once WEBHOOK_SECRET_HEADER is set, which this stack does not set,
+      # so it is correctness for the day a scenario does.
+      REIWA_URL: http://reiwa-e2e-api:5000
     ports:
       - "127.0.0.1:18000:8000"
     depends_on:
@@ -96,7 +119,11 @@ services:
   rezeis-e2e-worker:
     image: rezeis-admin:e2e
     container_name: rezeis-e2e-worker
-    command: ["node", "dist/main.js"]
+    # dist/main.js is the API entrypoint. This container ran a SECOND API —
+    # Dockerfile line 6 and rezeis-admin/docker-compose.yml both say the worker
+    # overrides CMD with dist/worker.js, which is the entrypoint that starts an
+    # application context and never calls app.listen().
+    command: ["node", "dist/worker.js"]
     environment:
       NODE_ENV: production
       REZEIS_DOMAIN: localhost
@@ -119,9 +146,32 @@ services:
       REMNAWAVE_HOST: localhost
       REMNAWAVE_PORT: 3001
       REMNAWAVE_TOKEN: e2e-placeholder
+      # Production refuses to boot without at least one trusted admin origin
+      # (src/common/http/cors-origin.ts): the container exits on env
+      # validation before Nest starts.
+      ADMIN_CORS_ORIGINS: http://localhost:18000
+      # Must equal reiwa’s: reiwa signs internal calls with it and the panel
+      # verifies the HMAC. Test value, and the only place it exists.
+      REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
+      # See the API container above. `worker` runs the @Cron jobs and binds no
+      # port; dist/worker.js defaults to it, but production states it and so
+      # does this, because a role read from two places drifts.
+      RUID_PROCESS_ROLE: worker
+      REIWA_URL: http://reiwa-e2e-api:5000
     depends_on:
       rezeis-e2e-admin:
         condition: service_healthy
+    # Nothing depends_on this container, so without a probe a worker that dies
+    # on boot — a missing env var, a failed migration — leaves the run green:
+    # every scenario talks to the API. `run-e2e.ps1` asserts this status.
+    # Same probe as production (rezeis-admin/docker-compose.yml): the worker
+    # serves no HTTP, so liveness is PID 1 still being there.
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     networks:
       - rezeis-e2e
 
@@ -139,7 +189,9 @@ services:
 
   reiwa-e2e-api:
     build:
-      context: ../reiwa
+      # reiwa is a SIBLING of rezeis, not a child: ../reiwa resolved to
+      # rezeis/reiwa and the build died with "unable to prepare context".
+      context: ../../reiwa
       dockerfile: Dockerfile
     image: reiwa:e2e
     container_name: reiwa-e2e-api
@@ -148,13 +200,31 @@ services:
       PORT: 5000
       REZEIS_HOST: rezeis-e2e-admin
       REZEIS_PORT: 8000
-      # Token is filled in at runtime by `run-e2e.ps1` after the admin
-      # bootstraps and creates an api_token. A placeholder keeps the
-      # zod schema happy until then.
-      REZEIS_TOKEN: e2e-placeholder
+      # `run-e2e.ps1` mints an api_token once the admin is up and exports it as
+      # REZEIS_E2E_TOKEN before `compose up reiwa-e2e-api`. The placeholder
+      # default keeps `compose build` and `compose down` from needing it.
+      #
+      # The script used to start this container with a hand-written
+      # `docker run`, which meant two copies of this env block that nothing
+      # kept in step AND a container outside the compose project, so
+      # `compose down` could not remove it.
+      REZEIS_TOKEN: ${REZEIS_E2E_TOKEN:-e2e-placeholder}
       REDIS_URL: redis://reiwa-e2e-redis:6379
-      REIWA_COOKIE_SECRET: e2e-cookie-secret-please-change-me
+      # REIWA_COOKIE_SECRET used to sit here. reiwa removed it from config and
+      # from .env.example on 2026-07-17 (AUDIT.md): session cookies carry an
+      # opaque UUID and Redis is the authority, so there was nothing to sign.
+      # The schema is a plain z.object, so the stale key was silently stripped
+      # and this stack has been describing a setting the cabinet does not read.
+      #
+      # Not set either: REIWA_COOKIE_SECURE / REIWA_ALLOW_INSECURE_COOKIES.
+      # Unset in production means secure=true (api/app.ts), which is what
+      # .env.example ships and therefore what this mirrors — but it also means
+      # the browser would drop the session cookie over plain http://localhost.
+      # The day a scenario signs in on the cabinet, that is the variable to add.
       REIWA_PUBLIC_WEB_URL: http://localhost:5500
+      # Mandatory for reiwa in production (>= 32 chars) and must match the
+      # panel’s, above.
+      REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
     ports:
       - "127.0.0.1:15000:5000"
     depends_on:

@@ -2,6 +2,14 @@ export interface RemnawaveHostInterface {
   readonly uuid: string;
   readonly viewPosition: number;
   readonly remark: string;
+  /**
+   * The line the operator writes FOR CUSTOMERS on the host in Remnawave —
+   * at most 30 characters, present since Remnawave 2.0.0, and what Happ shows
+   * its user. `remark` is the operator's own naming scheme ("Germany 07 D");
+   * this is the customer-facing one. Null when the operator left it empty.
+   * Optional so every fixture that builds a host by hand keeps compiling.
+   */
+  readonly serverDescription?: string | null;
   readonly address: string;
   readonly port: number;
   readonly isDisabled: boolean;
@@ -35,4 +43,13 @@ export interface RemnawaveHostInterface {
    * matches how those versions behave.
    */
   readonly excludedInternalSquads: readonly string[];
+  /**
+   * The subscription formats the operator kept this host out of — any of
+   * `XRAY_JSON`, `XRAY_BASE64`, `MIHOMO`, `STASH`, `CLASH`, `SINGBOX`.
+   * Remnawave builds each format without the hosts that name it here, so a
+   * host naming all six reaches no app. Empty when the panel does not send
+   * the field. Optional so every fixture that builds a host by hand keeps
+   * compiling.
+   */
+  readonly excludeFromSubscriptionTypes?: readonly string[];
 }

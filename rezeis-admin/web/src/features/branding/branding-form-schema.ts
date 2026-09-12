@@ -1,5 +1,15 @@
 import { z } from 'zod'
 
+// Relative, never `@/`: reiwa's round-trip tests load this file by path, where `@` is the cabinet's src.
+import {
+  QR_STYLE_PLAIN,
+  isUsableDark,
+  resolveQrStyle,
+  type QrEyeShape,
+  type QrModuleShape,
+  type QrStyle,
+} from '../../lib/qr/kit/qr-style'
+
 import { CARD_LOGO_PRESETS, type CardLogoPreset } from './branding-options'
 import { CARD_EFFECT_CATALOG, type CardEffectId } from './card-effect-catalog'
 
@@ -140,6 +150,52 @@ export const DEFAULT_SERVERS_GLOBE: BrandingServersGlobeDraft = {
   props: {},
 }
 
+/**
+ * The QR style, as the form holds it: the cabinet renderer's own `QrStyle`,
+ * from the vendored copy (`web/src/lib/qr/kit`) rather than a restatement of
+ * it, so the form cannot hold a shape the renderer does not draw.
+ */
+export type BrandingQrStyleDraft = QrStyle
+
+/**
+ * The shapes the QR tab offers, in display order. `satisfies` refuses one the
+ * renderer does not know; `qr-style-contract.test.ts` holds the other
+ * direction, and holds both lists to the API's.
+ */
+export const BRANDING_QR_MODULE_SHAPES = [
+  'square',
+  'rounded',
+  'dots',
+] as const satisfies readonly QrModuleShape[]
+export const BRANDING_QR_EYE_SHAPES = ['square', 'rounded'] as const satisfies readonly QrEyeShape[]
+
+/**
+ * The plain code: what the cabinet drew before this setting existed, and what
+ * it keeps drawing for every installation that never opens the tab.
+ */
+export const DEFAULT_QR_STYLE: BrandingQrStyleDraft = QR_STYLE_PLAIN
+
+/**
+ * Ready-made styles for the QR tab. Each is a style the cabinet's decode test
+ * reads through its camera model (`reiwa/web/test/qr-style-decodes.test.ts`),
+ * or one a case there dominates — so the risk of an unreadable code is ours,
+ * not the operator's:
+ *
+ *   plain         — today's code;
+ *   rounded       — rounded modules and eyes in black; the test reads the same
+ *                   shapes at the palest allowed grey, `#595959`;
+ *   dots          — dots with rounded eyes in black; the test reads the same
+ *                   shapes in the navy below, which is lighter;
+ *   roundedColour — rounded modules and eyes in that navy; rounded modules
+ *                   keep more ink than the dots the test reads it with.
+ */
+export const QR_STYLE_PRESETS = [
+  { id: 'plain', style: QR_STYLE_PLAIN },
+  { id: 'rounded', style: { modules: 'rounded', eyes: 'rounded', dark: '#000000' } },
+  { id: 'dots', style: { modules: 'dots', eyes: 'rounded', dark: '#000000' } },
+  { id: 'roundedColour', style: { modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a' } },
+] as const satisfies readonly { readonly id: string; readonly style: BrandingQrStyleDraft }[]
+
 export interface BrandingFormDraft {
   readonly themePresetId: string | null
   readonly themePresetVersion: number | null
@@ -200,6 +256,16 @@ export interface BrandingFormDraft {
   readonly iconColors?: Record<string, string>
   readonly iconDecor?: Record<string, BrandingIconDecorDraft>
   readonly serversGlobe?: BrandingServersGlobeDraft
+  /**
+   * REQUIRED, unlike the optional blocks around it, and on purpose. A field
+   * missing from `DEFAULT_BRANDING_DRAFT` is never compared, so its edits never
+   * leave the page ("No changes to save"); a field missing from the zod object
+   * is stripped, so the page says "Saved" and the value reverts before the
+   * operator's eyes. Required here, either omission is a compile error: the
+   * default stops type-checking, and the schema's transform can no longer
+   * produce the `BrandingFormData` it promises.
+   */
+  readonly qrStyle: BrandingQrStyleDraft
   readonly borderRadius: string
   readonly cornerRadii: BrandingCornerRadiiDraft
   readonly fontFamily: string
@@ -452,6 +518,8 @@ export interface BrandingFormValidationMessages {
   readonly hexInvalid: string
   readonly imageUrlInvalid: string
   readonly gradientInvalid: string
+  /** A QR colour under 7:1 against white — see `qrStyle.dark` in the schema. */
+  readonly qrDarkTooLight: string
 }
 
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
@@ -517,6 +585,7 @@ export const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
   iconColors: {},
   iconDecor: {},
   serversGlobe: DEFAULT_SERVERS_GLOBE,
+  qrStyle: DEFAULT_QR_STYLE,
   borderRadius: 'rounded-2xl',
   cornerRadii: DEFAULT_CORNER_RADII_DRAFT,
   fontFamily: 'Geist Variable, system-ui, sans-serif',
@@ -744,6 +813,26 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
             .refine((value) => Object.keys(value).length <= 64),
         })
         .optional(),
+      // No `.optional()`, deliberately — see `BrandingFormDraft.qrStyle`. The
+      // colour is judged by the cabinet renderer's own `isUsableDark`, from the
+      // vendored copy, so the page refuses exactly what the cabinet would not
+      // draw; the API (`QrStyleDto`) refuses the same set.
+      qrStyle: z.object({
+        modules: z.enum(BRANDING_QR_MODULE_SHAPES),
+        eyes: z.enum(BRANDING_QR_EYE_SHAPES),
+        dark: z
+          .string()
+          .trim()
+          .superRefine((value, ctx) => {
+            // One issue per value, the shape before the contrast, so the
+            // operator is told the one thing that is actually wrong.
+            if (!OPAQUE_HEX_PATTERN.test(value)) {
+              ctx.addIssue({ code: 'custom', message: messages.hexInvalid })
+            } else if (!isUsableDark(value)) {
+              ctx.addIssue({ code: 'custom', message: messages.qrDarkTooLight })
+            }
+          }),
+      }),
       borderRadius: borderRadiusSchema(),
       cornerRadii: cornerRadiiSchema,
       fontFamily: z.string().trim().min(1).max(256),
@@ -896,6 +985,10 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     iconColors: isPlainRecord(input?.iconColors) ? input.iconColors : {},
     iconDecor: normalizeIconDecorDraft(input?.iconDecor),
     serversGlobe: normalizeServersGlobeDraft(input?.serversGlobe),
+    // The cabinet's own reader, from the vendored renderer, so the tab shows
+    // what subscribers are shown: a stored block the cabinet would not draw as
+    // written reads back as what it does draw.
+    qrStyle: resolveQrStyle(input?.qrStyle),
     cornerRadii: normalizeCornerRadiiDraft(
       input?.cornerRadii,
       input?.borderRadius,

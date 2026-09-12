@@ -336,8 +336,8 @@ function TimeseriesCard({
               />
               <Tooltip
                 contentStyle={{
-                  background: 'hsl(var(--popover))',
-                  border: '1px solid hsl(var(--border))',
+                  background: 'var(--popover)',
+                  border: '1px solid var(--border)',
                   borderRadius: 8,
                   fontSize: 12,
                 }}
@@ -431,8 +431,8 @@ function LevelDistributionCard({ from, to }: { readonly from: string; readonly t
               />
               <Tooltip
                 contentStyle={{
-                  background: 'hsl(var(--popover))',
-                  border: '1px solid hsl(var(--border))',
+                  background: 'var(--popover)',
+                  border: '1px solid var(--border)',
                   borderRadius: 8,
                   fontSize: 12,
                 }}
@@ -503,8 +503,8 @@ function GatewayDistributionCard({ from, to }: { readonly from: string; readonly
               </Pie>
               <Tooltip
                 contentStyle={{
-                  background: 'hsl(var(--popover))',
-                  border: '1px solid hsl(var(--border))',
+                  background: 'var(--popover)',
+                  border: '1px solid var(--border)',
                   borderRadius: 8,
                   fontSize: 12,
                 }}
