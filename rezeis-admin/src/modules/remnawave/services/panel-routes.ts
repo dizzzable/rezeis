@@ -25,7 +25,7 @@
  *     the pin matching panel 3.3.2). None of the three is imported from `src/`,
  *     `Dockerfile` stage 1 runs `npm ci --omit=dev`, and so none of the three
  *     reaches the image.
- *   • `@remnawave/contract-v34` (3.4.2) IS DIFFERENT and the sentence above does
+ *   • `@remnawave/contract-v34` (3.4.10) IS DIFFERENT and the sentence above does
  *     not cover it: it sits in `dependencies`, and `panel-infra.client.ts`,
  *     `panel-devices.client.ts` and `panel-users.client.ts` import VALUES from
  *     it, not just types. `--omit=dev` therefore keeps it, and it ships inside
@@ -68,7 +68,7 @@ function seg(value: string): string {
 export const PANEL_ROUTES = {
   // ── Whole-panel reads ────────────────────────────────────────────────────
   // Constants, not builders, and byte-identical across 2.7.3 / 2.8.35 / 3.2.3 /
-  // 3.4.2 — pinned against all four in
+  // 3.4.10 — pinned against all four in
   // `test/remnawave-squad-status-era-decode.spec.ts`. They came off
   // `GetStatusCommand.url` / `GetInternalSquadsCommand.url` /
   // `GetExternalSquadsCommand.url` when those imports left the runtime.

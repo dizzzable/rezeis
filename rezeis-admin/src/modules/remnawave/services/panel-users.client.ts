@@ -128,7 +128,7 @@ export class PanelUsersClient {
   /**
    * `DELETE /api/users/{id}`.
    *
-   * `unknown`, not `{ isDeleted: boolean }`: contract 3.4.2 declares no
+   * `unknown`, not `{ isDeleted: boolean }`: contract 3.4.10 declares no
    * `ResponseSchema` for this route, and 3.x answers `204` with an empty body
    * where 2.x answered `200 {"response":{"isDeleted":true}}`. Inventing a
    * shape here would put a hand-written interface back in exactly the place

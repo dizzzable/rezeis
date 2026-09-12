@@ -530,7 +530,7 @@ export function buildNodeUsersBandwidthPath(now = new Date()): string {
  *
  * This list is the single source of truth for BOTH the runtime drift detector
  * below and `test/remnawave-user-row-era-conformance.spec.ts`, which pins it
- * against the vendor SDK (`@remnawave/contract-v34` → 3.4.2) and against the
+ * against the vendor SDK (`@remnawave/contract-v34` → 3.4.10) and against the
  * OpenAPI document itself. Sharing the constant is deliberate: if the test and
  * the detector each kept their own copy, the detector would eventually report
  * drift that was only our own staleness, and the operator would learn to ignore

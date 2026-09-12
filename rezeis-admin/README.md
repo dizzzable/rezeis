@@ -2,7 +2,7 @@
 
 Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
-- **Version:** `0.9.7.54`
+- **Version:** `0.9.7.55`
 - **Backend:** NestJS 11 · Prisma 7 · PostgreSQL · Redis · BullMQ
 - **Frontend:** React 19 · Vite 8 · TanStack Query 5 · shadcn/ui · Tailwind 4
 
@@ -42,7 +42,7 @@ Upgrading the live panel therefore needs no dependency change here. The Remnawav
 
 Era detection keys on the MAJOR version only (`panel-version.util.ts`), so 3.4.4 is handled exactly as 3.4.1–3.4.3 with no list to extend.
 
-The vendor contracts are the CI oracle for both eras — `@remnawave/backend-contract` (2.7.3), `@remnawave/contract-v28` (2.8.35), `@remnawave/contract-v3` (3.2.3) and `@remnawave/contract-v34` (3.4.2). The guard specs execute them so a drifting route or row shape fails a test at build time instead of against a live panel at run time.
+The vendor contracts are the CI oracle for both eras — `@remnawave/backend-contract` (2.7.3), `@remnawave/contract-v28` (2.8.35), `@remnawave/contract-v3` (3.2.3) and `@remnawave/contract-v34` (3.4.10). The guard specs execute them so a drifting route or row shape fails a test at build time instead of against a live panel at run time.
 
 **Three of the four are devDependencies and stay out of the image; `contract-v34` does not.** `Dockerfile` stage 1 runs `npm ci --omit=dev`, which removes the 2.7, 2.8 and 3.2 pins, and keeps the 3.4 one because `src/` imports it. The check this section used to name proves nothing, because it names the wrong package — run both and the difference is the finding:
 
@@ -51,7 +51,12 @@ npm ls --omit=dev @remnawave/backend-contract   # (empty) — as advertised
 npm ls --omit=dev @remnawave/contract-v34       # present, and therefore in the image
 ```
 
-**The 3.4 pin is one patch behind on one field, deliberately.** `3.4.2` predates the host squad rename, which landed in contract `3.4.3`, so `PanelHost` still names `excludedInternalSquads`. Nothing reads that type for a host — `mapHost` does, and it is tested against the OpenAPI dumps — but do not take the vendor type as the authority here. Bumping the pin also moves every other schema these three clients execute, so it belongs in its own change with its own verification.
+**The 3.4 pin stops at `3.4.10`, and the ceiling has two independent reasons.** It is well past `3.4.3`, where the host squad rename landed, so `PanelHost` names `internalSquads` and knows `ALLOW_ONLY` as panel 3.4 does. What it cannot do is follow the contract to its newest release:
+
+- **`3.4.11` made `tags` REQUIRED on an internal squad.** A genuine 3.3.2 answer does not carry it, so the pinned schema rejects a HEALTHY panel and every squad read is logged as drift. A drift flag that fires on healthy answers carries no information; `test/panel-infra-client.spec.ts` replays a captured 3.3.2 body and asserts the flag stays down, which is what caught this.
+- **`3.4.12` moved to zod 4.5.x.** This repository pins zod at exactly `4.4.3`, and so does the cabinet. A contract on a different zod minor stops deduplicating and installs a SECOND copy, and two zod instances do not share types — the `PanelCommand` boundary in `panel-devices.client.ts` stops compiling.
+
+Going further is a change of its own: the first is a fleet decision about which panel versions the oracle should describe, the second a zod upgrade across both repositories. `mapHost` remains the authority for a host row either way — it reads both shapes and is tested against the OpenAPI dumps, because the fleet runs 2.7 through 3.4 at once.
 
 Contract package versions do NOT track panel versions: panel `3.4.4` ships contract `3.4.15`.
 
@@ -85,7 +90,7 @@ cd web && npm run build # → dist/
 
 Both images are published to GHCR on every push to `main`:
 
-- `ghcr.io/dizzzable/rezeis:v0.9.7.54`
+- `ghcr.io/dizzzable/rezeis:v0.9.7.55`
 - `ghcr.io/dizzzable/rezeis:0.9.7`
 - `ghcr.io/dizzzable/rezeis:sha-<short>`
 

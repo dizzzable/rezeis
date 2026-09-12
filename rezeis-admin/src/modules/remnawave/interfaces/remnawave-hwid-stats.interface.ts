@@ -2,7 +2,7 @@
  * `/api/hwid/devices/stats`, as every vendored Remnawave version sends it.
  *
  * `byApp` moved between versions: 2.7.x sent it at the top level, while 2.8,
- * 3.2, 3.4.2 and 3.4.3 nest one list inside every `byPlatform` entry and send
+ * 3.2, contract 3.4.10 and panel 3.4.3 nest one list inside every `byPlatform` entry and send
  * no top-level list at all. Both are declared optional because both are in the
  * field. Nothing should read either one directly — `summariseHwidApps` reads
  * both and never adds them together, and its answer is `apps`.

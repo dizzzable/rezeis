@@ -37,10 +37,14 @@ import {
  * been renamed between eras, and `getExternalSquadOptions()` threw
  * `ServiceUnavailableException` on EVERY panel with at least one external
  * squad. So a response that fails its schema is logged as drift and handed
- * back anyway. The contract is pinned to one panel minor (3.4.2 ↔ panel 3.3.x)
- * while the fleet runs several, and a required field added in a later minor —
- * `integrationUuids` on nodes, `mapper` on hosts — must not take a feature
- * down on an older one.
+ * back anyway. The contract is pinned to ONE point on the 3.4 line (3.4.10)
+ * while the fleet runs 2.7 through 3.4 at the same time, and a required field
+ * added in a later minor — `integrationUuids` on nodes, `mapper` on hosts,
+ * `tags` on internal squads — must not take a feature down on an older panel.
+ * That last one is why the pin stops where it does: 3.4.11 made squad `tags`
+ * required, which a real 3.3.2 answer does not carry, so pinning past 3.4.10
+ * makes this drift flag fire on a HEALTHY panel — and a flag that fires on
+ * healthy answers is a flag nobody reads.
  *
  * "Lenient" is not "silent": every drift is logged with the command's own
  * description, and the caller still receives typed data it can null-check.

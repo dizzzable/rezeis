@@ -112,7 +112,7 @@ export interface RemnawaveCapabilities {
  * `ip-control/*` family with `connections/*`, and the adapter speaks it.
  *
  * Membership is keyed on `major.minor`, so this set cannot tell 3.4.1 from
- * 3.4.2 and never has: both are the single `'3.4'` entry, and a patch-level
+ * 3.4.10 and never has: both are the single `'3.4'` entry, and a patch-level
  * difference is not something this gate is able to warn about. 3.3.2 is
  * therefore covered by `'3.3'`.
  *

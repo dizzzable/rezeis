@@ -1,6 +1,6 @@
 {
   "name": "rezeis-admin",
-  "version": "0.9.7.54",
+  "version": "0.9.7.55",
   "description": "Rezeis Admin NestJS microservice baseline",
   "private": true,
   "license": "MIT",
@@ -57,7 +57,7 @@
     "@nestjs/websockets": "^11.2.3",
     "@prisma/adapter-pg": "^7.9.0",
     "@prisma/client": "^7.9.0",
-    "@remnawave/contract-v34": "npm:@remnawave/backend-contract@3.4.2",
+    "@remnawave/contract-v34": "npm:@remnawave/backend-contract@3.4.10",
     "@simplewebauthn/server": "^13.3.0",
     "@types/web-push": "^3.6.4",
     "axios": "^1.18.1",

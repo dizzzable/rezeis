@@ -27,7 +27,7 @@ import type {
  * The HWID-device and live-connection half of the panel integration, expressed
  * as calls onto {@link PanelCommandExecutor} with the vendor's own command
  * objects. Every route, verb and schema below arrives from
- * `@remnawave/contract-v34` (= `@remnawave/backend-contract@3.4.2`, the
+ * `@remnawave/contract-v34` (= `@remnawave/backend-contract@3.4.10`, the
  * contract minor that belongs to panel 3.3.x); nothing here is a hand-copied
  * literal that can drift from the panel without a word.
  *
@@ -585,7 +585,7 @@ type PanelHwidDeviceListEnvelope = z.infer<typeof GetUserHwidDevicesCommand.Resp
  * `{ total, devices }`.
  *
  * Derived from the LIST command, and shared with both delete commands, which
- * declare the identical payload in 3.4.2 — `test/panel-devices-client.spec.ts`
+ * declare the identical payload in 3.4.10 — `test/panel-devices-client.spec.ts`
  * pins that against the real schemas so a later contract that splits them
  * cannot leave the deletes silently mistyped.
  */
@@ -599,7 +599,7 @@ type PanelHwidDeviceInventoryEnvelope = z.infer<typeof GetHwidDevicesCommand.Res
  * panel's.
  *
  * The row type is deliberately the SAME `PanelHwidDevice` the per-user list
- * serves. 3.4.2 declares both off `HwidUserDeviceSchema`, so a contract that
+ * serves. 3.4.10 declares both off `HwidUserDeviceSchema`, so a contract that
  * ever splits them fails the compile here rather than letting a caller read a
  * field one of the two routes stopped sending.
  */

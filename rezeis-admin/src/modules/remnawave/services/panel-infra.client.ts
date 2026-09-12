@@ -165,7 +165,7 @@ export class PanelInfraClient {
    *
    * THE PROBE, and the one method here that must survive a panel the pinned
    * contract does not describe — because it is what decides which era the panel
-   * is. Contract 3.4.2 declares `version`, `build` AND `git` all required on
+   * is. Contract 3.4.10 declares `version`, `build` AND `git` all required on
    * this response; a 2.7.4 panel answers `{ version }` and a build that predates
    * the endpoint answers 404. Neither may stop the probe: the executor's lenient
    * response handling hands the drifted payload back rather than rejecting it,
@@ -638,19 +638,32 @@ export type PanelMetadata = z.infer<typeof GetMetadataCommand.ResponseSchema>['r
 
 export type PanelNode = z.infer<typeof GetNodesCommand.ResponseSchema>['response'][number];
 /**
- * STALE ON ONE FIELD, deliberately left so rather than silently bumped.
+ * CURRENT AS OF THE PIN, and the pin has a ceiling with two reasons.
  *
- * The pin is `@remnawave/backend-contract@3.4.2`, and the host squad rename
- * landed in `3.4.3`: this type therefore still says `excludedInternalSquads`,
- * a field panel 3.4 does not send, and lacks `internalSquads`, the one it does.
- * Panel 3.4.1's own OpenAPI already carries the new shape, so the npm package
- * simply trailed the panel by a patch.
+ * `@remnawave/backend-contract@3.4.10` is the newest release this project can
+ * take, and it is well past `3.4.3`, where the host squad rename landed — so
+ * this type names `internalSquads` and knows `ALLOW_ONLY`, as panel 3.4 does.
+ * (`mapHost` is still the authority for a host row: it reads BOTH shapes and is
+ * tested against the OpenAPI dumps in `icon/`, because the fleet also runs 2.7,
+ * 2.8 and 3.3. A vendor type describes one era; the mapper serves all of them.)
  *
- * `mapHost` is the authority for a host row, not this type — it reads both
- * shapes and is tested against the dumps in `icon/`. Bumping the pin is a
- * one-line change, but it also moves every OTHER schema these three clients
- * execute at runtime, so it belongs in a change of its own with its own
- * verification rather than riding along with a subscriber-list fix.
+ * Why not the newest published contract, which is what panel 3.4.4 ships:
+ *
+ *   • **3.4.11 made `tags` REQUIRED on an internal squad.** A genuine 3.3.2
+ *     answer does not carry it, so the pinned schema rejects a healthy panel
+ *     and `PanelCommandExecutor` reports drift on every squad read. Caught by
+ *     `test/panel-infra-client.spec.ts`, which replays a captured 3.3.2 body
+ *     and asserts the drift flag stays down.
+ *   • **3.4.12 moved its zod dependency to 4.5.x.** This project pins zod
+ *     exactly at 4.4.3 — so does the cabinet — and a contract on a different
+ *     minor stops deduplicating and installs a SECOND copy of zod. Two zod
+ *     instances do not share types: the `PanelCommand` boundary in
+ *     `panel-devices.client.ts` stops compiling, and anything comparing schema
+ *     objects across the seam would fail at run time.
+ *
+ * Moving past either needs its own change: the first is a fleet decision about
+ * which panel versions the oracle should describe, the second is a zod upgrade
+ * across both repositories.
  */
 export type PanelHost = z.infer<typeof GetHostsCommand.ResponseSchema>['response'][number];
 export type PanelNodeUsersBandwidth = z.infer<
