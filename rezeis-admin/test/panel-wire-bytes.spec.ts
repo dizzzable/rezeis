@@ -74,8 +74,11 @@ function toWire(config: AxiosLikeConfig): WireRequest {
   if (config.data !== undefined) {
     const context = { ...axios.defaults, headers };
     let data: unknown = config.data;
+    // `InstanceType<typeof …>`, not the bare name: TypeScript 6 resolves `axios`
+    // through its `exports` map to the CommonJS typings the runtime `require`
+    // actually loads, where the named import is a value only.
     const transforms = axios.defaults.transformRequest as unknown as ReadonlyArray<
-      (this: unknown, value: unknown, requestHeaders: AxiosHeaders) => unknown
+      (this: unknown, value: unknown, requestHeaders: InstanceType<typeof AxiosHeaders>) => unknown
     >;
     for (const transform of transforms) data = transform.call(context, data, headers);
     body = typeof data === 'string' ? data : String(data);

@@ -71,7 +71,15 @@ async function bootstrap(): Promise<void> {
   // gateway (handshake carries an admin JWT + credentials), so the WebSocket
   // endpoint isn't open to all origins while HTTP CORS is locked down.
   app.useWebSocketAdapter(new AdminIoAdapter(app, appConfiguration.corsOrigins));
-  app.setGlobalPrefix('api');
+  // `/api` WITH the leading slash. Routes come out the same either way — Nest
+  // adds the slash when it builds them — but @nestjs/platform-express 12.0.1
+  // mounts its not-found handler on this string verbatim, and Express never
+  // matches a mount path that lacks the slash. With `'api'` every unknown
+  // `/api/*` route skipped `AdminSafeExceptionFilter` and answered Express's
+  // HTML "Cannot GET" page instead of the JSON envelope, while typecheck, the
+  // build and the whole suite stayed green. Upstream: nestjs/nest#17647 (fix
+  // pending in #17648). Guarded by `unknown-api-route-envelope.http.spec.ts`.
+  app.setGlobalPrefix('/api');
   // Serve admin-side uploads (FAQ photos/videos, custom icons, branding assets,
   // bot banners) under `/uploads/*`. Files live on disk in
   // `data/uploads/<feature>/...` and are referenced by the corresponding entity

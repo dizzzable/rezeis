@@ -77,7 +77,11 @@ function finish(code) {
 
 function nestCoreVersion() {
   try {
-    return require('@nestjs/core/package.json').version;
+    // Not `require('@nestjs/core/package.json')`: from 12 the package's exports
+    // map (`"./*": "./*.js"`) does not export it, so that threw and the line
+    // below reported "unknown". The manifest sits beside the resolved entry.
+    const entry = require.resolve('@nestjs/core');
+    return JSON.parse(fs.readFileSync(path.join(path.dirname(entry), 'package.json'), 'utf8')).version;
   } catch {
     return 'unknown';
   }

@@ -25,9 +25,15 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "baseUrl": "./",
     "incremental": true,
     "skipLibCheck": true,
+    // TypeScript 6 turns `strict` on when it is absent, which would switch on
+    // every strict flag this file does not name. Stated explicitly, the set is
+    // the one TypeScript 5.9 applied, except `alwaysStrict`: 6 keeps it on
+    // unless it is set to `false`, a value 6 deprecates. That changes nothing
+    // here — every file is a module, and modules were already parsed and
+    // emitted as strict code. The ratchet is the flags below.
+    "strict": false,
     "strictNullChecks": true,
     "noImplicitAny": true,
     "strictBindCallApply": false,
@@ -35,9 +41,8 @@
     "noFallthroughCasesInSwitch": false,
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "ignoreDeprecations": "5.0",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   // `ts-node` builds its program by FOLLOWING IMPORTS from the entry file and
