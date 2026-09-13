@@ -209,7 +209,7 @@ describe('UpdateAntiFraudSettingsDto — the first of two gates', () => {
       ['subscriptionUa', 'uaEvidenceWindowMinutes', 14],
       ['subscriptionUa', 'uaEvidenceWindowMinutes', 361],
       ['subscriptionUa', 'uaRequestPageSize', 99],
-      ['subscriptionUa', 'uaRequestPageSize', 2001],
+      ['subscriptionUa', 'uaRequestPageSize', 1001],
     ];
     for (const [section, field, value] of outOfRange) {
       const errors = await errorsFor({ [section]: { [field]: value } });
@@ -223,7 +223,7 @@ describe('UpdateAntiFraudSettingsDto — the first of two gates', () => {
         subscriptionUa: {
           enableSubscriptionUaTunnel: true,
           uaEvidenceWindowMinutes: 120,
-          uaRequestPageSize: 1500,
+          uaRequestPageSize: 900,
         },
       }),
       [],

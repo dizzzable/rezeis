@@ -383,7 +383,7 @@ describe('SubscriptionUaDetectors — the operator switch', () => {
       stored: {
         subscriptionUa: {
           enableSubscriptionUaTunnel: true,
-          uaRequestPageSize: 1200,
+          uaRequestPageSize: 900,
           uaEvidenceWindowMinutes: 15,
         },
       },
@@ -395,7 +395,7 @@ describe('SubscriptionUaDetectors — the operator switch', () => {
 
     const candidates = await harness.detectors.detectSubscriptionUaTunnel(NOW);
 
-    assert.deepEqual(harness.pageSizesRequested(), [1200]);
+    assert.deepEqual(harness.pageSizesRequested(), [900]);
     const metadata = candidates[0].metadata as { occurrences: number; windowMinutes: number };
     assert.equal(metadata.windowMinutes, 15);
     assert.equal(

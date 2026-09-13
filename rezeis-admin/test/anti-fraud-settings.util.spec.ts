@@ -280,13 +280,13 @@ describe('mergeAntiFraudSettings — rejects, never clamps', () => {
     assert.deepEqual(
       mergeAntiFraudSettings(
         {},
-        { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 1200 } },
+        { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 900 } },
       ),
-      { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 1200 } },
+      { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 900 } },
     );
     assert.throws(
       () => mergeAntiFraudSettings({}, { subscriptionUa: { uaRequestPageSize: 50 } }),
-      /antiFraudSettings\.subscriptionUa\.uaRequestPageSize must be an integer between 100 and 2000/,
+      /antiFraudSettings\.subscriptionUa\.uaRequestPageSize must be an integer between 100 and 1000/,
     );
     assert.throws(
       () => mergeAntiFraudSettings({}, { subscriptionUa: { uaEvidenceWindowMinutes: 361 } }),
@@ -393,11 +393,11 @@ describe('toAntiFraudSettingsView', () => {
     );
 
     const stored = toAntiFraudSettingsView(
-      { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 2000 } },
+      { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 1000 } },
       {},
     );
     assert.equal(stored.effective.subscriptionUa.enableSubscriptionUaTunnel, true);
-    assert.equal(stored.effective.subscriptionUa.uaRequestPageSize, 2000);
+    assert.equal(stored.effective.subscriptionUa.uaRequestPageSize, 1000);
     assert.equal(
       stored.effective.subscriptionUa.uaEvidenceWindowMinutes,
       60,
@@ -407,6 +407,21 @@ describe('toAntiFraudSettingsView', () => {
       'enableSubscriptionUaTunnel',
       'uaRequestPageSize',
     ]);
+  });
+
+  it('drops a page size saved under the old 2000 ceiling to the default, never clamps it', () => {
+    // The ceiling came down from 2000 to the panel's own 1000, so a panel can
+    // hold a value the form accepted and every panel release refused. It must
+    // read as not set — the detector runs on the default again instead of
+    // failing every run — and never as 1000: a clamp on read is the shipped
+    // defect the file header describes.
+    const view = toAntiFraudSettingsView(
+      { subscriptionUa: { enableSubscriptionUaTunnel: true, uaRequestPageSize: 2000 } },
+      {},
+    );
+    assert.equal(view.effective.subscriptionUa.uaRequestPageSize, 500);
+    assert.deepEqual(view.overridden.subscriptionUa, ['enableSubscriptionUaTunnel']);
+    assert.equal(view.stored.subscriptionUa?.uaRequestPageSize, 2000, 'the stored value is shown as it is');
   });
 
   it('ships the documented bounds so the form never restates them', () => {
@@ -452,7 +467,7 @@ describe('toAntiFraudSettingsView', () => {
     assert.deepEqual(ranges.subscriptionUa.uaRequestPageSize, {
       default: 500,
       min: 100,
-      max: 2000,
+      max: 1000,
       integer: true,
     });
     assert.deepEqual(Object.keys(ranges.subscriptionUa).sort(), [

@@ -63,6 +63,12 @@ export interface SubscriptionUaDetectionConfig {
    *
    * 500 is one request and matches the page size the adapter already uses for
    * the panel user walk.
+   *
+   * The ceiling is 1000 because the panel's is: every supported release, 2.7
+   * through 3.4, refuses `size` above 1000. It used to be 2000, so any value
+   * from 1001 up was saved without complaint and then refused on every run,
+   * and the detector logged "request log is not readable" and saw nothing.
+   * `subscription-ua-page-size-cap.spec.ts` holds the ceiling to each contract.
    */
   readonly uaRequestPageSize: number;
 }
@@ -78,7 +84,7 @@ export interface SubscriptionUaDetectionConfig {
  */
 export const SUBSCRIPTION_UA_TUNABLE_RANGES = {
   uaEvidenceWindowMinutes: { default: 60, min: 15, max: 360, integer: true },
-  uaRequestPageSize: { default: 500, min: 100, max: 2000, integer: true },
+  uaRequestPageSize: { default: 500, min: 100, max: 1000, integer: true },
 } as const satisfies Record<string, NumericTunableRange>;
 
 /** Default for the boolean subscription-UA tunable (nothing to range-check). */
