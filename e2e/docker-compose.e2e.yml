@@ -23,6 +23,15 @@
 #  and reiwa (5000) ports are bound to 127.0.0.1 for the test runner.
 # ═══════════════════════════════════════════════════════════════════════════
 
+# The panel → cabinet relay secret, written ONCE and aliased into all three
+# containers that need it. The two repositories name it differently —
+# `WEBHOOK_SECRET_HEADER` on the panel, `REZEIS_WEBHOOK_SECRET` on reiwa — and
+# a pair that differs by a byte is exactly how a real install breaks the relay:
+# every save still succeeds and the cabinet quietly catches up a minute later.
+# Three hand-copied literals could drift the same way. Test value; the panel's
+# format is 64-256 alphanumerics.
+x-relay-secret: &relay-secret e2eRelaySecretNotForProduction0123456789abcdef0123456789abcdef01
+
 services:
   rezeis-e2e-db:
     image: postgres:17-alpine
@@ -58,6 +67,11 @@ services:
     build:
       context: ../rezeis-admin
       dockerfile: Dockerfile
+      # Stamped with the run's id so run-e2e.ps1 can tell THIS build's image
+      # from one left by an earlier run. A label is image metadata only: every
+      # cached layer stays cached. See Get-ImagesNotBuiltByThisRun.
+      labels:
+        org.rezeis.e2e.build: ${E2E_BUILD_ID:-unstamped}
     image: rezeis-admin:e2e
     container_name: rezeis-e2e-admin
     environment:
@@ -96,10 +110,13 @@ services:
       # the split exists to prevent. The stack was not mirroring production.
       RUID_PROCESS_ROLE: api
       # Defaults to http://reiwa:5000 (env.schema.ts), a host that does not
-      # exist on this network: every cabinet push would dial nowhere. Dialled
-      # only once WEBHOOK_SECRET_HEADER is set, which this stack does not set,
-      # so it is correctness for the day a scenario does.
+      # exist on this network: every cabinet push would dial nowhere.
       REIWA_URL: http://reiwa-e2e-api:5000
+      # Without it the relay is OFF, not failing: `ReiwaRelayQueueService.enqueue`
+      # returns before queuing anything, so no cache invalidation, notification
+      # or broadcast ever left the panel on this stack and nothing noticed.
+      # Scenario 17 is what sees it now.
+      WEBHOOK_SECRET_HEADER: *relay-secret
     ports:
       - "127.0.0.1:18000:8000"
     depends_on:
@@ -158,6 +175,13 @@ services:
       # does this, because a role read from two places drifts.
       RUID_PROCESS_ROLE: worker
       REIWA_URL: http://reiwa-e2e-api:5000
+      # Needed HERE too, not only on the API. The worker loads the full
+      # AppModule (src/worker.ts), so both processes consume the `reiwa-relay`
+      # queue, and a job is signed with the env of whichever one picks it up.
+      # Set on the API alone, the jobs the worker takes fail as `disabled` —
+      # permanently, no retry — and the relay works only when the API process
+      # happens to take the job.
+      WEBHOOK_SECRET_HEADER: *relay-secret
     depends_on:
       rezeis-e2e-admin:
         condition: service_healthy
@@ -193,6 +217,8 @@ services:
       # rezeis/reiwa and the build died with "unable to prepare context".
       context: ../../reiwa
       dockerfile: Dockerfile
+      labels:
+        org.rezeis.e2e.build: ${E2E_BUILD_ID:-unstamped}
     image: reiwa:e2e
     container_name: reiwa-e2e-api
     environment:
@@ -225,6 +251,10 @@ services:
       # Mandatory for reiwa in production (>= 32 chars) and must match the
       # panel’s, above.
       REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
+      # Verifies the relay's `X-Rezeis-Signature`. Unset, `POST
+      # /api/v1/webhooks/rezeis` answers 401 to everything, the panel's own
+      # WEBHOOK_SECRET_HEADER notwithstanding.
+      REZEIS_WEBHOOK_SECRET: *relay-secret
     ports:
       - "127.0.0.1:15000:5000"
     depends_on:

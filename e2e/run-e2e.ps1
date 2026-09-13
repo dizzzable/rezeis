@@ -47,6 +47,23 @@ function Ensure-DockerOnline {
   }
 }
 
+$E2EImages = @('rezeis-admin:e2e', 'reiwa:e2e')
+
+# Every stack image that does NOT carry this run's build id, with the id it
+# carries instead. Compose stamps the id as a label (docker-compose.e2e.yml).
+function Get-ImagesNotBuiltByThisRun {
+  $stale = @()
+  foreach ($image in $E2EImages) {
+    $raw = (& cmd.exe /c "docker image inspect --format ""{{json .Config.Labels}}"" $image 2>nul" | Out-String).Trim()
+    if (-not $raw) { $stale += "$image (missing)"; continue }
+    $labels = $raw | ConvertFrom-Json
+    $stamp = $null
+    if ($labels) { $stamp = $labels.'org.rezeis.e2e.build' }
+    if ($stamp -ne $env:E2E_BUILD_ID) { $stale += "$image (carries build id '$stamp')" }
+  }
+  return ,$stale
+}
+
 function Bring-StackUp {
   if ($Reset) {
     Step 'Reset: tearing down old stack + volumes'
@@ -60,16 +77,31 @@ function Bring-StackUp {
   Step 'Building images (rezeis-admin + reiwa)'
   # `docker compose build` on Docker 29+ on Windows occasionally returns
   # a non-zero exit code through the buildx layer even on a fully
-  # successful build (compose-bake / metadata edge case). We swallow the
-  # error and verify the produced images instead — much more robust.
-  $ErrorActionPreference = 'Continue'
-  & docker compose -p $projectName -f $composeFile build 2>&1 | ForEach-Object { Write-Host $_ }
-  $ErrorActionPreference = 'Stop'
-  $haveAdmin = (docker images -q rezeis-admin:e2e | Out-String).Trim()
-  $haveReiwa = (docker images -q reiwa:e2e | Out-String).Trim()
-  if (-not $haveAdmin) { throw 'rezeis-admin:e2e image was not produced' }
-  if (-not $haveReiwa) { throw 'reiwa:e2e image was not produced' }
-  Write-Host '  Both images present.' -ForegroundColor Green
+  # successful build (compose-bake / metadata edge case), so its exit code
+  # cannot be the verdict. Neither can "the image exists": a FAILED build
+  # leaves the previous run's image under the same tag. On 2026-09-13 a
+  # network reset inside `npm ci` cancelled both builds, and the stand went on
+  # to pass 17/17 against a panel and a cabinet a day and a half old. The
+  # verdict is the build id compose stamps on each image, fresh for this run.
+  $env:E2E_BUILD_ID = [guid]::NewGuid().ToString('N')
+  $maxAttempts = 2
+  $stale = @()
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    $ErrorActionPreference = 'Continue'
+    & docker compose -p $projectName -f $composeFile build 2>&1 | ForEach-Object { Write-Host $_ }
+    $ErrorActionPreference = 'Stop'
+    $stale = Get-ImagesNotBuiltByThisRun
+    if ($stale.Count -eq 0) { break }
+    # A cancelled build is usually the network (npm ci pulls ~1000 packages
+    # per image); one more attempt reuses every layer that did finish.
+    if ($attempt -lt $maxAttempts) {
+      Write-Host "  not rebuilt by this run: $($stale -join ', '); building again" -ForegroundColor Yellow
+    }
+  }
+  if ($stale.Count -gt 0) {
+    throw "Images not rebuilt by this run: $($stale -join '; '). The build failed, see its output above."
+  }
+  Write-Host '  Both images rebuilt by this run.' -ForegroundColor Green
 
   Step 'Starting infrastructure (db + redis x2)'
   docker compose -p $projectName -f $composeFile up -d rezeis-e2e-db rezeis-e2e-redis reiwa-e2e-redis

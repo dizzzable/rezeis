@@ -20,12 +20,15 @@
  *  10. Phase 8 — Bulk users (no-op on empty user table; verifies validation).
  *  11. Phase 9 — Update checker.
  *  12. Reiwa side — health, branding, public-config proxy, bootstrap user.
+ *  13. Relay — a branding save reaches the cabinet through the panel's signed
+ *      webhook, and a webhook the panel did not sign is refused.
  *
  * Add new scenarios as plain functions and append them to SCENARIOS. Forgetting
  * the second half is caught before the first request goes out — see
  * `assertEveryScenarioIsRegistered`.
  */
 
+import { createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -557,6 +560,146 @@ async function scenarioReiwaPlansProxy(ctx: ScenarioContext): Promise<string> {
   return `200 OK · plans=${count}`;
 }
 
+// ── Panel → cabinet relay ──────────────────────────────────────────────────
+
+/**
+ * How long reiwa serves public-config from memory before asking the panel
+ * again: `CACHE_TTL_MS` in reiwa's `src/api/routes/branding.ts`. Restated here
+ * only to size the deadline below and to print next to the measured times.
+ */
+const CABINET_PUBLIC_CONFIG_TTL_MS = 60_000;
+
+/**
+ * How long a saved brand name may take to show in the cabinet. Far below the
+ * cache TTL on purpose: arriving by expiry is exactly what must not pass.
+ */
+const RELAY_DEADLINE_MS = 15_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function cabinetBrandName(ctx: ScenarioContext): Promise<string> {
+  const res = await ctx.reiwa.get<{ branding: { brandName: string } }>('/api/v1/public-config');
+  expectStatus(res, 200, 'GET reiwa /api/v1/public-config');
+  return res.data.branding.brandName;
+}
+
+/** Saves `name` on the panel and returns how long the cabinet took to show it. */
+async function saveBrandNameAndWaitForCabinet(
+  ctx: ScenarioContext,
+  auth: Record<string, string>,
+  name: string,
+): Promise<number> {
+  const started = Date.now();
+  const saved = await ctx.admin.patch<{ brandName: string }>(
+    '/admin/settings/branding',
+    { brandName: name },
+    { headers: auth },
+  );
+  expectStatus(saved, 200, `PATCH /admin/settings/branding (brandName "${name}")`);
+  assert(saved.data.brandName === name, `the panel stored "${saved.data.brandName}", not "${name}"`);
+
+  let shown = '';
+  while (Date.now() - started < RELAY_DEADLINE_MS) {
+    shown = await cabinetBrandName(ctx);
+    if (shown === name) return Date.now() - started;
+    await sleep(250);
+  }
+  throw new Error(
+    `the cabinet still shows "${shown}" ${RELAY_DEADLINE_MS} ms after the panel saved "${name}": ` +
+      'the relay did not arrive. Check that WEBHOOK_SECRET_HEADER on BOTH panel containers equals ' +
+      "reiwa's REZEIS_WEBHOOK_SECRET, and look for `reiwa relay` in the admin and worker logs " +
+      'and for "rezeis webhook: rejected" in reiwa\'s.',
+  );
+}
+
+/**
+ * THE RELAY CARRIES AN OPERATOR'S SAVE TO THE CABINET.
+ *
+ * Everything the cabinet caches from the panel — theme, landing, access mode,
+ * the connect screen — and every notification and broadcast reaches it over
+ * one hop: the panel queues the event (`reiwa-relay`), a processor POSTs it to
+ * `<REIWA_URL>/api/v1/webhooks/rezeis` signed with WEBHOOK_SECRET_HEADER, and
+ * reiwa checks that signature against REZEIS_WEBHOOK_SECRET before acting.
+ * Each half has unit tests; nothing checked that the halves agree. When they
+ * do not, nothing errors where anyone looks: the save succeeds, the relay job
+ * fails in a queue, and the cabinet shows the change a minute later, by cache
+ * expiry. This stack did not even set the secret until this scenario existed.
+ *
+ * Observed through the brand name reiwa serves from its 60 s public-config
+ * cache: a save must show up well inside that minute.
+ *
+ * WHY THE NAME IS CHANGED TWICE. The first change can arrive by plain expiry:
+ * scenario 14 filled that cache, and it may be nearly a minute old by now. The
+ * second change cannot. The payload that showed the first change was fetched
+ * from the panel AFTER the first save, so without the relay the cabinet keeps
+ * serving it until at least a minute after that save — while the second change
+ * has to appear within `RELAY_DEADLINE_MS` of a save made no more than
+ * `RELAY_DEADLINE_MS` after the first. The second change is therefore the
+ * proof, and it also puts the operator's name back.
+ */
+async function scenarioRelayCarriesBrandingToCabinet(ctx: ScenarioContext): Promise<string> {
+  const auth = { Authorization: `Bearer ${ctx.bearerToken}` };
+  const current = await ctx.admin.get<{ brandName: string }>('/admin/settings/branding', {
+    headers: auth,
+  });
+  expectStatus(current, 200, 'GET /admin/settings/branding');
+  const original = current.data.brandName;
+  // Something for the first save to replace: the cabinet has a cached copy.
+  await cabinetBrandName(ctx);
+
+  const marker = `e2e relay ${Date.now().toString(36)}`;
+  assert(marker !== original, 'the marker name must differ from the saved one');
+  let restored = false;
+  try {
+    const away = await saveBrandNameAndWaitForCabinet(ctx, auth, marker);
+    const back = await saveBrandNameAndWaitForCabinet(ctx, auth, original);
+    restored = true;
+    return `save → cabinet: ${away} ms, ${back} ms (cache TTL ${CABINET_PUBLIC_CONFIG_TTL_MS} ms)`;
+  } finally {
+    if (!restored) {
+      // Leave the panel's name as it was even when the relay is broken; the
+      // cabinet then catches up by expiry, which is the failure being reported.
+      await ctx.admin
+        .patch('/admin/settings/branding', { brandName: original }, { headers: auth })
+        .catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * A WEBHOOK THE PANEL DID NOT SIGN CHANGES NOTHING.
+ *
+ * `POST /api/v1/webhooks/rezeis` is on reiwa's PUBLIC domain by design (the
+ * panel may run on another host), and what it accepts drops caches and makes
+ * the bot message subscribers. Its signature check is therefore the whole
+ * boundary. Both refusals are the same 401, so this cannot tell "wrong secret"
+ * from "no secret configured" — scenario 17 is what proves the right one is.
+ * What this pins is the regression neither unit suite would put in front of a
+ * running process: a receiver that answers 2xx to anyone.
+ */
+async function scenarioRelayRefusesForgedEvents(ctx: ScenarioContext): Promise<string> {
+  const body = JSON.stringify({
+    event: 'reiwa.branding.invalidate',
+    metadata: { reason: 'e2e-forged' },
+  });
+  const json = { 'Content-Type': 'application/json' };
+
+  const unsigned = await ctx.reiwa.post('/api/v1/webhooks/rezeis', body, { headers: json });
+  expectStatus(unsigned, 401, 'POST reiwa /api/v1/webhooks/rezeis with no signature');
+
+  // Well-formed and fresh, keyed by a secret nobody configured: this reaches the
+  // HMAC comparison itself instead of failing in the header parser.
+  const t = Math.floor(Date.now() / 1000);
+  const v1 = createHmac('sha256', randomBytes(32).toString('hex')).update(`${t}.${body}`).digest('hex');
+  const forged = await ctx.reiwa.post('/api/v1/webhooks/rezeis', body, {
+    headers: { ...json, 'X-Rezeis-Signature': `t=${t},v1=${v1}` },
+  });
+  expectStatus(forged, 401, 'POST reiwa /api/v1/webhooks/rezeis signed with the wrong secret');
+  return 'unsigned → 401 · wrong secret → 401';
+}
+
 // ── Scenario list ──────────────────────────────────────────────────────────
 
 const SCENARIOS: Array<{ name: string; run: (ctx: ScenarioContext) => Promise<string> }> = [
@@ -575,6 +718,8 @@ const SCENARIOS: Array<{ name: string; run: (ctx: ScenarioContext) => Promise<st
   { name: '13 · Reiwa · Health', run: scenarioReiwaHealth },
   { name: '14 · Reiwa · Branding/public-config proxy', run: scenarioReiwaProxiesBranding },
   { name: '15 · Reiwa · Plans proxy', run: scenarioReiwaPlansProxy },
+  { name: '16 · Relay · Forged webhook refused', run: scenarioRelayRefusesForgedEvents },
+  { name: '17 · Relay · Branding save reaches the cabinet', run: scenarioRelayCarriesBrandingToCabinet },
 ];
 
 /**
