@@ -33,9 +33,13 @@ import usdtUrl from '@/assets/currency/Usdt.svg'
 
 /**
  * Currency codes recognised by our backend. We keep this in sync with the
- * Prisma `Currency` enum manually — the backend exports the same set in
- * `src/common/types/prisma-enums.ts`. If you add a new code there, add
- * an entry here too (and ship a vendor SVG into `src/assets/currency/`).
+ * Prisma `Currency` enum manually — the source of truth is `enum Currency` in
+ * `rezeis-admin/prisma/schema.prisma`. If a code is added there, add an entry
+ * here too (and ship a vendor SVG into `src/assets/currency/`).
+ *
+ * This used to point at a hand-written mirror, `src/common/types/prisma-enums.ts`,
+ * which was deleted on 13.09.2026 after it was found to disagree with the schema
+ * in five enums. A list maintained by hand drifts; point at the schema itself.
  */
 export type CurrencyCode =
   | 'USD'

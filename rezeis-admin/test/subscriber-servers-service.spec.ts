@@ -266,6 +266,22 @@ describe('the shared snapshot', () => {
     assert.deepEqual(cacheWrites, []);
   });
 
+  it('tells the operator, at warn, that the panel returned no hosts', async () => {
+    // The one branch of the diagnosis that had no assertion anywhere. It is
+    // also the one an operator most needs to see: an empty host list is what a
+    // Remnawave outage looks like from here (`getAllHosts` swallows its own
+    // failure and answers `[]`), so it must reach the Logs page — `warn`, not
+    // `debug`, which production floors out — and it must say "the panel", so
+    // nobody goes looking at squads or plans for a fault that is upstream.
+    const { service, logs } = makeService({ hosts: [] });
+    const result = await service.getForSubscription('user-1', 'sub-1');
+    assert.deepEqual(result, { servers: [], recommendedServerId: null });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0]?.level, 'warn');
+    assert.match(logs[0]?.message ?? '', /the panel returned no hosts/);
+    assert.match(logs[0]?.message ?? '', /sub-1/);
+  });
+
   it('refuses to cache a snapshot with no nodes', async () => {
     // Same failure, different half: every server would read `unknown` with no
     // recommendation, for everyone, for the length of the TTL.

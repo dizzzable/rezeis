@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import type { PurchaseChannel } from '@prisma/client';
 import OpenAI from 'openai';
 import type { ChatCompletionTool } from 'openai/resources/chat/completions';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { PurchaseChannel } from '../../../common/types/prisma-enums';
 import type { PlanCatalogQueryContextInterface } from '../../plans/interfaces/plan-catalog.interface';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { FaqService } from '../../faq/services/faq.service';
