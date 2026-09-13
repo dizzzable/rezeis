@@ -14,7 +14,7 @@ import { PanelUsersClient } from '../src/modules/remnawave/services/panel-users.
 
 /**
  * A captured 3.3.2 answer, so the happy paths below do not have to invent a
- * user row — and so the executor has nothing to log drift about.
+ * user row.
  */
 const CAPTURED_USER = JSON.parse(
   readFileSync('test/fixtures/remnawave/3.3.2/user.json', 'utf8'),
@@ -101,17 +101,15 @@ function panelUsersMock(
         return { kind: 'network' as const, detail: 'ECONNREFUSED' };
       }
       if (behaviour === 'unreadable') {
-        // A 2xx the executor could not validate is handed back RAW, drift flag
-        // set — so `expireAt` can be anything at all, including nothing.
+        // A 2xx body is handed back RAW — nothing validates it — so `expireAt`
+        // can be anything at all, including nothing.
         return {
           kind: 'ok' as const,
-          drifted: true,
           data: { response: { ...CAPTURED_USER.response, expireAt: 'not-a-date' } },
         };
       }
       return {
         kind: 'ok' as const,
-        drifted: false,
         data: {
           response: {
             ...CAPTURED_USER.response,
@@ -326,8 +324,8 @@ describe('ExpiredProfileCleanupService', () => {
   });
 
   it('defers instead of deleting when the panel answers 2xx with an unreadable expiry', async () => {
-    // The executor is LENIENT: a 2xx whose body fails the contract is handed
-    // back raw with `drifted: true`, so `expireAt` reaches the sweep as
+    // Nothing validates a panel answer on its way to the sweep: a 2xx body is
+    // handed over as the panel sent it, so `expireAt` reaches the sweep as
     // whatever the panel sent. `Date.parse` then yields NaN, which compares
     // false against every cutoff — i.e. it falls into the DELETE branch unless
     // the sweep refuses it by name. Nothing about an unreadable date proves the

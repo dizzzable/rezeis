@@ -23,7 +23,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { ExtendedUsersSchema, HwidUserDeviceSchema } from '@remnawave/contract-v3';
+// The contract panel 3.2.0–3.2.1 ships (backend-contract 3.2.0), per the
+// vendor's own table — the release the 3.2.1 captures below were taken from.
+import { ExtendedUsersSchema, HwidUserDeviceSchema } from '@remnawave/contract-panel-3.2.1';
 
 import {
   mapInfraProvider,
@@ -498,10 +500,11 @@ describe('mapUserSummary', () => {
 // fields replaced by same-shaped placeholders.
 //
 // A capture pins one panel on one day, so it is corroborated below against the
-// vendor's own `ExtendedUsersSchema` from `@remnawave/contract-v3` — which is
-// 3.2.2, NOT 3.2.1, and is therefore a second witness rather than the
-// authority. They agree exactly, all 24 keys; if a future bump makes them
-// disagree, that test fails and the disagreement is the finding.
+// vendor's own `ExtendedUsersSchema` from the contract panel 3.2.1 actually
+// ships — `@remnawave/contract-panel-3.2.1`, backend-contract 3.2.0, per the
+// vendor's table. A second witness from a different source, not the authority:
+// they agree exactly, all 24 keys, and if they ever disagree that test fails
+// and the disagreement is the finding.
 
 const USER_321_CAPTURED_KEYS = [
   'id',
@@ -578,12 +581,12 @@ describe('mapUserSummary on Remnawave 3.2.1', () => {
   });
 
   it('agrees with the vendor contract on the whole 3.x user record', () => {
-    // Second witness, deliberately from a different source and a different
-    // patch (3.2.2). Corroboration, not authority — see the section note.
+    // Second witness, deliberately from a different source: the contract the
+    // captured release ships. Corroboration, not authority — see the section note.
     assert.deepStrictEqual(
       Object.keys(ExtendedUsersSchema.shape).sort(),
       [...USER_321_CAPTURED_KEYS].sort(),
-      'the live 3.2.1 capture and @remnawave/contract-v3 (3.2.2) no longer describe the same user record',
+      'the live 3.2.1 capture and the contract panel 3.2.1 ships (3.2.0) no longer describe the same user record',
     );
   });
 
@@ -690,7 +693,8 @@ describe('mapUserSummary on Remnawave 3.2.1', () => {
 // 3.2.1 lab user owned no devices and the panel answered
 // `{"response":{"total":0,"devices":[]}}`. NO DEVICE ROW WAS EVER OBSERVED, so
 // the row keys in `test/fixtures/remnawave/3.2.1/devices.json` come from the
-// vendor's `HwidUserDeviceSchema` instead, and the assertion below pins the
+// `HwidUserDeviceSchema` of the contract panel 3.2.1 ships (backend-contract
+// 3.2.0) instead, and the assertion below pins the
 // fixture against that schema rather than against prose. If the fixture and
 // the vendor ever disagree, this fails — which is the whole point, because a
 // hand-written row is exactly the kind of thing that quietly rots.

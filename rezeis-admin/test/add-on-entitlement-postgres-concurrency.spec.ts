@@ -375,7 +375,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
           // race this test is about.
           return {
             kind: 'ok' as const,
-            drifted: false,
             data: {
               response: {
                 id: LATE_CREATE_PANEL_ID,
@@ -447,7 +446,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
           await releaseUpdate.promise;
           return {
             kind: 'ok' as const,
-            drifted: false,
             data: {
               response: {
                 id: RUNNING_UPDATE_PANEL_ID,
@@ -459,7 +457,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         },
         getUserById: async () => ({
           kind: 'ok' as const,
-          drifted: false,
           data: { response: { id: RUNNING_UPDATE_PANEL_ID, username: `${prefix}-update-profile` } },
         }),
       } as never,

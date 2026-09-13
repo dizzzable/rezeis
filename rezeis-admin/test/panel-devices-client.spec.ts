@@ -2,31 +2,26 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { Logger } from '@nestjs/common';
-import {
-  DeleteAllUserHwidDevicesCommand,
-  DeleteUserHwidDeviceCommand,
-  DropConnectionsCommand,
-  GetUserHwidDevicesCommand,
-} from '@remnawave/contract-v34';
+import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
+import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
+import * as contractPanel33 from '@remnawave/contract-panel-3.3';
+import * as contractPanel343 from '@remnawave/contract-panel-3.4.3';
+import * as contractPanel344 from '@remnawave/contract-panel-3.4.4';
 
 import {
   PanelCommandExecutor,
   type PanelTransport,
   type PanelTransportResult,
 } from '../src/modules/remnawave/services/panel-command.executor';
+import { PANEL_COMMANDS } from '../src/modules/remnawave/services/panel-commands';
 import {
   PanelDevicesClient,
   type PanelDropConnectionsBody,
 } from '../src/modules/remnawave/services/panel-devices.client';
 
 /**
- * The devices client, driven by the REAL contract
- * ═══════════════════════════════════════════════
- * Every command below is imported from `@remnawave/contract-v34` and handed to
- * the executor unchanged. Hand-built fakes would prove only that the client
- * agrees with itself; the value of taking routes, verbs and schemas from the
- * vendor is that they are the vendor's, so the tests have to use the vendor's.
- *
+ * The devices client, over the real executor and the real command table
+ * ═════════════════════════════════════════════════════════════════════
  * The cases that matter here are not happy paths:
  *
  *   • a poll that runs out of budget answers `null` and NEVER `[]`. The
@@ -36,9 +31,15 @@ import {
  *     nodes, which are both the slowest to answer and the ones sharers use.
  *   • a read that succeeded and found nothing answers `[]`, so the distinction
  *     above carries information in both directions.
+ *   • an answer whose list is missing is `unreadable`, on EVERY answer — no
+ *     schema runs in front of this client any more, so its own guards are the
+ *     whole guarantee.
  *   • a drop-connections body we built wrong never leaves the process. The 2.x
- *     spelling (`userUuids`) is a guaranteed 400 on panel 3.3.2, and a 400 on
- *     the enforcement path is filed as terminal.
+ *     spelling (`userUuids`) is a guaranteed 400 on every 3.x panel, and a 400
+ *     on the enforcement path is filed as terminal.
+ *
+ * The per-user device list and both device deletes were never reached from
+ * `src/` and were deleted with the tests that were their only callers.
  */
 Logger.overrideLogger(false);
 
@@ -97,7 +98,7 @@ function clientOver(answers: readonly PanelTransportResult[]): {
   return { client: new PanelDevicesClient(new PanelCommandExecutor(transport)), calls };
 }
 
-/** A by-node job result the contract accepts, carrying the given users. */
+/** A by-node job result carrying the given users. */
 function nodeJobResult(users: ReadonlyArray<unknown>): unknown {
   return {
     response: {
@@ -108,89 +109,6 @@ function nodeJobResult(users: ReadonlyArray<unknown>): unknown {
   };
 }
 
-describe('HWID reads address the user the way 3.3.2 does', () => {
-  it('takes GET and the numeric path from the contract, and reports an empty panel as empty', async () => {
-    const { client, calls } = clientOver([ok({ response: { total: 0, devices: [] } })]);
-
-    const outcome = await client.listUserDevices(4471);
-
-    assert.equal(calls[0]?.method, 'get');
-    // Not a template literal written here — the vendor's own url builder made it.
-    assert.equal(calls[0]?.url, '/api/hwid/devices/4471');
-    assert.equal(outcome.kind, 'ok');
-    // An answer, not an absence: the panel said this profile has no devices.
-    assert.deepStrictEqual(outcome.kind === 'ok' ? outcome.data.devices : null, []);
-    assert.equal(outcome.kind === 'ok' ? outcome.data.total : null, 0);
-  });
-
-  it('refuses a user id the route cannot carry instead of asking for /NaN', async () => {
-    const { client, calls } = clientOver([ok({ response: { total: 0, devices: [] } })]);
-
-    const outcome = await client.listUserDevices(Number.NaN);
-
-    assert.equal(outcome.kind, 'invalid-request');
-    // The panel would have answered "Validation failed (numeric string is
-    // expected)", which reads like a rejected user rather than our bad call.
-    assert.deepStrictEqual(calls, []);
-  });
-
-  it('keys the delete bodies on userId, the only owner key 3.3.2 declares', async () => {
-    const { client, calls } = clientOver([ok({ response: { total: 1, devices: [] } })]);
-
-    await client.deleteUserDevice(4471, 'HWID-A');
-    await client.deleteAllUserDevices(4471);
-
-    assert.equal(calls[0]?.url, '/api/hwid/devices/delete');
-    assert.equal(calls[0]?.method, 'post');
-    assert.deepStrictEqual(calls[0]?.body, { userId: 4471, hwid: 'HWID-A' });
-    assert.equal(calls[1]?.url, '/api/hwid/devices/delete-all');
-    assert.deepStrictEqual(calls[1]?.body, { userId: 4471 });
-  });
-
-  it('shows why the old userUuid body was a guaranteed 400', async () => {
-    // Not a claim about our code — a claim about the vendor's schema, which is
-    // what the executor now checks bodies against. The hand-rolled client sent
-    // this shape whenever the addressing era was not positively known to be
-    // 3.x, and every one of those requests was rejected.
-    const refused = DeleteUserHwidDeviceCommand.RequestBodySchema.safeParse({
-      userUuid: '11111111-1111-4111-8111-111111111111',
-      hwid: 'HWID-A',
-    });
-    assert.equal(refused.success, false);
-  });
-
-  it('pins the three device commands to one payload, since one type serves all three', async () => {
-    // `PanelHwidDeviceList` is derived from the LIST command and returned by
-    // the deletes too. If a later contract splits them this fails here rather
-    // than mistyping the deletes in silence.
-    const payload = {
-      response: {
-        total: 1,
-        devices: [
-          {
-            hwid: 'HWID-A',
-            userId: 4471,
-            platform: 'iOS',
-            osVersion: '18.2',
-            deviceModel: 'iPhone',
-            userAgent: 'Happ',
-            requestIp: '203.0.113.7',
-            createdAt: '2026-08-28T10:00:00.000Z',
-            updatedAt: '2026-08-28T11:00:00.000Z',
-          },
-        ],
-      },
-    };
-    for (const command of [
-      GetUserHwidDevicesCommand,
-      DeleteUserHwidDeviceCommand,
-      DeleteAllUserHwidDevicesCommand,
-    ]) {
-      assert.equal(command.ResponseSchema.safeParse(payload).success, true);
-    }
-  });
-});
-
 describe('device stats ask once', () => {
   it('does not chase /api/hwid/stats after the real path fails', async () => {
     const { client, calls } = clientOver([
@@ -200,18 +118,51 @@ describe('device stats ask once', () => {
     const outcome = await client.getDeviceStats();
 
     // One request. The old version fell through to `/api/hwid/stats` in a bare
-    // `catch { continue }` — a route 3.3.2 does not serve — so a real failure
-    // on the first path was answered by a second that could only 404, and the
-    // pair returned `null` as though the panel had never been asked.
+    // `catch { continue }` — a route no 3.x panel serves — so a real failure on
+    // the first path was answered by a second that could only 404, and the pair
+    // returned `null` as though the panel had never been asked.
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.url, '/api/hwid/devices/stats');
     // And the reason survives instead of being flattened into "no stats".
     assert.equal(outcome.kind, 'rejected');
   });
+
+  it('projects byPlatform to the declared keys, because its caller copies it whole into an alert', async () => {
+    const { client } = clientOver([
+      ok({
+        response: {
+          byPlatform: [
+            {
+              platform: 'iOS',
+              count: 3,
+              undeclaredRowKey: 'must not leave the process',
+              byApp: [{ app: 'Happ', count: 3, undeclaredAppKey: true }],
+            },
+          ],
+          stats: { totalUniqueDevices: 3, totalHwidDevices: 3, averageHwidDevicesPerUser: 1.5 },
+        },
+      }),
+    ]);
+
+    const outcome = await client.getDeviceStats();
+
+    assert.equal(outcome.kind, 'ok');
+    // Exactly what the vendor parse used to hand the detector — keys and order.
+    assert.equal(
+      JSON.stringify(outcome.kind === 'ok' ? outcome.data.byPlatform : null),
+      '[{"platform":"iOS","count":3,"byApp":[{"app":"Happ","count":3}]}]',
+    );
+    assert.equal(outcome.kind === 'ok' ? outcome.data.stats.averageHwidDevicesPerUser : null, 1.5);
+  });
+
+  it('refuses a stats answer with no response object instead of guessing', async () => {
+    const { client } = clientOver([ok('<html>502</html>')]);
+    assert.equal((await client.getDeviceStats()).kind, 'unreadable');
+  });
 });
 
 describe('top users are walked, not sampled', () => {
-  it('sends the page size the contract caps at 100 rather than taking the default 5', async () => {
+  it('sends the page size the panel caps at 100 rather than taking the default 5', async () => {
     const firstPage = Array.from({ length: 100 }, (_, index) => ({
       id: index + 1,
       username: `rz_sub_${index + 1}`,
@@ -229,8 +180,8 @@ describe('top users are walked, not sampled', () => {
 
     const outcome = await client.listTopUsersByDeviceCount();
 
-    // Omitting `size` never meant "everything": the contract defaults it to 5,
-    // so the device-overage detector was judging a five-row sample and calling
+    // Omitting `size` never meant "everything": the panel defaults it to 5, so
+    // the device-overage detector was judging a five-row sample and calling
     // every other subscriber clean.
     assert.deepStrictEqual(calls[0]?.query, { start: 0, size: 100 });
     assert.deepStrictEqual(calls[1]?.query, { start: 100, size: 100 });
@@ -263,6 +214,17 @@ describe('top users are walked, not sampled', () => {
     // same value a healthy panel produces.
     assert.equal(outcome.kind, 'network');
   });
+
+  it('reports a page whose users list is missing as unreadable, not as a thrown walk', async () => {
+    // With a schema in front, this body would have been flagged before the
+    // walk touched it; without one, the walk's own guard is what stands
+    // between it and `push(...undefined)`.
+    const { client } = clientOver([ok({ response: { total: 12 } })]);
+
+    const outcome = await client.listTopUsersByDeviceCount();
+
+    assert.equal(outcome.kind, 'unreadable');
+  });
 });
 
 describe('the whole device inventory is walked', () => {
@@ -280,10 +242,10 @@ describe('the whole device inventory is walked', () => {
       updatedAt: '2026-08-01T00:00:00.000Z',
     }));
 
-  it('pages at the contract ceiling rather than taking the default 25', async () => {
-    // The contract defaults `size` to 25. Omitting it would walk a fleet 25
-    // rows at a time — and the caller is looking for one hwid bound to two
-    // owners, which is only visible when BOTH of its rows are in hand.
+  it('pages at the panel ceiling rather than taking the default 25', async () => {
+    // The panel defaults `size` to 25. Omitting it would walk a fleet 25 rows
+    // at a time — and the caller is looking for one hwid bound to two owners,
+    // which is only visible when BOTH of its rows are in hand.
     const { client, calls } = clientOver([
       ok({ response: { devices: inventoryPage(1, 1000), total: 1500 } }),
       ok({ response: { devices: inventoryPage(1001, 500), total: 1500 } }),
@@ -299,14 +261,34 @@ describe('the whole device inventory is walked', () => {
   });
 
   it('sends no filters, because the panel says they cost its own database', async () => {
-    // The contract's endpoint description warns the filters "rely on expensive
-    // operators such as LIKE under the hood" and may hurt "the performance of
-    // your database" — the operator's production one.
     const { client, calls } = clientOver([ok({ response: { devices: [], total: 0 } })]);
 
     await client.listAllDevices();
 
     assert.deepStrictEqual(Object.keys(calls[0]?.query ?? {}).sort(), ['size', 'start']);
+  });
+
+  it('projects each row to the nine declared keys, so an undeclared lastSeenAt never reaches the export', async () => {
+    // The export reads `lastSeenAt ?? updatedAt`, and no 3.x release declares
+    // `lastSeenAt`. The vendor parse stripped it from every healthy answer, so
+    // the export column has always come from `updatedAt`.
+    const row = { ...inventoryPage(1, 1)[0], lastSeenAt: '2030-01-01T00:00:00.000Z', extra: 1 };
+    const { client } = clientOver([ok({ response: { devices: [row], total: 1 } })]);
+
+    const outcome = await client.listAllDevices();
+
+    const device = outcome.kind === 'ok' ? outcome.data.devices[0] : null;
+    assert.deepStrictEqual(Object.keys(device ?? {}), [
+      'hwid',
+      'userId',
+      'platform',
+      'osVersion',
+      'deviceModel',
+      'userAgent',
+      'requestIp',
+      'createdAt',
+      'updatedAt',
+    ]);
   });
 
   it('says so when the row budget stops a walk the panel could have continued', async () => {
@@ -331,12 +313,11 @@ describe('the whole device inventory is walked', () => {
   });
 
   it('does not call a walk complete on a row count it never read', async () => {
-    // THE drift case, and it silently hid most of a fleet. `total` starts at 0
-    // and is only assigned when the field is a number, so a panel minor that
-    // renamed or dropped it left the counter at zero — and the very first full
-    // page then satisfied "we hold at least as many as the panel reports". The
-    // walk returned one page of a fifteen-thousand-row fleet flagged complete,
-    // at full confidence, with nothing logged.
+    // `total` starts at 0 and is only assigned when the field is a number, so a
+    // panel that renamed or dropped it left the counter at zero — and the very
+    // first full page then satisfied "we hold at least as many as the panel
+    // reports". The walk returned one page of a fifteen-thousand-row fleet
+    // flagged complete, at full confidence, with nothing logged.
     const page = inventoryPage(1, 1000);
     const { client, calls } = clientOver([ok({ response: { devices: page } })]);
 
@@ -348,8 +329,7 @@ describe('the whole device inventory is walked', () => {
   });
 
   it('reports an inventory whose device list is missing as unreadable, not empty', async () => {
-    // The drift path: the panel answered 2xx with a body the row list is not
-    // findable in. `[]` here would mean "no device is bound to two accounts".
+    // `[]` here would mean "no device is bound to two accounts".
     const { client } = clientOver([ok({ response: { total: 4 } })]);
 
     const outcome = await client.listAllDevices();
@@ -429,12 +409,27 @@ describe('a connections job that could not be read is never reported as empty', 
     assert.equal(await client.fetchNodeConnections(NODE_UUID, { attempts: 2, intervalMs: 0 }), null);
   });
 
-  it('hands back the rows the contract declares, dates and all', async () => {
+  it('answers null when the start answer carries no job id it can poll', async () => {
+    // A job id that is not a string is refused by the result route's own
+    // params rule before a poll is ever sent.
+    const { client, calls } = clientOver([ok({ response: { jobId: 7 } })]);
+
+    assert.equal(await client.fetchNodeConnections(NODE_UUID, { attempts: 2, intervalMs: 0 }), null);
+    assert.equal(calls.length, 1);
+  });
+
+  it('decodes a well-formed lastSeen into the Date its readers render', async () => {
     const { client } = clientOver([
       ok({ response: { jobId: 'job-1' } }),
       ok(
         nodeJobResult([
-          { userId: 4471, ips: [{ ip: '203.0.113.7', lastSeen: '2026-08-28T10:00:00.000Z' }] },
+          {
+            userId: 4471,
+            ips: [
+              { ip: '203.0.113.7', lastSeen: '2026-08-28T10:00:00Z' },
+              { ip: '203.0.113.8', lastSeen: 'yesterday-ish' },
+            ],
+          },
         ]),
       ),
     ]);
@@ -443,14 +438,18 @@ describe('a connections job that could not be read is never reported as empty', 
 
     assert.equal(rows?.length, 1);
     assert.equal(rows?.[0]?.userId, 4471);
-    // The contract's own transform ran, which is the point of validating
-    // through the vendor's schema rather than casting the body.
-    assert.ok(rows?.[0]?.ips[0]?.lastSeen instanceof Date);
+    const [good, bad] = rows?.[0]?.ips ?? [];
+    // The same `new Date(value)` the vendor parse produced: the sharing
+    // detector persists `toISOString()` of it in signal metadata.
+    assert.ok(good?.lastSeen instanceof Date);
+    assert.equal((good?.lastSeen as Date).toISOString(), '2026-08-28T10:00:00.000Z');
+    // Anything else is handed on as sent, for the detector's "undated" count.
+    assert.equal(bad?.lastSeen, 'yesterday-ish');
   });
 });
 
-describe('connections routes come from the contract and only from /api/connections', () => {
-  it('starts and polls the by-node job on the vendor’s paths', async () => {
+describe('connections routes come from the table and only from /api/connections', () => {
+  it('starts and polls the by-node job on the panel’s paths', async () => {
     const { client, calls } = clientOver([
       ok({ response: { jobId: 'job-7' } }),
       ok(nodeJobResult([])),
@@ -460,9 +459,10 @@ describe('connections routes come from the contract and only from /api/connectio
 
     assert.equal(calls[0]?.method, 'post');
     assert.equal(calls[0]?.url, `/api/connections/by-node/${OTHER_NODE_UUID}`);
+    assert.deepStrictEqual(calls[0]?.body, {});
     assert.equal(calls[1]?.method, 'get');
     assert.equal(calls[1]?.url, '/api/connections/by-node/job-7');
-    // The 2.x family is gone from 3.3.2 entirely; nothing here may reach for it.
+    // The 2.x family is gone from every 3.x panel; nothing here may reach for it.
     assert.equal(
       calls.some((call) => call.url.includes('ip-control')),
       false,
@@ -484,15 +484,15 @@ describe('connections routes come from the contract and only from /api/connectio
 
     const rows = await client.fetchUserConnections(4471, { attempts: 2, intervalMs: 0 });
 
-    // Both commands build `/api/connections/by-user/{…}`: the POST takes a USER
-    // id and the GET takes a JOB id, so swapping them produces a well-formed
-    // URL and a nonsense request.
+    // Both routes build `/api/connections/by-user/{…}`: the POST takes a USER id
+    // and the GET takes a JOB id, so swapping them produces a well-formed URL
+    // and a nonsense request.
     assert.equal(calls[0]?.url, '/api/connections/by-user/4471');
     assert.equal(calls[1]?.url, '/api/connections/by-user/job-9');
     assert.deepStrictEqual(rows, []);
   });
 
-  it('refuses a node id that is not the uuid the contract requires', async () => {
+  it('refuses a node id that is not the uuid the panel requires', async () => {
     const { client, calls } = clientOver([ok({ response: { jobId: 'job-1' } })]);
 
     const rows = await client.fetchNodeConnections('node-3', { attempts: 2, intervalMs: 0 });
@@ -502,8 +502,7 @@ describe('connections routes come from the contract and only from /api/connectio
   });
 
   it('refuses to invent an empty node out of a body it cannot read', async () => {
-    // A drifted answer: the executor hands back raw bytes when the pinned
-    // schema rejects a response, so `users` may not be there at all.
+    // `users` is not there at all.
     const { client } = clientOver([
       ok({ response: { jobId: 'job-1' } }),
       ok({ response: { isCompleted: true, isFailed: false, result: { success: true } } }),
@@ -513,7 +512,154 @@ describe('connections routes come from the contract and only from /api/connectio
   });
 });
 
-describe('dropping connections builds the body the contract declares', () => {
+describe('the explicit decoders reproduce what each era’s contract parse produced', () => {
+  // The consumer audit found three device reads whose callers depended on the
+  // vendor parse. These hold the replacement to the parse itself, per era: on
+  // a body the contract accepts, the client must hand over the same values.
+  const ERAS = [
+    ['3.2.0', contractPanel321],
+    ['3.2.3', contractPanel323],
+    ['3.4.2', contractPanel33],
+    ['3.4.13', contractPanel343],
+    ['3.4.15', contractPanel344],
+  ] as const;
+
+  interface Parsed {
+    success: boolean;
+    data?: { response: Record<string, unknown> };
+  }
+  function vendorParse(contract: unknown, command: string, body: unknown): Parsed {
+    const schema = (contract as Record<string, { ResponseSchema: { safeParse(v: unknown): Parsed } }>)[
+      command
+    ]?.ResponseSchema;
+    assert.ok(schema !== undefined, `${command} has no ResponseSchema`);
+    return schema.safeParse(body);
+  }
+
+  it('byPlatform: the same keys in the same order', async () => {
+    const body = {
+      response: {
+        byPlatform: [
+          { platform: 'iOS', count: 3, extra: 'x', byApp: [{ app: 'Happ', count: 2, extra: 1 }, { app: 'v2', count: 1 }] },
+          { platform: 'Android', count: 1, byApp: [] },
+        ],
+        stats: { totalUniqueDevices: 4, totalHwidDevices: 4, averageHwidDevicesPerUser: 2 },
+      },
+    };
+    const { client } = clientOver([ok(JSON.parse(JSON.stringify(body)))]);
+    const outcome = await client.getDeviceStats();
+    const ours = JSON.stringify(outcome.kind === 'ok' ? outcome.data.byPlatform : null);
+    for (const [version, contract] of ERAS) {
+      const parsed = vendorParse(contract, 'GetHwidDevicesStatsCommand', body);
+      assert.equal(parsed.success, true, `contract ${version} refuses the stats body`);
+      assert.equal(ours, JSON.stringify(parsed.data?.response['byPlatform']), `contract ${version}`);
+    }
+  });
+
+  it('device rows: the same keys in the same order', async () => {
+    const row = {
+      hwid: 'HWID-A',
+      userId: 4471,
+      platform: 'iOS',
+      osVersion: '18.2',
+      deviceModel: 'iPhone',
+      userAgent: 'Happ',
+      requestIp: '203.0.113.7',
+      createdAt: '2026-08-28T10:00:00.000Z',
+      updatedAt: '2026-08-28T11:00:00.000Z',
+      lastSeenAt: '2026-08-29T00:00:00.000Z',
+    };
+    const body = { response: { devices: [row], total: 1 } };
+    const { client } = clientOver([ok(JSON.parse(JSON.stringify(body)))]);
+    const outcome = await client.listAllDevices();
+    const ours = Object.keys(outcome.kind === 'ok' ? outcome.data.devices[0] ?? {} : {});
+    for (const [version, contract] of ERAS) {
+      const parsed = vendorParse(contract, 'GetHwidDevicesCommand', body);
+      assert.equal(parsed.success, true, `contract ${version} refuses the inventory body`);
+      const devices = parsed.data?.response['devices'] as ReadonlyArray<Record<string, unknown>>;
+      assert.deepStrictEqual(ours, Object.keys(devices[0] ?? {}), `contract ${version}`);
+    }
+  });
+
+  it('lastSeen: the same instant as the same Date', async () => {
+    const body = {
+      response: {
+        isCompleted: true,
+        isFailed: false,
+        result: {
+          success: true,
+          nodeUuid: NODE_UUID,
+          users: [
+            {
+              userId: 4471,
+              ips: [
+                { ip: '203.0.113.7', lastSeen: '2026-08-28T10:00:00.123456Z' },
+                { ip: '203.0.113.8', lastSeen: '2026-08-28T13:00:00+03:00' },
+                { ip: '203.0.113.9', lastSeen: '2026-08-28T10:00:00' },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const { client } = clientOver([ok({ response: { jobId: 'job-1' } }), ok(JSON.parse(JSON.stringify(body)))]);
+    const rows = await client.fetchNodeConnections(NODE_UUID, { attempts: 1, intervalMs: 0 });
+    const ours = (rows?.[0]?.ips ?? []).map((sample) => (sample.lastSeen as Date).toISOString());
+    assert.equal(ours.length, 3);
+    for (const [version, contract] of ERAS) {
+      const parsed = vendorParse(contract, 'ConnectionsByNodeResultCommand', body);
+      assert.equal(parsed.success, true, `contract ${version} refuses the job body`);
+      const result = parsed.data?.response['result'] as {
+        users: ReadonlyArray<{ ips: ReadonlyArray<{ lastSeen: Date }> }>;
+      };
+      assert.deepStrictEqual(
+        ours,
+        (result.users[0]?.ips ?? []).map((sample) => sample.lastSeen.toISOString()),
+        `contract ${version}`,
+      );
+    }
+  });
+
+  it('lastSeen on the by-user job: the same instant as the same Date', async () => {
+    const body = {
+      response: {
+        isCompleted: true,
+        isFailed: false,
+        progress: { total: 1, completed: 1, percent: 100 },
+        result: {
+          success: true,
+          userId: 4471,
+          nodes: [
+            {
+              nodeUuid: NODE_UUID,
+              nodeName: 'de-1',
+              countryCode: 'DE',
+              ips: [{ ip: '203.0.113.7', lastSeen: '2026-08-28T10:00:00.1Z' }],
+            },
+          ],
+        },
+      },
+    };
+    const { client } = clientOver([ok({ response: { jobId: 'job-2' } }), ok(JSON.parse(JSON.stringify(body)))]);
+    const nodes = await client.fetchUserConnections(4471, { attempts: 1, intervalMs: 0 });
+    const ours = (nodes?.[0]?.ips ?? []).map((sample) => (sample.lastSeen as Date).toISOString());
+    assert.deepStrictEqual(ours, ['2026-08-28T10:00:00.100Z']);
+    for (const [version, contract] of ERAS) {
+      const parsed = vendorParse(contract, 'ConnectionsByUserResultCommand', body);
+      assert.equal(parsed.success, true, `contract ${version} refuses the job body`);
+      const result = parsed.data?.response['result'] as {
+        nodes: ReadonlyArray<{ ips: ReadonlyArray<{ lastSeen: Date }> }>;
+      };
+      assert.deepStrictEqual(
+        ours,
+        (result.nodes[0]?.ips ?? []).map((sample) => sample.lastSeen.toISOString()),
+        `contract ${version}`,
+      );
+    }
+  });
+});
+
+describe('dropping connections builds the body the table declares', () => {
   it('sends the 3.x { dropBy, targetNodes } pair unchanged', async () => {
     const { client, calls } = clientOver([ok('')]);
     const body: PanelDropConnectionsBody = {
@@ -527,9 +673,8 @@ describe('dropping connections builds the body the contract declares', () => {
     assert.equal(calls[0]?.method, 'post');
     assert.equal(calls[0]?.url, '/api/connections/drop');
     assert.deepStrictEqual(calls[0]?.body, body);
-    // The contract agrees with what was sent — the same schema the executor
-    // checked it against.
-    assert.equal(DropConnectionsCommand.RequestBodySchema.safeParse(calls[0]?.body).success, true);
+    // The table agrees with what was sent — the same rule the executor checked.
+    assert.equal(PANEL_COMMANDS.DropConnectionsCommand.body.safeParse(calls[0]?.body).success, true);
   });
 
   it('refuses the 2.x userUuids arm before the request leaves', async () => {
@@ -558,10 +703,10 @@ describe('dropping connections builds the body the contract declares', () => {
       targetNodes: { target: 'allNodes' },
     });
 
-    // The contract permits an empty array, so this is a well-formed request
-    // asking a fleet-wide endpoint to act on nobody. Not worth betting a
-    // panel's interpretation on.
+    // Refused in words an operator can act on, before the table's own
+    // `min(1)` gets to say it more tersely.
     assert.equal(outcome.kind, 'invalid-request');
+    assert.match(outcome.kind === 'invalid-request' ? outcome.detail : '', /target nobody/);
     assert.deepStrictEqual(calls, []);
   });
 });

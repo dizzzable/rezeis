@@ -104,15 +104,15 @@ function build(options: {
       patchCount += 1;
       if ('description' in body) {
         legacyUpdateCalled = true;
-        return { kind: 'ok', drifted: false, data: { response: panelUser() } };
+        return { kind: 'ok', data: { response: panelUser() } };
       }
       setCalled = true;
       strictSetInputs.push(body);
-      return options.setOutcome ?? { kind: 'ok', drifted: false, data: { response: panelUser() } };
+      return options.setOutcome ?? { kind: 'ok', data: { response: panelUser() } };
     },
     getUserById: async () =>
-      options.readBack ?? { kind: 'ok', drifted: false, data: { response: panelUser() } },
-    resetTraffic: async () => ({ kind: 'ok', drifted: false, data: { response: panelUser() } }),
+      options.readBack ?? { kind: 'ok', data: { response: panelUser() } },
+    resetTraffic: async () => ({ kind: 'ok', data: { response: panelUser() } }),
     resolveUser: async () => {
       throw new Error('a row carrying a numeric identity must never be re-resolved');
     },
@@ -179,7 +179,6 @@ describe('ProfileSyncProcessor versioned desired-state write (T-009/T-010)', () 
     const h = build({
       readBack: {
         kind: 'ok',
-        drifted: false,
         data: { response: panelUser({ trafficLimitBytes: 999, hwidDeviceLimit: 1 }) },
       },
     });

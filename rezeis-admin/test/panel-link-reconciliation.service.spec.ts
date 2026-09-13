@@ -399,9 +399,9 @@ interface PanelHarness {
  */
 function panelHarness(input: {
   resolve?: (selector: unknown) => {
-    // `id` is typed loosely ON PURPOSE. The executor is LENIENT — a `2xx` whose
-    // body fails the pinned contract is handed back RAW — so a drifted resolve
-    // can carry anything at all here, and the sweep has to survive it.
+    // `id` is typed loosely ON PURPOSE. No schema runs over a panel answer — a
+    // `2xx` body is handed back RAW — so a resolve can carry anything at all
+    // here, and the sweep has to survive it.
     id: number | string;
     shortUuid: string | null;
     username: string | null;
@@ -432,7 +432,7 @@ function panelHarness(input: {
             : input.resolve(selector);
         return resolved === null
           ? notFound
-          : { kind: 'ok', drifted: false, data: { response: resolved } };
+          : { kind: 'ok', data: { response: resolved } };
       },
       getUserById: async (userId: number) => {
         calls.push('getUserById');
@@ -442,7 +442,7 @@ function panelHarness(input: {
             ? { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } }
             : input.profile(userId);
         if (answer.kind === 'ok') {
-          return { kind: 'ok', drifted: false, data: { response: answer.user } };
+          return { kind: 'ok', data: { response: answer.user } };
         }
         return answer.kind === 'missing' ? notFound : { kind: 'network', detail: 'ECONNREFUSED' };
       },
@@ -631,12 +631,12 @@ describe('PanelLinkReconciliationService — stale rows that cannot be repaired'
   });
 
   it('refuses to invent a repair when the panel answers with the identity the row already holds', async () => {
-    // REACHED THROUGH DRIFT, which is the only way left to reach it: the
-    // contract declares `id` as a number, so a conforming answer can never
-    // equal a uuid-shaped stored identity — but the executor hands back a body
-    // it could not validate RAW rather than refusing it, so the field can
-    // arrive as anything the panel sent. Writing the row's own value back over
-    // itself and reporting `linked` would be a repair that changed nothing.
+    // REACHED ONLY THROUGH A NON-CONFORMING ANSWER: every 3.x contract declares
+    // `id` as a number, so a conforming answer can never equal a uuid-shaped
+    // stored identity — but nothing validates the panel's answer on its way
+    // here, so the field can arrive as anything the panel sent. Writing the
+    // row's own value back over itself and reporting `linked` would be a repair
+    // that changed nothing.
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-panel-disagrees', remnawaveId: DEAD_UUID }),
     ]);

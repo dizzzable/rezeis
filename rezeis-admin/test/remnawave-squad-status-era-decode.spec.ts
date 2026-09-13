@@ -13,10 +13,12 @@
  * external squad, because an EMPTY list satisfies the schema trivially. That is
  * why the outage read as intermittent instead of as a version incompatibility.
  *
- * NO SINGLE VENDOR SCHEMA CAN SERVE BOTH ERAS — asserted below, not assumed.
- * 2.7.3 and 2.8.35 accept a 2.x list and reject a 3.3.2 one; 3.2.3 and 3.4.2 do
- * exactly the reverse. Pinning forward would have recreated the same outage for
- * every installation still on a 2.x panel. The two `*Options` reads need
+ * NO SINGLE VENDOR SCHEMA ACCEPTS EVERY RELEASE'S ANSWER — measured below, per
+ * release, not assumed. The 2.x contracts accept a 2.x list and reject a 3.3.2
+ * one; the 3.2 and 3.3 contracts do the reverse; and the 3.4 contracts reject
+ * BOTH, because from contract 3.4.11 on `tags` is required on a squad row and
+ * neither a 2.x nor a 3.3 panel sends it. Pinning any one of them would have
+ * recreated the same outage for some part of the fleet. The two `*Options` reads need
  * `{ uuid, name }` and the status read needs a handful of booleans — fields no
  * era has ever spelled differently — so the fix is a tolerant local decoder,
  * `panel-response-decoders.ts`, in the style of `parsePanelUserRow` and
@@ -30,13 +32,17 @@
  * makes it tell the operator `External squad not found: <uuid>` about a squad
  * that exists. Both outcomes are pinned here, separately.
  *
- * THE ANCHORS, all available in CI:
+ * THE ANCHORS, all available in CI — the contract each panel release ships, per
+ * the vendor's own table (https://docs.rw/sdk/typescript-sdk/), as devDependency
+ * aliases named by panel release:
  *
- *   `@remnawave/backend-contract`  2.7.3  — the 2.7 line (dev; was the runtime
- *                                           dependency until this change)
- *   `@remnawave/contract-v28`      2.8.35 — the 2.8 line
- *   `@remnawave/contract-v3`       3.2.3  — the 3.2 line
- *   `@remnawave/contract-v34`      3.4.2  — exact pin, matches panel 3.3.2
+ *   `@remnawave/contract-panel-2.7`    backend-contract 2.7.2   panel 2.7.3–2.7.4
+ *   `@remnawave/contract-panel-2.8`    backend-contract 2.8.35  panel 2.8.0–2.8.1
+ *   `@remnawave/contract-panel-3.2.1`  backend-contract 3.2.0   panel 3.2.0–3.2.1
+ *   `@remnawave/contract-panel-3.2.3`  backend-contract 3.2.3   panel 3.2.3
+ *   `@remnawave/contract-panel-3.3`    backend-contract 3.4.2   panel 3.3.0–3.3.2
+ *   `@remnawave/contract-panel-3.4.3`  backend-contract 3.4.13  panel 3.4.0–3.4.3
+ *   `@remnawave/contract-panel-3.4.4`  backend-contract 3.4.15  panel 3.4.4
  *   `test/fixtures/remnawave/{2.7.4,2.8.0,3.3.2}/{external,internal}-squads.json`
  *   `test/fixtures/remnawave/{2.7.4,2.8.0,3.3.2}/auth-status.json`
  *       — derived MECHANICALLY from each version's own OpenAPI document, key
@@ -51,10 +57,13 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { ServiceUnavailableException } from '@nestjs/common';
-import * as contractProd from '@remnawave/backend-contract';
-import * as contractV28 from '@remnawave/contract-v28';
-import * as contractV3 from '@remnawave/contract-v3';
-import * as contractV34 from '@remnawave/contract-v34';
+import * as contractPanel27 from '@remnawave/contract-panel-2.7';
+import * as contractPanel28 from '@remnawave/contract-panel-2.8';
+import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
+import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
+import * as contractPanel33 from '@remnawave/contract-panel-3.3';
+import * as contractPanel343 from '@remnawave/contract-panel-3.4.3';
+import * as contractPanel344 from '@remnawave/contract-panel-3.4.4';
 import { of } from 'rxjs';
 
 import {
@@ -65,7 +74,7 @@ import { PANEL_ROUTES } from '../src/modules/remnawave/services/panel-routes';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 
 // ── the vendor contracts, structurally typed ────────────────────────────────
-// Same approach as `remnawave-user-row-era-conformance.spec.ts`: the four
+// Same approach as `remnawave-user-row-era-conformance.spec.ts`: the seven
 // packages are separate zod builds and their inferred types are not mutually
 // assignable, so they are consumed through one hand-written shape.
 
@@ -81,17 +90,18 @@ interface VendorCommand {
 
 interface ContractLine {
   readonly label: string;
-  readonly era: '2.x' | '3.x';
+  /** The backend-contract version, which is NOT the panel's version. */
+  readonly contract: string;
   readonly externalSquads: VendorCommand;
   readonly internalSquads: VendorCommand;
   readonly status: VendorCommand;
 }
 
-function lineOf(label: string, era: '2.x' | '3.x', mod: unknown): ContractLine {
+function lineOf(panels: string, contractVersion: string, mod: unknown): ContractLine {
   const contract = mod as Record<string, unknown>;
   return {
-    label,
-    era,
+    label: `contract ${contractVersion} (panel ${panels})`,
+    contract: contractVersion,
     externalSquads: contract.GetExternalSquadsCommand as VendorCommand,
     internalSquads: contract.GetInternalSquadsCommand as VendorCommand,
     status: contract.GetStatusCommand as VendorCommand,
@@ -99,11 +109,38 @@ function lineOf(label: string, era: '2.x' | '3.x', mod: unknown): ContractLine {
 }
 
 const CONTRACT_LINES: readonly ContractLine[] = [
-  lineOf('backend-contract 2.7.3', '2.x', contractProd),
-  lineOf('contract-v28 2.8.35', '2.x', contractV28),
-  lineOf('contract-v3 3.2.3', '3.x', contractV3),
-  lineOf('contract-v34 3.4.2', '3.x', contractV34),
+  lineOf('2.7.3–2.7.4', '2.7.2', contractPanel27),
+  lineOf('2.8.0–2.8.1', '2.8.35', contractPanel28),
+  lineOf('3.2.0–3.2.1', '3.2.0', contractPanel321),
+  lineOf('3.2.3', '3.2.3', contractPanel323),
+  lineOf('3.3.0–3.3.2', '3.4.2', contractPanel33),
+  lineOf('3.4.0–3.4.3', '3.4.13', contractPanel343),
+  lineOf('3.4.4', '3.4.15', contractPanel344),
 ];
+
+function lineByContract(version: string): ContractLine {
+  const found = CONTRACT_LINES.find((line) => line.contract === version);
+  assert.ok(found !== undefined, `contract ${version} is not wired into this spec`);
+  return found;
+}
+
+/** The contract each fixture's panel release ships — the pairing every capture is judged by. */
+const SHIPPED_CONTRACT: Readonly<Record<string, string>> = {
+  '2.7.4': '2.7.2',
+  '2.8.0': '2.8.35',
+  '3.3.2': '3.4.2',
+};
+
+/**
+ * Whether each contract ACCEPTS each release's external-squad list. Measured
+ * against the installed contracts, then pinned: a contract that starts or stops
+ * accepting a release's answer fails here and the change is the finding.
+ */
+const EXTERNAL_SQUADS_ACCEPTED: Readonly<Record<string, Readonly<Record<string, boolean>>>> = {
+  '2.7.4': { '2.7.2': true, '2.8.35': true, '3.2.0': false, '3.2.3': false, '3.4.2': false, '3.4.13': false, '3.4.15': false },
+  '2.8.0': { '2.7.2': true, '2.8.35': true, '3.2.0': false, '3.2.3': false, '3.4.2': false, '3.4.13': false, '3.4.15': false },
+  '3.3.2': { '2.7.2': false, '2.8.35': false, '3.2.0': true, '3.2.3': true, '3.4.2': true, '3.4.13': false, '3.4.15': false },
+};
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -209,13 +246,14 @@ describe('Remnawave squads and auth status decode on every panel era', () => {
     const fixture = loadFixture('3.3.2', 'external-squads.json');
     const rows = fixtureRows(fixture, 'externalSquads');
 
-    // The payload really is the one that broke: the schema that used to run at
-    // runtime rejects it, and rejects it precisely over the renamed field.
-    const vendor = contractProd.GetExternalSquadsCommand.ResponseSchema.safeParse(fixture.body);
+    // The payload really is the one that broke: a 2.7-line schema — the runtime
+    // pin was `~2.7.3`; this is 2.7.2, the contract panel 2.7.3–2.7.4 ships —
+    // rejects it, and rejects it over the renamed field.
+    const vendor = lineByContract('2.7.2').externalSquads.ResponseSchema.safeParse(fixture.body);
     assert.equal(
       vendor.success,
       false,
-      'the 2.7.3 schema is supposed to REJECT a 3.3.2 external-squad list — if it now accepts it, ' +
+      'the 2.7-line schema is supposed to REJECT a 3.3.2 external-squad list — if it now accepts it, ' +
         'this fixture no longer reproduces the defect',
     );
     assert.ok(
@@ -261,19 +299,43 @@ describe('Remnawave squads and auth status decode on every panel era', () => {
     }
   });
 
-  it('records that no single vendor schema accepts every era — why none is executed at runtime', () => {
-    for (const line of CONTRACT_LINES) {
-      for (const { version, era } of PANEL_ERAS) {
-        const fixture = loadFixture(version, 'external-squads.json');
-        const parsed = line.externalSquads.ResponseSchema.safeParse(fixture.body);
+  it('each capture is accepted by the contract its own panel release ships', () => {
+    for (const { version } of PANEL_ERAS) {
+      const shipped = SHIPPED_CONTRACT[version];
+      assert.ok(shipped !== undefined, `no shipped contract recorded for panel ${version}`);
+      const fixture = loadFixture(version, 'external-squads.json');
+      assert.equal(
+        lineByContract(shipped).externalSquads.ResponseSchema.safeParse(fixture.body).success,
+        true,
+        `panel ${version}'s external-squad list is refused by contract ${shipped}, the one it ships — ` +
+          'the fixture no longer describes that release',
+      );
+    }
+  });
+
+  it('records that no single vendor schema accepts every release — why none is executed at runtime', () => {
+    for (const { version } of PANEL_ERAS) {
+      const fixture = loadFixture(version, 'external-squads.json');
+      const expected = EXTERNAL_SQUADS_ACCEPTED[version];
+      assert.ok(expected !== undefined, `no measured row for panel ${version}`);
+      assert.deepStrictEqual(
+        Object.keys(expected).sort(),
+        CONTRACT_LINES.map((line) => line.contract).sort(),
+        `the measured row for panel ${version} does not name every contract`,
+      );
+      for (const line of CONTRACT_LINES) {
         assert.equal(
-          parsed.success,
-          line.era === era,
-          `${line.label} vs panel ${version}: a vendor schema accepts its OWN era and only its own era. ` +
-            'That is the whole reason the runtime stopped executing them.',
+          line.externalSquads.ResponseSchema.safeParse(fixture.body).success,
+          expected[line.contract],
+          `${line.label} vs panel ${version}`,
         );
       }
     }
+    // The conclusion, derived rather than asserted: no contract accepts all three.
+    const acceptsAll = CONTRACT_LINES.filter((line) =>
+      PANEL_ERAS.every(({ version }) => EXTERNAL_SQUADS_ACCEPTED[version]?.[line.contract] === true),
+    );
+    assert.deepStrictEqual(acceptsAll.map((line) => line.label), []);
   });
 
   it('parses an EMPTY external-squad list under every vendor schema — why the outage looked intermittent', () => {

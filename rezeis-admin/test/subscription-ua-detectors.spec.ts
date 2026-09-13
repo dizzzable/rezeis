@@ -73,10 +73,9 @@ function record(
     srrRuleName: null,
     requestIp: over.ipAddress === undefined ? '203.0.113.1' : over.ipAddress,
     userAgent: over.userAgent === undefined ? 'v2rayNG/1.8.5' : over.userAgent,
-    // The contract turns `requestAt` into a `Date`, so a validated response
-    // hands the detector a Date. A literal the schema would have REJECTED can
-    // only reach it on the executor's drift path, where the raw wire string
-    // comes through instead — so that is what an unparseable one is sent as.
+    // What `PanelInfraClient` hands over: a well-formed `requestAt` decoded
+    // into a `Date`, and anything else exactly as the panel sent it — so that
+    // is what an unparseable one is sent as.
     requestAt: Number.isFinite(Date.parse(requestedAt)) ? new Date(requestedAt) : requestedAt,
   } as unknown as PanelRequestRecord;
 }
@@ -571,7 +570,7 @@ describe('SubscriptionUaDetectors — degrades loudly, never silently', () => {
   });
 
   it('warns and drops a matching record whose owner id is not an integer', async () => {
-    // Only reachable on the executor's DRIFT path — the contract declares
+    // Only reachable on a non-conforming answer — every 3.x contract declares
     // `userId` as a number — but reachable, and the wrong handling is not a
     // dropped row: `Number.parseInt` reads a LEADING run of digits and stops,
     // so a uuid-shaped value would become panel user #3 and file one customer's

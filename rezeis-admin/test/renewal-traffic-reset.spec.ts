@@ -193,7 +193,6 @@ async function runUpdateJob(payload: Record<string, unknown>): Promise<readonly 
         calls.push('update');
         return {
           kind: 'ok' as const,
-          drifted: false,
           data: {
             response: {
               id: 7,
@@ -205,7 +204,7 @@ async function runUpdateJob(payload: Record<string, unknown>): Promise<readonly 
       },
       resetTraffic: async () => {
         calls.push('reset');
-        return { kind: 'ok' as const, drifted: false, data: { response: { id: 7 } } };
+        return { kind: 'ok' as const, data: { response: { id: 7 } } };
       },
     } as never,
     {

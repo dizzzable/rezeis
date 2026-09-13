@@ -48,7 +48,7 @@ function panelRow(patch: Record<string, unknown> = {}) {
 
 /** A successful user route answer, envelope included. */
 function panelOk(patch: Record<string, unknown> = {}) {
-  return { kind: 'ok' as const, drifted: false, data: { response: panelRow(patch) } };
+  return { kind: 'ok' as const, data: { response: panelRow(patch) } };
 }
 
 /** The panel's own "no such user" — the ONE refusal that means a gone profile. */
@@ -802,7 +802,7 @@ describe('ProfileSyncProcessor', () => {
       {
         deleteUser: async (userId: number) => {
           deletedTargets.push(userId);
-          return { kind: 'ok', drifted: false, data: undefined };
+          return { kind: 'ok', data: undefined };
         },
       } as never,
       {} as never,
@@ -852,7 +852,7 @@ describe('ProfileSyncProcessor', () => {
       {
         deleteUser: async (userId: number) => {
           deletedTargets.push(userId);
-          return { kind: 'ok', drifted: false, data: undefined };
+          return { kind: 'ok', data: undefined };
         },
       } as never,
       {} as never,
@@ -940,7 +940,7 @@ describe('ProfileSyncProcessor', () => {
       {
         deleteUser: async (userId: number) => {
           deletedTargets.push(userId);
-          return { kind: 'ok', drifted: false, data: undefined };
+          return { kind: 'ok', data: undefined };
         },
         resolveUser: async () => {
           throw new Error('a decimal target addresses the panel directly, never through a resolve');
@@ -1023,7 +1023,7 @@ describe('ProfileSyncProcessor', () => {
           // directly — no resolve, no username, no second chance to land on
           // somebody else's profile.
           assert.equal(userId, 4711);
-          return { kind: 'ok', drifted: false, data: undefined };
+          return { kind: 'ok', data: undefined };
         },
       } as never,
       {} as never,
@@ -2776,7 +2776,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'x' }) },
         }),
       } as never,
-      { updateUser: async () => ({ kind: 'ok', drifted: false, data: { response: panelUser } }) } as never,
+      { updateUser: async () => ({ kind: 'ok', data: { response: panelUser } }) } as never,
       {
         generateProfileName: async () => ({ username: 'rz_bob_1', description: 'd' }),
         getContactInfo: async () => ({ email: null, telegramId: null }),
@@ -2829,7 +2829,7 @@ describe('ProfileSyncProcessor — recording the panel identity of rows that alr
   });
 
   it('does not invent a username from a panel row that carries none', async () => {
-    // A drifted body is handed back RAW, so `username` can arrive empty — and
+    // A panel body is handed back RAW, so `username` can arrive empty — and
     // an empty username resolves to "which user is called nothing?".
     const { processor, subscriptionWrites } = build(
       {},
@@ -2994,12 +2994,11 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
                 detail: 'User with specified params not found',
                 retryAfterMs: null,
               }
-            : { kind: 'ok', drifted: false, data: { response: options.existingPanelUser } },
+            : { kind: 'ok', data: { response: options.existingPanelUser } },
         createUser: async () => {
           creates += 1;
           return {
             kind: 'ok',
-            drifted: false,
             data: {
               response: {
                 id: 9001,
@@ -3183,7 +3182,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
       {
         deleteUser: async (userId: number) => {
           deletedTargets.push(userId);
-          return { kind: 'ok', drifted: false, data: undefined };
+          return { kind: 'ok', data: undefined };
         },
       } as never,
       {} as never,
@@ -3431,10 +3430,10 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
       } as never,
       {
         getUserByUsername: async () => panelMissing(),
-        // `drifted: true` on purpose. The executor is LENIENT — a `2xx` whose
-        // body fails the pinned contract is handed back RAW — so this is the
-        // shape a real panel can produce, not a fixture that could not happen.
-        createUser: async () => ({ kind: 'ok', drifted: true, data: { response: panelUser } }),
+        // A `2xx` body is handed back RAW — no schema runs over a panel answer —
+        // so this is a shape a real panel can produce, not a fixture that could
+        // not happen.
+        createUser: async () => ({ kind: 'ok', data: { response: panelUser } }),
       } as never,
       {
         generateProfileName: async () => ({ username: 'rz_subscription_1', description: 'd' }),
@@ -3475,7 +3474,7 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
   });
 
   it('refuses an id that is not a usable number for the same reason', async () => {
-    // The other spellings a drifted body can carry: a string where the contract
+    // The other spellings a raw body can carry: a string where the contract
     // declares a number, and a value too large to survive `String()` intact.
     const attempt = createWithPanelUser({
       id: '4471',
@@ -3541,7 +3540,7 @@ describe('ProfileSyncProcessor — retiring the row is fenced on BOTH era names'
         },
       } as never,
       {
-        deleteUser: async () => ({ kind: 'ok', drifted: false, data: undefined }),
+        deleteUser: async () => ({ kind: 'ok', data: undefined }),
         resolveUser: async () => {
           throw new Error('the recorded numeric id is the address; nothing may re-resolve it');
         },

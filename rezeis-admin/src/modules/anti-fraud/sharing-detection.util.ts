@@ -169,11 +169,10 @@ export function selectConcurrentSamples<T extends { readonly lastSeenMs: number 
  * counted as unreadable; it is never guessed at.
  *
  * ── Why it accepts a number AND a string ────────────────────────────────────
- * The contract declares `userId` as a number, so the numeric arm is the normal
- * path. The string arm is reachable only when a response fails the pinned
- * schema and `PanelCommandExecutor` hands back the raw wire body — and it IS
- * reachable, which is the point: a `'42'` refused there would take a genuine
- * offender's connections out of the count and read as innocence.
+ * Every 3.x release declares `userId` as a number, so the numeric arm is the
+ * normal path. Nothing validates a panel answer on its way here, so the string
+ * arm is reachable too — which is the point: a `'42'` refused there would take
+ * a genuine offender's connections out of the count and read as innocence.
  *
  * This lives here, and not beside its one caller, because the hazard above is
  * the reason the function exists and `test/sharing-detection.util.spec.ts`

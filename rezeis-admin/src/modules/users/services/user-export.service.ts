@@ -443,13 +443,17 @@ function readPlanName(snapshot: unknown): string | null {
 /**
  * `lastSeenAt` where the build has it, `updatedAt` where it does not.
  *
- * A `Date` IS ACCEPTED, and refusing one was the bug. The contract package
- * declares `updatedAt` as `z.iso.datetime().transform(str => new Date(str))`,
- * so on the validated path — that is, on every healthy panel — the value that
- * arrives here is already a `Date`. A `typeof seen === 'string'` test threw it
- * away, and the column came back blank for every device of every customer. It
- * populated only when the panel's answer FAILED validation and raw JSON leaked
- * through, which is the exact inverse of what anyone would guess from the data.
+ * A `Date` IS ACCEPTED, and refusing one was the bug. While the panel client ran
+ * the vendor schema over every answer, `updatedAt` arrived here as a `Date` on
+ * every healthy panel, and a `typeof seen === 'string'` test threw it away — the
+ * column came back blank for every device of every customer. The client now
+ * hands the wire string over, so both shapes are read and both render the same
+ * ISO string.
+ *
+ * `lastSeenAt` is declared by no 3.x release, and the inventory walk projects
+ * each row to the keys the panel declares (see
+ * `PanelDevicesClient.listAllDevices`), so on 3.x this column always comes from
+ * `updatedAt` — as it did when the vendor parse stripped the key.
  */
 function readDeviceSeenAt(device: Record<string, unknown>): string | null {
   const seen = device['lastSeenAt'] ?? device['updatedAt'];

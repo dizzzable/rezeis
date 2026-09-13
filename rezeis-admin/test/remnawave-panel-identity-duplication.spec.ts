@@ -528,7 +528,7 @@ function buildDeleteGuard(input: {
     {
       deleteUser: async (userId: number) => {
         deletedTargets.push(userId);
-        return { kind: 'ok', drifted: false, data: undefined };
+        return { kind: 'ok', data: undefined };
       },
       resolveUser: async () => {
         throw new Error('a target that is already a numeric id must never be re-resolved');

@@ -25,14 +25,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import {
-  CreateUserCommand as CreateUserV28,
-  UpdateUserCommand as UpdateUserV28,
-} from '@remnawave/contract-v28';
-import {
-  CreateUserCommand as CreateUserV3,
-  UpdateUserCommand as UpdateUserV3,
-} from '@remnawave/contract-v3';
+import * as contractPanel27 from '@remnawave/contract-panel-2.7';
+import * as contractPanel28 from '@remnawave/contract-panel-2.8';
+import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
+import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
 import { of } from 'rxjs';
 
 import type { PanelUserRef } from '../src/modules/remnawave/services/panel-user-address';
@@ -64,6 +60,21 @@ function fixture(rel: string): PanelFixture {
  * followed by a liveness floor that fails loudly instead.
  */
 const TWO_X_WRITE_FIXTURES = ['2.7.4/created-user.json', '2.8.0/created-user.json'] as const;
+
+/** The two write commands, typed structurally: each release is a separate zod build. */
+interface UserWriteContract {
+  readonly CreateUserCommand: { readonly ResponseSchema: { safeParse(value: unknown): { success: boolean } } };
+  readonly UpdateUserCommand: { readonly ResponseSchema: { safeParse(value: unknown): { success: boolean } } };
+}
+
+/**
+ * The contract each 2.x fixture's release ships, per the vendor's own table:
+ * panel 2.7.3–2.7.4 ships 2.7.2, panel 2.8.0–2.8.1 ships 2.8.35.
+ */
+const SHIPPED_2X_CONTRACT: Readonly<Record<string, UserWriteContract>> = {
+  '2.7.4/created-user.json': contractPanel27 as unknown as UserWriteContract,
+  '2.8.0/created-user.json': contractPanel28 as unknown as UserWriteContract,
+};
 
 const CONFIG = {
   host: 'remnawave',
@@ -170,9 +181,9 @@ const ERAS: readonly EraCase[] = [
   },
   {
     // The body is the verbatim 3.2.1 capture; the version reported is the
-    // operator's actual build. Both are `addressing: 'id'` and the row shape is
-    // unchanged across the 3.2.x line — see `@remnawave/contract-v3`, pinned at
-    // 3.2.3, which the fixture guard below parses this same body through.
+    // operator's actual build. Both are `addressing: 'id'`, and the fixture
+    // guard below parses this same body through BOTH contracts — 3.2.0, which
+    // panel 3.2.1 ships, and 3.2.3, which that operator's panel ships.
     label: '3.2.3 (the operator who reported the defect)',
     version: '3.2.3',
     file: '3.2.1/user.json',
@@ -350,10 +361,12 @@ describe("the write fixtures are the panel's record, not ours", () => {
       }
     });
 
-    it(`${rel} parses as the vendor's own create/update response`, () => {
+    it(`${rel} parses as the create/update response of the contract its release ships`, () => {
       const body = { response: fixture(rel).response };
-      assert.equal(CreateUserV28.ResponseSchema.safeParse(body).success, true, rel);
-      assert.equal(UpdateUserV28.ResponseSchema.safeParse(body).success, true, rel);
+      const shipped = SHIPPED_2X_CONTRACT[rel];
+      assert.ok(shipped !== undefined, `${rel}: no shipped contract recorded`);
+      assert.equal(shipped.CreateUserCommand.ResponseSchema.safeParse(body).success, true, rel);
+      assert.equal(shipped.UpdateUserCommand.ResponseSchema.safeParse(body).success, true, rel);
     });
   }
 
@@ -371,8 +384,11 @@ describe("the write fixtures are the panel's record, not ours", () => {
     // ABSENCE of the key, not emptiness: that is what the decoder branches on.
     assert.equal('uuid' in body.response, false);
     assert.equal(typeof body.response['id'], 'number');
-    // `@remnawave/contract-v3` is pinned at 3.2.3 — this operator's exact build.
-    assert.equal(CreateUserV3.ResponseSchema.safeParse(body).success, true);
-    assert.equal(UpdateUserV3.ResponseSchema.safeParse(body).success, true);
+    // The capture's own release first — panel 3.2.1 ships contract 3.2.0 — and
+    // then contract 3.2.3, the build of the operator who reported the defect.
+    for (const shipped of [contractPanel321, contractPanel323] as unknown as readonly UserWriteContract[]) {
+      assert.equal(shipped.CreateUserCommand.ResponseSchema.safeParse(body).success, true);
+      assert.equal(shipped.UpdateUserCommand.ResponseSchema.safeParse(body).success, true);
+    }
   });
 });

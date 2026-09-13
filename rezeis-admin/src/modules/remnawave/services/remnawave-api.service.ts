@@ -530,8 +530,9 @@ export function buildNodeUsersBandwidthPath(now = new Date()): string {
  *
  * This list is the single source of truth for BOTH the runtime drift detector
  * below and `test/remnawave-user-row-era-conformance.spec.ts`, which pins it
- * against the vendor SDK (`@remnawave/contract-v34` → 3.4.10) and against the
- * OpenAPI document itself. Sharing the constant is deliberate: if the test and
+ * against the contract panel 3.3 ships (`@remnawave/contract-panel-3.3` →
+ * backend-contract 3.4.2, a test-only oracle) and against the OpenAPI document
+ * itself. Sharing the constant is deliberate: if the test and
  * the detector each kept their own copy, the detector would eventually report
  * drift that was only our own staleness, and the operator would learn to ignore
  * it — which is the failure mode this whole mechanism exists to prevent.
@@ -3383,10 +3384,11 @@ export class RemnawaveApiService {
    * device-list readers, which all fall back to an array length): it bounds the
    * walk and cross-checks the result when the panel reports a usable one, but
    * an absent or non-integer `total` must NOT fail a read whose rows all
-   * arrived and all decoded. The vendored `@remnawave/backend-contract` does
-   * declare it (`GetAllUsersCommand.ResponseSchema`, `total: z.number()` — note:
-   * not `.int()`), but that package is pinned at 2.7.3 and says nothing about
-   * the build actually answering us; making the whole read hinge on it means a
+   * arrived and all decoded. The vendor contract does declare it
+   * (`GetAllUsersCommand.ResponseSchema`, `total: z.number()` — note: not
+   * `.int()`, checked in the 2.7.2 test oracle), but a contract describes one
+   * panel release and says nothing about the build actually answering us;
+   * making the whole read hinge on it means a
    * single wire difference stops every backup import overlaying live panel
    * state on one version while the other works, silently and successfully. A
    * page shorter than the panel's own page size is the end-of-list signal that

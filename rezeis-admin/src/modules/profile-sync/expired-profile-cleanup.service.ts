@@ -50,11 +50,11 @@ function hasLostPanelLink(row: {
 /**
  * A panel instant in milliseconds, or `null` when it is not one.
  *
- * The contract TRANSFORMS `expireAt` into a `Date`, but a body the executor
- * flagged `drifted` is handed back raw and still carries the ISO string. This
- * sweep DELETES on the strength of that date, so an unreadable one must defer
- * rather than fall through to `NaN` — which compares false against every
- * cutoff and would take the deletion branch.
+ * The panel client hands back the panel's own JSON, so `expireAt` arrives as
+ * the ISO string; a `Date` is accepted too. This sweep DELETES on the strength
+ * of that date, so an unreadable one must defer rather than fall through to
+ * `NaN` — which compares false against every cutoff and would take the
+ * deletion branch.
  */
 function readInstantMs(value: unknown): number | null {
   if (value instanceof Date) {
@@ -343,10 +343,10 @@ export class ExpiredProfileCleanupService {
       let panelSubscriptionUrl: string | null = null;
       if (panelOutcome !== null && panelOutcome.kind === 'ok') {
         const profile = panelOutcome.data.response;
-        // A response the executor flagged `drifted` is the panel's RAW body,
-        // where `expireAt` is still the string the contract would have turned
-        // into a `Date`. Both are read, and anything else DEFERS rather than
-        // deleting on a date this could not read.
+        // The panel's RAW body: nothing validates it on the way here, so
+        // `expireAt` is whatever the panel sent. A string or a `Date` is read,
+        // and anything else DEFERS rather than deleting on a date this could
+        // not read.
         const expireAtMs = readInstantMs(profile.expireAt);
         if (expireAtMs === null) {
           deferred += 1;

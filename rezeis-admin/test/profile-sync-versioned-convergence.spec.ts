@@ -54,9 +54,9 @@ function panelUsersStub(onUpdate: () => void) {
   return {
     updateUser: async () => {
       onUpdate();
-      return { kind: 'ok' as const, drifted: false, data: { response } };
+      return { kind: 'ok' as const, data: { response } };
     },
-    getUserById: async () => ({ kind: 'ok' as const, drifted: false, data: { response } }),
+    getUserById: async () => ({ kind: 'ok' as const, data: { response } }),
     resolveUser: async () => {
       throw new Error('a row carrying a numeric identity must never be re-resolved');
     },

@@ -56,7 +56,8 @@ interface ProfileSyncJobData {
  *
  * ── THE PANEL IS 3.x, AND THAT IS NOT A DEFAULT ─────────────────────────────
  * Every panel call below goes through {@link PanelUsersClient}, which speaks
- * the vendor's own contract and addresses users by NUMERIC ID, username or
+ * the panel's own routes (held to every 3.x contract by
+ * `test/panel-command-conformance.spec.ts`) and addresses users by NUMERIC ID, username or
  * shortUuid — there is no uuid addressing left, because 3.x deleted the column.
  * A 2.x panel is refused once, centrally, by `LegacyPanelRefusal` in
  * `panel-transport.ts`; nothing here asks what era it is talking to. The era
@@ -579,12 +580,12 @@ export class ProfileSyncProcessor extends WorkerHost {
           observedTrafficLimitBytes,
           observedDeviceLimit,
           observedAt: now,
-          // NULL, and not the contract minor this build is pinned to. The
-          // column records what the PANEL said its build was, and the user
-          // routes do not say — the strict adapter read it off an envelope
-          // field 3.x does not send, so it was already null on every 3.x
-          // answer. Writing our own pin here would put a number in an
-          // operator-facing column that describes us rather than them.
+          // NULL, and not any contract version of ours. The column records
+          // what the PANEL said its build was, and the user routes do not say —
+          // the strict adapter read it off an envelope field 3.x does not send,
+          // so it was already null on every 3.x answer. Writing a version of
+          // ours here would put a number in an operator-facing column that
+          // describes us rather than them.
           observedContractVersion: null,
           driftClass: null,
         },
@@ -947,8 +948,12 @@ export class ProfileSyncProcessor extends WorkerHost {
       trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024, // GB → bytes
       hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
       // Optional and never nullable upstream: a plan snapshot with no strategy
-      // (every 3x-ui import) must OMIT the field and let the panel apply its own
-      // `NO_RESET`, not send an explicit `null` the route refuses.
+      // (every 3x-ui import) must OMIT the field rather than send an explicit
+      // `null` the route refuses. What reaches the wire for an omitted strategy
+      // is `trafficLimitStrategy: "NO_RESET"` — the command table's schema
+      // carries the panel's default and the executor sends the parsed body
+      // (pinned byte for byte by `test/panel-wire-bytes.spec.ts`). The same
+      // holds for `status`, which goes out as `ACTIVE` when omitted above.
       ...(trafficLimitStrategy === null
         ? {}
         : { trafficLimitStrategy: trafficLimitStrategy as PanelResetPeriod }),
@@ -962,14 +967,13 @@ export class ProfileSyncProcessor extends WorkerHost {
       );
     }
     const panelUser = created.data.response;
-    // THE PANEL'S ANSWER IS CHECKED BEFORE IT BECOMES AN IDENTITY. The executor
-    // is lenient by design: a `2xx` whose body fails the contract comes back
-    // RAW, so `id` can be missing entirely — and `String(undefined)` is
-    // `'undefined'`, a non-empty string that sails past `persistProfileLink`'s
-    // emptiness guard and names no profile on any panel. That is exactly the
-    // defect the old cast produced (a job that reported success over a NULL
-    // column), arriving through the one door the new layer deliberately leaves
-    // open, so it is closed here instead.
+    // THE PANEL'S ANSWER IS CHECKED BEFORE IT BECOMES AN IDENTITY. Nothing in
+    // front of this validates a response — the client hands back the panel's
+    // JSON as it arrived — so `id` can be missing entirely, and
+    // `String(undefined)` is `'undefined'`, a non-empty string that sails past
+    // `persistProfileLink`'s emptiness guard and names no profile on any panel.
+    // That is exactly the defect the old cast produced (a job that reported
+    // success over a NULL column), so the door is closed here.
     const createdPanelId = readPanelUserId(panelUser);
     if (createdPanelId === null) {
       throw new Error(
@@ -1121,8 +1125,8 @@ export class ProfileSyncProcessor extends WorkerHost {
    * `remnawave-profile:undefined` — serialising every concurrent CREATE on one
    * lock — and the job completed. Refusing here converts all of that into one
    * failed job an operator can see and a retry can fix. {@link readPanelUserId}
-   * closes the same hole one layer up, where a drifted body can now produce the
-   * string `'undefined'` instead of an absent one.
+   * closes the same hole one layer up, where an unvalidated panel body could
+   * otherwise produce the string `'undefined'` instead of an absent one.
    */
   private async persistProfileLink(
     subscriptionId: string,
@@ -2478,10 +2482,10 @@ function canonicalDeviceLimit(value: number | null): number | null {
  * one.
  *
  * NOT `row.id` taken on trust, and the difference is a column written with the
- * literal string `'undefined'`. The executor is LENIENT by design: a `2xx`
- * whose body fails the pinned contract is handed back RAW with `drifted: true`,
- * so every field on it is whatever the panel actually sent — including nothing
- * at all. `String(undefined)` is `'undefined'`, which is non-empty, passes
+ * literal string `'undefined'`. No schema runs over a panel response: the
+ * client hands back the JSON the panel sent, so every field on a row is
+ * whatever the panel actually sent — including nothing at all.
+ * `String(undefined)` is `'undefined'`, which is non-empty, passes
  * `persistProfileLink`'s emptiness guard, and names no profile on any panel.
  */
 function readPanelUserId(row: { readonly id?: unknown }): number | null {
@@ -2496,12 +2500,13 @@ function readPanelString(value: unknown): string | null {
 /**
  * A panel timestamp as the ISO string the callers downstream parse.
  *
- * The contract TRANSFORMS every date field into a `Date`, but a response the
- * executor flagged `drifted` is the panel's raw body — where the same field is
- * still a string. Both are accepted, and anything else answers `null` rather
- * than `String(undefined)`: `stampMonthRollingAnchor` would write
+ * The client hands the panel's own JSON over, so a date field arrives as the
+ * wire string; a `Date` is still accepted, which is what the vendor parse used
+ * to produce and what several test doubles hand over. Anything else answers
+ * `null` rather than `String(undefined)`: `stampMonthRollingAnchor` would write
  * `Invalid Date` into a MONTH_ROLLING reset anchor, which silently moves a
- * customer's reset boundary.
+ * customer's reset boundary. Only the instant is used downstream
+ * (`Date.parse`), so the two spellings of one timestamp write the same anchor.
  */
 function panelTimestamp(value: unknown): string | null {
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();

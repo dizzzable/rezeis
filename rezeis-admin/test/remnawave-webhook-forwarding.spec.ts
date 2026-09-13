@@ -265,9 +265,9 @@ describe('panel user identity across panel versions', () => {
   /**
    * A real Remnawave 3.2.x `RemnawaveWebhookUserEvents` envelope.
    *
-   * Shaped from `ExtendedUsersSchema` in the vendor's own 3.2.2 contract
-   * (`@remnawave/contract-v3`, a devDependency): `id` is a number and the
-   * schema has NO `uuid` property at all. That absence is the whole point of
+   * Shaped from `ExtendedUsersSchema` as the 3.x contracts declare it (e.g.
+   * `@remnawave/contract-panel-3.2.3`, a devDependency): `id` is a number and
+   * the schema has NO `uuid` property at all. That absence is the whole point of
    * this fixture — nothing here may add a uuid "for completeness", or the test
    * stops being about a 3.x panel.
    */

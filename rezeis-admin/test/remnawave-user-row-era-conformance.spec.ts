@@ -22,12 +22,17 @@
  * the regression this repo must not ship again. Every claim below is therefore
  * made PER ERA.
  *
- * THE ANCHORS, all available in CI:
+ * THE ANCHORS, all available in CI — the contract each panel release ships, per
+ * the vendor's own table (https://docs.rw/sdk/typescript-sdk/), as devDependency
+ * aliases named by panel release. None of them is a runtime dependency.
  *
- *   `@remnawave/backend-contract`  2.7.3  — the PRODUCTION dependency (runtime)
- *   `@remnawave/contract-v28`      2.8.35 — dev alias, the 2.8 line
- *   `@remnawave/contract-v3`       3.2.3  — dev alias, the 3.2 line
- *   `@remnawave/contract-v34`      3.4.2  — dev alias, exact pin, matches 3.3.2
+ *   `@remnawave/contract-panel-2.7`    backend-contract 2.7.2   panel 2.7.3–2.7.4
+ *   `@remnawave/contract-panel-2.8`    backend-contract 2.8.35  panel 2.8.0–2.8.1
+ *   `@remnawave/contract-panel-3.2.1`  backend-contract 3.2.0   panel 3.2.0–3.2.1
+ *   `@remnawave/contract-panel-3.2.3`  backend-contract 3.2.3   panel 3.2.3
+ *   `@remnawave/contract-panel-3.3`    backend-contract 3.4.2   panel 3.3.0–3.3.2
+ *   `@remnawave/contract-panel-3.4.3`  backend-contract 3.4.13  panel 3.4.0–3.4.3
+ *   `@remnawave/contract-panel-3.4.4`  backend-contract 3.4.15  panel 3.4.4
  *   `test/fixtures/remnawave/3.3.2/user.json` — derived MECHANICALLY from
  *       `UserResponseDto.response` in the vendor's OpenAPI document for panel
  *       3.3.2. Its key set is the specification's, not something hand-written to
@@ -46,10 +51,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import * as contractProd from '@remnawave/backend-contract';
-import * as contractV28 from '@remnawave/contract-v28';
-import * as contractV3 from '@remnawave/contract-v3';
-import * as contractV34 from '@remnawave/contract-v34';
+import * as contractPanel27 from '@remnawave/contract-panel-2.7';
+import * as contractPanel28 from '@remnawave/contract-panel-2.8';
+import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
+import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
+import * as contractPanel33 from '@remnawave/contract-panel-3.3';
+import * as contractPanel343 from '@remnawave/contract-panel-3.4.3';
+import * as contractPanel344 from '@remnawave/contract-panel-3.4.4';
 import { of } from 'rxjs';
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
@@ -81,35 +89,30 @@ interface ContractUnderTest {
   readonly era: '2.x' | '3.x';
 }
 
+function contractOf(
+  panels: string,
+  version: string,
+  era: '2.x' | '3.x',
+  mod: unknown,
+): ContractUnderTest {
+  const contract = mod as { CreateUserCommand: unknown; UpdateUserCommand: unknown };
+  return {
+    label: `contract ${version} (panel ${panels})`,
+    version,
+    era,
+    create: contract.CreateUserCommand as UserCommand,
+    update: contract.UpdateUserCommand as UserCommand,
+  };
+}
+
 const CONTRACTS: readonly ContractUnderTest[] = [
-  {
-    label: 'prod 2.7.3 (the RUNTIME dependency)',
-    version: '2.7.3',
-    era: '2.x',
-    create: contractProd.CreateUserCommand as unknown as UserCommand,
-    update: contractProd.UpdateUserCommand as unknown as UserCommand,
-  },
-  {
-    label: 'v28 2.8.35',
-    version: '2.8.35',
-    era: '2.x',
-    create: contractV28.CreateUserCommand as unknown as UserCommand,
-    update: contractV28.UpdateUserCommand as unknown as UserCommand,
-  },
-  {
-    label: 'v3 3.2.3',
-    version: '3.2.3',
-    era: '3.x',
-    create: contractV3.CreateUserCommand as unknown as UserCommand,
-    update: contractV3.UpdateUserCommand as unknown as UserCommand,
-  },
-  {
-    label: 'v34 3.4.2 (exact pin for panel 3.3.2)',
-    version: '3.4.2',
-    era: '3.x',
-    create: contractV34.CreateUserCommand as unknown as UserCommand,
-    update: contractV34.UpdateUserCommand as unknown as UserCommand,
-  },
+  contractOf('2.7.3–2.7.4', '2.7.2', '2.x', contractPanel27),
+  contractOf('2.8.0–2.8.1', '2.8.35', '2.x', contractPanel28),
+  contractOf('3.2.0–3.2.1', '3.2.0', '3.x', contractPanel321),
+  contractOf('3.2.3', '3.2.3', '3.x', contractPanel323),
+  contractOf('3.3.0–3.3.2', '3.4.2', '3.x', contractPanel33),
+  contractOf('3.4.0–3.4.3', '3.4.13', '3.x', contractPanel343),
+  contractOf('3.4.4', '3.4.15', '3.x', contractPanel344),
 ];
 
 function contractByVersion(version: string): ContractUnderTest {
@@ -182,6 +185,8 @@ interface EraCase {
   readonly label: string;
   /** What `/api/system/stats/recap` reports, i.e. which era we are addressing. */
   readonly panelVersion: string;
+  /** The contract that panel release ships — the one its row is judged by. */
+  readonly shippedContract: string;
   readonly row: PanelFixture;
   /** Which field the ROW itself says is its identity. */
   readonly identityField: 'uuid' | 'id';
@@ -193,65 +198,74 @@ interface EraCase {
   readonly verdicts: Readonly<Record<string, Verdict>>;
 }
 
+/** Every 3.x contract does the same thing to a user row: no `uuid` is declared, so none survives. */
+const THREE_X_DISCARDS: Readonly<Record<string, Verdict>> = {
+  '3.2.0': 'accepts, uuid DISCARDED',
+  '3.2.3': 'accepts, uuid DISCARDED',
+  '3.4.2': 'accepts, uuid DISCARDED',
+  '3.4.13': 'accepts, uuid DISCARDED',
+  '3.4.15': 'accepts, uuid DISCARDED',
+};
+
 const ERAS: readonly EraCase[] = [
   {
     label: '2.7.4 (a shipped deployment still on the 2.7 line)',
     panelVersion: '2.7.4',
+    shippedContract: '2.7.2',
     row: ROW_274,
     identityField: 'uuid',
     expectedIdentity: '11111111-1111-4111-8111-111111111111',
     expectedPanelId: 4471,
     ref: '11111111-1111-4111-8111-111111111111',
     verdicts: {
-      '2.7.3': 'accepts, uuid preserved',
+      '2.7.2': 'accepts, uuid preserved',
       '2.8.35': 'accepts, uuid preserved',
-      '3.2.3': 'accepts, uuid DISCARDED',
-      '3.4.2': 'accepts, uuid DISCARDED',
+      ...THREE_X_DISCARDS,
     },
   },
   {
     label: '2.8.0 (a shipped deployment on the 2.8 line)',
     panelVersion: '2.8.0',
+    shippedContract: '2.8.35',
     row: ROW_280,
     identityField: 'uuid',
     expectedIdentity: '22222222-2222-4222-8222-222222222222',
     expectedPanelId: 8123,
     ref: '22222222-2222-4222-8222-222222222222',
     verdicts: {
-      '2.7.3': 'accepts, uuid preserved',
+      '2.7.2': 'accepts, uuid preserved',
       '2.8.35': 'accepts, uuid preserved',
-      '3.2.3': 'accepts, uuid DISCARDED',
-      '3.4.2': 'accepts, uuid DISCARDED',
+      ...THREE_X_DISCARDS,
     },
   },
   {
     label: '3.2.1 (verbatim live capture)',
-    panelVersion: '3.2.3',
+    panelVersion: '3.2.1',
+    shippedContract: '3.2.0',
     row: ROW_321,
     identityField: 'id',
     expectedIdentity: '2',
     expectedPanelId: 2,
     ref: { remnawaveId: '2', panelId: 2, panelUsername: 'labuser1' },
     verdicts: {
-      '2.7.3': 'rejects: uuid required',
+      '2.7.2': 'rejects: uuid required',
       '2.8.35': 'rejects: uuid required',
-      '3.2.3': 'accepts, uuid DISCARDED',
-      '3.4.2': 'accepts, uuid DISCARDED',
+      ...THREE_X_DISCARDS,
     },
   },
   {
     label: "3.3.2 (the owner's panel, shape taken from its OpenAPI document)",
     panelVersion: '3.3.2',
+    shippedContract: '3.4.2',
     row: ROW_332,
     identityField: 'id',
     expectedIdentity: '7',
     expectedPanelId: 7,
     ref: { remnawaveId: '7', panelId: 7, panelUsername: 'rz_sub_332' },
     verdicts: {
-      '2.7.3': 'rejects: uuid required',
+      '2.7.2': 'rejects: uuid required',
       '2.8.35': 'rejects: uuid required',
-      '3.2.3': 'accepts, uuid DISCARDED',
-      '3.4.2': 'accepts, uuid DISCARDED',
+      ...THREE_X_DISCARDS,
     },
   },
 ];
@@ -411,7 +425,24 @@ describe('no single vendor contract reads both panel eras', () => {
     }
     // Anchor: the matrix is not empty.
     assert.equal(ERAS.length, 4);
-    assert.equal(CONTRACTS.length, 4);
+    assert.equal(CONTRACTS.length, 7);
+  });
+
+  it('each row is accepted by the contract its own panel release ships', () => {
+    for (const era of ERAS) {
+      const shipped = contractByVersion(era.shippedContract);
+      const body = { response: era.row.response };
+      assert.equal(
+        shipped.create.ResponseSchema.safeParse(body).success,
+        true,
+        `${era.label}: refused by ${shipped.label}, the contract that release ships`,
+      );
+      assert.equal(
+        shipped.update.ResponseSchema.safeParse(body).success,
+        true,
+        `${era.label}: the update response refused by ${shipped.label}`,
+      );
+    }
   });
 
   it('at least one era is REJECTED by the 2.x line and one loses its uuid to the 3.x line', () => {
@@ -545,7 +576,7 @@ describe('PANEL_USER_SPEC_REQUIRED_KEYS_3X is pinned to the vendor, two ways', (
     assertKeySetsAgree(ours, spec, 'our key-set constant vs the 3.3.2 OpenAPI document');
   });
 
-  it('the 3.4.2 SDK and the 3.3.2 document agree with each other — the pin is right', () => {
+  it('the 3.4.2 SDK and the 3.3.2 document agree with each other — the pairing is right', () => {
     const sdk = [...declaredRowKeys(contractByVersion('3.4.2'))].sort();
     const spec = [...(ROW_332.specRequired as readonly string[])].sort();
     assertKeySetsAgree(sdk, spec, 'the 3.4.2 SDK vs the 3.3.2 OpenAPI document');
@@ -553,7 +584,7 @@ describe('PANEL_USER_SPEC_REQUIRED_KEYS_3X is pinned to the vendor, two ways', (
 
   it('the 2.x contracts declare exactly one field more, and it is the uuid', () => {
     const threeX = new Set(declaredRowKeys(contractByVersion('3.4.2')));
-    for (const version of ['2.7.3', '2.8.35']) {
+    for (const version of ['2.7.2', '2.8.35']) {
       const twoX = declaredRowKeys(contractByVersion(version));
       const extra = twoX.filter((k) => !threeX.has(k)).sort();
       assert.deepStrictEqual(extra, ['uuid'], `${version} differs from 3.x by more than the uuid`);

@@ -1,33 +1,16 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import {
-  ConnectionsByNodeCommand,
-  ConnectionsByNodeResultCommand,
-  ConnectionsByUserCommand,
-  ConnectionsByUserResultCommand,
-  DeleteAllUserHwidDevicesCommand,
-  DeleteUserCommand,
-  DeleteUserHwidDeviceCommand,
-  DropConnectionsCommand,
-  ERRORS,
-  GetUserByIdCommand,
-  GetUserByShortUuidCommand,
-  GetUserByUsernameCommand,
-  GetUserHwidDevicesCommand,
-  GetUsersCommand,
-  ResetUserTrafficCommand,
-  ResolveUserCommand,
-  RevokeUserSubscriptionCommand,
-  SyncSnippetCommand,
-  UpdateUserCommand,
-} from '@remnawave/contract-v3';
-
-// Namespace imports for the 2.x lines: their export NAMES differ from 3.x
+// Namespace imports: the 2.x and 3.x lines export different command NAMES
 // (`GetUserByUuidCommand` vs `GetUserByIdCommand`), and a named import of a
-// symbol a future patch removes would fail at load rather than as an assertion.
-import * as contract27 from '@remnawave/backend-contract';
-import * as contract28 from '@remnawave/contract-v28';
+// symbol a later release removes would fail at load rather than as an assertion.
+import * as contractPanel27 from '@remnawave/contract-panel-2.7';
+import * as contractPanel28 from '@remnawave/contract-panel-2.8';
+import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
+import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
+import * as contractPanel33 from '@remnawave/contract-panel-3.3';
+import * as contractPanel343 from '@remnawave/contract-panel-3.4.3';
+import * as contractPanel344 from '@remnawave/contract-panel-3.4.4';
 
 import {
   PANEL_ROUTES,
@@ -35,39 +18,37 @@ import {
 } from '../src/modules/remnawave/services/panel-routes';
 
 /**
- * Pins every Remnawave 3.x route and error code rezeis builds against the
- * vendor's own published contract (`@remnawave/backend-contract@3.2.3`,
- * installed as the devDependency alias `@remnawave/contract-v3`).
+ * Pins every Remnawave route and "no such user" code in `panel-routes.ts`
+ * against the contract each panel release actually ships.
  *
  * WHY THIS EXISTS. Everything in `panel-routes.ts` was originally transcribed by
  * hand off a panel running in a local lab. Hand transcription is exactly how
  * this integration has rotted before: a path or a field name changes upstream,
  * nothing here notices, and the first report comes from a customer rather than
- * from CI. This spec turns those constants from notes into checked facts —
- * bump the alias and a drifted route fails here.
+ * from CI. This spec turns those constants from notes into checked facts.
  *
- * WHY THE VENDOR PACKAGE IS NOT A PRODUCTION DEPENDENCY. It pins `zod@4.4.3`
- * while this project pins `4.3.6`, so importing it from `src/` would ship a
- * third copy of zod in order to execute schemas the adapter deliberately does
- * not use — its response parsing is on purpose more tolerant than the published
- * contract (see `mapSubscriptionSettings`, and the defensive `total` reads in
- * `strictListUserDevices`). Strict vendor validation there would turn cosmetic
- * panel drift into an outage. So: the vendor's authority at build time, nothing
- * extra at runtime.
+ * WHICH CONTRACT, FOR WHICH PANEL. The contract's version number is not the
+ * panel's — contract 3.4.2 belongs to panel 3.3, and some contract releases
+ * match no panel at all. The pairing below is the vendor's own table
+ * (https://docs.rw/sdk/typescript-sdk/), installed as devDependency aliases
+ * named by PANEL release:
  *
- * SCOPE. Both eras. The 3.x half is pinned against `@remnawave/contract-v3`
- * (3.2.3); the 2.x half against `@remnawave/contract-v28` (2.8.35), because the
- * production dependency is pinned at `~2.7.3` — the 2.7 LINE — while the
- * operator's panels are 2.7.4 and 2.8.0. That pin turns out to be harmless (the
- * two contract lines declare ZERO differing paths across 185/186 commands, and
- * the three commands the adapter imports at runtime are identical), but
- * "harmless" is a measurement, not a guarantee, so the 2.8 line is checked here
- * rather than assumed.
+ *   `@remnawave/contract-panel-2.7`    backend-contract 2.7.2   panel 2.7.3–2.7.4
+ *   `@remnawave/contract-panel-2.8`    backend-contract 2.8.35  panel 2.8.0–2.8.1
+ *   `@remnawave/contract-panel-3.2.1`  backend-contract 3.2.0   panel 3.2.0–3.2.1
+ *   `@remnawave/contract-panel-3.2.3`  backend-contract 3.2.3   panel 3.2.3
+ *   `@remnawave/contract-panel-3.3`    backend-contract 3.4.2   panel 3.3.0–3.3.2
+ *   `@remnawave/contract-panel-3.4.3`  backend-contract 3.4.13  panel 3.4.0–3.4.3
+ *   `@remnawave/contract-panel-3.4.4`  backend-contract 3.4.15  panel 3.4.4
+ *
+ * None of them is a runtime dependency — `panel-command-conformance.spec.ts`
+ * guards that — so they cost the image nothing. The 3.x routes are checked
+ * against every 3.x release, the 2.x routes against both 2.x releases.
  */
 
 /**
  * The vendor states collection routes with a trailing slash (`/api/users/`)
- * and rezeis states them without. Express treats the two as the same route and
+ * and rezeis states some without. Express treats the two as the same route and
  * the panel answers both, so the difference is cosmetic — but it has to be
  * normalised away deliberately rather than silently, otherwise this spec would
  * be asserting a formatting convention instead of a route.
@@ -81,16 +62,30 @@ const ID = '4242';
 const NODE_UUID = '7aa64e53-f5da-4366-9760-0fdad1497a28';
 const JOB_ID = '7';
 
-type UrlBuilder = { readonly url: string | ((...args: string[]) => string) };
+type ContractNamespace = Readonly<Record<string, unknown>>;
 
-/** The vendor exposes parameterised routes as builders and fixed ones as strings. */
-function vendorUrl(command: UrlBuilder, arg?: string): string {
-  const { url } = command;
-  return route(typeof url === 'function' ? url(arg ?? '') : url);
+interface Release {
+  readonly panels: string;
+  readonly contract: string;
+  readonly module: ContractNamespace;
 }
 
-/** `url` off an unknown export, or `null` when it carries none. */
-function urlOfUnknown(command: unknown, arg = '{X}'): string | null {
+const THREE_X: readonly Release[] = [
+  { panels: '3.2.0–3.2.1', contract: '3.2.0', module: contractPanel321 as unknown as ContractNamespace },
+  { panels: '3.2.3', contract: '3.2.3', module: contractPanel323 as unknown as ContractNamespace },
+  { panels: '3.3.0–3.3.2', contract: '3.4.2', module: contractPanel33 as unknown as ContractNamespace },
+  { panels: '3.4.0–3.4.3', contract: '3.4.13', module: contractPanel343 as unknown as ContractNamespace },
+  { panels: '3.4.4', contract: '3.4.15', module: contractPanel344 as unknown as ContractNamespace },
+];
+
+const TWO_X: readonly Release[] = [
+  { panels: '2.7.3–2.7.4', contract: '2.7.2', module: contractPanel27 as unknown as ContractNamespace },
+  { panels: '2.8.0–2.8.1', contract: '2.8.35', module: contractPanel28 as unknown as ContractNamespace },
+];
+
+/** `url` off an export, or `null` when the release does not export that command. */
+function urlOf(release: Release, name: string, arg = '{X}'): string | null {
+  const command = release.module[name];
   if (command === null || typeof command !== 'object') return null;
   const url = (command as { url?: unknown }).url;
   if (typeof url === 'string') return route(url);
@@ -98,207 +93,213 @@ function urlOfUnknown(command: unknown, arg = '{X}'): string | null {
   return route((url as (value: string) => string)(arg));
 }
 
-type ContractNamespace = Record<string, unknown>;
-
-const CONTRACTS: Readonly<Record<string, ContractNamespace>> = {
-  '@remnawave/backend-contract': contract27 as unknown as ContractNamespace,
-  '@remnawave/contract-v28': contract28 as unknown as ContractNamespace,
-};
-
-function loadContract(spec: string): ContractNamespace {
-  const found = CONTRACTS[spec];
-  assert.ok(found !== undefined, `contract ${spec} is not wired into this spec`);
-  return found;
-}
-
-/**
- * A 2.x route by EXPORT NAME. Fails loudly when the vendor stops exporting it,
- * which is the signal we want — a silently skipped assertion is how a guard
- * test turns green while guarding nothing.
- */
-function vendorUrl28(name: string, arg?: string): string {
-  const url = urlOfUnknown((contract28 as unknown as ContractNamespace)[name], arg);
-  assert.ok(url !== null, `@remnawave/contract-v28 exports no url for ${name}`);
+/** A route by export name. Fails loudly when a release stops exporting it. */
+function vendorUrl(release: Release, name: string, arg?: string): string {
+  const url = urlOf(release, name, arg);
+  assert.ok(url !== null, `contract ${release.contract} (panel ${release.panels}) exports no url for ${name}`);
   return url;
 }
 
-describe('Remnawave 3.x routes match the vendor contract', () => {
-  // [what it is, ours, theirs]
-  const CASES: ReadonlyArray<readonly [string, string, string]> = [
-    ['GET one profile', route(PANEL_ROUTES.user(ID)), vendorUrl(GetUserByIdCommand, ID)],
-    ['DELETE one profile', route(PANEL_ROUTES.deleteUser(ID)), vendorUrl(DeleteUserCommand, ID)],
-    [
-      'reset traffic',
-      route(PANEL_ROUTES.resetUserTraffic(ID)),
-      vendorUrl(ResetUserTrafficCommand, ID),
-    ],
+describe('Remnawave 3.x routes match every 3.x release', () => {
+  // [what it is, ours, the vendor's command, the segment]
+  const CASES: ReadonlyArray<readonly [string, string, string, string | undefined]> = [
+    ['GET one profile', route(PANEL_ROUTES.user(ID)), 'GetUserByIdCommand', ID],
+    ['DELETE one profile', route(PANEL_ROUTES.deleteUser(ID)), 'DeleteUserCommand', ID],
+    ['reset traffic', route(PANEL_ROUTES.resetUserTraffic(ID)), 'ResetUserTrafficCommand', ID],
     [
       'revoke subscription',
       route(PANEL_ROUTES.revokeUserSubscription(ID)),
-      vendorUrl(RevokeUserSubscriptionCommand, ID),
+      'RevokeUserSubscriptionCommand',
+      ID,
     ],
-    [
-      'devices of one profile',
-      route(PANEL_ROUTES.userHwidDevices(ID)),
-      vendorUrl(GetUserHwidDevicesCommand, ID),
-    ],
-    [
-      'delete one device',
-      route(PANEL_ROUTES.deleteHwidDevice),
-      vendorUrl(DeleteUserHwidDeviceCommand),
-    ],
+    ['devices of one profile', route(PANEL_ROUTES.userHwidDevices(ID)), 'GetUserHwidDevicesCommand', ID],
+    ['delete one device', route(PANEL_ROUTES.deleteHwidDevice), 'DeleteUserHwidDeviceCommand', undefined],
     [
       'delete every device',
       route(PANEL_ROUTES.deleteAllHwidDevices),
-      vendorUrl(DeleteAllUserHwidDevicesCommand),
+      'DeleteAllUserHwidDevicesCommand',
+      undefined,
     ],
-    ['user collection (list)', route(PANEL_ROUTES.users), vendorUrl(GetUsersCommand)],
-    ['user collection (write)', route(PANEL_ROUTES.users), vendorUrl(UpdateUserCommand)],
-    ['resolve identity', route(PANEL_ROUTES.resolveUser), vendorUrl(ResolveUserCommand)],
+    ['user collection (list)', route(PANEL_ROUTES.users), 'GetUsersCommand', undefined],
+    ['user collection (write)', route(PANEL_ROUTES.users), 'UpdateUserCommand', undefined],
+    ['resolve identity', route(PANEL_ROUTES.resolveUser), 'ResolveUserCommand', undefined],
     [
       'lookup by username',
       route(PANEL_ROUTES.userByUsername('labuser1')),
-      vendorUrl(GetUserByUsernameCommand, 'labuser1'),
+      'GetUserByUsernameCommand',
+      'labuser1',
     ],
     [
       'lookup by short uuid',
       route(PANEL_ROUTES.userByShortUuid('PyTr7C5568QuLhup')),
-      vendorUrl(GetUserByShortUuidCommand, 'PyTr7C5568QuLhup'),
+      'GetUserByShortUuidCommand',
+      'PyTr7C5568QuLhup',
     ],
     [
       'connections by user — start',
       route(PANEL_ROUTES.connectionsByUserStart(ID)),
-      vendorUrl(ConnectionsByUserCommand, ID),
+      'ConnectionsByUserCommand',
+      ID,
     ],
     [
       'connections by user — result',
       route(PANEL_ROUTES.connectionsByUserResult(JOB_ID)),
-      vendorUrl(ConnectionsByUserResultCommand, JOB_ID),
+      'ConnectionsByUserResultCommand',
+      JOB_ID,
     ],
     [
       'connections by node — start',
       route(PANEL_ROUTES.connectionsByNodeStart(NODE_UUID)),
-      vendorUrl(ConnectionsByNodeCommand, NODE_UUID),
+      'ConnectionsByNodeCommand',
+      NODE_UUID,
     ],
     [
       'connections by node — result',
       route(PANEL_ROUTES.connectionsByNodeResult(JOB_ID)),
-      vendorUrl(ConnectionsByNodeResultCommand, JOB_ID),
+      'ConnectionsByNodeResultCommand',
+      JOB_ID,
     ],
-    ['drop connections', route(PANEL_ROUTES.connectionsDrop), vendorUrl(DropConnectionsCommand)],
-    ['sync snippet', route(PANEL_ROUTES.snippetSync), vendorUrl(SyncSnippetCommand)],
+    ['drop connections', route(PANEL_ROUTES.connectionsDrop), 'DropConnectionsCommand', undefined],
   ];
 
-  for (const [label, ours, theirs] of CASES) {
-    it(`${label}: ${theirs}`, () => {
-      assert.equal(ours, theirs);
+  for (const [label, ours, command, arg] of CASES) {
+    it(`${label}: ${ours}`, () => {
+      for (const release of THREE_X) {
+        assert.equal(ours, vendorUrl(release, command, arg), `contract ${release.contract} (panel ${release.panels})`);
+      }
     });
   }
 
+  it('snippet sync exists from panel 3.2.3 on, and panel 3.2.0–3.2.1 does not serve it', () => {
+    // Measured, not assumed: contract 3.2.0 exports no `SyncSnippetCommand`.
+    // `PANEL_ROUTES.snippetSync` has no caller in `src/`, so this is a fact
+    // about the constant rather than a live request — recorded so that the day
+    // something calls it, the release it cannot work on is already named.
+    const [oldest, ...rest] = THREE_X;
+    assert.equal(urlOf(oldest as Release, 'SyncSnippetCommand'), null);
+    for (const release of rest) {
+      assert.equal(route(PANEL_ROUTES.snippetSync), vendorUrl(release, 'SyncSnippetCommand'), release.contract);
+    }
+  });
+
   it('checks every route family, so a bad import cannot pass by checking nothing', () => {
-    // A liveness floor. If the vendor package stops exporting these, the loop
-    // above would simply run fewer cases and still be green.
-    assert.ok(CASES.length >= 18, `only ${CASES.length} routes checked`);
+    // A liveness floor. If the vendor packages stopped exporting these, the
+    // loop above would simply run fewer cases and still be green.
+    assert.equal(CASES.length, 17);
+    assert.equal(THREE_X.length, 5);
     const families = new Set(CASES.map(([, ours]) => ours.split('/')[2]));
-    assert.deepEqual([...families].sort(), ['connections', 'hwid', 'snippets', 'users']);
+    assert.deepEqual([...families].sort(), ['connections', 'hwid', 'users']);
   });
 
   it('the comparison can actually fail', () => {
     // Self-test: proves `route()` is not flattening everything to one value.
-    assert.notEqual(route(PANEL_ROUTES.user(ID)), vendorUrl(GetUserHwidDevicesCommand, ID));
+    assert.notEqual(
+      route(PANEL_ROUTES.user(ID)),
+      vendorUrl(THREE_X[0] as Release, 'GetUserHwidDevicesCommand', ID),
+    );
   });
 });
 
-describe('Remnawave 2.x routes match the vendor contract', () => {
+describe('Remnawave 2.x routes match both 2.x releases', () => {
   // The 2.x half of `PANEL_ROUTES`: the same operations, addressed by UUID, plus
   // the `ip-control/*` family that 3.x deleted outright.
   const UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
 
-  const CASES: ReadonlyArray<readonly [string, string, string]> = [
-    ['GET one profile', route(PANEL_ROUTES.user(UUID)), vendorUrl28('GetUserByUuidCommand', UUID)],
-    [
-      'DELETE one profile',
-      route(PANEL_ROUTES.deleteUser(UUID)),
-      vendorUrl28('DeleteUserCommand', UUID),
-    ],
-    [
-      'reset traffic',
-      route(PANEL_ROUTES.resetUserTraffic(UUID)),
-      vendorUrl28('ResetUserTrafficCommand', UUID),
-    ],
+  const CASES: ReadonlyArray<readonly [string, string, string, string | undefined]> = [
+    ['GET one profile', route(PANEL_ROUTES.user(UUID)), 'GetUserByUuidCommand', UUID],
+    ['DELETE one profile', route(PANEL_ROUTES.deleteUser(UUID)), 'DeleteUserCommand', UUID],
+    ['reset traffic', route(PANEL_ROUTES.resetUserTraffic(UUID)), 'ResetUserTrafficCommand', UUID],
     [
       'revoke subscription',
       route(PANEL_ROUTES.revokeUserSubscription(UUID)),
-      vendorUrl28('RevokeUserSubscriptionCommand', UUID),
+      'RevokeUserSubscriptionCommand',
+      UUID,
     ],
-    [
-      'devices of one profile',
-      route(PANEL_ROUTES.userHwidDevices(UUID)),
-      vendorUrl28('GetUserHwidDevicesCommand', UUID),
-    ],
-    [
-      'delete one device',
-      route(PANEL_ROUTES.deleteHwidDevice),
-      vendorUrl28('DeleteUserHwidDeviceCommand'),
-    ],
+    ['devices of one profile', route(PANEL_ROUTES.userHwidDevices(UUID)), 'GetUserHwidDevicesCommand', UUID],
+    ['delete one device', route(PANEL_ROUTES.deleteHwidDevice), 'DeleteUserHwidDeviceCommand', undefined],
     [
       'delete every device',
       route(PANEL_ROUTES.deleteAllHwidDevices),
-      vendorUrl28('DeleteAllUserHwidDevicesCommand'),
+      'DeleteAllUserHwidDevicesCommand',
+      undefined,
     ],
-    ['drop connections (2.x)', route(PANEL_ROUTES.ipControlDrop), vendorUrl28('DropConnectionsCommand')],
+    ['drop connections (2.x)', route(PANEL_ROUTES.ipControlDrop), 'DropConnectionsCommand', undefined],
   ];
 
-  for (const [label, ours, theirs] of CASES) {
-    it(`${label}: ${theirs}`, () => {
-      assert.equal(ours, theirs);
+  for (const [label, ours, command, arg] of CASES) {
+    it(`${label}: ${ours}`, () => {
+      for (const release of TWO_X) {
+        assert.equal(ours, vendorUrl(release, command, arg), `contract ${release.contract} (panel ${release.panels})`);
+      }
     });
   }
 
   it('checks the 2.x families too', () => {
-    assert.ok(CASES.length >= 8, `only ${CASES.length} routes checked`);
+    assert.equal(CASES.length, 8);
     const families = new Set(CASES.map(([, ours]) => ours.split('/')[2]));
     assert.deepEqual([...families].sort(), ['hwid', 'ip-control', 'users']);
   });
 
-  it('the two contract lines agree on every path rezeis builds', () => {
-    // The reason the stale `~2.7.3` production pin does not matter. If a future
-    // 2.x patch ever moves a path, this is where it surfaces.
-    const v27 = loadContract('@remnawave/backend-contract');
-    const v28 = loadContract('@remnawave/contract-v28');
+  it('the two 2.x releases agree on every path either of them publishes', () => {
+    const [v27, v28] = TWO_X as readonly [Release, Release];
     const drifted: string[] = [];
-    for (const name of Object.keys(v27)) {
+    let compared = 0;
+    for (const name of Object.keys(v27.module)) {
       if (!name.endsWith('Command')) continue;
-      const a = urlOfUnknown(v27[name]);
-      const b = urlOfUnknown(v28[name]);
-      if (a !== null && b !== null && a !== b) drifted.push(`${name}: ${a} -> ${b}`);
+      const a = urlOf(v27, name);
+      const b = urlOf(v28, name);
+      if (a === null || b === null) continue;
+      compared += 1;
+      if (a !== b) drifted.push(`${name}: ${a} -> ${b}`);
     }
+    // Anchor: the comparison really walked the contract.
+    assert.ok(compared > 100, `only ${compared} commands compared`);
     assert.deepEqual(drifted, []);
   });
 });
 
-describe('Remnawave "no such user" codes match the vendor contract', () => {
-  it('both codes are the vendor\'s, and both mean a missing user', () => {
-    assert.equal(ERRORS.USER_NOT_FOUND.code, 'A025');
-    assert.equal(ERRORS.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.code, 'A063');
-    assert.equal(ERRORS.USER_NOT_FOUND.httpCode, 404);
-    assert.equal(ERRORS.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.httpCode, 404);
+describe('Remnawave "no such user" codes match every release', () => {
+  interface Errors {
+    readonly USER_NOT_FOUND: { readonly code: string; readonly httpCode: number; readonly message: string };
+    readonly GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND: {
+      readonly code: string;
+      readonly httpCode: number;
+      readonly message: string;
+    };
+  }
+  const RELEASES = [...TWO_X, ...THREE_X];
+  const errorsOf = (release: Release): Errors => release.module['ERRORS'] as Errors;
+
+  it('both codes are the vendor’s, and both mean a missing user, in every release', () => {
+    assert.equal(RELEASES.length, 7);
+    for (const release of RELEASES) {
+      const errors = errorsOf(release);
+      assert.equal(errors.USER_NOT_FOUND.code, 'A025', release.contract);
+      assert.equal(errors.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.code, 'A063', release.contract);
+      assert.equal(errors.USER_NOT_FOUND.httpCode, 404, release.contract);
+      assert.equal(errors.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.httpCode, 404, release.contract);
+    }
   });
 
   it('rezeis recognises exactly those two, no more and no fewer', () => {
+    const newest = errorsOf(THREE_X[THREE_X.length - 1] as Release);
     assert.deepEqual(
       [...PANEL_USER_NOT_FOUND_ERROR_CODES].sort(),
-      [ERRORS.USER_NOT_FOUND.code, ERRORS.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.code].sort(),
+      [newest.USER_NOT_FOUND.code, newest.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.code].sort(),
     );
   });
 
-  it('A063\'s message does NOT contain the A025 message, which is why the code matters', () => {
+  it('A063’s message does NOT contain the A025 message, which is why the code matters', () => {
     // The reason recognising A025 alone was not enough: a substring check on
     // "user not found" does not match "User with specified params not found".
-    assert.ok(
-      !ERRORS.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.message
-        .toLowerCase()
-        .includes(ERRORS.USER_NOT_FOUND.message.toLowerCase()),
-    );
+    for (const release of RELEASES) {
+      const errors = errorsOf(release);
+      assert.ok(
+        !errors.GET_USER_BY_UNIQUE_FIELDS_NOT_FOUND.message
+          .toLowerCase()
+          .includes(errors.USER_NOT_FOUND.message.toLowerCase()),
+        release.contract,
+      );
+    }
   });
 });

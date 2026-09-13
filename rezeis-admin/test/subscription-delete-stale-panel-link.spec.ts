@@ -917,7 +917,7 @@ function panelUsersHarness(options: { allowDelete?: boolean } = {}): {
     client['deleteUser'] = async (userId: number) => {
       calls.push('deleteUser');
       deleted.push(userId);
-      return { kind: 'ok', drifted: false, data: undefined };
+      return { kind: 'ok', data: undefined };
     };
   }
   return { calls, deleted, client };

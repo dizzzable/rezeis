@@ -18,37 +18,47 @@ Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
 ## Remnawave compatibility
 
-`rezeis-admin` talks to Remnawave panels over plain HTTP, and the fleet it serves runs many panel versions at once — 2.7 through 3.4. Two paths do the talking, and they treat vendor schemas differently. This section used to say that no vendor schema is ever applied to a live response. **That was wrong**, and it is corrected here (13.09.2026) rather than quietly rewritten:
+`rezeis-admin` talks to Remnawave panels over plain HTTP, and the fleet it serves runs many panel versions at once. Two paths do the talking, and **neither executes a vendor schema at runtime** (13.09.2026 — this replaced a runtime dependency on `@remnawave/backend-contract@3.4.10`, described below because the reasons still matter):
 
-- **`remnawave-api.service.ts`** reads answers with the tolerant local decoders in `panel-response-decoders.ts`. No vendor schema is involved.
-- **`panel-infra.client.ts`, `panel-users.client.ts` and `panel-devices.client.ts`** go through `panel-command.executor.ts`, which DOES apply the pinned vendor contract to live traffic in both directions: an outgoing body is replaced by its parsed form, path and query parameters are validated so a malformed request is refused before it is sent, and **every response is `safeParse`d** — on success the caller receives the parsed data (undeclared keys stripped, date strings turned into `Date`), on a mismatch a drift warning is logged and the raw body is returned. It never throws on a mismatch, which is the lesson of a real outage: the adapter once used `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3` as a hard gate, 3.x renamed `responseHeaders` to `responseHeadersAdd` + `responseHeadersRemove`, and every 3.x install with an external squad got `ServiceUnavailableException` from a healthy panel.
+- **`remnawave-api.service.ts`** reads answers with the tolerant local decoders in `panel-response-decoders.ts`.
+- **`panel-infra.client.ts`, `panel-users.client.ts` and `panel-devices.client.ts`** go through `panel-command.executor.ts`, driven by the hand-owned command table in **`panel-commands.ts`**: the path, verb, description and request rules of the 21 commands production actually issues. Requests are validated before they are sent — bodies by the executor, path parameters and the two capped queries by the clients — with our own zod copy of the rules the vendor contract enforced for the inputs we send, and the executor sends the **parsed** body, so the vendor's defaults (`status: ACTIVE`, `trafficLimitStrategy: NO_RESET` on a create), key order and `expireAt` rendering still reach the wire. **Responses are not validated.** The clients hand back the panel's JSON behind their own envelope and array guards, which now run on every answer.
 
-So one vendor package is a runtime dependency: `@remnawave/contract-v34` sits in `dependencies`, ships inside the published image, and carries its AGPL-3.0-only licence. Whether that is acceptable is a licensing question for the owner and it is open. The check this section used to name could not fail, because it names a different package:
+Why the response parse went. The executor used to `safeParse` every answer with a pinned contract: parsed data on success, the raw body plus a "drift" warning on a mismatch. A contract describes ONE panel release, so a field a later release made required (`tags` on squads, from contract `3.4.11`) flagged every healthy 3.2/3.3 panel as drift, and the pin could never move past it. The parse did only two things to the answers rezeis reads — datetime strings became `Date`, undeclared keys were stripped — and an audit of every production reader found five that depended on either. Those five are now provided explicitly, per field (`panel-response-fields.ts`): `lastSeen` on both connection jobs and `requestAt` on the request log are decoded to `Date`, and the HWID stats `byPlatform` rows and the device inventory rows are projected to the declared keys; `test/panel-devices-client.spec.ts` and `test/panel-infra-client.spec.ts` hold each one to every era's own parse. The older lesson stands: the adapter once used `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3` as a hard gate, 3.x renamed `responseHeaders` to `responseHeadersAdd` + `responseHeadersRemove`, and every 3.x install with an external squad got `ServiceUnavailableException` from a healthy panel.
+
+**No `@remnawave/*` package is in the runtime image.** The contracts are devDependency oracles, one per panel release family, named by the panel release and pinned exactly to the contract that release ships (table below). `Dockerfile` stage 1 runs `npm ci --omit=dev`, so none of them — and none of their AGPL-3.0-only licences — ships. That is enforced, not asserted: `test/panel-command-conformance.spec.ts` fails if any file under `src/` imports `@remnawave/*` (by value, by type, dynamically or by `require`), if `package.json` lists one outside `devDependencies`, if the lockfile marks one as a production package, or if this prints anything:
 
 ```bash
-npm ls --omit=dev @remnawave/backend-contract   # (empty)
-npm ls --omit=dev @remnawave/contract-v34       # present, and therefore in the image
+npm ls --omit=dev --all | grep @remnawave/   # nothing
+npm ls --omit=dev zod                         # exactly one zod
 ```
 
 ### Contract versions follow panel releases, not the other way round
 
-Remnawave publishes the pairing at <https://docs.rw/sdk/typescript-sdk/> ("Always pick and pin the correct version of the SDK to match the version of the Remnawave backend"). The rows that matter for this fleet, cross-checked against `libs/contract/package.json` at each backend tag:
+Remnawave publishes the pairing at <https://docs.rw/sdk/typescript-sdk/> ("Always pick and pin the correct version of the SDK to match the version of the Remnawave backend"). The rows that matter for this fleet, cross-checked against `libs/contract/package.json` at each backend tag, and the devDependency alias that holds each one:
 
-| Live panel | Contract it ships |
-|------------|-------------------|
-| `2.7.3`–`2.7.4` | `2.7.2` |
-| `2.8.0`–`2.8.1` | `2.8.35` |
-| `3.2.0`–`3.2.1` | `3.2.0` |
-| `3.2.3` | `3.2.3` |
-| `3.3.0`–`3.3.2` | `3.4.2` |
-| `3.4.0`–`3.4.3` | `3.4.13` |
-| `3.4.4` | `3.4.15` |
+| Live panel | Contract it ships | Test oracle |
+|------------|-------------------|-------------|
+| `2.7.3`–`2.7.4` | `2.7.2` | `@remnawave/contract-panel-2.7` |
+| `2.8.0`–`2.8.1` | `2.8.35` | `@remnawave/contract-panel-2.8` |
+| `3.2.0`–`3.2.1` | `3.2.0` | `@remnawave/contract-panel-3.2.1` |
+| `3.2.3` | `3.2.3` | `@remnawave/contract-panel-3.2.3` |
+| `3.3.0`–`3.3.2` | `3.4.2` | `@remnawave/contract-panel-3.3` |
+| `3.4.0`–`3.4.3` | `3.4.13` | `@remnawave/contract-panel-3.4.3` |
+| `3.4.4` | `3.4.15` | `@remnawave/contract-panel-3.4.4` |
 
-Three consequences, all measured:
+Consequences, all measured:
 
-- **The contract's number is not the panel's.** `3.4.2` is the contract of panel **3.3**. Contract releases are also published ahead of panel tags — `3.4.3` to `3.4.12` appeared before panel 3.4.0 existed — so a contract version can match no panel at all. The current runtime pin, `3.4.10`, is one of those, and so is the `~2.7.3` oracle.
-- **No single contract is quiet on every era.** From `3.4.11` on, `tags` is required on six list rows (internal and external squads, config profiles, node plugins, subpage configs, templates); panels 3.2 and 3.3 do not send it, so a 3.4.13+ runtime pin logs drift on every healthy 3.2/3.3 squad read — which is exactly what `test/panel-infra-client.spec.ts` caught when the pin was tried at 3.4.15. `3.4.10` already logs drift on 3.2 node rows. `3.4.12` and later also pin zod exactly at 4.5.x.
-- **The request side is identical across the whole 3.x fleet.** Between contracts `3.2.2` and `3.4.15`, none of the 55 commands the three clients import changed its URL, verb, or request schema. Moving the pin from `3.4.2` to `3.4.10` in 0.9.7.55 therefore changed nothing that is sent.
+- **The contract's number is not the panel's.** `3.4.2` is the contract of panel **3.3**. Contract releases are also published ahead of panel tags — `3.4.3` to `3.4.12` appeared before panel 3.4.0 existed — so a contract version can match no panel at all. The former runtime pin, `3.4.10`, was one of those, and so was the former `~2.7.3` oracle.
+- **No single contract accepts every release's answers.** From `3.4.11` on, `tags` is required on six list rows (internal and external squads, config profiles, node plugins, subpage configs, templates), and panels 3.2 and 3.3 do not send it; the 2.x contracts refuse 3.x squad rows over `responseHeaders`. The matrices are pinned in `test/remnawave-squad-status-era-decode.spec.ts` and `test/remnawave-user-row-era-conformance.spec.ts`, each capture judged against the contract its own release ships.
+- **The request side is identical across the whole 3.x fleet**, for the 21 commands rezeis issues, with two measured exceptions that do not reach the wire: `CreateUserCommand.vlessUuid` changed its guid pattern after contract `3.2.0` (rezeis never sends `vlessUuid`), and contracts from `3.4.12` run zod 4.5, which requires seconds in a datetime carrying `Z` or an offset (rezeis sends `toISOString()`; its own zod is 4.5.4).
+
+### What the conformance test proves, and what it does not
+
+`test/panel-command-conformance.spec.ts` compares every entry of `panel-commands.ts` with the 3.x oracles (`3.2.0`, `3.2.3`, `3.4.2`, `3.4.13`, `3.4.15`): the URL each builder produces for sample segments, the verb, which request schemas exist, the accept/refuse verdict on a corpus of accepted and refused inputs, and — for an accepted body — the parsed body, byte for byte, because that is what goes on the wire. A route, verb or rule that drifts in any era fails it; the one legitimate era disagreement (the zod 4.5 datetime tightening) is a named exception whose count is pinned. `test/panel-wire-bytes.spec.ts` separately pins the exact request bytes at every production call site, recorded from the build that still ran the vendor schema.
+
+It does **not** validate responses (nothing does, by design), and it does not cover the two queries the clients have never validated (`GET /api/subscription-request-history/`, `POST /api/bandwidth-stats/nodes/users`); for those it checks that the values production sends are accepted by every era. Note that the `uaRequestPageSize` tunable allows up to 2000 while every contract caps that request log's `size` at 1000.
+
+It compares verdicts and parsed bodies, never error wording, and that is deliberate: zod keeps its message locale on `globalThis.__zod_globalConfig`, shared by every copy in a process, and the last copy loaded wins. In any test process that loads an oracle bundling its own zod 4.4.3 (`contract-panel-3.2.1`, `-3.2.3`, `-3.3`), the messages of rezeis's zod 4.5.4 are written by 4.4.3's locale — `expected number, received number` where production says `received Infinity`. Production has one zod, so this affects tests only; do not assert zod's default wording in a file that loads those oracles.
 
 Era detection keys on the MAJOR version only (`panel-version.util.ts`), so every 3.4.x is handled the same way with no list to extend.
 

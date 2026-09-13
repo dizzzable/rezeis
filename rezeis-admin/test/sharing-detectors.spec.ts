@@ -197,11 +197,10 @@ function makeHarness(remna: RemnaMock, subs: SubRow[] = []): Harness {
           ? null
           : rows.map((row) => ({
               userId: row.userId,
-              // The contract transforms `lastSeen` into a `Date`, so that is
-              // what a validated response yields. A value the schema would have
-              // REJECTED could only arrive on the drift path, where the raw
-              // wire string comes through instead — so that is what an
-              // unparseable literal is handed over as.
+              // What `PanelDevicesClient` hands over: a well-formed `lastSeen`
+              // decoded into a `Date`, and anything else exactly as the panel
+              // sent it — so that is what an unparseable literal is handed
+              // over as.
               ips: row.ips.map((sample) => ({
                 ip: sample.ip,
                 lastSeen: Number.isFinite(Date.parse(sample.lastSeen))

@@ -1,6 +1,6 @@
 {
   "version": "3.2.1",
-  "source": "NOT A LIVE CAPTURE. The lab 3.2.1 user owned no devices, so GET /api/hwid/devices/{userId} answered {\"response\":{\"total\":0,\"devices\":[]}} and no ROW was ever observed. The envelope below is that captured shape; the row keys are the vendor's own, taken from HwidUserDeviceSchema in @remnawave/contract-v3 (3.2.2, already a devDependency of this repo) — hwid, userId, platform, osVersion, deviceModel, userAgent, requestIp, createdAt, updatedAt. Values are invented; keys are not.",
+  "source": "NOT A LIVE CAPTURE. The lab 3.2.1 user owned no devices, so GET /api/hwid/devices/{userId} answered {\"response\":{\"total\":0,\"devices\":[]}} and no ROW was ever observed. The envelope below is that captured shape; the row keys are the vendor's own, taken from HwidUserDeviceSchema in @remnawave/contract-panel-3.2.1 (backend-contract 3.2.0, the contract panel 3.2.1 ships; a devDependency of this repo) — hwid, userId, platform, osVersion, deviceModel, userAgent, requestIp, createdAt, updatedAt. Values are invented; keys are not.",
   "response": {
     "total": 2,
     "devices": [

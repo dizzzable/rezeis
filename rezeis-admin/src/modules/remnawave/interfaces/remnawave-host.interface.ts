@@ -93,10 +93,12 @@ export interface RemnawaveHostInterface {
    * That is exactly how every panel before 3.4 behaved.
    *
    * Version note: the rename reached the npm contract package in
-   * `@remnawave/backend-contract@3.4.3`. The copy this repository pins for the
-   * 3.4 line is one patch older and still declares the old field, so the
-   * vendored types are NOT the authority here — these dumps are
-   * (`icon/Remnawave API v3.4.1.json`, `v3.4.3.json`), and so is the mapper.
+   * `@remnawave/backend-contract@3.4.3`, a release no panel ships. Per the
+   * vendor's own table, panel 3.3 ships contract 3.4.2, which still declares the
+   * old `excludedInternalSquads`, and panel 3.4.0–3.4.3 ships 3.4.13, which
+   * declares `internalSquads` — both are test-only oracles here, and no contract
+   * is a runtime dependency. The authority for a host row is these dumps
+   * (`icon/Remnawave API v3.4.1.json`, `v3.4.3.json`) and the mapper.
    */
   readonly internalSquads: InternalSquadAccessInterface;
   /**

@@ -509,7 +509,7 @@ function panelHarness(
             : input.resolve(selector);
         return resolved === null
           ? notFound
-          : { kind: 'ok', drifted: false, data: { response: resolved } };
+          : { kind: 'ok', data: { response: resolved } };
       },
       getUserById: async () => {
         calls.push('getUserById');
@@ -518,7 +518,7 @@ function panelHarness(
             ? { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } }
             : input.profile();
         if (answer.kind === 'ok') {
-          return { kind: 'ok', drifted: false, data: { response: answer.user } };
+          return { kind: 'ok', data: { response: answer.user } };
         }
         return answer.kind === 'missing' ? notFound : { kind: 'network', detail: 'ECONNREFUSED' };
       },

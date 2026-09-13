@@ -681,12 +681,11 @@ export class RemnawaveDetectors {
               uuid: n.uuid,
               name: n.name,
               countryCode: n.countryCode,
-              // Rendered here rather than passed through. The contract turns
-              // this field into a `Date`, and a `Date` in an alert payload
-              // reaches the audit row and the Telegram card as whatever the
-              // serializer on that path happens to do with it — while the
-              // executor's drift path hands back the wire string for the same
-              // field. One shape out, always.
+              // Rendered here rather than passed through. The panel sends a
+              // string, a test double or an older reader may hand over a
+              // `Date`, and either would reach the audit row and the Telegram
+              // card as whatever the serializer on that path makes of it. One
+              // shape out, always.
               lastStatusChange: readInstantIso(n.lastStatusChange),
             })),
           },
@@ -760,8 +759,7 @@ export class RemnawaveDetectors {
     const recentlyChanged = liveNodes
       .filter((n) => !n.isDisabled)
       .filter((n) => {
-        // Both shapes are read: the contract transforms this field into a
-        // `Date`, and the executor's drift path hands back the wire string.
+        // Both shapes are read: the wire string the panel sends, and a `Date`.
         const changedAt = readInstantMs(n.lastStatusChange);
         return changedAt !== null && changedAt >= windowStart;
       })
@@ -1079,13 +1077,12 @@ function describeReadFailure(
  * A panel timestamp as milliseconds, or `null` when it is not a placeable
  * instant.
  *
- * BOTH SHAPES ARE READ. The vendor contract transforms `lastStatusChange` into
- * a `Date`, so that is what a validated response yields; on the executor's
- * DRIFT path the panel's raw bytes come back and the same field is the wire
- * string. A reader that handled only one would see no status changes at all on
- * a drifted response — and no status changes means the node-stability guard
- * disarms, which is the direction that produces false accusations during an
- * outage.
+ * BOTH SHAPES ARE READ. `PanelInfraClient` hands the node row over as the panel
+ * sent it, so `lastStatusChange` is the wire string; a `Date` — what the vendor
+ * parse used to produce, and what test doubles still pass — is read as well. A
+ * reader that handled only one would see no status changes at all from the
+ * other — and no status changes means the node-stability guard disarms, which
+ * is the direction that produces false accusations during an outage.
  */
 function readInstantMs(value: unknown): number | null {
   if (value instanceof Date) {

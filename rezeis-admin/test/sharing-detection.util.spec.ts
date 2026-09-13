@@ -174,8 +174,8 @@ describe('parsePanelId', () => {
 
   it('takes the number the contract actually declares', () => {
     // `userId` is a number on 3.x, so this is the NORMAL path — the string
-    // cases above survive only for the executor's drift arm, where a response
-    // that fails the pinned schema comes back as raw wire bytes.
+    // cases above are for a non-conforming answer, which nothing validates away
+    // before it reaches the detector.
     assert.equal(parsePanelId(7), 7);
     assert.equal(parsePanelId(0), 0);
   });

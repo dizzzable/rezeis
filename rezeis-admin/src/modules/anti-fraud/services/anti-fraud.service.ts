@@ -669,11 +669,12 @@ export class AntiFraudService {
    * drilldown is built on is a list. The failure is not lost — it is logged
    * with its reason, and the operator is looking at the panel anyway.
    *
-   * The timestamps are normalised to ISO strings on the way out. The contract
-   * transforms `lastSeen` into a `Date` while the executor's drift path hands
-   * back the wire string, and a drilldown that changes its payload shape
-   * depending on whether the panel's response validated is a drilldown that
-   * breaks intermittently.
+   * The timestamps leave as ISO strings, never as whatever object arrived.
+   * `PanelDevicesClient` decodes a well-formed `lastSeen` into a `Date`, which
+   * renders through `toISOString()` exactly as it did when the vendor parse
+   * produced it; a value the client could not decode arrives as sent and is
+   * served as the panel's own characters if it is a placeable instant, `null`
+   * otherwise.
    */
   public async getSignalLiveIps(signalId: string): Promise<readonly FraudSignalLiveNodeIps[]> {
     const signal = await this.prismaService.fraudSignal.findUnique({
@@ -2243,10 +2244,10 @@ function extractIps(metadata: Record<string, unknown>): readonly string[] {
  *
  * Declared here rather than re-exported from the panel client because it is a
  * WIRE shape: `GET /admin/fraud/signals/:id/live-ips` returns it verbatim, and
- * the client's own type follows the vendor contract — including a `lastSeen`
- * that is a `Date` after validation and a string after drift. Pinning the
- * response here is what stops the admin SPA's payload changing shape depending
- * on whether the panel's answer matched the pinned contract.
+ * the client's own type is the panel's — including a `lastSeen` that is a
+ * `Date` when it decoded and the panel's raw value when it did not. Pinning the
+ * response here is what stops the admin SPA's payload changing shape with the
+ * panel's formatting.
  */
 export interface FraudSignalLiveNodeIps {
   readonly nodeUuid: string;
@@ -2309,9 +2310,9 @@ function dedupeIds(values: ReadonlyArray<number | null | undefined>): readonly n
 }
 
 /**
- * A panel timestamp as ISO-8601, reading BOTH the `Date` the contract produces
- * and the wire string the executor's drift path hands back. `null` for anything
- * that is not a placeable instant, so a drilldown row never carries a
+ * A panel timestamp as ISO-8601, reading BOTH the `Date` the client decodes a
+ * well-formed timestamp into and a string it could not decode. `null` for
+ * anything that is not a placeable instant, so a drilldown row never carries a
  * timestamp nobody can interpret.
  */
 function readInstantIso(value: unknown): string | null {

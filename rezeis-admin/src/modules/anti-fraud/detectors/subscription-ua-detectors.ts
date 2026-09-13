@@ -145,11 +145,12 @@ export class SubscriptionUaDetectors {
       let oldestInPageMs: number | null = null;
       const windowed: Array<{ readonly record: PanelRequestRecord; readonly atIso: string }> = [];
       for (const record of records) {
-        // `requestAt` arrives as a `Date` on the validated path and as the wire
-        // string on the executor's drift path. Both are read; anything else is
-        // a fetch we cannot place in time, and a fetch we cannot place in time
-        // cannot be placed in the window either. Keeping it would let an
-        // arbitrarily old record be judged as if it had just happened.
+        // `requestAt` arrives as a `Date` when the panel sent a well-formed
+        // timestamp (the client decodes it) and as whatever was sent otherwise.
+        // Both a `Date` and a string are read; anything else is a fetch we
+        // cannot place in time, and a fetch we cannot place in time cannot be
+        // placed in the window either. Keeping it would let an arbitrarily old
+        // record be judged as if it had just happened.
         const at = readInstant(record.requestAt);
         if (at === null) {
           undatedRecords += 1;
@@ -376,11 +377,13 @@ interface UaHit {
 /**
  * A panel timestamp as milliseconds plus the ISO string a signal carries.
  *
- * BOTH SHAPES ARE READ. The contract transforms `requestAt` into a `Date`, so
- * that is what a validated response yields; on the executor's DRIFT path the
- * panel's raw bytes come back and the field is the wire string. A reader that
- * handled only one of them would drop every record on a drifted response — and
- * "dropped" here means the fetch is judged as undated and never examined.
+ * BOTH SHAPES ARE READ. `PanelInfraClient.getSubscriptionRequestHistory`
+ * decodes a well-formed `requestAt` into a `Date` — the form the vendor parse
+ * used to hand over, so the `iso` stored in signal metadata stays the
+ * `toISOString()` rendering it has always been — and hands anything else over
+ * as the panel sent it. A reader that handled only one of them would drop
+ * records of the other — and "dropped" here means the fetch is judged as
+ * undated and never examined.
  *
  * `null` for anything that is not a placeable instant.
  */
@@ -401,9 +404,9 @@ function readInstant(value: unknown): { readonly ms: number; readonly iso: strin
 /**
  * A request record's owner, as the identity string rezeis stores.
  *
- * The contract declares `userId` as a number, so the string arm is only
- * reachable on the drift path — but it is reachable, and refusing a `'4471'`
- * there would drop a genuine sighting. The WHOLE string has to be digits:
+ * Every 3.x release declares `userId` as a number, but nothing validates the
+ * answer on its way here, so the string arm is reachable — and refusing a
+ * `'4471'` would drop a genuine sighting. The WHOLE string has to be digits:
  * `Number.parseInt` reads a LEADING run and stops, so a uuid-shaped value would
  * become panel user #3 and file one customer's evidence against another's name.
  */

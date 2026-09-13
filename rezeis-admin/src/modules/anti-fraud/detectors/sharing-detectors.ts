@@ -701,10 +701,10 @@ export class SharingDetectors {
       }
 
       // ── Group the inventory by device ─────────────────────────────────
-      // Read defensively field by field. `unwrapEnvelope` guarantees that
-      // `devices` is an ARRAY on the drift path and says nothing about what is
-      // in it, so a panel minor that renamed either column would otherwise
-      // arrive here as a group of `undefined`s keyed on `''`.
+      // Read defensively field by field. The client guarantees that `devices`
+      // is an ARRAY and says nothing about what is in it, so a panel release
+      // that renamed either column would otherwise arrive here as a group of
+      // `undefined`s keyed on `''`.
       const byHwid = new Map<string, DeviceBinding[]>();
       let unusableRows = 0;
       for (const row of inventory.data.devices) {
@@ -1194,10 +1194,9 @@ export class SharingDetectors {
       }
       if (unreadablePanelIds > 0) {
         // Never silent: an earlier reader turned `3f2a-…` into panel user #3
-        // and filed those IPs against whoever that was. The contract now
-        // declares `userId` as a number, so this is only reachable on the
-        // drift path — where the executor hands back the panel's raw bytes and
-        // the field can be anything at all.
+        // and filed those IPs against whoever that was. Every 3.x release
+        // declares `userId` as a number, but nothing validates the answer on
+        // its way here, so the field can be anything a panel sends.
         this.logger.warn(
           `Concurrent-IP detection skipped ${unreadablePanelIds} live-connection row(s) whose ` +
             'userId is not an integer panel id — they cannot be attributed to a user without guessing',
@@ -1521,9 +1520,8 @@ export class SharingDetectors {
     const recentlyChanged = liveNodes
       .filter((n) => !n.isDisabled)
       .filter((n) => {
-        // The contract transforms this field to a `Date`; on the executor's
-        // drift path it arrives as the wire string instead. Both are read, and
-        // anything else is simply not a timestamp we can place in the window.
+        // The panel sends this as a string; a `Date` is read too. Anything else
+        // is simply not a timestamp we can place in the window.
         const changedAt = readInstant(n.lastStatusChange);
         return changedAt !== null && changedAt.ms >= windowStart;
       })
@@ -2131,14 +2129,14 @@ interface PanelUserFacts {
  * A timestamp the panel sent, as both the milliseconds the window arithmetic
  * needs and the ISO string the signal metadata carries.
  *
- * BOTH SHAPES ARE READ, and neither is a fallback for sloppiness. The vendor
- * contract transforms every `lastSeen` / `lastStatusChange` into a `Date`, so
- * that is what a validated response yields; on the executor's DRIFT path the
- * panel's raw bytes come back instead and the same field is the wire string.
- * A reader that handled only one of them would silently drop every sample from
- * a panel whose response the pinned contract does not fully accept — and
- * dropping samples here means under-counting networks, which means not naming
- * a sharer.
+ * BOTH SHAPES ARE READ, and neither is a fallback for sloppiness.
+ * `PanelDevicesClient` decodes a well-formed `lastSeen` into a `Date` — the form
+ * the vendor parse used to hand over, which is what keeps the ISO string in the
+ * signal metadata rendered by `toISOString()` — and hands anything else over as
+ * sent; `lastStatusChange` on a node row always arrives as the wire string. A
+ * reader that handled only one of them would silently drop every sample of the
+ * other — and dropping samples here means under-counting networks, which means
+ * not naming a sharer.
  *
  * `null` for anything that is not a placeable instant. Fail-open is the wrong
  * direction for evidence: a sighting we cannot place in time cannot show

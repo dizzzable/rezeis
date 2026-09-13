@@ -5,40 +5,30 @@
  * paths differ only in the identifier they carry, so inline templates put the
  * version decision at seventeen call sites instead of one. Collecting them also
  * makes them checkable — `test/remnawave-3x-contract-guard.spec.ts` asserts every
- * USER-SCOPED builder below against the vendor's own URL builders in
- * `@remnawave/backend-contract@3.2.3`, and the whole-panel constants added at the
- * top of the table are pinned the same way by
- * `test/remnawave-squad-status-era-decode.spec.ts`. A path that drifts in a
- * future panel release fails a test here instead of failing silently against a
- * live panel.
+ * USER-SCOPED builder below against the URL builders of every contract the
+ * fleet's panel releases ship, and the whole-panel constants at the top of the
+ * table are pinned the same way by `test/remnawave-squad-status-era-decode.spec.ts`.
+ * A path that drifts in a future panel release fails a test here instead of
+ * failing silently against a live panel.
  *
- * WHY THE VENDOR PACKAGE IS NOT IMPORTED HERE. This spot has held a claim about
- * the vendor packages twice, and both times the claim drifted out of true while
- * nobody was reading it. Checked again 12.09.2026, and it had drifted again —
- * so what follows is what `package.json` and `Dockerfile` actually say, and the
- * one part of it that needs a decision is named as needing one rather than
- * written up as settled:
+ * THIS TABLE SERVES `remnawave-api.service.ts`. The three contract-driven
+ * clients (`panel-users`, `panel-devices`, `panel-infra`) take their routes from
+ * the hand-owned command table in `panel-commands.ts`, which
+ * `test/panel-command-conformance.spec.ts` holds to every era the same way.
  *
- *   • THREE of the four contract packages are devDependencies — the 2.7 line
- *     (`@remnawave/backend-contract`, 2.7.3), the 2.8 line
- *     (`@remnawave/contract-v28`, 2.8.35) and `@remnawave/contract-v3` (3.2.3,
- *     the pin matching panel 3.3.2). None of the three is imported from `src/`,
- *     `Dockerfile` stage 1 runs `npm ci --omit=dev`, and so none of the three
- *     reaches the image.
- *   • `@remnawave/contract-v34` (3.4.10) IS DIFFERENT and the sentence above does
- *     not cover it: it sits in `dependencies`, and `panel-infra.client.ts`,
- *     `panel-devices.client.ts` and `panel-users.client.ts` import VALUES from
- *     it, not just types. `--omit=dev` therefore keeps it, and it ships inside
- *     the published image carrying its AGPL-3.0-only licence. Whether that is
- *     acceptable is a licensing question for the owner, not a code question,
- *     and it is open — recorded here so the next reader finds the fact rather
- *     than a comforting sentence about it.
- *   • They remain the CI ORACLE for both eras, executed by the guard specs —
- *     including the URLs immediately below, which
- *     `test/remnawave-squad-status-era-decode.spec.ts` pins against all four
- *     lines' own `*.url` constants. Holding a route to the vendor at BUILD time
- *     is the whole benefit; executing vendor schemas at RUN time was never
- *     a benefit at all.
+ * WHY NO VENDOR PACKAGE IS IMPORTED HERE — OR ANYWHERE IN `src/`. This spot has
+ * held a claim about the vendor packages several times, and each time the claim
+ * drifted out of true while nobody was reading it. So the claim is now a TEST:
+ * `test/panel-command-conformance.spec.ts` fails if any file under `src/` imports
+ * `@remnawave/*` (by value, by type, dynamically or by `require`), if
+ * `package.json` lists one outside `devDependencies`, or if `npm ls --omit=dev`
+ * finds one. The contracts are devDependency ORACLES, one per panel release
+ * family, named by the panel release and pinned exactly to the contract that
+ * release ships (https://docs.rw/sdk/typescript-sdk/) — `@remnawave/contract-panel-2.7`
+ * through `@remnawave/contract-panel-3.4.4`. `Dockerfile` stage 1 runs
+ * `npm ci --omit=dev`, so none of them, and none of their AGPL-3.0-only
+ * licences, reaches the image. Holding a route to the vendor at BUILD time is
+ * the whole benefit; executing vendor schemas at RUN time never was one.
  *
  * WHAT EXECUTING THEM AT RUNTIME ACTUALLY COST, since "we could just parse with
  * the official schema" is a reasonable-sounding idea and will be proposed again:
@@ -67,8 +57,8 @@ function seg(value: string): string {
 
 export const PANEL_ROUTES = {
   // ── Whole-panel reads ────────────────────────────────────────────────────
-  // Constants, not builders, and byte-identical across 2.7.3 / 2.8.35 / 3.2.3 /
-  // 3.4.10 — pinned against all four in
+  // Constants, not builders, and byte-identical in every contract a panel
+  // release ships, 2.7.2 through 3.4.15 — pinned against all seven in
   // `test/remnawave-squad-status-era-decode.spec.ts`. They came off
   // `GetStatusCommand.url` / `GetInternalSquadsCommand.url` /
   // `GetExternalSquadsCommand.url` when those imports left the runtime.
@@ -116,7 +106,11 @@ export const PANEL_ROUTES = {
   /** `GET`/`POST` — the whole-panel user list and the profile write. */
   users: '/api/users',
 
-  /** `POST` — push one reusable snippet into all config profiles that reference it. */
+  /**
+   * `POST` — push one reusable snippet into all config profiles that reference it.
+   * No caller today, and not served by panel 3.2.0–3.2.1: contract 3.2.0 has no
+   * such command (measured in `remnawave-3x-contract-guard.spec.ts`).
+   */
   snippetSync: '/api/snippets/actions/sync',
 
   /** `POST` — map any one of id / shortUuid / username onto the others. */

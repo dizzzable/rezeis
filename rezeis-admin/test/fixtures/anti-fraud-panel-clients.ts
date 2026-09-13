@@ -36,8 +36,8 @@ import {
 
 // ── Outcome constructors ─────────────────────────────────────────────────────
 
-export function panelOk<T>(data: T, drifted = false): PanelReadOutcome<T> {
-  return { kind: 'ok', data, drifted };
+export function panelOk<T>(data: T): PanelReadOutcome<T> {
+  return { kind: 'ok', data };
 }
 
 /** The panel answered, and refused. */
@@ -96,11 +96,13 @@ const NODE_DEFAULTS = {
 };
 
 /**
- * One node, with everything the contract declares filled in.
+ * One node, shaped like a panel 3.x row.
  *
- * A spec names the four or five fields it is actually about; the rest are
- * present because `PanelNode` is `z.infer` of the vendor's own schema and a
- * partial cast would let a detector read a field this fixture never modelled.
+ * A spec names the four or five fields it is actually about. The rest are
+ * filled in because the client hands the panel's JSON over unstripped, so a
+ * detector receives every field a real node row carries — a fixture holding
+ * only the fields `PanelNode` names would be a narrower object than production
+ * ever sees.
  */
 export function panelNode(
   over: Partial<PanelNode> & { readonly uuid: string; readonly name?: string },
@@ -133,8 +135,8 @@ export function hwidTopUsersPage(
  *
  * A spec names the three fields the cross-account detector reads — the device,
  * its owner, and how the client described itself — and the rest are filled in
- * because `PanelHwidDevice` is `z.infer` of the vendor's own schema. A partial
- * cast would let the detector read a column this fixture never modelled.
+ * with the nine keys the client projects every device row to, so the detector
+ * sees the same row shape the inventory walk produces.
  */
 export function hwidDeviceInventory(
   devices: ReadonlyArray<{
