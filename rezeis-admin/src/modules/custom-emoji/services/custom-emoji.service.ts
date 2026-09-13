@@ -6,7 +6,11 @@ import { gunzipSync } from 'fflate';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SettingsService } from '../../settings/services/settings.service';
-import { mutateSettingsRow } from '../../settings/utils/settings-row-write.util';
+import {
+  mutateExistingSettingsRow,
+  mutateSettingsRow,
+  type SettingsRowMutation,
+} from '../../settings/utils/settings-row-write.util';
 import {
   CustomEmojiInterface,
   CustomEmojiPackInterface,
@@ -237,7 +241,23 @@ export class CustomEmojiService {
         recovered.setName !== existing.setName ||
         recovered.builtin !== existing.builtin;
       if (changed) {
-        await this.savePacks(packs.map((pack) => (pack.id === existing.id ? recovered : pack)));
+        // Replaced by id under the lock, so every other pack stays as it now
+        // stands. A pack deleted while its files downloaded stays deleted, and
+        // the files downloaded for it go with it.
+        const stillStored = await this.updatePacks(
+          (current) =>
+            current.some((pack) => pack.id === existing.id)
+              ? {
+                  next: current.map((pack) => (pack.id === existing.id ? recovered : pack)),
+                  result: true,
+                }
+              : { next: null, result: false },
+          { createRow: false },
+        );
+        if (!stillStored) {
+          await this.reapAssetsNotIn(recovered, existing);
+          throw new NotFoundException('The pack was deleted while it was being repaired');
+        }
       }
       this.logger.log(
         `Reused emoji set "${recovered.name}" (${setName}); restored ${restored.recoveredEmojiCount} missing asset(s), repaired ${restored.repairedEmojiCount} emoji id/fallback record(s)`,
@@ -279,16 +299,43 @@ export class CustomEmojiService {
     if (emojis.length === 0) {
       throw new BadRequestException('Could not resolve any sticker from the set');
     }
-    const pack: CustomEmojiPackInterface = {
+    const downloaded: CustomEmojiPackInterface = {
       id: randomBytes(8).toString('hex'),
       name,
       setName,
       builtin: input.builtin ?? false,
       emojis,
     };
-    await this.savePacks([...packs, pack]);
+    // The duplicate check and the slug plan above read the list before the
+    // downloads, which take seconds. Both are re-made against the list under
+    // the lock, where another import (a second tab, the boot seeder) may have
+    // landed meanwhile.
+    const stored = await this.updatePacks(
+      (current) => {
+        const twin = current.find((candidate) => matchesStickerSet(candidate, setName, stickers));
+        if (twin !== undefined) return { next: null, result: { pack: twin, added: false } };
+        const taken = new Set(indexEmojisBySlug(current).keys());
+        const pack: CustomEmojiPackInterface = {
+          ...downloaded,
+          emojis: downloaded.emojis.map((emoji) => {
+            // A `:slug:` has to name one emoji. Planned slugs another pack took
+            // since are re-planned; the files are named randomly, not by slug.
+            const slug = uniqueSlug(emoji.slug, taken);
+            taken.add(slug);
+            return slug === emoji.slug ? emoji : { ...emoji, slug };
+          }),
+        };
+        return { next: [...current, pack], result: { pack, added: true } };
+      },
+      { createRow: true },
+    );
+    if (!stored.added) {
+      await this.reapAssetsNotIn(downloaded, null);
+      this.logger.log(`Emoji set "${setName}" was imported concurrently; kept the pack already stored`);
+      return stored.pack;
+    }
     this.logger.log(`Imported emoji set "${name}" (${setName}): ${emojis.length} emojis`);
-    return pack;
+    return stored.pack;
   }
 
   /**
@@ -327,10 +374,11 @@ export class CustomEmojiService {
 
     let recoveredEmojiCount = 0;
     let skippedPacks = 0;
-    let changed = false;
-    const next = [...packs];
-    for (let index = 0; index < next.length; index += 1) {
-      const pack = next[index]!;
+    const restoredById = new Map<
+      string,
+      { readonly pack: CustomEmojiPackInterface; readonly recoveredEmojiCount: number }
+    >();
+    for (const pack of packs) {
       if (!pack.setName) continue;
       try {
         const set = await tgApi<{ stickers?: TgSticker[] }>(token, 'getStickerSet', { name: pack.setName });
@@ -342,9 +390,7 @@ export class CustomEmojiService {
         }
         const restored = await this.rehydratePackAssets(token, pack, stickers);
         if (restored.changed) {
-          next[index] = restored.pack;
-          changed = true;
-          recoveredEmojiCount += restored.recoveredEmojiCount;
+          restoredById.set(pack.id, restored);
         }
       } catch (err: unknown) {
         skippedPacks += 1;
@@ -355,7 +401,29 @@ export class CustomEmojiService {
         );
       }
     }
-    if (changed) await this.savePacks(next);
+    if (restoredById.size > 0) {
+      // Each recovered pack replaces its own id under the lock; recovery runs
+      // across Telegram round-trips, and an edit made meanwhile to any other
+      // pack must survive it. A pack deleted meanwhile is not brought back.
+      const gone = await this.updatePacks(
+        (current) => {
+          const stored = new Set(current.map((pack) => pack.id));
+          return {
+            next: current.map((pack) => restoredById.get(pack.id)?.pack ?? pack),
+            result: new Set([...restoredById.keys()].filter((id) => !stored.has(id))),
+          };
+        },
+        { createRow: false },
+      );
+      for (const [id, restored] of restoredById) {
+        if (!gone.has(id)) {
+          recoveredEmojiCount += restored.recoveredEmojiCount;
+          continue;
+        }
+        const original = packs.find((pack) => pack.id === id) ?? null;
+        await this.reapAssetsNotIn(restored.pack, original);
+      }
+    }
     return { recoveredEmojiCount, skippedPacks };
   }
 
@@ -529,12 +597,18 @@ export class CustomEmojiService {
   }
 
   public async deletePack(packId: string): Promise<void> {
-    const packs = await this.listPacks();
-    const target = packs.find((p) => p.id === packId);
-    if (!target) {
+    const target = await this.updatePacks(
+      (current) => {
+        const found = current.find((p) => p.id === packId);
+        return found === undefined
+          ? { next: null, result: null }
+          : { next: current.filter((p) => p.id !== packId), result: found };
+      },
+      { createRow: false },
+    );
+    if (target === null) {
       throw new NotFoundException('Pack not found');
     }
-    await this.savePacks(packs.filter((p) => p.id !== packId));
     // Reap assets outside the settings write (best-effort).
     await Promise.all(
       target.emojis.flatMap((e) => [
@@ -560,35 +634,43 @@ export class CustomEmojiService {
     readonly slug: string;
     readonly patch: UpdateEmojiPatch;
   }): Promise<CustomEmojiPackInterface> {
-    const packs = await this.listPacks();
-    const pack = packs.find((p) => p.id === input.packId);
-    if (!pack) {
-      throw new NotFoundException('Pack not found');
-    }
-    const target = pack.emojis.find((e) => e.slug === input.slug);
-    if (!target) {
-      // Previously a typo in the slug saved the pack unchanged and answered
-      // 200, so the operator was told an edit landed that never existed.
-      throw new NotFoundException('Emoji not found in this pack');
-    }
-    const patched = applyEmojiPatch(target, input.patch);
-    assertEmojiIsDeliverable(patched, input.patch);
-    const emojis = pack.emojis.map((e) => (e.slug === input.slug ? patched : e));
-    const next = packs.map((p) => (p.id === input.packId ? { ...pack, emojis } : p));
-    await this.savePacks(next);
-    return { ...pack, emojis };
+    // Decided on the list under the lock: a pack renamed or deleted in another
+    // tab a moment ago is what this edit sees, instead of being written back
+    // as it was before. A refusal thrown here rolls the transaction back.
+    return this.updatePacks(
+      (current) => {
+        const pack = current.find((p) => p.id === input.packId);
+        if (!pack) {
+          throw new NotFoundException('Pack not found');
+        }
+        const target = pack.emojis.find((e) => e.slug === input.slug);
+        if (!target) {
+          // Previously a typo in the slug saved the pack unchanged and answered
+          // 200, so the operator was told an edit landed that never existed.
+          throw new NotFoundException('Emoji not found in this pack');
+        }
+        const patched = applyEmojiPatch(target, input.patch);
+        assertEmojiIsDeliverable(patched, input.patch);
+        const updated = { ...pack, emojis: pack.emojis.map((e) => (e.slug === input.slug ? patched : e)) };
+        return { next: current.map((p) => (p.id === input.packId ? updated : p)), result: updated };
+      },
+      { createRow: false },
+    );
   }
 
   // ── builtin defaults (boot seeder support) ──────────────────────────────
 
   /** Flag an existing pack as a builtin default. Returns false if not found. */
   public async markPackBuiltin(packId: string): Promise<boolean> {
-    const packs = await this.listPacks();
-    const target = packs.find((p) => p.id === packId);
-    if (!target) return false;
-    if (target.builtin === true) return true;
-    await this.savePacks(packs.map((p) => (p.id === packId ? { ...p, builtin: true } : p)));
-    return true;
+    return this.updatePacks(
+      (current) => {
+        const target = current.find((p) => p.id === packId);
+        if (!target) return { next: null, result: false };
+        if (target.builtin === true) return { next: null, result: true };
+        return { next: current.map((p) => (p.id === packId ? { ...p, builtin: true } : p)), result: true };
+      },
+      { createRow: false },
+    );
   }
 
   /**
@@ -600,21 +682,25 @@ export class CustomEmojiService {
     packId: string,
     input: { readonly setName: string; readonly builtin?: boolean },
   ): Promise<boolean> {
-    const packs = await this.listPacks();
-    const target = packs.find((pack) => pack.id === packId);
-    if (!target) return false;
     const setName = input.setName.trim();
     if (setName.length === 0) return false;
-    const builtin = input.builtin === true ? true : target.builtin;
-    if (target.setName === setName && builtin === target.builtin) return true;
-    await this.savePacks(
-      packs.map((pack) =>
-        pack.id === packId
-          ? { ...pack, setName, ...(builtin === true ? { builtin: true } : {}) }
-          : pack,
-      ),
+    return this.updatePacks(
+      (current) => {
+        const target = current.find((pack) => pack.id === packId);
+        if (!target) return { next: null, result: false };
+        const builtin = input.builtin === true ? true : target.builtin;
+        if (target.setName === setName && builtin === target.builtin) return { next: null, result: true };
+        return {
+          next: current.map((pack) =>
+            pack.id === packId
+              ? { ...pack, setName, ...(builtin === true ? { builtin: true } : {}) }
+              : pack,
+          ),
+          result: true,
+        };
+      },
+      { createRow: false },
     );
-    return true;
   }
 
   /** Read the marker list of builtin pack ids already seeded on this instance. */
@@ -648,26 +734,70 @@ export class CustomEmojiService {
   // ── persistence ────────────────────────────────────────────────────────
 
   /**
-   * Store the pack list, keeping every other key of `systemNotifications` as
-   * it stands under the row lock.
+   * Decide the next pack list from the list AS IT STANDS under the settings
+   * row lock, and store it — or store nothing when `apply` answers `next: null`.
    *
-   * What the lock does NOT cover: `packs` itself was computed by the caller
-   * from an earlier `listPacks()`, outside any transaction and often across
-   * Telegram downloads, so two pack edits that overlap still end with the
-   * later list. Fencing that would mean holding the row lock across network
-   * I/O; it is a separate problem from the one fixed here.
+   * Every edit used to compute the whole list from an earlier `listPacks()`
+   * and hand the result to a save. Two edits that overlapped (a delete in one
+   * tab, an emoji rename in another, a restore's asset recovery) both started
+   * from the same list, and whichever committed second silently restored what
+   * the first had changed. Locking the row at the save could not help: the
+   * list had been decided before the lock was taken. The decision is taken
+   * under it now, so each edit lands on top of the others.
+   *
+   * `apply` runs while every other settings writer waits, so it must not do
+   * I/O. Work that needs the network (Telegram downloads) happens first, and
+   * `apply` re-checks that work against the current list.
+   *
+   * `createRow: false` keeps an edit of a pack from creating the singleton on an
+   * empty table; `apply` then sees an empty list and nothing is written.
    */
-  private async savePacks(packs: readonly CustomEmojiPackInterface[]): Promise<void> {
-    await mutateSettingsRow(this.prismaService, async ({ row: settings, write }) => {
+  private async updatePacks<T>(
+    apply: (current: CustomEmojiPackInterface[]) => {
+      readonly next: readonly CustomEmojiPackInterface[] | null;
+      readonly result: T;
+    },
+    options: { readonly createRow: boolean },
+  ): Promise<T> {
+    const underLock = async ({ row: settings, write }: SettingsRowMutation): Promise<T> => {
       const systemNotifications = asObject(settings.systemNotifications);
-      systemNotifications.customEmojiPacks = packs as unknown as Prisma.InputJsonValue;
-      await write({ systemNotifications: systemNotifications as Prisma.InputJsonValue });
-    });
+      const { next, result } = apply(readCustomEmojiPacks(systemNotifications));
+      if (next !== null) {
+        systemNotifications.customEmojiPacks = next as unknown as Prisma.InputJsonValue;
+        await write({ systemNotifications: systemNotifications as Prisma.InputJsonValue });
+      }
+      return result;
+    };
+    return options.createRow
+      ? mutateSettingsRow(this.prismaService, underLock)
+      : mutateExistingSettingsRow(this.prismaService, underLock, () => apply([]).result);
+  }
+
+  /** Remove files this instance downloaded that the stored pack does not reference. */
+  private async reapAssetsNotIn(
+    downloaded: CustomEmojiPackInterface,
+    kept: CustomEmojiPackInterface | null,
+  ): Promise<void> {
+    const keep = new Set(kept === null ? [] : packAssetUrls(kept));
+    await Promise.all(
+      packAssetUrls(downloaded)
+        .filter((url) => !keep.has(url))
+        .map((url) => this.assetUpload.remove(url)),
+    );
   }
 
   private async getSettings(): Promise<Settings | null> {
     return this.prismaService.settings.findFirst({ orderBy: { updatedAt: 'asc' } });
   }
+}
+
+/** Every uploaded file a pack references, for reaping what a lost race downloaded. */
+function packAssetUrls(pack: CustomEmojiPackInterface): string[] {
+  return pack.emojis.flatMap((emoji) =>
+    [emoji.imageUrl, emoji.lottieUrl, emoji.videoUrl].filter(
+      (url): url is string => typeof url === 'string' && url.length > 0,
+    ),
+  );
 }
 
 function uniqueSlug(base: string, used: ReadonlySet<string>): string {

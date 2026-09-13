@@ -15,9 +15,15 @@ function makeService(input: {
   readonly assets: {
     readonly exists: (url: string | null | undefined) => Promise<boolean>;
     readonly persist?: (value: { buffer: Buffer; kind: string }) => Promise<{ url: string; size: number }>;
+    readonly remove?: (url: string | null | undefined) => Promise<void>;
   };
   /** Counts settings writes: the service saves only when it saw a change. */
   readonly onWrite?: () => void;
+  /**
+   * Runs as the settings row lock is granted: another writer's commit landing
+   * between whatever the service read earlier and the lock.
+   */
+  readonly beforeLock?: (row: { systemNotifications: Record<string, unknown> }) => void;
 }): CustomEmojiService {
   const row = { id: 'settings-1', systemNotifications: input.settings.systemNotifications };
   const settingsDelegate = {
@@ -31,7 +37,10 @@ function makeService(input: {
     },
   };
   // Writes run behind the settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`).
-  const lockSettingsRow = async () => [{ id: row.id }];
+  const lockSettingsRow = async () => {
+    input.beforeLock?.(row);
+    return [{ id: row.id }];
+  };
   const prisma = {
     settings: settingsDelegate,
     $transaction: async <T>(
@@ -46,6 +55,7 @@ function makeService(input: {
     {
       exists: input.assets.exists,
       persist: input.assets.persist ?? (async () => ({ url: '/uploads/emoji/recovered.webp', size: 1 })),
+      remove: input.assets.remove ?? (async () => undefined),
     } as never,
     { getDecryptedBotToken: async () => 'bot-token' } as never,
   );
@@ -702,5 +712,202 @@ describe('CustomEmojiService', () => {
       });
       assert.equal(storedEmoji(dead)?.fallback, '📣');
     });
+  });
+});
+
+describe('CustomEmojiService — a pack edit decides on the list as it stands under the lock', () => {
+  // Every pack edit used to compute the whole list from a read taken before the
+  // settings row lock, imports and recovery across seconds of Telegram
+  // downloads, and write that list back. Two edits that overlapped both started
+  // from the same list, and the second commit restored what the first changed.
+  // `beforeLock` commits the other writer's change between that early read and
+  // the lock; each case fails if the edit writes back the list it started from.
+
+  interface StoredEmoji {
+    readonly slug: string;
+    readonly name: string;
+    readonly imageUrl: string;
+    readonly lottieUrl: null;
+    readonly videoUrl: null;
+    readonly fallback: string;
+    readonly customEmojiId: string;
+  }
+
+  interface StoredPack {
+    readonly id: string;
+    readonly name: string;
+    readonly emojis: ReadonlyArray<{ readonly slug: string; readonly name: string; readonly imageUrl: string }>;
+  }
+
+  function emoji(slug: string, imageUrl: string, customEmojiId = '1001'): StoredEmoji {
+    return { slug, name: slug, imageUrl, lottieUrl: null, videoUrl: null, fallback: '🙂', customEmojiId };
+  }
+
+  function pack(
+    id: string,
+    emojis: readonly StoredEmoji[],
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return { id, name: id, emojis, ...extra };
+  }
+
+  function storedPacks(settings: StoredSettings): readonly StoredPack[] {
+    const packs = settings.systemNotifications.customEmojiPacks;
+    return Array.isArray(packs) ? (packs as readonly StoredPack[]) : [];
+  }
+
+  /** The other writer's commit, landing once, as this edit's lock is granted. */
+  function commitsBeforeLock(settings: StoredSettings, packs: readonly unknown[]) {
+    let landed = false;
+    return (row: { systemNotifications: Record<string, unknown> }): void => {
+      if (landed) return;
+      landed = true;
+      const next = { ...row.systemNotifications, customEmojiPacks: packs };
+      row.systemNotifications = next;
+      settings.systemNotifications = next;
+    };
+  }
+
+  function stickerSetFetch(stickers: ReadonlyArray<Record<string, unknown>>): typeof fetch {
+    return (async (url: string | URL) => {
+      const value = String(url);
+      if (value.includes('getStickerSet')) {
+        return telegramResponse({ ok: true, result: { title: 'News', stickers } });
+      }
+      if (value.includes('getFile')) {
+        return telegramResponse({ ok: true, result: { file_path: 'emoji.webp' } });
+      }
+      return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+    }) as typeof fetch;
+  }
+
+  it('deletePack keeps a pack another tab added a moment before', async () => {
+    const settings: StoredSettings = {
+      systemNotifications: {
+        customEmojiPacks: [
+          pack('a', [emoji('a_1', '/uploads/emoji/a.webp')]),
+          pack('b', [emoji('b_1', '/uploads/emoji/b.webp')]),
+        ],
+      },
+    };
+    const service = makeService({
+      settings,
+      assets: { exists: async () => true },
+      beforeLock: commitsBeforeLock(settings, [
+        pack('a', [emoji('a_1', '/uploads/emoji/a.webp')]),
+        pack('b', [emoji('b_1', '/uploads/emoji/b.webp')]),
+        pack('c', [emoji('c_1', '/uploads/emoji/c.webp')]),
+      ]),
+    });
+
+    await service.deletePack('a');
+
+    assert.deepEqual(storedPacks(settings).map((p) => p.id), ['b', 'c']);
+  });
+
+  it('updateEmoji lands on a pack renamed in another tab a moment before', async () => {
+    const settings: StoredSettings = {
+      systemNotifications: { customEmojiPacks: [pack('a', [emoji('a_1', '/uploads/emoji/a.webp')])] },
+    };
+    const service = makeService({
+      settings,
+      assets: { exists: async () => true },
+      beforeLock: commitsBeforeLock(settings, [
+        pack('a', [emoji('a_1', '/uploads/emoji/a.webp')], { name: 'Renamed elsewhere' }),
+      ]),
+    });
+
+    const result = await service.updateEmoji({ packId: 'a', slug: 'a_1', patch: { name: 'Edited here' } });
+
+    const [stored] = storedPacks(settings);
+    assert.equal(stored?.name, 'Renamed elsewhere', "the other tab's rename must survive this edit");
+    assert.equal(stored?.emojis[0]?.name, 'Edited here');
+    assert.equal(result.name, 'Renamed elsewhere');
+  });
+
+  it('importBySetLink keeps the pack a concurrent import stored while it downloaded, and removes its own files', async () => {
+    const settings: StoredSettings = { systemNotifications: { customEmojiPacks: [] } };
+    const removed: string[] = [];
+    const service = makeService({
+      settings,
+      assets: {
+        exists: async () => true,
+        persist: async () => ({ url: '/uploads/emoji/ours.webp', size: 4 }),
+        remove: async (url) => {
+          removed.push(String(url));
+        },
+      },
+      beforeLock: commitsBeforeLock(settings, [
+        pack('twin', [emoji('news_1', '/uploads/emoji/twin.webp')], { setName: 'NewsEmoji' }),
+      ]),
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stickerSetFetch([{ file_id: 'file-1', custom_emoji_id: '1001', emoji: '📰' }]);
+    try {
+      const result = await service.importBySetLink({ packName: 'News', link: 'https://t.me/addemoji/NewsEmoji' });
+
+      assert.equal(result.id, 'twin');
+      assert.deepEqual(storedPacks(settings).map((p) => p.id), ['twin'], 'no second pack of the same set');
+      assert.deepEqual(removed, ['/uploads/emoji/ours.webp'], 'the losing download is not left on disk');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('importBySetLink re-plans a slug another pack took while it downloaded', async () => {
+    const settings: StoredSettings = { systemNotifications: { customEmojiPacks: [] } };
+    const service = makeService({
+      settings,
+      assets: { exists: async () => true, persist: async () => ({ url: '/uploads/emoji/ours.webp', size: 4 }) },
+      beforeLock: commitsBeforeLock(settings, [
+        pack('other', [emoji('news_1', '/uploads/emoji/other.webp', '1001')], { setName: 'OtherSet' }),
+      ]),
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stickerSetFetch([{ file_id: 'file-1', custom_emoji_id: '2002', emoji: '📰' }]);
+    try {
+      const result = await service.importBySetLink({ packName: 'News', link: 'https://t.me/addemoji/NewsEmoji' });
+
+      const stored = storedPacks(settings);
+      assert.deepEqual(stored.map((p) => p.id), ['other', result.id]);
+      assert.equal(stored[0]?.emojis[0]?.slug, 'news_1', 'the pack that took the slug keeps it');
+      assert.equal(stored[1]?.emojis[0]?.slug, 'news_1_2', 'the new emoji gets a slug of its own');
+      assert.equal(result.emojis[0]?.slug, 'news_1_2');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rehydrateMissingAssets does not bring back a pack deleted during recovery, and removes what it downloaded for it', async () => {
+    const settings: StoredSettings = {
+      systemNotifications: {
+        customEmojiPacks: [
+          pack('restored', [emoji('news_1', '/uploads/emoji/missing.webp')], { setName: 'NewsEmoji' }),
+        ],
+      },
+    };
+    const removed: string[] = [];
+    const service = makeService({
+      settings,
+      assets: {
+        exists: async (url) => url !== '/uploads/emoji/missing.webp',
+        persist: async () => ({ url: '/uploads/emoji/recovered.webp', size: 4 }),
+        remove: async (url) => {
+          removed.push(String(url));
+        },
+      },
+      beforeLock: commitsBeforeLock(settings, []),
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stickerSetFetch([{ file_id: 'file-1', custom_emoji_id: '1001' }]);
+    try {
+      const result = await service.rehydrateMissingAssets();
+
+      assert.deepEqual(storedPacks(settings), []);
+      assert.deepEqual(removed, ['/uploads/emoji/recovered.webp']);
+      assert.deepEqual(result, { recoveredEmojiCount: 0, skippedPacks: 0 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
