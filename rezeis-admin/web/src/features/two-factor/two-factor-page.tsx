@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { LocalQr } from '@/components/ui/local-qr'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -325,12 +326,26 @@ function EnrollmentPendingCard({
         {enrollment.otpauthUri && (
           <>
             <div className="flex flex-col items-center gap-3">
-              <img
-                alt={t('twoFactorPage.confirm.qrAlt')}
-                width={200}
-                height={200}
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(enrollment.otpauthUri)}`}
-                className="rounded border bg-background p-2"
+              {/*
+                Drawn here, in the browser, and never fetched. This code
+                encodes `enrollment.otpauthUri`, and that URI carries the
+                admin's TOTP shared secret in its `secret=` parameter — the
+                second factor itself. It used to be an `<img>` pointed at a
+                public QR-image service with the URI in the query string, which
+                handed every enrollment's secret to a third party, to its
+                logs, and to anything on the path in between; anyone holding
+                it can mint valid codes forever. `LocalQr` draws with the
+                panel's own renderer (the vendored kit, plain dark-on-light,
+                four-module quiet zone) and mounts it as a `data:` URL, so
+                nothing leaves the page. Its plate is white in both themes —
+                the old `bg-background` plate went dark in the dark theme,
+                and authenticator apps scan dark-on-light.
+                `two-factor-enrollment-qr.test.tsx` holds both halves.
+              */}
+              <LocalQr
+                url={enrollment.otpauthUri}
+                label={t('twoFactorPage.confirm.qrAlt')}
+                size={200}
               />
               <p className="text-xs text-muted-foreground">{t('twoFactorPage.confirm.secretManual')}</p>
               <code className="break-all rounded bg-muted px-3 py-1 text-sm">{enrollment.secret}</code>
