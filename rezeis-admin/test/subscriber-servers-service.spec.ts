@@ -239,6 +239,23 @@ describe('what an empty list says to the operator', () => {
     assert.equal(logs[0]?.level, 'debug');
   });
 
+  it('stays quiet, but says why, when everything left is a section header', async () => {
+    // The operator tagged these hosts, so this is theirs to fix and must not
+    // warn. But the reason has to be reachable from here at all: it is only
+    // logged because a header with no server under it is dropped inside
+    // `buildServers`, which is what leaves this method a list empty enough to
+    // explain. A header that stayed in would answer one grey row and no word.
+    const { service, logs } = makeService({
+      hosts: [host({ tags: ['REZEIS:SEPARATOR'] })],
+    });
+    const result = await service.getForSubscription('user-1', 'sub-1');
+    assert.deepEqual(result, { servers: [], recommendedServerId: null });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0]?.level, 'debug');
+    assert.match(logs[0]?.message ?? '', /all of them separators/);
+    assert.match(logs[0]?.message ?? '', /sub-1/);
+  });
+
   it('says nothing at all when there are servers to show', async () => {
     const { service, logs } = makeService();
     await service.getForSubscription('user-1', 'sub-1');

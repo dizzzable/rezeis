@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { RemnawaveHostInterface } from '../src/modules/remnawave/interfaces/remnawave-host.interface';
 import { RemnawaveNodeInterface } from '../src/modules/remnawave/interfaces/remnawave-node.interface';
 import { RemnawaveInternalSquadDetailInterface } from '../src/modules/remnawave/interfaces/remnawave-squad-detail.interface';
+import { SubscriberServerInterface } from '../src/modules/remnawave/interfaces/subscriber-server.interface';
 import { mapInternalSquadDetails } from '../src/modules/remnawave/services/remnawave-squad-mappers';
 import {
   buildServers,
@@ -530,17 +531,228 @@ describe('the recommendation', () => {
   });
 });
 
+describe('section headers the operator tagged', () => {
+  // Remnawave has no separator. Operators fake one with an ordinary host whose
+  // remark is a heading, and tag it `REZEIS:SEPARATOR` so this list can tell.
+  // The header below is a whole host on purpose: the default `host()` links
+  // the online `node-de` and carries a badge, so a header built like a server
+  // would come out with a state, a flag and a badge — the rows these tests
+  // exist to refuse.
+  const TAG = 'REZEIS:SEPARATOR';
+  const ALL_FORMATS = ['XRAY_JSON', 'XRAY_BASE64', 'MIHOMO', 'STASH', 'CLASH', 'SINGBOX'];
+  const header = (over: Partial<RemnawaveHostInterface> = {}): RemnawaveHostInterface =>
+    host({
+      remark: '⬇️ Все | Локации ⬇️',
+      serverDescription: 'РАЗДЕЛИТЕЛЬ | НЕ СЕРВЕР',
+      tags: ['PREMIUM', TAG],
+      ...over,
+    });
+  const listOf = (
+    hosts: RemnawaveHostInterface[],
+    nodes: RemnawaveNodeInterface[] = [node()],
+  ): readonly SubscriberServerInterface[] =>
+    buildServers(['squad-eu'], { hosts, nodes, squads: [squad()] });
+
+  it('makes a header of the tagged host, and leaves its untagged twin a server', () => {
+    // Identical but for the tag, so nothing but the tag can tell them apart.
+    const servers = listOf([
+      header({ uuid: 'sep', viewPosition: 1 }),
+      header({ uuid: 'twin', viewPosition: 2, tags: ['PREMIUM'] }),
+    ]);
+    // The whole row, so a field the header must not have fails by name.
+    assert.deepEqual(servers[0], {
+      id: 'sep',
+      kind: 'separator',
+      name: '⬇️ Все | Локации ⬇️',
+      description: null,
+      flag: null,
+      countryCode: null,
+      status: 'unknown',
+      uptimeSeconds: null,
+      usersOnline: null,
+    });
+    // What the header would have been: the twin gets all of it.
+    assert.equal(servers[1]?.kind, 'server');
+    assert.equal(servers[1]?.status, 'online');
+    assert.equal(servers[1]?.countryCode, 'DE');
+    assert.equal(servers[1]?.description, 'РАЗДЕЛИТЕЛЬ | НЕ СЕРВЕР');
+  });
+
+  it('reads the tag exactly as Remnawave stores it — no case folding, no near misses', () => {
+    // Remnawave accepts `^[A-Z0-9_:]+$` only, so any other spelling is not the
+    // operator following the instructions, and a guess costs a working server
+    // its status. Each host is alone in its list: read as a header, it would
+    // have nothing under it and vanish, and `row` would be undefined.
+    for (const tag of ['rezeis:separator', 'Rezeis:Separator', 'REZEIS:SEPARATORS', 'REZEIS_SEPARATOR', 'SEPARATOR']) {
+      const [row] = listOf([header({ tags: [tag] })]);
+      assert.equal(row?.kind, 'server', `the tag ${JSON.stringify(tag)} made a header`);
+      assert.equal(row?.status, 'online', `the tag ${JSON.stringify(tag)}`);
+    }
+  });
+
+  it('never takes a header’s state from a node — linked by its node list, or found at its address', () => {
+    // The latent defect this closes. A header is an ordinary host: it has an
+    // address and may list nodes, and one copied from a working host keeps
+    // both. Sitting on the quietest node, it used to read as online and be the
+    // recommended server — a heading, recommended as the place to connect.
+    const quiet = node({ uuid: 'node-quiet', address: '2.26.199.173', usersOnline: 0, xrayUptime: 999, countryCode: 'NL' });
+    const busy = node({ uuid: 'node-busy', address: '10.9.9.9', ips: [], usersOnline: 40 });
+    const linkages: [string, Partial<RemnawaveHostInterface>][] = [
+      ['by its node list', { nodes: ['node-quiet'] }],
+      ['by its address', { nodes: [], address: '2.26.199.173' }],
+    ];
+    for (const [how, linkage] of linkages) {
+      const servers = listOf(
+        [
+          header({ uuid: 'sep', viewPosition: 1, ...linkage }),
+          host({ uuid: 'de', viewPosition: 2, nodes: ['node-busy'] }),
+        ],
+        [quiet, busy],
+      );
+      assert.equal(servers[0]?.kind, 'separator', how);
+      assert.equal(servers[0]?.status, 'unknown', how);
+      assert.equal(servers[0]?.uptimeSeconds, null, how);
+      assert.equal(servers[0]?.usersOnline, null, how);
+      assert.equal(servers[0]?.countryCode, null, how);
+      assert.equal(pickRecommended(servers), 'de', how);
+    }
+  });
+
+  it('never recommends a header, even one that says it is up', () => {
+    // The rule, not the data feeding it: a header is built as `unknown`, so the
+    // status check alone would skip one today. This keeps the recommendation
+    // from depending on how another function fills in a field.
+    const row = (over: Partial<SubscriberServerInterface>): SubscriberServerInterface => ({
+      id: 'x',
+      kind: 'server',
+      name: 'x',
+      description: null,
+      flag: null,
+      countryCode: null,
+      status: 'online',
+      uptimeSeconds: 60,
+      usersOnline: 10,
+      ...over,
+    });
+    assert.equal(
+      pickRecommended([row({ id: 'sep', kind: 'separator', usersOnline: 0 }), row({ id: 'de' })]),
+      'de',
+    );
+  });
+
+  it('puts a tagged host through every filter first', () => {
+    // A tag does not make a host visible. Each dropped header sits directly
+    // over a server, so the rule that drops a header with nothing under it
+    // cannot be what removes it here — and `shown` is the control proving a
+    // header survives this fixture at all.
+    const drops: [string, Partial<RemnawaveHostInterface>][] = [
+      ['hidden', { isHidden: true }],
+      ['disabled', { isDisabled: true }],
+      ['squad-excluded', { internalSquads: { mode: 'exclude', squads: ['squad-eu'] } }],
+      ['allowed-elsewhere', { internalSquads: { mode: 'allow-only', squads: ['squad-vip'] } }],
+      ['every-format', { excludeFromSubscriptionTypes: ALL_FORMATS }],
+      ['other-inbound', { configProfileInboundUuid: 'inbound-us' }],
+      ['no-inbound', { configProfileInboundUuid: null }],
+    ];
+    const hosts = drops.flatMap(([id, over], index) => [
+      header({ uuid: id, viewPosition: index * 2 + 1, ...over }),
+      host({ uuid: `under-${id}`, viewPosition: index * 2 + 2 }),
+    ]);
+    hosts.push(
+      header({ uuid: 'shown', viewPosition: 100 }),
+      host({ uuid: 'under-shown', viewPosition: 101 }),
+    );
+    assert.deepEqual(
+      listOf(hosts).map((server) => server.id),
+      [...drops.map(([id]) => `under-${id}`), 'shown', 'under-shown'],
+    );
+  });
+
+  it('keeps a header exactly where the operator ordered it', () => {
+    // Positions scrambled, as the snapshot is free to send them.
+    const servers = listOf([
+      host({ uuid: 'lv', viewPosition: 4 }),
+      header({ uuid: 'sep-locations', viewPosition: 3 }),
+      host({ uuid: 'auto', viewPosition: 2 }),
+      header({ uuid: 'sep-auto', viewPosition: 1 }),
+    ]);
+    assert.deepEqual(servers.map((server) => server.id), ['sep-auto', 'auto', 'sep-locations', 'lv']);
+  });
+
+  it('drops a header left at the end with nothing under it', () => {
+    // And leaves a server above the first header where it was, unlabelled.
+    const servers = listOf([
+      host({ uuid: 'auto', viewPosition: 1 }),
+      header({ uuid: 'sep-top', viewPosition: 2 }),
+      host({ uuid: 'de', viewPosition: 3 }),
+      header({ uuid: 'sep-trailing', viewPosition: 4 }),
+    ]);
+    assert.deepEqual(servers.map((server) => server.id), ['auto', 'sep-top', 'de']);
+  });
+
+  it('keeps only the last of consecutive headers — the one over the servers', () => {
+    // How a run happens: a section whose only host this customer may not see.
+    // Its header passes every filter and lands directly on the next header,
+    // labelling nothing. The last header of the run is the one naming the
+    // servers really below it; the first would name a section that is gone.
+    const servers = listOf([
+      header({ uuid: 'sep-vip', remark: 'VIP', viewPosition: 1 }),
+      host({ uuid: 'vip-only', viewPosition: 2, internalSquads: { mode: 'allow-only', squads: ['squad-vip'] } }),
+      header({ uuid: 'sep-soon', remark: 'Скоро', viewPosition: 3 }),
+      header({ uuid: 'sep-locations', viewPosition: 4 }),
+      host({ uuid: 'de', viewPosition: 5 }),
+      host({ uuid: 'lv', viewPosition: 6 }),
+    ]);
+    assert.deepEqual(servers.map((server) => server.id), ['sep-locations', 'de', 'lv']);
+  });
+
+  it('comes back empty when nothing but headers reaches the customer', () => {
+    assert.deepEqual(
+      listOf([header({ uuid: 'a', viewPosition: 1 }), header({ uuid: 'b', viewPosition: 2 })]),
+      [],
+    );
+  });
+
+  it('reads a host row with no tags at all as a server rather than failing', () => {
+    // Belt and braces, as with `internalSquads` above: the snapshot comes back
+    // out of Redis unchecked. `tags` has been in every snapshot this list has
+    // cached, but a row without it must not empty the list with a TypeError.
+    const stale = { ...host({ uuid: 'stale' }) } as Record<string, unknown>;
+    delete stale['tags'];
+    const [row] = listOf([stale as unknown as RemnawaveHostInterface]);
+    assert.equal(row?.kind, 'server');
+    assert.equal(row?.status, 'online');
+  });
+});
+
 describe('what must never reach a customer', () => {
+  // A section header rides along on purpose. It is an ordinary host in
+  // Remnawave — address, port, a node list — and its row is built on a
+  // different path from a server's, so the boundary has to hold on both.
   const servers = buildServers(['squad-eu'], {
-    hosts: [host()],
+    hosts: [
+      host({
+        uuid: 'host-sep',
+        viewPosition: 0,
+        remark: '⬇️ Локации ⬇️',
+        address: 'sep.internal.example',
+        port: 8443,
+        tags: ['REZEIS:SEPARATOR'],
+      }),
+      host(),
+    ],
     nodes: [node()],
     squads: [squad()],
   });
 
   it('carries no address, port, node name or IP', () => {
+    // Both rows present, or the header's path is not being checked at all.
+    assert.deepEqual(servers.map((server) => server.kind), ['separator', 'server']);
     const serialized = JSON.stringify(servers);
     for (const secret of [
       'de1.internal.example', // host address
+      'sep.internal.example', // the header's host address
+      '8443', // the header's port
       '10.0.0.1', // node address
       '203.0.113.10', // node IP
       'de-1.hetzner', // node name
@@ -553,17 +765,28 @@ describe('what must never reach a customer', () => {
 
   it('exposes only the agreed fields', () => {
     // A new field added to the host or node mapper must not arrive here by
-    // accident: the response shape is a boundary, so it is stated exactly.
-    assert.deepEqual(Object.keys(servers[0]).sort(), [
-      'countryCode',
-      'description',
-      'flag',
-      'id',
-      'name',
-      'status',
-      'uptimeSeconds',
-      'usersOnline',
-    ]);
+    // accident: the response shape is a boundary, so it is stated exactly —
+    // for a header row as much as a server row, because the two are built
+    // apart. `kind` joined deliberately: it tells the cabinet to draw a header,
+    // and it is one of two fixed words, nothing read off the host.
+    assert.equal(servers.length, 2);
+    for (const server of servers) {
+      assert.deepEqual(
+        Object.keys(server).sort(),
+        [
+          'countryCode',
+          'description',
+          'flag',
+          'id',
+          'kind',
+          'name',
+          'status',
+          'uptimeSeconds',
+          'usersOnline',
+        ],
+        server.kind,
+      );
+    }
   });
 
   it('takes an inbound’s uuid and nothing else from the squad payload', () => {
@@ -710,6 +933,42 @@ describe('why the list came back empty', () => {
     }));
     assert.match(reason, /all kept out of every subscription format/);
     assert.doesNotMatch(reason, /served to these squads/);
+  });
+
+  it('names a list of nothing but section headers as its own reason, quietly', () => {
+    // Every filter passed and there is still nothing to show: each host that
+    // reached the customer is a header, and a header with no server under it
+    // is not listed. Blaming the squads would send the operator to settings
+    // that are fine. The tags are theirs, so it stays below the Logs page.
+    const hosts = [
+      host({ uuid: 'a', viewPosition: 1, tags: ['REZEIS:SEPARATOR'] }),
+      host({ uuid: 'b', viewPosition: 2, tags: ['REZEIS:SEPARATOR'] }),
+    ];
+    assert.deepEqual(buildServers(['squad-eu'], snapshot({ hosts })), []);
+    const { level, reason } = explainEmpty(['squad-eu'], snapshot({ hosts }));
+    assert.match(reason, /2 host\(s\) served to these squads, all of them separators tagged REZEIS:SEPARATOR/);
+    assert.equal(level, 'debug');
+  });
+
+  it('reports a break earlier in the chain before it blames the headers', () => {
+    // The header reason is the last link, past every filter. A tagged host that
+    // is also hidden, unticked or not served to these squads is missing for
+    // THAT reason, and naming the tag instead would point at the wrong fix.
+    const cases: [RegExp, Partial<RemnawaveHostInterface>][] = [
+      [/all hidden or disabled/, { isHidden: true }],
+      [
+        /all kept out of every subscription format/,
+        { excludeFromSubscriptionTypes: ['XRAY_JSON', 'XRAY_BASE64', 'MIHOMO', 'STASH', 'CLASH', 'SINGBOX'] },
+      ],
+      [/none of them served to these squads/, { internalSquads: { mode: 'exclude', squads: ['squad-eu'] } }],
+    ];
+    for (const [expected, over] of cases) {
+      const { reason } = explainEmpty(['squad-eu'], snapshot({
+        hosts: [host({ tags: ['REZEIS:SEPARATOR'], ...over })],
+      }));
+      assert.match(reason, expected);
+      assert.doesNotMatch(reason, /separator/);
+    }
   });
 });
 

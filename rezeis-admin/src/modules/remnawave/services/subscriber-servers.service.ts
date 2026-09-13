@@ -231,7 +231,53 @@ function reachesNoApp(host: RemnawaveHostInterface): boolean {
 }
 
 /**
- * Filters the snapshot down to what these squads reach, and describes each one.
+ * The tag that makes a host a section header in the customer's list.
+ *
+ * WHY A TAG. Remnawave has no separator concept. Operators fake section
+ * headers with an ordinary host whose remark is a heading ("⬇️ Все | Локации
+ * ⬇️", often with a badge such as "РАЗДЕЛИТЕЛЬ | НЕ СЕРВЕР"), VPN apps draw it
+ * as a row reading "n/a", and this list drew it as a server with no data.
+ * Nothing on the host tells the two apart. A working virtual host can sit on
+ * `0.0.0.0`, and a working CDN host addressed by domain matches no node either,
+ * so any automatic rule would sooner or later draw a server somebody pays for
+ * as a heading — no status, no uptime, never recommended. The operator knows
+ * which hosts are headers; a tag is where Remnawave lets them say so.
+ *
+ * NO NEW CALL AND NO CACHE KEY BUMP. `mapHost` has produced `tags` on every
+ * host since 2.8 support (June 2026, before this list existed), folding 2.7's
+ * single `tag` into a one-element array, so every snapshot ever cached under
+ * `SNAPSHOT_CACHE_KEY` already carries it. Reading it changes no stored shape.
+ *
+ * THE SPELLING. Remnawave's create and update schemas accept host tags matching
+ * `^[A-Z0-9_:]+$` only — at most 36 characters each from 2.8 on, 32 for 2.7's
+ * single `tag` — so a lowercase or hyphenated marker could not be typed in at
+ * all. The `REZEIS:` prefix keeps it clear of whatever the operator already
+ * uses tags for.
+ *
+ * EXACT AND CASE-SENSITIVE, deliberately; host tags are not lowercased here. A
+ * tag Remnawave would have refused can only come from a row edited by hand, and
+ * the two ways of guessing wrong are not equal: a header missed stays the grey
+ * row it has always been, while a server mistaken for a header loses its status
+ * in front of the customer who uses it.
+ */
+const SEPARATOR_TAG = 'REZEIS:SEPARATOR';
+
+/**
+ * Whether the operator tagged this host as a section header.
+ *
+ * `Array.isArray` rather than the type, for the reason `NO_SQUAD_RULE` exists:
+ * this reads a snapshot back out of Redis with an unchecked cast. `tags` has
+ * been in every snapshot this list has cached, so this should never see a row
+ * without it — and if it does, the host reads as the server it was on every
+ * version before this one, where a throw would empty the list for everybody.
+ */
+function isSeparator(host: RemnawaveHostInterface): boolean {
+  return Array.isArray(host.tags) && host.tags.includes(SEPARATOR_TAG);
+}
+
+/**
+ * Filters the snapshot down to what these squads reach, describes each one, and
+ * drops any section header left with no server under it.
  *
  * Exported for the spec: the interesting behaviour is all in here, and testing
  * it through the service would mean standing up Prisma and Redis to assert
@@ -241,10 +287,30 @@ export function buildServers(
   squadUuids: readonly string[],
   snapshot: PanelSnapshot,
 ): readonly SubscriberServerInterface[] {
+  const nodesByUuid = new Map(snapshot.nodes.map((node) => [node.uuid, node]));
+  return withoutEmptySections(
+    listedHosts(squadUuids, snapshot).map((host) => describeHost(host, nodesByUuid)),
+  );
+}
+
+/**
+ * The hosts served to these squads, in the operator's order: every filter
+ * applied, nothing described yet.
+ *
+ * A host tagged as a section header goes through exactly the same filters as
+ * any other, and only one that would have been listed becomes a header. A
+ * hidden header is hidden; a header kept out of this customer's squads is not
+ * theirs to see. Nothing here looks at the tag.
+ *
+ * Its own function so that `explainEmpty` can ask the question this list was
+ * built with, rather than a copy of it that could drift.
+ */
+function listedHosts(
+  squadUuids: readonly string[],
+  snapshot: PanelSnapshot,
+): RemnawaveHostInterface[] {
   const reachedBy = squadsByInbound(squadUuids, snapshot.squads);
   if (reachedBy.size === 0) return [];
-
-  const nodesByUuid = new Map(snapshot.nodes.map((node) => [node.uuid, node]));
 
   return snapshot.hosts
     .filter((host) => {
@@ -282,8 +348,50 @@ export function buildServers(
       }
       return false;
     })
-    .sort((a, b) => a.viewPosition - b.viewPosition)
-    .map((host) => describeHost(host, nodesByUuid));
+    // The order is the operator's, and a header is ordered like any host: it
+    // keeps exactly the place it had when it was drawn as a server. `sort` is
+    // stable, so hosts sharing a position keep the panel's own order too.
+    .sort((a, b) => a.viewPosition - b.viewPosition);
+}
+
+/**
+ * Drops every section header with no server under it.
+ *
+ * A header promises that servers follow, and the filters break that promise
+ * per customer: a section whose hosts are hidden, kept out of this customer's
+ * squads, or kept out of every format is empty for THIS customer, while its
+ * header — which passed the same filters — is still standing. So the rule is
+ * read off the finished list, not off the snapshot:
+ *
+ *   • a header followed by at least one server before the next header, or
+ *     before the end of the list, stays;
+ *   • a header followed directly by another header goes, so of a run of
+ *     headers only the LAST one before a server survives. That is the one
+ *     sitting over the servers that are actually there; the ones above it
+ *     named sections that came out empty. Keeping the first instead would
+ *     put the heading of an emptied section over servers from another one;
+ *   • a header at the very end goes: it heads nothing.
+ *
+ * Servers above the first header stay where the operator put them, unlabelled.
+ * A list of nothing but headers comes out empty, and `explainEmpty` says so.
+ */
+function withoutEmptySections(
+  rows: readonly SubscriberServerInterface[],
+): SubscriberServerInterface[] {
+  const kept: SubscriberServerInterface[] = [];
+  let header: SubscriberServerInterface | null = null;
+  for (const row of rows) {
+    if (row.kind === 'separator') {
+      // Replaces a header nothing has followed yet.
+      header = row;
+      continue;
+    }
+    if (header !== null) kept.push(header);
+    header = null;
+    kept.push(row);
+  }
+  // A header still waiting here has no server under it.
+  return kept;
 }
 
 export interface EmptyReason {
@@ -305,8 +413,10 @@ export interface EmptyReason {
  *
  * Reads left to right along subscription -> squads -> inbounds -> hosts and
  * stops at the first break, because the first break explains every one after
- * it. Counts rather than identifiers: this goes to a log an operator reads,
- * and host UUIDs would tell them nothing they could act on.
+ * it. The last link is the one past every filter: hosts that did reach the
+ * customer, all of them section headers, which the list does not show without
+ * a server under them. Counts rather than identifiers: this goes to a log an
+ * operator reads, and host UUIDs would tell them nothing they could act on.
  *
  * Exported for the spec, and pure for the same reason as its neighbours.
  */
@@ -371,9 +481,22 @@ export function explainEmpty(
       reason: `${visible.length} matching host(s), all kept out of every subscription format`,
     };
   }
+  const listed = listedHosts(squadUuids, snapshot);
+  if (listed.length === 0) {
+    return {
+      level: 'debug',
+      reason: `${delivered.length} matching host(s), none of them served to these squads`,
+    };
+  }
+  // Every filter passed, and the list is still empty: the only rows that can
+  // disappear after the filters are headers with no server under them, so
+  // everything that reached the customer was a header. The operator's own doing
+  // like the three above — they tagged them — so it does not shout. Last, so it
+  // never speaks over a break earlier in the chain: a tagged host that is also
+  // hidden, or unticked, or not served to these squads, is reported as that.
   return {
     level: 'debug',
-    reason: `${delivered.length} matching host(s), none of them served to these squads`,
+    reason: `${listed.length} host(s) served to these squads, all of them separators tagged ${SEPARATOR_TAG}`,
   };
 }
 
@@ -430,7 +553,8 @@ function squadsByInbound(
  * this hot path has no business making.
  *
  * The addresses are read here and never emitted: `describeHost` still returns
- * the same seven fields, and none of them is an address.
+ * only the fields `SubscriberServerInterface` names, and none of them is an
+ * address. A section header never gets this far — see `describeSeparator`.
  */
 function nodesServing(
   host: RemnawaveHostInterface,
@@ -460,6 +584,10 @@ function describeHost(
   host: RemnawaveHostInterface,
   nodesByUuid: ReadonlyMap<string, RemnawaveNodeInterface>,
 ): SubscriberServerInterface {
+  // Before the node lookup, not after it: a header describes no server, so it
+  // must not borrow the state of one.
+  if (isSeparator(host)) return describeSeparator(host);
+
   const nodes = nodesServing(host, nodesByUuid);
 
   // The name is the REMARK — the string the customer already reads as the
@@ -495,6 +623,7 @@ function describeHost(
 
   return {
     id: host.uuid,
+    kind: 'server',
     name,
     description,
     flag,
@@ -511,6 +640,38 @@ function describeHost(
       connected.length > 0
         ? connected.reduce((total, node) => total + node.usersOnline, 0)
         : null,
+  };
+}
+
+/**
+ * A section header: the operator's words, and nothing that describes a server.
+ *
+ * NEVER MATCHED TO A NODE. A header host still has an address and can still
+ * list nodes — it is an ordinary host in Remnawave, and one copied from a
+ * working host keeps both. Before headers were recognised, one that shared a
+ * node's address read as online, carried that node's uptime and load, and
+ * could be named the least busy server of all. So nothing below reads a node:
+ * no flag or country (there is no place), `unknown` (there is no state), and no
+ * uptime or load. The badge goes too — on a header it is the category the
+ * operator wrote to label the row a separator, which the header now shows by
+ * being one.
+ *
+ * Those values are also the whole of the fallback: a cabinet that predates
+ * `kind` drops it, and a row reading `unknown` with nothing else is the grey
+ * "no data" row such a cabinet has always drawn for this host — only without
+ * the badge.
+ */
+function describeSeparator(host: RemnawaveHostInterface): SubscriberServerInterface {
+  return {
+    id: host.uuid,
+    kind: 'separator',
+    name: host.remark,
+    description: null,
+    flag: null,
+    countryCode: null,
+    status: 'unknown',
+    uptimeSeconds: null,
+    usersOnline: null,
   };
 }
 
@@ -556,12 +717,19 @@ function resolveStatus(
  *
  * Exported for the same reason as `buildServers`: this is the rule, and a spec
  * that reimplements it in order to check it has verified nothing.
+ *
+ * Never a section header. `describeSeparator` already sends every header as
+ * `unknown`, so the status test below would pass one over today — but a header
+ * is not somewhere to connect whatever its status says, and a recommendation
+ * that depended on how another function fills in a field it does not own would
+ * break the first time that function changed.
  */
 export function pickRecommended(
   servers: readonly SubscriberServerInterface[],
 ): string | null {
   let best: SubscriberServerInterface | null = null;
   for (const server of servers) {
+    if (server.kind === 'separator') continue;
     if (server.status !== 'online') continue;
     if (best === null || (server.usersOnline ?? 0) < (best.usersOnline ?? 0)) {
       best = server;

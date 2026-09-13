@@ -14,6 +14,27 @@
 export interface SubscriberServerInterface {
   readonly id: string;
   /**
+   * `separator` for a section header, `server` for everything else.
+   *
+   * Remnawave has no header concept, so operators fake one with an ordinary
+   * host whose remark is a heading — "⬇️ Все | Локации ⬇️" — and VPN apps draw
+   * it as a row reading "n/a". Nothing about such a host tells it apart from a
+   * real one, so the operator says which hosts they are by tagging them
+   * `REZEIS:SEPARATOR` in Remnawave (see `SEPARATOR_TAG` in
+   * `subscriber-servers.service.ts`).
+   *
+   * A separator row is the operator's words and nothing else: `name` is the
+   * remark, and `description`, `flag`, `countryCode`, `uptimeSeconds` and
+   * `usersOnline` are all `null`, with `status` `unknown`. It is never matched
+   * to a node and never recommended, and a header with no server under it is
+   * not sent at all.
+   *
+   * Those empty fields are also what makes the field safe to add. A cabinet
+   * older than it drops `kind` at its own boundary, and what is left is the
+   * grey "no data" row that host has always been drawn as, minus its badge.
+   */
+  readonly kind: 'server' | 'separator';
+  /**
    * The host's name exactly as the operator wrote it, flag and all.
    *
    * Not reformatted and not translated: this is the same string the customer
