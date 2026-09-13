@@ -33,7 +33,7 @@
 import { queryOptions, useQuery, type UseQueryResult } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
-import { expectArray } from '@/lib/api-utils'
+import { expectArray, isRecord } from '@/lib/api-utils'
 
 // ── Wire types ──────────────────────────────────────────────────────────────
 
@@ -163,6 +163,17 @@ export const plansQueryKeys = {
     [...plansQueryKeys.lists(), filters ?? {}] as const,
   squadPropagation: (planId: string) =>
     [...plansQueryKeys.all, 'squad-propagation', planId] as const,
+  /**
+   * What still uses one plan, read by the delete dialog.
+   *
+   * DELIBERATELY NOT under `all`. A successful delete invalidates `all` while
+   * the dialog that asked for these references is still mounted, so a key under
+   * that root would be refetched on the spot — for the plan that was just
+   * deleted, which answers 404 by contract. Nothing else needs to invalidate
+   * it: the query keeps no cache (`gcTime: 0`), so every opening of the dialog
+   * reads fresh counts.
+   */
+  references: (planId: string) => ['admin', 'plan-references', planId] as const,
 }
 
 /**
@@ -215,6 +226,83 @@ export async function fetchPlans(signal?: AbortSignal): Promise<readonly Plan[]>
 export async function reorderPlans(orderedIds: readonly string[]): Promise<readonly Plan[]> {
   const response = await api.patch('/admin/plans/reorder', { orderedIds })
   return expectArray<Plan>(response.data)
+}
+
+// ── Deletion ────────────────────────────────────────────────────────────────
+
+/**
+ * One kind of thing that still uses a plan, as
+ * `GET /admin/plans/:planId/references` reports it: a stable key the SPA
+ * localises (the table lives in `plan-delete.ts`) and how many rows of that
+ * kind point at the plan. The server sends only kinds whose count is above
+ * zero, in a fixed order.
+ */
+export interface PlanReference {
+  readonly kind: string
+  readonly count: number
+}
+
+/**
+ * `DELETE /admin/plans/:planId`. For an operator holding `plans:delete` the
+ * delete always succeeds; `removed` says which of two things happened. `true`:
+ * nothing used the plan, and the row went with its durations and prices.
+ * `false`: something still did, so the plan was hidden everywhere and the
+ * nightly sweeper removes it once nothing uses it.
+ */
+export interface PlanDeleteResult {
+  readonly deleted: true
+  readonly removed: boolean
+}
+
+/**
+ * How long the delete dialog waits for the references before it says it could
+ * not check. The list informs the decision and gates nothing — the delete goes
+ * ahead either way — so a slow count must not hold the Delete button for the
+ * client-wide thirty seconds.
+ */
+const PLAN_REFERENCES_TIMEOUT_MS = 10_000
+
+/**
+ * The references body, checked rather than cast.
+ *
+ * Anything that is not `{ references: [{ kind, count }] }` THROWS, and the
+ * dialog renders that as "could not check" — never as an empty list. An empty
+ * list is the sentence "this plan is deleted for good", and saying it about a
+ * plan whose usage this build could not read is the confident false statement
+ * `expectArray` exists to prevent. `planId` is not required: the dialog already
+ * knows which plan it asked about.
+ */
+export function readPlanReferences(body: unknown): readonly PlanReference[] {
+  if (!isRecord(body) || !Array.isArray(body.references)) {
+    throw new Error('errors.unexpectedResponsePayload')
+  }
+  const rows: readonly unknown[] = body.references
+  return rows.map((row): PlanReference => {
+    if (!isRecord(row) || typeof row.kind !== 'string' || row.kind.length === 0) {
+      throw new Error('errors.unexpectedResponsePayload')
+    }
+    const { count } = row
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+      throw new Error('errors.unexpectedResponsePayload')
+    }
+    return { kind: row.kind, count }
+  })
+}
+
+export async function fetchPlanReferences(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<readonly PlanReference[]> {
+  const response = await api.get(`/admin/plans/${encodeURIComponent(planId)}/references`, {
+    signal,
+    timeout: PLAN_REFERENCES_TIMEOUT_MS,
+  })
+  return readPlanReferences(response.data)
+}
+
+export async function deletePlan(planId: string): Promise<PlanDeleteResult> {
+  const response = await api.delete<PlanDeleteResult>(`/admin/plans/${encodeURIComponent(planId)}`)
+  return response.data
 }
 
 // ── queryOptions builder ────────────────────────────────────────────────────
@@ -278,5 +366,24 @@ export function usePlanSquadPropagation(
     enabled: planId !== null,
     refetchInterval: (query) => (query.state.data?.isComplete === false ? 3_000 : false),
     staleTime: 0,
+  })
+}
+
+/**
+ * What still uses a plan, for the delete dialog. `null` disables the query.
+ *
+ * NO CACHE, on purpose (`gcTime: 0`). These are live counts shown right above
+ * a destructive button; a copy from the last time the dialog was open would
+ * render instantly and then change under the operator's cursor. Each opening
+ * starts in the loading state and reads the server's current answer.
+ */
+export function usePlanReferences(planId: string | null): UseQueryResult<readonly PlanReference[]> {
+  return useQuery({
+    queryKey: plansQueryKeys.references(planId ?? ''),
+    queryFn: ({ signal }) => fetchPlanReferences(planId as string, signal),
+    enabled: planId !== null,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
   })
 }

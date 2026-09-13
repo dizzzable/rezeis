@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Archive, ArchiveRestore, Package, BarChart3, List, GripVertical, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
+import { Plus, Pencil, Archive, ArchiveRestore, Trash2, Package, BarChart3, List, GripVertical, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   closestCenter,
@@ -21,6 +21,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
+import { useHasPermission } from '@/features/rbac'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
@@ -33,6 +34,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
 import { PlanForm, type PlanFormData } from './plan-form'
 import {
+  deletePlan,
   plansQueryKeys,
   reorderPlans,
   usePlanSquadPropagation,
@@ -40,6 +42,8 @@ import {
   type Plan,
   type PlanUpdateResult,
 } from './plans-api'
+import { isPlanAlreadyGone } from './plan-delete'
+import { PlanDeleteDialog } from './plan-delete-dialog'
 import { resolvePlanWriteRefusal } from './plan-write-refusals'
 import { PlansStatsTab } from './plans-stats-tab'
 
@@ -83,6 +87,15 @@ export default function PlansPage() {
   // subscriber in the background; without this the operator is told "saved" and
   // has no way to know whether the panel ever heard about it.
   const [watchedPropagationPlanId, setWatchedPropagationPlanId] = useState<string | null>(null)
+
+  // The one plan-card control gated on a permission. The server enforces
+  // `plans:delete` on the route; showing the button to an operator without it
+  // would offer a destructive action that can only answer 403.
+  const canDeletePlans = useHasPermission('plans', 'delete')
+  // Kept after the dialog closes, so its content stays put while it animates
+  // away; `deleteDialogOpen` alone decides whether it is showing.
+  const [planToDelete, setPlanToDelete] = useState<Plan | null>(null)
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
   const { data: plans, isLoading } = usePlans()
 
@@ -144,6 +157,28 @@ export default function PlansPage() {
       toast.success(t('plansPage.unarchived'))
     },
     onError: (err) => toast.error(refusalMessage(err, t('plansPage.unarchiveFailed'))),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deletePlan(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
+      setDeleteDialogOpen(false)
+      toast.success(t('plansPage.deleted'))
+    },
+    onError: (err) => {
+      // 404 is the plan already being gone — deleted from another tab or by
+      // another operator. That is the outcome the operator asked for, so it is
+      // said as such, and the list is refreshed to drop the stale card.
+      if (isPlanAlreadyGone(err)) {
+        queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
+        setDeleteDialogOpen(false)
+        toast.info(t('plansPage.alreadyDeleted'))
+        return
+      }
+      // The dialog stays open: the operator can retry or cancel.
+      toast.error(refusalMessage(err, t('plansPage.deleteFailed')))
+    },
   })
 
   const toggleActiveMutation = useMutation({
@@ -304,6 +339,14 @@ export default function PlansPage() {
                     onToggleActive={(v) => toggleActiveMutation.mutate({ id: plan.id, isActive: v })}
                     onArchive={() => archiveMutation.mutate(plan.id)}
                     onUnarchive={() => unarchiveMutation.mutate(plan.id)}
+                    onDelete={
+                      canDeletePlans
+                        ? () => {
+                            setPlanToDelete(plan)
+                            setDeleteDialogOpen(true)
+                          }
+                        : undefined
+                    }
                     archivePending={archiveMutation.isPending}
                     unarchivePending={unarchiveMutation.isPending}
                   />
@@ -350,6 +393,14 @@ export default function PlansPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <PlanDeleteDialog
+        plan={planToDelete}
+        open={deleteDialogOpen}
+        deleting={deleteMutation.isPending}
+        onConfirm={(id) => deleteMutation.mutate(id)}
+        onOpenChange={setDeleteDialogOpen}
+      />
     </div>
   )
 }
@@ -361,13 +412,16 @@ interface SortablePlanCardProps {
   readonly onToggleActive: (isActive: boolean) => void
   readonly onArchive: () => void
   readonly onUnarchive: () => void
+  /** Absent when the operator may not delete plans: no control is rendered. */
+  readonly onDelete?: () => void
   readonly archivePending: boolean
   readonly unarchivePending: boolean
 }
 
 /**
  * One draggable plan card. The grip handle carries the dnd-kit drag listeners
- * so the action controls (switch/edit/archive) stay independently clickable.
+ * so the action controls (switch/edit/archive/delete) stay independently
+ * clickable.
  */
 function SortablePlanCard({
   plan,
@@ -376,6 +430,7 @@ function SortablePlanCard({
   onToggleActive,
   onArchive,
   onUnarchive,
+  onDelete,
   archivePending,
   unarchivePending,
 }: SortablePlanCardProps) {
@@ -454,6 +509,20 @@ function SortablePlanCard({
                 aria-label={t('plansPage.aria.archive')}
               >
                 <Archive className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {/* The same control on every card, on sale, inactive or archived:
+                a delete is never refused, and the dialog it opens says what
+                the delete will do to this particular plan. */}
+            {onDelete && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 text-destructive hover:text-destructive"
+                onClick={onDelete}
+                aria-label={t('plansPage.aria.delete')}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
               </Button>
             )}
           </div>

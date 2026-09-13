@@ -553,6 +553,9 @@ export const ru = {
     archiveFailed: 'Не удалось архивировать тариф',
     unarchived: 'Тариф восстановлен',
     unarchiveFailed: 'Не удалось восстановить тариф',
+    deleted: 'Тариф удалён',
+    deleteFailed: 'Не удалось удалить тариф',
+    alreadyDeleted: 'Тариф уже удалён — список обновлён',
     toggleActiveFailed: 'Не удалось переключить активность тарифа',
     reorderFailed: 'Не удалось изменить порядок тарифов',
     orderHint:
@@ -591,6 +594,91 @@ export const ru = {
     },
     createTitle: 'Создать тариф',
     editTitle: 'Редактировать тариф',
+    // Подтверждение удаления. В удалении не отказывают: диалог перечисляет, что
+    // ещё использует тариф, и говорит, что удаление в этом случае сделает. По
+    // строке на вид ссылки, ключи — как в `PLAN_REFERENCE_KIND_SPECS`
+    // (plan-delete.ts); `unknown` — вид, которого эта сборка не знает.
+    deleteDialog: {
+      title: 'Удалить тариф «{{name}}»?',
+      checking: 'Проверяем, где используется тариф…',
+      unused: 'Тариф «{{name}}» будет удалён безвозвратно вместе с длительностями и ценами.',
+      used: 'Тариф исчезнет из панели и кабинета, купить его больше будет нельзя.',
+      usedBy: 'Сейчас используется:',
+      checkFailed: 'Не удалось проверить, где используется тариф. Удалить его всё равно можно.',
+      checkFailedHint:
+        'Если тариф ещё где-то используется, он исчезнет из панели и кабинета, а его данные удалятся, когда он перестанет использоваться.',
+      confirm: 'Удалить',
+      consequences: {
+        subscribers:
+          'Подписчики сохранят доступ до конца срока, а при продлении выберут действующий тариф. Автопродление само не переведёт их на другой тариф.',
+        invoices: 'Покупки по ожидающим и оплаченным платежам всё равно будут выданы.',
+        grants:
+          'Промокоды, задания, конкурсы, колесо фортуны, рекламные бонусы и реферальные подарки продолжат выдавать этот тариф. Если это не нужно, измените их.',
+        cleanup: 'Данные тарифа удалятся полностью, когда он перестанет где-либо использоваться.',
+      },
+      references: {
+        subscriptions_one: '{{count}} подписка',
+        subscriptions_few: '{{count}} подписки',
+        subscriptions_many: '{{count}} подписок',
+        subscriptions_other: '{{count}} подписок',
+        scheduledTerms_one: '{{count}} запланированный срок подписки',
+        scheduledTerms_few: '{{count}} запланированных срока подписки',
+        scheduledTerms_many: '{{count}} запланированных сроков подписки',
+        scheduledTerms_other: '{{count}} запланированных сроков подписки',
+        unsettledPayments_one: '{{count}} незавершённый платёж',
+        unsettledPayments_few: '{{count}} незавершённых платежа',
+        unsettledPayments_many: '{{count}} незавершённых платежей',
+        unsettledPayments_other: '{{count}} незавершённых платежей',
+        recentCheckouts_one: '{{count}} недавняя отменённая или неудачная оплата',
+        recentCheckouts_few: '{{count}} недавние отменённые или неудачные оплаты',
+        recentCheckouts_many: '{{count}} недавних отменённых или неудачных оплат',
+        recentCheckouts_other: '{{count}} недавних отменённых или неудачных оплат',
+        renewalItems_one: '{{count}} неприменённая позиция продления',
+        renewalItems_few: '{{count}} неприменённые позиции продления',
+        renewalItems_many: '{{count}} неприменённых позиций продления',
+        renewalItems_other: '{{count}} неприменённых позиций продления',
+        trialReservations_one: '{{count}} бронь пробного периода',
+        trialReservations_few: '{{count}} брони пробного периода',
+        trialReservations_many: '{{count}} броней пробного периода',
+        trialReservations_other: '{{count}} броней пробного периода',
+        promocodes_one: '{{count}} промокод',
+        promocodes_few: '{{count}} промокода',
+        promocodes_many: '{{count}} промокодов',
+        promocodes_other: '{{count}} промокодов',
+        quests_one: '{{count}} задание',
+        quests_few: '{{count}} задания',
+        quests_many: '{{count}} заданий',
+        quests_other: '{{count}} заданий',
+        contests_one: '{{count}} конкурс',
+        contests_few: '{{count}} конкурса',
+        contests_many: '{{count}} конкурсов',
+        contests_other: '{{count}} конкурсов',
+        wheelSectors_one: '{{count}} сектор колеса фортуны',
+        wheelSectors_few: '{{count}} сектора колеса фортуны',
+        wheelSectors_many: '{{count}} секторов колеса фортуны',
+        wheelSectors_other: '{{count}} секторов колеса фортуны',
+        addOns_one: '{{count}} доп. услуга',
+        addOns_few: '{{count}} доп. услуги',
+        addOns_many: '{{count}} доп. услуг',
+        addOns_other: '{{count}} доп. услуг',
+        adPlacements_one: '{{count}} рекламное размещение с бонусом за регистрацию',
+        adPlacements_few: '{{count}} рекламных размещения с бонусом за регистрацию',
+        adPlacements_many: '{{count}} рекламных размещений с бонусом за регистрацию',
+        adPlacements_other: '{{count}} рекламных размещений с бонусом за регистрацию',
+        referralGift: 'Подарочная подписка в обмене баллов',
+        referralEligibility:
+          'Реферальная программа: это единственный тариф, за покупку которого засчитывается реферал. Проверьте настройки рефералов.',
+        transitions_one:
+          '{{count}} тариф, где он указан как улучшение или замена (оттуда он будет убран)',
+        transitions_few:
+          '{{count}} тарифа, где он указан как улучшение или замена (оттуда он будет убран)',
+        transitions_many:
+          '{{count}} тарифов, где он указан как улучшение или замена (оттуда он будет убран)',
+        transitions_other:
+          '{{count}} тарифов, где он указан как улучшение или замена (оттуда он будет убран)',
+        unknown: 'Другое ({{kind}}): {{count}}',
+      },
+    },
     tabs: {
       list: 'Список',
       stats: 'Статистика',
@@ -634,6 +722,7 @@ export const ru = {
       edit: 'Редактировать тариф',
       archive: 'Архивировать тариф',
       unarchive: 'Восстановить тариф',
+      delete: 'Удалить тариф',
       dragHandle: 'Перетащить для изменения порядка',
     },
     status: {
@@ -2992,7 +3081,7 @@ export const ru = {
     squadValidationUnavailable:
       'Remnawave не ответил, проверить сквады не удалось. Проверьте подключение к панели и сохраните ещё раз.',
     deleteReferenced:
-      'На этот тариф ещё ссылаются подписки или другие тарифы, поэтому удалить его нельзя. Вместо удаления архивируйте его.',
+      'Тариф ещё где-то используется, поэтому сервер не дал его удалить. Чтобы снять тариф с продажи, архивируйте его.',
   },
   promocodeForm: {
     code: 'Промокод',

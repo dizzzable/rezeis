@@ -544,6 +544,9 @@ export const en = {
     archiveFailed: 'Failed to archive plan',
     unarchived: 'Plan unarchived',
     unarchiveFailed: 'Failed to unarchive plan',
+    deleted: 'Plan deleted',
+    deleteFailed: 'Failed to delete plan',
+    alreadyDeleted: 'The plan was already deleted — the list has been refreshed',
     toggleActiveFailed: 'Failed to toggle plan active state',
     reorderFailed: 'Failed to change plan order',
     orderHint:
@@ -568,6 +571,63 @@ export const en = {
     },
     createTitle: 'Create plan',
     editTitle: 'Edit plan',
+    // The delete confirmation. A delete is never refused: the dialog lists what
+    // still uses the plan and says what the delete does in that case. One row
+    // per reference kind, keyed as in `PLAN_REFERENCE_KIND_SPECS`
+    // (plan-delete.ts); `unknown` is a kind this build has no words for.
+    deleteDialog: {
+      title: 'Delete plan "{{name}}"?',
+      checking: 'Checking where the plan is used…',
+      unused: 'Plan "{{name}}" will be deleted permanently, together with its durations and prices.',
+      used: 'The plan will disappear from the panel and the cabinet, and nobody will be able to buy it.',
+      usedBy: 'Currently used by:',
+      checkFailed: 'Could not check where the plan is used. You can still delete it.',
+      checkFailedHint:
+        'If something still uses the plan, it disappears from the panel and the cabinet, and its data is removed once nothing uses it.',
+      confirm: 'Delete',
+      consequences: {
+        subscribers:
+          'Subscribers keep access until their term ends and choose an active plan when they renew. Auto-renew will not move them to another plan on its own.',
+        invoices: 'Purchases from pending and paid payments will still be delivered.',
+        grants:
+          'Promo codes, quests, contests, the wheel of fortune, ad bonuses and referral gifts will keep granting this plan. Change them if that is not what you want.',
+        cleanup: 'The plan’s data is removed completely once nothing uses it.',
+      },
+      references: {
+        subscriptions_one: '{{count}} subscription',
+        subscriptions_other: '{{count}} subscriptions',
+        scheduledTerms_one: '{{count}} scheduled subscription term',
+        scheduledTerms_other: '{{count}} scheduled subscription terms',
+        unsettledPayments_one: '{{count}} unsettled payment',
+        unsettledPayments_other: '{{count}} unsettled payments',
+        recentCheckouts_one: '{{count}} recent canceled or failed checkout',
+        recentCheckouts_other: '{{count}} recent canceled or failed checkouts',
+        renewalItems_one: '{{count}} unapplied renewal item',
+        renewalItems_other: '{{count}} unapplied renewal items',
+        trialReservations_one: '{{count}} trial reservation',
+        trialReservations_other: '{{count}} trial reservations',
+        promocodes_one: '{{count}} promo code',
+        promocodes_other: '{{count}} promo codes',
+        quests_one: '{{count}} quest',
+        quests_other: '{{count}} quests',
+        contests_one: '{{count}} contest',
+        contests_other: '{{count}} contests',
+        wheelSectors_one: '{{count}} wheel of fortune sector',
+        wheelSectors_other: '{{count}} wheel of fortune sectors',
+        addOns_one: '{{count}} add-on',
+        addOns_other: '{{count}} add-ons',
+        adPlacements_one: '{{count}} ad placement with a signup bonus',
+        adPlacements_other: '{{count}} ad placements with a signup bonus',
+        referralGift: 'The gift subscription in the points exchange',
+        referralEligibility:
+          'The referral program: this is the only plan whose purchase counts a referral. Check the referral settings.',
+        transitions_one:
+          '{{count}} plan that lists it as an upgrade or replacement (it will be removed from there)',
+        transitions_other:
+          '{{count}} plans that list it as an upgrade or replacement (it will be removed from there)',
+        unknown: 'Other ({{kind}}): {{count}}',
+      },
+    },
     tabs: {
       list: 'List',
       stats: 'Stats',
@@ -605,6 +665,7 @@ export const en = {
       edit: 'Edit plan',
       archive: 'Archive plan',
       unarchive: 'Unarchive plan',
+      delete: 'Delete plan',
       dragHandle: 'Drag to reorder',
     },
     status: {
@@ -2942,7 +3003,7 @@ export const en = {
     squadValidationUnavailable:
       'Remnawave did not answer, so the squads could not be checked. Check the panel connection and save again.',
     deleteReferenced:
-      'Subscriptions or other plans still reference this plan, so it cannot be deleted. Archive it instead.',
+      'The plan is still in use somewhere, so the server refused to delete it. To take it off sale, archive it.',
   },
   promocodeForm: {
     code: 'Promocode',
