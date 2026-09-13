@@ -239,9 +239,19 @@ export function mergeBrandingSettings(input: {
         // a partial block, so what arrives is always the operator's complete
         // decision; filling gaps from the stored style would let a client that
         // sent only a shape keep a colour it never looked at, and filling them
-        // from the default would wipe one it did. The logo goes with the
-        // block: `null` or no `logo` key is no logo (see `QrStyleDto.logo`).
-        merged[key] = readQrStyle({ qrStyle: value });
+        // from the default would wipe one it did.
+        //
+        // The one exception is a block with no `logo` KEY at all. That block
+        // comes from a writer that does not know logos exist — a panel tab
+        // loaded before logos shipped, still open through the deploy, saving
+        // colours — and replacing whole there would silently delete a logo
+        // another admin has since set. So the stored logo stays; `logo: null`
+        // is what removes it, and the panel form always sends the member.
+        const block = readRecord(value);
+        const next = readQrStyle({ qrStyle: value });
+        merged[key] = Object.prototype.hasOwnProperty.call(block, 'logo')
+          ? next
+          : { ...next, logo: current.qrStyle.logo };
       } else {
         merged[key] = value;
       }

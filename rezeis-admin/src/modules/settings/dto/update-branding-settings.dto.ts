@@ -924,16 +924,17 @@ export class QrStyleDto {
    * The logo, or `null` for none.
    *
    * `null` is a value: it takes a stored logo away. A block that carries no
-   * `logo` key at all is a block WITHOUT a logo, read the way the reader and
-   * the cabinet read it — and it is accepted rather than refused, unlike a
-   * missing drawing member, on purpose. The key did not exist before this
-   * release: a panel tab left open across the upgrade, and every script
-   * written against the three-member block, sends exactly that, and the
-   * cabinet's round-trip contract (`reiwa/test/web/qr-style-round-trip.test.ts`)
-   * still sends three-member blocks and expects them saved. Refusing them
-   * would fail every such save for a member none of those clients has ever
-   * shown anybody; accepting them costs a logo only a client that never
-   * displayed it could remove, which is what replacing the block whole means.
+   * `logo` key at all is accepted rather than refused, unlike a missing
+   * drawing member, on purpose. The key did not exist before this release: a
+   * panel tab left open across the upgrade, and every script written against
+   * the three-member block, sends exactly that, and the cabinet's round-trip
+   * contract (`reiwa/test/web/qr-style-round-trip.test.ts`) still sends
+   * three-member blocks and expects them saved. Refusing them would fail every
+   * such save for a member none of those clients has ever shown anybody.
+   *
+   * And such a save KEEPS the stored logo (`mergeBrandingSettings`): a client
+   * that never displayed logos must not be able to delete one another admin
+   * set. Only an explicit `null` removes it — the panel form always sends it.
    *
    * `@IsOptional()` waves `null` and an absent key past the checks below;
    * anything else must be a whole `QrLogoDto`.

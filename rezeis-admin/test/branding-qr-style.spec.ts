@@ -210,11 +210,13 @@ describe('qrStyle — the merge', () => {
       existing: { qrStyle: { ...NAVY_DOTS, logo: LOGO } },
       patch: { qrStyle: { modules: 'rounded' } },
     });
+    // The block says nothing about a logo, so the stored one stays (next cases);
+    // everything the block DOES describe is taken whole, defaults included.
     assert.deepEqual(readBrandingSettings(merged).qrStyle, {
       modules: 'rounded',
       eyes: 'square',
       dark: '#000000',
-      logo: null,
+      logo: LOGO,
     });
   });
 
@@ -228,14 +230,36 @@ describe('qrStyle — the merge', () => {
     assert.deepEqual(JSON.parse(JSON.stringify(merged.qrStyle)), { ...NAVY_DOTS, logo: LOGO });
   });
 
-  it('takes a stored logo away on `logo: null`, and on a block that carries no logo at all', () => {
-    for (const qrStyle of [
-      { ...NAVY_DOTS, logo: null },
-      { modules: NAVY_DOTS.modules, eyes: NAVY_DOTS.eyes, dark: NAVY_DOTS.dark },
-    ]) {
-      const merged = mergeBrandingSettings({ existing: { qrStyle: { ...NAVY_DOTS, logo: LOGO } }, patch: { qrStyle } });
-      assert.equal(readBrandingSettings(merged).qrStyle.logo, null, JSON.stringify(qrStyle));
-    }
+  it('takes a stored logo away on `logo: null`', () => {
+    const merged = mergeBrandingSettings({
+      existing: { qrStyle: { ...NAVY_DOTS, logo: LOGO } },
+      patch: { qrStyle: { ...NAVY_DOTS, logo: null } },
+    });
+    assert.equal(readBrandingSettings(merged).qrStyle.logo, null);
+  });
+
+  it('keeps a stored logo when a block does not mention logos at all — a tab loaded before logos shipped', () => {
+    // An operator with a pre-logo panel tab still open saves new colours. Their
+    // block has no `logo` key; replacing whole would delete the logo another
+    // admin set meanwhile. The colours are theirs; the logo stays.
+    const merged = mergeBrandingSettings({
+      existing: { qrStyle: { ...NAVY_DOTS, logo: LOGO } },
+      patch: { qrStyle: { modules: 'square', eyes: 'square', dark: '#123456' } },
+    });
+    assert.deepEqual(readBrandingSettings(merged).qrStyle, {
+      modules: 'square',
+      eyes: 'square',
+      dark: '#123456',
+      logo: LOGO,
+    });
+  });
+
+  it('does not invent a logo for a block without one when none is stored', () => {
+    const merged = mergeBrandingSettings({
+      existing: { qrStyle: NAVY_DOTS },
+      patch: { qrStyle: { modules: 'square', eyes: 'square', dark: '#123456' } },
+    });
+    assert.equal(readBrandingSettings(merged).qrStyle.logo, null);
   });
 
   it('leaves the stored style alone, logo and all, when a save is about something else', () => {
