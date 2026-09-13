@@ -36,7 +36,7 @@ Rezeis — продвинутая админ-панель для управле�
 **Что выделяет Rezeis:**
 
 - 🏗 **Монорепо** — backend, worker, и SPA в одном проекте, единый Docker-образ
-- 🔗 **Native Remnawave SDK** — глубокая интеграция через `@remnawave/backend-contract`
+- 🔗 **Remnawave 2.7–3.4** — собственная таблица команд панели, в тестах сверяется с официальным контрактом каждой версии; вендорных пакетов в рантайме нет
 - 📊 **Real-time everything** — WebSocket-инвалидация кеша, live-метрики, optimistic UI
 - 🛡 **Anti-Abuse** с 8 детекторами и lifecycle сигналов
 - 💰 **15 платёжных шлюзов** с per-gateway аналитикой
@@ -388,17 +388,17 @@ rezeis/
 
 | Технология | Версия | Назначение |
 |-----------|--------|-----------|
-| NestJS | 11 | Application framework |
+| NestJS | 12 | Application framework |
 | Prisma | 7 | ORM + migrations |
 | PostgreSQL | 17 | Primary database |
 | Valkey (Redis) | 8 | Cache + BullMQ broker |
 | BullMQ | 5 | Job queues (profile sync, broadcast, email) |
 | Passport + JWT | — | Authentication |
 | `@simplewebauthn/server` | 13 | Passkey / WebAuthn |
-| Swagger | 11 | API documentation |
+| Swagger | 12 | API documentation |
 | Socket.IO | 4 | Real-time WebSocket |
 | Helmet | 8 | Security headers |
-| `@remnawave/backend-contract` | 2.7.3 | Typed Remnawave SDK |
+| `@remnawave/backend-contract` | 2.7–3.4, dev | Contract oracles for the panel command table (tests only) |
 | fast-check | 3 | Property-based testing |
 
 ### Frontend
@@ -406,7 +406,7 @@ rezeis/
 | Технология | Версия | Назначение |
 |-----------|--------|-----------|
 | React | 19 | UI framework |
-| TypeScript | 5.9 | Type safety |
+| TypeScript | 6 | Type safety |
 | Vite | 8 | Build tool |
 | TanStack Query | 5 | Server state management |
 | Zustand | 5 | Client state |

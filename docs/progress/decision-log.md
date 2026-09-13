@@ -2,6 +2,31 @@
 
 ## Established Decisions
 
+### 2026-09-13: NestJS 12 and TypeScript 6; `@nestjs/throttler` held on 6.5.0 by a scoped override
+
+- Every `@nestjs/*` package is on 12.x (common and core 12.0.1). TypeScript 6.0.3 is forced, not chosen: `@nestjs/schematics` 12 requires `>=6`, `@nestjs/cli` 12 depends on `~6.0.2`, and `typescript-eslint` allows `<6.1`.
+- `@nestjs/throttler` has no release with a ^12 peer: 6.5.0 stops at ^11, and support is merged upstream (nestjs/throttler#2670) but unreleased. It is held with the scoped override `{ "@nestjs/throttler": { "@nestjs/common": "$@nestjs/common", "@nestjs/core": "$@nestjs/core" } }`, which points its peers at our own copies. No `--force`, no legacy peer deps. Remove the override when a throttler release declares ^12.
+- `setGlobalPrefix('/api')` keeps its leading slash. `@nestjs/platform-express` 12.0.1 mounts the not-found handler on the prefix string verbatim, and Express never matches `api` without the slash, so unknown `/api/*` routes answered Express's HTML page instead of the admin error envelope (nestjs/nest#17647). Guarded by `rezeis-admin/test/unknown-api-route-envelope.http.spec.ts`.
+- Outside `/api` a 404 is now Express's own HTML page, with the status unchanged: Nest 12 mounts no not-found handler outside the prefix. Nothing parses those bodies.
+- `tsconfig.json` takes only what TypeScript 6 forced: `baseUrl` dropped, `strict: false` stated because 6 defaults it on, the inert `ignoreDeprecations` removed.
+Files:
+- `rezeis-admin/package.json`
+- `rezeis-admin/tsconfig.json`
+- `rezeis-admin/src/main.ts`
+
+### 2026-09-13: vendor contracts leave the runtime for good; the panel command table is rezeis's own
+
+- The 2026-08-23 entry below removed the runtime dependency, but by 2026-09-12 `@remnawave/contract-v34` was back in `dependencies`. `panel-command.executor.ts` `safeParse`d every response of the infra, users and devices clients and sent the parsed request body, so the vendor schema of one panel era again shaped what callers received from panels of every era: extra keys stripped and dates converted where it matched, a drift report and the raw body where it did not.
+- Position now: the 21 commands production issues are in `rezeis-admin/src/modules/remnawave/services/panel-commands.ts` (URL, verb, request-body rules). The executor validates the request body and sends the parsed one; responses are handed on raw. The five readers that need parsed response fields decode them explicitly in `panel-response-fields.ts`.
+- The oracles are seven devDependency aliases, one per panel release line in the vendor's table at https://docs.rw/sdk/typescript-sdk/: `@remnawave/contract-panel-2.7` = `@remnawave/backend-contract` 2.7.2, `-2.8` = 2.8.35, `-3.2.1` = 3.2.0, `-3.2.3` = 3.2.3, `-3.3` = 3.4.2, `-3.4.3` = 3.4.13, `-3.4.4` = 3.4.15. A contract package version is not a panel version.
+- `rezeis-admin/test/panel-command-conformance.spec.ts` compares every table entry with every 3.x oracle, and fails on any `@remnawave/*` import in `src/`, any `@remnawave/*` entry outside `devDependencies`, or any lockfile entry not marked dev.
+- zod is exactly 4.5.4 in the API and the SPA. Telegram's bot limits count code points, as zod 4.5 `.max` does.
+Files:
+- `rezeis-admin/package.json`
+- `rezeis-admin/src/modules/remnawave/services/panel-commands.ts`
+- `rezeis-admin/src/modules/remnawave/services/panel-response-fields.ts`
+- `rezeis-admin/test/panel-command-conformance.spec.ts`
+
 ### 2026-08-23: `@remnawave/backend-contract` is removed as a runtime dependency (reverses 2026-04-22)
 
 - This reverses the 2026-04-22 AltShop-devices entry below, which recorded that the package "stays a typed schema and route-metadata dependency inside `rezeis-admin`". That was a reasonable decision on the evidence available then; live 3.x panels supplied the evidence that overturned it. The earlier entry is left intact as the record of what was decided at the time.

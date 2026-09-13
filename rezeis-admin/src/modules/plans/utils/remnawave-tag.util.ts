@@ -1,8 +1,9 @@
 /**
  * The panel's own rule for `User.tag`, restated at the admin boundary.
  *
- * Remnawave declares the field identically on every version this project
- * targets (2.7.4 and 2.8.0) — `@remnawave/backend-contract`
+ * Remnawave declares the field identically on every release line this project
+ * serves, 2.7 through 3.4 — in each contract oracle
+ * (`@remnawave/contract-panel-*`, see `panel-command-conformance.spec.ts`)
  * `users/create-user.command` and `users/update-user.command` both carry
  * `z.string().regex(/^[A-Z0-9_]+$/).max(16).nullable()`.
  *

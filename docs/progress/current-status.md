@@ -1,6 +1,6 @@
 # Current Status
 
-Updated: 2026-08-23 — scope corrected against `git status`; Remnawave contract packages are dev-only.
+Updated: 2026-09-13 — the Stack tables, the architecture line for NestJS and the Remnawave contract paragraph only. The status section directly below is from 2026-08-23 and has not been re-checked since.
 
 ## Current Remnawave Status
 
@@ -19,28 +19,28 @@ Updated: 2026-08-23 — scope corrected against `git status`; Remnawave contract
 ### Backend (rezeis-admin)
 | Technology | Version |
 |---|---|
-| NestJS | 11.1.19 |
-| Prisma | 7.8.0 |
+| NestJS | 12.0.1 |
+| Prisma | 7.9.0 |
 | TypeScript | 6.0.3 |
 | Node.js | 24+ |
 | PostgreSQL | 15 |
 | Redis | 7 |
-| BullMQ | 5.76.6 |
-| zod | 4.4.3 |
+| BullMQ | 5.76.10 |
+| zod | 4.5.4 |
 
-**No `@remnawave/*` package runs at runtime, and there is no contract version to keep in step with the live panel.** `grep -rn "@remnawave/" rezeis-admin/src/` returns no imports — only prose in comments. The four vendor contracts (`@remnawave/backend-contract` 2.7.3, `@remnawave/contract-v28` 2.8.35, `@remnawave/contract-v3` 3.2.3, `@remnawave/contract-v34` 3.4.2) are **devDependencies**: they are the CI oracle the guard specs execute, and `Dockerfile` stage 1 runs `npm ci --omit=dev` so none of them ships. Adding a runtime import re-creates a production outage — a vendor schema describes ONE panel era, so `safeParse` against it failed deterministically on healthy 3.x panels and threw `ServiceUnavailableException` on every squad read. See `rezeis-admin/README.md` § Remnawave compatibility for the full account.
+**No `@remnawave/*` package runs at runtime** — `npm ls --omit=dev` lists none, and `test/panel-command-conformance.spec.ts` fails if one appears. The 21 commands production issues live in rezeis's own table, `rezeis-admin/src/modules/remnawave/services/panel-commands.ts`: it validates and sends the parsed request body and hands responses on raw, and the few readers that need parsed fields use explicit decoders (`panel-response-fields.ts`). The vendor contracts are seven **devDependency** oracles, one per panel release line in the vendor's table at https://docs.rw/sdk/typescript-sdk/: `@remnawave/contract-panel-{2.7,2.8,3.2.1,3.2.3,3.3,3.4.3,3.4.4}` = `@remnawave/backend-contract` 2.7.2, 2.8.35, 3.2.0, 3.2.3, 3.4.2, 3.4.13, 3.4.15. The conformance spec holds the command table to every 3.x one. They are AGPL-3.0-only and `Dockerfile` stage 1 runs `npm ci --omit=dev`, so none ships in the image. A vendor schema describes ONE panel era; parsing live responses with one failed deterministically on healthy panels of another era (`decision-log.md`, 2026-08-23 and 2026-09-13).
 
 ### Frontend (rezeis-admin/web)
 | Technology | Version |
 |---|---|
-| React | 19.2.6 |
-| Vite | 8.0.11 |
+| React | 19.2.8 |
+| Vite | 8.1.5 |
 | Tailwind CSS | 4.3.0 |
 | TypeScript | 6.0.3 |
-| TanStack Query | 5.100.9 |
-| React Router | 7.15.0 |
+| TanStack Query | 5.100.13 |
+| React Router | 8.3.0 |
 | shadcn/ui | latest |
-| Vitest | 4.1.5 |
+| Vitest | 4.1.11 |
 
 ---
 
@@ -48,7 +48,7 @@ Updated: 2026-08-23 — scope corrected against `git status`; Remnawave contract
 
 ```
 rezeis/
-├── rezeis-admin/          NestJS 11 backend (admin API + business logic)
+├── rezeis-admin/          NestJS 12 backend (admin API + business logic)
 │   ├── src/
 │   │   ├── common/       Infrastructure (17 modules)
 │   │   │   ├── cache/         Redis cache service
