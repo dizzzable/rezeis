@@ -30,15 +30,28 @@ jobs:
       - run: npm run typecheck
 
       # `typecheck` above compiles `tsconfig.json`, which EXCLUDES `**/*.spec.ts`
-      # — so it returns exit 0 with the whole suite hard-broken. The specs are
-      # type-checked at RUN time by `ts-node/register` in the tests job, which
-      # means the first sign of a type error is a spec that refuses to start,
-      # and files under `test/` that no spec imports are never checked at all.
-      # This step is the compiler saying in seconds what that job says in
-      # minutes, and it is the only thing that covers those unimported files.
+      # — so it returns exit 0 with the whole suite hard-broken. And the tests
+      # job does NOT type-check the specs either: `npm test` loads them through
+      # `ts-node/register/transpile-only`, which strips types without checking
+      # them, so a spec with a type error runs and can pass. This step is
+      # therefore the only type check the specs and every file under `test/`
+      # get. (This comment used to say the tests job checks them at run time;
+      # the script had changed underneath it. Corrected 13.09.2026.)
       - run: npm run typecheck:test
 
       - run: npm run lint
+
+      # Nothing above ever evaluates the built server. Typecheck, lint and even
+      # `nest build` all pass on a dependency graph Nest cannot resolve: a
+      # provider missing from its module, or — on NestJS 12, which stops
+      # inheriting `@Optional()` metadata — an injectable whose optional
+      # dependency silently became required. Both the API and the worker then
+      # abort at start and restart in a loop, with every static check green.
+      # `smoke:boot` builds the whole AppModule graph in Nest's preview mode
+      # from `dist/`, with no database and no `.env`, in a few seconds. It is
+      # the one check here that has seen the process start.
+      - run: npm run build
+      - run: npm run smoke:boot
 
   web-quality:
     name: Web quality

@@ -25,6 +25,14 @@ export class AdminIoAdapter extends IoAdapter {
 
   public createIOServer(port: number, options?: ServerOptions) {
     const corsOptions = buildCorsOptions(this.corsOrigins);
+    // The cast is for the compiler only; the object is the same at runtime.
+    // `IoAdapter#createIOServer` takes `options?: any` in
+    // `@nestjs/platform-socket.io` 11 and `options?: ServerOptions` in 12.
+    // socket.io's `ServerOptions` declares its own fields required
+    // (`path: string`, `serveClient: boolean`, ...), while spreading the
+    // OPTIONAL `options` can only yield `path?: string`, so without the cast
+    // `nest build` fails on 12 with TS2345. socket.io's own `Server`
+    // constructor accepts `Partial<ServerOptions>`, which is what this is.
     return super.createIOServer(port, {
       ...(options ?? {}),
       cors: {
@@ -32,6 +40,6 @@ export class AdminIoAdapter extends IoAdapter {
         credentials: corsOptions.credentials,
         methods: corsOptions.methods,
       },
-    });
+    } as ServerOptions);
   }
 }

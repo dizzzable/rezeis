@@ -25,7 +25,7 @@ if ($LASTEXITCODE -ne 0) {
     $importErrors = $errors | Select-String "Cannot find module"
     if ($importErrors) {
         Write-Host "Found missing module imports. Please ensure all dependencies are installed:" -ForegroundColor Yellow
-        Write-Host "  npm install nest-winston winston @willsoto/nestjs-prometheus prom-client @nestjs/throttler @nestjs/terminus" -ForegroundColor Cyan
+        Write-Host "  npm install winston @willsoto/nestjs-prometheus prom-client @nestjs/throttler" -ForegroundColor Cyan
     }
     
     exit 1
