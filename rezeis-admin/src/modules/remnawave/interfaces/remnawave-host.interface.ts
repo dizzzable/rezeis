@@ -31,11 +31,17 @@ export interface RemnawaveHostInterface {
   readonly viewPosition: number;
   readonly remark: string;
   /**
-   * The line the operator writes FOR CUSTOMERS on the host in Remnawave —
-   * at most 30 characters, present since Remnawave 2.0.0, and what Happ shows
-   * its user. `remark` is the operator's own naming scheme ("Germany 07 D");
-   * this is the customer-facing one. Null when the operator left it empty.
-   * Optional so every fixture that builds a host by hand keeps compiling.
+   * A short LABEL under the host's name in VPN clients — at most 30
+   * characters, present since Remnawave 2.0.0. Null when the operator left it
+   * empty. Optional so every fixture that builds a host by hand keeps
+   * compiling.
+   *
+   * Not the name, and this used to say otherwise. Both this and `remark` are
+   * shown to customers; they are a title and a label. Incy draws the remark in
+   * large type ("Germany - 1") over this in a coloured chip ("ОСНОВНОЙ |
+   * СЕРВЕР"), and operators write it as a category they repeat across hosts on
+   * purpose. Read as the name, one operator's server list printed the same
+   * category five times over five countries.
    */
   readonly serverDescription?: string | null;
   readonly address: string;

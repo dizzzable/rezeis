@@ -21,6 +21,23 @@ export interface SubscriberServerInterface {
    * worse than either wording alone.
    */
   readonly name: string;
+  /**
+   * The host's `serverDescription`, for the cabinet to show as a badge under
+   * the name — or `null` when there is nothing worth a badge.
+   *
+   * This is the field that was once shown AS the name, and the correction is
+   * written down here because both readings of it sound reasonable until you
+   * look at a VPN client. Incy draws a host as its `remark` in large type with
+   * the `serverDescription` in a coloured chip underneath: "Germany - 1" over
+   * "ОСНОВНОЙ | СЕРВЕР", "Latvia - 1" over "ОСНОВНОЙ | СЕРВЕР". Operators write
+   * it as a CATEGORY, so it repeats across hosts by design. Used as the name, a
+   * real operator's list read "ОСНОВНОЙ | СЕРВЕР" five times over five
+   * different countries, and a subscriber sent the screenshot.
+   *
+   * `null` also when it merely repeats the name, so a host whose operator
+   * copied one field into the other does not show its name twice.
+   */
+  readonly description: string | null;
   /** The flag emoji in `name`, or one built from a node's country. */
   readonly flag: string | null;
   /**

@@ -13,7 +13,7 @@ import {
   SubscriberServerInterface,
   SubscriberServersInterface,
 } from '../interfaces/subscriber-server.interface';
-import { extractFlag, resolveHostCountry } from '../utils/host-flag.util';
+import { resolveHostCountry } from '../utils/host-flag.util';
 import { RemnawaveApiService } from './remnawave-api.service';
 
 /**
@@ -462,31 +462,31 @@ function describeHost(
 ): SubscriberServerInterface {
   const nodes = nodesServing(host, nodesByUuid);
 
-  // What the customer reads. `serverDescription` is the line the operator
-  // writes FOR customers on the host in Remnawave (at most 30 characters, and
-  // what Happ shows), while `remark` is the operator's own naming — "Germany
-  // 07 D", "Latvia 03 M" — which used to reach the customer verbatim. The
-  // owner's call, 11.09.2026: take the name from the Remnawave host. Prefer
-  // the description; fall back to the remark, so an operator who never filled
-  // the field in sees no change at all.
-  const name = host.serverDescription?.trim() || host.remark;
+  // The name is the REMARK — the string the customer already reads as the
+  // server's name inside their VPN client — and `serverDescription` is the
+  // badge under it. Checked against a client rather than reasoned about: Incy
+  // draws "Germany - 1" in large type over a chip reading "ОСНОВНОЙ | СЕРВЕР".
+  //
+  // This used to be the other way round (0.9.7.52 preferred the description),
+  // on the reading that the description is "the customer-facing line" and the
+  // remark "internal naming". Both strings are customer-facing; they are a
+  // title and a label. Operators write the description as a category and
+  // repeat it across hosts on purpose, so a real list rendered "ОСНОВНОЙ |
+  // СЕРВЕР" five times over five countries. If a remark reads like internal
+  // naming, the customer is reading it in Happ and Incy too, and the fix for
+  // both is renaming the host in Remnawave — not a second opinion here.
+  const name = host.remark;
+  const described = host.serverDescription?.trim() ?? '';
+  const description =
+    described === '' || sameLabel(described, name) ? null : described;
 
   const { flag, countryCode } = resolveHostCountry(
-    // The flag has to be the one in the name the CUSTOMER reads. The cabinet
-    // draws the flag from `countryCode` and strips it back out of `name` so
-    // that it is not shown twice (`nameWithoutFlag` — and on Windows the
-    // emoji has no glyph at all, so a flag left in the name reads as two
-    // stray letters). A flag typed into `serverDescription`, the field this
-    // list has only just started reading and therefore the one an operator
-    // now writes it into, used to lose both ways: cut off the name here, and
-    // replaced by whatever the internal remark — or a node — happened to say.
-    // Where the host resolves to no node it was replaced by nothing at all,
-    // and the customer read a bare name beside an empty badge.
-    //
-    // Prefer the flag in the displayed name; fall back to the remark, where
-    // operators have always put it, and then to the nodes — unchanged for
-    // every host whose description carries no flag of its own.
-    extractFlag(name) === null ? host.remark : name,
+    // From the remark, then from the nodes — the flag belongs to the NAME,
+    // which the cabinet strips the flag back out of and draws beside it. A
+    // flag inside the description stays inside the badge, as it does in the
+    // client; it is not promoted into the flag slot, which would otherwise let
+    // a category chip such as "🇪🇺 AUTO" relabel a German server as EU.
+    host.remark,
     nodes.map((node) => node.countryCode),
   );
 
@@ -496,6 +496,7 @@ function describeHost(
   return {
     id: host.uuid,
     name,
+    description,
     flag,
     countryCode,
     status: resolveStatus(live, connected),
@@ -511,6 +512,26 @@ function describeHost(
         ? connected.reduce((total, node) => total + node.usersOnline, 0)
         : null,
   };
+}
+
+/**
+ * Whether a description only repeats the name, so the badge would say nothing
+ * the title has not.
+ *
+ * Compared the way a person reads them: flags removed (the cabinet draws the
+ * name's flag separately, so "🇩🇪 Germany" and "Germany" are the same words on
+ * screen), runs of whitespace collapsed, and case ignored — "GERMANY" in a chip
+ * under "Germany" is still the same word twice. Anything else is a different
+ * label and keeps its badge; this is deliberately not a similarity measure.
+ */
+function sameLabel(a: string, b: string): boolean {
+  const plain = (value: string): string =>
+    value
+      .replace(/[\u{1F1E6}-\u{1F1FF}]{2}/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+  return plain(a) === plain(b);
 }
 
 function resolveStatus(

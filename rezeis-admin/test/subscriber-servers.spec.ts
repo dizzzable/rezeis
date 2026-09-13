@@ -556,6 +556,7 @@ describe('what must never reach a customer', () => {
     // accident: the response shape is a boundary, so it is stated exactly.
     assert.deepEqual(Object.keys(servers[0]).sort(), [
       'countryCode',
+      'description',
       'flag',
       'id',
       'name',
@@ -713,73 +714,102 @@ describe('why the list came back empty', () => {
 });
 
 describe('the name a customer reads', () => {
-  // The owner's call, 11.09.2026: take it from the Remnawave host. The host
-  // carries two strings — `remark`, the operator's own naming ("Germany 07 D"),
-  // and `serverDescription`, the line written for customers (what Happ shows).
-  const nameOf = (hostOver: Partial<RemnawaveHostInterface>): string | undefined =>
-    buildServers(['squad-eu'], { hosts: [host(hostOver)], nodes: [node()], squads: [squad()] })[0]
-      ?.name;
+  // A host carries two strings a customer sees, and they are a TITLE and a
+  // LABEL. Checked against a client, not reasoned about: Incy draws the remark
+  // in large type ("Germany - 1") over the serverDescription in a chip
+  // ("ОСНОВНОЙ | СЕРВЕР"). The cabinet must read the same way, because the
+  // customer holds both screens in the same hand.
+  const serverOf = (hostOver: Partial<RemnawaveHostInterface>) =>
+    buildServers(['squad-eu'], { hosts: [host(hostOver)], nodes: [node()], squads: [squad()] })[0];
 
-  it('is the description the operator wrote for customers, when there is one', () => {
-    assert.equal(nameOf({ remark: 'Germany 07 D', serverDescription: 'Германия' }), 'Германия');
+  it('does not print one category five times over five countries', () => {
+    // THE SUBSCRIBER'S SCREENSHOT, as data. A real operator's list, where the
+    // description is a category repeated on purpose. With the description used
+    // as the name, all five rows read "ОСНОВНОЙ | СЕРВЕР" and nothing told the
+    // customer which of them was Latvia.
+    const remarks = ['Germany - 1', 'Germany - 2', 'Netherlands - 1', 'Latvia - 1', 'Finland - 1'];
+    const servers = buildServers(['squad-eu'], {
+      hosts: remarks.map((remark, index) =>
+        host({ uuid: 'host-' + index, remark, serverDescription: 'ОСНОВНОЙ | СЕРВЕР' }),
+      ),
+      nodes: [node()],
+      squads: [squad()],
+    });
+    assert.deepEqual(servers.map((server) => server.name), remarks);
+    assert.equal(new Set(servers.map((server) => server.name)).size, remarks.length);
+    for (const server of servers) assert.equal(server.description, 'ОСНОВНОЙ | СЕРВЕР');
   });
 
-  it('falls back to the remark when the description is absent, empty or blank', () => {
-    // An operator who never filled the field in must see no change at all.
-    assert.equal(nameOf({ remark: 'Germany 07 D' }), 'Germany 07 D');
+  it('is the remark, whether or not there is a description', () => {
+    assert.equal(serverOf({ remark: 'Poland- 1 | Fast', serverDescription: 'БЫСТРЫЙ | СЕРВЕР' })?.name, 'Poland- 1 | Fast');
+    assert.equal(serverOf({ remark: 'Poland- 1 | Fast' })?.name, 'Poland- 1 | Fast');
+  });
+
+  it('carries the description separately, for the badge', () => {
+    const server = serverOf({ remark: 'test-bs-cdn', serverDescription: 'LTE | СЕРВЕР' });
+    assert.equal(server?.name, 'test-bs-cdn');
+    assert.equal(server?.description, 'LTE | СЕРВЕР');
+  });
+
+  it('has no badge when the description is absent, empty or blank', () => {
+    assert.equal(serverOf({ remark: 'Germany - 1' })?.description, null);
     for (const serverDescription of [null, '', '   ']) {
       assert.equal(
-        nameOf({ remark: 'Germany 07 D', serverDescription }),
-        'Germany 07 D',
-        `serverDescription = ${JSON.stringify(serverDescription)}`,
+        serverOf({ remark: 'Germany - 1', serverDescription })?.description,
+        null,
+        'serverDescription = ' + JSON.stringify(serverDescription),
       );
     }
   });
 
-  it('trims the description rather than showing its padding', () => {
-    assert.equal(nameOf({ remark: 'x', serverDescription: '  Германия  ' }), 'Германия');
+  it('trims the badge rather than showing its padding', () => {
+    assert.equal(serverOf({ remark: 'x', serverDescription: '  AUTO | СЕРВЕР  ' })?.description, 'AUTO | СЕРВЕР');
   });
 
-  it('still takes the flag from the remark, where operators put it', () => {
-    const [server] = buildServers(['squad-eu'], {
-      hosts: [host({ remark: 'Frankfurt 🇩🇪', serverDescription: 'Франкфурт' })],
+  it('has no badge that only repeats the name', () => {
+    // An operator who copied one field into the other would otherwise see every
+    // name twice. Compared as a person reads it: the cabinet draws the flag
+    // separately, and a chip in capitals is still the same word.
+    for (const [remark, serverDescription] of [
+      ['Germany - 1', 'Germany - 1'],
+      ['Germany - 1', 'GERMANY - 1'],
+      ['🇩🇪 Germany - 1', 'Germany - 1'],
+      ['Germany  -  1', ' germany - 1 '],
+    ]) {
+      assert.equal(
+        serverOf({ remark, serverDescription })?.description,
+        null,
+        JSON.stringify(remark) + ' / ' + JSON.stringify(serverDescription),
+      );
+    }
+  });
+
+  it('keeps a badge that merely resembles the name', () => {
+    // Not a similarity measure: anything that is not the same words is a
+    // different label, and the operator wrote it for a reason.
+    assert.equal(serverOf({ remark: 'Germany - 1', serverDescription: 'Germany' })?.description, 'Germany');
+  });
+
+  it('takes the flag from the remark, and then from the nodes', () => {
+    const [flagged] = buildServers(['squad-eu'], {
+      hosts: [host({ remark: 'Frankfurt 🇩🇪', serverDescription: 'ОСНОВНОЙ | СЕРВЕР' })],
       nodes: [node({ countryCode: '' })],
       squads: [squad()],
     });
-    assert.equal(server.name, 'Франкфурт');
-    assert.equal(server.flag, '🇩🇪');
+    assert.equal(flagged.flag, '🇩🇪');
+    assert.equal(serverOf({ remark: 'Germany - 1' })?.countryCode, 'DE');
   });
 
-  // ── and the other way round ───────────────────────────────────────
-  //
-  // The cabinet draws the flag from `countryCode` and strips it back out of
-  // `name` so that it is not shown twice (`nameWithoutFlag`). So an operator
-  // who writes the flag into the line meant FOR customers — now that the line
-  // meant for customers is the one they read — used to lose it twice over: cut
-  // off the name, and redrawn from whatever the internal remark or a node said
-  // instead.
-
-  it('takes the flag from the description when that is where the operator put it', () => {
+  it('does not promote a flag out of the badge into the flag slot', () => {
+    // The description is a category. A chip reading "🇪🇺 AUTO" on a host whose
+    // node is German must not relabel that server as EU; the flag stays inside
+    // the chip, exactly where the client shows it.
     const [server] = buildServers(['squad-eu'], {
-      hosts: [host({ remark: 'ams-03', serverDescription: '🇳🇱 Амстердам', nodes: ['node-nl'] })],
-      nodes: [node({ uuid: 'node-nl', countryCode: 'DE' })],
+      hosts: [host({ remark: 'Auto | Germany', serverDescription: '🇪🇺 AUTO' })],
+      nodes: [node({ countryCode: 'DE' })],
       squads: [squad()],
     });
-    assert.equal(server.name, '🇳🇱 Амстердам');
-    assert.equal(server.flag, '🇳🇱');
-    assert.equal(server.countryCode, 'NL');
-  });
-
-  it('still does, for a host that resolves to no node at all', () => {
-    // Nothing in the remark and nothing from a node: the flag the operator
-    // wrote was the only one there was, and the customer read a bare name
-    // beside an empty badge.
-    const [server] = buildServers(['squad-eu'], {
-      hosts: [host({ remark: 'ams-03', serverDescription: '🇳🇱 Амстердам', nodes: [], address: '' })],
-      nodes: [],
-      squads: [squad()],
-    });
-    assert.equal(server.flag, '🇳🇱');
-    assert.equal(server.countryCode, 'NL');
+    assert.equal(server.countryCode, 'DE');
+    assert.equal(server.description, '🇪🇺 AUTO');
   });
 });
