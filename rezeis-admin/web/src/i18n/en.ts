@@ -4587,7 +4587,7 @@ export const en = {
         dots: 'Dots',
       },
       dotsNote:
-        'Dots need a large code: where it is shown small they are drawn as rounded squares, which a camera reads more reliably. The cabinet always shows the partner advertising codes small, so dots never appear on them.',
+        'Dots need a large code: where it is shown small they are drawn as rounded squares, which a camera reads more reliably. Partner advertising codes are always small on the placement card — the partner sample below shows what that does to them.',
       eyesLabel: 'Corner squares',
       eyesHint:
         'The three large squares in the corners are how a camera finds the code. Only their corners are rounded.',
@@ -4608,9 +4608,13 @@ export const en = {
       previewLabel: 'How it looks',
       previewReferral: 'Referral invite',
       previewConnect: 'Connect code — always plain',
+      previewPartner: 'Partner advertising code — actual size',
+      previewPartnerMagnified: 'The same image, enlarged',
+      previewPartnerStepDown:
+        'Partners see these codes small, on the placement card, and at that size dots are drawn as rounded squares — a camera reads those more reliably. In the cabinet a partner can tap a code to open it large.',
       previewRefused: 'This colour will not save, so the sample is drawn in black.',
       previewHint:
-        'The sample is exactly the image the cabinet will build, at the size a subscriber opens the invite at.',
+        'The invite and the partner code are exactly the images the cabinet builds, each at its own size there: the invite as a subscriber opens it, the partner code as a partner sees it on a placement card. The enlarged copy is the same partner image, only magnified.',
     },
     sections: {
       nav: {

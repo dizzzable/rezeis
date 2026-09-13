@@ -100,6 +100,22 @@ const PLATFORMS: AdPlatform[] = [
   'OTHER',
 ]
 
+/**
+ * The CSS size of a placement's QR codes. They are drawn by the shared kit
+ * with the standard four-module quiet zone (`LocalQr`), where they used to be
+ * an 88 px bitmap with a one-module zone — and at 88 px the wider zone would
+ * have shrunk every module. At 120 px a module is 3.24 px on a short bot link
+ * (version 3), 2.93 on an ordinary bot or web link (version 4) and 2.67 on a
+ * long web address (version 5): larger at every length than the old tile gave
+ * (2.84, 2.51, 2.26), so a phone pointed at the screen reads them no worse
+ * than before, and a screenshot taken for an advertisement starts bigger.
+ *
+ * Company codes, and plain on purpose: the operator's QR style is branding,
+ * which needs `settings:view`, and this page is guarded by `advertising:view`
+ * alone. See `LocalQr`.
+ */
+export const PLACEMENT_QR_PX = 120
+
 /** Hoverable info icon: what / how / example. Reuses the product tooltip pattern. */
 function InfoHint({ text }: { text: string }) {
   const { t } = useTranslation()
@@ -402,8 +418,8 @@ function PlacementTile({ placement }: { placement: AdPlacement }) {
         </div>
         {(botUrl || webUrl) && (
           <div className="flex gap-3">
-            {botUrl && <LocalQr label={t('advertisingPage.links.qrBot')} url={botUrl} size={88} />}
-            {webUrl && <LocalQr label={t('advertisingPage.links.qrWeb')} url={webUrl} size={88} />}
+            {botUrl && <LocalQr label={t('advertisingPage.links.qrBot')} url={botUrl} size={PLACEMENT_QR_PX} />}
+            {webUrl && <LocalQr label={t('advertisingPage.links.qrWeb')} url={webUrl} size={PLACEMENT_QR_PX} />}
           </div>
         )}
       </div>

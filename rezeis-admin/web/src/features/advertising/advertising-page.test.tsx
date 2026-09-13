@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 
+import { en as advertisingEn } from '@/i18n/features/advertising.en'
+import { i18nReady, loadFeatureBundle } from '@/i18n/i18n'
+import { QUIET_ZONE_MODULES } from '@/lib/qr/kit/qr-options'
+import { QR_STYLE_PLAIN, drawQr, qrSvg } from '@/lib/qr/kit/qr-style'
 import { renderWithProviders } from '@/test/test-utils'
-import AdvertisingPage from './advertising-page'
+import AdvertisingPage, { PLACEMENT_QR_PX } from './advertising-page'
 import {
   approveAdRequest,
   getAdOverview,
@@ -15,11 +19,10 @@ import {
   type AdPlacementRequest,
 } from './advertising-api'
 
-vi.mock('qrcode', () => ({
-  default: {
-    toDataURL: vi.fn().mockResolvedValue('data:image/png;base64,dGVzdA=='),
-  },
-}))
+// No `qrcode` mock. The placement codes are drawn by the shared kit, and the
+// mock this file used to carry stubbed only `toDataURL` — under the kit it
+// would make every code fail to draw and leave an empty placeholder, which
+// every case below would have passed on without noticing.
 
 vi.mock('./advertising-api', async () => {
   const actual = await vi.importActual<typeof import('./advertising-api')>('./advertising-api')
@@ -136,6 +139,82 @@ describe('AdvertisingPage', () => {
     fireEvent.click(screen.getByTestId('placement-toggle-status'))
     await waitFor(() => {
       expect(updateAdPlacement).toHaveBeenCalledWith('p1', { status: 'ACTIVE' })
+    })
+  })
+
+  describe('placement QR codes', () => {
+    /**
+     * Operators screenshot these codes into company advertisements, so what
+     * this page draws is what gets printed. It used to be its own bitmap —
+     * `qrcode`'s `toDataURL` with a ONE-module quiet zone, where ISO/IEC 18004
+     * asks for four. These hold it to the shared kit's plain code instead:
+     * byte for byte, measured rather than trusted, and at the page's size.
+     */
+    const BOT = 'https://t.me/ExampleVpnBot?start=ad_abc12345'
+    const WEB = 'https://cabinet.example.com/?campaign=ad_abc12345'
+    const labels = advertisingEn.advertisingPage.links
+
+    const decode = (image: HTMLElement): string => {
+      const src = image.getAttribute('src') ?? ''
+      const prefix = 'data:image/svg+xml;charset=utf-8,'
+      expect(src.startsWith(prefix), `not an SVG data URL: ${src.slice(0, 40)}…`).toBe(true)
+      return decodeURIComponent(src.slice(prefix.length))
+    }
+
+    async function renderCodes(): Promise<{ bot: HTMLElement; web: HTMLElement }> {
+      vi.mocked(listAdCampaigns).mockResolvedValue([
+        {
+          ...campaign,
+          placements: [{ ...placement, links: { botStart: BOT, miniAppStart: null, miniAppWeb: WEB } }],
+        },
+      ])
+      // The labels are the codes' accessible names; they live in the lazy
+      // feature bundle, which the router loads and a bare render does not.
+      await i18nReady
+      await loadFeatureBundle('advertising')
+      expect(labels.qrBot).toMatch(/\S/)
+      expect(labels.qrWeb).toMatch(/\S/)
+      renderWithProviders(<AdvertisingPage />)
+      return {
+        bot: await screen.findByRole('img', { name: labels.qrBot }),
+        web: await screen.findByRole('img', { name: labels.qrWeb }),
+      }
+    }
+
+    it("draws each link as the kit's plain SVG, at the page's size", async () => {
+      const { bot, web } = await renderCodes()
+      expect(decode(bot)).toBe(await qrSvg(BOT, QR_STYLE_PLAIN, PLACEMENT_QR_PX))
+      expect(decode(web)).toBe(await qrSvg(WEB, QR_STYLE_PLAIN, PLACEMENT_QR_PX))
+      for (const image of [bot, web]) {
+        expect(image).toHaveAttribute('width', String(PLACEMENT_QR_PX))
+        expect(image).toHaveAttribute('height', String(PLACEMENT_QR_PX))
+      }
+    })
+
+    it('leaves the quiet zone the standard asks for — four modules, measured off the drawn SVG', async () => {
+      const { bot, web } = await renderCodes()
+      for (const [link, image] of [
+        [BOT, bot],
+        [WEB, web],
+      ] as const) {
+        const side = /viewBox="0 0 (\d+) \1"/.exec(decode(image))?.[1]
+        expect(side, 'the code no longer declares a square viewBox').toBeDefined()
+        // The symbol's own width from its version (ISO/IEC 18004: 17 + 4v
+        // modules); whatever the drawing adds around it is quiet zone.
+        const modules = 17 + 4 * drawQr(link, QR_STYLE_PLAIN).version
+        expect((Number(side) - modules) / 2, `quiet zone of ${link}`).toBe(4)
+      }
+      expect(QUIET_ZONE_MODULES).toBe(4)
+    })
+
+    it('never styles a company code — the markup is the plain writer, not the matrix renderer', async () => {
+      const { bot } = await renderCodes()
+      const svg = decode(bot)
+      // `qrcode`'s writer paints one light path and one dark path; the styled
+      // renderer paints rects and circles. A code with either was styled.
+      expect(svg).toContain('shape-rendering="crispEdges"')
+      expect(svg).not.toContain('<circle')
+      expect(svg).not.toContain('<rect')
     })
   })
 

@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { en } from '@/i18n/en'
-import { QR_STYLE_PLAIN, qrSvg } from '@/lib/qr/kit/qr-style'
+import { ru } from '@/i18n/ru'
+import { QR_STYLE_PLAIN, ROUNDED_MODULE_RADIUS, qrSvg } from '@/lib/qr/kit/qr-style'
 import { renderWithProviders } from '@/test/test-utils'
 
 import type { BrandingQrStyleDraft } from './branding-form-schema'
 import {
   QR_PREVIEW_CONNECT_LINK,
   QR_PREVIEW_CONNECT_PX,
+  QR_PREVIEW_PARTNER_LINK,
+  QR_PREVIEW_PARTNER_MAGNIFIED_PX,
+  QR_PREVIEW_PARTNER_PX,
   QR_PREVIEW_REFERRAL_LINK,
   QR_PREVIEW_REFERRAL_PX,
   QrStyleSection,
@@ -23,6 +27,29 @@ import {
  * the same input, byte for byte — the promise of the tab is that it shows the
  * code subscribers get, so "an image appeared" would prove nothing.
  */
+
+/**
+ * The real renderer, with one switch that is off unless a case turns it on: a
+ * renderer that keeps dots at any size, the way a future kit with a lower dots
+ * threshold would at 96 px. The tab must take "dots were replaced" from what
+ * was DRAWN, and at the partner's fixed size and link the real renderer always
+ * replaces them — so without this, reading the style instead of the drawing
+ * would be indistinguishable here.
+ */
+const renderer = vi.hoisted(() => ({ keepDotsAtAnySize: false }))
+vi.mock('@/lib/qr/kit/qr-style', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/qr/kit/qr-style')>()
+  return {
+    ...actual,
+    // Every argument after the size is passed through untouched, so a renderer
+    // that grows one keeps its meaning here instead of losing it on both sides
+    // of a comparison.
+    qrSvg: (...args: Parameters<typeof actual.qrSvg>) => {
+      const [text, style, displayPixels, ...rest] = args
+      return actual.qrSvg(text, style, renderer.keepDotsAtAnySize ? undefined : displayPixels, ...rest)
+    },
+  }
+})
 
 const copy = en.brandingPage.qr
 const NAVY_DOTS = { modules: 'dots', eyes: 'rounded', dark: '#1e3a8a' } as const
@@ -39,6 +66,27 @@ function renderSection(value: BrandingQrStyleDraft, darkError?: string) {
 const group = (name: string) => within(screen.getByRole('group', { name }))
 const dataUrl = (svg: string): string =>
   `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+
+type SampleKind = 'referral' | 'connect' | 'partner' | 'partner-magnified'
+
+/**
+ * A drawn sample, found by what it IS rather than by its caption. A caption
+ * key missing from the bundle is `undefined`, and `getByRole('img', { name:
+ * undefined })` matches any image at all — the query would pass on the wrong
+ * code.
+ */
+async function sample(kind: SampleKind): Promise<HTMLImageElement> {
+  return waitFor(() => {
+    const image = document.querySelector<HTMLImageElement>(`img[data-qr-preview="${kind}"]`)
+    if (image === null) throw new Error(`the ${kind} sample has not been drawn`)
+    return image
+  })
+}
+
+const markup = (image: HTMLImageElement): string =>
+  decodeURIComponent((image.getAttribute('src') ?? '').replace(/^data:image\/svg\+xml;charset=utf-8,/, ''))
+
+const stepDownNote = (): Element | null => document.querySelector('[data-qr-step-down]')
 
 describe('QR style section — what it says', () => {
   it('names the two codes it styles, and says the connect code stays plain and why', () => {
@@ -174,5 +222,112 @@ describe('QR style section — the preview', () => {
       ),
     )
     expect(screen.getByText(copy.previewRefused)).toBeInTheDocument()
+  })
+})
+
+describe('QR style section — the partner advertising code', () => {
+  /**
+   * Partners get their codes at 96 CSS px, where the renderer steps dots down
+   * to rounded squares; the referral sample, at 208, keeps them. So a tab that
+   * showed only the referral sample would let the operator approve dots that
+   * no partner ever sees. These cases hold the partner sample to the code the
+   * cabinet draws for a partner — byte for byte, at the partner's size, in the
+   * draft style — and hold the step-down note to what was actually drawn.
+   *
+   * What they cannot hold is the NUMBER: for this link the renderer draws the
+   * same bytes at every size from 96 to 163 px, so a constant of 120 passes
+   * here exactly as 96 does. `qr-preview-cabinet.test.ts` reads the size off
+   * the cabinet's source instead.
+   */
+
+  it('has its captions and its note in both languages', () => {
+    for (const bundle of [en.brandingPage.qr, ru.brandingPage.qr]) {
+      expect(bundle.previewPartner).toEqual(expect.stringMatching(/\S/))
+      expect(bundle.previewPartnerMagnified).toEqual(expect.stringMatching(/\S/))
+      expect(bundle.previewPartnerStepDown).toEqual(expect.stringMatching(/\S/))
+    }
+  })
+
+  it('draws the partner code with the cabinet renderer, in the draft style, at the partner size', async () => {
+    renderSection(NAVY_DOTS)
+    const partner = await sample('partner')
+    expect(partner).toHaveAttribute(
+      'src',
+      dataUrl(await qrSvg(QR_PREVIEW_PARTNER_LINK, NAVY_DOTS, QR_PREVIEW_PARTNER_PX)),
+    )
+    expect(partner).toHaveAttribute('width', String(QR_PREVIEW_PARTNER_PX))
+    expect(partner).toHaveAttribute('height', String(QR_PREVIEW_PARTNER_PX))
+    expect(partner).toHaveAttribute('alt', copy.previewPartner)
+  })
+
+  it('shows dots on the referral sample and rounded squares on the partner sample, for the same style', async () => {
+    renderSection(NAVY_DOTS)
+    expect(markup(await sample('referral'))).toContain('<circle')
+    const partner = markup(await sample('partner'))
+    expect(partner).not.toContain('<circle')
+    // Not merely "no dots": rounded data modules are what dots became.
+    expect(partner).toContain(` rx="${ROUNDED_MODULE_RADIUS}"`)
+    // And the step really ran: the same style drawn with no size — as a
+    // preview that forgot to pass one would draw it — keeps its dots.
+    const unsized = await qrSvg(QR_PREVIEW_PARTNER_LINK, NAVY_DOTS)
+    expect(unsized).toContain('<circle')
+    expect(partner).not.toBe(unsized)
+  })
+
+  it('shows that same image enlarged — the same src, hidden from assistive technology', async () => {
+    renderSection(NAVY_DOTS)
+    const partner = await sample('partner')
+    const magnified = await sample('partner-magnified')
+    expect(magnified.getAttribute('src')).toBe(partner.getAttribute('src'))
+    expect(magnified).toHaveAttribute('aria-hidden', 'true')
+    expect(magnified).toHaveAttribute('alt', '')
+    expect(Number(magnified.getAttribute('width'))).toBe(QR_PREVIEW_PARTNER_MAGNIFIED_PX)
+    expect(QR_PREVIEW_PARTNER_MAGNIFIED_PX).toBeGreaterThan(QR_PREVIEW_PARTNER_PX)
+    expect(screen.getByText(copy.previewPartnerMagnified)).toBeInTheDocument()
+  })
+
+  it('explains the step-down when dots were replaced', async () => {
+    renderSection(NAVY_DOTS)
+    await sample('partner')
+    await waitFor(() => expect(stepDownNote()).not.toBeNull())
+    expect(stepDownNote()).toHaveTextContent(copy.previewPartnerStepDown)
+  })
+
+  it('takes the step-down from the drawing, not from the style — kept dots need no note', async () => {
+    renderer.keepDotsAtAnySize = true
+    try {
+      renderSection(NAVY_DOTS)
+      const partner = markup(await sample('partner'))
+      expect(partner, 'precondition: this renderer kept the dots at the partner size').toContain('<circle')
+      // Drawn and set together with the image, so this is the final answer.
+      expect(stepDownNote()).toBeNull()
+    } finally {
+      renderer.keepDotsAtAnySize = false
+    }
+  })
+
+  it.each([
+    ['rounded squares', { ...NAVY_DOTS, modules: 'rounded' }],
+    ['squares', { ...NAVY_DOTS, modules: 'square' }],
+    ['the plain code', QR_STYLE_PLAIN],
+  ] as const)('says nothing about a step-down for %s — nothing was replaced', async (_name, style) => {
+    renderSection(style)
+    const partner = await sample('partner')
+    expect(partner).toHaveAttribute(
+      'src',
+      dataUrl(await qrSvg(QR_PREVIEW_PARTNER_LINK, style, QR_PREVIEW_PARTNER_PX)),
+    )
+    // The image and the note are set together, so a drawn image means the
+    // note has had its chance to appear.
+    expect(stepDownNote()).toBeNull()
+    expect(screen.queryByText(copy.previewPartnerStepDown)).not.toBeInTheDocument()
+  })
+
+  it('draws the plain style as the plain code', async () => {
+    renderSection(QR_STYLE_PLAIN)
+    const drawn = markup(await sample('partner'))
+    expect(drawn).toBe(await qrSvg(QR_PREVIEW_PARTNER_LINK, QR_STYLE_PLAIN))
+    expect(drawn).not.toContain('<circle')
+    expect(drawn).not.toContain(' rx=')
   })
 })
