@@ -4,13 +4,14 @@ import {
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { Currency, PlanAvailability, Prisma, SubscriptionStatus } from '@prisma/client';
+import { Currency, PlanAvailability } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { AdminPlanDurationDto } from '../dto/admin-plan-duration.dto';
 import { PLAN_WRITE_REFUSAL_CODES } from '../plan-write-refusal-codes';
 import { ArchivedPlanRenewModeValue } from '../utils/archived-plan-renew-mode.util';
+import { isPlanSoftDeleted } from '../utils/plan-deletion.util';
 import { sameSquadSelection } from '../utils/plan-squads.util';
 
 import { NormalizedPlanWriteInput } from './plans-admin.normalizers';
@@ -63,57 +64,50 @@ export class PlansAdminValidators {
     await this.assertSquadsAreValid(input.input, input.persistedSquads ?? null);
   }
 
-  public async assertPlanDeleteIsAllowed(
-    planId: string,
-    transactionClient: Prisma.TransactionClient,
-  ): Promise<void> {
-    const transitionReference = await transactionClient.plan.findFirst({
-      where: {
-        OR: [
-          { upgradeToPlanIds: { has: planId } },
-          { replacementPlanIds: { has: planId } },
-        ],
-      },
-      select: { id: true },
-    });
-    if (transitionReference !== null) {
-      throw new BadRequestException({
-        code: PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
-        message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-      });
-    }
-    const subscriptionReference = await transactionClient.$queryRaw<
-      readonly { readonly id: string }[]
-    >(
-      Prisma.sql`
-        SELECT "id"
-        FROM "subscriptions"
-        WHERE "status" <> ${SubscriptionStatus.DELETED}
-          AND "plan_snapshot"->>'id' = ${planId}
-        LIMIT 1
-      `,
-    );
-    if (subscriptionReference.length > 0) {
-      throw new BadRequestException({
-        code: PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
-        message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-      });
-    }
-  }
+  // Deletion is no longer a validator's decision. Contract v2 never refuses a
+  // delete; what the delete does is decided by `PlanReferenceGuardService`
+  // inside `PlanDeletionService`. The two hold checks that lived here — and
+  // had drifted from the sweeper's seven — are gone with it.
 
   // ── Unique name ─────────────────────────────────────────────────────────
 
+  /**
+   * A live plan holding the name refuses the write, as it always did. A
+   * SOFT-deleted one does not: the operator cannot see it, so refusing over it
+   * would be unanswerable — the write goes ahead and the hidden row gives the
+   * name up (`findDeletedPlanHoldingName` → `releasePlanNameFromDeletedPlan`).
+   */
   private async assertUniquePlanName(planId: string | null, name: string): Promise<void> {
-    const existingPlan = await this.prismaService.plan.findFirst({
-      where: { name },
-      select: { id: true },
-    });
-    if (existingPlan !== null && existingPlan.id !== planId) {
+    const existingPlan = await this.readPlanHoldingName(name);
+    if (existingPlan !== null && existingPlan.id !== planId && !isPlanSoftDeleted(existingPlan)) {
       throw new BadRequestException({
         code: PLAN_WRITE_REFUSAL_CODES.NAME_TAKEN,
         message: `Plan with name '${name}' already exists`,
       });
     }
+  }
+
+  /**
+   * The soft-deleted plan that must give `name` up before this write can take
+   * it, or `null` when no hidden plan holds it (or the holder is the plan being
+   * edited).
+   */
+  public async findDeletedPlanHoldingName(
+    planId: string | null,
+    name: string,
+  ): Promise<{ readonly id: string; readonly name: string } | null> {
+    const holder = await this.readPlanHoldingName(name);
+    if (holder === null || holder.id === planId || !isPlanSoftDeleted(holder)) {
+      return null;
+    }
+    return { id: holder.id, name: holder.name };
+  }
+
+  private readPlanHoldingName(name: string) {
+    return this.prismaService.plan.findFirst({
+      where: { name },
+      select: { id: true, name: true, deletedAt: true },
+    });
   }
 
   // ── Durations / prices integrity ────────────────────────────────────────
@@ -247,7 +241,10 @@ export class PlansAdminValidators {
       return;
     }
     const referencedPlans = await this.prismaService.plan.findMany({
-      where: { id: { in: referencedIds } },
+      // A deleted plan is NOT FOUND as a target, not merely unassignable: the
+      // editor never offers it, so only a stale form can send its id, and "not
+      // found" is the true account of it.
+      where: { id: { in: referencedIds }, deletedAt: null },
       select: {
         id: true,
         isActive: true,

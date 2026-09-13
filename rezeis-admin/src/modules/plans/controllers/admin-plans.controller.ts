@@ -15,6 +15,11 @@ import { MovePlanDto } from '../dto/move-plan.dto';
 import { ReorderPlansDto } from '../dto/reorder-plans.dto';
 import { UpdatePlanDto } from '../dto/update-plan.dto';
 import { AdminPlanInterface } from '../interfaces/admin-plan.interface';
+import {
+  PlanDeleteResultInterface,
+  PlanDeletionService,
+  PlanReferencesResponseInterface,
+} from '../services/plan-deletion.service';
 import { PlanSquadPropagationStatus } from '../services/plan-squad-propagation.service';
 import { AdminPlanUpdateResultInterface, PlansAdminService } from '../services/plans-admin.service';
 import { RemnawaveSquadOptionInterface } from '../../remnawave/interfaces/remnawave-squad-option.interface';
@@ -30,6 +35,7 @@ export class AdminPlansController {
   public constructor(
     private readonly plansAdminService: PlansAdminService,
     private readonly unknownSquadAudit: UnknownSquadAuditService,
+    private readonly planDeletionService: PlanDeletionService,
   ) {}
 
   /**
@@ -105,6 +111,23 @@ export class AdminPlansController {
     return this.plansAdminService.getSquadPropagationStatus(planId);
   }
 
+  /**
+   * What still uses the plan, for the delete dialog: every kind with a count
+   * above zero, in the fixed order `PLAN_REFERENCE_KINDS` declares. 404 for an
+   * unknown or already deleted plan.
+   *
+   * Gated on `plans:delete` alone — the handler-level decorator replaces the
+   * class's `plans:view` — because the answer exists only to inform a delete,
+   * and it names how many subscriptions, payments and prizes hang on a plan.
+   */
+  @Get(':planId/references')
+  @RequirePermission('plans', 'delete')
+  public async getPlanReferences(
+    @Param('planId') planId: string,
+  ): Promise<PlanReferencesResponseInterface> {
+    return this.planDeletionService.getReferences(planId);
+  }
+
   @Post()
   @RequirePermission('plans', 'create')
   public async createPlan(
@@ -172,17 +195,23 @@ export class AdminPlansController {
     });
   }
 
+  /**
+   * Deletes the plan — never refused for what uses it (contract v2).
+   * `removed: true` means the row went with its durations and prices;
+   * `removed: false` means something still used it, so it was hidden everywhere
+   * and the nightly sweep removes it once nothing does. 404 for an unknown or
+   * already deleted plan. See `PlanDeletionService`.
+   */
   @Delete(':planId')
   @RequirePermission('plans', 'delete')
   public async deletePlan(
     @Param('planId') planId: string,
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() request: Request,
-  ): Promise<{ readonly deleted: true }> {
-    await this.plansAdminService.deletePlan(planId, {
+  ): Promise<PlanDeleteResultInterface> {
+    return this.planDeletionService.deletePlan(planId, {
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
     });
-    return { deleted: true } as const;
   }
 }

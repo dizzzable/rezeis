@@ -2234,6 +2234,13 @@ model Plan {
   /// duration's `PlanDuration.cashbackPoints` (a year and a month differ).
   cashbackMode         PointsCashbackMode    @default(INHERIT) @map("cashback_mode")
   cashbackPercent      Int?                  @map("cashback_percent")
+  /// Set when an operator deleted a plan that something still used
+  /// (`PlanDeletionService`). The row stays so obligations already taken keep
+  /// resolving it by id — a paid invoice, a promocode, a quest prize — while
+  /// every listing, picker and renewal treats it as gone. The nightly
+  /// `RetiredPlanSweeperService` removes the row once nothing uses it. NULL for
+  /// every plan that was never deleted.
+  deletedAt            DateTime?             @map("deleted_at") @db.Timestamptz(3)
   createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 

@@ -24,6 +24,14 @@ interface SubFixture {
   readonly planLess?: boolean;
   /** Catalog plan ids offered for a plan-less subscription's renewal. */
   readonly catalogPlanIds?: readonly string[];
+  /**
+   * What became of the snapshot's plan. `live` (default): the row exists and was
+   * never deleted. `missing`: the row is gone. `softDeleted`: an operator deleted
+   * it while something used it, so the row stays with `deletedAt` stamped.
+   */
+  readonly planState?: 'live' | 'missing' | 'softDeleted';
+  /** An archived REPLACE_ON_RENEW plan: the discovery quote offers these instead. */
+  readonly replacementPlanIds?: readonly string[];
 }
 
 const GATEWAY = PaymentGatewayType.YOOKASSA;
@@ -389,6 +397,102 @@ describe('SubscriptionRenewalService plan-less (panel-imported) subscriptions', 
   });
 });
 
+/**
+ * THE RENEWAL THAT CHARGED A CARD FOR A PLAN NOBODY CHOSE.
+ *
+ * `pickTargetPlan` fell back to `availablePlans[0]` whenever the subscription's
+ * plan was not among the renewal targets — and for a plan whose row was gone
+ * the discovery quote offers the whole active catalogue, so the renewal was
+ * priced onto whichever plan was listed FIRST with `requiresPlanSelection:
+ * false`. Autopay then charged the saved card for it. A deleted plan (row gone,
+ * or soft-deleted and hidden) now asks the subscriber to choose, exactly like a
+ * plan-less imported subscription; a plan that still exists renews as before.
+ */
+describe('SubscriptionRenewalService — a subscription whose plan was deleted', () => {
+  for (const planState of ['missing', 'softDeleted'] as const) {
+    it(`asks the subscriber to choose when the plan is ${planState}, instead of picking the first catalogue plan`, async () => {
+      const service = createService([
+        sub({ id: 's1', planState, catalogPlanIds: ['cat-first', 'cat-second'], price: '11.00' }),
+      ]);
+
+      const result = await service.getRenewalOptions({ identity: { userId: 'u' }, gatewayType: GATEWAY });
+
+      const item = result.items[0];
+      assert.equal(item?.requiresPlanSelection, true, 'no choice was asked');
+      assert.equal(item?.renewable, true, 'the catalogue is there to choose from');
+      assert.equal(item?.planId, null, `silently renewed onto ${String(item?.planId)}`);
+      assert.equal(item?.amount, null);
+      assert.equal(result.total, null);
+    });
+
+    it(`refuses to price a ${planState}-plan renewal for checkout without a choice`, async () => {
+      // This is the call autopay's charge goes through. Refusing here is what
+      // stops the card being charged for `cat-first`.
+      const service = createService([sub({ id: 's1', planState, catalogPlanIds: ['cat-first', 'cat-second'] })]);
+
+      await assert.rejects(
+        () => service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY }),
+        (e: unknown) => e instanceof BadRequestException && e.message === 'RENEWAL_ITEM_NOT_PRICEABLE',
+      );
+    });
+
+    it(`prices a ${planState}-plan renewal onto the plan the subscriber chose`, async () => {
+      const service = createService([
+        sub({ id: 's1', planState, catalogPlanIds: ['cat-first', 'cat-second'], price: '14.00' }),
+      ]);
+
+      const result = await service.priceRenewalItems({
+        identity: { userId: 'u' },
+        subscriptionIds: ['s1'],
+        gatewayType: GATEWAY,
+        plans: new Map([['s1', 'cat-second']]),
+      });
+
+      assert.equal(result.items[0]?.planId, 'cat-second');
+      assert.equal(result.items[0]?.amount, '14.00');
+    });
+  }
+
+  it('renews a plan that still exists onto itself, with no choice asked (unchanged)', async () => {
+    const service = createService([sub({ id: 's1', planId: 'plan-own', planState: 'live', price: '10.00' })]);
+
+    const result = await service.getRenewalOptions({ identity: { userId: 'u' }, gatewayType: GATEWAY });
+
+    assert.equal(result.items[0]?.requiresPlanSelection, false);
+    assert.equal(result.items[0]?.planId, 'plan-own');
+    assert.equal(result.items[0]?.amount, '10.00');
+  });
+
+  it('renews an archived plan with replacements onto its first replacement (unchanged)', async () => {
+    const service = createService([
+      sub({ id: 's1', planId: 'plan-archived', replacementPlanIds: ['plan-new', 'plan-newer'], price: '12.00' }),
+    ]);
+
+    const result = await service.getRenewalOptions({ identity: { userId: 'u' }, gatewayType: GATEWAY });
+
+    assert.equal(result.items[0]?.requiresPlanSelection, false);
+    assert.equal(result.items[0]?.planId, 'plan-new');
+    assert.equal(result.items[0]?.amount, '12.00');
+  });
+
+  it('answers requiresPlanSelection(subscriptionId) the way the renewal decides it', async () => {
+    const service = createService([
+      sub({ id: 'gone', planState: 'missing' }),
+      sub({ id: 'hidden', planState: 'softDeleted' }),
+      sub({ id: 'imported', planLess: true }),
+      sub({ id: 'live', planState: 'live' }),
+      sub({ id: 'replaced', replacementPlanIds: ['plan-new'] }),
+    ]);
+
+    assert.equal(await service.requiresPlanSelection('gone'), true);
+    assert.equal(await service.requiresPlanSelection('hidden'), true);
+    assert.equal(await service.requiresPlanSelection('imported'), true);
+    assert.equal(await service.requiresPlanSelection('live'), false);
+    assert.equal(await service.requiresPlanSelection('replaced'), false);
+    assert.equal(await service.requiresPlanSelection('no-such-subscription'), false);
+  });
+});
+
 function sub(input: {
   readonly id: string;
   readonly planId?: string;
@@ -400,6 +504,8 @@ function sub(input: {
   readonly notRenewable?: boolean;
   readonly planLess?: boolean;
   readonly catalogPlanIds?: readonly string[];
+  readonly planState?: 'live' | 'missing' | 'softDeleted';
+  readonly replacementPlanIds?: readonly string[];
 }): SubFixture {
   return {
     id: input.id,
@@ -412,6 +518,8 @@ function sub(input: {
     notRenewable: input.notRenewable ?? false,
     planLess: input.planLess ?? false,
     catalogPlanIds: input.catalogPlanIds,
+    planState: input.planState,
+    replacementPlanIds: input.replacementPlanIds,
   };
 }
 
@@ -443,6 +551,22 @@ function createService(
       },
     },
     user: { findUnique: async () => ({ id: 'user-1' }) },
+    plan: {
+      // The renewal asks whether the snapshot's plan still exists and was never
+      // deleted. A fixture's own plan is live unless `planState` says otherwise;
+      // an id no fixture owns does not exist, as in the database. Honours
+      // `select` — the service asks for `deletedAt` and nothing else.
+      findUnique: async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
+        const owner = fixtures.find((f) => !f.planLess && f.planId === args.where.id);
+        if (owner === undefined || owner.planState === 'missing') return null;
+        const row = {
+          id: owner.planId,
+          deletedAt: owner.planState === 'softDeleted' ? new Date('2026-09-01T00:00:00.000Z') : null,
+        };
+        if (args.select === undefined) return row;
+        return Object.fromEntries(Object.keys(args.select).map((key) => [key, row[key as keyof typeof row]]));
+      },
+    },
   };
 
   const buildPlan = (id: string, days: readonly number[]) => ({
@@ -476,9 +600,15 @@ function createService(
         f.durations !== undefined && f.durations.length > 0 ? f.durations : [f.durationDays];
       // Plan-less subscriptions: the discovery quote offers a catalog of plans
       // (mirrors the real getSourceSelection fallback) the user must choose from.
-      const availablePlans = f.planLess
+      // A plan whose row is gone or soft-deleted gets the same catalogue — the
+      // real `getSourceSelection` treats both like a plan-less snapshot for
+      // RENEW. An archived REPLACE_ON_RENEW plan offers its replacements.
+      const planGone = f.planLess || f.planState === 'missing' || f.planState === 'softDeleted';
+      const availablePlans = planGone
         ? (f.catalogPlanIds ?? ['cat-a', 'cat-b']).map((id) => buildPlan(id, durationDaysList))
-        : [buildPlan(f.planId, durationDaysList)];
+        : f.replacementPlanIds !== undefined
+          ? f.replacementPlanIds.map((id) => buildPlan(id, durationDaysList))
+          : [buildPlan(f.planId, durationDaysList)];
       if (input.planId === undefined) {
         // discovery pass
         return {

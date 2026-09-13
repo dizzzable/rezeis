@@ -14,6 +14,7 @@ import { InternalAdminAuthGuard } from '../src/modules/auth/guards/internal-admi
 import { PlansModule } from '../src/modules/plans/plans.module';
 import { UnknownSquadAuditService } from '../src/modules/plans/services/unknown-squad-audit.service';
 import { PlanCatalogService } from '../src/modules/plans/services/plan-catalog.service';
+import { PlanDeletionService } from '../src/modules/plans/services/plan-deletion.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import {
   PlansStatsQueryInput,
@@ -89,6 +90,21 @@ describe('GET admin/plans/stats routing', () => {
           },
         },
         { provide: PlanCatalogService, useValue: { getCatalogPlans: async () => [] } },
+        // `GET :planId/references` is a second parameterised route on this
+        // controller. None of the requests below may reach it, so the double
+        // THROWS rather than answering: a routing change that sent one of them
+        // there would fail loudly instead of returning a plausible body.
+        {
+          provide: PlanDeletionService,
+          useValue: {
+            getReferences: async () => {
+              throw new Error('GET :planId/references answered a request routed elsewhere');
+            },
+            deletePlan: async () => {
+              throw new Error('DELETE :planId is not exercised by this spec');
+            },
+          },
+        },
         // Records its calls, because the routing assertion below needs to know
         // WHICH handler ran. A stub that only satisfied Nest's constructor
         // resolution would leave the second literal route on this controller

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { ArgumentsHost, HttpException } from '@nestjs/common';
@@ -143,16 +145,21 @@ function buildValidators(options: {
   return new PlansAdminValidators(prismaService as never, remnawaveApiService as never);
 }
 
-/** A transaction client answering only the two reads the delete guard makes. */
-function deleteClient(options: {
-  readonly transitionReference?: { readonly id: string } | null;
-  readonly subscriptionRows?: readonly { readonly id: string }[];
-}): never {
-  return {
-    plan: { findFirst: async () => options.transitionReference ?? null },
-    $queryRaw: async () => options.subscriptionRows ?? [],
-  } as never;
-}
+/**
+ * Codes that are declared but thrown by nothing in this build.
+ *
+ * `DELETE_REFERENCED` coded the refusal to delete a plan that subscriptions or
+ * transition rules still used. Plan-deletion contract v2 (13.09.2026) never
+ * refuses a delete — `PlanDeletionService` hides a used plan instead — so the
+ * two throw sites, and the transaction-client double that drove them here, are
+ * gone. The code stays DECLARED: an older server still throws it during a
+ * rolling deploy, and the panel SPA pins its own refusal table against the
+ * backend's object. What this file asserts about it instead is the opposite of
+ * what it asserts about a live code: that NOTHING in `src` throws it.
+ */
+const RETIRED_CODES: ReadonlySet<PlanWriteRefusalCode> = new Set([
+  PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
+]);
 
 // ── The table ───────────────────────────────────────────────────────────────
 
@@ -423,33 +430,6 @@ const REFUSALS: readonly RefusalCase[] = [
         input: write({ internalSquads: [INTERNAL_SQUAD_ID] }),
       }),
   },
-  {
-    what: 'deleting a plan a transition rule still points at',
-    code: PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
-    message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-    wireMessage: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-    status: 400,
-    refuse: () =>
-      buildValidators({}).assertPlanDeleteIsAllowed(
-        EDITED_PLAN_ID,
-        deleteClient({ transitionReference: { id: OTHER_PLAN_ID } }),
-      ),
-  },
-  {
-    // The SAME refusal from the second throw site in the delete guard. Both
-    // sentences were already identical; a code on one and not the other would
-    // make the pair distinguishable on the wire for no reason.
-    what: 'deleting a plan a live subscription snapshot still names',
-    code: PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED,
-    message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-    wireMessage: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-    status: 400,
-    refuse: () =>
-      buildValidators({}).assertPlanDeleteIsAllowed(
-        EDITED_PLAN_ID,
-        deleteClient({ transitionReference: null, subscriptionRows: [{ id: 'subscription-1' }] }),
-      ),
-  },
 ];
 
 // ── 1. The sentence is unchanged, and the code rides beside it ──────────────
@@ -535,20 +515,56 @@ describe('PLAN_WRITE_REFUSAL_CODES and the filter allowlist', () => {
    * And the reverse direction: a code declared but never driven through the
    * real validator would be an allowlist entry nothing proves is reachable.
    */
-  it('exercises every declared code against the real validator', () => {
+  it('exercises every declared, non-retired code against the real validator', () => {
     const covered = new Set<PlanWriteRefusalCode>(REFUSALS.map((refusal) => refusal.code));
     const declared = Object.values(PLAN_WRITE_REFUSAL_CODES);
 
     assert.deepEqual(
-      declared.filter((code) => !covered.has(code)),
+      declared.filter((code) => !covered.has(code) && !RETIRED_CODES.has(code)),
       [],
       'declared codes with no case above: nothing proves these are ever thrown, or ever survive',
     );
     assert.deepEqual(
-      [...covered].filter((code) => !declared.includes(code)),
+      [...covered].filter((code) => !declared.includes(code) || RETIRED_CODES.has(code)),
       [],
-      'a case names a code the table no longer declares',
+      'a case names a code the table no longer declares, or one marked retired',
     );
+  });
+
+  /**
+   * The other half of retiring a code: a retired entry that some new throw
+   * site quietly starts using again would be a refusal this file no longer
+   * drives through the validator or the filter. Scanned by source, because a
+   * retired code by definition has no behaviour left to call.
+   */
+  it('throws no retired code anywhere in src', () => {
+    const srcRoot = join(__dirname, '..', 'src');
+    const declaredIn = join(srcRoot, 'modules', 'plans', 'plan-write-refusal-codes.ts');
+    const allowlistedIn = join(srcRoot, 'common', 'filters', 'admin-safe-exception.filter.ts');
+    const files = listTypeScript(srcRoot);
+    const offenders: string[] = [];
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8');
+      for (const [key, value] of Object.entries(PLAN_WRITE_REFUSAL_CODES)) {
+        if (!RETIRED_CODES.has(value)) continue;
+        const byKey = source.includes(`PLAN_WRITE_REFUSAL_CODES.${key}`);
+        const byLiteral = file !== declaredIn && file !== allowlistedIn && source.includes(`'${value}'`);
+        if (byKey || byLiteral) offenders.push(`${relative(srcRoot, file)} (${value})`);
+      }
+    }
+
+    // Anchor: a scan that read nothing would find no offender either.
+    assert.ok(files.length > 500, `scanned only ${files.length} files under src`);
+    assert.ok(files.includes(declaredIn), 'the scan did not reach the code table itself');
+    assert.deepEqual(offenders, [], 'a retired plan refusal code is thrown again');
+  });
+
+  it('keeps every retired code declared and allowlisted, for older servers and the SPA pin', () => {
+    for (const code of RETIRED_CODES) {
+      assert.ok(Object.values(PLAN_WRITE_REFUSAL_CODES).includes(code), `${code} was removed from the table`);
+      assert.ok(SAFE_PRODUCT_CODES.has(code), `${code} was removed from SAFE_PRODUCT_CODES`);
+    }
+    assert.equal(PLAN_WRITE_REFUSAL_CODES.DELETE_REFERENCED, 'PLAN_DELETE_REFERENCED');
   });
 
   /**
@@ -618,4 +634,15 @@ function throughSafeFilter(exception: unknown): WireResponse {
 
   new AdminSafeExceptionFilter().catch(exception, host);
   return { statusCode, body };
+}
+
+/** Every `.ts` file under `dir`, recursively, as absolute paths. */
+function listTypeScript(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...listTypeScript(path));
+    else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(path);
+  }
+  return files;
 }

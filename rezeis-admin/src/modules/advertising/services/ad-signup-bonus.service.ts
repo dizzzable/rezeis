@@ -107,7 +107,17 @@ export class AdSignupBonusService {
           return;
         }
         const plan = await this.prismaService.plan.findFirst({
-          where: { id: planId, isActive: true, isArchived: false },
+          where: {
+            id: planId,
+            OR: [
+              { isActive: true, isArchived: false },
+              // A DELETED plan keeps paying out a placement that already grants
+              // it — the delete dialog promises exactly that, and the plan row is
+              // kept (soft-deleted) so it can. Taking a live plan off sale still
+              // stops the bonus, as before.
+              { deletedAt: { not: null } },
+            ],
+          },
           select: { id: true },
         });
         if (plan === null) {

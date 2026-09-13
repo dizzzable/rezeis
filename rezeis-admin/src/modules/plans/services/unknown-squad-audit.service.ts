@@ -121,6 +121,10 @@ export class UnknownSquadAuditService {
     // time while the plan still holds the dead uuid means the next purchase
     // recreates the problem.
     const plans = await this.prismaService.plan.findMany({
+      // Not a deleted plan: the report is a list to fix, and a deleted plan
+      // cannot be opened in the editor any more. Its subscribers still appear
+      // above, row by row, which is where the repair for them happens.
+      where: { deletedAt: null },
       select: { id: true, name: true, internalSquads: true, externalSquad: true },
     });
     const affectedPlans = plans

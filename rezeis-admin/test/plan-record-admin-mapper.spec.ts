@@ -114,6 +114,7 @@ function planRecord(overrides: Partial<PlanRecord> = {}): PlanRecord {
     externalSquad: null,
     cashbackMode: PointsCashbackMode.INHERIT,
     cashbackPercent: null,
+    deletedAt: null,
     createdAt: new Date('2026-04-19T12:00:00.000Z'),
     updatedAt: new Date('2026-04-19T12:00:00.000Z'),
     durations: [durationRecord()],

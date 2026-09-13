@@ -11,6 +11,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
 import { AddOnEligibilityService } from '../../add-ons/services/add-on-eligibility.service';
+import { isPlanSoftDeleted } from '../../plans/utils/plan-deletion.util';
 import {
   SubscriptionQuotePlanInterface,
   SubscriptionQuoteWarningInterface,
@@ -376,13 +377,22 @@ export class SubscriptionRenewalService {
       gatewayType: input.gatewayType,
     });
 
-    // Plan-less (panel-imported) subscription: the catalog is offered as the
-    // renewal target set. Until the user picks a plan we report the sub as
-    // renewable-but-needs-a-plan (no price yet); once chosen we price it like
-    // a normal renewal onto that plan.
-    const planLess = original.planId === null;
+    // The subscriber has to CHOOSE the plan when there is none to renew onto:
+    // a plan-less (panel-imported) subscription, or one whose plan was deleted
+    // — the row gone, or soft-deleted and hidden. In both cases the discovery
+    // quote offers the active catalogue. Until a plan is picked the sub is
+    // reported renewable-but-needs-a-plan (no price yet); once chosen it is
+    // priced like a normal renewal onto that plan.
+    //
+    // Read AFTER discovery, deliberately. A plan deleted between the two reads
+    // then still asks for a choice; read before, a plan deleted in between
+    // would meet a catalogue in `availablePlans` with no choice required, and
+    // `pickTargetPlan` would renew onto whichever plan is listed first — the
+    // silent pick this exists to prevent. A deletion is never undone, so the
+    // other ordering cannot happen.
+    const selectionRequired = await this.renewalPlanIsGone(original.planId);
     const chosenPlanId = input.chosenPlanId ?? null;
-    if (planLess && chosenPlanId === null) {
+    if (selectionRequired && chosenPlanId === null) {
       const canSelect = discovery.availablePlans.length > 0;
       return {
         subscriptionId: input.subscriptionId,
@@ -400,7 +410,7 @@ export class SubscriptionRenewalService {
       };
     }
 
-    const targetPlan = planLess
+    const targetPlan = selectionRequired
       ? (discovery.availablePlans.find((plan) => plan.id === chosenPlanId) ?? null)
       : pickTargetPlan(discovery.availablePlans, original.planId);
     if (targetPlan === null) {
@@ -491,6 +501,43 @@ export class SubscriptionRenewalService {
     };
   }
 
+  /**
+   * Whether renewing this subscription needs the SUBSCRIBER to choose a plan —
+   * the plan it was on is gone, or it never had one.
+   *
+   * Public for `AutoRenewService`, which cannot choose on anybody's behalf and
+   * must therefore not try to charge such a subscription at all. It is the same
+   * predicate `quoteSubscriptionRenewal` renews by, so autopay and the cabinet
+   * cannot disagree about which subscriptions need a choice. A subscription
+   * that is not there answers `false`: the charge path reports that itself.
+   */
+  public async requiresPlanSelection(subscriptionId: string): Promise<boolean> {
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { planSnapshot: true },
+    });
+    if (subscription === null) {
+      return false;
+    }
+    return this.renewalPlanIsGone(readSnapshotSelection(subscription.planSnapshot).planId);
+  }
+
+  /**
+   * No plan id, no row, or a soft-deleted row. A soft-deleted plan still
+   * RESOLVES by id — fulfilment and grants depend on that — but it is never
+   * renewed onto: it is gone for everyone (plan-deletion contract v2).
+   */
+  private async renewalPlanIsGone(planId: string | null): Promise<boolean> {
+    if (planId === null) {
+      return true;
+    }
+    const plan = await this.prismaService.plan.findUnique({
+      where: { id: planId },
+      select: { deletedAt: true },
+    });
+    return plan === null || isPlanSoftDeleted(plan);
+  }
+
   private async loadCandidateSubscriptions(
     userId: string,
     subscriptionIds?: readonly string[],
@@ -540,6 +587,17 @@ function readSnapshotSelection(planSnapshot: Prisma.JsonValue): {
   return { planId, durationDays };
 }
 
+/**
+ * The renewal target for a subscription whose plan still EXISTS: the plan
+ * itself, or — when the quote offers something else, which for an existing plan
+ * means an archived `REPLACE_ON_RENEW` plan listing its replacements — the first
+ * replacement.
+ *
+ * Never reached for a missing, soft-deleted or absent plan: those require the
+ * subscriber's choice (`renewalPlanIsGone`). This fallback is exactly what used
+ * to renew such a subscription onto the first catalogue plan — and have autopay
+ * charge the saved card for a plan the subscriber never chose.
+ */
 function pickTargetPlan(
   availablePlans: readonly SubscriptionQuotePlanInterface[],
   originalPlanId: string | null,

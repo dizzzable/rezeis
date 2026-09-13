@@ -1,0 +1,16 @@
+-- A plan an operator deleted while something still used it.
+--
+-- `DELETE /api/admin/plans/:planId` always succeeds (plan-deletion contract v2,
+-- 13.09.2026). When nothing references the plan the row goes for good, with
+-- its durations and prices. When something does — an unpaid or paid-but-not-
+-- yet-delivered invoice, a promocode, a quest, a contest prize, a subscriber —
+-- the row has to stay, because those obligations resolve the plan BY ID from
+-- the live table, and a missing row turns them into money taken with nothing
+-- delivered. So the row is kept and stamped here, and every listing, picker
+-- and renewal treats a stamped plan as gone. The nightly retired-plan sweep
+-- removes it once the same reference guard reports nothing.
+--
+-- Nullable with no default: a catalogue-only change, no table rewrite, and
+-- every existing plan reads as never deleted, which is what NULL means here.
+-- `IF NOT EXISTS` because `prisma migrate deploy` may replay a failed run.
+ALTER TABLE "plans" ADD COLUMN IF NOT EXISTS "deleted_at" TIMESTAMPTZ(3);

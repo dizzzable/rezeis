@@ -480,7 +480,10 @@ export class AdminUserSubscriptionsController {
         throw new BadRequestException('planId must be a non-empty plan id string.');
       }
       const planId = body.planId;
-      const plan = await this.prismaService.plan.findUnique({ where: { id: planId } });
+      // A deleted plan is gone for the operator too: it is never offered in the
+      // picker, and assigning one from a stale page would put a subscriber on a
+      // plan nobody can renew.
+      const plan = await this.prismaService.plan.findUnique({ where: { id: planId, deletedAt: null } });
       if (!plan) throw new NotFoundException('Plan not found');
       data.planSnapshot = buildPlanSnapshot(plan);
       // Plans dictate the limits/squads at the moment of assignment.
@@ -1139,7 +1142,8 @@ export class AdminUserSubscriptionsController {
     @Req() req: Request,
   ) {
     const user = await this.findUserByTelegramId(telegramId);
-    const plan = await this.prismaService.plan.findUnique({ where: { id: body.planId } });
+    // Not a deleted plan: the give-subscription picker never lists one.
+    const plan = await this.prismaService.plan.findUnique({ where: { id: body.planId, deletedAt: null } });
     if (!plan) throw new NotFoundException('Plan not found');
 
     if (body.isTrial === true) {

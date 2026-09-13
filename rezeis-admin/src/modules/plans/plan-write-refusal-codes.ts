@@ -41,10 +41,9 @@
  * against; none of these has a prior reader, so they follow the majority.
  *
  * `DELETE_REFERENCED` is here despite the module's name because the refusal it
- * codes is thrown by the same validator class, reaches the same operator through
+ * coded was thrown by the same validator class, reached the same operator through
  * the same toast, and is a write to the plan catalogue in every sense but the
- * HTTP verb. Splitting it into a second module would have bought a tidier file
- * name and a second allowlist to keep in sync.
+ * HTTP verb. It is retired now — see the entry itself for why it stays listed.
  */
 export const PLAN_WRITE_REFUSAL_CODES = Object.freeze({
   /** Another plan already holds this name. */
@@ -84,7 +83,19 @@ export const PLAN_WRITE_REFUSAL_CODES = Object.freeze({
    * because nothing the operator typed is known to be wrong.
    */
   SQUAD_VALIDATION_UNAVAILABLE: 'PLAN_SQUAD_VALIDATION_UNAVAILABLE',
-  /** Deletion refused: subscriptions or transition rules still point here. */
+  /**
+   * RETIRED — no path in this build throws it. Deletion was refused with it
+   * while subscriptions or transition rules pointed at a plan; plan-deletion
+   * contract v2 (13.09.2026) never refuses a delete (`PlanDeletionService`).
+   *
+   * Kept, not removed, for two readers: an older server still throws it during
+   * a rolling deploy, so the panel SPA keeps translating it — and the SPA's
+   * refusal table is pinned against THIS object
+   * (`web/src/features/plans/plan-write-refusals.test.ts`), so removing the
+   * entry here would break that pin rather than retire the code.
+   * `test/plan-write-refusal-codes.spec.ts` asserts that nothing in `src`
+   * throws it any more.
+   */
   DELETE_REFERENCED: 'PLAN_DELETE_REFERENCED',
 } as const);
 

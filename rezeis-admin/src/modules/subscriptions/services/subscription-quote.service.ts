@@ -16,6 +16,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
+import { isPlanSoftDeleted } from '../../plans/utils/plan-deletion.util';
 import { PLAN_INCLUDE, PlanRecord } from '../../plans/utils/plan-record.util';
 import { evaluateTrialClaim, readTrialSettings } from '../../plans/utils/trial-settings.util';
 import { isInvitedUser } from '../../plans/utils/trial-invite.util';
@@ -630,24 +631,34 @@ export class SubscriptionQuoteService {
       where: { id: sourcePlanId },
       include: PLAN_INCLUDE,
     });
-    if (sourcePlan === null) {
+    if (
+      sourcePlan === null ||
+      (input.purchaseType === PurchaseType.RENEW && isPlanSoftDeleted(sourcePlan))
+    ) {
       // ── A PLAN THAT NO LONGER EXISTS IS NOT A DEAD END FOR A RENEWAL ──────
       //
-      // The snapshot names a plan; the row is gone. That happens when an
-      // operator deletes a retired plan, and now happens on its own:
-      // `RetiredPlanSweeperService` removes a plan taken out of sale once the
-      // last customer has left it — and "left it" counts an EXPIRED
-      // subscription as gone, because its history lives in its own snapshot.
+      // The snapshot names a plan; the row is gone — or it is a SOFT-deleted
+      // row, which for a renewal is the same thing. An operator deleted it
+      // (`PlanDeletionService` keeps the row, hidden, while something still
+      // uses it), or `RetiredPlanSweeperService` removed it once nothing did.
       //
       // The customer that describes is precisely the one this branch used to
-      // turn away: somebody whose subscription lapsed months ago, coming back
-      // to renew. They were offered NOTHING — not the replacements the retired
-      // plan names, not the catalogue — while the same method four lines above
-      // already hands the catalogue to a renewal whose snapshot has no plan id
-      // at all. The two cases are the same problem and now get the same answer.
+      // turn away: somebody coming back to renew a plan that is gone. They were
+      // offered NOTHING — not the replacements the plan names, not the
+      // catalogue — while the same method four lines above already hands the
+      // catalogue to a renewal whose snapshot has no plan id at all. The cases
+      // are the same problem and get the same answer: the active catalogue, to
+      // CHOOSE from. `SubscriptionRenewalService` reads the same state and asks
+      // the subscriber to pick (`requiresPlanSelection`) instead of silently
+      // renewing onto the first plan in the list — and a deleted plan's own
+      // replacement list is deliberately not used: the plan is gone for
+      // everyone, and the renewal is offered the active plans.
       //
-      // UPGRADE is deliberately left alone: it reprices against the source plan
-      // it is upgrading FROM, and there is nothing to reprice against.
+      // UPGRADE is deliberately left alone. For a plan whose row is gone it has
+      // nothing to reprice against; for a soft-deleted plan the row is still
+      // there, so an upgrade from it keeps working exactly as it did while the
+      // plan was merely archived — including the trial → catalogue fallback a
+      // trial subscriber on a deleted trial plan depends on.
       if (input.purchaseType === 'RENEW' && input.userId !== undefined) {
         const catalog = await this.getCatalogOptionPlans({
           userId: input.userId,

@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { AutoRenewService } from './auto-renew.service';
 import { AutoRenewScheduler } from './auto-renew.scheduler';
 import { AdminAutoRenewController } from './controllers/admin-auto-renew.controller';
@@ -19,7 +20,9 @@ import { InternalWorkerController } from './controllers/internal-worker.controll
   // the profile name, the used traffic and the bound device count, none of
   // which exist locally. Injected optionally, so a container without it sends
   // the notice with the local facts rather than not sending it.
-  imports: [AuthModule, NotificationsModule, PaymentsModule, RemnawaveModule],
+  // `SubscriptionsModule` supplies `SubscriptionRenewalService`: autopay asks it
+  // whether a renewal needs the subscriber's own choice of plan before charging.
+  imports: [AuthModule, NotificationsModule, PaymentsModule, RemnawaveModule, SubscriptionsModule],
   controllers: [AdminAutoRenewController, InternalWorkerController],
   providers: [AutoRenewService, AutoRenewScheduler],
   exports: [AutoRenewService, AutoRenewScheduler],

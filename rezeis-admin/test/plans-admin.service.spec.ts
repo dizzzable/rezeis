@@ -196,38 +196,11 @@ describe('PlansAdminService', () => {
     assert.deepStrictEqual(result, []);
   });
 
-  it('blocks deletion when a subscription snapshot still references the plan', async () => {
-    const prismaService = {
-      $transaction: async <T>(callback: (client: any) => Promise<T>): Promise<T> =>
-        callback({
-          plan: {
-            findUnique: async () => ({ id: 'plan-1', name: 'Starter', orderIndex: 1 }),
-            findFirst: async () => null,
-            delete: async () => undefined,
-            findMany: async () => [],
-            update: async () => undefined,
-          },
-          $queryRaw: async () => [{ id: 'subscription-1' }],
-        }),
-    };
-    const service = createService(
-      prismaService,
-      { getInternalSquadOptions: async () => [], getExternalSquadOptions: async () => [] },
-    );
-
-    await assert.rejects(
-      async () => {
-        await service.deletePlan('plan-1', {
-          currentAdmin: { id: 'admin-1' } as never,
-          requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
-        });
-      },
-      {
-        name: 'BadRequestException',
-        message: 'Plan is referenced by subscriptions or transition rules. Archive it instead.',
-      },
-    );
-  });
+  // A case here used to pin "deletion is refused while a subscription names the
+  // plan". Contract v2 (13.09.2026) reverses that — a delete never refuses; a
+  // used plan is hidden instead of removed — and deletion moved out of this
+  // service into `PlanDeletionService`. Its cases, the subscription one
+  // included, are in `test/plan-deletion.service.spec.ts`.
 
   it('persists paid trial plans with one priced duration and current trial settings', async () => {
     let actualCreateData: unknown;

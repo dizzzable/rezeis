@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { PlanReferenceGuardService } from '../src/modules/plans/services/plan-reference-guard.service';
 import { RetiredPlanSweeperService } from '../src/modules/plans/services/retired-plan-sweeper.service';
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
+import { buildPlanReferenceDb, PlanReferenceDbSeed, Row } from './fixtures/plan-reference-db';
 
 /**
- * A plan taken out of sale disappears once the last customer has left it.
+ * A plan taken out of sale — or deleted while something still used it —
+ * disappears once nothing uses it.
  *
  * ── Why the fake obeys the query instead of answering from options ────────
  *
@@ -19,9 +22,12 @@ import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-ro
  *
  * Every one of those mutations deletes a paying customer's plan.
  *
- * So the fake below is a small database: rows in, queries applied to them,
- * results out. A stub that answers from its own options is only ever testing
- * that its options were read.
+ * So the database below is a small database: rows in, the service's own queries
+ * applied to them, results out (`test/fixtures/plan-reference-db.ts`). And the
+ * guard is the REAL `PlanReferenceGuardService` — the same one the delete dialog
+ * and the delete read — so this file proves the sweep holds a plan for exactly
+ * what the guard reports, not for a list of its own. What each kind counts is
+ * pinned kind by kind in `test/plan-reference-guard.spec.ts`.
  */
 
 type PlanRow = {
@@ -32,27 +38,36 @@ type PlanRow = {
   archivedRenewMode: 'SELF_RENEW' | 'REPLACE_ON_RENEW';
   upgradeToPlanIds: string[];
   replacementPlanIds: string[];
+  deletedAt: Date | null;
 };
 
 type SubRow = { planId: string; status: string };
-type TxItemRow = { planId: string; transactionStatus: string };
+type TxItemRow = { planId: string; transactionStatus: string; appliedAt?: Date | null };
+type TxRow = { planId: string; transactionStatus: string; fulfilledAt?: Date | null };
+
+const NOW = new Date();
+const DELETED_AT = new Date(NOW.getTime() - 24 * 60 * 60 * 1000);
 
 function build(options: {
   readonly plans: readonly Partial<PlanRow>[];
   readonly subs?: readonly SubRow[];
   readonly txItems?: readonly TxItemRow[];
   /** Single purchases: plan named in the transaction's own snapshot, no items. */
-  readonly txns?: readonly TxItemRow[];
-  /** Plan ids a quest gives away as its reward. */
+  readonly txns?: readonly TxRow[];
+  /** Plan ids a quest gives away as its (DAYS) reward. */
   readonly quests?: readonly string[];
   /** Each entry is one add-on's `applicablePlanIds`. */
   readonly addOns?: readonly (readonly string[])[];
-  /** Each entry is one promocode's `allowedPlanIds`. */
+  /** Each entry is one promocode's `allowedPlanIds` — a RESTRICTION, not a grant. */
   readonly promocodes?: readonly (readonly string[])[];
+  /** Plan ids an unarchived promocode GRANTS (legacy `plan` column). */
+  readonly grantingPromocodes?: readonly string[];
+  /** Anything else the shared guard reads, as raw rows. */
+  readonly extra?: PlanReferenceDbSeed;
   readonly events?: boolean;
   readonly failDelete?: boolean;
 }) {
-  const plans: PlanRow[] = options.plans.map((p, i) => ({
+  const plans: Row[] = options.plans.map((p, i) => ({
     id: p.id ?? `p${i}`,
     name: p.name ?? `Plan ${p.id ?? i}`,
     orderIndex: p.orderIndex ?? i,
@@ -60,123 +75,64 @@ function build(options: {
     archivedRenewMode: p.archivedRenewMode ?? 'REPLACE_ON_RENEW',
     upgradeToPlanIds: p.upgradeToPlanIds ?? [],
     replacementPlanIds: p.replacementPlanIds ?? [],
+    deletedAt: p.deletedAt ?? null,
+    isActive: p.deletedAt === undefined || p.deletedAt === null,
   }));
-  const subs = [...(options.subs ?? [])];
-  const txItems = [...(options.txItems ?? [])];
-  const txns = (options.txns ?? []).map((t) => ({ planId: t.planId, status: t.transactionStatus }));
-  const quests = [...(options.quests ?? [])];
-  const addOns = (options.addOns ?? []).map((l) => [...l]);
-  const promocodes = (options.promocodes ?? []).map((l) => [...l]);
-  const audits: Array<Record<string, unknown>> = [];
+  const parents = (options.txItems ?? []).map((t, i) => ({
+    id: `renewal-${i}`,
+    status: t.transactionStatus,
+    planSnapshot: { combinedRenewal: true },
+    fulfilledAt: null,
+    createdAt: NOW,
+  }));
+  const db = buildPlanReferenceDb({
+    ...options.extra,
+    plans,
+    subscriptions: (options.subs ?? []).map((s, i) => ({
+      id: `sub-${i}`,
+      status: s.status,
+      planSnapshot: { id: s.planId },
+    })),
+    transactions: [
+      ...parents,
+      ...(options.txns ?? []).map((t, i) => ({
+        id: `tx-${i}`,
+        status: t.transactionStatus,
+        planSnapshot: { id: t.planId },
+        fulfilledAt: t.fulfilledAt ?? null,
+        createdAt: NOW,
+      })),
+      ...(options.extra?.transactions ?? []),
+    ],
+    transactionItems: (options.txItems ?? []).map((t, i) => ({
+      id: `item-${i}`,
+      transactionId: `renewal-${i}`,
+      planId: t.planId,
+      appliedAt: t.appliedAt ?? null,
+    })),
+    quests: (options.quests ?? []).map((planId, i) => ({ id: `quest-${i}`, rewardPlanId: planId, rewardType: 'DAYS' })),
+    addOns: (options.addOns ?? []).map((list, i) => ({ id: `addon-${i}`, applicablePlanIds: [...list] })),
+    promocodes: [
+      ...(options.promocodes ?? []).map((list, i) => ({
+        id: `restricted-${i}`,
+        archivedAt: null,
+        plan: null,
+        allowedPlanIds: [...list],
+      })),
+      ...(options.grantingPromocodes ?? []).map((planId, i) => ({
+        id: `granting-${i}`,
+        archivedAt: null,
+        plan: { id: planId },
+        allowedPlanIds: [],
+      })),
+    ],
+    failures: options.failDelete === true ? { 'plan.deleteMany': new Error('delete refused') } : undefined,
+  });
   const emitted: Array<{ type: string; category: string; message: string; metadata: unknown }> = [];
 
-  function matchesPlanWhere(row: PlanRow, where: Record<string, unknown>): boolean {
-    if (where.isArchived !== undefined && row.isArchived !== where.isArchived) return false;
-    if (where.archivedRenewMode !== undefined && row.archivedRenewMode !== where.archivedRenewMode) {
-      return false;
-    }
-    const or = where.OR as ReadonlyArray<Record<string, { hasSome: string[] }>> | undefined;
-    if (or !== undefined) {
-      // Both arms are evaluated — the whole point. Reading only `OR[0]` is what
-      // let the `replacementPlanIds` half be deleted with every test green.
-      return or.some((arm) => {
-        const [field, spec] = Object.entries(arm)[0]!;
-        const held = row[field as 'upgradeToPlanIds' | 'replacementPlanIds'];
-        return spec.hasSome.some((id) => held.includes(id));
-      });
-    }
-    return true;
-  }
-
-  const tx = {
-    plan: {
-      findMany: async (args: { where?: Record<string, unknown>; orderBy?: unknown }) => {
-        const rows = plans.filter((p) => matchesPlanWhere(p, args.where ?? {}));
-        return [...rows].sort((a, b) => a.orderIndex - b.orderIndex);
-      },
-      deleteMany: async ({ where }: { where: { id: { in: string[] } } }) => {
-        if (options.failDelete === true) throw new Error('delete refused');
-        for (const id of where.id.in) {
-          const i = plans.findIndex((p) => p.id === id);
-          if (i >= 0) plans.splice(i, 1);
-        }
-        return { count: where.id.in.length };
-      },
-      update: async ({
-        where,
-        data,
-      }: {
-        where: { id: string };
-        data: { orderIndex: number };
-      }) => {
-        const row = plans.find((p) => p.id === where.id);
-        if (row !== undefined) row.orderIndex = data.orderIndex;
-        return {};
-      },
-    },
-    subscription: {
-      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
-        const planId = (where.planSnapshot as { equals: string }).equals;
-        const excluded = (where.status as { not: string }).not;
-        const hit = subs.find((s) => s.planId === planId && s.status !== excluded);
-        return hit === undefined ? null : { id: 'sub-1' };
-      },
-    },
-    transaction: {
-      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
-        const planId = (where.planSnapshot as { equals: string }).equals;
-        const status = where.status as string;
-        const hit = txns.find((t) => t.planId === planId && t.status === status);
-        return hit === undefined ? null : { id: 'tx-1' };
-      },
-    },
-    quest: {
-      findMany: async ({ where }: { where: Record<string, unknown> }) => {
-        const ids = (where.rewardPlanId as { in: string[] }).in;
-        return quests.filter((q) => ids.includes(q)).map((rewardPlanId) => ({ rewardPlanId }));
-      },
-    },
-    addOn: {
-      findMany: async ({ where }: { where: Record<string, unknown> }) => {
-        const ids = (where.applicablePlanIds as { hasSome: string[] }).hasSome;
-        return addOns
-          .filter((list) => list.some((id) => ids.includes(id)))
-          .map((applicablePlanIds) => ({ applicablePlanIds }));
-      },
-    },
-    promocode: {
-      findMany: async ({ where }: { where: Record<string, unknown> }) => {
-        const ids = (where.allowedPlanIds as { hasSome: string[] }).hasSome;
-        return promocodes
-          .filter((list) => list.some((id) => ids.includes(id)))
-          .map((allowedPlanIds) => ({ allowedPlanIds }));
-      },
-    },
-    adminAuditLog: {
-      create: async ({ data }: { data: Record<string, unknown> }) => {
-        audits.push(data);
-        return data;
-      },
-    },
-    transactionItem: {
-      findMany: async ({ where }: { where: Record<string, unknown> }) => {
-        const ids = (where.planId as { in: string[] }).in;
-        const status = (where.transaction as { status: string }).status;
-        const hits = txItems.filter(
-          (t) => ids.includes(t.planId) && t.transactionStatus === status,
-        );
-        return [...new Set(hits.map((t) => t.planId))].map((planId) => ({ planId }));
-      },
-    },
-  };
-
-  const prisma = {
-    ...tx,
-    $transaction: async <T>(fn: (client: unknown) => Promise<T>): Promise<T> => fn(tx),
-  };
-
   const service = new RetiredPlanSweeperService(
-    prisma as never,
+    db.client as never,
+    new PlanReferenceGuardService(db.client as never),
     options.events === false
       ? undefined
       : ({
@@ -185,11 +141,18 @@ function build(options: {
           },
         } as never),
   );
-  return { service, plans, emitted, audits };
+  return {
+    service,
+    plans: db.tables.plan as unknown as PlanRow[],
+    emitted,
+    audits: db.tables.adminAuditLog,
+    db,
+  };
 }
 
 const order = (plans: readonly PlanRow[]): string =>
   [...plans]
+    .filter((p) => p.deletedAt === null)
     .sort((a, b) => a.orderIndex - b.orderIndex)
     .map((p) => `${p.id}@${p.orderIndex}`)
     .join(' ');
@@ -292,12 +255,55 @@ describe('what keeps a retired plan alive', () => {
     assert.equal(plans.length, 1);
   });
 
-  it('is NOT held by a payment that already settled', async () => {
-    // The other direction of the same check. Holding on COMPLETED would keep
-    // every plan anybody ever bought — which is the dead weight this removes.
+  it('is NOT held by a renewal line that was already applied', async () => {
+    // The other direction of the same check. Holding on every COMPLETED line
+    // would keep every plan anybody ever renewed — the dead weight this removes.
     const { service, plans } = build({
       plans: [{ id: 'p1' }],
-      txItems: [{ planId: 'p1', transactionStatus: 'COMPLETED' }],
+      txItems: [{ planId: 'p1', transactionStatus: 'COMPLETED', appliedAt: new Date() }],
+    });
+
+    await service.sweep();
+
+    assert.deepStrictEqual(plans, []);
+  });
+
+  it('keeps it while a COMPLETED renewal line has not been applied yet', async () => {
+    // This case used to be pinned the OTHER way — "a COMPLETED item does not
+    // hold the plan" — and that was the defect. COMPLETED is the provider's
+    // word that the money arrived; `appliedAt` is ours that the renewal was
+    // delivered. Between the two the plan row is still needed: a legacy line
+    // without a verified snapshot is fulfilled from the live row, and throws
+    // `Renewal plan not found` without it — money taken, nothing delivered,
+    // retried for ever (plan-delete research, table A).
+    const { service, plans } = build({
+      plans: [{ id: 'p1' }],
+      txItems: [{ planId: 'p1', transactionStatus: 'COMPLETED', appliedAt: null }],
+    });
+
+    await service.sweep();
+
+    assert.equal(plans.length, 1);
+  });
+
+  it('keeps it while a paid single purchase has not been fulfilled yet', async () => {
+    // The same gap for a NEW / ADDITIONAL / UPGRADE purchase: COMPLETED with
+    // `fulfilledAt` still empty is exactly the state `getRequiredPlan` is
+    // about to read the live plan row in.
+    const { service, plans } = build({
+      plans: [{ id: 'p1' }],
+      txns: [{ planId: 'p1', transactionStatus: 'COMPLETED', fulfilledAt: null }],
+    });
+
+    await service.sweep();
+
+    assert.equal(plans.length, 1);
+  });
+
+  it('is NOT held by a single purchase that was fulfilled', async () => {
+    const { service, plans } = build({
+      plans: [{ id: 'p1' }],
+      txns: [{ planId: 'p1', transactionStatus: 'COMPLETED', fulfilledAt: new Date() }],
     });
 
     await service.sweep();
@@ -350,12 +356,26 @@ describe('what keeps a retired plan alive', () => {
     assert.equal(plans.length, 1);
   });
 
-  it('keeps it while a promocode is restricted to it', async () => {
-    const { service, plans } = build({ plans: [{ id: 'p1' }], promocodes: [['p1']] });
+  it('keeps it while a promocode GRANTS it', async () => {
+    // What this file's rationale always claimed to protect and its query never
+    // did: a code that mints a subscription on the plan when it is redeemed.
+    const { service, plans } = build({ plans: [{ id: 'p1' }], grantingPromocodes: ['p1'] });
 
     await service.sweep();
 
     assert.equal(plans.length, 1);
+  });
+
+  it('is NOT held by a promocode merely RESTRICTED to it', async () => {
+    // `allowed_plan_ids` limits which purchases a discount applies to. Once the
+    // plan is gone that purchase cannot happen, and the code refuses cleanly
+    // without being used up — so it is not a reference, and the shared guard
+    // does not count it. It used to hold the plan here, and nowhere else.
+    const { service, plans } = build({ plans: [{ id: 'p1' }], promocodes: [['p1']] });
+
+    await service.sweep();
+
+    assert.deepStrictEqual(plans, []);
   });
 
   it('is not held by config naming a DIFFERENT plan', async () => {
@@ -392,6 +412,142 @@ describe('what keeps a retired plan alive', () => {
   });
 });
 
+describe('a plan an operator deleted while it was still used', () => {
+  // The deleted plans below are SELF_RENEW on purpose. The retired-plan arm of
+  // the sweep never selects that mode, so these rows are candidates ONLY because
+  // they were deleted — a fixture that was also archived REPLACE_ON_RENEW would
+  // be swept by the other arm, and every case here would pass with the deleted
+  // arm removed. (A mutation run caught exactly that in the first version.)
+  it('is removed once nothing uses it', async () => {
+    const { service, plans } = build({
+      plans: [{ id: 'd1', deletedAt: DELETED_AT, archivedRenewMode: 'SELF_RENEW' }],
+    });
+
+    const removed = await service.sweep();
+
+    assert.deepStrictEqual(plans, []);
+    assert.deepStrictEqual(
+      removed.map((p) => ({ id: p.id, wasDeleted: p.wasDeleted })),
+      [{ id: 'd1', wasDeleted: true }],
+    );
+  });
+
+  it('is kept while something still uses it', async () => {
+    const { service, plans } = build({
+      plans: [{ id: 'd1', deletedAt: DELETED_AT, archivedRenewMode: 'SELF_RENEW' }],
+      subs: [{ planId: 'd1', status: 'ACTIVE' }],
+    });
+
+    await service.sweep();
+
+    assert.equal(plans.length, 1);
+  });
+
+  it('reports a deleted plan as deleted even when it is also an archived REPLACE_ON_RENEW plan', async () => {
+    // Both arms select this row; the audit and the announcement must still say
+    // it was a DELETED plan, not a retired one.
+    const { service, plans, audits } = build({
+      plans: [{ id: 'd1', deletedAt: DELETED_AT, archivedRenewMode: 'REPLACE_ON_RENEW' }],
+    });
+
+    const removed = await service.sweep();
+
+    assert.deepStrictEqual(plans, []);
+    assert.equal(removed[0]?.wasDeleted, true);
+    assert.equal((audits[0]?.metadata as Record<string, unknown>).reason, 'deleted-plan-sweep');
+  });
+
+  it('never sweeps a LIVE SELF_RENEW plan, however empty, beside a deleted one that goes', async () => {
+    // The non-vacuous half of the first case: the same renew mode, not deleted.
+    const { service, plans } = build({
+      plans: [
+        { id: 'kept-self-renew', archivedRenewMode: 'SELF_RENEW' },
+        { id: 'd1', deletedAt: DELETED_AT, archivedRenewMode: 'SELF_RENEW' },
+      ],
+    });
+
+    await service.sweep();
+
+    assert.deepStrictEqual(
+      plans.map((p) => p.id),
+      ['kept-self-renew'],
+    );
+  });
+
+  it('goes the night after its last use ends, and not before', async () => {
+    const { service, plans, db } = build({
+      plans: [{ id: 'd1', deletedAt: DELETED_AT, archivedRenewMode: 'SELF_RENEW' }],
+      quests: ['d1'],
+    });
+
+    await service.sweep();
+    assert.equal(plans.length, 1, 'removed while a quest still gave it away');
+
+    db.tables.quest.splice(0, db.tables.quest.length);
+    await service.sweep();
+
+    assert.deepStrictEqual(plans, []);
+  });
+
+  it('writes plans.deleted with the deleted-plan reason', async () => {
+    const { service, audits, emitted } = build({
+      plans: [{ id: 'd1', name: 'Pro 2025', deletedAt: DELETED_AT, archivedRenewMode: 'SELF_RENEW' }],
+    });
+
+    await service.sweep();
+
+    assert.equal(audits[0]?.action, 'plans.deleted');
+    assert.deepStrictEqual(audits[0]?.metadata, {
+      planId: 'd1',
+      name: 'Pro 2025',
+      automated: true,
+      reason: 'deleted-plan-sweep',
+    });
+    assert.match(String(emitted[0]?.message), /Deleted plan "Pro 2025"/);
+  });
+});
+
+describe('the sweep holds a plan for exactly what the shared guard reports', () => {
+  // Kinds the old seven-check hold list never looked at. Each keeps a retired
+  // plan now because the sweep asks the same guard the delete does.
+  const kinds: ReadonlyArray<[string, PlanReferenceDbSeed]> = [
+    ['a SCHEDULED paid term', { subscriptionTerms: [{ id: 't', planId: 'p1', status: 'SCHEDULED' }] }],
+    ['a RESERVED paid trial', { trialClaims: [{ id: 'c', planId: 'p1', status: 'RESERVED' }] }],
+    [
+      'a wheel sector minting a code for it',
+      { wheelSectors: [{ id: 'w', kind: 'PROMOCODE', promoPlanId: 'p1', promoRewardType: 'SUBSCRIPTION' }] },
+    ],
+    [
+      'a recent cancelled checkout a late webhook can revive',
+      {
+        transactions: [
+          { id: 'x', status: 'CANCELED', planSnapshot: { id: 'p1' }, fulfilledAt: null, createdAt: new Date() },
+        ],
+      },
+    ],
+  ];
+
+  for (const [what, extra] of kinds) {
+    it(`keeps it for ${what}`, async () => {
+      const { service, plans } = build({ plans: [{ id: 'p1' }], extra });
+
+      await service.sweep();
+
+      assert.equal(plans.length, 1);
+    });
+  }
+
+  it('locks the candidates before it counts their references', async () => {
+    const { service, db } = build({ plans: [{ id: 'p1' }] });
+
+    await service.sweep();
+
+    const lock = db.calls.indexOf('$queryRaw:lock-plans');
+    const firstCount = db.calls.findIndex((call) => call.endsWith('.count') || call.endsWith('.groupBy'));
+    assert.ok(lock >= 0 && firstCount > lock, `order was: ${db.calls.join(' -> ')}`);
+  });
+});
+
 describe('the order of the surviving plans', () => {
   it('leaves no hole and no duplicate after removing ONE plan', async () => {
     const { service, plans } = build({
@@ -424,6 +580,23 @@ describe('the order of the surviving plans', () => {
     await service.sweep();
 
     assert.equal(order(plans), 'c@0 d@1');
+  });
+
+  it('compacts the VISIBLE plans only: a hidden plan still on hold leaves no hole', async () => {
+    const { service, plans } = build({
+      plans: [
+        { id: 'held', orderIndex: 0, deletedAt: DELETED_AT },
+        { id: 'gone', orderIndex: 1 },
+        { id: 'a', orderIndex: 2, isArchived: false },
+        { id: 'b', orderIndex: 3, isArchived: false },
+      ],
+      subs: [{ planId: 'held', status: 'ACTIVE' }],
+    });
+
+    await service.sweep();
+
+    assert.ok(plans.some((p) => p.id === 'held'));
+    assert.equal(order(plans), 'a@0 b@1');
   });
 
   it('leaves a already-compact table alone', async () => {

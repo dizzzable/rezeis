@@ -575,6 +575,139 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
+  // ── A soft-deleted source plan (plan-deletion contract v2) ────────────────
+  //
+  // The row is kept for obligations already taken, but for a RENEWAL it is
+  // gone: the subscriber is offered the active catalogue to choose from — the
+  // same answer a plan whose row is missing gets — never the deleted plan and
+  // never silently its own replacement list. UPGRADE from it is unchanged: the
+  // row still exists to reprice against.
+  it('offers the active catalogue, not the deleted plan, when a RENEW source plan is soft-deleted', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'deleted-plan' })],
+      plans: [
+        createPlan({ id: 'deleted-plan', availability: PlanAvailability.ALL, deleted: true }),
+        createPlan({ id: 'catalog-a', availability: PlanAvailability.ALL }),
+        createPlan({ id: 'catalog-b', availability: PlanAvailability.ALL }),
+        createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL }),
+      ],
+    });
+
+    const discovery = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      channel: PurchaseChannel.WEB,
+    });
+    const onDeleted = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      planId: 'deleted-plan',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+    const onChosen = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      planId: 'catalog-b',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      discovery.availablePlans.map((plan) => plan.id),
+      ['catalog-a', 'catalog-b'],
+    );
+    assert.equal(onDeleted.isEligible, false, 'a renewal was quoted onto the deleted plan');
+    assert.ok(onDeleted.warnings.some((warning) => warning.code === 'PLAN_NOT_AVAILABLE'));
+    assert.equal(onChosen.isEligible, true, 'the plan the subscriber chose could not be renewed onto');
+  });
+
+  it('still renews a LIVE archived SELF_RENEW plan onto itself — the case the one above differs from only by the delete', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'old-plan' })],
+      plans: [
+        createPlan({ id: 'old-plan', availability: PlanAvailability.ALL, isArchived: true }),
+        createPlan({ id: 'catalog-a', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const discovery = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      discovery.availablePlans.map((plan) => plan.id),
+      ['old-plan'],
+    );
+  });
+
+  it('does not fall back to a soft-deleted plan’s own replacement list', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'deleted-plan' })],
+      plans: [
+        createPlan({
+          id: 'deleted-plan',
+          availability: PlanAvailability.ALL,
+          deleted: true,
+          archivedRenewMode: 'REPLACE_ON_RENEW',
+          replacementPlanIds: ['replacement'],
+        }),
+        createPlan({ id: 'replacement', availability: PlanAvailability.ALL }),
+        createPlan({ id: 'catalog-a', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const discovery = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      discovery.availablePlans.map((plan) => plan.id),
+      ['replacement', 'catalog-a'],
+    );
+  });
+
+  it('keeps UPGRADE from a soft-deleted plan working against its upgrade targets', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'deleted-plan' })],
+      plans: [
+        createPlan({
+          id: 'deleted-plan',
+          availability: PlanAvailability.ALL,
+          deleted: true,
+          upgradeToPlanIds: ['bigger'],
+        }),
+        createPlan({ id: 'bigger', availability: PlanAvailability.ALL }),
+        createPlan({ id: 'catalog-a', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const quote = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.UPGRADE,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      quote.availablePlans.map((plan) => plan.id),
+      ['bigger'],
+    );
+  });
+
   it('returns a missing source plan warning for legacy subscription snapshots', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
@@ -748,6 +881,8 @@ function createPlan(input: {
   readonly replacementPlanIds?: readonly string[];
   readonly upgradeToPlanIds?: readonly string[];
   readonly trialSettings?: Record<string, unknown>;
+  /** Soft-deleted: stamped, archived and inactive, as `PlanDeletionService` leaves it. */
+  readonly deleted?: boolean;
 }): Record<string, unknown> {
   return {
     id: input.id,
@@ -755,8 +890,9 @@ function createPlan(input: {
     name: input.id,
     description: null,
     tag: null,
-    isActive: true,
-    isArchived: input.isArchived ?? false,
+    isActive: input.deleted !== true,
+    deletedAt: input.deleted === true ? new Date('2026-09-01T00:00:00.000Z') : null,
+    isArchived: input.deleted === true ? true : (input.isArchived ?? false),
     archivedRenewMode: input.archivedRenewMode ?? 'SELF_RENEW',
     type: PlanType.BOTH,
     availability: input.availability,

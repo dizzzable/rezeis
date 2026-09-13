@@ -11,6 +11,11 @@ import { CreatePlanDto } from '../dto/create-plan.dto';
 import { PlanMoveDirection } from '../dto/move-plan.dto';
 import { UpdatePlanDto } from '../dto/update-plan.dto';
 import { AdminPlanInterface } from '../interfaces/admin-plan.interface';
+import {
+  LIVE_PLAN_WHERE,
+  ReleasedPlanName,
+  releasePlanNameFromDeletedPlan,
+} from '../utils/plan-deletion.util';
 import { mapAdminPlan, PLAN_INCLUDE } from '../utils/plan-record.util';
 
 import {
@@ -97,6 +102,9 @@ export class PlansAdminService {
 
   public async listPlans(): Promise<readonly AdminPlanInterface[]> {
     const plans = await this.prismaService.plan.findMany({
+      // A soft-deleted plan is gone for the operator: the row is kept only so
+      // obligations already taken can resolve it by id (`PlanDeletionService`).
+      where: LIVE_PLAN_WHERE,
       include: PLAN_INCLUDE,
       orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
     });
@@ -122,8 +130,22 @@ export class PlansAdminService {
   ): Promise<AdminPlanInterface> {
     const normalizedInput = normalizeCreatePlanInput(input);
     await this.plansAdminValidators.assertPlanWriteIsValid({ planId: null, input: normalizedInput });
+    const nameHolder = await this.plansAdminValidators.findDeletedPlanHoldingName(
+      null,
+      normalizedInput.name,
+    );
     const createdPlan = await this.prismaService.$transaction(async (transactionClient) => {
+      // A DELETED plan holding the name gives it up instead of refusing the
+      // operator over a plan they can no longer see — in this transaction, so
+      // the rename and the create commit together or not at all.
+      const releasedName =
+        nameHolder === null
+          ? null
+          : await releasePlanNameFromDeletedPlan(transactionClient, nameHolder);
       const lastPlan = await transactionClient.plan.findFirst({
+        // The last VISIBLE plan: a hidden one's index is meaningless, and
+        // appending after it would open a gap in the order on screen.
+        where: LIVE_PLAN_WHERE,
         orderBy: { orderIndex: 'desc' },
         select: { orderIndex: true },
       });
@@ -144,6 +166,7 @@ export class PlansAdminService {
         metadata: {
           planId: created.id,
           name: created.name,
+          ...releasedNameMetadata(releasedName),
         },
       });
       return created;
@@ -168,8 +191,18 @@ export class PlansAdminService {
         externalSquad: currentPlan.externalSquad,
       },
     });
+    // Only a RENAME can collide with a deleted plan: the current name is this
+    // row's own, and the unique index guarantees no other row holds it.
+    const nameHolder =
+      normalizedInput.name === currentPlan.name
+        ? null
+        : await this.plansAdminValidators.findDeletedPlanHoldingName(planId, normalizedInput.name);
     const { updated, propagation } = await this.prismaService.$transaction(
       async (transactionClient) => {
+        const releasedName =
+          nameHolder === null
+            ? null
+            : await releasePlanNameFromDeletedPlan(transactionClient, nameHolder);
         const updatedPlan = await transactionClient.plan.update({
           where: { id: planId },
           data: {
@@ -248,6 +281,7 @@ export class PlansAdminService {
             name: updatedPlan.name,
             source: PLAN_UPDATE_SOURCES.PLANS_TAB,
             squadPropagation: { ...squadPropagation.summary },
+            ...releasedNameMetadata(releasedName),
           },
         });
         return { updated: updatedPlan, propagation: squadPropagation };
@@ -322,7 +356,9 @@ export class PlansAdminService {
     readonly context: AdminMutationContext;
   }): Promise<PlanAccessChangeResultInterface> {
     const plan = await this.prismaService.plan.findUnique({
-      where: { id: input.planId },
+      // A deleted plan is not offered on the user card, so a toggle for one is
+      // a stale page: answered like any other plan that is not there.
+      where: { id: input.planId, deletedAt: null },
       select: { id: true, name: true, availability: true },
     });
     if (plan === null) {
@@ -409,6 +445,9 @@ export class PlansAdminService {
   ): Promise<AdminPlanInterface> {
     const updatedPlan = await this.prismaService.$transaction(async (transactionClient) => {
       const plans = await transactionClient.plan.findMany({
+        // The neighbours on SCREEN: swapping with a hidden plan would move
+        // nothing the operator can see, and a deleted plan cannot be moved.
+        where: LIVE_PLAN_WHERE,
         orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
         select: { id: true, orderIndex: true },
       });
@@ -463,7 +502,11 @@ export class PlansAdminService {
     context: AdminMutationContext,
   ): Promise<readonly AdminPlanInterface[]> {
     await this.prismaService.$transaction(async (transactionClient) => {
-      const existing = await transactionClient.plan.findMany({ select: { id: true } });
+      // A stale page may still send a deleted plan's id; it takes no slot.
+      const existing = await transactionClient.plan.findMany({
+        where: LIVE_PLAN_WHERE,
+        select: { id: true },
+      });
       const existingIds = new Set(existing.map((plan) => plan.id));
       let index = 0;
       for (const id of orderedIds) {
@@ -484,45 +527,20 @@ export class PlansAdminService {
     return this.listPlans();
   }
 
-  public async deletePlan(planId: string, context: AdminMutationContext): Promise<void> {
-    await this.prismaService.$transaction(async (transactionClient) => {
-      const existingPlan = await transactionClient.plan.findUnique({
-        where: { id: planId },
-        select: { id: true, name: true, orderIndex: true },
-      });
-      if (existingPlan === null) {
-        throw new NotFoundException('Plan not found');
-      }
-      await this.plansAdminValidators.assertPlanDeleteIsAllowed(planId, transactionClient);
-      await transactionClient.plan.delete({ where: { id: planId } });
-      const remainingPlans = await transactionClient.plan.findMany({
-        where: { orderIndex: { gt: existingPlan.orderIndex } },
-        orderBy: { orderIndex: 'asc' },
-        select: { id: true, orderIndex: true },
-      });
-      for (const plan of remainingPlans) {
-        await transactionClient.plan.update({
-          where: { id: plan.id },
-          data: { orderIndex: plan.orderIndex - 1 },
-        });
-      }
-      await this.logAdminAction({
-        transactionClient,
-        action: 'plans.deleted',
-        context,
-        metadata: {
-          planId,
-          name: existingPlan.name,
-        },
-      });
-    });
-  }
+  // Deleting a plan lives in `PlanDeletionService`: it is decided by the shared
+  // reference guard, not by the write validators this class orchestrates.
 
   // ── Internal helpers ─────────────────────────────────────────────────────
 
+  /**
+   * The plan an operator is about to read or change. A soft-deleted plan is
+   * NOT FOUND here, which is what keeps it gone for every route built on this:
+   * the editor, archive/unarchive and the squad propagation status. An edit
+   * could otherwise switch a deleted plan back on sale.
+   */
   private async getRequiredPlan(planId: string) {
     const plan = await this.prismaService.plan.findUnique({
-      where: { id: planId },
+      where: { id: planId, deletedAt: null },
       include: PLAN_INCLUDE,
     });
     if (plan === null) {
@@ -552,4 +570,21 @@ export class PlansAdminService {
       },
     });
   }
+}
+
+/**
+ * Audit metadata for a create or rename that took a deleted plan's name. Absent
+ * when nothing was released, so the rows every other write produces keep the
+ * exact shape they always had.
+ */
+function releasedNameMetadata(released: ReleasedPlanName | null): Prisma.InputJsonObject {
+  if (released === null) {
+    return {};
+  }
+  return {
+    releasedNameFromDeletedPlan: {
+      planId: released.planId,
+      renamedTo: released.newName,
+    },
+  };
 }

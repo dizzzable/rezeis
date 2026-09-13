@@ -99,6 +99,8 @@ function createHarness(opts: {
     // The shared notice-payload builder. Inert here: what these cases are
     // about is who gets notified and how often, not what the message says.
     { build: async () => ({}) } as never,
+    // Renewal plan selection. Not reached by the warning emitters.
+    { requiresPlanSelection: async () => false } as never,
   );
   return { service, createdFor, counters };
 }
@@ -305,11 +307,121 @@ describe('AutoRenewService.processAutopayCharges', () => {
       // The shared notice-payload builder. Inert here: what these cases are
       // about is who gets notified and how often, not what the message says.
       { build: async () => ({}) } as never,
+      // A renewal that needs no plan choice: the case is about the attempt key.
+      { requiresPlanSelection: async () => false } as never,
     );
 
     const result = await service.processAutopayCharges();
 
     assert.equal(renewalCalls, 0);
     assert.deepEqual(result, { attempted: 0, succeeded: 0, failed: 0, skipped: 1 });
+  });
+});
+
+/**
+ * AUTOPAY NEVER CHARGES FOR A PLAN THE SUBSCRIBER DID NOT CHOOSE.
+ *
+ * The defect: a subscription whose plan had been deleted was quoted for renewal
+ * onto `availablePlans[0]` — the FIRST catalogue plan — with no choice
+ * required, and this service charged the saved card for it. The renewal quote
+ * now asks the subscriber to choose instead (`SubscriptionRenewalService`), and
+ * these cases pin what autopay does with that answer: it does not try, it does
+ * not count the non-attempt as a failed payment, and it lets the subscription
+ * lapse on time so the ordinary `expired` notice — with its "renew" button — is
+ * what reaches the customer.
+ *
+ * The selection answer is stubbed here; the answer itself (missing plan,
+ * soft-deleted plan, plan-less import) is pinned in
+ * `test/subscription-renewal.service.spec.ts` and against PostgreSQL in
+ * `test/plan-delete-postgres.spec.ts`.
+ */
+describe('autopay and a renewal that needs the subscriber’s choice', () => {
+  function autopayHarness(options: {
+    readonly needsChoice: ReadonlySet<string>;
+    readonly expiresAt: Date;
+    readonly status?: SubscriptionStatus;
+  }) {
+    const checkoutsFor: string[] = [];
+    const asked: string[] = [];
+    const expiredIds: string[][] = [];
+    const prisma = {
+      subscription: {
+        findMany: async () => [
+          { id: 'sub-needs-choice', userId: 'user-1', expiresAt: options.expiresAt },
+          { id: 'sub-ordinary', userId: 'user-2', expiresAt: options.expiresAt },
+        ],
+        updateMany: async (args: { where: { id: { in: string[] } } }) => {
+          expiredIds.push([...args.where.id.in]);
+          return { count: args.where.id.in.length };
+        },
+      },
+      // No attempts yet for either subscription in this expiry epoch.
+      transaction: { findMany: async () => [] },
+    };
+    const service = new AutoRenewService(
+      prisma as never,
+      { create: async () => undefined } as never,
+      {
+        renewalCheckout: async (input: { subscriptionIds: string[] }) => {
+          checkoutsFor.push(...input.subscriptionIds);
+          return {
+            paymentId: `pay-${input.subscriptionIds[0]}`,
+            transactionStatus: TransactionStatus.PENDING,
+            checkoutUrl: null,
+          };
+        },
+      } as never,
+      {
+        findPreferredForCharge: async () => ({ id: 'method-1', gatewayType: PaymentGatewayType.YOOKASSA }),
+      } as never,
+      { build: async () => ({}) } as never,
+      {
+        requiresPlanSelection: async (subscriptionId: string) => {
+          asked.push(subscriptionId);
+          return options.needsChoice.has(subscriptionId);
+        },
+      } as never,
+    );
+    return { service, checkoutsFor, asked, expiredIds };
+  }
+
+  it('does not charge it, and still charges the ordinary one beside it', async () => {
+    const h = autopayHarness({
+      needsChoice: new Set(['sub-needs-choice']),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const result = await h.service.processAutopayCharges();
+
+    assert.deepEqual(h.checkoutsFor, ['sub-ordinary'], 'the card was charged for a plan nobody chose');
+    assert.deepEqual(result, { attempted: 1, succeeded: 0, failed: 0, skipped: 2 });
+  });
+
+  it('counts it as skipped on every tick, never as a failed payment', async () => {
+    const h = autopayHarness({
+      needsChoice: new Set(['sub-needs-choice', 'sub-ordinary']),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const first = await h.service.processAutopayCharges();
+    const second = await h.service.processAutopayCharges();
+
+    assert.deepEqual(first, { attempted: 0, succeeded: 0, failed: 0, skipped: 2 });
+    assert.deepEqual(second, first);
+    assert.deepEqual(h.checkoutsFor, []);
+  });
+
+  it('lets it expire on time instead of holding it ACTIVE for a retry that cannot succeed', async () => {
+    const h = autopayHarness({
+      needsChoice: new Set(['sub-needs-choice']),
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+
+    await h.service.markExpiredSubscriptions();
+
+    assert.deepEqual(h.expiredIds, [['sub-needs-choice']], 'the subscription needing a choice was not expired');
+    // The ordinary one still has retries and a card: it is charged past due
+    // and left ACTIVE — the non-vacuous half of the same case.
+    assert.deepEqual(h.checkoutsFor, ['sub-ordinary']);
   });
 });

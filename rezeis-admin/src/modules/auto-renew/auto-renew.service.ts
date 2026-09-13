@@ -11,6 +11,7 @@ import { UserNotificationsService } from '../notifications/services/user-notific
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
 import { SubscriptionNoticePayloadService } from '../remnawave/services/subscription-notice-payload.service';
+import { SubscriptionRenewalService } from '../subscriptions/services/subscription-renewal.service';
 
 /**
  * One tick's worth of expiry warnings. Larger than the expired batch because a
@@ -78,6 +79,13 @@ export class AutoRenewService {
      * the same words.
      */
     private readonly noticePayload: SubscriptionNoticePayloadService,
+    /**
+     * Answers whether a renewal needs the SUBSCRIBER to choose a plan — the
+     * plan it was on was deleted, or it never had one. Autopay cannot choose,
+     * so it does not charge such a subscription at all (see
+     * `processAutopayCharges`).
+     */
+    private readonly subscriptionRenewalService: SubscriptionRenewalService,
   ) {}
 
   /**
@@ -150,6 +158,26 @@ export class AutoRenewService {
       const method = await this.savedPaymentMethodService.findPreferredForCharge(sub.userId);
       if (method === null) {
         skipped += 1;
+        continue;
+      }
+
+      // ── A RENEWAL THAT NEEDS A CHOICE IS NOT CHARGED ───────────────────
+      //
+      // When the subscription's plan was deleted (or it never had one), the
+      // renewal quote offers the active catalogue and asks the subscriber to
+      // pick. Before that rule, the quote silently picked the FIRST catalogue
+      // plan and this loop charged the saved card for it — a plan the customer
+      // never chose. Now the checkout would refuse the unpriced renewal instead,
+      // and refusing it here, before the attempt, is what keeps that refusal
+      // from being counted as a failed payment on every tick and from holding
+      // the subscription ACTIVE past its date waiting for a retry that cannot
+      // succeed. It lapses normally, and the ordinary expiry notice — with its
+      // "renew" button — is what tells the customer to choose.
+      if (await this.subscriptionRenewalService.requiresPlanSelection(sub.id)) {
+        skipped += 1;
+        this.logger.log(
+          `Autopay skipped for subscription ${sub.id}: renewing it needs a plan the subscriber has to choose`,
+        );
         continue;
       }
 
@@ -255,7 +283,16 @@ export class AutoRenewService {
       }
 
       const method = await this.savedPaymentMethodService.findPreferredForCharge(sub.userId);
-      if (method !== null && attemptState.usedAttempts < MAX_AUTOPAY_ATTEMPTS) {
+      if (
+        method !== null &&
+        attemptState.usedAttempts < MAX_AUTOPAY_ATTEMPTS &&
+        // A renewal that needs the subscriber's choice has no retry to wait
+        // for — the past-due pass below would only refuse it again, and without
+        // a transaction row the attempt count never moves, so it would stay
+        // ACTIVE past its date for ever. It expires like a subscription with no
+        // card, which is also what sends it the `expired` notice.
+        !(await this.subscriptionRenewalService.requiresPlanSelection(sub.id))
+      ) {
         // Still has retries left — leave ACTIVE so processAutopayCharges can
         // fire on next tick even if slightly past expiresAt (window closed for
         // pre-expiry, but past-due retries still allowed until max attempts).

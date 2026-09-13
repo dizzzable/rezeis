@@ -9,6 +9,8 @@ import { AdminPlansController } from './controllers/admin-plans.controller';
 import { AdminPlansStatsController } from './controllers/admin-plans-stats.controller';
 import { InternalPlanCatalogController } from './controllers/internal-plan-catalog.controller';
 import { PlanCatalogService } from './services/plan-catalog.service';
+import { PlanDeletionService } from './services/plan-deletion.service';
+import { PlanReferenceGuardService } from './services/plan-reference-guard.service';
 import { PlanSquadPropagationService } from './services/plan-squad-propagation.service';
 import { PlansAdminService } from './services/plans-admin.service';
 import { PlansAdminValidators } from './services/plans-admin.validators';
@@ -48,6 +50,10 @@ import { PricingService } from './services/pricing.service';
   providers: [
     PricingService,
     PlanCatalogService,
+    // ONE reference guard, read by the delete dialog, the delete and the
+    // nightly sweep — see `PlanReferenceGuardService`.
+    PlanReferenceGuardService,
+    PlanDeletionService,
     PlanSquadPropagationService,
     PlansAdminService,
     PlansAdminValidators,
