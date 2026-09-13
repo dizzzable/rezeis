@@ -18,20 +18,39 @@ Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
 ## Remnawave compatibility
 
-`rezeis-admin` talks to a Remnawave panel over plain HTTP and decodes the answers itself. **No vendor schema is ever applied to a live RESPONSE, and there is no contract version to keep in step with the live panel.** That is the claim that matters, and it is the one that holds: every response is read by the tolerant local decoders in `panel-response-decoders.ts`.
+`rezeis-admin` talks to Remnawave panels over plain HTTP, and the fleet it serves runs many panel versions at once — 2.7 through 3.4. Two paths do the talking, and they treat vendor schemas differently. This section used to say that no vendor schema is ever applied to a live response. **That was wrong**, and it is corrected here (13.09.2026) rather than quietly rewritten:
 
-What does NOT hold, and used to be asserted here: "no `@remnawave/*` package runs at runtime". One of the four does. `@remnawave/contract-v34` sits in `dependencies` and `panel-infra.client.ts`, `panel-users.client.ts` and `panel-devices.client.ts` import VALUES from it — route constants, inferred types, and the request-side `RequestParamSchema` / `RequestQuerySchema` used to refuse a malformed outgoing request before it is sent. So it ships inside the published image, carrying its AGPL-3.0-only licence. Whether that is acceptable is a licensing question for the owner and it is open; it is written down here rather than papered over, because the sentence it replaces was checked by a command that could not fail (see the end of this section).
+- **`remnawave-api.service.ts`** reads answers with the tolerant local decoders in `panel-response-decoders.ts`. No vendor schema is involved.
+- **`panel-infra.client.ts`, `panel-users.client.ts` and `panel-devices.client.ts`** go through `panel-command.executor.ts`, which DOES apply the pinned vendor contract to live traffic in both directions: an outgoing body is replaced by its parsed form, path and query parameters are validated so a malformed request is refused before it is sent, and **every response is `safeParse`d** — on success the caller receives the parsed data (undeclared keys stripped, date strings turned into `Date`), on a mismatch a drift warning is logged and the raw body is returned. It never throws on a mismatch, which is the lesson of a real outage: the adapter once used `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3` as a hard gate, 3.x renamed `responseHeaders` to `responseHeadersAdd` + `responseHeadersRemove`, and every 3.x install with an external squad got `ServiceUnavailableException` from a healthy panel.
 
-That is deliberate, and it is the fix for a real outage. The adapter used to `safeParse` live responses with `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3`, a production dependency. That schema requires `responseHeaders` on every external-squad row; panel 3.x renamed the field to `responseHeadersAdd` + `responseHeadersRemove`, so the parse failed deterministically and the squad read threw `ServiceUnavailableException` against a perfectly healthy 3.x panel — every time it had at least one external squad. A vendor schema describes ONE era. rezeis serves every era its operators are still running, and they upgrade on their own schedule, so pinning forward would simply have moved the outage onto the installations still on 2.x.
+So one vendor package is a runtime dependency: `@remnawave/contract-v34` sits in `dependencies`, ships inside the published image, and carries its AGPL-3.0-only licence. Whether that is acceptable is a licensing question for the owner and it is open. The check this section used to name could not fail, because it names a different package:
 
-| Live panel | Runtime decoding                                     | Notes                                                              |
-|------------|------------------------------------------------------|--------------------------------------------------------------------|
-| `2.7.x`    | tolerant local decoders, no vendor package            | No `/api/system/recap`, `/api/system/bandwidth`, `/api/hwid/stats` |
-| `2.8.x`    | same                                                  | Adds the recap/bandwidth/hwid surface                              |
-| `3.0`–`3.3`| same                                                  | Numeric user ids, `/api/connections/*` replaces `/api/ip-control/*` |
-| `3.4.x`    | same                                                  | Host squad rule became `internalSquads: { mode, squads }`; verified through `3.4.4` |
+```bash
+npm ls --omit=dev @remnawave/backend-contract   # (empty)
+npm ls --omit=dev @remnawave/contract-v34       # present, and therefore in the image
+```
 
-Upgrading the live panel therefore needs no dependency change here. The Remnawave page in the admin SPA degrades gracefully when an endpoint is missing (shows a "metric is unavailable" notice instead of crashing).
+### Contract versions follow panel releases, not the other way round
+
+Remnawave publishes the pairing at <https://docs.rw/sdk/typescript-sdk/> ("Always pick and pin the correct version of the SDK to match the version of the Remnawave backend"). The rows that matter for this fleet, cross-checked against `libs/contract/package.json` at each backend tag:
+
+| Live panel | Contract it ships |
+|------------|-------------------|
+| `2.7.3`–`2.7.4` | `2.7.2` |
+| `2.8.0`–`2.8.1` | `2.8.35` |
+| `3.2.0`–`3.2.1` | `3.2.0` |
+| `3.2.3` | `3.2.3` |
+| `3.3.0`–`3.3.2` | `3.4.2` |
+| `3.4.0`–`3.4.3` | `3.4.13` |
+| `3.4.4` | `3.4.15` |
+
+Three consequences, all measured:
+
+- **The contract's number is not the panel's.** `3.4.2` is the contract of panel **3.3**. Contract releases are also published ahead of panel tags — `3.4.3` to `3.4.12` appeared before panel 3.4.0 existed — so a contract version can match no panel at all. The current runtime pin, `3.4.10`, is one of those, and so is the `~2.7.3` oracle.
+- **No single contract is quiet on every era.** From `3.4.11` on, `tags` is required on six list rows (internal and external squads, config profiles, node plugins, subpage configs, templates); panels 3.2 and 3.3 do not send it, so a 3.4.13+ runtime pin logs drift on every healthy 3.2/3.3 squad read — which is exactly what `test/panel-infra-client.spec.ts` caught when the pin was tried at 3.4.15. `3.4.10` already logs drift on 3.2 node rows. `3.4.12` and later also pin zod exactly at 4.5.x.
+- **The request side is identical across the whole 3.x fleet.** Between contracts `3.2.2` and `3.4.15`, none of the 55 commands the three clients import changed its URL, verb, or request schema. Moving the pin from `3.4.2` to `3.4.10` in 0.9.7.55 therefore changed nothing that is sent.
+
+Era detection keys on the MAJOR version only (`panel-version.util.ts`), so every 3.4.x is handled the same way with no list to extend.
 
 **Panel 3.4.4 (12.09.2026) needs nothing here, and that is a checked statement rather than a hopeful one.** The whole `3.4.3...3.4.4` diff is 27 files; on the surface rezeis reads, every change is additive: a `POST /api/hosts/actions/clone` endpoint with its route and one new error code (`A258`), and three new subscription-template variables. No host, user, node or internal-squad response schema moved. Specifically checked because it would have mattered:
 
@@ -40,25 +59,7 @@ Upgrading the live panel therefore needs no dependency change here. The Remnawav
 - The default response rules changed one user-agent regex. rezeis only checks that `responseRules` is an object, and never reads the rules.
 - The "subscription request payload" fix renames a field inside Remnawave's own Redis stream, which rezeis does not consume.
 
-Era detection keys on the MAJOR version only (`panel-version.util.ts`), so 3.4.4 is handled exactly as 3.4.1–3.4.3 with no list to extend.
-
-The vendor contracts are the CI oracle for both eras — `@remnawave/backend-contract` (2.7.3), `@remnawave/contract-v28` (2.8.35), `@remnawave/contract-v3` (3.2.3) and `@remnawave/contract-v34` (3.4.10). The guard specs execute them so a drifting route or row shape fails a test at build time instead of against a live panel at run time.
-
-**Three of the four are devDependencies and stay out of the image; `contract-v34` does not.** `Dockerfile` stage 1 runs `npm ci --omit=dev`, which removes the 2.7, 2.8 and 3.2 pins, and keeps the 3.4 one because `src/` imports it. The check this section used to name proves nothing, because it names the wrong package — run both and the difference is the finding:
-
-```bash
-npm ls --omit=dev @remnawave/backend-contract   # (empty) — as advertised
-npm ls --omit=dev @remnawave/contract-v34       # present, and therefore in the image
-```
-
-**The 3.4 pin stops at `3.4.10`, and the ceiling has two independent reasons.** It is well past `3.4.3`, where the host squad rename landed, so `PanelHost` names `internalSquads` and knows `ALLOW_ONLY` as panel 3.4 does. What it cannot do is follow the contract to its newest release:
-
-- **`3.4.11` made `tags` REQUIRED on an internal squad.** A genuine 3.3.2 answer does not carry it, so the pinned schema rejects a HEALTHY panel and every squad read is logged as drift. A drift flag that fires on healthy answers carries no information; `test/panel-infra-client.spec.ts` replays a captured 3.3.2 body and asserts the flag stays down, which is what caught this.
-- **`3.4.12` moved to zod 4.5.x.** This repository pins zod at exactly `4.4.3`, and so does the cabinet. A contract on a different zod minor stops deduplicating and installs a SECOND copy, and two zod instances do not share types — the `PanelCommand` boundary in `panel-devices.client.ts` stops compiling.
-
-Going further is a change of its own: the first is a fleet decision about which panel versions the oracle should describe, the second a zod upgrade across both repositories. `mapHost` remains the authority for a host row either way — it reads both shapes and is tested against the OpenAPI dumps, because the fleet runs 2.7 through 3.4 at once.
-
-Contract package versions do NOT track panel versions: panel `3.4.4` ships contract `3.4.15`.
+`mapHost` remains the authority for a host row: it reads both the pre-3.4 and the 3.4 squad shapes and is tested against the OpenAPI dumps.
 
 ## Quick start
 
