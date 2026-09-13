@@ -3,6 +3,7 @@ import { ExternalAuthProvider, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CryptoService } from '../../oauth/services/crypto.service';
+import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import {
   DisposableEmailMode,
   ExternalAuthPolicy,
@@ -225,31 +226,41 @@ export class ExternalProviderConfigService {
     return readPolicy(settings?.platformPolicy);
   }
 
+  /**
+   * `platformPolicy` also carries the platform-branding texts that
+   * `SettingsService.updatePlatformSettings` merges into it, and both used to
+   * write the whole column back from their own read. This one read outside any
+   * transaction, so a policy save racing a branding save restored the other's
+   * previous value. The merge now starts from the row read under the lock.
+   */
   public async updatePolicy(input: Partial<ExternalAuthPolicy>): Promise<ExternalAuthPolicy> {
-    const settings = await this.prismaService.settings.findFirst({
-      select: { id: true, platformPolicy: true },
-    });
-    if (!settings) throw new BadRequestException('Settings row not initialized');
-    const current = readPolicy(settings.platformPolicy);
-    const next: ExternalAuthPolicy = {
-      mode: input.mode !== undefined && DISPOSABLE_MODES.includes(input.mode) ? input.mode : current.mode,
-      customBlocklist: normalizeDomains(input.customBlocklist ?? current.customBlocklist),
-      allowlist: normalizeDomains(input.allowlist ?? current.allowlist),
-      gateProvidersByEmailModule:
-        input.gateProvidersByEmailModule ?? current.gateProvidersByEmailModule,
-    };
-    const base = isRecord(settings.platformPolicy) ? settings.platformPolicy : {};
-    const externalAuthJson: Prisma.InputJsonObject = {
-      mode: next.mode,
-      customBlocklist: [...next.customBlocklist],
-      allowlist: [...next.allowlist],
-      gateProvidersByEmailModule: next.gateProvidersByEmailModule,
-    };
-    await this.prismaService.settings.update({
-      where: { id: settings.id },
-      data: { platformPolicy: { ...base, externalAuth: externalAuthJson } as Prisma.InputJsonObject },
-    });
-    return next;
+    return mutateExistingSettingsRow(
+      this.prismaService,
+      async ({ row: settings, write }) => {
+        const current = readPolicy(settings.platformPolicy);
+        const next: ExternalAuthPolicy = {
+          mode: input.mode !== undefined && DISPOSABLE_MODES.includes(input.mode) ? input.mode : current.mode,
+          customBlocklist: normalizeDomains(input.customBlocklist ?? current.customBlocklist),
+          allowlist: normalizeDomains(input.allowlist ?? current.allowlist),
+          gateProvidersByEmailModule:
+            input.gateProvidersByEmailModule ?? current.gateProvidersByEmailModule,
+        };
+        const base = isRecord(settings.platformPolicy) ? settings.platformPolicy : {};
+        const externalAuthJson: Prisma.InputJsonObject = {
+          mode: next.mode,
+          customBlocklist: [...next.customBlocklist],
+          allowlist: [...next.allowlist],
+          gateProvidersByEmailModule: next.gateProvidersByEmailModule,
+        };
+        await write({
+          platformPolicy: { ...base, externalAuth: externalAuthJson } as Prisma.InputJsonObject,
+        });
+        return next;
+      },
+      () => {
+        throw new BadRequestException('Settings row not initialized');
+      },
+    );
   }
 
   private toView(row: {

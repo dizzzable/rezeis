@@ -46,6 +46,8 @@ function createHarness(initial: unknown = {}): Harness {
   const row = () => ({ id: 1, antiFraudSettings: stored, updatedAt: new Date() });
 
   const tx = {
+    // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+    $queryRaw: async () => [{ id: 1 }],
     settings: {
       findFirst: async () => row(),
       update: async (args: { data: { antiFraudSettings?: unknown } }) => {

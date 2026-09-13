@@ -85,6 +85,10 @@ function buildRecordingStub(): {
     adminIpAllowlist: delegate('adminIpAllowlist'),
     faqItem: delegate('faqItem'),
     legalDocument: delegate('legalDocument'),
+    // The settings section takes the singleton row lock (finding no row here)
+    // and inserts the row under a savepoint.
+    $queryRaw: async () => [],
+    $executeRaw: async () => 0,
   };
   return {
     prisma: {

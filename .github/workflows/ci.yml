@@ -198,3 +198,4 @@ jobs:
           test/device-limit-provenance-postgres.spec.ts
           test/subscription-device-limit-reduction.spec.ts
           test/plan-delete-postgres.spec.ts
+          test/settings-row-lock-postgres.spec.ts

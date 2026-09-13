@@ -6,6 +6,7 @@ import { gunzipSync } from 'fflate';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SettingsService } from '../../settings/services/settings.service';
+import { mutateSettingsRow } from '../../settings/utils/settings-row-write.util';
 import {
   CustomEmojiInterface,
   CustomEmojiPackInterface,
@@ -624,36 +625,43 @@ export class CustomEmojiService {
     return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
   }
 
-  /** Append a builtin id to the seeded-defaults marker (idempotent). */
+  /**
+   * Append a builtin id to the seeded-defaults marker (idempotent).
+   *
+   * The marker shares `systemNotifications` with the bot token, the SMTP
+   * password and the VAPID keys, and the seed calls this while the API boots —
+   * when the worker, booting beside it, may be adopting VAPID keys into the
+   * same column. Read under the row lock, so neither write drops the other's key.
+   */
   public async addSeededDefault(id: string): Promise<void> {
-    await this.prismaService.$transaction(async (tx) => {
-      const existing = await tx.settings.findFirst({ orderBy: { updatedAt: 'asc' } });
-      const settings = existing ?? (await tx.settings.create({ data: {} }));
+    await mutateSettingsRow(this.prismaService, async ({ row: settings, write }) => {
       const sn = asObject(settings.systemNotifications);
       const raw = Array.isArray(sn.seededEmojiDefaults)
         ? (sn.seededEmojiDefaults as unknown[]).filter((v): v is string => typeof v === 'string')
         : [];
       if (!raw.includes(id)) raw.push(id);
       sn.seededEmojiDefaults = raw as unknown as Prisma.InputJsonValue;
-      await tx.settings.update({
-        where: { id: settings.id },
-        data: { systemNotifications: sn as Prisma.InputJsonValue },
-      });
+      await write({ systemNotifications: sn as Prisma.InputJsonValue });
     });
   }
 
   // ── persistence ────────────────────────────────────────────────────────
 
+  /**
+   * Store the pack list, keeping every other key of `systemNotifications` as
+   * it stands under the row lock.
+   *
+   * What the lock does NOT cover: `packs` itself was computed by the caller
+   * from an earlier `listPacks()`, outside any transaction and often across
+   * Telegram downloads, so two pack edits that overlap still end with the
+   * later list. Fencing that would mean holding the row lock across network
+   * I/O; it is a separate problem from the one fixed here.
+   */
   private async savePacks(packs: readonly CustomEmojiPackInterface[]): Promise<void> {
-    await this.prismaService.$transaction(async (tx) => {
-      const existing = await tx.settings.findFirst({ orderBy: { updatedAt: 'asc' } });
-      const settings = existing ?? (await tx.settings.create({ data: {} }));
+    await mutateSettingsRow(this.prismaService, async ({ row: settings, write }) => {
       const systemNotifications = asObject(settings.systemNotifications);
       systemNotifications.customEmojiPacks = packs as unknown as Prisma.InputJsonValue;
-      await tx.settings.update({
-        where: { id: settings.id },
-        data: { systemNotifications: systemNotifications as Prisma.InputJsonValue },
-      });
+      await write({ systemNotifications: systemNotifications as Prisma.InputJsonValue });
     });
   }
 

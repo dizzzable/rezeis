@@ -158,6 +158,8 @@ function makeSettingsDb(referralSettings: Record<string, unknown>) {
   const auditLogs: Array<Record<string, unknown>> = [];
 
   const transactionClient = {
+    // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+    $queryRaw: async () => [{ id: row.id }],
     settings: {
       findFirst: async () => row,
       create: async () => row,

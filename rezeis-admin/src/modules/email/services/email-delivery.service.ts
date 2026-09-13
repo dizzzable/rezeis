@@ -9,6 +9,7 @@ import { emailConfig } from '../../../common/config/email.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
+import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import { EMAIL_QUEUE, EMAIL_JOBS } from '../email.constants';
 import type { SendEmailPayload, SmtpSettingsInterface } from '../interfaces/email.interface';
 import { EmailTemplateRendererService } from './email-template-renderer.service';
@@ -220,28 +221,36 @@ export class EmailDeliveryService {
 
   /**
    * Save SMTP settings to the database (Settings.systemNotifications.email).
+   *
+   * This read the column and wrote it back with no transaction and no lock,
+   * so a save overlapping any other `systemNotifications` writer — the bot
+   * token, VAPID keys, Telegram routing — kept only one of the two changes.
+   * The merge now starts from the row read under the lock. No row means no
+   * write, exactly as before: SMTP settings never create the singleton.
    */
   public async saveSmtpSettings(input: Partial<SmtpSettingsInterface>): Promise<SmtpSettingsInterface> {
-    const settings = await this.prismaService.settings.findFirst({
-      select: { id: true, systemNotifications: true },
-    });
+    const saved = await mutateExistingSettingsRow(
+      this.prismaService,
+      async ({ row: settings, write }) => {
+        const existing = (settings.systemNotifications ?? {}) as Record<string, unknown>;
+        const currentEmail = (existing.email ?? {}) as Record<string, unknown>;
 
-    const existing = (settings?.systemNotifications ?? {}) as Record<string, unknown>;
-    const currentEmail = (existing.email ?? {}) as Record<string, unknown>;
+        const updated = {
+          ...existing,
+          email: {
+            ...currentEmail,
+            ...input,
+          },
+        };
 
-    const updated = {
-      ...existing,
-      email: {
-        ...currentEmail,
-        ...input,
+        await write({ systemNotifications: updated });
+        return true;
       },
-    };
+      () => false,
+    );
 
-    if (settings) {
-      await this.prismaService.settings.update({
-        where: { id: settings.id },
-        data: { systemNotifications: updated },
-      });
+    // Announced only once the transaction has committed.
+    if (saved) {
       const updatedFields = Object.keys(input)
         .map((field) => field === 'password' ? 'passwordSet' : field)
         .sort();

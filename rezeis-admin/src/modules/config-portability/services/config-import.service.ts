@@ -13,6 +13,10 @@ import {
 import { isValidPermission } from '../../rbac/rbac.resources';
 import { RESERVED_ROLE_NAMES } from '../../rbac/services/rbac.service';
 import {
+  mutateSettingsRowInTransaction,
+  runSettingsWriteTransaction,
+} from '../../settings/utils/settings-row-write.util';
+import {
   ALL_SECTIONS,
   CONFIG_EXPORT_VERSION,
   ConfigExportManifestInterface,
@@ -432,8 +436,16 @@ export class ConfigImportService {
     input: ConfigImportInput,
   ): Promise<SectionImportSummaryInterface> {
     const { section, rows } = entry;
+    // The settings section rewrites the singleton row, so its transaction is
+    // opened through the settings-write helper: once it settles, the
+    // `SettingsService` row cache in this process stops serving the pre-import
+    // row. Every other section leaves that cache alone.
+    const transaction = <T>(work: (tx: PrismaTransactionClient) => Promise<T>): Promise<T> =>
+      section === 'settings'
+        ? runSettingsWriteTransaction(this.prismaService, work)
+        : this.prismaService.$transaction(work);
     try {
-      const counts = await this.prismaService.$transaction(async (tx) => {
+      const counts = await transaction(async (tx) => {
         const applied = await this.importSection(
           tx,
           section,
@@ -761,6 +773,13 @@ export class ConfigImportService {
    * of this table's twenty-five columns are `Json`, and every secret the export
    * redacts lives INSIDE one of them, so the patch has to reach that far — see
    * `mergeAgainstExistingRow`.
+   *
+   * The row it merges against is read under the settings row lock. Without it
+   * an operator saving, say, the SMTP password while the import ran would see
+   * the import write the pre-save blob back over it. An import into an empty
+   * table that loses the insert race to a concurrent first read no longer
+   * fails the section on a unique violation: the row the winner created is
+   * then treated as the existing one.
    */
   private async upsertSettings(
     tx: PrismaTransactionClient,
@@ -773,19 +792,21 @@ export class ConfigImportService {
     const row = rows[0]!;
     const data = stripRelationFields(coerceTimestamps(row));
     delete data['id'];
-    const existing = await tx.settings.findFirst();
-    if (existing) {
-      if (strategy === 'skip') {
-        return { created: 0, updated: 0, skipped: 1 };
-      }
-      await tx.settings.update({
-        where: { id: existing.id },
-        data: mergeAgainstExistingRow(data, existing),
-      });
-      return { created: 0, updated: 1, skipped: 0 };
-    }
-    await tx.settings.create({ data: { ...data, id: 1 } });
-    return { created: 1, updated: 0, skipped: 0 };
+    return mutateSettingsRowInTransaction(
+      tx,
+      async ({ row: existing, created, write }) => {
+        if (created) {
+          // Inserted from the payload a moment ago; nothing to merge against.
+          return { created: 1, updated: 0, skipped: 0 };
+        }
+        if (strategy === 'skip') {
+          return { created: 0, updated: 0, skipped: 1 };
+        }
+        await write(mergeAgainstExistingRow(data, existing));
+        return { created: 0, updated: 1, skipped: 0 };
+      },
+      { createWith: { ...data, id: 1 } },
+    );
   }
 }
 

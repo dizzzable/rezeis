@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
+import { mutateSettingsRow } from '../../settings/utils/settings-row-write.util';
 import type { AiConfigSettings } from '../interfaces/ai-config.interface';
 import { decryptApiKey, encryptApiKey } from '../utils/ai-secret-cipher';
 
@@ -89,55 +90,59 @@ export class AiConfigService {
    * "keep the existing key", so a round-trip save from the masked admin view can
    * never overwrite the real key with the mask. Legacy plaintext `apiKey` is
    * dropped on write.
+   *
+   * The merge reads the column under the settings row lock. It used to read it
+   * outside any transaction and `upsert` the result, so two saves that
+   * overlapped (the key in one tab, the model in another) kept whichever
+   * committed last — including a key the other save had just replaced. On an
+   * empty table the row is created with its defaults first, which leaves the
+   * same row the `upsert` created.
    */
   public async updateSettings(payload: Partial<AiConfigSettings>): Promise<AiConfigSettings> {
-    const row = await this.prisma.settings.findFirst({ where: { id: 1 } });
-    const storedNow = (row?.aiSupportSettings ?? {}) as Record<string, unknown>;
-    const existing = this.mapStored(storedNow);
+    return mutateSettingsRow(this.prisma, async ({ row, write }) => {
+      const storedNow = (row.aiSupportSettings ?? {}) as Record<string, unknown>;
+      const existing = this.mapStored(storedNow);
 
-    const incomingKey = payload.apiKey;
-    const keepExistingKey =
-      incomingKey === undefined ||
-      incomingKey.trim().length === 0 ||
-      incomingKey.includes('***');
+      const incomingKey = payload.apiKey;
+      const keepExistingKey =
+        incomingKey === undefined ||
+        incomingKey.trim().length === 0 ||
+        incomingKey.includes('***');
 
-    const next: Record<string, unknown> = {
-      baseUrl: payload.baseUrl ?? existing.baseUrl,
-      model: payload.model ?? existing.model,
-      modelsEndpoint: payload.modelsEndpoint ?? existing.modelsEndpoint,
-      enabled: payload.enabled ?? existing.enabled,
-      systemPrompt: payload.systemPrompt ?? existing.systemPrompt,
-    };
+      const next: Record<string, unknown> = {
+        baseUrl: payload.baseUrl ?? existing.baseUrl,
+        model: payload.model ?? existing.model,
+        modelsEndpoint: payload.modelsEndpoint ?? existing.modelsEndpoint,
+        enabled: payload.enabled ?? existing.enabled,
+        systemPrompt: payload.systemPrompt ?? existing.systemPrompt,
+      };
 
-    let resolvedApiKey = existing.apiKey;
-    if (keepExistingKey) {
-      // Preserve the stored encrypted blob VERBATIM so a decrypt failure or a
-      // crypt-key rotation can never wipe the key on an unrelated save (e.g.
-      // toggling `enabled`). Migrate a legacy plaintext key to encrypted form.
-      if (typeof storedNow.apiKeyEnc === 'string' && storedNow.apiKeyEnc.length > 0) {
-        next.apiKeyEnc = storedNow.apiKeyEnc;
-      } else if (typeof storedNow.apiKey === 'string' && storedNow.apiKey.length > 0) {
-        next.apiKeyEnc = encryptApiKey(storedNow.apiKey, this.cryptKey());
+      let resolvedApiKey = existing.apiKey;
+      if (keepExistingKey) {
+        // Preserve the stored encrypted blob VERBATIM so a decrypt failure or a
+        // crypt-key rotation can never wipe the key on an unrelated save (e.g.
+        // toggling `enabled`). Migrate a legacy plaintext key to encrypted form.
+        if (typeof storedNow.apiKeyEnc === 'string' && storedNow.apiKeyEnc.length > 0) {
+          next.apiKeyEnc = storedNow.apiKeyEnc;
+        } else if (typeof storedNow.apiKey === 'string' && storedNow.apiKey.length > 0) {
+          next.apiKeyEnc = encryptApiKey(storedNow.apiKey, this.cryptKey());
+        }
+      } else {
+        resolvedApiKey = incomingKey;
+        next.apiKeyEnc = encryptApiKey(incomingKey, this.cryptKey());
       }
-    } else {
-      resolvedApiKey = incomingKey;
-      next.apiKeyEnc = encryptApiKey(incomingKey, this.cryptKey());
-    }
 
-    await this.prisma.settings.upsert({
-      where: { id: 1 },
-      create: { id: 1, aiSupportSettings: next as object },
-      update: { aiSupportSettings: next as object },
+      await write({ aiSupportSettings: next as object });
+
+      return {
+        baseUrl: next.baseUrl as string,
+        apiKey: resolvedApiKey,
+        model: next.model as string,
+        modelsEndpoint: next.modelsEndpoint as string,
+        enabled: next.enabled as boolean,
+        systemPrompt: next.systemPrompt as string,
+      };
     });
-
-    return {
-      baseUrl: next.baseUrl as string,
-      apiKey: resolvedApiKey,
-      model: next.model as string,
-      modelsEndpoint: next.modelsEndpoint as string,
-      enabled: next.enabled as boolean,
-      systemPrompt: next.systemPrompt as string,
-    };
   }
 
   /**

@@ -5,6 +5,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import type { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { readCustomEmojiPacks } from '../../custom-emoji/utils/custom-emoji-packs.util';
+import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import { buildSlotUsage } from '../utils/slot-usage.util';
 import { BotEmojisService } from './bot-emojis.service';
 import { BotTextsService } from './bot-texts.service';
@@ -92,46 +93,54 @@ export class BotEmojiStudioService {
    * `Settings.systemNotifications.botEmoji`). When off, reiwa strips
    * `custom_emoji` entities so a non-premium owner's messages never fail to
    * send. Audited; the singleton settings row is expected to exist.
+   *
+   * The merge used to start from a row read OUTSIDE the transaction, so the
+   * whole `systemNotifications` blob it wrote back could be older than the
+   * bot token or SMTP password saved a moment before. It now reads under the
+   * row lock. The read up front only decides whether there is anything to
+   * lock; nothing from it reaches the write.
    */
   public async setOwnerHasPremium(input: {
     readonly enabled: boolean;
     readonly admin: CurrentAdminInterface;
     readonly requestMetadata: RequestMetadataInterface;
   }): Promise<boolean> {
-    const settings = await this.prismaService.settings.findFirst({
+    const present = await this.prismaService.settings.findFirst({
       orderBy: { updatedAt: 'asc' },
-      select: { id: true, systemNotifications: true },
+      select: { id: true },
     });
-    if (settings === null) return input.enabled;
+    if (present === null) return input.enabled;
 
-    const sys =
-      typeof settings.systemNotifications === 'object' && settings.systemNotifications !== null
-        ? (settings.systemNotifications as Record<string, unknown>)
-        : {};
-    const botEmoji =
-      typeof sys.botEmoji === 'object' && sys.botEmoji !== null
-        ? (sys.botEmoji as Record<string, unknown>)
-        : {};
-    const next = { ...sys, botEmoji: { ...botEmoji, ownerHasPremium: input.enabled } };
+    await mutateExistingSettingsRow(
+      this.prismaService,
+      async ({ tx, row: settings, write }) => {
+        const sys =
+          typeof settings.systemNotifications === 'object' && settings.systemNotifications !== null
+            ? (settings.systemNotifications as Record<string, unknown>)
+            : {};
+        const botEmoji =
+          typeof sys.botEmoji === 'object' && sys.botEmoji !== null
+            ? (sys.botEmoji as Record<string, unknown>)
+            : {};
+        const next = { ...sys, botEmoji: { ...botEmoji, ownerHasPremium: input.enabled } };
 
-    await this.prismaService.$transaction([
-      this.prismaService.settings.update({
-        where: { id: settings.id },
-        data: { systemNotifications: next as Prisma.InputJsonValue },
-      }),
-      this.prismaService.adminAuditLog.create({
-        data: {
-          action: 'bot_config.emoji.ownerPremium',
-          ipAddress: input.requestMetadata.remoteAddress,
-          userAgent: input.requestMetadata.userAgent,
-          metadata: {
-            requestId: input.requestMetadata.requestId,
-            ownerHasPremium: input.enabled,
-          } as Prisma.InputJsonObject,
-          adminUser: { connect: { id: input.admin.id } },
-        },
-      }),
-    ]);
+        await write({ systemNotifications: next as Prisma.InputJsonValue });
+        await tx.adminAuditLog.create({
+          data: {
+            action: 'bot_config.emoji.ownerPremium',
+            ipAddress: input.requestMetadata.remoteAddress,
+            userAgent: input.requestMetadata.userAgent,
+            metadata: {
+              requestId: input.requestMetadata.requestId,
+              ownerHasPremium: input.enabled,
+            } as Prisma.InputJsonObject,
+            adminUser: { connect: { id: input.admin.id } },
+          },
+        });
+      },
+      // Gone between the check and the lock: the same answer as no row at all.
+      () => undefined,
+    );
     return input.enabled;
   }
 }

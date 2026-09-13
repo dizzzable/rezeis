@@ -33,6 +33,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { BACKUP_QUEUE, BACKUP_JOBS } from '../backup.constants';
 import { SettingsService } from '../../settings/services/settings.service';
+import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import {
   BotNotifierClient,
   type NotifyDeliveryResult,
@@ -293,43 +294,48 @@ export class BackupService implements OnModuleInit {
     };
   }
 
-  /** Persist a partial backup-settings patch into `systemNotifications.backup`. */
+  /**
+   * Persist a partial backup-settings patch into `systemNotifications.backup`.
+   *
+   * `{ ...sys, backup }` writes the WHOLE column back, and `sys` used to be
+   * read outside any transaction, so a save racing another writer of the
+   * column (the bot token, the SMTP password, VAPID keys) restored that key's
+   * previous value. It is read under the row lock now.
+   */
   public async updateSettings(patch: UpdateBackupSettingsInput): Promise<BackupSettingsView> {
-    const settings = await this.prismaService.settings.findFirst({
-      orderBy: { updatedAt: 'asc' },
-      select: { id: true, systemNotifications: true },
-    });
-    if (settings === null) {
-      throw new BadRequestException('Settings row not initialised');
-    }
-    const sys =
-      typeof settings.systemNotifications === 'object' && settings.systemNotifications !== null
-        ? (settings.systemNotifications as Record<string, unknown>)
-        : {};
-    const current = this.normalizeBackupConfig(sys.backup);
+    await mutateExistingSettingsRow(
+      this.prismaService,
+      async ({ row: settings, write }) => {
+        const sys =
+          typeof settings.systemNotifications === 'object' && settings.systemNotifications !== null
+            ? (settings.systemNotifications as Record<string, unknown>)
+            : {};
+        const current = this.normalizeBackupConfig(sys.backup);
 
-    const nextTelegram = {
-      enabled: patch.telegram?.enabled ?? current.telegram.enabled,
-      chatId:
-        patch.telegram?.chatId !== undefined
-          ? normalizeNullableString(patch.telegram.chatId)
-          : current.telegram.chatId,
-      topicId:
-        patch.telegram?.topicId !== undefined
-          ? normalizeNullableTopicId(patch.telegram.topicId)
-          : current.telegram.topicId,
-    };
-    const next = {
-      autoEnabled: patch.autoEnabled ?? current.autoEnabled,
-      intervalHours: clampInt(patch.intervalHours ?? current.intervalHours, 1, 168),
-      maxKeep: clampInt(patch.maxKeep ?? current.maxKeep, 1, 100),
-      telegram: nextTelegram,
-    };
+        const nextTelegram = {
+          enabled: patch.telegram?.enabled ?? current.telegram.enabled,
+          chatId:
+            patch.telegram?.chatId !== undefined
+              ? normalizeNullableString(patch.telegram.chatId)
+              : current.telegram.chatId,
+          topicId:
+            patch.telegram?.topicId !== undefined
+              ? normalizeNullableTopicId(patch.telegram.topicId)
+              : current.telegram.topicId,
+        };
+        const next = {
+          autoEnabled: patch.autoEnabled ?? current.autoEnabled,
+          intervalHours: clampInt(patch.intervalHours ?? current.intervalHours, 1, 168),
+          maxKeep: clampInt(patch.maxKeep ?? current.maxKeep, 1, 100),
+          telegram: nextTelegram,
+        };
 
-    await this.prismaService.settings.update({
-      where: { id: settings.id },
-      data: { systemNotifications: { ...sys, backup: next } as never },
-    });
+        await write({ systemNotifications: { ...sys, backup: next } as never });
+      },
+      () => {
+        throw new BadRequestException('Settings row not initialised');
+      },
+    );
     return this.getSettings();
   }
 

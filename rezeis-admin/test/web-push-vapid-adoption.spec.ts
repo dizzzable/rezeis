@@ -359,6 +359,8 @@ function createService(options: Options) {
   };
 
   const tx = {
+    // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+    $queryRaw: async () => [{ id: settingsRow.id }],
     settings: {
       findFirst: async () => settingsRow,
       update: async (args: { where: { id: number }; data: { systemNotifications: unknown } }) => {

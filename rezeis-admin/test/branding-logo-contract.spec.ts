@@ -222,6 +222,8 @@ describe('a logo-only save reaches the database', () => {
       updatedAt: new Date('2026-08-19T12:00:00.000Z'),
     };
     const transactionClient = {
+      // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+      $queryRaw: async () => [{ id: existing.id }],
       settings: {
         findFirst: async () => existing,
         create: async () => {

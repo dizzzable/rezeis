@@ -30,10 +30,16 @@ function makeService(input: {
       return row;
     },
   };
+  // Writes run behind the settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`).
+  const lockSettingsRow = async () => [{ id: row.id }];
   const prisma = {
     settings: settingsDelegate,
-    $transaction: async <T>(callback: (tx: { settings: typeof settingsDelegate }) => Promise<T>) =>
-      callback({ settings: settingsDelegate }),
+    $transaction: async <T>(
+      callback: (tx: {
+        settings: typeof settingsDelegate;
+        $queryRaw: typeof lockSettingsRow;
+      }) => Promise<T>,
+    ) => callback({ settings: settingsDelegate, $queryRaw: lockSettingsRow }),
   };
   return new CustomEmojiService(
     prisma as never,

@@ -157,6 +157,8 @@ describe('SettingsService', () => {
       updatedAt: new Date('2026-04-16T16:00:00.000Z'),
     });
     const transactionClient = {
+      // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+      $queryRaw: async () => [{ id: existingSettings.id }],
       settings: {
         findFirst: async () => existingSettings,
         create: async () => {
@@ -240,6 +242,7 @@ describe('SettingsService', () => {
       systemNotifications: { incidents: false, telegram: { chatId: '-100123' } },
     });
     const transactionClient = {
+      $queryRaw: async () => [{ id: existingSettings.id }],
       settings: {
         findFirst: async () => existingSettings,
         create: async () => existingSettings,
@@ -315,6 +318,7 @@ describe('SettingsService', () => {
       },
     });
     const transactionClient = {
+      $queryRaw: async () => [{ id: existingSettings.id }],
       settings: {
         findFirst: async () => existingSettings,
         create: async () => existingSettings,
@@ -371,6 +375,7 @@ describe('SettingsService', () => {
     const updateCalls: unknown[] = [];
     const existingSettings = buildSettingsRecord({ systemNotifications: { telegram: { enabled: false } } });
     const transactionClient = {
+      $queryRaw: async () => [{ id: existingSettings.id }],
       settings: {
         findFirst: async () => existingSettings,
         create: async () => existingSettings,
@@ -404,6 +409,7 @@ describe('SettingsService', () => {
       partnerSettings: { levels: { LEVEL_1: 10 }, withdrawals: { enabled: false, methods: ['USDT'] } },
     });
     const transactionClient = {
+      $queryRaw: async () => [{ id: existingSettings.id }],
       settings: {
         findFirst: async () => existingSettings,
         create: async () => existingSettings,
@@ -466,6 +472,7 @@ describe('SettingsService', () => {
       ],
     });
     const transactionClient = {
+      $queryRaw: async () => [{ id: existingSettings.id }],
       settings: {
         findFirst: async () => existingSettings,
         create: async () => existingSettings,

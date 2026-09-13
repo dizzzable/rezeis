@@ -10,29 +10,33 @@ describe('EmailDeliveryService', () => {
   it('emits a redacted settings event after SMTP settings are saved', async () => {
     const events: Array<{ type: string; metadata?: Record<string, unknown> }> = [];
     const updates: unknown[] = [];
-    const prismaService = {
-      settings: {
-        findFirst: async () => ({
-          id: 'settings-1',
-          systemNotifications: {
-            email: {
-              enabled: false,
-              host: 'smtp.old.example',
-              port: 587,
-              username: 'old-user',
-              password: 'old-secret',
-              fromAddress: 'old@example.com',
-              fromName: 'Old Name',
-              useTls: true,
-              useSsl: false,
-            },
+    const settings = {
+      findFirst: async () => ({
+        id: 'settings-1',
+        systemNotifications: {
+          email: {
+            enabled: false,
+            host: 'smtp.old.example',
+            port: 587,
+            username: 'old-user',
+            password: 'old-secret',
+            fromAddress: 'old@example.com',
+            fromName: 'Old Name',
+            useTls: true,
+            useSsl: false,
           },
-        }),
-        update: async (args: unknown) => {
-          updates.push(args);
-          return args;
         },
+      }),
+      update: async (args: unknown) => {
+        updates.push(args);
+        return args;
       },
+    };
+    // The save runs in a transaction behind the settings row lock.
+    const tx = { settings, $queryRaw: async () => [{ id: 'settings-1' }] };
+    const prismaService = {
+      settings,
+      $transaction: async (work: (client: typeof tx) => Promise<unknown>) => work(tx),
     };
     const service = new EmailDeliveryService(
       {

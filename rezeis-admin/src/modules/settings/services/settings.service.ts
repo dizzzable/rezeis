@@ -50,6 +50,11 @@ import { PlatformBrandingInterface } from '../interfaces/platform-branding.inter
 import { mergePlatformBranding, readPlatformBranding } from '../utils/platform-branding.util';
 import { readCustomIcons } from '../utils/custom-icons.util';
 import {
+  ensureSettingsRow,
+  mutateSettingsRow,
+  readSettingsRowGeneration,
+} from '../utils/settings-row-write.util';
+import {
   mergeSupportSettings,
   toSupportLimits,
   toSupportSettingsView,
@@ -233,8 +238,6 @@ interface UpdatePlatformSettingsChanges {
   readonly data: Prisma.SettingsUpdateInput;
 }
 
-type SettingsClient = Prisma.TransactionClient | PrismaService;
-
 const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
   rulesRequired: true,
   rulesLink: null,
@@ -258,9 +261,13 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
 export class SettingsService {
   private readonly logger = new Logger(SettingsService.name);
 
-  /** Short-TTL cache of the singleton settings row (base-client reads only). */
+  /**
+   * Short-TTL cache of the singleton settings row. `generation` is the
+   * settings-write generation the row was fetched under; see
+   * `getSettingsRecord` for why an entry from an older one is never served.
+   */
   private static readonly SETTINGS_CACHE_TTL_MS = 5_000;
-  private settingsCache: { record: Settings; at: number } | null = null;
+  private settingsCache: { record: Settings; at: number; generation: number } | null = null;
 
   /** Lazily resolved reiwa relay producer; see `resolveRelayQueue`. */
   private relayQueue: ReiwaRelayQueueService | null = null;
@@ -292,21 +299,21 @@ export class SettingsService {
    * Returns the singleton platform settings record, creating defaults when missing.
    */
   public async getPlatformSettings(): Promise<PlatformSettingsInterface> {
-    const settings: Settings = await this.getOrCreateSettingsRecord(this.prismaService);
+    const settings: Settings = await this.getOrCreateSettingsRecord();
     return mapPlatformSettings(settings);
   }
 
   public async getPaymentOpsAlertSettings(): Promise<PaymentOpsAlertSettingsInterface> {
-    const settings = await this.getOrCreateSettingsRecord(this.prismaService);
+    const settings = await this.getOrCreateSettingsRecord();
     return readPaymentOpsAlertSettings(settings.systemNotifications);
   }
 
   public async updatePaymentOpsAlertSettings(
     input: UpdatePaymentOpsAlertSettingsInput,
   ): Promise<PaymentOpsAlertSettingsInterface> {
-    const settings = await this.prismaService.$transaction(
-      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
-        const existingSettings = await this.getOrCreateSettingsRecord(transactionClient);
+    const settings = await mutateSettingsRow(
+      this.prismaService,
+      async ({ tx: transactionClient, row: existingSettings, write }): Promise<Settings> => {
         const nextSystemNotifications = mergePaymentOpsAlertSettings({
           systemNotifications: existingSettings.systemNotifications,
           patch: input.updatePaymentOpsAlertSettingsDto,
@@ -314,11 +321,8 @@ export class SettingsService {
         const nextAlertSettings = readPaymentOpsAlertSettings(nextSystemNotifications);
         validatePaymentOpsAlertSettings(nextAlertSettings);
 
-        const updatedSettings = await transactionClient.settings.update({
-          where: { id: existingSettings.id },
-          data: {
-            systemNotifications: nextSystemNotifications as Prisma.InputJsonValue,
-          },
+        const updatedSettings = await write({
+          systemNotifications: nextSystemNotifications as Prisma.InputJsonValue,
         });
         await transactionClient.adminAuditLog.create({
           data: buildAdminAuditLogData({
@@ -444,7 +448,7 @@ export class SettingsService {
    * Returns the internal read-only platform policy payload for the user edge.
    */
   public async getInternalPlatformPolicy(): Promise<InternalPlatformPolicyInterface> {
-    const settings: Settings | null = await this.getSettingsRecord(this.prismaService);
+    const settings: Settings | null = await this.getSettingsRecord();
     const base =
       settings === null ? DEFAULT_INTERNAL_PLATFORM_POLICY : mapInternalPlatformPolicy(settings);
     // Capability flags are deployment-time env, not stored in Settings — apply
@@ -457,7 +461,7 @@ export class SettingsService {
    * no settings record exists yet (very first install).
    */
   public async getBrandingSettings(): Promise<BrandingSettingsInterface> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     return readBrandingSettings(settings?.brandingSettings ?? null);
   }
 
@@ -467,7 +471,7 @@ export class SettingsService {
    * `platformPolicy` JSON column.
    */
   public async getPlatformBranding(): Promise<PlatformBrandingInterface> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     return readPlatformBranding(settings?.platformPolicy ?? null);
   }
 
@@ -483,18 +487,15 @@ export class SettingsService {
       return this.getBrandingSettings();
     }
 
-    const settings = await this.prismaService.$transaction(
-      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
-        const existing = await this.getOrCreateSettingsRecord(transactionClient);
+    const settings = await mutateSettingsRow(
+      this.prismaService,
+      async ({ tx: transactionClient, row: existing, write }): Promise<Settings> => {
         const merged = mergeBrandingSettings({
           existing: existing.brandingSettings,
           patch: input.updateBrandingSettingsDto,
         });
-        const updated = await transactionClient.settings.update({
-          where: { id: existing.id },
-          data: {
-            brandingSettings: merged as Prisma.InputJsonValue,
-          },
+        const updated = await write({
+          brandingSettings: merged as Prisma.InputJsonValue,
         });
         await transactionClient.adminAuditLog.create({
           data: buildAdminAuditLogData({
@@ -513,6 +514,11 @@ export class SettingsService {
     // Best-effort: tell reiwa to drop its cached public-config so the cabinet
     // picks up the new theme without waiting for the HTTP cache TTL. Never
     // blocks / fails the save (Property 2).
+    //
+    // The cabinet answers this by re-reading `internal/branding/public-config`,
+    // which goes through this service's row cache. `mutateSettingsRow` has
+    // already bumped the settings-write generation by the time control is back
+    // here, so that re-read cannot be served the pre-save row.
     if (this.reiwaCacheInvalidator !== undefined) {
       void this.reiwaCacheInvalidator.invalidateBranding(`branding.${updatedFields.join(',')}`);
     }
@@ -529,12 +535,12 @@ export class SettingsService {
       input.updatePlatformSettingsDto,
     );
     if (updateChanges.updatedFields.length === 0) {
-      const settings: Settings = await this.getOrCreateSettingsRecord(this.prismaService);
+      const settings: Settings = await this.getOrCreateSettingsRecord();
       return mapPlatformSettings(settings);
     }
-    const settings: Settings = await this.prismaService.$transaction(
-      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
-        const existingSettings: Settings = await this.getOrCreateSettingsRecord(transactionClient);
+    const settings: Settings = await mutateSettingsRow(
+      this.prismaService,
+      async ({ tx: transactionClient, row: existingSettings, write }): Promise<Settings> => {
         const data: Prisma.SettingsUpdateInput = { ...updateChanges.data };
         // Platform-branding texts live in the (otherwise unused) platformPolicy
         // JSON column; merge over the existing value so partial patches keep
@@ -563,10 +569,7 @@ export class SettingsService {
           }
           data.systemNotifications = nextSystemNotifications as Prisma.InputJsonValue;
         }
-        const updatedSettings: Settings = await transactionClient.settings.update({
-          where: { id: existingSettings.id },
-          data,
-        });
+        const updatedSettings: Settings = await write(data);
         await transactionClient.adminAuditLog.create({
           data: buildAdminAuditLogData({
             action: 'settings.platform.updated',
@@ -583,7 +586,9 @@ export class SettingsService {
     );
     // Best-effort policy invalidation — fire-and-forget so an unreachable
     // reiwa never blocks the admin save. The 60s edge cache TTL is the
-    // backstop if the webhook fails to deliver.
+    // backstop if the webhook fails to deliver. The cabinet's refetch of
+    // `internal/platform-policy` misses this service's row cache for the same
+    // reason as in `updateBrandingSettings`: the generation is already bumped.
     if (
       this.reiwaCacheInvalidator !== undefined &&
       updateChanges.updatedFields.some((f) =>
@@ -644,7 +649,7 @@ export class SettingsService {
       readonly publicKey: string;
     };
   }> {
-    const settings = await this.getOrCreateSettingsRecord(this.prismaService);
+    const settings = await this.getOrCreateSettingsRecord();
     const platform = mapPlatformSettings(settings);
     const secretFlags = readSystemNotificationSecretFlags(settings.systemNotifications);
     return {
@@ -694,7 +699,7 @@ export class SettingsService {
    * module cycle. The util carries the reasoning and the history.
    */
   public async getDecryptedBotToken(): Promise<string | null> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (settings === null) return null;
     const token = readAdminBotToken(
       settings.systemNotifications,
@@ -762,7 +767,7 @@ export class SettingsService {
     readonly privateKey: string;
     readonly subject: string;
   } | null> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     const webPush =
       settings !== null ? readJsonObject(readJsonObject(settings.systemNotifications).webPush) : {};
     const publicKey = typeof webPush.publicKey === 'string' ? webPush.publicKey.trim() : '';
@@ -861,18 +866,14 @@ export class SettingsService {
     requestMetadata: RequestMetadataInterface,
     action: string,
   ): Promise<string> {
-    return this.prismaService.$transaction(async (tx): Promise<string> => {
-      const existing = await this.getOrCreateSettingsRecord(tx);
+    return mutateSettingsRow(this.prismaService, async ({ tx, row: existing, write }): Promise<string> => {
       const nextSystemNotifications = readJsonObject(existing.systemNotifications);
       if (webPush === null) {
         delete nextSystemNotifications.webPush;
       } else {
         nextSystemNotifications.webPush = webPush;
       }
-      await tx.settings.update({
-        where: { id: existing.id },
-        data: { systemNotifications: nextSystemNotifications as Prisma.InputJsonValue },
-      });
+      await write({ systemNotifications: nextSystemNotifications as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action,
@@ -902,15 +903,15 @@ export class SettingsService {
     readonly systemNotifications: Record<string, unknown>;
   }> {
     if (input.userNotifications === undefined && input.systemNotifications === undefined) {
-      const current = await this.getOrCreateSettingsRecord(this.prismaService);
+      const current = await this.getOrCreateSettingsRecord();
       return {
         userNotifications: readJsonObject(current.userNotifications),
         systemNotifications: maskSystemNotifications(current.systemNotifications),
       };
     }
-    const settings = await this.prismaService.$transaction(
-      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
-        const existing = await this.getOrCreateSettingsRecord(transactionClient);
+    const settings = await mutateSettingsRow(
+      this.prismaService,
+      async ({ tx: transactionClient, row: existing, write }): Promise<Settings> => {
         const data: Prisma.SettingsUpdateInput = {};
         const updatedFields: string[] = [];
         if (input.userNotifications !== undefined) {
@@ -923,10 +924,7 @@ export class SettingsService {
           data.systemNotifications = merged as Prisma.InputJsonValue;
           updatedFields.push('systemNotifications');
         }
-        const updated = await transactionClient.settings.update({
-          where: { id: existing.id },
-          data,
-        });
+        const updated = await write(data);
         await transactionClient.adminAuditLog.create({
           data: buildAdminAuditLogData({
             action: 'settings.notifications.updated',
@@ -955,9 +953,9 @@ export class SettingsService {
   public async updateTelegramDelivery(
     input: UpdateTelegramDeliveryInput,
   ): Promise<TelegramDeliveryConfig> {
-    const settings = await this.prismaService.$transaction(
-      async (transactionClient: Prisma.TransactionClient): Promise<Settings> => {
-        const existing = await this.getOrCreateSettingsRecord(transactionClient);
+    const settings = await mutateSettingsRow(
+      this.prismaService,
+      async ({ tx: transactionClient, row: existing, write }): Promise<Settings> => {
         const systemNotifications = readJsonObject(existing.systemNotifications);
         const previousTelegram = readJsonObject(systemNotifications.telegram);
         const previousTopics = readJsonObject(previousTelegram.topics);
@@ -1039,14 +1037,11 @@ export class SettingsService {
           throw new BadRequestException('TELEGRAM_DELIVERY_CHAT_REQUIRED');
         }
 
-        const updated = await transactionClient.settings.update({
-          where: { id: existing.id },
-          data: {
-            systemNotifications: {
-              ...systemNotifications,
-              telegram: nextTelegram,
-            } as Prisma.InputJsonValue,
-          },
+        const updated = await write({
+          systemNotifications: {
+            ...systemNotifications,
+            telegram: nextTelegram,
+          } as Prisma.InputJsonValue,
         });
         await transactionClient.adminAuditLog.create({
           data: buildAdminAuditLogData({
@@ -1072,7 +1067,7 @@ export class SettingsService {
    * delivery surface instead of a separate broadcast-channels table).
    */
   public async getTelegramDeliveryConfig(): Promise<TelegramDeliveryConfig> {
-    const settings = await this.getOrCreateSettingsRecord(this.prismaService);
+    const settings = await this.getOrCreateSettingsRecord();
     return readTelegramDeliveryConfig(settings.systemNotifications);
   }
 
@@ -1095,7 +1090,7 @@ export class SettingsService {
     input: SendTelegramDeliveryTestInput,
   ): Promise<TelegramDeliveryTestResult> {
     const config = readTelegramDeliveryConfig(
-      (await this.getOrCreateSettingsRecord(this.prismaService)).systemNotifications,
+      (await this.getOrCreateSettingsRecord()).systemNotifications,
     );
     const category = normalizeTestCategory(input.category);
 
@@ -1183,19 +1178,21 @@ export class SettingsService {
     return { delivered: true, via: 'legacy', outcome: 'sent', reason: null };
   }
 
-  private async getOrCreateSettingsRecord(settingsClient: SettingsClient): Promise<Settings> {
-    // A non-base (transaction) client means a WRITE is in progress — drop the
-    // read cache so post-commit reads repopulate fresh.
-    if (settingsClient !== this.prismaService) {
-      this.settingsCache = null;
-    }
-    const existingSettings: Settings | null = await this.getSettingsRecord(settingsClient);
+  /**
+   * The row for a READ path, creating the defaults on a first install.
+   *
+   * Writes no longer come through here. They used to, with a transaction
+   * client, and cleared the row cache on the way in — which a read landing
+   * before the commit simply refilled with the old row. Every write now goes
+   * through `settings-row-write.util.ts`, which locks the row and bumps the
+   * generation `getSettingsRecord` checks.
+   */
+  private async getOrCreateSettingsRecord(): Promise<Settings> {
+    const existingSettings: Settings | null = await this.getSettingsRecord();
     if (existingSettings) {
       return existingSettings;
     }
-    const created = await settingsClient.settings.create({ data: {} });
-    this.settingsCache = null;
-    return created;
+    return ensureSettingsRow(this.prismaService);
   }
 
   /**
@@ -1208,14 +1205,10 @@ export class SettingsService {
   public async updateReferralSettings(
     input: UpdateReferralSettingsInput,
   ): Promise<Record<string, unknown>> {
-    return this.prismaService.$transaction(async (tx) => {
-      const settings = await this.getOrCreateSettingsRecord(tx);
+    return mutateSettingsRow(this.prismaService, async ({ tx, row: settings, write }) => {
       const previous = readJsonObject(settings.referralSettings);
       const next = mergeReferralSettings(previous, input.patch);
-      await tx.settings.update({
-        where: { id: settings.id },
-        data: { referralSettings: next as unknown as Prisma.InputJsonValue },
-      });
+      await write({ referralSettings: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.referralSettings.update',
@@ -1232,7 +1225,7 @@ export class SettingsService {
   }
 
   public async getReferralSettings(): Promise<Record<string, unknown>> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (!settings) return {};
     return readJsonObject(settings.referralSettings);
   }
@@ -1245,14 +1238,10 @@ export class SettingsService {
    * is live at once; nothing else caches it.
    */
   public async updatePointsSettings(input: UpdatePointsSettingsInput): Promise<Record<string, unknown>> {
-    return this.prismaService.$transaction(async (tx) => {
-      const settings = await this.getOrCreateSettingsRecord(tx);
+    return mutateSettingsRow(this.prismaService, async ({ tx, row: settings, write }) => {
       const previous = readJsonObject(settings.pointsSettings);
       const next = mergePointsSettings(previous, input.patch);
-      await tx.settings.update({
-        where: { id: settings.id },
-        data: { pointsSettings: next as unknown as Prisma.InputJsonValue },
-      });
+      await write({ pointsSettings: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.pointsSettings.update',
@@ -1270,7 +1259,7 @@ export class SettingsService {
   }
 
   public async getPointsSettings(): Promise<Record<string, unknown>> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (!settings) return {};
     return readJsonObject(settings.pointsSettings);
   }
@@ -1284,14 +1273,10 @@ export class SettingsService {
   public async updatePartnerSettings(
     input: UpdatePartnerSettingsInput,
   ): Promise<Record<string, unknown>> {
-    return this.prismaService.$transaction(async (tx) => {
-      const settings = await this.getOrCreateSettingsRecord(tx);
+    return mutateSettingsRow(this.prismaService, async ({ tx, row: settings, write }) => {
       const previous = readJsonObject(settings.partnerSettings);
       const next = mergePartnerSettings(previous, input.patch);
-      await tx.settings.update({
-        where: { id: settings.id },
-        data: { partnerSettings: next as unknown as Prisma.InputJsonValue },
-      });
+      await write({ partnerSettings: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.partnerSettings.update',
@@ -1308,7 +1293,7 @@ export class SettingsService {
   }
 
   public async getPartnerSettings(): Promise<Record<string, unknown>> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (!settings) return {};
     return readJsonObject(settings.partnerSettings);
   }
@@ -1316,7 +1301,7 @@ export class SettingsService {
   // ── Anonymous support chat settings ─────────────────────────────────────
 
   private async readStoredSupport(): Promise<StoredSupportSettings> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (!settings) return {};
     return readJsonObject(settings.supportSettings) as StoredSupportSettings;
   }
@@ -1368,8 +1353,7 @@ export class SettingsService {
     readonly requestMetadata: RequestMetadataInterface;
     readonly patch: UpdateSupportSettingsDto;
   }): Promise<SupportSettingsView> {
-    const settings = await this.prismaService.$transaction(async (tx) => {
-      const existing = await this.getOrCreateSettingsRecord(tx);
+    const settings = await mutateSettingsRow(this.prismaService, async ({ tx, row: existing, write }) => {
       const previous = readJsonObject(existing.supportSettings) as StoredSupportSettings;
 
       // Encrypt a supplied Turnstile secret; an empty string clears it.
@@ -1399,10 +1383,7 @@ export class SettingsService {
         turnstileSecretEnc: secretEnc,
       });
 
-      const updated = await tx.settings.update({
-        where: { id: existing.id },
-        data: { supportSettings: next as unknown as Prisma.InputJsonValue },
-      });
+      const updated = await write({ supportSettings: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.supportSettings.update',
@@ -1423,7 +1404,7 @@ export class SettingsService {
   // ── Remnawave expired-profile cleanup settings ──────────────────────────
 
   private async readStoredRemnawaveCleanup(): Promise<StoredRemnawaveCleanupSettings> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (!settings) return {};
     return readJsonObject(settings.remnawaveCleanupSettings) as StoredRemnawaveCleanupSettings;
   }
@@ -1443,8 +1424,7 @@ export class SettingsService {
     readonly requestMetadata: RequestMetadataInterface;
     readonly patch: UpdateRemnawaveCleanupSettingsDto;
   }): Promise<RemnawaveCleanupSettingsView> {
-    const settings = await this.prismaService.$transaction(async (tx) => {
-      const existing = await this.getOrCreateSettingsRecord(tx);
+    const settings = await mutateSettingsRow(this.prismaService, async ({ tx, row: existing, write }) => {
       const previous = readJsonObject(
         existing.remnawaveCleanupSettings,
       ) as StoredRemnawaveCleanupSettings;
@@ -1452,9 +1432,8 @@ export class SettingsService {
         deleteEnabled: input.patch.deleteEnabled,
         graceDays: input.patch.graceDays,
       });
-      const updated = await tx.settings.update({
-        where: { id: existing.id },
-        data: { remnawaveCleanupSettings: next as unknown as Prisma.InputJsonValue },
+      const updated = await write({
+        remnawaveCleanupSettings: next as unknown as Prisma.InputJsonValue,
       });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
@@ -1477,7 +1456,7 @@ export class SettingsService {
   // ── Anti-fraud detector tunables (panel-managed, env fallback) ──────────
 
   private async readStoredAntiFraud(): Promise<StoredAntiFraudSettings> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     if (!settings) return {};
     return readStoredAntiFraudSettings(settings.antiFraudSettings);
   }
@@ -1520,14 +1499,10 @@ export class SettingsService {
     readonly requestMetadata: RequestMetadataInterface;
     readonly patch: UpdateAntiFraudSettingsDto;
   }): Promise<AntiFraudSettingsView> {
-    const settings = await this.prismaService.$transaction(async (tx) => {
-      const existing = await this.getOrCreateSettingsRecord(tx);
+    const settings = await mutateSettingsRow(this.prismaService, async ({ tx, row: existing, write }) => {
       const previous = readStoredAntiFraudSettings(existing.antiFraudSettings);
       const next = mergeAntiFraudSettings(previous, input.patch);
-      const updated = await tx.settings.update({
-        where: { id: existing.id },
-        data: { antiFraudSettings: next as unknown as Prisma.InputJsonValue },
-      });
+      const updated = await write({ antiFraudSettings: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.antiFraudSettings.update',
@@ -1550,7 +1525,7 @@ export class SettingsService {
   // ── Quest partner HMAC secrets (panel-managed, env fallback) ────────────
 
   private async readStoredQuestPartners() {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     return readQuestPartnerStore(settings?.questPartnerSettings ?? null);
   }
 
@@ -1586,14 +1561,10 @@ export class SettingsService {
       throw new BadRequestException('REZEIS_CRYPT_KEY is required to store a partner secret');
     }
 
-    const settings = await this.prismaService.$transaction(async (tx) => {
-      const existing = await this.getOrCreateSettingsRecord(tx);
+    const settings = await mutateSettingsRow(this.prismaService, async ({ tx, row: existing, write }) => {
       const previous = readQuestPartnerStore(existing.questPartnerSettings);
       const next = mergeQuestPartnerSecrets(previous, input.patch.partners, cryptKey);
-      const updated = await tx.settings.update({
-        where: { id: existing.id },
-        data: { questPartnerSettings: next as unknown as Prisma.InputJsonValue },
-      });
+      const updated = await write({ questPartnerSettings: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.questPartnerSecrets.update',
@@ -1617,7 +1588,7 @@ export class SettingsService {
    * Returns the operator's custom icon library (normalized + validated).
    */
   public async getCustomIcons(): Promise<CustomIconInterface[]> {
-    const settings = await this.getSettingsRecord(this.prismaService);
+    const settings = await this.getSettingsRecord();
     return readCustomIcons(settings?.customIcons ?? null);
   }
 
@@ -1634,13 +1605,9 @@ export class SettingsService {
       color: icon.color ?? null,
     }));
 
-    const settings = await this.prismaService.$transaction(async (tx) => {
-      const existing = await this.getOrCreateSettingsRecord(tx);
+    const settings = await mutateSettingsRow(this.prismaService, async ({ tx, row: existing, write }) => {
       const previous = readCustomIcons(existing.customIcons);
-      const updated = await tx.settings.update({
-        where: { id: existing.id },
-        data: { customIcons: next as unknown as Prisma.InputJsonValue },
-      });
+      const updated = await write({ customIcons: next as unknown as Prisma.InputJsonValue });
       await tx.adminAuditLog.create({
         data: buildAdminAuditLogData({
           action: 'settings.customIcons.update',
@@ -1665,26 +1632,44 @@ export class SettingsService {
 
   /**
    * Reads the singleton settings row. Hit on many hot paths (branding, policy,
-   * bot token, telegram, cleanup), so base-client reads are served from a
-   * short-TTL in-memory cache to collapse repeated fetches. Bounded staleness
-   * (≤ {@link SettingsService.SETTINGS_CACHE_TTL_MS}) with no manual-invalidation
-   * risk: write transactions use a non-base client (never cached) AND drop the
-   * cache in `getOrCreateSettingsRecord`, and the TTL self-heals regardless.
+   * bot token, telegram, cleanup), so reads are served from a short-TTL
+   * in-memory cache to collapse repeated fetches.
+   *
+   * Invalidation is by the settings-write generation, which every write in
+   * this process bumps once its transaction settles (`settings-row-write.util.ts`).
+   * This used to CLEAR the cache when a write transaction started, and that
+   * was not invalidation: a read landing between the clear and the commit
+   * fetched the old row and cached it with a fresh timestamp, and so did a
+   * read that began before the write and finished after it. A save's reiwa
+   * invalidation drops the cabinet's branding and policy caches, the cabinet's
+   * next request re-reads them through here — `internal/branding/public-config`
+   * and `internal/platform-policy` — and whatever it got, it kept for its own
+   * 60 seconds. Writers outside this service never cleared anything at all.
+   *
+   * Two rules close it:
+   *   - an entry is served only while its generation is still current, so
+   *     nothing fetched before a write settled survives it;
+   *   - a fetch stores its result only if the generation did not move while it
+   *     was in flight, so a slow read cannot land a pre-write row afterwards.
+   *
+   * Still bounded by {@link SettingsService.SETTINGS_CACHE_TTL_MS} across
+   * processes: a write in the worker does not bump the API's generation.
    */
-  private async getSettingsRecord(settingsClient: SettingsClient): Promise<Settings | null> {
-    const isBaseClient = settingsClient === this.prismaService;
+  private async getSettingsRecord(): Promise<Settings | null> {
+    const generation = readSettingsRowGeneration();
+    const cached = this.settingsCache;
     if (
-      isBaseClient &&
-      this.settingsCache !== null &&
-      Date.now() - this.settingsCache.at < SettingsService.SETTINGS_CACHE_TTL_MS
+      cached !== null &&
+      cached.generation === generation &&
+      Date.now() - cached.at < SettingsService.SETTINGS_CACHE_TTL_MS
     ) {
-      return this.settingsCache.record;
+      return cached.record;
     }
-    const record = await settingsClient.settings.findFirst({
+    const record = await this.prismaService.settings.findFirst({
       orderBy: { updatedAt: 'asc' },
     });
-    if (isBaseClient && record !== null) {
-      this.settingsCache = { record, at: Date.now() };
+    if (record !== null && readSettingsRowGeneration() === generation) {
+      this.settingsCache = { record, at: Date.now(), generation };
     }
     return record;
   }

@@ -12,6 +12,7 @@ import {
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { SettingsService } from '../../settings/services/settings.service';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
+import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import { encryptTotpSecret } from '../../two-factor/utils/secret-cipher';
 
 /**
@@ -445,6 +446,13 @@ export class WebPushService implements OnModuleInit {
    * transaction is what makes that safe, and the loser reports `adopted`
    * because the panel does now hold keys — which is the only thing the caller
    * is asking about.
+   *
+   * A re-read inside a transaction is only safe under the row lock, though,
+   * and there was none: under READ COMMITTED both processes read the column
+   * without the marker and both wrote it back. The API process boots the emoji
+   * seed at the same moment, which writes `seededEmojiDefaults` into this very
+   * column — so one boot could drop the adopted keypair or the seed marker.
+   * The read now happens after `SELECT ... FOR UPDATE`.
    */
   private async adoptLegacyEnvKeys(): Promise<LegacyEnvAdoption> {
     // Environment first, deliberately: on a deployment that never used the
@@ -478,39 +486,40 @@ export class WebPushService implements OnModuleInit {
       };
     }
     try {
-      return await this.prismaService.$transaction(async (tx): Promise<LegacyEnvAdoption> => {
-        // Re-read inside the transaction. Settings is a singleton JSON column
-        // that several features share (`botTokenEnc`, telegram delivery, the
-        // notification toggles); a stale copy written back wholesale would
-        // drop whichever of them changed since. Spreading the row we just read
-        // preserves every sibling key — the same shape `persistWebPush` uses.
-        const existing = await tx.settings.findFirst({ orderBy: { id: 'asc' } });
-        if (existing === null) {
-          return { outcome: 'failed', reason: 'the settings row disappeared mid-migration' };
-        }
-        const nextSystemNotifications = readJsonObject(existing.systemNotifications);
-        if (nextSystemNotifications.webPushEnvAdoptedAt) {
-          return { outcome: 'already-migrated' };
-        }
-        if (readJsonObject(nextSystemNotifications.webPush).publicKey !== undefined) {
-          // Someone configured the panel between our read and this write.
-          // Theirs wins: it is the newer intent, and overwriting it would
-          // strand the subscriptions their key already has. Push is on, which
-          // is what the caller needs to know.
+      return await mutateExistingSettingsRow(
+        this.prismaService,
+        async ({ row: existing, write }): Promise<LegacyEnvAdoption> => {
+          // Re-read inside the transaction, under the row lock. Settings is a
+          // singleton JSON column that several features share (`botTokenEnc`,
+          // telegram delivery, the notification toggles); a stale copy written
+          // back wholesale would drop whichever of them changed since.
+          // Spreading the row we just read preserves every sibling key — the
+          // same shape `persistWebPush` uses.
+          const nextSystemNotifications = readJsonObject(existing.systemNotifications);
+          if (nextSystemNotifications.webPushEnvAdoptedAt) {
+            return { outcome: 'already-migrated' };
+          }
+          if (readJsonObject(nextSystemNotifications.webPush).publicKey !== undefined) {
+            // Someone configured the panel between our read and this write.
+            // Theirs wins: it is the newer intent, and overwriting it would
+            // strand the subscriptions their key already has. Push is on, which
+            // is what the caller needs to know.
+            return { outcome: 'adopted' };
+          }
+          nextSystemNotifications.webPush = {
+            publicKey,
+            privateKeyEnc: encryptTotpSecret(privateKey, cryptKey),
+            contactEmail: contactEmail.replace(/^mailto:/i, ''),
+          };
+          nextSystemNotifications.webPushEnvAdoptedAt = new Date().toISOString();
+          await write({ systemNotifications: nextSystemNotifications as Prisma.InputJsonValue });
           return { outcome: 'adopted' };
-        }
-        nextSystemNotifications.webPush = {
-          publicKey,
-          privateKeyEnc: encryptTotpSecret(privateKey, cryptKey),
-          contactEmail: contactEmail.replace(/^mailto:/i, ''),
-        };
-        nextSystemNotifications.webPushEnvAdoptedAt = new Date().toISOString();
-        await tx.settings.update({
-          where: { id: existing.id },
-          data: { systemNotifications: nextSystemNotifications as Prisma.InputJsonValue },
-        });
-        return { outcome: 'adopted' };
-      });
+        },
+        (): LegacyEnvAdoption => ({
+          outcome: 'failed',
+          reason: 'the settings row disappeared mid-migration',
+        }),
+      );
     } catch (err: unknown) {
       return {
         outcome: 'failed',

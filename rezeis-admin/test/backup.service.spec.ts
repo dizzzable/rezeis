@@ -159,15 +159,19 @@ describe('BackupService', () => {
     const state: { systemNotifications: Record<string, unknown> } = {
       systemNotifications: { other: 'keep' },
     };
+    const settings = {
+      findFirst: async () => ({ id: 's1', systemNotifications: state.systemNotifications }),
+      update: async (args: { data: { systemNotifications: Record<string, unknown> } }) => {
+        state.systemNotifications = args.data.systemNotifications;
+        return args;
+      },
+    };
+    // The write now runs in a transaction behind the settings row lock.
+    const tx = { settings, $queryRaw: async () => [{ id: 's1' }] };
     const service = createService(
       {
-        settings: {
-          findFirst: async () => ({ id: 's1', systemNotifications: state.systemNotifications }),
-          update: async (args: { data: { systemNotifications: Record<string, unknown> } }) => {
-            state.systemNotifications = args.data.systemNotifications;
-            return args;
-          },
-        },
+        settings,
+        $transaction: async (work: (client: typeof tx) => Promise<unknown>) => work(tx),
       },
       {},
       'tok',

@@ -101,24 +101,29 @@ describe('BotEmojiStudioService.setOwnerHasPremium', () => {
   function build() {
     const writes: Array<Record<string, unknown>> = [];
     let updated: Record<string, unknown> | null = null;
+    const settings = {
+      findFirst: async () => ({
+        id: 's1',
+        systemNotifications: { customEmojiPacks: [], other: 'keep' },
+      }),
+      update: (args: { data: { systemNotifications: unknown } }) => {
+        updated = args.data.systemNotifications as Record<string, unknown>;
+        return args;
+      },
+    };
+    const adminAuditLog = {
+      create: (args: Record<string, unknown>) => {
+        writes.push(args);
+        return args;
+      },
+    };
+    // The merge reads the row under the settings row lock, in an interactive
+    // transaction; the write and the audit row commit together in it.
+    const tx = { settings, adminAuditLog, $queryRaw: async () => [{ id: 's1' }] };
     const prisma = {
-      settings: {
-        findFirst: async () => ({
-          id: 's1',
-          systemNotifications: { customEmojiPacks: [], other: 'keep' },
-        }),
-        update: (args: { data: { systemNotifications: unknown } }) => {
-          updated = args.data.systemNotifications as Record<string, unknown>;
-          return args;
-        },
-      },
-      adminAuditLog: {
-        create: (args: Record<string, unknown>) => {
-          writes.push(args);
-          return args;
-        },
-      },
-      $transaction: async (ops: unknown[]) => ops,
+      settings,
+      adminAuditLog,
+      $transaction: async (work: (client: typeof tx) => Promise<unknown>) => work(tx),
     };
     const service = new BotEmojiStudioService(
       prisma as never,

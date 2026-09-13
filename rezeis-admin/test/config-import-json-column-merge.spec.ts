@@ -231,6 +231,10 @@ function buildImportPrisma(state: DestinationState): {
   });
 
   const tx = {
+    // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) and the
+    // savepoint the create path inserts under. Neither is a write to record.
+    $queryRaw: async () => (state.settings ? [{ id: state.settings['id'] }] : []),
+    $executeRaw: async () => 0,
     settings: {
       findFirst: async () => state.settings ?? null,
       findUnique: async () => state.settings ?? null,

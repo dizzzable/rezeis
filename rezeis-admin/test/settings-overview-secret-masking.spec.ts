@@ -183,6 +183,8 @@ describe('PATCH /admin/settings/notifications — systemNotifications masking', 
   } {
     const updateCalls: unknown[] = [];
     const transactionClient = {
+      // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+      $queryRaw: async () => [{ id: record.id }],
       settings: {
         findFirst: async () => record,
         create: async () => record,

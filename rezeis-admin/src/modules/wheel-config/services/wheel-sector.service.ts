@@ -2,6 +2,10 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Prisma, WheelSectorKind, WheelSpinStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  lockSettingsRow,
+  mutateExistingSettingsRow,
+} from '../../settings/utils/settings-row-write.util';
 import { sectorChancePercent } from '../../wheel/wheel-draw.util';
 import { readWheelSettings, type WheelSettings } from '../../wheel/wheel-settings.util';
 import { readWheelBlockers, readWheelEconomy, type WheelBlocker, type WheelEconomy } from '../wheel-economy.util';
@@ -213,40 +217,41 @@ export class WheelSectorService {
    * moment a broken wheel would start costing something.
    */
   public async updateSettings(patch: Partial<WheelSettings>): Promise<WheelOverview> {
-    await this.prismaService.$transaction(async (tx) => {
-      await this.lockWheelConfig(tx);
+    // The lock the sector edits take (see `lockWheelConfig`) is the settings
+    // row lock, and the helper takes it before reading the row — so this
+    // switch and a sector edit still serialise exactly as they did, and a
+    // `wheelSettings` write no longer races the other writers of the row.
+    await mutateExistingSettingsRow(
+      this.prismaService,
+      async ({ tx, row, write }) => {
+        const next: WheelSettings = { ...readWheelSettings(row.wheelSettings), ...patch };
 
-      const row = await tx.settings.findFirst({ select: { id: true, wheelSettings: true } });
-      if (row === null) {
-        // The settings row is a singleton created on first read elsewhere; if
-        // it genuinely does not exist yet there is nothing to switch on.
-        throw new BadRequestException('Настройки платформы ещё не созданы');
-      }
-      const next: WheelSettings = { ...readWheelSettings(row.wheelSettings), ...patch };
-
-      if (next.enabled) {
-        // Read the sectors under the same lock the edits take, so a sector
-        // saved a moment ago cannot be the one this switch was judged without.
-        const rows = await tx.wheelSector.findMany({
-          select: ECONOMY_SELECT,
-        });
-        const blockers = readWheelBlockers(rows);
-        if (blockers.length > 0) {
-          throw new BadRequestException(describeBlockers(blockers, readWheelEconomy(rows)));
+        if (next.enabled) {
+          // Read the sectors under the same lock the edits take, so a sector
+          // saved a moment ago cannot be the one this switch was judged without.
+          const rows = await tx.wheelSector.findMany({
+            select: ECONOMY_SELECT,
+          });
+          const blockers = readWheelBlockers(rows);
+          if (blockers.length > 0) {
+            throw new BadRequestException(describeBlockers(blockers, readWheelEconomy(rows)));
+          }
         }
-      }
 
-      await tx.settings.update({
-        where: { id: row.id },
-        data: {
+        await write({
           wheelSettings: {
             enabled: next.enabled,
             freeSpinCooldownHours: next.freeSpinCooldownHours,
             spinPricePoints: next.spinPricePoints,
           } as Prisma.InputJsonObject,
-        },
-      });
-    });
+        });
+      },
+      () => {
+        // The settings row is a singleton created on first read elsewhere; if
+        // it genuinely does not exist yet there is nothing to switch on.
+        throw new BadRequestException('Настройки платформы ещё не созданы');
+      },
+    );
     return this.overview();
   }
 
@@ -258,9 +263,14 @@ export class WheelSectorService {
    * enabling the wheel while a spins sector is being made richer reads the
    * old sectors, and the sector edit reads the old switch. The singleton
    * settings row is the natural mutex — there is exactly one wheel.
+   *
+   * Taken as the first statement of each sector transaction, before any
+   * `wheel_sectors` row is touched, and through the same helper every settings
+   * writer uses: the settings lock is always the first lock, so no transaction
+   * can hold a sector row while waiting for it.
    */
   private async lockWheelConfig(tx: Prisma.TransactionClient): Promise<void> {
-    await tx.$executeRaw`SELECT "id" FROM "settings" FOR UPDATE`;
+    await lockSettingsRow(tx);
   }
 
   private assertSectorValid(payload: SectorPayload): void {

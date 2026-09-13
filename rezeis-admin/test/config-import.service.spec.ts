@@ -190,6 +190,10 @@ function buildRecordingStub() {
       },
     };
   }
+  // The settings section takes the singleton row lock (finding no row here)
+  // and inserts the row under a savepoint. Neither is a write to record.
+  tx.$queryRaw = async () => [];
+  tx.$executeRaw = async () => 0;
 
   const prisma = {
     $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),

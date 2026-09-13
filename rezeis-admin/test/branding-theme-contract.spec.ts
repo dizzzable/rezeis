@@ -1183,6 +1183,8 @@ describe('SettingsService WEB Reiwa audit metadata', () => {
       updatedAt: new Date('2026-07-30T12:00:00.000Z'),
     };
     const transactionClient = {
+      // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
+      $queryRaw: async () => [{ id: existing.id }],
       settings: {
         findFirst: async () => existing,
         create: async () => {
