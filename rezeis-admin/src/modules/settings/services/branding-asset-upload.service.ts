@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 
 import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 
+import { QR_LOGO_SVG_MAX_BYTES } from '../utils/branding-qr-style.util';
 import { verifyImageContent } from './icon-upload.service';
 
 export interface BrandingAssetUploadedInterface {
@@ -17,10 +18,29 @@ export interface BrandingAssetUploadedInterface {
   readonly size: number;
 }
 
+/**
+ * What an upload is for, when that changes what it may be.
+ *
+ *   - `asset` — the header logo, the PWA icon, card artwork: the slots' own
+ *     ceilings, 2 MB for a raster file and `SVG_MAX_BYTES` (512 KB) for SVG.
+ *   - `qr-logo` — a logo for the middle of the subscriber's QR codes. The
+ *     cabinet inlines an SVG logo whole into every code and loads NO logo from
+ *     an SVG over `QR_LOGO_SVG_MAX_BYTES` (96 KB) — silently, the code simply
+ *     appears without it — so that is this purpose's SVG ceiling, refused here
+ *     where the operator is told. Rasters keep the 2 MB: the cabinet redraws
+ *     them to 256 px before they go anywhere.
+ *
+ * Every other rule — the types, the sniffing, the SVG reject-list — is the
+ * same for both, through the same `verifyImageContent`.
+ */
+export type BrandingAssetPurpose = 'asset' | 'qr-logo';
+
 interface PersistInput {
   readonly buffer: Buffer;
   readonly originalName: string;
   readonly mimeType: string;
+  /** `asset` when absent. */
+  readonly purpose?: BrandingAssetPurpose;
 }
 
 // Branding assets (header logo / square PWA icon) are small; 2 MB is generous.
@@ -82,7 +102,9 @@ export class BrandingAssetUploadService implements OnModuleInit {
       );
     }
 
-    const verified = verifyImageContent(input.buffer, input.mimeType, ALLOWED_TYPES);
+    const verified = verifyImageContent(input.buffer, input.mimeType, ALLOWED_TYPES, {
+      svgMaxBytes: input.purpose === 'qr-logo' ? QR_LOGO_SVG_MAX_BYTES : undefined,
+    });
     const ext = EXT_BY_MIME[verified.mimeType];
     const fileName = `${randomBytes(16).toString('hex')}${ext}`;
     const fullPath = join(this.uploadsDir, fileName);

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { BrandingAssetUploadService } from '../src/modules/settings/services/branding-asset-upload.service';
+import { QR_LOGO_SVG_MAX_BYTES } from '../src/modules/settings/utils/branding-qr-style.util';
 import {
   mergeBrandingSettings,
   readBrandingSettings,
@@ -104,6 +105,94 @@ describe('BrandingAssetUploadService', () => {
     });
     const stored = await fs.readFile(join(dir, out.url.split('/').pop() as string), 'utf8');
     assert.equal(stored, clean);
+  });
+
+  describe('a QR logo (purpose qr-logo)', () => {
+    /**
+     * A clean SVG of exactly `bytes` bytes: a path padded with a comment.
+     * The byte count is asserted, so the boundary cases below cannot drift
+     * off the boundary with an edit to the markup.
+     */
+    function svgOfBytes(bytes: number): Buffer {
+      const head = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path d="M16 3 4 12l12 17 12-17Z"/><!--';
+      const tail = '--></svg>';
+      const svg = `${head}${'x'.repeat(bytes - head.length - tail.length)}${tail}`;
+      assert.equal(Buffer.byteLength(svg, 'utf8'), bytes);
+      return Buffer.from(svg, 'utf8');
+    }
+
+    it('stores an SVG of exactly 96 KB — the most the cabinet inlines into a code', async () => {
+      assert.equal(QR_LOGO_SVG_MAX_BYTES, 96 * 1024);
+      const out = await service.persist({
+        buffer: svgOfBytes(96 * 1024),
+        originalName: 'qr-logo.svg',
+        mimeType: 'image/svg+xml',
+        purpose: 'qr-logo',
+      });
+      assert.match(out.url, /^\/uploads\/branding\/[a-f0-9]{32}\.svg$/);
+      assert.equal(out.size, 96 * 1024);
+    });
+
+    it('refuses an SVG one byte over 96 KB, names the limit, and stores nothing', async () => {
+      await assert.rejects(
+        () =>
+          service.persist({
+            buffer: svgOfBytes(96 * 1024 + 1),
+            originalName: 'qr-logo.svg',
+            mimeType: 'image/svg+xml',
+            purpose: 'qr-logo',
+          }),
+        /SVG too large \(max 96 KB\)/,
+      );
+      assert.deepEqual(await fs.readdir(dir), [], 'a refused logo must leave nothing on disk');
+    });
+
+    it('keeps the branding slots at their own SVG ceiling: the same file is fine as a brand logo', async () => {
+      const out = await service.persist({
+        buffer: svgOfBytes(96 * 1024 + 1),
+        originalName: 'logo.svg',
+        mimeType: 'image/svg+xml',
+      });
+      assert.match(out.url, /\.svg$/);
+    });
+
+    it('holds a QR logo to every rule a branding upload has: the SVG reject-list and the sniffed type', async () => {
+      await assert.rejects(
+        () =>
+          service.persist({
+            buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', 'utf8'),
+            originalName: 'qr-logo.svg',
+            mimeType: 'image/svg+xml',
+            purpose: 'qr-logo',
+          }),
+        /disallowed/i,
+      );
+      await assert.rejects(
+        () =>
+          service.persist({
+            buffer: Buffer.from('GIF89a-not-a-png', 'ascii'),
+            originalName: 'qr-logo.png',
+            mimeType: 'image/png',
+            purpose: 'qr-logo',
+          }),
+        /Unsupported file type|does not match/,
+      );
+      assert.deepEqual(await fs.readdir(dir), []);
+    });
+
+    it('keeps the raster ceiling a branding upload has: a PNG is judged by bytes, not by the SVG limit', async () => {
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.alloc(96 * 1024),
+      ]);
+      const out = await service.persist({
+        buffer: png,
+        originalName: 'qr-logo.png',
+        mimeType: 'image/png',
+        purpose: 'qr-logo',
+      });
+      assert.match(out.url, /\.png$/);
+    });
   });
 
   it('remove() ignores path-traversal filenames', async () => {

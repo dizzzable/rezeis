@@ -1,16 +1,21 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { en } from '@/i18n/en'
 import { ru } from '@/i18n/ru'
-import { QR_STYLE_PLAIN, ROUNDED_MODULE_RADIUS, qrSvg } from '@/lib/qr/kit/qr-style'
+import { QR_STYLE_PLAIN, ROUNDED_MODULE_RADIUS, qrSvg, type QrLogo } from '@/lib/qr/kit/qr-style'
+import { EYE_LOGO, SVG_LOGO_BYTES, TRANSPARENT_LOGO, paintLogo } from '@/test/qr-logo-bitmaps'
 import { renderWithProviders } from '@/test/test-utils'
 
 import type { BrandingQrStyleDraft } from './branding-form-schema'
+import { createQrLogoCheckStore, type QrLogoChecker, type QrLogoCheckStore } from './qr-logo-check'
+import { createBrowserQrLogoChecker } from './qr-logo-check-browser'
+import type { QrLogoBitmap } from './qr-logo-check-run'
 import {
   QR_PREVIEW_CONNECT_LINK,
   QR_PREVIEW_CONNECT_PX,
+  QR_PREVIEW_PARTNER_ENLARGED_PX,
   QR_PREVIEW_PARTNER_LINK,
   QR_PREVIEW_PARTNER_MAGNIFIED_PX,
   QR_PREVIEW_PARTNER_PX,
@@ -21,11 +26,15 @@ import {
 
 /**
  * The QR tab as the operator meets it: what it says, what each control hands
- * back, what the contrast line says before a save, and what the preview draws.
+ * back, what the contrast line and the logo check say before a save, and what
+ * the preview draws.
  *
  * The preview is compared with the vendored cabinet renderer's own output for
  * the same input, byte for byte — the promise of the tab is that it shows the
- * code subscribers get, so "an image appeared" would prove nothing.
+ * code subscribers get, so "an image appeared" would prove nothing. The logo
+ * check decodes for real: its checker is the production one with the
+ * browser-only steps (loading through `fetch`, drawing through a canvas)
+ * replaced by the picture they would produce, over five links of each shape.
  */
 
 /**
@@ -51,23 +60,64 @@ vi.mock('@/lib/qr/kit/qr-style', async (importOriginal) => {
   }
 })
 
-const copy = en.brandingPage.qr
-const NAVY_DOTS = { modules: 'dots', eyes: 'rounded', dark: '#1e3a8a' } as const
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
-function renderSection(value: BrandingQrStyleDraft, darkError?: string) {
+const copy = en.brandingPage.qr
+const NAVY_DOTS = { modules: 'dots', eyes: 'rounded', dark: '#1e3a8a', logo: null } as const
+const LOGO: QrLogo = { src: '/uploads/branding/0123456789abcdef0123456789abcdef.png', size: 'small', plate: 'light' }
+const LOGO_HREF = 'data:image/png;base64,iVBORw0KGgo='
+
+/** A checker that must never run: the case has no logo, or is not about the check. */
+const idleChecker = (): { checker: QrLogoChecker; calls: unknown[] } => {
+  const calls: unknown[] = []
+  return {
+    calls,
+    checker: async (style) => {
+      calls.push(style)
+      return null
+    },
+  }
+}
+
+/** The production checker over five links of each shape, with the picture the browser would have drawn. */
+const decodingChecker = (picture: QrLogoBitmap | null, href: string | null = LOGO_HREF): QrLogoChecker =>
+  createBrowserQrLogoChecker({ loadHref: async () => href, drawBox: async () => picture, linksPerShape: 5 })
+
+function renderSection(
+  value: BrandingQrStyleDraft,
+  options: {
+    readonly darkError?: string
+    readonly logoError?: string
+    readonly brandLogoUrl?: string | null
+    readonly uploadLogo?: (file: File) => Promise<string>
+    readonly logoCheck?: QrLogoCheckStore
+  } = {},
+) {
   const onChange = vi.fn()
+  const uploadLogo = options.uploadLogo ?? vi.fn(async () => LOGO.src)
+  const logoCheck = options.logoCheck ?? createQrLogoCheckStore(idleChecker().checker)
   const view = renderWithProviders(
-    <QrStyleSection value={value} onChange={onChange} darkError={darkError} />,
+    <QrStyleSection
+      value={value}
+      onChange={onChange}
+      darkError={options.darkError}
+      logoError={options.logoError}
+      brandLogoUrl={options.brandLogoUrl}
+      uploadLogo={uploadLogo}
+      logoCheck={logoCheck}
+    />,
     { withRouter: false },
   )
-  return { onChange, ...view }
+  return { onChange, uploadLogo, ...view }
 }
 
 const group = (name: string) => within(screen.getByRole('group', { name }))
 const dataUrl = (svg: string): string =>
   `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
 
-type SampleKind = 'referral' | 'connect' | 'partner' | 'partner-magnified'
+type SampleKind = 'referral' | 'connect' | 'partner' | 'partner-magnified' | 'partner-enlarged'
 
 /**
  * A drawn sample, found by what it IS rather than by its caption. A caption
@@ -87,6 +137,16 @@ const markup = (image: HTMLImageElement): string =>
   decodeURIComponent((image.getAttribute('src') ?? '').replace(/^data:image\/svg\+xml;charset=utf-8,/, ''))
 
 const stepDownNote = (): Element | null => document.querySelector('[data-qr-step-down]')
+const logoControls = (): HTMLElement => {
+  const controls = document.querySelector<HTMLElement>('[data-qr-logo-controls]')
+  if (controls === null) throw new Error('the logo controls are not rendered')
+  return controls
+}
+const fileInput = (): HTMLInputElement => {
+  const input = document.querySelector<HTMLInputElement>('[data-qr-logo-file]')
+  if (input === null) throw new Error('the logo file input is not rendered')
+  return input
+}
 
 describe('QR style section — what it says', () => {
   it('names the two codes it styles, and says the connect code stays plain and why', () => {
@@ -104,11 +164,18 @@ describe('QR style section — controls', () => {
     await user.click(
       group(copy.presetsLabel).getByRole('button', { name: copy.presets.roundedColour }),
     )
-    expect(onChange).toHaveBeenCalledWith({ modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a' })
+    expect(onChange).toHaveBeenCalledWith({ modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a', logo: null })
   })
 
-  it('marks the preset that matches the current style', () => {
-    renderSection({ modules: 'dots', eyes: 'rounded', dark: '#000000' })
+  it('keeps the operator’s logo when a preset is applied', async () => {
+    const user = userEvent.setup()
+    const { onChange } = renderSection({ ...NAVY_DOTS, logo: LOGO })
+    await user.click(group(copy.presetsLabel).getByRole('button', { name: copy.presets.plain }))
+    expect(onChange).toHaveBeenLastCalledWith({ modules: 'square', eyes: 'square', dark: '#000000', logo: LOGO })
+  })
+
+  it('marks the preset that matches the current style, whatever the logo', () => {
+    renderSection({ modules: 'dots', eyes: 'rounded', dark: '#000000', logo: LOGO })
     const presets = group(copy.presetsLabel)
     expect(presets.getByRole('button', { name: copy.presets.dots })).toHaveAttribute(
       'aria-pressed',
@@ -120,9 +187,9 @@ describe('QR style section — controls', () => {
     )
   })
 
-  it('changes one member and keeps the other two', async () => {
+  it('changes one member and keeps the others', async () => {
     const user = userEvent.setup()
-    const navyRounded = { modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a' } as const
+    const navyRounded = { modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a', logo: LOGO } as const
     const { onChange } = renderSection(navyRounded)
     await user.click(group(copy.modulesLabel).getByRole('button', { name: copy.modules.dots }))
     expect(onChange).toHaveBeenLastCalledWith({ ...navyRounded, modules: 'dots' })
@@ -137,52 +204,227 @@ describe('QR style section — controls', () => {
     expect(onChange).toHaveBeenLastCalledWith({ ...NAVY_DOTS, dark: '#' })
   })
 
-  it('resets to the plain code', async () => {
+  it('resets to the plain code — logo and all', async () => {
     const user = userEvent.setup()
-    const { onChange } = renderSection(NAVY_DOTS)
+    const { onChange } = renderSection({ ...NAVY_DOTS, logo: LOGO })
     await user.click(screen.getByRole('button', { name: copy.reset }))
     expect(onChange).toHaveBeenCalledWith(QR_STYLE_PLAIN)
   })
 
-  it('has nothing to reset when the code is already plain', () => {
-    renderSection(QR_STYLE_PLAIN)
+  it('has nothing to reset when the code is already plain — and something when only a logo is set', () => {
+    const { unmount } = renderSection(QR_STYLE_PLAIN)
     expect(screen.getByRole('button', { name: copy.reset })).toBeDisabled()
+    unmount()
+    renderSection({ ...QR_STYLE_PLAIN, logo: LOGO })
+    expect(screen.getByRole('button', { name: copy.reset })).toBeEnabled()
   })
 })
 
-describe('QR style section — the contrast line, before any save', () => {
+describe('QR style section — the logo controls', () => {
+  it('offers an upload and nothing to size while there is no logo', () => {
+    renderSection(QR_STYLE_PLAIN)
+    expect(within(logoControls()).getByText(copy.logo.none)).toBeInTheDocument()
+    expect(within(logoControls()).getByRole('button', { name: copy.logo.upload })).toBeEnabled()
+    expect(screen.queryByRole('group', { name: copy.logo.sizeLabel })).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: copy.logo.plateLabel })).not.toBeInTheDocument()
+  })
+
+  it('uploads a picked file and hands the logo back small, on the white field', async () => {
+    const user = userEvent.setup()
+    const uploadLogo = vi.fn(async () => '/uploads/branding/fedcba9876543210fedcba9876543210.webp')
+    const { onChange } = renderSection(NAVY_DOTS, { uploadLogo })
+    const file = new File([new Uint8Array(1024)], 'mark.webp', { type: 'image/webp' })
+    await user.upload(fileInput(), file)
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(uploadLogo).toHaveBeenCalledWith(file)
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...NAVY_DOTS,
+      logo: { src: '/uploads/branding/fedcba9876543210fedcba9876543210.webp', size: 'small', plate: 'light' },
+    })
+  })
+
+  it('replaces a logo’s file and keeps the size and plate the operator chose', async () => {
+    const user = userEvent.setup()
+    const chosen: QrLogo = { ...LOGO, size: 'large', plate: 'dark' }
+    const { onChange } = renderSection({ ...NAVY_DOTS, logo: chosen }, { uploadLogo: async () => '/uploads/branding/b.svg' })
+    await user.upload(fileInput(), new File(['<svg/>'], 'b.svg', { type: 'image/svg+xml' }))
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange).toHaveBeenLastCalledWith({ ...NAVY_DOTS, logo: { ...chosen, src: '/uploads/branding/b.svg' } })
+  })
+
+  it('refuses an SVG over 96 KB before uploading it, naming both sizes', async () => {
+    const user = userEvent.setup()
+    const { onChange, uploadLogo } = renderSection(NAVY_DOTS)
+    await user.upload(fileInput(), new File([new Uint8Array(120 * 1024)], 'huge.svg', { type: 'image/svg+xml' }))
+    const alert = await within(logoControls()).findByRole('alert')
+    expect(alert).toHaveTextContent('This SVG is 120 KB, and a QR logo in SVG may be at most 96 KB')
+    expect(uploadLogo).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('refuses an SVG one byte over 96 KB', async () => {
+    const user = userEvent.setup()
+    const { uploadLogo } = renderSection(NAVY_DOTS)
+    await user.upload(fileInput(), new File([new Uint8Array(96 * 1024 + 1)], 'over.svg', { type: 'image/svg+xml' }))
+    expect(await within(logoControls()).findByRole('alert')).toHaveTextContent('at most 96 KB')
+    expect(uploadLogo).not.toHaveBeenCalled()
+  })
+
+  it('uploads an SVG of exactly 96 KB', async () => {
+    const user = userEvent.setup()
+    const { uploadLogo } = renderSection(NAVY_DOTS)
+    await user.upload(fileInput(), new File([new Uint8Array(96 * 1024)], 'fits.svg', { type: 'image/svg+xml' }))
+    await waitFor(() => expect(uploadLogo).toHaveBeenCalledTimes(1))
+  })
+
+  it('refuses a raster file over 2 MB before uploading it', async () => {
+    const user = userEvent.setup()
+    const { uploadLogo } = renderSection(NAVY_DOTS)
+    await user.upload(fileInput(), new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' }))
+    expect(await within(logoControls()).findByRole('alert')).toHaveTextContent('2 MB')
+    expect(uploadLogo).not.toHaveBeenCalled()
+  })
+
+  it('shows the server’s own refusal of an upload', async () => {
+    const user = userEvent.setup()
+    const refusal = 'SVG contains a disallowed element: <script>. A namespace prefix does not make it safe.'
+    const { onChange } = renderSection(NAVY_DOTS, {
+      uploadLogo: () => Promise.reject(Object.assign(new Error('Bad Request'), { response: { data: { message: refusal } } })),
+    })
+    await user.upload(fileInput(), new File(['<svg/>'], 'bad.svg', { type: 'image/svg+xml' }))
+    expect(await within(logoControls()).findByRole('alert')).toHaveTextContent(refusal)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('takes the brand logo when it is an upload the cabinet relays', async () => {
+    const user = userEvent.setup()
+    const brandLogoUrl = '/uploads/branding/99999999999999999999999999999999.svg'
+    const { onChange } = renderSection(NAVY_DOTS, { brandLogoUrl })
+    await user.click(within(logoControls()).getByRole('button', { name: copy.logo.useBrandLogo }))
+    expect(onChange).toHaveBeenLastCalledWith({ ...NAVY_DOTS, logo: { src: brandLogoUrl, size: 'small', plate: 'light' } })
+    expect(screen.queryByText(copy.logo.brandLogoUnusable)).not.toBeInTheDocument()
+  })
+
   it.each([
-    // WCAG's 4.5:1 grey: the one the cabinet's camera model failed to read.
-    ['#767676', 'too-light', '4.54:1'],
-    // The first grey under 7:1. Floored, so it can never read as "7.00".
-    ['#5a5a5a', 'too-light', '6.89:1'],
-    // A blue at 6.999258:1 — refused, and near enough the line that rounding
-    // to two places would print "7.00:1" beside the refusal. It is flooring,
-    // not the distance from the line, that keeps the two honest, and no grey
-    // is close enough to show that: #595959 and #5a5a5a sit either side of it.
-    ['#0050ca', 'too-light', '6.99:1'],
-    // The palest grey that passes.
-    ['#595959', 'ok', '7.00:1'],
-    ['#000000', 'ok', '21.00:1'],
-  ])('%s is %s at %s', (dark, verdict, ratio) => {
-    renderSection({ ...NAVY_DOTS, dark })
-    const line = document.querySelector('[data-qr-contrast]')
-    expect(line).toHaveAttribute('data-qr-contrast', verdict)
-    expect(line).toHaveTextContent(ratio)
-    expect(line).toHaveTextContent(verdict === 'ok' ? /enough/ : /will not save/)
+    ['an external address', 'https://cdn.example.com/logo.png'],
+    ['an inline image', 'data:image/png;base64,iVBORw0KGgo='],
+  ])('will not take a brand logo that is %s, and says why', (_name, brandLogoUrl) => {
+    renderSection(NAVY_DOTS, { brandLogoUrl })
+    expect(within(logoControls()).getByRole('button', { name: copy.logo.useBrandLogo })).toBeDisabled()
+    expect(screen.getByText(copy.logo.brandLogoUnusable)).toBeInTheDocument()
   })
 
-  it('asks for a colour when the value is not one', () => {
-    renderSection({ ...NAVY_DOTS, dark: '#12' })
-    const line = document.querySelector('[data-qr-contrast]')
-    expect(line).toHaveAttribute('data-qr-contrast', 'invalid')
-    expect(line).toHaveTextContent(copy.colourInvalid)
+  it('sets the size and the plate, keeping the address', async () => {
+    const user = userEvent.setup()
+    const { onChange } = renderSection({ ...NAVY_DOTS, logo: LOGO })
+    await user.click(group(copy.logo.sizeLabel).getByRole('button', { name: copy.logo.sizes.large }))
+    expect(onChange).toHaveBeenLastCalledWith({ ...NAVY_DOTS, logo: { ...LOGO, size: 'large' } })
+    await user.click(group(copy.logo.plateLabel).getByRole('button', { name: copy.logo.plates.dark }))
+    expect(onChange).toHaveBeenLastCalledWith({ ...NAVY_DOTS, logo: { ...LOGO, plate: 'dark' } })
+    expect(group(copy.logo.sizeLabel).getByRole('button', { name: copy.logo.sizes.small })).toHaveAttribute('aria-pressed', 'true')
+    expect(group(copy.logo.plateLabel).getByRole('button', { name: copy.logo.plates.light })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('shows a refusal the save attached to the colour, and marks the field', () => {
-    renderSection({ ...NAVY_DOTS, dark: '#767676' }, 'refused on save')
-    expect(screen.getByRole('alert')).toHaveTextContent('refused on save')
-    expect(screen.getByLabelText(copy.colourLabel)).toHaveAttribute('aria-invalid', 'true')
+  it('takes the logo away, and only the logo', async () => {
+    const user = userEvent.setup()
+    const { onChange } = renderSection({ ...NAVY_DOTS, logo: LOGO })
+    await user.click(within(logoControls()).getByRole('button', { name: copy.logo.remove }))
+    expect(onChange).toHaveBeenLastCalledWith(NAVY_DOTS)
+  })
+
+  it('shows a refusal the save attached to the logo beside the logo controls, and marks the upload', () => {
+    renderSection({ ...NAVY_DOTS, logo: LOGO }, { logoError: 'refused on save' })
+    const controls = within(logoControls())
+    expect(controls.getByRole('alert')).toHaveTextContent('refused on save')
+    expect(controls.getByRole('button', { name: copy.logo.replace })).toHaveAttribute('aria-invalid', 'true')
+    // Not on the colour: a logo refusal names the logo.
+    expect(screen.getByLabelText(copy.colourLabel)).toHaveAttribute('aria-invalid', 'false')
+  })
+
+  it('has its labels in both languages', () => {
+    for (const bundle of [en.brandingPage.qr.logo, ru.brandingPage.qr.logo]) {
+      for (const value of [bundle.label, bundle.upload, bundle.useBrandLogo, bundle.remove, bundle.check.unreadable, bundle.check.passed]) {
+        expect(value).toEqual(expect.stringMatching(/\S/))
+      }
+    }
+  })
+})
+
+describe('QR style section — the logo check', () => {
+  it('checks nothing while there is no logo', async () => {
+    const { checker, calls } = idleChecker()
+    renderSection(NAVY_DOTS, { logoCheck: createQrLogoCheckStore(checker) })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(calls).toEqual([])
+    expect(document.querySelector('[data-qr-logo-check]')).toBeNull()
+  })
+
+  it('checks a logo by decoding codes that carry it, and says they read', async () => {
+    renderSection(
+      { ...QR_STYLE_PLAIN, logo: { ...LOGO, size: 'large' } },
+      { logoCheck: createQrLogoCheckStore(decodingChecker(paintLogo(TRANSPARENT_LOGO))) },
+    )
+    const status = await waitFor(
+      () => {
+        const element = document.querySelector('[data-qr-logo-check="passed"]')
+        if (element === null) throw new Error('no passing verdict yet')
+        return element
+      },
+      { timeout: 30_000 },
+    )
+    // Five links of each shape at both sizes: 40 codes carry the logo, and
+    // none that reads without it stops reading with it.
+    expect(status.textContent).toMatch(/^Checked on 40 codes: 0 of the \d+ that read without the logo stopped reading with it \(0%\)/)
+  }, 60_000)
+
+  it('refuses an eye-shaped logo with the numbers it measured', async () => {
+    renderSection(
+      { ...QR_STYLE_PLAIN, logo: { ...LOGO, size: 'large' } },
+      { logoCheck: createQrLogoCheckStore(decodingChecker(paintLogo(EYE_LOGO))) },
+    )
+    const status = await waitFor(
+      () => {
+        const element = document.querySelector('[data-qr-logo-check="unreadable"]')
+        if (element === null) throw new Error('no refusal yet')
+        return element
+      },
+      { timeout: 30_000 },
+    )
+    expect(status.textContent).toMatch(/^This logo makes codes unreadable: 17 of the \d+ codes that read without it no longer read with it \(\d+(\.\d)?%; at most 5% is allowed\)/)
+  }, 60_000)
+
+  it('says the cabinet cannot load a logo its loader draws nothing from', async () => {
+    renderSection({ ...NAVY_DOTS, logo: LOGO }, { logoCheck: createQrLogoCheckStore(decodingChecker(null, null)) })
+    expect(await screen.findByText(copy.logo.check.unloadable)).toBeInTheDocument()
+  })
+
+  it('offers to check again when the check could not run, and runs it again', async () => {
+    const user = userEvent.setup()
+    let attempts = 0
+    const checker: QrLogoChecker = async () => {
+      attempts += 1
+      return { status: 'failed' }
+    }
+    renderSection({ ...NAVY_DOTS, logo: LOGO }, { logoCheck: createQrLogoCheckStore(checker) })
+    expect(await screen.findByText(copy.logo.check.failed)).toBeInTheDocument()
+    expect(attempts).toBe(1)
+    await user.click(screen.getByRole('button', { name: copy.logo.check.retry }))
+    await waitFor(() => expect(attempts).toBe(2))
+  })
+
+  it('shows progress while it runs', async () => {
+    let finish: () => void = () => {}
+    const checker: QrLogoChecker = (_style, { onProgress }) =>
+      new Promise((resolve) => {
+        onProgress(0, 800)
+        onProgress(400, 800)
+        finish = () => resolve(null)
+      })
+    renderSection({ ...NAVY_DOTS, logo: LOGO }, { logoCheck: createQrLogoCheckStore(checker) })
+    const progress = await screen.findByRole('progressbar', { name: copy.logo.check.progress })
+    expect(progress).toBeInTheDocument()
+    expect(document.querySelector('[data-qr-logo-check="checking"]')).toHaveTextContent('0 of 800')
+    finish()
   })
 })
 
@@ -223,16 +465,45 @@ describe('QR style section — the preview', () => {
     )
     expect(screen.getByText(copy.previewRefused)).toBeInTheDocument()
   })
+
+  it('draws the logo into the invite and the opened partner code exactly as the cabinet does — and never into the card code', async () => {
+    const bytes = SVG_LOGO_BYTES
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      redirected: false,
+      headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? 'image/svg+xml' : null) },
+      arrayBuffer: async () => bytes.slice().buffer,
+    }))
+    vi.stubGlobal('fetch', fetch)
+    const logo: QrLogo = { src: '/uploads/branding/11111111111111111111111111111111.svg', size: 'large', plate: 'dark' }
+    const style = { ...NAVY_DOTS, logo }
+    const href = `data:image/svg+xml;base64,${btoa(String.fromCharCode(...bytes))}`
+    renderSection(style)
+
+    const expectedReferral = dataUrl(await qrSvg(QR_PREVIEW_REFERRAL_LINK, style, QR_PREVIEW_REFERRAL_PX, href))
+    const expectedEnlarged = dataUrl(await qrSvg(QR_PREVIEW_PARTNER_LINK, style, QR_PREVIEW_PARTNER_ENLARGED_PX, href))
+    expect(expectedReferral).toContain(encodeURIComponent('<image'))
+    expect(expectedEnlarged).toContain(encodeURIComponent('<image'))
+
+    await waitFor(async () => expect((await sample('referral')).getAttribute('src')).toBe(expectedReferral))
+    await waitFor(async () => expect((await sample('partner-enlarged')).getAttribute('src')).toBe(expectedEnlarged))
+    expect(fetch).toHaveBeenCalledWith(logo.src, { credentials: 'same-origin' })
+    // The card's own code has no room for a logo, and the cabinet draws it without one.
+    const card = markup(await sample('partner'))
+    expect(card).not.toContain('<image')
+    expect(card).toBe(await qrSvg(QR_PREVIEW_PARTNER_LINK, { ...style, logo: null }, QR_PREVIEW_PARTNER_PX))
+  })
 })
 
 describe('QR style section — the partner advertising code', () => {
   /**
-   * Partners get their codes at 96 CSS px, where the renderer steps dots down
-   * to rounded squares; the referral sample, at 208, keeps them. So a tab that
-   * showed only the referral sample would let the operator approve dots that
-   * no partner ever sees. These cases hold the partner sample to the code the
-   * cabinet draws for a partner — byte for byte, at the partner's size, in the
-   * draft style — and hold the step-down note to what was actually drawn.
+   * Partners get their codes at 96 CSS px on a placement card, where the
+   * renderer steps dots down to rounded squares; the referral sample, at 208,
+   * keeps them. So a tab that showed only the referral sample would let the
+   * operator approve dots that no partner card shows. These cases hold the
+   * partner sample to the code the cabinet draws for a partner — byte for
+   * byte, at the partner's size, in the draft style — and hold the step-down
+   * note to what was actually drawn.
    *
    * What they cannot hold is the NUMBER: for this link the renderer draws the
    * same bytes at every size from 96 to 163 px, so a constant of 120 passes
@@ -244,6 +515,7 @@ describe('QR style section — the partner advertising code', () => {
     for (const bundle of [en.brandingPage.qr, ru.brandingPage.qr]) {
       expect(bundle.previewPartner).toEqual(expect.stringMatching(/\S/))
       expect(bundle.previewPartnerMagnified).toEqual(expect.stringMatching(/\S/))
+      expect(bundle.previewPartnerEnlarged).toEqual(expect.stringMatching(/\S/))
       expect(bundle.previewPartnerStepDown).toEqual(expect.stringMatching(/\S/))
     }
   })
@@ -258,6 +530,20 @@ describe('QR style section — the partner advertising code', () => {
     expect(partner).toHaveAttribute('width', String(QR_PREVIEW_PARTNER_PX))
     expect(partner).toHaveAttribute('height', String(QR_PREVIEW_PARTNER_PX))
     expect(partner).toHaveAttribute('alt', copy.previewPartner)
+  })
+
+  it('draws the code a partner opens as a drawing of its own, at the size the cabinet opens it', async () => {
+    renderSection(NAVY_DOTS)
+    const enlarged = await sample('partner-enlarged')
+    expect(enlarged).toHaveAttribute(
+      'src',
+      dataUrl(await qrSvg(QR_PREVIEW_PARTNER_LINK, NAVY_DOTS, QR_PREVIEW_PARTNER_ENLARGED_PX)),
+    )
+    expect(enlarged).toHaveAttribute('width', String(QR_PREVIEW_PARTNER_ENLARGED_PX))
+    expect(enlarged).toHaveAttribute('alt', copy.previewPartnerEnlarged)
+    // At its own size the dots survive: it is not the card image scaled.
+    expect(markup(enlarged)).toContain('<circle')
+    expect(enlarged.getAttribute('src')).not.toBe((await sample('partner')).getAttribute('src'))
   })
 
   it('shows dots on the referral sample and rounded squares on the partner sample, for the same style', async () => {

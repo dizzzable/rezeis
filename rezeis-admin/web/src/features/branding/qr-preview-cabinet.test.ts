@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
+import { LOGO_DISPLAY_PIXELS } from '@/lib/qr/kit/qr-logo'
+
 import {
+  QR_PREVIEW_PARTNER_ENLARGED_PX,
   QR_PREVIEW_PARTNER_LINK,
   QR_PREVIEW_PARTNER_PX,
   QR_PREVIEW_REFERRAL_PX,
@@ -53,6 +56,7 @@ const WEB_SRC = join(HERE, '..', '..')
 // checkouts: branding → features → src → web → rezeis-admin → rezeis → root.
 const REIWA_WEB_SRC = join(HERE, '..', '..', '..', '..', '..', '..', 'reiwa', 'web', 'src')
 const PARTNER_ADS = join(REIWA_WEB_SRC, 'features', 'partner', 'components', 'partner-advertising-section.tsx')
+const PARTNER_QR_DIALOG = join(REIWA_WEB_SRC, 'features', 'partner', 'components', 'partner-qr-dialog.tsx')
 const INVITE_HERO = join(REIWA_WEB_SRC, 'features', 'referrals', 'components', 'invite-link-hero.tsx')
 
 /* ─────────────────────────────── reading sources ────────────────────────────── */
@@ -535,6 +539,16 @@ describe('reading LocalQr sizes off a source', () => {
 const hasSibling = existsSync(REIWA_WEB_SRC)
 
 describe('the sample sizes are the cabinet’s own', () => {
+  it('draws the samples that carry a logo at the sizes the kit names — the sizes the logo check verifies at', () => {
+    // Always runs: the kit is vendored, so this half needs no sibling checkout.
+    expect(QR_PREVIEW_REFERRAL_PX).toBe(LOGO_DISPLAY_PIXELS.referralInvite)
+    expect(QR_PREVIEW_PARTNER_ENLARGED_PX).toBe(LOGO_DISPLAY_PIXELS.partnerEnlarged)
+    const numerically = (a: number, b: number): number => a - b
+    expect(Object.values(LOGO_DISPLAY_PIXELS).sort(numerically)).toEqual(
+      [QR_PREVIEW_REFERRAL_PX, QR_PREVIEW_PARTNER_ENLARGED_PX].sort(numerically),
+    )
+  })
+
   it.skipIf(!hasSibling)('draws the partner sample at the size partners see their codes on the card', () => {
     expect(existsSync(PARTNER_ADS), `${PARTNER_ADS} is gone — where do partner codes render now?`).toBe(true)
     const card = onTheCard(localQrUses(reiwaSource(PARTNER_ADS)))
@@ -555,6 +569,20 @@ describe('the sample sizes are the cabinet’s own', () => {
           `previews it at QR_PREVIEW_PARTNER_PX = ${QR_PREVIEW_PARTNER_PX}. Whether dots survive depends on that ` +
           'size, so the operator would approve a code partners do not get',
       ).toBe(QR_PREVIEW_PARTNER_PX)
+    }
+  })
+
+  it.skipIf(!hasSibling)('draws the opened partner sample at the size the partner dialog draws the code', () => {
+    expect(existsSync(PARTNER_QR_DIALOG), `${PARTNER_QR_DIALOG} is gone — where does a tapped partner code open now?`).toBe(true)
+    const calls = qrSvgSizes(reiwaSource(PARTNER_QR_DIALOG))
+    expect(calls.length, 'the partner dialog no longer draws its code with `qrSvg`').toBeGreaterThan(0)
+    for (const call of calls) {
+      expect(
+        call.size,
+        `partner-qr-dialog.tsx:${call.line} draws \`${call.text}\` at ${call.size ?? 'a size this test cannot read'} px, ` +
+          `but the QR tab previews the opened partner code at QR_PREVIEW_PARTNER_ENLARGED_PX = ${QR_PREVIEW_PARTNER_ENLARGED_PX} — ` +
+          'and the logo check verifies a logo at the sizes the kit names, so the two have to be one number',
+      ).toBe(QR_PREVIEW_PARTNER_ENLARGED_PX)
     }
   })
 

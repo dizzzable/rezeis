@@ -51,8 +51,12 @@ import {
   CARD_GRADIENT_SOURCES,
   CardGradientSource,
   QR_EYE_SHAPES,
+  QR_LOGO_PLATES,
+  QR_LOGO_SIZES,
   QR_MODULE_SHAPES,
   QrEyeShape,
+  QrLogoPlate,
+  QrLogoSize,
   QrModuleShape,
 } from '../interfaces/branding-settings.interface';
 import {
@@ -61,7 +65,9 @@ import {
 } from '../utils/branding-css.util';
 import {
   QR_DARK_HEX_PATTERN,
+  QR_LOGO_SRC_MAX_LENGTH,
   QR_MIN_CONTRAST,
+  isQrLogoSrc,
   isUsableQrDark,
   qrContrastAgainstWhite,
 } from '../utils/branding-qr-style.util';
@@ -837,16 +843,65 @@ function IsUsableQrDark(validationOptions?: ValidationOptions): PropertyDecorato
 }
 
 /**
+ * `qrStyle.logo.src` must be an upload the cabinet relays — `isQrLogoSrc`,
+ * shared with the reader, so the two stages accept exactly the same addresses.
+ * A value that is not a string is `@IsString`'s to report.
+ */
+function IsQrLogoSrc(validationOptions?: ValidationOptions): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isQrLogoSrc',
+      validator: {
+        validate: (value: unknown): boolean => typeof value !== 'string' || isQrLogoSrc(value),
+        defaultMessage: (args?: ValidationArguments): string =>
+          `$property must be an image uploaded on the branding page — /uploads/branding/<file> ending in .png, .jpg, .jpeg, .webp or .svg, at most ${QR_LOGO_SRC_MAX_LENGTH} characters; the cabinet draws no logo from any other address; received ${describeRejectedValue(args?.value)}`,
+      },
+    },
+    validationOptions,
+  );
+}
+
+/**
+ * The logo in the middle of the two styled codes. A flat nested class like
+ * `QrStyleDto` itself, for the same reason: `forbidNonWhitelisted` reaches
+ * inside it, so an unknown key is a 400 that names it.
+ *
+ * ALL THREE MEMBERS ARE REQUIRED, and each is held to the reader's own rule.
+ * The reader takes a logo all or nothing (`readQrLogo`): were a member optional
+ * here, a logo missing its plate would be answered 200 and read back as no
+ * logo at all.
+ *
+ * WHAT THIS DOES NOT CHECK: whether codes carrying the logo still READ. That
+ * takes drawing the operator's image, which only a browser does, and the
+ * panel's QR tab decodes codes with the logo before it lets the logo be saved
+ * (`web/src/features/branding/qr-logo-check.ts`). This class holds a logo to
+ * every structural rule and to nothing else; a client other than the panel is
+ * trusted with readability, as it is trusted with the rest of the design.
+ */
+export class QrLogoDto {
+  @IsString()
+  @IsQrLogoSrc()
+  public src!: string;
+
+  @IsIn(QR_LOGO_SIZES as readonly string[])
+  public size!: QrLogoSize;
+
+  @IsIn(QR_LOGO_PLATES as readonly string[])
+  public plate!: QrLogoPlate;
+}
+
+/**
  * The QR style block — a flat nested class like `BrandLogoDto`, NOT a bare
  * record checked by hand like `serversGlobe`. Declared members are what lets
- * `forbidNonWhitelisted` reach inside the block: a key that is not one of the
- * three is an honest 400 that names it, and class-transformer drops
+ * `forbidNonWhitelisted` reach inside the block: a key that is not one of its
+ * members is an honest 400 that names it, and class-transformer drops
  * `constructor` and `__proto__` before anything reads them.
  *
- * ALL THREE MEMBERS ARE REQUIRED. The stored block is replaced whole (see
- * `mergeBrandingSettings`), so a partial block would put every member it left
- * out back to plain — an operator's colour gone because a client sent only a
- * shape. A 400 is the one outcome of that request anybody can see and act on.
+ * THE THREE DRAWING MEMBERS ARE REQUIRED. The stored block is replaced whole
+ * (see `mergeBrandingSettings`), so a partial block would put every member it
+ * left out back to plain — an operator's colour gone because a client sent
+ * only a shape. A 400 is the one outcome of that request anybody can see and
+ * act on.
  */
 export class QrStyleDto {
   @IsIn(QR_MODULE_SHAPES as readonly string[])
@@ -864,6 +919,30 @@ export class QrStyleDto {
   })
   @IsUsableQrDark()
   public dark!: string;
+
+  /**
+   * The logo, or `null` for none.
+   *
+   * `null` is a value: it takes a stored logo away. A block that carries no
+   * `logo` key at all is a block WITHOUT a logo, read the way the reader and
+   * the cabinet read it — and it is accepted rather than refused, unlike a
+   * missing drawing member, on purpose. The key did not exist before this
+   * release: a panel tab left open across the upgrade, and every script
+   * written against the three-member block, sends exactly that, and the
+   * cabinet's round-trip contract (`reiwa/test/web/qr-style-round-trip.test.ts`)
+   * still sends three-member blocks and expects them saved. Refusing them
+   * would fail every such save for a member none of those clients has ever
+   * shown anybody; accepting them costs a logo only a client that never
+   * displayed it could remove, which is what replacing the block whole means.
+   *
+   * `@IsOptional()` waves `null` and an absent key past the checks below;
+   * anything else must be a whole `QrLogoDto`.
+   */
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => QrLogoDto)
+  public logo?: QrLogoDto | null;
 }
 
 /** Explicit subscription-card foreground policy, separate from primary UI text. */
@@ -1231,7 +1310,8 @@ export class UpdateBrandingSettingsDto {
   /**
    * The operator's QR style for the referral invite and the partner's
    * advertising code — never the connect code, which the cabinet always draws
-   * plain. One block with all three members required; see `QrStyleDto`.
+   * plain. One block with its three drawing members required and an optional
+   * logo; see `QrStyleDto`.
    *
    * `@ValidateIf` rather than `@IsOptional()`: `@IsOptional()` waves `null`
    * past every validator below it, the gate then counts `{ qrStyle: null }` as

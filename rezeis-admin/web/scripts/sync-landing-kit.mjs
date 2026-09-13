@@ -34,15 +34,18 @@
  *
  * ── The QR renderer → `src/lib/qr/kit/` ───────────────────────────────────
  *
- * Two files out of reiwa's `web/src/lib/`: `qr-style.ts`, which draws a styled
- * QR code from the matrix, and the `qr-options.ts` it imports. The operator
- * picks a QR style on the branding page and the cabinet draws it; the page's
- * preview and its contrast verdict run this copy, so what the operator
- * approves is what subscribers are shown, refused or accepted by the same
- * colour rule. The source is a shared directory of unrelated modules, so this
- * kit names what it TAKES (`include`) instead of what it leaves behind: a new
- * file in reiwa's `lib/` is not this panel's business, and an exclude list
- * would vendor it silently. `src/lib/qr/qr-kit-manifest.test.ts` freezes it.
+ * Four files out of reiwa's `web/src/lib/`: `qr-style.ts`, which draws a styled
+ * QR code from the matrix, the `qr-options.ts` it imports, `qr-logo.ts`, which
+ * plans whether an operator's logo fits a code and how large, and
+ * `qr-logo-source.ts`, which turns the uploaded logo into the `data:` URI the
+ * renderer inlines. The operator picks a QR style and a logo on the branding
+ * page and the cabinet draws them; the page's preview, its contrast verdict
+ * and its logo check run this copy, so what the operator approves is what
+ * subscribers are shown, refused or accepted by the same rules. The source is
+ * a shared directory of unrelated modules, so this kit names what it TAKES
+ * (`include`) instead of what it leaves behind: a new file in reiwa's `lib/`
+ * is not this panel's business, and an exclude list would vendor it silently.
+ * `src/lib/qr/qr-kit-manifest.test.ts` freezes it.
  *
  * Usage:  node scripts/sync-landing-kit.mjs [--check] [--kit <name>]
  *                                           [--source <reiwa-root>]
@@ -106,7 +109,7 @@ const KITS = [
     exclude: new Set(),
     // The source is reiwa's whole `lib/`, so this kit names what it TAKES.
     // Keep in step with `src/lib/qr/qr-kit-manifest.test.ts`.
-    include: new Set(['qr-options.ts', 'qr-style.ts']),
+    include: new Set(['qr-logo-source.ts', 'qr-logo.ts', 'qr-options.ts', 'qr-style.ts']),
     note: 'DO NOT EDIT files in kit/ by hand — they are vendored from reiwa',
   },
 ]

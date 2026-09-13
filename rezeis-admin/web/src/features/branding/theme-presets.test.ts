@@ -35,6 +35,7 @@ const validationMessages = {
   imageUrlInvalid: 'image invalid',
   gradientInvalid: 'gradient invalid',
   qrDarkTooLight: 'qr dark too light',
+  qrLogoInvalid: 'qr logo invalid',
 } as const
 
 describe('WEB Reiwa theme catalog', () => {

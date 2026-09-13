@@ -4665,17 +4665,62 @@ export const en = {
       contrastTooLight:
         'Contrast with white {{ratio}}:1 — too little: the colour is too light. At least 7:1 is needed, or it will not save',
       tooLight: 'The QR code colour is too light: it needs at least 7:1 contrast with white',
+      logo: {
+        label: 'Logo in the middle',
+        hint: 'Your logo in the centre of the referral invite and of the partner codes a partner opens full size. Where a code has no room for it — the small codes on a placement card — the code is drawn without it.',
+        none: 'No logo: the codes are drawn without one.',
+        upload: 'Upload a logo',
+        replace: 'Replace',
+        uploading: 'Uploading…',
+        limits: 'PNG or WebP up to {{raster}}, SVG up to {{svg}}. A square mark on a transparent background works best.',
+        tooLargeSvg:
+          'This SVG is {{actual}}, and a QR logo in SVG may be at most {{limit}}: the cabinet draws no logo from a larger file. Simplify it, or export a PNG.',
+        tooLargeRaster: 'This file is {{actual}}; the most a logo may be is {{limit}}.',
+        uploadFailed: 'The logo could not be uploaded',
+        useBrandLogo: 'Use the brand logo',
+        brandLogoUnusable:
+          'The brand logo cannot go into a QR code: only an image uploaded on this page can. Upload it here instead.',
+        current: 'Current logo',
+        remove: 'Remove the logo',
+        sizeLabel: 'Logo size',
+        sizes: {
+          small: 'Small — up to 20% of the code',
+          large: 'Large — up to 30% of the code',
+        },
+        plateLabel: 'Under the logo',
+        plates: {
+          light: 'The white background',
+          dark: 'A plate in the code colour',
+        },
+        invalid: 'The QR logo must be an image uploaded on this page',
+        check: {
+          checking: 'Checking that codes with this logo still read: {{done}} of {{total}}',
+          progress: 'Logo check progress',
+          passed:
+            'Checked on {{codes}} codes: {{broken}} of the {{readable}} that read without the logo stopped reading with it ({{rate}}%) — within the {{limit}}% allowed.',
+          unreadable:
+            'This logo makes codes unreadable: {{broken}} of the {{readable}} codes that read without it no longer read with it ({{rate}}%; at most {{limit}}% is allowed). Marks shaped like the corner squares of a code — rings, frames, a square in a square — are the usual cause: try a filled mark, the small size, or the other background.',
+          unreadableCell:
+            'This logo makes codes unreadable: in one kind of code it breaks {{rate}}% of those that read without it (at most {{limit}}% is allowed). Marks shaped like the corner squares of a code — rings, frames, a square in a square — are the usual cause: try a filled mark, the small size, or the other background.',
+          unloadable:
+            'The cabinet cannot load this logo: the file is missing, is not an image, or is an SVG over 96 KB. Codes would be drawn without it, so it will not save.',
+          failed: 'The logo could not be checked in this browser, so it will not save yet.',
+          retry: 'Check again',
+          pending: 'The QR logo is still being checked. Wait for the check to finish, then save.',
+        },
+      },
       reset: 'Reset to plain',
       previewLabel: 'How it looks',
       previewReferral: 'Referral invite',
       previewConnect: 'Connect code — always plain',
       previewPartner: 'Partner advertising code — actual size',
       previewPartnerMagnified: 'The same image, enlarged',
+      previewPartnerEnlarged: 'Partner advertising code — opened full size',
       previewPartnerStepDown:
         'Partners see these codes small, on the placement card, and at that size dots are drawn as rounded squares — a camera reads those more reliably. In the cabinet a partner can tap a code to open it large.',
       previewRefused: 'This colour will not save, so the sample is drawn in black.',
       previewHint:
-        'The invite and the partner code are exactly the images the cabinet builds, each at its own size there: the invite as a subscriber opens it, the partner code as a partner sees it on a placement card. The enlarged copy is the same partner image, only magnified.',
+        'Every sample is exactly the image the cabinet builds, at its own size there: the invite as a subscriber opens it, the partner code as a partner sees it on a placement card and as it opens when tapped. The enlarged copy is the placement-card image, only magnified.',
     },
     sections: {
       nav: {

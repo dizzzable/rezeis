@@ -37,6 +37,27 @@ vi.mock('./card-effect-section', () => ({
   CardEffectPicker: () => <div data-testid="card-effect-picker" />,
 }))
 
+/**
+ * The page's logo check, with only the browser-only steps replaced: loading
+ * the file (`fetch`) and drawing it (a canvas) answer the picture a case
+ * names. Everything after — the links, the drawings, ZXing, the rule — is the
+ * production check, over five links of each shape.
+ */
+const picture = vi.hoisted(() => ({ current: 'transparent' as 'transparent' | 'eye' }))
+vi.mock('./qr-logo-check-browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./qr-logo-check-browser')>()
+  const bitmaps = await import('@/test/qr-logo-bitmaps')
+  return {
+    ...actual,
+    createBrowserQrLogoChecker: () =>
+      actual.createBrowserQrLogoChecker({
+        loadHref: async () => 'data:image/png;base64,iVBORw0KGgo=',
+        drawBox: async () => bitmaps.paintLogo(picture.current === 'eye' ? bitmaps.EYE_LOGO : bitmaps.TRANSPARENT_LOGO),
+        linksPerShape: 5,
+      }),
+  }
+})
+
 import WebReiwaPage from './branding-page'
 import { DEFAULT_BRANDING_DRAFT } from './branding-form-schema'
 
@@ -80,7 +101,7 @@ describe('QR tab — saving', () => {
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
     expect(patchSpy).toHaveBeenCalledWith('/admin/settings/branding', {
-      qrStyle: { modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a' },
+      qrStyle: { modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a', logo: null },
     })
   }, 30_000)
 
@@ -101,4 +122,74 @@ describe('QR tab — saving', () => {
     expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining(copy.tooLight))
     expect(patchSpy).not.toHaveBeenCalled()
   }, 30_000)
+})
+
+describe('QR tab — saving a logo', () => {
+  const UPLOADED = '/uploads/branding/0123456789abcdef0123456789abcdef.png'
+
+  /** The operator uploads a logo on the QR tab; the API answers with its address. */
+  async function uploadLogo(user: ReturnType<typeof userEvent.setup>) {
+    const postSpy = vi.spyOn(api, 'post').mockResolvedValue({ data: { url: UPLOADED } })
+    await user.click(screen.getByRole('tab', { name: page.tabs.qr }))
+    await screen.findByRole('group', { name: copy.presetsLabel })
+    const input = document.querySelector<HTMLInputElement>('[data-qr-logo-file]')
+    expect(input, 'the logo file input').not.toBeNull()
+    await user.upload(input as HTMLInputElement, new File([new Uint8Array(2048)], 'logo.png', { type: 'image/png' }))
+    await waitFor(() => expect(postSpy).toHaveBeenCalledOnce())
+    expect(postSpy.mock.calls[0]?.[0]).toBe('/admin/settings/branding/qr-logo-upload')
+  }
+
+  const verdict = (status: string): Promise<Element> =>
+    waitFor(
+      () => {
+        const element = document.querySelector(`[data-qr-logo-check="${status}"]`)
+        if (element === null) throw new Error(`no ${status} verdict yet`)
+        return element
+      },
+      { timeout: 20_000 },
+    )
+
+  const logoAlert = (): Promise<HTMLElement> =>
+    waitFor(() => {
+      const alert = document.querySelector<HTMLElement>('[data-qr-logo-controls] [role="alert"]')
+      if (alert === null) throw new Error('no refusal on the logo controls')
+      return alert
+    })
+
+  it('refuses a logo the check found unreadable, and brings the operator back to the logo from another tab', async () => {
+    picture.current = 'eye'
+    const user = userEvent.setup()
+    const patchSpy = await openPage()
+    await uploadLogo(user)
+    await user.click(within(await screen.findByRole('group', { name: copy.logo.sizeLabel })).getByRole('button', { name: copy.logo.sizes.large }))
+    const refusal = (await verdict('unreadable')).textContent ?? ''
+    expect(refusal).toMatch(/^This logo makes codes unreadable/)
+
+    // Walk away from the logo: the refusal has to find it again.
+    await user.click(screen.getByRole('tab', { name: page.tabs.brand }))
+    await user.click(screen.getByRole('button', { name: page.save }))
+
+    expect((await logoAlert()).textContent).toBe(refusal)
+    expect(screen.getByRole('tab', { name: page.tabs.qr })).toHaveAttribute('aria-selected', 'true')
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining(refusal))
+    expect(patchSpy).not.toHaveBeenCalled()
+  }, 60_000)
+
+  it('refuses a save while the logo is still being checked, then saves it with the style around it once it passed', async () => {
+    picture.current = 'transparent'
+    const user = userEvent.setup()
+    const patchSpy = await openPage()
+    await uploadLogo(user)
+    // At once — before the check has had its chance to run.
+    await user.click(screen.getByRole('button', { name: page.save }))
+    expect((await logoAlert()).textContent).toBe(copy.logo.check.pending)
+    expect(patchSpy).not.toHaveBeenCalled()
+
+    await verdict('passed')
+    await user.click(screen.getByRole('button', { name: page.save }))
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledOnce())
+    expect(patchSpy).toHaveBeenCalledWith('/admin/settings/branding', {
+      qrStyle: { modules: 'square', eyes: 'square', dark: '#000000', logo: { src: UPLOADED, size: 'small', plate: 'light' } },
+    })
+  }, 60_000)
 })

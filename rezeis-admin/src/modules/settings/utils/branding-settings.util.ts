@@ -51,9 +51,14 @@ import {
   PLAN_CARD_TEXT_MODES,
   ProfileNamingSettings,
   QR_EYE_SHAPES,
+  QR_LOGO_PLATES,
+  QR_LOGO_SIZES,
   QR_MODULE_SHAPES,
   QR_STYLE_PLAIN,
   QrEyeShape,
+  QrLogoPlate,
+  QrLogoSettings,
+  QrLogoSize,
   QrModuleShape,
   QrStyleSettings,
   SubscriptionCardTextMode,
@@ -66,7 +71,7 @@ import {
   isSafeBrandingGradient,
   isSafeBrandingGradientOrNone,
 } from './branding-css.util';
-import { isUsableQrDark } from './branding-qr-style.util';
+import { isQrLogoSrc, isUsableQrDark } from './branding-qr-style.util';
 /** Hex colour validation: 3, 4, 6 or 8 hex chars after a leading `#`. */
 const HEX_PATTERN = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 const OPAQUE_HEX_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
@@ -234,7 +239,8 @@ export function mergeBrandingSettings(input: {
         // a partial block, so what arrives is always the operator's complete
         // decision; filling gaps from the stored style would let a client that
         // sent only a shape keep a colour it never looked at, and filling them
-        // from the default would wipe one it did.
+        // from the default would wipe one it did. The logo goes with the
+        // block: `null` or no `logo` key is no logo (see `QrStyleDto.logo`).
         merged[key] = readQrStyle({ qrStyle: value });
       } else {
         merged[key] = value;
@@ -1086,6 +1092,8 @@ function readServersGlobe(record: Record<string, unknown>, key: string): Servers
  *
  * `dark` keeps the case the operator wrote, like every other colour in this
  * file; the cabinet reads `#1E3A8A` and `#1e3a8a` alike.
+ *
+ * The logo is read ALL OR NOTHING (`readQrLogo`), unlike the members above.
  */
 function readQrStyle(record: Record<string, unknown>): QrStyleSettings {
   const value = readRecord(record['qrStyle']);
@@ -1102,7 +1110,41 @@ function readQrStyle(record: Record<string, unknown>): QrStyleSettings {
         ? (eyes as QrEyeShape)
         : QR_STYLE_PLAIN.eyes,
     dark: isUsableQrDark(dark) ? dark : QR_STYLE_PLAIN.dark,
+    logo: readQrLogo(ownMember(value, 'logo')),
   };
+}
+
+/**
+ * The stored logo, or `null` — as the cabinet's `resolveQrStyle` reads it, so
+ * the panel shows after a reload the logo subscribers are shown.
+ *
+ * All or nothing, and total. An address that is not a relayed upload
+ * (`isQrLogoSrc`), a size or plate this build does not know, a member missing,
+ * a logo that is not an object: each is NO logo, never a logo with a member
+ * guessed — a "small" the operator never chose, or a plate they never saw, is
+ * a picture nobody decided on, and the panel's readability check judged the
+ * logo together with its size and plate. Extra keys are dropped, so nothing
+ * rides along to the cabinet.
+ */
+function readQrLogo(value: unknown): QrLogoSettings | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const src = ownMember(value, 'src');
+  const size = ownMember(value, 'size');
+  const plate = ownMember(value, 'plate');
+  if (!isQrLogoSrc(src)) return null;
+  if (typeof size !== 'string' || !(QR_LOGO_SIZES as readonly string[]).includes(size)) return null;
+  if (typeof plate !== 'string' || !(QR_LOGO_PLATES as readonly string[]).includes(plate)) return null;
+  return { src, size: size as QrLogoSize, plate: plate as QrLogoPlate };
+}
+
+/**
+ * An own member, never one inherited: `{}['constructor']` is `Object`, a
+ * function from the prototype, not a missing key.
+ */
+function ownMember(value: object, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(value, key)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
 }
 
 /** A vocabulary key: lowercase, short, and safe inside a class name. */

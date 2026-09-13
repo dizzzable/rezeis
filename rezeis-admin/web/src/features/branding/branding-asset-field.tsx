@@ -22,6 +22,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 
+import { formatByteLimit } from './format-byte-limit'
+
 /**
  * Byte ceilings the server enforces, mirrored here so the operator learns them
  * BEFORE picking a file rather than after waiting for an upload.
@@ -342,20 +344,6 @@ function describeOversize(
       limit: formatByteLimit(rejection.limitBytes),
     },
   )
-}
-
-/**
- * Bytes as an operator reads them. Binary units, because that is what both
- * server constants are written in (`512 * 1024`, `2 * 1024 * 1024`) — rounding
- * 512 KiB to "524 KB" would print a number that appears nowhere else.
- */
-function formatByteLimit(bytes: number): string {
-  if (bytes >= 1024 * 1024) {
-    const mb = bytes / (1024 * 1024)
-    return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`
-  }
-  const kb = bytes / 1024
-  return `${Number.isInteger(kb) ? kb : Math.round(kb)} KB`
 }
 
 /**

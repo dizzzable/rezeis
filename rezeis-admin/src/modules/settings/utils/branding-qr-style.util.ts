@@ -1,7 +1,8 @@
 /**
- * The one rule the backend holds a QR colour to, shared by the write guard
- * (`QrStyleDto` in `dto/update-branding-settings.dto.ts`) and the reader
- * (`readQrStyle` in `branding-settings.util.ts`).
+ * The rules the backend holds a QR style to — the colour, and the logo's
+ * address and size — shared by the write guard (`QrStyleDto` in
+ * `dto/update-branding-settings.dto.ts`) and the reader (`readQrStyle` in
+ * `branding-settings.util.ts`).
  *
  * ONE FUNCTION FOR BOTH STAGES, for the reason `isSafeBrandingGradient` is one
  * function for both. A colour the DTO accepts and the reader then drops is
@@ -85,3 +86,44 @@ export function isUsableQrDark(value: unknown): value is string {
     qrRelativeLuminance(value) <= QR_MAX_DARK_LUMINANCE
   );
 }
+
+/**
+ * THE LOGO'S ADDRESS — the cabinet's `isQrLogoSrc` (`reiwa/web/src/lib/qr-style.ts`),
+ * pattern, length cap and `..` refusal alike, shared here by the write guard
+ * (`QrLogoDto`) and the reader (`readQrStyle`) for the same reason the colour
+ * rule above is one function for both.
+ *
+ * Only `/uploads/branding/<file>` with an image extension the cabinet's relay
+ * serves an image type for. The cabinet inlines the logo into the code as a
+ * `data:` URI, loading it same-origin through that relay, and refuses any
+ * other address: an external URL would be a logo it never draws, and a `data:`
+ * URI in the settings would ride inside every branding payload. The file name
+ * is the relay's own rule (`isSafeBrandingFile`), and this panel's uploads
+ * (`BrandingAssetUploadService`) always produce one: 32 hex digits and the
+ * sniffed type's extension.
+ */
+export const QR_LOGO_SRC_PATTERN = /^\/uploads\/branding\/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|webp|svg)$/i;
+
+/** The cabinet's `LOGO_SRC_MAX_LENGTH`. */
+export const QR_LOGO_SRC_MAX_LENGTH = 256;
+
+export function isQrLogoSrc(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= QR_LOGO_SRC_MAX_LENGTH &&
+    QR_LOGO_SRC_PATTERN.test(value) &&
+    !value.includes('..')
+  );
+}
+
+/**
+ * The largest SVG a QR logo may be — the cabinet's `LOGO_SVG_MAX_BYTES`.
+ *
+ * The cabinet inlines an SVG logo whole, base64, into every code it draws,
+ * and loads NO logo at all from a larger file, silently: the code simply
+ * appears without it. So the ceiling is enforced where the operator can still
+ * be told — at the upload (`BrandingAssetUploadService`, purpose `qr-logo`) —
+ * rather than left for subscribers to discover. Raster logos keep the branding
+ * slots' own ceiling: the cabinet redraws them to 256 px first.
+ */
+export const QR_LOGO_SVG_MAX_BYTES = 96 * 1024;

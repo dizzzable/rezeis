@@ -648,10 +648,32 @@ describe('branding PATCH — qrStyle is one whole style a camera can read', () =
   it('refuses an unknown key inside the block, and names it', async () => {
     assert.deepEqual(
       failedPaths(
-        await validatePatch({ qrStyle: { ...NAVY_DOTS, logo: 'https://x.example/l.png' } }),
+        await validatePatch({ qrStyle: { ...NAVY_DOTS, gradient: 'linear-gradient(#000, #111)' } }),
       ),
-      ['qrStyle.logo'],
+      ['qrStyle.gradient'],
     );
+  });
+
+  it('puts a refused logo on the logo, member by member', async () => {
+    const LOGO = { src: '/uploads/branding/0123456789abcdef0123456789abcdef.svg', size: 'small', plate: 'light' };
+    assert.deepEqual(failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, logo: LOGO } })), []);
+    assert.deepEqual(failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, logo: null } })), []);
+    const cases: ReadonlyArray<readonly [unknown, readonly string[]]> = [
+      // A string where the logo object belongs — what the old key looked like.
+      ['https://x.example/l.png', ['qrStyle.logo']],
+      [{ ...LOGO, src: 'https://x.example/l.png' }, ['qrStyle.logo.src']],
+      [{ ...LOGO, size: 'medium' }, ['qrStyle.logo.size']],
+      [{ ...LOGO, plate: 'glass' }, ['qrStyle.logo.plate']],
+      [{ src: LOGO.src }, ['qrStyle.logo.size', 'qrStyle.logo.plate']],
+      [{ ...LOGO, opacity: 0.5 }, ['qrStyle.logo.opacity']],
+    ];
+    for (const [logo, expected] of cases) {
+      assert.deepEqual(
+        [...failedPaths(await validatePatch({ qrStyle: { ...NAVY_DOTS, logo } }))].sort(),
+        [...expected].sort(),
+        JSON.stringify(logo),
+      );
+    }
   });
 
   it('refuses null and every other non-object instead of resetting the style', async () => {
@@ -695,6 +717,22 @@ describe('branding PATCH — qrStyle is one whole style a camera can read', () =
       assert.equal(escaped(outcome), false, `${raw} escaped the pipe as ${String(outcome)}`);
       assert.equal(outcome instanceof Error, false, `${raw} was refused: ${String(outcome)}`);
       assert.deepEqual({ ...(outcome as UpdateBrandingSettingsDto).qrStyle }, NAVY_DOTS, raw);
+    }
+
+    // Inside the logo, the nested class does the same: dropped, the logo is
+    // exactly its three members.
+    for (const raw of [
+      '{"qrStyle":{"modules":"dots","eyes":"rounded","dark":"#1e3a8a","logo":{"src":"/uploads/branding/a.png","size":"small","plate":"light","constructor":{}}}}',
+      '{"qrStyle":{"modules":"dots","eyes":"rounded","dark":"#1e3a8a","logo":{"src":"/uploads/branding/a.png","size":"small","plate":"light","__proto__":{"src":"https://x.example/l.png"}}}}',
+    ]) {
+      const outcome = await run(raw);
+      assert.equal(escaped(outcome), false, `${raw} escaped the pipe as ${String(outcome)}`);
+      assert.equal(outcome instanceof Error, false, `${raw} was refused: ${String(outcome)}`);
+      assert.deepEqual(
+        { ...(outcome as UpdateBrandingSettingsDto).qrStyle?.logo },
+        { src: '/uploads/branding/a.png', size: 'small', plate: 'light' },
+        raw,
+      );
     }
 
     // Instead of a block: a block with no members, so a 400 — not a pass that

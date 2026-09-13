@@ -521,6 +521,40 @@ export class SettingsController {
       mimeType: file.mimetype,
     });
   }
+
+  /**
+   * Uploads a logo for the middle of the subscriber's QR codes and returns its
+   * public `/uploads/branding/<file>` URL, which the SPA then sets as
+   * `qrStyle.logo.src`.
+   *
+   * The branding upload's own checks, with the QR logo's SVG ceiling
+   * (`QR_LOGO_SVG_MAX_BYTES`, 96 KB): the cabinet loads no logo from a larger
+   * SVG, so a file over it is refused here, where the operator is told, rather
+   * than stored and silently never drawn. Whether codes carrying the logo
+   * still read is the QR tab's check, in the browser, before the save.
+   */
+  @Post('branding/qr-logo-upload')
+  @RequirePermission('settings', 'edit')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: BRANDING_ASSET_MAX_FILE_SIZE },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a QR-code logo (PNG / WebP, or SVG up to 96 KB) and return its public URL' })
+  public async uploadBrandingQrLogo(
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ): Promise<BrandingAssetUploadedInterface> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+    return this.brandingAssetUploadService.persist({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+      purpose: 'qr-logo',
+    });
+  }
 }
 
 /**

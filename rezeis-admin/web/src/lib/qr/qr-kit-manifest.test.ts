@@ -7,13 +7,16 @@ import { describe, expect, it } from 'vitest'
 /**
  * Byte-freeze for the vendored QR renderer (`kit/`).
  *
- * The operator picks a QR style on the branding page and the cabinet draws it.
- * The page's preview, its "what the cabinet would draw" fallback and its
- * contrast verdict all run this copy of the cabinet's own renderer —
- * `qr-style.ts` and the `qr-options.ts` it imports — so what the operator
- * approves is what subscribers are shown, and a colour the page calls too
- * light is one the cabinet would not draw. A copy that drifted would keep both
- * promises inside the panel and break them in production, silently.
+ * The operator picks a QR style and a logo on the branding page and the cabinet
+ * draws them. The page's preview, its "what the cabinet would draw" fallback,
+ * its contrast verdict and its logo check all run this copy of the cabinet's
+ * own renderer — `qr-style.ts`, the `qr-options.ts` it imports, the logo
+ * planner `qr-logo.ts` and the logo loader `qr-logo-source.ts` — so what the
+ * operator approves is what subscribers are shown, a colour the page calls too
+ * light is one the cabinet would not draw, and a logo the page verified is
+ * planned and loaded exactly as the cabinet plans and loads it. A copy that
+ * drifted would keep those promises inside the panel and break them in
+ * production, silently.
  *
  * Same treatment as the landing and media-viewer kits:
  *
@@ -23,7 +26,7 @@ import { describe, expect, it } from 'vitest'
  *     checkout exists; this repo's CI has no reiwa working tree).
  *
  * Unlike those kits the source is reiwa's shared `web/src/lib/`, so the kit is
- * an allowlist of two files rather than a directory minus exclusions.
+ * an allowlist of four files rather than a directory minus exclusions.
  */
 
 const KIT_DIR = join(__dirname, 'kit')
@@ -35,7 +38,7 @@ const REIWA_WEB_DIR = join(__dirname, '..', '..', '..', '..', '..', '..', 'reiwa
 const REIWA_LIB_DIR = join(REIWA_WEB_DIR, 'src', 'lib')
 
 /** The only files this kit takes from reiwa's `lib/` — keep in step with the script. */
-const INCLUDE = ['qr-options.ts', 'qr-style.ts'] as const
+const INCLUDE = ['qr-logo-source.ts', 'qr-logo.ts', 'qr-options.ts', 'qr-style.ts'] as const
 
 /** Hash the canonical LF form, matching the sync script. */
 const sha256 = (text: string): string =>

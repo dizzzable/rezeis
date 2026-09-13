@@ -590,14 +590,20 @@ export function decodeSvgText(buffer: Buffer): string {
  * matches no raster signature. The returned buffer is the validated markup
  * (BOM, prolog and epilog removed, re-encoded UTF-8), so the exact bytes that
  * reach disk are the bytes that were validated.
+ *
+ * `options.svgMaxBytes` is `assertSafeSvg`'s ceiling for a slot that needs a
+ * smaller one than `SVG_MAX_BYTES` — measured on those same validated bytes,
+ * so the number is a limit on exactly what is stored and served. Every other
+ * rule is the same for every slot.
  */
 export function verifyImageContent(
   buffer: Buffer,
   declaredMimeType: string,
   allowedTypes: ReadonlySet<string>,
+  options: { readonly svgMaxBytes?: number } = {},
 ): { readonly buffer: Buffer; readonly mimeType: string } {
   if (declaredMimeType === 'image/svg+xml') {
-    const svg = assertSafeSvg(decodeSvgText(buffer));
+    const svg = assertSafeSvg(decodeSvgText(buffer), options.svgMaxBytes);
     return { buffer: Buffer.from(svg, 'utf8'), mimeType: 'image/svg+xml' };
   }
 

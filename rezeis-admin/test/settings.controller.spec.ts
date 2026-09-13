@@ -25,6 +25,7 @@ import { IconUploadService, IconUploadedInterface } from '../src/modules/setting
 import { BrandingAssetUploadService } from '../src/modules/settings/services/branding-asset-upload.service';
 import { SettingsService, TelegramDeliveryConfig } from '../src/modules/settings/services/settings.service';
 import { SettingsController } from '../src/modules/settings/controllers/settings.controller';
+import { assertEffectiveRoutePermission } from './helpers/controller-routes';
 
 interface DelegatedCall<TBody> {
   readonly currentAdmin: CurrentAdminInterface;
@@ -295,7 +296,7 @@ describe('SettingsController', () => {
       iconColors: {},
       iconDecor: {},
   serversGlobe: { enabled: true, variant: 'globe', props: {} },
-      qrStyle: { modules: 'square', eyes: 'square', dark: '#000000' },
+      qrStyle: { modules: 'square', eyes: 'square', dark: '#000000', logo: null },
       borderRadius: '1rem',
       cornerRadii: { cardPx: 24, itemPx: 14, pillPx: 9999 },
       fontFamily: 'Inter',
@@ -470,5 +471,45 @@ describe('SettingsController', () => {
       originalName: file.originalname,
       mimeType: file.mimetype,
     });
+  });
+
+  it('uploads a QR logo on its own route, gated like the branding upload, with the QR logo purpose', async () => {
+    assert.deepStrictEqual(getRoute('uploadBrandingQrLogo'), {
+      path: 'branding/qr-logo-upload',
+      method: RequestMethod.POST,
+    });
+    assertEffectiveRoutePermission(
+      SettingsController,
+      SettingsController.prototype.uploadBrandingQrLogo,
+      { resource: 'settings', action: 'edit' },
+      'POST branding/qr-logo-upload',
+    );
+
+    const uploaded = {
+      url: '/uploads/branding/0123456789abcdef0123456789abcdef.svg',
+      originalName: 'qr-logo.svg',
+      mimeType: 'image/svg+xml',
+      size: 512,
+    };
+    const persisted: unknown[] = [];
+    const controller = createController({}, {}, {
+      persist: async (input: unknown) => {
+        persisted.push(input);
+        return uploaded;
+      },
+    });
+    const file = {
+      buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'),
+      originalname: 'qr-logo.svg',
+      mimetype: 'image/svg+xml',
+    } as Express.Multer.File;
+
+    await assert.rejects(controller.uploadBrandingQrLogo(undefined), BadRequestException);
+    assert.deepStrictEqual(await controller.uploadBrandingQrLogo(file), uploaded);
+    // The purpose is what holds an SVG to the cabinet's 96 KB; without it the
+    // route would store a logo the cabinet silently never draws.
+    assert.deepStrictEqual(persisted, [
+      { buffer: file.buffer, originalName: file.originalname, mimeType: file.mimetype, purpose: 'qr-logo' },
+    ]);
   });
 });

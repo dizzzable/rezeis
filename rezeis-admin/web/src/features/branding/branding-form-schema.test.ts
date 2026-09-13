@@ -12,6 +12,7 @@ const messages = {
   imageUrlInvalid: 'image url invalid',
   gradientInvalid: 'gradient invalid',
   qrDarkTooLight: 'qr dark too light',
+  qrLogoInvalid: 'qr logo invalid',
 } as const
 
 describe('branding form schema', () => {

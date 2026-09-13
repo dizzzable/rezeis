@@ -3,9 +3,12 @@ import { z } from 'zod'
 // Relative, never `@/`: reiwa's round-trip tests load this file by path, where `@` is the cabinet's src.
 import {
   QR_STYLE_PLAIN,
+  isQrLogoSrc,
   isUsableDark,
   resolveQrStyle,
   type QrEyeShape,
+  type QrLogoPlate,
+  type QrLogoSize,
   type QrModuleShape,
   type QrStyle,
 } from '../../lib/qr/kit/qr-style'
@@ -168,12 +171,18 @@ export const BRANDING_QR_MODULE_SHAPES = [
   'dots',
 ] as const satisfies readonly QrModuleShape[]
 export const BRANDING_QR_EYE_SHAPES = ['square', 'rounded'] as const satisfies readonly QrEyeShape[]
+/** The logo sizes and plates the tab offers — the renderer's; `qr-style-contract.test.ts` holds both to the API's. */
+export const BRANDING_QR_LOGO_SIZES = ['small', 'large'] as const satisfies readonly QrLogoSize[]
+export const BRANDING_QR_LOGO_PLATES = ['light', 'dark'] as const satisfies readonly QrLogoPlate[]
 
 /**
  * The plain code: what the cabinet drew before this setting existed, and what
  * it keeps drawing for every installation that never opens the tab.
  */
 export const DEFAULT_QR_STYLE: BrandingQrStyleDraft = QR_STYLE_PLAIN
+
+/** What a preset decides: how the code is drawn. Never the logo — see `applyQrStylePreset`. */
+export type QrStylePreset = Omit<BrandingQrStyleDraft, 'logo'>
 
 /**
  * Ready-made styles for the QR tab. Each is a style the cabinet's decode test
@@ -188,13 +197,29 @@ export const DEFAULT_QR_STYLE: BrandingQrStyleDraft = QR_STYLE_PLAIN
  *                   shapes in the navy below, which is lighter;
  *   roundedColour — rounded modules and eyes in that navy; rounded modules
  *                   keep more ink than the dots the test reads it with.
+ *
+ * A preset carries no logo member at all: it restyles the code AROUND the
+ * operator's logo (`applyQrStylePreset`).
  */
 export const QR_STYLE_PRESETS = [
-  { id: 'plain', style: QR_STYLE_PLAIN },
+  {
+    id: 'plain',
+    style: { modules: QR_STYLE_PLAIN.modules, eyes: QR_STYLE_PLAIN.eyes, dark: QR_STYLE_PLAIN.dark },
+  },
   { id: 'rounded', style: { modules: 'rounded', eyes: 'rounded', dark: '#000000' } },
   { id: 'dots', style: { modules: 'dots', eyes: 'rounded', dark: '#000000' } },
   { id: 'roundedColour', style: { modules: 'rounded', eyes: 'rounded', dark: '#1e3a8a' } },
-] as const satisfies readonly { readonly id: string; readonly style: BrandingQrStyleDraft }[]
+] as const satisfies readonly { readonly id: string; readonly style: QrStylePreset }[]
+
+/**
+ * A preset applied to the current style. THE LOGO STAYS — the owner's
+ * decision: a preset is a way to draw the code, and an operator who chose a
+ * logo and then tries a ready-made look has not asked to lose it. (Resetting
+ * to the plain code is a different control, and does take the logo away.)
+ */
+export function applyQrStylePreset(current: BrandingQrStyleDraft, preset: QrStylePreset): BrandingQrStyleDraft {
+  return { modules: preset.modules, eyes: preset.eyes, dark: preset.dark, logo: current.logo }
+}
 
 export interface BrandingFormDraft {
   readonly themePresetId: string | null
@@ -520,6 +545,8 @@ export interface BrandingFormValidationMessages {
   readonly gradientInvalid: string
   /** A QR colour under 7:1 against white — see `qrStyle.dark` in the schema. */
   readonly qrDarkTooLight: string
+  /** A QR logo that is not an image uploaded on the branding page — see `qrStyle.logo` in the schema. */
+  readonly qrLogoInvalid: string
 }
 
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
@@ -832,6 +859,26 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
               ctx.addIssue({ code: 'custom', message: messages.qrDarkTooLight })
             }
           }),
+        // `null` is no logo. The address is judged by the renderer's own
+        // `isQrLogoSrc`, from the vendored kit, so the page refuses exactly
+        // the addresses the cabinet would draw no logo from; the API
+        // (`QrLogoDto`) refuses the same set. A block that carries no `logo`
+        // key reads as no logo, as the API reads it (see `QrStyleDto.logo`):
+        // this page always sends one, but the draft type, not this line, is
+        // what keeps the member from being forgotten — the transform below
+        // cannot produce a `BrandingFormData` without it.
+        //
+        // Whether codes carrying the logo still READ is not a schema question
+        // — it takes decoding the operator's image — and is gated in the page's
+        // save (`qr-logo-check.ts`).
+        logo: z
+          .object({
+            src: z.string().refine((value) => isQrLogoSrc(value), { message: messages.qrLogoInvalid }),
+            size: z.enum(BRANDING_QR_LOGO_SIZES),
+            plate: z.enum(BRANDING_QR_LOGO_PLATES),
+          })
+          .nullable()
+          .default(null),
       }),
       borderRadius: borderRadiusSchema(),
       cornerRadii: cornerRadiiSchema,

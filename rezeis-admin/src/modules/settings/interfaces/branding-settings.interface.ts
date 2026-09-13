@@ -747,10 +747,12 @@ export interface ServersGlobeSettings {
  * Styling appears only where an operator turned it on — never a subscriber's
  * choice, never a new default.
  *
- * ONE BLOCK, REPLACED WHOLE. The three members are one decision. The DTO
- * requires all three and `mergeBrandingSettings` replaces the stored block
- * rather than merging a partial one over it, so there is no request that
- * changes the shape and quietly keeps — or quietly drops — a colour.
+ * ONE BLOCK, REPLACED WHOLE. The members are one decision. The DTO requires
+ * the three that draw every code and `mergeBrandingSettings` replaces the
+ * stored block rather than merging a partial one over it, so there is no
+ * request that changes the shape and quietly keeps — or quietly drops — a
+ * colour. The logo belongs to the same block and is replaced with it: a block
+ * that says nothing about a logo is a block without one (see `QrStyleDto`).
  *
  * `dark` is `#rgb` or `#rrggbb` and at least 7:1 against white. Why seven and
  * not WCAG's 4.5 is written down in `utils/branding-qr-style.util.ts`.
@@ -766,11 +768,45 @@ export type QrModuleShape = (typeof QR_MODULE_SHAPES)[number];
 export const QR_EYE_SHAPES = ['square', 'rounded'] as const;
 export type QrEyeShape = (typeof QR_EYE_SHAPES)[number];
 
+/**
+ * How wide the cabinet may draw the logo: `small` at most 20% of the symbol,
+ * `large` at most 30% — caps of the cabinet's planner (`qr-logo.ts`), which
+ * then decides per code whether any logo fits at all.
+ */
+export const QR_LOGO_SIZES = ['small', 'large'] as const;
+export type QrLogoSize = (typeof QR_LOGO_SIZES)[number];
+
+/** What the logo sits on: the white field itself, or a rounded square in the code's dark colour. */
+export const QR_LOGO_PLATES = ['light', 'dark'] as const;
+export type QrLogoPlate = (typeof QR_LOGO_PLATES)[number];
+
+/**
+ * An operator's logo in the middle of the two styled codes — the cabinet's
+ * `QrLogo`, member for member.
+ *
+ * `src` is an upload of this panel's, `/uploads/branding/<file>` with an image
+ * extension, and nothing else (`isQrLogoSrc` in `utils/branding-qr-style.util.ts`):
+ * the cabinet relays exactly that path same-origin and inlines the image into
+ * the code, so any other address is a logo it would never draw.
+ *
+ * WHETHER A LOGO KEEPS THE CODES READABLE is checked by the panel's QR tab,
+ * which decodes codes carrying it before it lets the operator save it. That
+ * check needs a browser to draw the operator's image and is NOT repeated here:
+ * the API holds a logo to every structural rule and to nothing else.
+ */
+export interface QrLogoSettings {
+  readonly src: string;
+  readonly size: QrLogoSize;
+  readonly plate: QrLogoPlate;
+}
+
 export interface QrStyleSettings {
   readonly modules: QrModuleShape;
   readonly eyes: QrEyeShape;
   /** Dark modules and eyes. The field under them is always opaque white. */
   readonly dark: string;
+  /** The logo in the middle, or `null` for none — which is what every installation starts with. */
+  readonly logo: QrLogoSettings | null;
 }
 
 /** The plain code — the cabinet's `QR_STYLE_PLAIN`, member for member. */
@@ -778,6 +814,7 @@ export const QR_STYLE_PLAIN: QrStyleSettings = {
   modules: 'square',
   eyes: 'square',
   dark: '#000000',
+  logo: null,
 };
 
 export interface BrandingSettingsInterface {

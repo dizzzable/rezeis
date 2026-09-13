@@ -72,6 +72,8 @@ import {
 import { CardEffectSection } from "./card-effect-section";
 import { ServersGlobeSection } from "./servers-globe-section";
 import { QrStyleSection } from "./qr-style-section";
+import { createQrLogoCheckStore, qrLogoSaveRefusal } from "./qr-logo-check";
+import { createBrowserQrLogoChecker } from "./qr-logo-check-browser";
 import { AppBackgroundSection } from "./app-background-section";
 import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots-section";
 import { GradientBuilder } from "./gradient-builder";
@@ -232,6 +234,27 @@ async function uploadBrandingAsset(file: File): Promise<string> {
   return data.url;
 }
 
+/**
+ * Upload a logo for the middle of the QR codes → its `/uploads/branding/...` URL.
+ * Its own endpoint because its SVG ceiling is the cabinet's (96 KB), not the
+ * branding slots' — see `uploadBrandingQrLogo` in the API.
+ */
+async function uploadQrLogo(file: File): Promise<string> {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post<{ url: string }>("/admin/settings/branding/qr-logo-upload", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data.url;
+}
+
+/** The first message a refused save attached anywhere under `qrStyle.logo`. */
+function qrLogoErrorMessage(
+  error: { message?: string; src?: { message?: string }; size?: { message?: string }; plate?: { message?: string } } | undefined,
+): string | undefined {
+  return error?.message ?? error?.src?.message ?? error?.size?.message ?? error?.plate?.message;
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function WebReiwaPage() {
@@ -245,7 +268,11 @@ export default function WebReiwaPage() {
     imageUrlInvalid: t('brandingPage.invalidImageUrl'),
     gradientInvalid: t('brandingPage.invalidGradient'),
     qrDarkTooLight: t('brandingPage.qr.tooLight'),
+    qrLogoInvalid: t('brandingPage.qr.logo.invalid'),
   }), [t]);
+  // One store for the page's life: the QR tab starts checks and shows their
+  // verdicts, and the save below refuses a logo whose check has not passed.
+  const [qrLogoCheck] = useState(() => createQrLogoCheckStore(createBrowserQrLogoChecker()));
   const brandingSchema = useMemo(
     () => createBrandingFormSchema(validationMessages),
     [validationMessages],
@@ -332,6 +359,20 @@ export default function WebReiwaPage() {
     if (result.fields.length === 0) {
       toast.info(t('brandingPage.noChanges'));
       return;
+    }
+    // A QR logo must have been decoded before it is saved — the owner's rule,
+    // and one only this page can keep: the check draws the operator's image,
+    // which the API cannot (`qr-logo-check.ts`). Asked only when the QR style
+    // is part of this save, so a logo saved earlier never blocks an unrelated
+    // edit. The refusal lands on the logo controls, on the QR tab.
+    if (result.fields.includes('qrStyle')) {
+      const refusal = qrLogoSaveRefusal(qrLogoCheck, values.qrStyle, t);
+      if (refusal !== null) {
+        form.setError('qrStyle.logo', { type: 'validate', message: refusal });
+        setTab('qr');
+        toast.error(`${t('brandingPage.validationFailed')}: ${refusal}`);
+        return;
+      }
     }
     mutation.mutate(result.data);
   };
@@ -2220,13 +2261,17 @@ export default function WebReiwaPage() {
                   <QrStyleSection
                     value={field.value}
                     onChange={(next) => {
-                      // From here on the live contrast line speaks; a refusal
-                      // about a colour the operator has since changed would
-                      // only contradict it.
+                      // From here on the live contrast line and the logo check
+                      // speak; a refusal about a colour or a logo the operator
+                      // has since changed would only contradict them.
                       form.clearErrors('qrStyle');
                       field.onChange(next);
                     }}
                     darkError={form.formState.errors.qrStyle?.dark?.message}
+                    logoError={qrLogoErrorMessage(form.formState.errors.qrStyle?.logo)}
+                    brandLogoUrl={watchedValues.logoUrl}
+                    uploadLogo={uploadQrLogo}
+                    logoCheck={qrLogoCheck}
                   />
                 ) : (
                   <></>
