@@ -17,6 +17,7 @@ import { PaymentGatewayRegistryService } from '../src/modules/payments/services/
 import { PaymentsCheckoutService } from '../src/modules/payments/services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from '../src/modules/payments/services/payments-renewal-checkout.service';
 import { SettingsService } from '../src/modules/settings/services/settings.service';
+import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/subscription-renewal.service';
 import { TelegramStarsWebhookService } from '../src/modules/payments/services/telegram-stars-webhook.service';
 import {
   buildRenewalCheckoutFingerprint,
@@ -24,8 +25,9 @@ import {
 } from '../src/modules/payments/utils/checkout-fingerprint.util';
 
 /**
- * `POST /api/internal/payments/renewal-checkout` — the three renewal refusals
- * asserted on the bytes that actually leave the process.
+ * `POST /api/internal/payments/renewal-checkout` — the renewal refusals
+ * asserted on the bytes that actually leave the process. Three are the story
+ * below; the fourth, `RENEWAL_ITEM_NOT_PRICEABLE`, has its own note at its case.
  *
  * WHY THIS SPEC EXISTS.
  *
@@ -160,6 +162,8 @@ async function boot(
   options: {
     existing?: Record<string, unknown> | null;
     providerCreateCheckout?: () => Promise<Record<string, unknown> | null>;
+    /** The pricing edge; defaults to a priceable single-line renewal. */
+    priceRenewalItems?: () => Promise<typeof PRICED>;
   } = {},
 ): Promise<INestApplication> {
   const prisma = {
@@ -204,7 +208,7 @@ async function boot(
   const renewalCheckoutService = new PaymentsRenewalCheckoutService(
     prisma as never,
     {
-      priceRenewalItems: async () => PRICED,
+      priceRenewalItems: options.priceRenewalItems ?? (async () => PRICED),
       assertRenewalPolicy: async () => undefined,
     } as never,
     {
@@ -250,7 +254,7 @@ async function boot(
     .compile();
 
   const app = testingModule.createNestApplication();
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('/api');
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );
@@ -393,6 +397,36 @@ describe('POST internal/payments/renewal-checkout — the refusal labels on the 
       'Provider checkout creation is unresolved; awaiting reconciliation',
       'the filter redacted the 503 message the warning is made of',
     );
+  });
+
+  it('delivers code: "RENEWAL_ITEM_NOT_PRICEABLE" instead of a bare 400 the cabinet answered 500', async () => {
+    // The fourth refusal, missed for a different reason than the three above:
+    // it had no code to forward at all. `priceRenewalItems` threw the bare
+    // string, the filter passed an untyped 400, and reiwa — finding no contract
+    // — answered its buyer 500 "Failed to create renewal checkout". It is what a
+    // plan withdrawn between the buyer's review and their Pay produces. The
+    // exception comes from the service's own factory, so this asserts the shape
+    // the service really throws.
+    const app = await boot({
+      existing: null,
+      priceRenewalItems: async () => {
+        throw renewalItemNotPriceable();
+      },
+    });
+
+    const response = await request(app.getHttpServer())
+      .post('/api/internal/payments/renewal-checkout')
+      .send(BASE_BODY);
+
+    assert.equal(
+      wireCode(response.text),
+      'RENEWAL_ITEM_NOT_PRICEABLE',
+      'the not-priceable refusal reached reiwa without a code, so it found no ' +
+        'contract and answered 500. Throw it with `{ code }` and keep the label ' +
+        'in SAFE_PRODUCT_CODES.',
+    );
+    assert.equal(response.status, 400);
+    assert.equal((response.body as { errorCode?: string }).errorCode, 'RENEWAL_ITEM_NOT_PRICEABLE');
   });
 
   it('still strips a non-allowlisted product code at the same 503', async () => {

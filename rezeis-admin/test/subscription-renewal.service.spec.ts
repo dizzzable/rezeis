@@ -9,6 +9,18 @@ import fc from 'fast-check';
 
 import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
 
+/**
+ * The refusal as the cabinet receives it, not only as it is thrown: the BFF
+ * branches on the body's `code`, and the safe filter forwards a code only from
+ * a `{ code, message }` body. Checking `message` alone passed while the code
+ * never reached the wire and the cabinet answered 500.
+ */
+function isNotPriceableRefusal(e: unknown): boolean {
+  if (!(e instanceof BadRequestException)) return false;
+  const body = e.getResponse() as { readonly code?: unknown };
+  return body.code === 'RENEWAL_ITEM_NOT_PRICEABLE' && e.message === 'RENEWAL_ITEM_NOT_PRICEABLE';
+}
+
 interface SubFixture {
   readonly id: string;
   readonly planId: string;
@@ -132,7 +144,7 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
           subscriptionIds: ['s1', 's2'],
           gatewayType: GATEWAY,
         }),
-      (e: unknown) => e instanceof BadRequestException && e.message === 'RENEWAL_ITEM_NOT_PRICEABLE',
+      isNotPriceableRefusal,
     );
   });
 
@@ -382,7 +394,7 @@ describe('SubscriptionRenewalService plan-less (panel-imported) subscriptions', 
           subscriptionIds: ['p1'],
           gatewayType: GATEWAY,
         }),
-      (e: unknown) => e instanceof BadRequestException && e.message === 'RENEWAL_ITEM_NOT_PRICEABLE',
+      isNotPriceableRefusal,
     );
   });
 
@@ -438,7 +450,7 @@ describe('SubscriptionRenewalService — a subscription whose plan was deleted',
 
       await assert.rejects(
         () => service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY }),
-        (e: unknown) => e instanceof BadRequestException && e.message === 'RENEWAL_ITEM_NOT_PRICEABLE',
+        isNotPriceableRefusal,
       );
     });
 

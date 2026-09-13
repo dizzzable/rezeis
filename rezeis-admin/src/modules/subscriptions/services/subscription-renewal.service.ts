@@ -58,6 +58,29 @@ const DURATION_INVALID: SubscriptionQuoteWarningInterface = {
 };
 
 /**
+ * The refusal `priceRenewalItems` throws when a subscription cannot be renewed
+ * on the terms asked for — usually a plan withdrawn between the buyer's review
+ * and their Pay, or a plan-less renewal sent without a plan.
+ *
+ * `{ code, message }`, not the bare string it used to be: the safe filter
+ * forwards a product code only from that shape (`SAFE_PRODUCT_CODES`), and the
+ * cabinet BFF branches on `code` alone. As a bare string the refusal left the
+ * panel as an untyped 400 and the cabinet as a 500 "Failed to create renewal
+ * checkout". The message stays the code, so the autopay log line that prints
+ * `error.message` reads as it always has.
+ *
+ * A factory rather than an inline `throw` so the wire spec
+ * (`internal-payments-renewal-refusals.http.spec.ts`) feeds the filter the
+ * exception this service really throws, not a copy that can drift from it.
+ */
+export function renewalItemNotPriceable(): BadRequestException {
+  return new BadRequestException({
+    code: 'RENEWAL_ITEM_NOT_PRICEABLE',
+    message: 'RENEWAL_ITEM_NOT_PRICEABLE',
+  });
+}
+
+/**
  * Builds renewal options and prices a renewal selection for a combined,
  * multi-subscription payment. Pricing delegates to {@link SubscriptionQuoteService}
  * so per-user discounts and promocode-driven discount fields are applied
@@ -232,7 +255,7 @@ export class SubscriptionRenewalService {
         quote.durationDays === null ||
         quote.targetPlan === null
       ) {
-        throw new BadRequestException('RENEWAL_ITEM_NOT_PRICEABLE');
+        throw renewalItemNotPriceable();
       }
       const selectedAddOnIds = renewalAddOnsEnabled
         ? (input.addOns?.get(subscription.id) ?? [])

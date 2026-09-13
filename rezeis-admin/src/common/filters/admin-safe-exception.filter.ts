@@ -1,3 +1,5 @@
+import { STATUS_CODES } from 'node:http';
+
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { Request, Response } from 'express';
 
@@ -152,6 +154,14 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   'QUOTE_CHANGED',
   'IDEMPOTENCY_KEY_CONFLICT',
   'PROVIDER_CHECKOUT_CREATION_UNRESOLVED',
+  // The fourth renewal refusal, missed twice over: it was thrown as a bare
+  // string, so there was no code for this list to forward, and it was not
+  // here. The cabinet saw an untyped 400 and answered its buyer 500 "Failed to
+  // create renewal checkout" — a server fault, for a refusal that means the
+  // reviewed terms no longer hold (usually a plan withdrawn between review and
+  // Pay). With the code the BFF answers a typed conflict and the renewal page
+  // re-prices the review. Thrown by `renewalItemNotPriceable()`.
+  'RENEWAL_ITEM_NOT_PRICEABLE',
   // The panel's own second-factor pivot, and the only entry here that is not
   // SCREAMING_SNAKE: the label is the wire value the sign-in form compares
   // against, so it is spelled the way the client reads it, not the way the
@@ -440,7 +450,10 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
     const request = context.getRequest<Request>();
     const responseBody = this.buildResponseBody(exception, request);
 
-    if (exception instanceof HttpException) {
+    // Below 500 is the client's problem whatever class carried it: a
+    // deliberate HttpException, or a body-parser refusal read by
+    // `readExposedClientHttpError`. Neither is a server fault worth a stack.
+    if (exception instanceof HttpException || responseBody.statusCode < 500) {
       this.logger.warn(
         [
           `requestId=${responseBody.requestId ?? 'unknown'}`,
@@ -506,6 +519,20 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       };
     }
 
+    const clientError = readExposedClientHttpError(exception);
+    if (clientError !== undefined) {
+      const reason = STATUS_CODES[clientError.statusCode];
+      return {
+        timestamp,
+        path,
+        requestId,
+        statusCode: clientError.statusCode,
+        message: sanitizeHttpExceptionMessage(clientError.message, clientError.statusCode),
+        errorCode: mapStatusToErrorCode(clientError.statusCode),
+        ...(reason ? { error: reason } : {}),
+      };
+    }
+
     return {
       timestamp,
       path,
@@ -516,6 +543,34 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       error: 'Internal Server Error',
     };
   }
+}
+
+/**
+ * A client error raised by Express middleware before any route ran — the body
+ * parser above all: a JSON body over `HTTP_BODY_PARSER_LIMIT` (413), too many
+ * form parameters (413), an unsupported charset or content encoding (415), an
+ * aborted or mis-sized body (400). These are `http-errors` instances, not
+ * HttpExceptions, and Nest's Express adapter turns only SyntaxError and
+ * URIError into one (`ExpressAdapter.mapException`). So they reached the
+ * generic branch: an 11 MB JSON body answered 500 "Internal server error" and
+ * was logged with a stack as a server fault.
+ *
+ * `expose: true` is the gate. `http-errors` sets it on every 4xx it creates and
+ * on no 5xx, and it is that library's statement that the message was written
+ * for the client. The status is range-checked regardless, and the message still
+ * meets the pattern scrub, because it can quote the request (the unsupported
+ * charset's name, say). An error without the flag keeps the generic 500.
+ */
+function readExposedClientHttpError(
+  exception: unknown,
+): { readonly statusCode: number; readonly message: string } | undefined {
+  if (!isRecord(exception) || exception.expose !== true) return undefined;
+  const status: unknown = exception.status ?? exception.statusCode;
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 400 || status > 499) {
+    return undefined;
+  }
+  const message: unknown = exception.message;
+  return { statusCode: status, message: typeof message === 'string' ? message : '' };
 }
 
 function extractHttpExceptionMessage(response: string | object, fallback: string, statusCode: number): string | string[] {

@@ -22,6 +22,7 @@ import {
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE,
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
 } from '../src/modules/remnawave/services/stale-panel-link';
+import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/subscription-renewal.service';
 
 interface CapturedResponse {
   statusCode?: number;
@@ -446,6 +447,77 @@ describe('AdminSafeExceptionFilter', () => {
     assert.equal(body.code, undefined);
     assert.equal(body.errorCode, 'BAD_REQUEST');
     assert.equal(body.message, 'Plain client-facing validation issue');
+  });
+
+  it('answers a body-parser refusal with its own 4xx, not a generic 500', () => {
+    // The shape `http-errors` gives body-parser's refusals: a plain Error with
+    // `status`, `statusCode`, `expose` and a `type`. Not an HttpException, so it
+    // used to fall through to the generic branch — an 11 MB JSON body answered
+    // 500 "Internal server error". The live-parser version of this is
+    // `body-parser-refusals.http.spec.ts`.
+    const tooLarge = Object.assign(new Error('request entity too large'), {
+      status: 413,
+      statusCode: 413,
+      expose: true,
+      type: 'entity.too.large',
+    });
+
+    const captured = runFilter(tooLarge, { originalUrl: '/api/admin/config/import', headers: {} });
+
+    assert.equal(captured.statusCode, 413);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.statusCode, 413);
+    assert.equal(body.errorCode, 'HTTP_413');
+    assert.equal(body.error, 'Payload Too Large');
+    assert.equal(body.message, 'request entity too large');
+    assert.equal(body.path, '/api/admin/config/import');
+  });
+
+  it('keeps the generic 500 for anything that does not declare itself a client-safe 4xx', () => {
+    const cases: ReadonlyArray<readonly [string, unknown]> = [
+      // A status without `expose` is not a claim the message is for the client.
+      ['status 400 without expose', Object.assign(new Error('pool exhausted'), { status: 400 })],
+      // `http-errors` never exposes a 5xx; an error that says so anyway is not trusted.
+      ['exposed 502', Object.assign(new Error('upstream'), { status: 502, expose: true })],
+      ['exposed non-integer status', Object.assign(new Error('odd'), { status: 413.5, expose: true })],
+      ['exposed string status', Object.assign(new Error('odd'), { status: '413', expose: true })],
+      ['expose as a truthy string', Object.assign(new Error('odd'), { status: 413, expose: 'true' })],
+    ];
+    for (const [label, exception] of cases) {
+      const captured = runFilter(exception, { originalUrl: '/api/x', headers: {} });
+      assert.equal(captured.statusCode, 500, label);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.errorCode, 'INTERNAL_SERVER_ERROR', label);
+      assert.equal(body.message, 'Internal server error', label);
+    }
+  });
+
+  it('still scrubs the message of an exposed client error, which can quote the request', () => {
+    const quoting = Object.assign(new Error('unsupported charset "https://evil.example/token=abc"'), {
+      status: 415,
+      statusCode: 415,
+      expose: true,
+      type: 'charset.unsupported',
+    });
+
+    const captured = runFilter(quoting, { originalUrl: '/api/x', headers: {} });
+
+    assert.equal(captured.statusCode, 415);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.message, 'Request failed');
+    assert.equal(JSON.stringify(body).includes('evil.example'), false);
+  });
+
+  it('forwards RENEWAL_ITEM_NOT_PRICEABLE, the renewal refusal the cabinet answered with a 500', () => {
+    const captured = runFilter(renewalItemNotPriceable(), {
+      originalUrl: '/api/internal/payments/renewal-checkout',
+      headers: {},
+    });
+
+    assert.equal(captured.statusCode, 400);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, 'RENEWAL_ITEM_NOT_PRICEABLE');
+    assert.equal(body.errorCode, 'RENEWAL_ITEM_NOT_PRICEABLE');
   });
 });
 
