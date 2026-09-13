@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  ArchivedPlanRenewMode,
   Currency,
   PaymentGatewayType,
   PlanAvailability,
@@ -23,7 +24,7 @@ import {
   RenewalItemInterface,
   RenewalOptionsInterface,
 } from '../interfaces/subscription-renewal.interface';
-import { SubscriptionQuoteService } from './subscription-quote.service';
+import { SubscriptionQuoteService, TRANSITION_TARGET_WHERE } from './subscription-quote.service';
 
 interface RenewalIdentity {
   readonly userId?: string;
@@ -523,9 +524,17 @@ export class SubscriptionRenewalService {
   }
 
   /**
-   * No plan id, no row, or a soft-deleted row. A soft-deleted plan still
-   * RESOLVES by id — fulfilment and grants depend on that — but it is never
-   * renewed onto: it is gone for everyone (plan-deletion contract v2).
+   * No plan id, no row, or a soft-deleted row — or an archived REPLACE_ON_RENEW
+   * plan with no replacement left on sale. A soft-deleted plan still RESOLVES by
+   * id — fulfilment and grants depend on that — but it is never renewed onto: it
+   * is gone for everyone (plan-deletion contract v2).
+   *
+   * The archived plan with no replacement has nothing to renew onto either. The
+   * editor refuses to save one, so this state only ever arises when its
+   * replacements are deleted (the delete strips them from the list) or taken off
+   * sale; the discovery quote then offers the catalogue for it, and picking that
+   * catalogue's first plan silently is exactly what this predicate prevents.
+   * `TRANSITION_TARGET_WHERE` is the quote's own definition of "on sale".
    */
   private async renewalPlanIsGone(planId: string | null): Promise<boolean> {
     if (planId === null) {
@@ -533,9 +542,18 @@ export class SubscriptionRenewalService {
     }
     const plan = await this.prismaService.plan.findUnique({
       where: { id: planId },
-      select: { deletedAt: true },
+      select: { deletedAt: true, isArchived: true, archivedRenewMode: true, replacementPlanIds: true },
     });
-    return plan === null || isPlanSoftDeleted(plan);
+    if (plan === null || isPlanSoftDeleted(plan)) {
+      return true;
+    }
+    if (!plan.isArchived || plan.archivedRenewMode !== ArchivedPlanRenewMode.REPLACE_ON_RENEW) {
+      return false;
+    }
+    const replacementsOnSale = await this.prismaService.plan.count({
+      where: { id: { in: plan.replacementPlanIds }, ...TRANSITION_TARGET_WHERE },
+    });
+    return replacementsOnSale === 0;
   }
 
   private async loadCandidateSubscriptions(

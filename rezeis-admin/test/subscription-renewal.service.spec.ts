@@ -32,6 +32,12 @@ interface SubFixture {
   readonly planState?: 'live' | 'missing' | 'softDeleted';
   /** An archived REPLACE_ON_RENEW plan: the discovery quote offers these instead. */
   readonly replacementPlanIds?: readonly string[];
+  /**
+   * Every replacement has since been deleted or taken off sale. The editor never
+   * saves an archived REPLACE_ON_RENEW plan without one, so this is what a delete
+   * of its only replacement leaves behind.
+   */
+  readonly replacementsOffSale?: boolean;
 }
 
 const GATEWAY = PaymentGatewayType.YOOKASSA;
@@ -475,6 +481,28 @@ describe('SubscriptionRenewalService — a subscription whose plan was deleted',
     assert.equal(result.items[0]?.amount, '12.00');
   });
 
+  it('asks the subscriber to choose when every replacement of an archived plan is gone or off sale', async () => {
+    // Deleting a plan strips it from other plans' replacement lists; the one it
+    // was the only replacement for is left with nothing to renew onto. It used to
+    // offer nothing at all — and with the catalogue offered instead, the first
+    // plan in it would have been picked silently.
+    const service = createService([
+      sub({
+        id: 's1',
+        planId: 'plan-archived',
+        replacementPlanIds: ['plan-deleted'],
+        replacementsOffSale: true,
+        catalogPlanIds: ['cat-first', 'cat-second'],
+      }),
+    ]);
+
+    const result = await service.getRenewalOptions({ identity: { userId: 'u' }, gatewayType: GATEWAY });
+
+    assert.equal(result.items[0]?.requiresPlanSelection, true, 'no choice was asked');
+    assert.equal(result.items[0]?.renewable, true);
+    assert.equal(result.items[0]?.planId, null, `silently renewed onto ${String(result.items[0]?.planId)}`);
+  });
+
   it('answers requiresPlanSelection(subscriptionId) the way the renewal decides it', async () => {
     const service = createService([
       sub({ id: 'gone', planState: 'missing' }),
@@ -482,6 +510,7 @@ describe('SubscriptionRenewalService — a subscription whose plan was deleted',
       sub({ id: 'imported', planLess: true }),
       sub({ id: 'live', planState: 'live' }),
       sub({ id: 'replaced', replacementPlanIds: ['plan-new'] }),
+      sub({ id: 'orphaned', replacementPlanIds: ['plan-deleted'], replacementsOffSale: true }),
     ]);
 
     assert.equal(await service.requiresPlanSelection('gone'), true);
@@ -489,6 +518,7 @@ describe('SubscriptionRenewalService — a subscription whose plan was deleted',
     assert.equal(await service.requiresPlanSelection('imported'), true);
     assert.equal(await service.requiresPlanSelection('live'), false);
     assert.equal(await service.requiresPlanSelection('replaced'), false);
+    assert.equal(await service.requiresPlanSelection('orphaned'), true);
     assert.equal(await service.requiresPlanSelection('no-such-subscription'), false);
   });
 });
@@ -506,6 +536,7 @@ function sub(input: {
   readonly catalogPlanIds?: readonly string[];
   readonly planState?: 'live' | 'missing' | 'softDeleted';
   readonly replacementPlanIds?: readonly string[];
+  readonly replacementsOffSale?: boolean;
 }): SubFixture {
   return {
     id: input.id,
@@ -520,6 +551,7 @@ function sub(input: {
     catalogPlanIds: input.catalogPlanIds,
     planState: input.planState,
     replacementPlanIds: input.replacementPlanIds,
+    replacementsOffSale: input.replacementsOffSale,
   };
 }
 
@@ -559,12 +591,27 @@ function createService(
       findUnique: async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
         const owner = fixtures.find((f) => !f.planLess && f.planId === args.where.id);
         if (owner === undefined || owner.planState === 'missing') return null;
+        const archivedWithReplacements = owner.replacementPlanIds !== undefined;
         const row = {
           id: owner.planId,
           deletedAt: owner.planState === 'softDeleted' ? new Date('2026-09-01T00:00:00.000Z') : null,
+          isArchived: archivedWithReplacements,
+          archivedRenewMode: archivedWithReplacements ? 'REPLACE_ON_RENEW' : 'SELF_RENEW',
+          replacementPlanIds: owner.replacementPlanIds ?? [],
         };
         if (args.select === undefined) return row;
         return Object.fromEntries(Object.keys(args.select).map((key) => [key, row[key as keyof typeof row]]));
+      },
+      // How many of these replacement ids are still on sale. A replacement id no
+      // fixture marks off sale counts; the filter the service passes is asserted,
+      // so a renewal that stopped asking "on sale" would not pass here unnoticed.
+      count: async (args: { where: { id: { in: string[] }; isActive?: unknown; isArchived?: unknown; availability?: unknown } }) => {
+        assert.deepStrictEqual(
+          { isActive: args.where.isActive, isArchived: args.where.isArchived, availability: args.where.availability },
+          { isActive: true, isArchived: false, availability: { not: PlanAvailability.TRIAL } },
+        );
+        const owner = fixtures.find((f) => f.replacementPlanIds !== undefined && f.replacementPlanIds.every((id) => args.where.id.in.includes(id)));
+        return owner?.replacementsOffSale === true ? 0 : args.where.id.in.length;
       },
     },
   };
@@ -603,7 +650,12 @@ function createService(
       // A plan whose row is gone or soft-deleted gets the same catalogue — the
       // real `getSourceSelection` treats both like a plan-less snapshot for
       // RENEW. An archived REPLACE_ON_RENEW plan offers its replacements.
-      const planGone = f.planLess || f.planState === 'missing' || f.planState === 'softDeleted';
+      // An archived plan whose replacements are all gone gets the catalogue too.
+      const planGone =
+        f.planLess ||
+        f.planState === 'missing' ||
+        f.planState === 'softDeleted' ||
+        (f.replacementPlanIds !== undefined && f.replacementsOffSale === true);
       const availablePlans = planGone
         ? (f.catalogPlanIds ?? ['cat-a', 'cat-b']).map((id) => buildPlan(id, durationDaysList))
         : f.replacementPlanIds !== undefined

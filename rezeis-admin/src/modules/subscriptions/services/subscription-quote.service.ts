@@ -149,6 +149,19 @@ function hasBlockingWarning(warnings: readonly SubscriptionQuoteWarningInterface
   return warnings.some((warning) => !INFORMATIONAL_WARNING_CODES.has(warning.code));
 }
 
+/**
+ * What makes a plan a valid upgrade or replacement TARGET: on sale, not a trial.
+ * Exported for `SubscriptionRenewalService`, which must know whether an archived
+ * REPLACE_ON_RENEW plan still has a replacement to renew onto — if the two ever
+ * disagreed, the renewal would either ask for a choice the quote does not offer,
+ * or silently pick a plan the quote offered only to choose from.
+ */
+export const TRANSITION_TARGET_WHERE = {
+  isActive: true,
+  isArchived: false,
+  availability: { not: PlanAvailability.TRIAL },
+} as const satisfies Prisma.PlanWhereInput;
+
 @Injectable()
 export class SubscriptionQuoteService {
   public constructor(
@@ -707,8 +720,30 @@ export class SubscriptionQuoteService {
     if (sourcePlan.archivedRenewMode === ArchivedPlanRenewMode.SELF_RENEW) {
       return { plans: [sourcePlan], warnings: [] };
     }
+    const replacements = await this.getTransitionPlans(sourcePlan.replacementPlanIds);
+    if (
+      replacements.length === 0 &&
+      input.purchaseType === PurchaseType.RENEW &&
+      input.userId !== undefined
+    ) {
+      // ── NO REPLACEMENT LEFT ON SALE IS THE SAME DEAD END AS NO PLAN ───────
+      //
+      // The plan editor refuses an archived REPLACE_ON_RENEW plan without
+      // replacements (TRANSITION_REPLACEMENT_REQUIRED), so an empty list here
+      // means every replacement has since been deleted — `PlanDeletionService`
+      // strips a deleted plan from these lists — or taken off sale. Offering
+      // nothing turned the subscriber away with no way to renew at all. Offer
+      // the active catalogue to CHOOSE from, as for a deleted plan above;
+      // `SubscriptionRenewalService` asks for the choice (`renewalPlanIsGone`).
+      const catalog = await this.getCatalogOptionPlans({
+        userId: input.userId,
+        channel: input.channel ?? PurchaseChannel.WEB,
+      });
+      const targets = catalog.filter((plan) => plan.availability !== PlanAvailability.TRIAL);
+      if (targets.length > 0) return { plans: targets, warnings: [ARCHIVED_PLAN_REPLACEMENT] };
+    }
     return {
-      plans: await this.getTransitionPlans(sourcePlan.replacementPlanIds),
+      plans: replacements,
       warnings: [ARCHIVED_PLAN_REPLACEMENT],
     };
   }
@@ -737,9 +772,7 @@ export class SubscriptionQuoteService {
     const plans = await this.prismaService.plan.findMany({
       where: {
         id: { in: [...planIds] },
-        isActive: true,
-        isArchived: false,
-        availability: { not: PlanAvailability.TRIAL },
+        ...TRANSITION_TARGET_WHERE,
       },
       include: PLAN_INCLUDE,
       orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],

@@ -485,6 +485,42 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
+  // The editor refuses an archived REPLACE_ON_RENEW plan with no replacements,
+  // so an empty list only ever means the replacements were deleted (the delete
+  // strips them) or taken off sale. Offering nothing turned the subscriber away;
+  // the active catalogue is offered to choose from, as for a deleted plan.
+  it('offers the active catalogue when no replacement of an archived replace-on-renew plan is left on sale', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'old-plan' })],
+      plans: [
+        createPlan({
+          id: 'old-plan',
+          availability: PlanAvailability.ALL,
+          isArchived: true,
+          archivedRenewMode: 'REPLACE_ON_RENEW',
+          replacementPlanIds: ['retired-replacement'],
+        }),
+        createPlan({ id: 'retired-replacement', availability: PlanAvailability.ALL, isArchived: true }),
+        createPlan({ id: 'catalog-a', availability: PlanAvailability.ALL }),
+        createPlan({ id: 'catalog-b', availability: PlanAvailability.ALL }),
+        createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL }),
+      ],
+    });
+
+    const discovery = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      discovery.availablePlans.map((plan) => plan.id),
+      ['catalog-a', 'catalog-b'],
+    );
+  });
+
   it('calculates discount-aware quote pricing without creating transactions', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2, purchaseDiscount: 20 }),
