@@ -4,6 +4,7 @@ import { TransactionStatus } from '@prisma/client';
 
 import {
   claimForImmediateFulfillment,
+  enqueueSyncJobsDeferringFailure,
   releaseFulfillmentClaim,
 } from '../src/modules/payments/services/payment-fulfillment-claim.util';
 
@@ -66,5 +67,36 @@ describe('payment-fulfillment-claim.util fencing', () => {
     void heldAt;
     const claim = await claimForImmediateFulfillment(prisma, 'tx-2');
     assert.equal(claim, null);
+  });
+});
+
+describe('enqueueSyncJobsDeferringFailure', () => {
+  it('enqueues every job and answers null when Redis takes them all', async () => {
+    const pushed: string[] = [];
+    const failure = await enqueueSyncJobsDeferringFailure(
+      { enqueue: async (id: string) => void pushed.push(id) },
+      [{ id: 'sync-1' }, { id: 'sync-2' }],
+    );
+
+    assert.equal(failure, null);
+    assert.deepStrictEqual(pushed, ['sync-1', 'sync-2']);
+  });
+
+  it('stops at the first refusal and RETURNS it instead of throwing past the caller', async () => {
+    const pushed: string[] = [];
+    const refusal = new Error('redis is down');
+
+    const failure = await enqueueSyncJobsDeferringFailure(
+      {
+        enqueue: async (id: string) => {
+          if (id === 'sync-2') throw refusal;
+          pushed.push(id);
+        },
+      },
+      [{ id: 'sync-1' }, { id: 'sync-2' }, { id: 'sync-3' }],
+    );
+
+    assert.deepStrictEqual(failure, { error: refusal });
+    assert.deepStrictEqual(pushed, ['sync-1'], 'the sweep re-drives the PENDING rest');
   });
 });

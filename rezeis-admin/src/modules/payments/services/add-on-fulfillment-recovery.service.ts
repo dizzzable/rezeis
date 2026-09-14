@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { PurchaseType, Transaction, TransactionStatus } from '@prisma/client';
+import { Prisma, PurchaseType, Transaction, TransactionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { isAddOnTransaction } from './payment-subscription-mutation.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
@@ -42,7 +43,13 @@ const MAX_PER_TICK = 100;
  *   3. enqueue the freshly-created profile-sync job(s);
  *   4. on provisioning failure, RELEASE the claim (`fulfilledAt` → null) so a
  *      later tick or a late webhook can retry — never leaving the row worse
- *      than found.
+ *      than found;
+ *   5. run the post-payment hooks — referral reward, partner earning,
+ *      cashback, МойНалог, ad conversion — for a paid add-on. Nothing else
+ *      runs them for this payment: once this claim stamps `fulfilledAt`, the
+ *      webhook retry that would have run them exits early on a fulfilled row,
+ *      so a recovered add-on used to deliver the traffic and drop every side
+ *      effect of the payment. Every hook is idempotent per transaction.
  *
  * The recovery of one row never aborts the sweep of the others.
  */
@@ -55,6 +62,7 @@ export class AddOnFulfillmentRecoveryService {
     private readonly paymentSubscriptionMutationService: PaymentSubscriptionMutationService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly systemEvents: SystemEventsService,
+    private readonly paymentReconciliationService: PaymentReconciliationService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'add-on-fulfillment-recovery' })
@@ -154,6 +162,11 @@ export class AddOnFulfillmentRecoveryService {
           }`,
         );
       });
+    }
+    // A zero-price add-on was never a payment: the live paths that complete one
+    // skip these hooks on purpose, and so does this one.
+    if (new Prisma.Decimal(transaction.amount.toString()).greaterThan(0)) {
+      await this.paymentReconciliationService.runPostFulfillmentHooksBestEffort(transaction);
     }
     this.systemEvents.warn(
       EVENT_TYPES.PAYMENT_FULFILLMENT_RECOVERED,

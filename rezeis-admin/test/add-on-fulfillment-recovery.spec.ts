@@ -53,6 +53,8 @@ interface Harness {
   applied: string[];
   enqueued: string[];
   events: Array<{ type: string; message: string }>;
+  /** Transactions the post-payment hooks ran for, in order. */
+  hooks: string[];
 }
 
 function build(options: {
@@ -114,13 +116,21 @@ function build(options: {
     },
   };
 
+  const hooks: string[] = [];
+  const reconciliation = {
+    runPostFulfillmentHooksBestEffort: async (tx: { id: string }) => {
+      hooks.push(tx.id);
+    },
+  };
+
   const service = new AddOnFulfillmentRecoveryService(
     prisma as never,
     mutation as never,
     profileSyncQueue as never,
     systemEvents as never,
+    reconciliation as never,
   );
-  return { service, claims, releases, applied, enqueued, events };
+  return { service, claims, releases, applied, enqueued, events, hooks };
 }
 
 describe('AddOnFulfillmentRecoveryService', () => {
@@ -174,6 +184,28 @@ describe('AddOnFulfillmentRecoveryService', () => {
     const result = await h.service.recoverStrandedFulfillments();
     assert.equal(result.recovered, 0);
     assert.deepEqual(h.applied, []);
+  });
+
+  it('runs the post-payment hooks for a recovered paid add-on — nothing else will', async () => {
+    // Once the claim stamps `fulfilledAt`, the webhook retry that would have
+    // run them exits early: the referral reward, the partner earning and the
+    // cashback of this payment were simply never made.
+    const h = build();
+
+    await h.service.recoverStrandedFulfillments();
+
+    assert.deepEqual(h.hooks, ['tx-1']);
+  });
+
+  it('runs no hooks when provisioning failed, or for a zero-price add-on', async () => {
+    const failed = build({ applyThrows: true });
+    await failed.service.recoverStrandedFulfillments();
+    assert.deepEqual(failed.hooks, [], 'nothing was delivered, and the claim is released for a retry');
+
+    const free = build({ rows: [txRecord({ amount: { toString: () => '0.00' } })] });
+    const result = await free.service.recoverStrandedFulfillments();
+    assert.equal(result.recovered, 1);
+    assert.deepEqual(free.hooks, [], 'a free add-on was never a payment');
   });
 
   it('processes multiple stranded rows independently', async () => {

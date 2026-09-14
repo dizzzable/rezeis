@@ -11,6 +11,7 @@ import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.s
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import {
   claimForImmediateFulfillment,
+  enqueueSyncJobsDeferringFailure,
   releaseFulfillmentClaim,
 } from './payment-fulfillment-claim.util';
 import { requireSetting, requireYookassaSecretKey } from './payment-provider-execution.helpers';
@@ -261,9 +262,12 @@ export class PaymentPendingExpiryService {
                 );
                 throw provisionError;
               }
-              for (const syncJob of syncJobs) {
-                await this.profileSyncQueueService.enqueue(syncJob.id);
-              }
+              // Deferred, not thrown: a Redis refusal must not skip the hooks
+              // below — see `enqueueSyncJobsDeferringFailure`.
+              const syncEnqueueFailure = await enqueueSyncJobsDeferringFailure(
+                this.profileSyncQueueService,
+                syncJobs,
+              );
               // Same post-completion hooks as webhook reconciliation (referrals,
               // partner, МойНалог, ads) + persist reusable method from poll body.
               // Best-effort: never reopen fulfillment if hooks fail.
@@ -271,6 +275,7 @@ export class PaymentPendingExpiryService {
                 completed,
                 data,
               );
+              if (syncEnqueueFailure !== null) throw syncEnqueueFailure.error;
               this.logger.warn(
                 `YooKassa payment ${tx.paymentId} polled succeeded and fulfilled without webhook`,
               );

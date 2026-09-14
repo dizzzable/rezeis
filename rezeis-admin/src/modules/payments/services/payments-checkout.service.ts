@@ -35,7 +35,11 @@ import {
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
-import { claimForImmediateFulfillment, releaseFulfillmentClaim } from './payment-fulfillment-claim.util';
+import {
+  claimForImmediateFulfillment,
+  enqueueSyncJobsDeferringFailure,
+  releaseFulfillmentClaim,
+} from './payment-fulfillment-claim.util';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
@@ -352,9 +356,12 @@ export class PaymentsCheckoutService {
           );
           throw provisionError;
         }
-        for (const syncJob of syncJobs) {
-          await this.profileSyncQueueService.enqueue(syncJob.id);
-        }
+        // Deferred, not thrown: a Redis refusal must not skip the hooks below —
+        // see `enqueueSyncJobsDeferringFailure`.
+        const syncEnqueueFailure = await enqueueSyncJobsDeferringFailure(
+          this.profileSyncQueueService,
+          syncJobs,
+        );
         const finalTransaction =
           (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ??
           completedTransaction;
@@ -362,6 +369,7 @@ export class PaymentsCheckoutService {
         // post-fulfilment hooks are owed here too. No `rawPayload` — the saved
         // method was already persisted above.
         await this.paymentReconciliationService.runPostFulfillmentHooksBestEffort(finalTransaction);
+        if (syncEnqueueFailure !== null) throw syncEnqueueFailure.error;
         return mapCheckoutResponse({
           transaction: finalTransaction,
           checkoutUrl: null,

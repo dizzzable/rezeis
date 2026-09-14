@@ -606,6 +606,37 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.postFulfillmentHookCalls.length, 1)
   })
 
+  it('still owes the post-payment hooks when the sync cannot be enqueued, and fails as before', async () => {
+    // The enqueue used to throw straight past the hooks, and nothing ran them
+    // later: the retry sees a COMPLETED, fulfilled row. The money was captured,
+    // so the referral reward, partner earning and cashback were simply lost.
+    const { service, state } = createService({
+      enqueueError: new Error('redis is down'),
+      providerCheckout: {
+        gatewayId: 'provider-succeeded-1',
+        checkoutUrl: null,
+        providerMode: 'IMMEDIATE',
+        providerStatus: 'succeeded',
+        gatewayData: { provider: 'YOOKASSA', providerStatus: 'succeeded', providerMode: 'IMMEDIATE' },
+      },
+    })
+
+    await assert.rejects(
+      service.checkout({
+        userId: 'user-1',
+        purchaseType: PurchaseType.NEW,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        channel: PurchaseChannel.WEB,
+      }),
+      /redis is down/,
+    )
+
+    assert.equal(state.enqueueCalls, 1)
+    assert.equal(state.postFulfillmentHookCalls.length, 1, 'the hooks ran before the failure surfaced')
+  })
+
   it('does not provision twice when the immediate claim was already fulfilled', async () => {
     // Simulate race: reconciler already claimed fulfilledAt before create-response path.
     const alreadyFulfilledAt = new Date('2026-07-21T12:00:00.000Z')
@@ -644,6 +675,7 @@ describe('PaymentsCheckoutService', () => {
 })
 
 function createService(input: {
+  enqueueError?: Error
   readonly gatewayType?: PaymentGatewayType
   readonly gatewayCurrency?: Currency
   readonly gatewaySettings?: Record<string, unknown>
@@ -853,6 +885,7 @@ function createService(input: {
       {
         enqueue: async () => {
           state.enqueueCalls += 1
+          if (input.enqueueError !== undefined) throw input.enqueueError
         },
       } as never,
       // SettingsService stub — returns the requested mode (PUBLIC default so

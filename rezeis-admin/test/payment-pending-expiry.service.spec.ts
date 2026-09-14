@@ -36,6 +36,18 @@ describe('PaymentPendingExpiryService YooKassa poll', () => {
     assert.equal(h.cancels.length, 0);
   });
 
+  it('runs the post-payment hooks of a polled success even when the sync cannot be enqueued', async () => {
+    const h = createService({
+      get: () => of({ status: 200, data: { id: 'yk-1', status: 'succeeded' } }),
+      enqueueError: new Error('redis is down'),
+    });
+
+    await h.service.expireStalePending();
+
+    assert.equal(h.state.enqueueCalls, 1);
+    assert.equal(h.state.hookCalls, 1, 'the referral, partner and cashback hooks are not lost with the enqueue');
+  });
+
   it('keeps PENDING when provider still pending', async () => {
     const h = createService({
       get: () => of({ status: 200, data: { id: 'yk-1', status: 'pending' } }),
@@ -153,18 +165,19 @@ interface Harness {
   readonly updates: Array<{ data: Record<string, unknown> }>;
   readonly cancels: unknown[];
   readonly releases: ReleaseCall[];
-  readonly state: { applyCalls: number; enqueueCalls: number };
+  readonly state: { applyCalls: number; enqueueCalls: number; hookCalls: number };
 }
 
 function createService(input: {
   readonly get: () => Observable<unknown>;
   readonly gatewayId?: string | null;
   readonly cancelRaceLost?: boolean;
+  readonly enqueueError?: Error;
 }): Harness {
   const updates: Array<{ data: Record<string, unknown> }> = [];
   const cancels: unknown[] = [];
   const releases: ReleaseCall[] = [];
-  const state = { applyCalls: 0, enqueueCalls: 0 };
+  const state = { applyCalls: 0, enqueueCalls: 0, hookCalls: 0 };
 
   const row = {
     id: 'tx-1',
@@ -234,9 +247,14 @@ function createService(input: {
     {
       enqueue: async () => {
         state.enqueueCalls += 1;
+        if (input.enqueueError !== undefined) throw input.enqueueError;
       },
     } as never,
-    { runPostFulfillmentHooks: async () => undefined } as never,
+    {
+      runPostFulfillmentHooks: async () => {
+        state.hookCalls += 1;
+      },
+    } as never,
   );
 
   return { service, updates, cancels, releases, state };

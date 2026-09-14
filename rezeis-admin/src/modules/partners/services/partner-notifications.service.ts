@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { PrismaService } from '../../../common/prisma/prisma.service';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 
 /**
@@ -13,6 +14,21 @@ import { UserNotificationsService } from '../../notifications/services/user-noti
  * delivered, only that there's something to notify about. That keeps
  * partner concerns out of the delivery layer and lets the operator
  * customize templates per channel through the existing admin UI.
+ *
+ * ── Why every money payload carries `amount` AND `amountMinor` ──────────────
+ *
+ * These events are emitted under dot types (`partner.earning`), and
+ * `UserNotificationsService` renders them with the CANONICAL template first:
+ * `resolveToggleKey` maps `partner.earning` onto `partner_earning` and
+ * `partner.withdrawal_approved` onto `partner_withdrawal_completed`. Those
+ * print `<b>{{amount}}</b> {{currency}}`. The payload carried neither — only
+ * `amountMinor` — so a partner read «На баланс зачислено <b></b> .» and
+ * «Вывод <b></b>  зачислен».
+ *
+ * So `amount` and `currency` are provided here, and `amountMinor` stays: the
+ * dot-type templates the catalogue also seeds print `{{amountMinor}}`, and
+ * operators may have written their own copy against it. No template is
+ * edited, because a stored template may be one an operator already changed.
  */
 @Injectable()
 export class PartnerNotificationsService {
@@ -20,6 +36,7 @@ export class PartnerNotificationsService {
 
   public constructor(
     private readonly userNotifications: UserNotificationsService,
+    private readonly prismaService: PrismaService,
   ) {}
 
   public async notifyEarning(input: {
@@ -33,6 +50,7 @@ export class PartnerNotificationsService {
       type: 'partner.earning',
       payload: {
         amountMinor: input.amount,
+        ...(await this.balanceMoney(input.partnerUserId, input.amount)),
         level: input.level,
         payerUserId: input.payerUserId,
       },
@@ -50,6 +68,7 @@ export class PartnerNotificationsService {
       payload: {
         withdrawalId: input.withdrawalId,
         amountMinor: input.amount,
+        ...(await this.balanceMoney(input.partnerUserId, input.amount)),
       },
     });
   }
@@ -66,9 +85,53 @@ export class PartnerNotificationsService {
       payload: {
         withdrawalId: input.withdrawalId,
         amountMinor: input.amount,
+        // The stock rejection copy prints only the reason, but it is the same
+        // family and an operator who adds the sum should find it there.
+        ...(await this.balanceMoney(input.partnerUserId, input.amount)),
         reason: input.reason,
       },
     });
+  }
+
+  /**
+   * `{ amount, currency }` for a sum held on a partner balance.
+   *
+   * `amount` is the minor-unit sum in major units — `15050` → `"150.50"`,
+   * `15000` → `"150"` — with a dot, because the payload is written before
+   * anyone knows the reader's language. `currency` is what the balance is
+   * denominated in: the user's `partnerBalanceCurrencyOverride`, else the
+   * operator's `defaultCurrency`, the rule `InternalPartnerController` and
+   * `PartnerBalancePaymentService` already apply.
+   *
+   * Never throws: the accrual or payout this announces has already happened,
+   * and a failed currency read costs the unit, not the notification.
+   */
+  private async balanceMoney(
+    partnerUserId: string,
+    amountMinor: number,
+  ): Promise<{ readonly amount: string; readonly currency?: string }> {
+    const amount = formatMinorUnits(amountMinor);
+    try {
+      const [user, settings] = await Promise.all([
+        this.prismaService.user.findUnique({
+          where: { id: partnerUserId },
+          select: { partnerBalanceCurrencyOverride: true },
+        }),
+        this.prismaService.settings.findUnique({
+          where: { id: 1 },
+          select: { defaultCurrency: true },
+        }),
+      ]);
+      const currency = user?.partnerBalanceCurrencyOverride ?? settings?.defaultCurrency ?? null;
+      return currency === null ? { amount } : { amount, currency };
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Could not resolve the partner balance currency for ${partnerUserId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { amount };
+    }
   }
 
   private async create(input: {
@@ -88,4 +151,21 @@ export class PartnerNotificationsService {
       );
     }
   }
+}
+
+/**
+ * Minor units to a major-unit string, by integer arithmetic.
+ *
+ * Every balance in the product is stored ×100 (`toMinorUnits`), whatever the
+ * currency. Whole amounts print without a fraction, the way the cabinet shows
+ * them; anything else prints exactly two digits. No float division, so no
+ * `0.1 + 0.2` in a partner's payout notice.
+ */
+function formatMinorUnits(amountMinor: number): string {
+  const sign = amountMinor < 0 ? '-' : '';
+  const absolute = Math.abs(Math.trunc(amountMinor));
+  const cents = absolute % 100;
+  // A multiple of 100 divides exactly, so this is integer arithmetic too.
+  const major = (absolute - cents) / 100;
+  return cents === 0 ? `${sign}${major}` : `${sign}${major}.${String(cents).padStart(2, '0')}`;
 }

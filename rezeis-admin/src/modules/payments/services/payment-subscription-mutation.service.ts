@@ -223,29 +223,16 @@ export class PaymentSubscriptionMutationService {
       .findUnique({ where: { id: transaction.userId }, select: { isBlocked: true } })
       .then((row) => row?.isBlocked === true)
       .catch(() => false);
-    if (purchaserBlocked) {
-      this.events.warn(
-        EVENT_TYPES.PAYMENT_COMPLETED,
-        'PAYMENT',
-        `Payment completed for a BLOCKED customer: ${transaction.purchaseType}`,
-        {
-          userId: transaction.userId,
-          paymentId: transaction.paymentId,
-          amount: transaction.amount.toString(),
-          currency: transaction.currency,
-          gatewayType: transaction.gatewayType,
-          // Spelled out because this is the operator's decision, not ours: the
-          // subscription exists and the VPN profile is disabled, so the
-          // customer has paid for something they cannot use until unblocked.
-          note:
-            'The invoice was created before the block and paid after it. The subscription was ' +
-            'recorded and the VPN profile is DISABLED. Decide whether to refund.',
-        },
-      );
-    }
 
-    // Emit payment completed event
-    this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', `Payment completed: ${transaction.purchaseType}`, {
+    // ONE completion per payment, whichever way it went.
+    //
+    // The blocked case used to be a WARNING emitted in ADDITION to the INFO
+    // below, so one payment produced two `payment.completed` events: two
+    // «Платёж получен» cards, two runs of every automation rule and outbound
+    // webhook bound to the type, and — with a receipt template active — two
+    // receipt emails to the customer. The warning now IS the completion: the
+    // same metadata, raised as WARNING with the note the operator has to act on.
+    const completedMetadata = {
       userId: transaction.userId,
       paymentId: transaction.paymentId,
       purchaseType: transaction.purchaseType,
@@ -261,7 +248,33 @@ export class PaymentSubscriptionMutationService {
       channel: transaction.channel,
       subscriptionId: result.subscription.id,
       remnawaveId: result.subscription.remnawaveId ?? undefined,
-    });
+    };
+    if (purchaserBlocked) {
+      // In Russian, both of them: the operator reads the message in the event
+      // feed and the note on the card («📝 Заметка»), and this one asks them
+      // for a decision about money.
+      this.events.warn(
+        EVENT_TYPES.PAYMENT_COMPLETED,
+        'PAYMENT',
+        'Платёж получен от заблокированного пользователя',
+        {
+          ...completedMetadata,
+          // Spelled out because this is the operator's decision, not ours: the
+          // subscription exists and the VPN profile is disabled, so the
+          // customer has paid for something they cannot use until unblocked.
+          note:
+            'Счёт создан до блокировки, а оплачен после неё. Подписка записана, VPN-профиль ' +
+            'отключён. Решите, нужен ли возврат средств.',
+        },
+      );
+    } else {
+      this.events.info(
+        EVENT_TYPES.PAYMENT_COMPLETED,
+        'PAYMENT',
+        `Payment completed: ${transaction.purchaseType}`,
+        completedMetadata,
+      );
+    }
 
     // Consume the one-time "next purchase" discount (PURCHASE_DISCOUNT promo
     // reward) now that a plan purchase has completed. Without this it kept

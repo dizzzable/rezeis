@@ -55,3 +55,30 @@ export async function releaseFulfillmentClaim(
     data: { fulfilledAt: null },
   });
 }
+
+/**
+ * Pushes the sync jobs a fulfilment created, stopping at the first refusal, and
+ * RETURNS that refusal instead of throwing it.
+ *
+ * Every fulfilling path still has work after this that must not depend on
+ * Redis: the post-fulfilment hooks — referral rewards, partner earnings,
+ * cashback, МойНалог, the ad conversion. An enqueue used to throw straight past
+ * them, and nothing ever ran them later: the retry early-returns on the row
+ * that is now COMPLETED and fulfilled, so the payment's side effects were
+ * simply lost. The PENDING job rows are already durable and the profile-sync
+ * sweep re-drives them, so the caller runs its hooks first and rethrows what
+ * this returns afterwards — keeping the failure exactly as visible as before.
+ */
+export async function enqueueSyncJobsDeferringFailure(
+  queue: { enqueue(syncJobId: string): Promise<void> },
+  syncJobs: readonly { readonly id: string }[],
+): Promise<{ readonly error: unknown } | null> {
+  for (const syncJob of syncJobs) {
+    try {
+      await queue.enqueue(syncJob.id);
+    } catch (error: unknown) {
+      return { error };
+    }
+  }
+  return null;
+}
