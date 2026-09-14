@@ -74,11 +74,16 @@ describe('BackupProcessor restore', () => {
   // spawned npx, which the image does not have), so a restored older schema
   // kept serving the newer build and nothing an operator reads said so.
   it('reports a restore whose migrations were not applied as a WARNING that says what to do', async () => {
-    const emitted: Array<{ severity: string; message: string; adminId?: string | null }> = [];
+    const emitted: Array<{
+      severity: string;
+      message: string;
+      adminId?: string | null;
+      metadata?: Record<string, unknown>;
+    }> = [];
     const restore = (migrationsApplied: boolean) =>
       new BackupProcessor(
         { runRestore: async () => true, runMigrateDeploy: async () => migrationsApplied } as never,
-        { emit: (event: { severity: string; message: string; adminId?: string | null }) => emitted.push(event) } as never,
+        { emit: (event: (typeof emitted)[number]) => emitted.push(event) } as never,
         { rehydrateMissingAssets: async () => ({ recoveredEmojiCount: 0, skippedPacks: 0 }) } as never,
       ).process({
         name: BACKUP_JOBS.RESTORE,
@@ -94,8 +99,11 @@ describe('BackupProcessor restore', () => {
     assert.match(emitted[0]!.message, /migrations/i);
     assert.match(emitted[0]!.message, /restart/i, 'the operator is told how the schema catches up');
     assert.equal(emitted[0]!.adminId, 'admin-1');
+    // The operator card prints no message: the same instruction, in Russian, is its note.
+    assert.match(String(emitted[0]!.metadata?.['note']), /перезапустите контейнер API/);
     // Control: a restore that brought the schema forward is still plain INFO.
     assert.equal(emitted[1]!.severity, 'INFO');
+    assert.equal(emitted[1]!.metadata?.['note'], undefined);
   });
 });
 

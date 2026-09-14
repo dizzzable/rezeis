@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { Logger } from '@nestjs/common';
@@ -192,7 +194,74 @@ describe('RemnawaveWebhookService forwarding', () => {
     assert.equal(stored.length, 4);
     assert.equal(emitted.length, 0);
   });
+
+  it('files the panel start under REMNAWAVE, where its tick-box is', async () => {
+    // It went out as NODE — into the operator's node topic — while the page
+    // offers it under «Remnawave» and the constant sits in that block.
+    const { service, emitted } = buildService();
+    await service.handleEvent('service.panel_started', { data: {} }, null);
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0]!.type, 'remnawave.panel.started');
+    assert.equal(emitted[0]!.category, 'REMNAWAVE');
+  });
+
+  it('forwards every mapped panel event under the category the operator ticks it in', async () => {
+    // The category picks the forum topic; the catalogue is where the operator
+    // chose that topic's contents. They have to be the same answer for every
+    // name the map forwards, not only for the one that drifted.
+    const catalogue = readCatalogueCategories();
+    const names = [
+      'user.first_connected', 'user.expired', 'user.limited', 'user.enabled', 'user.disabled',
+      'user.traffic_reset', 'user.expires_in_24_hours', 'user.expiration',
+      'user.bandwidth_usage_threshold_reached',
+      'node.connection_lost', 'node.connection_restored', 'node.created', 'node.modified',
+      'node.enabled', 'node.disabled', 'node.traffic_notify',
+      'service.panel_started',
+    ];
+    const disagreements: string[] = [];
+    for (const name of names) {
+      const { service, emitted } = buildService();
+      await service.handleEvent(name, { data: {} }, null);
+      assert.equal(emitted.length, 1, `${name} was not forwarded — the list above is stale`);
+      const ticked = catalogue.get(emitted[0]!.type);
+      if (ticked !== emitted[0]!.category) {
+        disagreements.push(`${name} → ${emitted[0]!.type}: emitted ${emitted[0]!.category}, ticked under ${ticked}`);
+      }
+    }
+    assert.deepStrictEqual(disagreements, []);
+  });
 });
+
+/** `event type → category` as the operator's catalogue in the SPA groups them. */
+function readCatalogueCategories(): Map<string, string> {
+  const source = readFileSync(
+    join(__dirname, '..', 'web', 'src', 'features', 'notifications', 'notifications-page.tsx'),
+    'utf8',
+  );
+  const start = source.indexOf('const EVENT_TYPE_CATALOG');
+  assert.ok(start >= 0, 'EVENT_TYPE_CATALOG not found');
+  // The literal's closing brace alone on its line. CRLF or LF: a Windows
+  // working copy is CRLF under `core.autocrlf`, and a miss here would read the
+  // rest of the file as one more category.
+  const close = /\r?\n\}\r?\n/.exec(source.slice(start));
+  assert.ok(close !== null, 'EVENT_TYPE_CATALOG literal end not found');
+  const end = start + close.index;
+  const byType = new Map<string, string>();
+  let category: string | null = null;
+  for (const line of source.slice(start, end).split(/\r?\n/)) {
+    const heading = /^\s{2}([A-Z]+): \[/.exec(line);
+    if (heading) category = heading[1]!;
+    const body = line.replace(/\/\/.*$/, '');
+    for (const match of body.matchAll(/'([a-z_][a-z0-9_.]*)'/g)) {
+      if (category !== null) byType.set(match[1]!, category);
+    }
+  }
+  assert.ok(
+    byType.get('node.connection_lost') === 'NODE' && byType.size > 50,
+    `parsed ${byType.size} types — the parse, not the catalogue, is wrong`,
+  );
+  return byType;
+}
 
 describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
   it('overlays status + expiry + limits onto the matching subscription on user.modified', async () => {

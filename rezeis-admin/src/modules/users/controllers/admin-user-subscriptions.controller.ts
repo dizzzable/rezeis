@@ -661,6 +661,8 @@ export class AdminUserSubscriptionsController {
           subscriptionId,
           userId: outcome.updated.userId,
           remnawavePanelUsername: outcome.updated.remnawavePanelUsername,
+          // The operator card prints no message; the consequence is its note.
+          note: 'Изменения сохранены только в rezeis: у подписки нет привязки к профилю Remnawave, и панель их не получит.',
         },
       );
     }

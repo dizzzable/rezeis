@@ -142,6 +142,96 @@ describe('a card too long for its channel', () => {
   });
 });
 
+/**
+ * Links
+ * ═════
+ * A card carries `<a href="…">` for a receipt, a checkout, a panel profile —
+ * and a tag like that is as long as its URL. The cut looked for an open `<`
+ * only in the last sixteen characters and balanced only four tag names, so a
+ * cut inside a long URL kept `<a href="https://recei` and a cut inside the
+ * link's text kept `<a href="…">Че` with no `</a>`. Either way Telegram
+ * refuses the whole card, and a card that grows longer is exactly the one
+ * that gets cut.
+ */
+describe('a card cut near a link', () => {
+  const url = `https://receipt.example/r?${'item=1&amp;'.repeat(60)}end=1`;
+
+  it('does not cut inside a long href that straddles the limit', () => {
+    const before = '#E\n<blockquote>💰 Платёж: ' + 'a'.repeat(LIMIT - 200);
+    const card = `${before}<a href="${url}">Чек</a></blockquote>`;
+    // The fixture must really put the attribute across the limit.
+    const hrefStart = card.indexOf('href="');
+    assert.ok(hrefStart < LIMIT && hrefStart + url.length > LIMIT, 'the href does not straddle the limit');
+
+    const clipped = clipHtmlCard(card, LIMIT);
+
+    assert.ok(clipped.length <= LIMIT, `${clipped.length} > ${LIMIT}`);
+    assertWellFormed(clipped);
+    assert.ok(!clipped.includes('href="https://receipt.example'), 'half a link survived');
+    assert.ok(clipped.length > LIMIT - 400, 'used only ' + clipped.length + ' of ' + LIMIT);
+  });
+
+  it('closes a link whose text the cut went through', () => {
+    const card = `#E\n${'b'.repeat(LIMIT - 300)}<a href="https://panel.example/u/1">${'Открыть профиль '.repeat(40)}</a>`;
+
+    const clipped = clipHtmlCard(card, LIMIT);
+
+    assert.ok(clipped.length <= LIMIT, `${clipped.length} > ${LIMIT}`);
+    assert.ok(clipped.includes('<a href="https://panel.example/u/1">'), 'the fixture never reached the link');
+    assertWellFormed(clipped);
+  });
+
+  it('closes a link and the quote around it innermost first', () => {
+    const link = '<a href="https://panel.example/u/1">';
+    const card = `#E\n<blockquote><b>${'c'.repeat(500)}${link}${'текст ссылки '.repeat(80)}</a></b></blockquote>`;
+
+    const clipped = clipHtmlCard(card, LIMIT);
+
+    assert.ok(clipped.length <= LIMIT, `${clipped.length} > ${LIMIT}`);
+    assert.ok(clipped.includes(link), 'the fixture never reached the link text');
+    assert.ok(clipped.includes('</a></b></blockquote>'), `wrong closers: ${clipped.slice(-40)}`);
+    assertWellFormed(clipped);
+  });
+});
+
+/**
+ * Markup Telegram's HTML parser accepts, as far as a clipped card can break
+ * it: every `<` opens a whole tag, every entity is whole, and every tag that
+ * opens is closed in reverse order. The trailing `…` marker is stripped first.
+ */
+function assertWellFormed(clipped: string): void {
+  const body = clipped.endsWith('\n…') ? clipped.slice(0, -2) : clipped;
+  const stack: string[] = [];
+  let index = 0;
+  while (index < body.length) {
+    const char = body[index];
+    if (char === '<') {
+      const close = body.indexOf('>', index);
+      assert.ok(close !== -1, `a tag is cut in half: ${JSON.stringify(body.slice(index, index + 40))}`);
+      const tag = body.slice(index, close + 1);
+      const match = /^<(\/?)([a-z][a-z0-9-]*)(\s[^>]*)?>$/i.exec(tag);
+      assert.ok(match !== null, `not a tag: ${tag}`);
+      if (match[3] !== undefined) {
+        // An attribute value must be a whole quoted string.
+        assert.match(match[3], /^(\s+[a-z-]+="[^"]*")+$/i, `broken attribute in ${tag}`);
+      }
+      const name = match[2]!.toLowerCase();
+      if (match[1] === '/') {
+        assert.equal(stack.pop(), name, `</${name}> closes something else in ${JSON.stringify(body.slice(-80))}`);
+      } else {
+        stack.push(name);
+      }
+      index = close + 1;
+      continue;
+    }
+    if (char === '&') {
+      assert.match(body.slice(index, index + 8), /^&(amp|lt|gt|quot);/, `a broken entity at ${index}`);
+    }
+    index += 1;
+  }
+  assert.deepStrictEqual(stack, [], `left open: ${stack.join(', ')}`);
+}
+
 function countOf(value: string, needle: string): number {
   return value.split(needle).length - 1;
 }

@@ -19,7 +19,7 @@ import { ReiwaRelayQueueService } from '../src/modules/notifications/services/re
  * rendered card, so the stub captures it off either one.
  */
 
-function buildService(): {
+function buildService(options: { readonly platformPolicy?: unknown } = {}): {
   service: SystemEventsService;
   getLastText: () => string | null;
 } {
@@ -55,6 +55,10 @@ function buildService(): {
         systemNotifications: {
           telegram: { enabled: false, chatId: null, devChatId: null },
         },
+        // Where the operator's time zone lives (`readPlatformBranding`). Absent
+        // unless a case is about it — which is the state of every install that
+        // never opened that setting.
+        platformPolicy: options.platformPolicy ?? {},
       }),
     },
     adminAuditLog: { create: async () => ({}) },
@@ -87,6 +91,11 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
+/** The `<b>Событие: …</b>` line — what an operator reads first. */
+function headerOf(card: string): string | undefined {
+  return card.split('\n').find((line) => line.includes('<b>Событие:'));
+}
+
 describe('SystemEventsService card formatting (enriched)', () => {
   let savedToken: string | undefined;
 
@@ -100,7 +109,7 @@ describe('SystemEventsService card formatting (enriched)', () => {
     else process.env.BOT_TOKEN = savedToken;
   });
 
-  it('renders a per-type header (emoji + Russian title) instead of the raw message', async () => {
+  it('heads the card with the per-type title, never with the raw message', async () => {
     const { service, getLastText } = buildService();
     service.info('payment.completed', 'PAYMENT', 'raw machine message', {
       paymentId: 'pay_123',
@@ -112,8 +121,106 @@ describe('SystemEventsService card formatting (enriched)', () => {
     const text = getLastText();
     assert.ok(text, 'card text should be captured');
     assert.ok(text.includes('#EventPaymentCompleted'));
-    assert.ok(text.includes('Событие: Платёж получен!'));
+    assert.equal(headerOf(text), '💰 <b>Событие: Платёж получен!</b>');
+    // Every fact is in the payment block: the log-line sentence adds nothing,
+    // so it stays off the card.
     assert.ok(!text.includes('raw machine message'));
+  });
+
+  it('keeps the sentence off a WARNING card whose type does not opt in', async () => {
+    // THE NOISE THIS PINS. Printing the message under the title on every
+    // WARNING turned the busiest cards into a title, then the same fact again
+    // as a log line or an enum. Each row is a producer's real sentence, and
+    // each of these types has its facts in a block (or in its title) already.
+    const noisy: ReadonlyArray<{
+      readonly type: string;
+      readonly category: 'REMNAWAVE' | 'NODE' | 'PAYMENT' | 'USER' | 'SYSTEM';
+      readonly message: string;
+      readonly metadata: Record<string, unknown>;
+    }> = [
+      { type: 'remnawave.user.expired', category: 'REMNAWAVE', message: 'Remnawave: user.expired', metadata: { remnawaveUsername: 'anna_vpn' } },
+      { type: 'remnawave.user.limited', category: 'REMNAWAVE', message: 'Remnawave: user.limited', metadata: { remnawaveUsername: 'anna_vpn' } },
+      { type: 'remnawave.user.disabled', category: 'REMNAWAVE', message: 'Remnawave: user.disabled', metadata: { remnawaveUsername: 'anna_vpn' } },
+      { type: 'remnawave.user.bandwidth_threshold', category: 'REMNAWAVE', message: 'Remnawave: user.bandwidth_usage_threshold_reached', metadata: { remnawaveUsername: 'anna_vpn' } },
+      { type: 'node.connection_lost', category: 'NODE', message: 'Remnawave: node.connection_lost', metadata: { nodeName: 'DE-1' } },
+      { type: 'node.disabled', category: 'NODE', message: 'Remnawave: node.disabled', metadata: { nodeName: 'DE-1' } },
+      { type: 'node.traffic_notify', category: 'NODE', message: 'Remnawave: node.traffic_notify', metadata: { nodeName: 'DE-1' } },
+      { type: 'payment.failed', category: 'PAYMENT', message: 'Платёж не прошёл: NEW', metadata: { paymentId: 'pay-1', amount: '10' } },
+      { type: 'user.deleted', category: 'USER', message: 'User account deleted', metadata: { userId: 'user-1' } },
+      { type: 'user.blocked', category: 'USER', message: 'User blocked: 1234567890', metadata: { userId: 'user-1' } },
+      {
+        type: 'remnawave.hwid_average_high',
+        category: 'REMNAWAVE',
+        message: 'Panel-wide HWID average is 5.4 devices per user',
+        metadata: { kind: 'hwid_average', averageDevicesPerUser: 5.4 },
+      },
+      {
+        type: 'system.broadcast_sent',
+        category: 'SYSTEM',
+        message: 'Broadcast partially delivered: 360 sent, 40 failed',
+        metadata: { broadcastId: 'bc-1', sentCount: 360, failedCount: 40 },
+      },
+      {
+        type: 'system.backup_completed',
+        category: 'SYSTEM',
+        message: 'Backup stored locally — not delivered to Telegram (crypt_key_missing): b-2.sql.gz',
+        metadata: { backupId: 'rec-2', filename: 'b-2.sql.gz', deliveredToTelegram: false, relayStatus: 'crypt_key_missing' },
+      },
+      {
+        type: 'reiwa.relay_undelivered',
+        category: 'SYSTEM',
+        message: 'Reiwa relay did not deliver reiwa.channel.broadcast (rejected)',
+        metadata: { relayEvent: 'reiwa.channel.broadcast', relayStatus: 'rejected' },
+      },
+    ];
+    for (const event of noisy) {
+      const { service, getLastText } = buildService();
+      service.warn(event.type, event.category, event.message, event.metadata);
+      await flush();
+      const card = getLastText() ?? '';
+      assert.ok(headerOf(card) !== undefined, `${event.type}: no card; got ${card}`);
+      assert.ok(
+        !card.includes(event.message),
+        `${event.type}: the producer's sentence is back on the card:\n${card}`,
+      );
+    }
+  });
+
+  it('prints the message of an opted-in WARNING directly under its title, escaped', async () => {
+    // The other half: a type whose message is written for the card. The
+    // Telegram refusal it quotes is Telegram's own text, so it is `<code>`.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'telegram.direct_undelivered',
+      'SYSTEM',
+      'Панель не доставила карточку в Telegram: Telegram отклонил сообщение: Bad Request: <b> & more',
+      { sourceEventType: 'payment.completed', chatId: '-100', detail: 'Bad Request: <b> & more' },
+    );
+    await flush();
+    const text = getLastText()!;
+    const lines = text.split('\n');
+    const header = lines.findIndex((line) => line.includes('<b>Событие:'));
+    assert.ok(header > 0, `no header line; got: ${text}`);
+    // Directly under the title — not in some block further down, where it
+    // would read as one more detail rather than as what happened.
+    assert.equal(
+      lines[header + 1],
+      '<blockquote>Telegram отклонил сообщение: <code>Bad Request: &lt;b&gt; &amp; more</code></blockquote>',
+    );
+    // Said once: the details block does not repeat the quoted refusal.
+    assert.ok(!text.includes('Подробности'), text);
+  });
+
+  it('prints a `warning`-only message at WARNING and not at INFO', async () => {
+    const sentence = 'Панель не доставила карточку в Telegram: Не удалось связаться с Telegram';
+    const { service, getLastText } = buildService();
+    service.info('telegram.direct_undelivered', 'SYSTEM', sentence, { sourceEventType: 'x.y' });
+    await flush();
+    assert.ok(!getLastText()!.includes('Не удалось связаться с Telegram'), getLastText()!);
+
+    service.warn('telegram.direct_undelivered', 'SYSTEM', sentence, { sourceEventType: 'x.y' });
+    await flush();
+    assert.ok(getLastText()!.includes('<blockquote>Не удалось связаться с Telegram</blockquote>'), getLastText()!);
   });
 
   it('renders an enriched payment block with currency symbol, receipt and paid date', async () => {
@@ -528,9 +635,10 @@ describe('an alert whose facts live only in its metadata', () => {
     assert.doesNotMatch(card, /Пропущено/);
   });
 
-  it('still keeps the raw machine message out of the card', async () => {
+  it('keeps the raw machine message off a card whose blocks carry the facts', async () => {
     // The blocks exist so the header can stay; they must not smuggle the
-    // message back in through a metadata key.
+    // message back in through a metadata key. (The WARNING half of this is
+    // the first describe's case about types that do not opt in.)
     const { service, getLastText } = buildService();
     service.info('node.geo_concentration', 'NODE', 'RAW-MACHINE-SENTENCE', {
       country: 'DE',
@@ -540,6 +648,774 @@ describe('an alert whose facts live only in its metadata', () => {
     });
     await flush();
 
-    assert.doesNotMatch(getLastText() ?? '', /RAW-MACHINE-SENTENCE/);
+    const card = getLastText() ?? '';
+    assert.doesNotMatch(card, /RAW-MACHINE-SENTENCE/);
+    assert.equal(headerOf(card), '🌍 <b>Событие: Концентрация онлайна в одной стране!</b>');
+  });
+});
+
+/**
+ * A failure must not be announced as the success it failed to be
+ * ═══════════════════════════════════════════════════════════════
+ * Several producers raise their FAILURES under the type of the success:
+ * `system.backup_completed` for a backup that never reached Telegram,
+ * `system.broadcast_sent` for one that reached part of its audience,
+ * `broadcast.started` for a partial recall and for a stalled broadcast put back
+ * in the queue. The card printed the success title for all of them and dropped
+ * the message and the metadata that said otherwise, so an operator read
+ * «Резервная копия создана!» about a backup that existed nowhere.
+ *
+ * These cases pin all three halves: a warning header of its own, the facts
+ * (reason, counts, rule, chat) in the blocks and details, and the message under
+ * the title for exactly the types whose facts live in the message alone.
+ */
+describe('a warning raised under a success type', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it('names a backup the relay never confirmed as undelivered, with the real reason', async () => {
+    // Emitted exactly as `BackupService.recordRelayNotDelivered` does it.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.backup_completed',
+      'SYSTEM',
+      'Backup stored locally — Telegram relay did not confirm delivery (unconfirmed): b-1.sql.gz',
+      {
+        backupId: 'rec-1',
+        filename: 'b-1.sql.gz',
+        deliveredToTelegram: false,
+        relayStatus: 'unconfirmed',
+        httpStatus: 502,
+        detail: 'bad gateway from the cabinet',
+      },
+    );
+    await flush();
+    const card = getLastText()!;
+
+    assert.equal(headerOf(card), '⚠️ <b>Событие: Резервная копия не доставлена в Telegram!</b>');
+    assert.ok(!card.includes('Резервная копия создана'), `a success title on a failure; got: ${card}`);
+    // Said once, in Russian, by the «Доставка» line — the English sentence
+    // restating it is not printed.
+    assert.ok(!card.includes('Telegram relay did not confirm delivery'));
+    assert.ok(
+      card.includes('📥 Доставка: только локально — reiwa не подтвердила отправку'),
+      `the delivery line must name the relay outcome; got: ${card}`,
+    );
+    assert.ok(!card.includes('слишком большой'), 'the one reason this was NOT');
+    assert.ok(card.includes('🌐 Ответ HTTP: 502'));
+    // The cabinet's own words, untranslated, and marked as such.
+    assert.ok(card.includes('🧾 Подробности: <code>bad gateway from the cabinet</code>'));
+    // Stated once: the backup block already turned the status into words.
+    assert.ok(!card.includes('Статус доставки'));
+  });
+
+  it('names each terminal reason the card of last resort can carry', async () => {
+    // `attemptTelegramDelivery` passes `outcome.reason` as `relayStatus`.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.backup_completed',
+      'SYSTEM',
+      'Backup stored locally — not delivered to Telegram (crypt_key_missing): b-2.sql.gz',
+      { backupId: 'rec-2', filename: 'b-2.sql.gz', deliveredToTelegram: false, relayStatus: 'crypt_key_missing' },
+    );
+    await flush();
+    assert.ok(getLastText()!.includes('📥 Доставка: только локально — не задан REZEIS_CRYPT_KEY'));
+  });
+
+  it('does not name one half of `not_configured` as the reason', async () => {
+    // `runTelegramDelivery` answers `not_configured` when delivery is switched
+    // off AND when it is switched on with no Chat ID. «выключена» told the
+    // operator whose switch was on that it was off.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.backup_completed',
+      'SYSTEM',
+      'Backup stored locally — not delivered to Telegram (not_configured): b-6.sql.gz',
+      { backupId: 'rec-6', filename: 'b-6.sql.gz', deliveredToTelegram: false, relayStatus: 'not_configured' },
+    );
+    await flush();
+    const card = getLastText()!;
+    assert.ok(
+      card.includes(
+        '📥 Доставка: только локально — доставка в Telegram не настроена (выключена или не указан Chat ID)',
+      ),
+      `got: ${card}`,
+    );
+  });
+
+  it('still says «too large» for the file that is too large', async () => {
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.backup_completed',
+      'SYSTEM',
+      'Backup stored locally (too large for Telegram): b-3.sql.gz (60 MB)',
+      {
+        backupId: 'rec-3',
+        filename: 'b-3.sql.gz',
+        sizeBytes: 60 * 1024 * 1024,
+        deliveredToTelegram: false,
+        relayStatus: 'too_large_for_telegram',
+      },
+    );
+    await flush();
+    assert.ok(
+      getLastText()!.includes('📥 Доставка: только локально — файл слишком большой для Telegram'),
+    );
+  });
+
+  it('does not call a backup deleted by retention «stored locally»', async () => {
+    // `applyRetention` removed the only copy: there is no local file either.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.backup_completed',
+      'SYSTEM',
+      'Retention deleted the only copy of b-4.sql.gz — it was never delivered off-site',
+      {
+        backupId: 'rec-4',
+        filename: 'b-4.sql.gz',
+        deliveredToTelegram: false,
+        deliveryChannel: null,
+        maxKeep: 3,
+        deletedByRetention: true,
+      },
+    );
+    await flush();
+    const card = getLastText()!;
+    assert.ok(!card.includes('Retention deleted the only copy'), 'restated by the delivery line');
+    assert.ok(card.includes('🗂 Файл: <code>b-4.sql.gz</code>'));
+    assert.ok(card.includes('📥 Доставка: копии больше нет'), `got: ${card}`);
+    assert.ok(!card.includes('только локально'));
+  });
+
+  it('keeps the success title and no delivery line for a backup that simply completed', async () => {
+    // The control: the warning header must be reachable only by a warning.
+    const { service, getLastText } = buildService();
+    service.info('system.backup_completed', 'SYSTEM', 'Backup completed: b-5.sql.gz (5 MB)', {
+      backupId: 'rec-5',
+      filename: 'b-5.sql.gz',
+      sizeBytes: 5 * 1024 * 1024,
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.equal(headerOf(card), '🗄 <b>Событие: Резервная копия создана!</b>');
+    assert.ok(!card.includes('Доставка:'));
+  });
+
+  it('reports a partial broadcast as partial, with both counts', async () => {
+    // `BroadcastDeliveryService.checkAndFinalize`, some recipients failed.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.broadcast_sent',
+      'SYSTEM',
+      'Broadcast partially delivered: 360 sent, 40 failed',
+      { broadcastId: 'bc-1', sentCount: 360, failedCount: 40 },
+    );
+    await flush();
+    const card = getLastText()!;
+    assert.equal(headerOf(card), '⚠️ <b>Событие: Рассылка доставлена не всем!</b>');
+    assert.ok(!card.includes('Рассылка отправлена'));
+    assert.ok(card.includes('📬 Доставлено: 360'));
+    assert.ok(card.includes('📭 Не доставлено: 40'));
+    // The counts once, in the details — not again in the producer's sentence.
+    assert.ok(!card.includes('360 sent'), `the counts are repeated:\n${card}`);
+  });
+
+  it('titles a batch that lost recipients as a failure, though it is INFO', async () => {
+    // `BroadcastProcessor.handleBatch` raises every batch as INFO, failures or
+    // not, so the severity cannot pick the header here — the metadata does.
+    const { service, getLastText } = buildService();
+    service.info('broadcast.batch_completed', 'SYSTEM', 'Batch: 46 sent, 4 failed', {
+      broadcastId: 'bc-7',
+      sent: 46,
+      failed: 4,
+      unresolved: 0,
+      batchSize: 50,
+    });
+    await flush();
+    const lossy = getLastText()!;
+    assert.equal(headerOf(lossy), '⚠️ <b>Событие: Партия рассылки доставлена не всем!</b>');
+    assert.ok(!lossy.includes('Партия рассылки отправлена'), `a success title on a failure:\n${lossy}`);
+    // The counts in Russian, from the metadata — not the English sentence.
+    assert.ok(lossy.includes('📬 Отправлено: 46'), lossy);
+    assert.ok(lossy.includes('📭 Не доставлено: 4'), lossy);
+    assert.ok(!lossy.includes('Batch: 46 sent'), lossy);
+
+    // The control: a clean batch keeps its title.
+    service.info('broadcast.batch_completed', 'SYSTEM', 'Batch: 50 sent, 0 failed', {
+      broadcastId: 'bc-7',
+      sent: 50,
+      failed: 0,
+      unresolved: 0,
+      batchSize: 50,
+    });
+    await flush();
+    assert.equal(headerOf(getLastText()!), '📬 <b>Событие: Партия рассылки отправлена!</b>');
+  });
+
+  it('titles a restore whose migrations did not run as exactly that', async () => {
+    // `BackupProcessor` raises the restore as WARNING when `migrationsApplied`
+    // is false: the data is in, the schema is not.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'system.restore_completed',
+      'SYSTEM',
+      'Database restored from b-8.sql.gz, but the pending migrations were not applied — restart the panel (API container) so its entrypoint applies them',
+      { filename: 'b-8.sql.gz', migrationsApplied: false, success: true },
+    );
+    await flush();
+    const warned = getLastText()!;
+    assert.equal(headerOf(warned), '⚠️ <b>Событие: База восстановлена, но миграции не применены!</b>');
+    assert.ok(!warned.includes('База восстановлена из копии'), `a success title on a failure:\n${warned}`);
+    assert.ok(warned.includes('🧱 Миграции: не применены'), warned);
+    assert.ok(!warned.includes('pending migrations were not applied'), warned);
+
+    service.info('system.restore_completed', 'SYSTEM', 'Database restored from b-9.sql.gz', {
+      filename: 'b-9.sql.gz',
+      migrationsApplied: true,
+      success: true,
+    });
+    await flush();
+    assert.equal(headerOf(getLastText()!), '♻️ <b>Событие: База восстановлена из копии!</b>');
+  });
+
+  it('reports a partial recall and a revived broadcast as problems, not as a start', async () => {
+    const { service, getLastText } = buildService();
+    service.warn(
+      'broadcast.started',
+      'SYSTEM',
+      'Recall removed 3 of 5 messages in this batch; 2 could not be deleted',
+      { broadcastId: 'bc-2', deleted: 3, failed: 2 },
+    );
+    await flush();
+    const recall = getLastText()!;
+    assert.equal(headerOf(recall), '⚠️ <b>Событие: Проблема с рассылкой!</b>');
+    assert.ok(recall.includes('🗑 Удалено у получателей: 3'), recall);
+    assert.ok(recall.includes('⚠️ Не удалось удалить: 2'), recall);
+    assert.ok(!recall.includes('Recall removed'), recall);
+
+    // `BroadcastReconcilerService.revive`, which carries the reason as `detail`.
+    service.warn('broadcast.started', 'SYSTEM', 'Broadcast bc-3 was picked up again: 12 recipients still undispatched', {
+      broadcastId: 'bc-3',
+      attempts: 1,
+      detail: '12 recipients still undispatched',
+    });
+    await flush();
+    const revived = getLastText()!;
+    assert.equal(headerOf(revived), '⚠️ <b>Событие: Проблема с рассылкой!</b>');
+    assert.ok(!revived.includes('Рассылка запущена'));
+    assert.ok(revived.includes('🆔 ID: <code>bc-3</code>'), revived);
+    assert.ok(revived.includes('🔁 Попытка возобновления: 1'), revived);
+    assert.ok(!revived.includes('was picked up again'), revived);
+    // Once, as the raw reason it is.
+    assert.equal(
+      revived.split('12 recipients still undispatched').length - 1,
+      1,
+      `the reason is repeated:\n${revived}`,
+    );
+    assert.ok(revived.includes('🧾 Подробности: <code>12 recipients still undispatched</code>'), revived);
+    assert.ok(!revived.includes('Почему'), 'a reason is not an explanation');
+  });
+
+  it('still prints a detail the printed message does not contain', async () => {
+    // The dedupe is by content, not by "a message was printed".
+    const { service, getLastText } = buildService();
+    service.warn('telegram.direct_undelivered', 'SYSTEM', 'Панель не доставила карточку в Telegram: Telegram не ответил вовремя', {
+      sourceEventType: 'payment.completed',
+      chatId: '-100',
+      detail: 'TimeoutError',
+    });
+    await flush();
+    assert.ok(getLastText()!.includes('🧾 Подробности: <code>TimeoutError</code>'), getLastText()!);
+  });
+
+  it('states the audience of a starting broadcast in Russian, from its metadata', async () => {
+    // `BroadcastDeliveryService.stageRecipients`: the size used to reach the
+    // card only as `Broadcast staging: 400 recipients`.
+    const { service, getLastText } = buildService();
+    service.info('broadcast.started', 'SYSTEM', 'Broadcast staging: 400 recipients', {
+      broadcastId: 'bc-4',
+      recipientCount: 400,
+      channelPost: 'disabled',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.equal(headerOf(card), '📣 <b>Событие: Рассылка запущена!</b>');
+    assert.ok(card.includes('👥 Получателей: 400'), card);
+    assert.ok(card.includes('📡 Пост в канал: не отправлен: связь панели с reiwa не настроена'), card);
+    assert.ok(!card.includes('Broadcast staging'), card);
+  });
+
+  it('delivers the text and the rule name of an automation notification', async () => {
+    // `ActionRegistry.notifyTelegram` — the text IS the notification.
+    const { service, getLastText } = buildService();
+    service.warn('automation.telegram_notify', 'SYSTEM', 'Узел DE-1 снова в строю', {
+      ruleId: 'rule-1',
+      ruleName: 'Сообщать о нодах',
+      trigger: 'node.connection_restored',
+      automationChainDepth: 1,
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('<blockquote>Узел DE-1 снова в строю</blockquote>'), `got: ${card}`);
+    assert.ok(card.includes('🤖 Правило: Сообщать о нодах'));
+    assert.ok(card.includes('⚡ Сработало на: <code>node.connection_restored</code>'), card);
+  });
+
+  it('delivers an automation text past the cap on producer sentences whole', async () => {
+    // `params.text` is the operator's own notification, not a log line, and
+    // nothing bounds it. The 1000-character cap on a producer's sentence cut
+    // the notification itself and kept the frame around it.
+    const text = `Нода DE-1 недоступна. ${'Подробности инцидента для дежурного. '.repeat(70)}`.trim();
+    assert.ok(text.length > 2000, 'the fixture must be past the sentence cap');
+    const { service, getLastText } = buildService();
+    service.warn('automation.telegram_notify', 'SYSTEM', text, { ruleName: 'Сообщать о нодах' });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes(`<blockquote>${text}</blockquote>`), `the text was cut:\n${card.slice(0, 400)}`);
+    assert.ok(card.includes('🤖 Правило: Сообщать о нодах'));
+  });
+
+  it('shortens an automation text past Telegram’s limit, and keeps the rule and the context', async () => {
+    // Left to the card clipper, the text — directly under the title — kept
+    // itself and cut everything after it: «🤖 Правило», «Контекст», «Сборка».
+    // The text is the part that gives way.
+    const unit = 'Строка уведомления. ';
+    const { service, getLastText } = buildService();
+    service.warn('automation.telegram_notify', 'SYSTEM', unit.repeat(400).trim(), {
+      ruleId: 'rule-9',
+      ruleName: 'Длинное правило',
+      trigger: 'node.connection_lost',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.length <= 4096, `${card.length} > 4096`);
+    assert.ok(card.includes('🤖 Правило: Длинное правило'), `the rule was cut off:\n${card.slice(-600)}`);
+    assert.ok(card.includes('⚡ Сработало на: <code>node.connection_lost</code>'), card.slice(-600));
+    assert.ok(card.includes('🌀 <b>Контекст:</b>'), `the context was cut off:\n${card.slice(-600)}`);
+    assert.ok(card.includes('🏗 <b>Сборка:</b>'), card.slice(-600));
+    // The text says it was shortened, inside its own quote.
+    assert.ok(/…<\/blockquote>/.test(card), 'a shortened text must say so');
+    assert.equal(
+      card.split('<blockquote>').length,
+      card.split('</blockquote>').length,
+      'a quote was left open',
+    );
+    // Still well past the 1000 characters the sentence cap used to leave: the
+    // text is bounded by the room the card leaves, not by a cap for log lines.
+    const kept = card.split(unit.trim()).length - 1;
+    assert.ok(kept * unit.length > 3000, `only ${kept * unit.length} characters of the text survived`);
+  });
+
+  it('names the card, the chat and the reason of an undelivered panel card', async () => {
+    // `TelegramDirectProcessor.recordUndelivered`.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'telegram.direct_undelivered',
+      'SYSTEM',
+      'Панель не доставила карточку в Telegram: Telegram отклонил токен бота — проверьте «Настройки» → «Токен бота»',
+      {
+        sourceEventType: 'payment.completed',
+        sendKind: 'message',
+        chatId: '-1001234567890',
+        telegramStatus: 'unauthorized',
+        httpStatus: 401,
+        detail: 'Unauthorized',
+        attemptsMade: 4,
+        attempts: 4,
+      },
+    );
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('Telegram отклонил токен бота'), `the reason is missing; got: ${card}`);
+    // The sentence opens with the card's own title; under that title it is
+    // printed from the colon on, not with the title said twice.
+    const lines = card.split('\n');
+    const header = lines.findIndex((line) => line.includes('<b>Событие:'));
+    assert.equal(
+      lines[header + 1],
+      '<blockquote>Telegram отклонил токен бота — проверьте «Настройки» → «Токен бота»</blockquote>',
+    );
+    assert.ok(card.includes('🏷 Карточка события: <code>payment.completed</code>'));
+    assert.ok(card.includes('💬 Чат: <code>-1001234567890</code>'));
+    assert.ok(card.includes('🌐 Ответ HTTP: 401'));
+    assert.ok(card.includes('🔂 Попыток: 4 из 4'), card);
+  });
+
+  it('gives an undelivered panel card its topic and its repeat count, said once', async () => {
+    // A coalesced alert (`createUndeliveredRecorder`) appends the count to its
+    // sentence and sets `repeatsSincePreviousAlert`. The details block states
+    // the count on both undelivered cards; this one prints its sentence too,
+    // so the appended copy is not repeated in it.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'telegram.direct_undelivered',
+      'SYSTEM',
+      'Панель не доставила карточку в Telegram: Не удалось связаться с Telegram; таких же с прошлого оповещения: 6',
+      {
+        sourceEventType: 'payment.completed',
+        chatId: '-1001234567890',
+        topicId: 42,
+        telegramStatus: 'failed',
+        attemptsMade: 4,
+        attempts: 4,
+        repeatsSincePreviousAlert: 6,
+      },
+    );
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('<blockquote>Не удалось связаться с Telegram</blockquote>'), card);
+    assert.ok(card.includes('🔁 Таких же с прошлого оповещения: 6'), card);
+    assert.equal(card.split(': 6').length - 1, 1, `the count is said twice:\n${card}`);
+    assert.ok(card.includes('🧵 Топик: <code>42</code>'), card);
+  });
+
+  it('names what an undelivered relay lost: the broadcast, the chat, the topic, how often', async () => {
+    // `buildRelayUndeliveredRecord`, coalesced. A broadcast's channel copy is
+    // relayed under `broadcast-channel:<broadcastId>`, and a lost one raises no
+    // card of its own any more — so this card has to say which broadcast.
+    const { service, getLastText } = buildService();
+    service.warn(
+      'reiwa.relay_undelivered',
+      'SYSTEM',
+      'Reiwa relay did not deliver reiwa.channel.broadcast (rejected); 37 more like it since the previous alert',
+      {
+        relayEvent: 'reiwa.channel.broadcast',
+        relayStatus: 'rejected',
+        httpStatus: 400,
+        detail: 'chat not found',
+        attemptsMade: 1,
+        attempts: 4,
+        relayEventId: 'broadcast-channel:bc-77',
+        chatId: '-1005550001',
+        topicId: 9,
+        repeatsSincePreviousAlert: 37,
+      },
+    );
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('📨 Маршрут реле: <code>reiwa.channel.broadcast</code>'));
+    assert.ok(card.includes('📡 Статус доставки: <code>rejected</code>'));
+    assert.ok(card.includes('🧾 Подробности: <code>chat not found</code>'), card);
+    assert.ok(card.includes('📣 Пост в канал рассылки: <code>bc-77</code>'), card);
+    assert.ok(card.includes('💬 Чат: <code>-1005550001</code>'), card);
+    assert.ok(card.includes('🧵 Топик: <code>9</code>'), card);
+    assert.ok(card.includes('🔁 Таких же с прошлого оповещения: 37'), card);
+    assert.ok(card.includes('🔂 Попыток: 1 из 4'), card);
+
+    // Any other relayed message is named by its key.
+    service.warn('reiwa.relay_undelivered', 'SYSTEM', 'Reiwa relay did not deliver reiwa.dev.notify (timeout)', {
+      relayEvent: 'reiwa.dev.notify',
+      relayStatus: 'timeout',
+      attemptsMade: 4,
+      attempts: 4,
+      relayEventId: 'sysevt:payment.completed:2026-09-14T10:00:00.000Z:dev-0123456789abcdef',
+    });
+    await flush();
+    assert.ok(
+      getLastText()!.includes(
+        '🔑 Ключ события: <code>sysevt:payment.completed:2026-09-14T10:00:00.000Z:dev-0123456789abcdef</code>',
+      ),
+      getLastText()!,
+    );
+  });
+
+  it('says the queue refused the job when the send was the direct fallback', async () => {
+    // `undelivered-record.ts`: a producer whose job Redis would not take makes
+    // one direct attempt, and `enqueueError` is what tells that road apart.
+    const { service, getLastText } = buildService();
+    service.warn('reiwa.relay_undelivered', 'SYSTEM', 'Reiwa relay did not deliver reiwa.dev.notify (failed)', {
+      relayEvent: 'reiwa.dev.notify',
+      relayStatus: 'failed',
+      attemptsMade: 1,
+      attempts: 1,
+      enqueueError: 'Connection is closed <redis>',
+    });
+    await flush();
+    assert.ok(
+      getLastText()!.includes(
+        '🧯 Очередь не приняла задачу: <code>Connection is closed &lt;redis&gt;</code>',
+      ),
+    );
+  });
+
+  it('states a Remnawave sync job’s facts in Russian, and prints a producer’s note', async () => {
+    // The jobs' sentences are English audit-log paragraphs. The counts are in
+    // the metadata; the instruction a warning exists to give is the producer's
+    // Russian `note`.
+    const instruction =
+      'Expired-profile cleanup: left 3 expired subscription(s) alone — their panel link was lost. ' +
+      'Run the panel-link reconciliation; they retire normally once relinked.';
+    const { service, getLastText } = buildService();
+    service.warn('system.remnawave_sync', 'SYSTEM', instruction, {
+      subscriptions: 3,
+      note: 'Запустите сверку привязок к панели: после неё подписки удалятся как обычно.',
+    });
+    await flush();
+    const warning = getLastText()!;
+    assert.ok(!warning.includes('Expired-profile cleanup'), warning);
+    assert.ok(warning.includes('📦 Подписок: 3'), warning);
+    assert.ok(
+      warning.includes('📝 Заметка: Запустите сверку привязок к панели: после неё подписки удалятся как обычно.'),
+      warning,
+    );
+
+    service.info('system.remnawave_sync', 'SYSTEM', 'Panel link reconciliation: linked 5 of 9 rows', {
+      dryRun: false,
+      scanned: 9,
+      linked: 5,
+    });
+    await flush();
+    const report = getLastText()!;
+    assert.ok(!report.includes('Panel link reconciliation'), report);
+    assert.ok(report.includes('🔎 Проверено строк: 9'), report);
+    assert.ok(report.includes('🔗 Привязано: 5'), report);
+    assert.ok(report.includes('🧪 Пробный прогон: нет'), report);
+  });
+});
+
+/**
+ * The fact a review card exists for
+ * ═════════════════════════════════
+ * Three `PaymentReconciliationService` warnings each hang on one figure the
+ * booked sum does not show — what the provider notified, what was refunded —
+ * and the payment block printed only «💷 Сумма». So «Оплачена неверная сумма!»
+ * arrived over «499.00 ₽» and nothing on the card said 120 had arrived.
+ *
+ * And the manual-review hold is one mechanism for every "money situation a
+ * human must settle": a completion YooKassa refused to confirm is held under
+ * `payment.amount_mismatch` too, and must not be titled as an underpayment.
+ *
+ * Metadata copied from the producers named in each case.
+ */
+describe('a payment card that needs a review', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  const booked = {
+    userId: 'user-1',
+    paymentId: 'pay-1',
+    gatewayType: 'CRYPTOMUS',
+    amount: '499.00',
+    currency: 'RUB',
+  };
+
+  it('shows what arrived on a held underpayment', async () => {
+    // `flagAmountMismatchForReview` → `holdPaymentForManualReview`.
+    const { service, getLastText } = buildService();
+    service.warn('payment.amount_mismatch', 'PAYMENT', 'Оплачена неверная сумма: NEW', {
+      ...booked,
+      notifiedAmount: '120.00',
+      providerStatus: 'wrong_amount',
+      needsManualReview: true,
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.equal(headerOf(card), '⚠️ <b>Событие: Оплачена неверная сумма!</b>');
+    assert.ok(card.includes('💷 Сумма: 499.00 ₽'), card);
+    assert.ok(card.includes('📨 Сумма в уведомлении: 120.00 ₽'), card);
+    assert.ok(card.includes('📡 Статус у провайдера: <code>wrong_amount</code>'), card);
+  });
+
+  it('titles a completion the provider refused to confirm as exactly that', async () => {
+    // `flagUnconfirmedCompletionForReview`: same hold, same type, a different
+    // situation — told apart by `verificationReason`, which only it sets.
+    const { service, getLastText } = buildService();
+    service.warn('payment.amount_mismatch', 'PAYMENT', 'Платёж не подтверждён провайдером: NEW', {
+      ...booked,
+      gatewayType: 'YOOKASSA',
+      providerStatus: 'canceled',
+      notificationClaimedStatus: 'succeeded',
+      verificationReason: 'PAYMENT_VERIFICATION_PROVIDER_CANCELED',
+      needsManualReview: true,
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.equal(headerOf(card), '🛡 <b>Событие: Платёж не подтверждён провайдером!</b>');
+    assert.ok(!card.includes('Оплачена неверная сумма'), `titled as an underpayment:\n${card}`);
+    assert.ok(card.includes('🛡 Проверка у провайдера: ЮKassa сообщает, что платёж отменён'), card);
+    assert.ok(card.includes('📨 Статус в уведомлении: <code>succeeded</code>'), card);
+    assert.ok(card.includes('📡 Статус у провайдера: <code>canceled</code>'), card);
+  });
+
+  it('shows how much of a payment a partial refund returned', async () => {
+    // `applyRefundEvent`, partial branch.
+    const { service, getLastText } = buildService();
+    service.warn('payment.refund_partial', 'PAYMENT', 'Частичный возврат платежа: NEW', {
+      ...booked,
+      refundedAmount: '100',
+      refundedAmountTotal: '150.00',
+      providerStatus: 'refunded',
+      refund: true,
+      partial: true,
+      needsManualReview: true,
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('↩️ Возвращено сейчас: 100 ₽'), card);
+    assert.ok(card.includes('↩️ Возвращено всего: 150.00 ₽'), card);
+  });
+
+  it('shows the notified sum beside the booked one on a short notification', async () => {
+    // `alertNotifiedAmountShortfall`.
+    const { service, getLastText } = buildService();
+    service.warn('payment.notified_amount_short', 'PAYMENT', 'Сумма в уведомлении меньше суммы заказа: NEW', {
+      ...booked,
+      notifiedAmount: '480.00',
+      providerStatus: 'paid',
+      needsManualReview: false,
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('💷 Сумма: 499.00 ₽'), card);
+    assert.ok(card.includes('📨 Сумма в уведомлении: 480.00 ₽'), card);
+    assert.ok(card.includes('📡 Статус у провайдера: <code>paid</code>'), card);
+  });
+});
+
+/**
+ * Metadata is operator- and client-controlled; the card is HTML
+ * ══════════════════════════════════════════════════════════════
+ * A HWID is whatever the VPN client sent, an `error` is an exception message
+ * quoting whatever it choked on. Interpolated raw, a `<` either forged markup
+ * or — far more often — made Telegram refuse the whole card.
+ */
+describe('values a card does not control', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it('escapes the HWID, the error, the action and the attempt', async () => {
+    const { service, getLastText } = buildService();
+    service.info('user_hwid_revoked', 'DEVICE', 'x', {
+      hwid: '<i>hw</i>',
+      remainingDevices: '<i>2</i>',
+      error: 'unexpected <html> & friends',
+      action: '<b>revoke</b>',
+      attempt: '<u>3</u>',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('🧬 HWID: <code>&lt;i&gt;hw&lt;/i&gt;</code>'), `got: ${card}`);
+    assert.ok(card.includes('📱 Осталось устройств: &lt;i&gt;2&lt;/i&gt;'));
+    assert.ok(card.includes('💬 Сообщение: <code>unexpected &lt;html&gt; &amp; friends</code>'));
+    assert.ok(card.includes('🧷 Действие: <code>&lt;b&gt;revoke&lt;/b&gt;</code>'));
+    assert.ok(card.includes('🔁 Попытка: &lt;u&gt;3&lt;/u&gt;'));
+    for (const raw of ['<i>', '<html>', '<b>revoke', '<u>']) {
+      assert.ok(!card.includes(raw), `${raw} reached the card unescaped`);
+    }
+  });
+
+  it('cannot close a link attribute with a quote in the URL', async () => {
+    const { service, getLastText } = buildService();
+    service.info('payment.completed', 'PAYMENT', 'paid', {
+      paymentId: 'pay-1',
+      amount: '10',
+      receiptUrl: 'https://receipt.example/r?a="x"&b=1',
+    });
+    await flush();
+    assert.ok(
+      getLastText()!.includes('<a href="https://receipt.example/r?a=&quot;x&quot;&amp;b=1">Чек</a>'),
+    );
+  });
+});
+
+/**
+ * «15:30» — in which zone?
+ * ════════════════════════
+ * Card times were `toLocaleString('ru-RU')` in the CONTAINER's zone, which is
+ * UTC under compose, with nothing on the card saying so. The panel already has
+ * the operator's zone — `platformPolicy.timezone`, the one customer
+ * notifications are written in — so the card uses it and names it.
+ */
+describe('times on a card', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it("are written in the operator's zone and name it", async () => {
+    const { service, getLastText } = buildService({ platformPolicy: { timezone: 'Europe/Moscow' } });
+    service.emit({
+      type: 'payment.completed',
+      category: 'PAYMENT',
+      severity: 'INFO',
+      message: 'paid',
+      metadata: { paymentId: 'pay-1', amount: '10', paidAt: '2026-09-14T15:30:00.000Z' },
+      timestamp: '2026-09-14T15:31:00.000Z',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('⏰ Время: 14.09.2026, 18:31:00 GMT+3'), `got: ${card}`);
+    assert.ok(card.includes('⏰ Оплачено: 14.09.2026, 18:30:00 GMT+3'));
+  });
+
+  it('say UTC when no zone is set, and when the stored one is not a zone', async () => {
+    // Run in a process zone that is NOT UTC. The suite runs under `TZ=UTC`,
+    // where "UTC" and "whatever zone the container is in" print the same
+    // string — so a card that fell back to the container's zone passed this
+    // case exactly as well as one that says UTC. Tokyo is nine hours away and
+    // has no daylight saving to make the expectation depend on the date.
+    const savedZone = process.env.TZ;
+    process.env.TZ = 'Asia/Tokyo';
+    try {
+      assert.equal(
+        new Date('2026-09-14T15:31:00.000Z').getHours(),
+        0,
+        'the process zone did not change, so this case would prove nothing',
+      );
+      for (const platformPolicy of [{}, { timezone: 'Mars/Olympus_Mons' }]) {
+        const { service, getLastText } = buildService({ platformPolicy });
+        service.emit({
+          type: 'payment.completed',
+          category: 'PAYMENT',
+          severity: 'INFO',
+          message: 'paid',
+          metadata: { paymentId: 'pay-1', amount: '10' },
+          timestamp: '2026-09-14T15:31:00.000Z',
+        });
+        await flush();
+        const card = getLastText()!;
+        assert.ok(
+          card.includes('⏰ Время: 14.09.2026, 15:31:00 UTC'),
+          `${JSON.stringify(platformPolicy)}: got ${card}`,
+        );
+      }
+    } finally {
+      if (savedZone === undefined) delete process.env.TZ;
+      else process.env.TZ = savedZone;
+    }
   });
 });

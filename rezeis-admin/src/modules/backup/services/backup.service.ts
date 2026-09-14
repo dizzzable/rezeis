@@ -1067,7 +1067,15 @@ export class BackupService implements OnModuleInit {
         EVENT_TYPES.SYSTEM_BACKUP_COMPLETED,
         'SYSTEM',
         `Backup stored locally (too large for Telegram): ${filename} (${formatBytes(stat.size)})`,
-        { backupId: recordId, filename, sizeBytes: stat.size, deliveredToTelegram: false },
+        {
+          backupId: recordId,
+          filename,
+          sizeBytes: stat.size,
+          deliveredToTelegram: false,
+          // Named like every other non-delivery, so the card states this
+          // reason from the same field it reads for all of them.
+          relayStatus: TOO_LARGE_REASON,
+        },
       );
       // Terminal: no number of retries shrinks the file.
       return terminalDelivery(TOO_LARGE_REASON);
@@ -1509,6 +1517,9 @@ export class BackupService implements OnModuleInit {
             deliveredToTelegram: false,
             deliveryChannel: row.deliveryChannel,
             maxKeep: keep,
+            // The one non-delivery with no local copy left; the card must not
+            // call it «только локально».
+            deletedByRetention: true,
           },
         );
       }

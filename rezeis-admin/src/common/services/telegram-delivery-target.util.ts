@@ -17,13 +17,19 @@
  * Extracted as a pure function so the fallback contract is unit-testable and
  * can't silently regress.
  */
+import { isErrorReportEvent } from './error-report.util';
+
 export interface TelegramDeliveryConfigShape {
   readonly enabled: boolean;
   readonly chatId: string | null;
   readonly devChatId: string | null;
   readonly topicMap: Record<string, number | null>;
   readonly defaultTopicId: number | null;
-  /** Optional topic that ALL ERROR-severity events route to, regardless of category. */
+  /**
+   * Optional topic that every error report routes to, regardless of category —
+   * the events `isErrorReportEvent` names, which is also what decides that the
+   * card is an incident card with a `.txt`.
+   */
   readonly errorTopicId: number | null;
 }
 
@@ -107,10 +113,15 @@ export function resolveTelegramDeliveryTarget(
 ): TelegramDeliveryTarget | null {
   const primaryActive = config.enabled && config.chatId !== null;
   if (primaryActive && config.chatId !== null) {
-    // ERROR severity gets its own dedicated topic when configured, so error
-    // logs land in one place regardless of which category raised them.
+    // Error reports get their own dedicated topic when configured, so they
+    // land in one place regardless of which category raised them.
+    //
+    // The SAME predicate the card renderer uses, not a second opinion on it.
+    // This line used to test `severity === 'ERROR'` while the renderer also
+    // counted a `*.error` type at WARNING, so `client.error` — always WARNING —
+    // arrived as an incident card with its `.txt` in the category topic.
     const errorRoute =
-      event.severity === 'ERROR' && config.errorTopicId !== null ? config.errorTopicId : null;
+      isErrorReportEvent(event) && config.errorTopicId !== null ? config.errorTopicId : null;
     return {
       chatId: config.chatId,
       topicId: errorRoute ?? config.topicMap[event.category] ?? config.defaultTopicId ?? null,

@@ -142,7 +142,14 @@ export class InternalGuestSupportController {
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
       'SUPPORT',
       'Ответ гостя в обращении',
-      { guest: true },
+      // WHICH conversation. Without the id the card said a guest had replied
+      // somewhere, and the admin push had nothing to deep-link to — it keys
+      // `/support-tickets?ticket=` off this exact field.
+      {
+        guest: true,
+        ticketId: (ticket as GuestTicketEntity).id,
+        subject: (ticket as GuestTicketEntity).subject,
+      },
     );
     return serializeGuestTicket(ticket);
   }
@@ -199,7 +206,8 @@ export class InternalGuestSupportController {
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
       'SUPPORT',
       'Гость прикрепил файл в обращении',
-      { guest: true },
+      // Same fields as the signed-in counterpart in `InternalUserSupportController`.
+      { guest: true, ticketId: (ticket as GuestTicketEntity).id },
     );
     return serializeGuestTicket(ticket);
   }

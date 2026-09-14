@@ -4,7 +4,8 @@ import { describe, it } from 'node:test';
 import { BroadcastStatus } from '@prisma/client';
 
 import { BroadcastReconcilerService } from '../src/modules/broadcast/services/broadcast-reconciler.service';
-import { EVENT_TYPES } from '../src/common/services/system-events.service';
+import { EVENT_TYPES, SystemEventsService } from '../src/common/services/system-events.service';
+import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 
 /**
  * The reconciler puts stranded broadcasts back in the queue.
@@ -23,6 +24,8 @@ function build(options: {
   /** Rows of ANY status. Defaults to the pending count — i.e. staging ran. */
   readonly totalCount?: number;
   readonly pendingStart?: ReadonlySet<string>;
+  /** A real event bus instead of the recording stub, for what the cards say. */
+  readonly systemEvents?: SystemEventsService;
 }) {
   const enqueued: string[] = [];
   const events: Array<{ severity: string; type: string; message: string }> = [];
@@ -75,10 +78,53 @@ function build(options: {
     service: new BroadcastReconcilerService(
       prisma as never,
       queue as never,
-      systemEvents as never,
+      (options.systemEvents ?? systemEvents) as never,
       delivery as never,
     ),
   };
+}
+
+/**
+ * The real `SystemEventsService` on the dev-fallback road, keeping every card
+ * it renders: an incident card rides as the caption of its `.txt`, any other
+ * card as plain text.
+ */
+function cardCapturingEvents(): { readonly events: SystemEventsService; readonly cards: string[] } {
+  const cards: string[] = [];
+  const capture = (event: string, meta: Record<string, unknown>): void => {
+    if (event === 'reiwa.dev.notify') cards.push(String(meta['text']));
+    else if (event === 'reiwa.dev.notify.document') cards.push(String(meta['caption']));
+  };
+  const events = new SystemEventsService(
+    {
+      settings: {
+        findFirst: async () => ({
+          systemNotifications: { telegram: { enabled: false, chatId: null, devChatId: null } },
+        }),
+      },
+      adminAuditLog: { create: async () => ({}) },
+    } as never,
+    { enabled: false, urls: [] } as never,
+    {
+      post: () => {
+        throw new Error('Bot API must not be called without a token');
+      },
+    } as never,
+    {
+      get: (token: unknown) => {
+        if (token === ReiwaRelayQueueService) {
+          return {
+            enqueue: async (event: string, meta: Record<string, unknown>) => {
+              capture(event, meta);
+              return true;
+            },
+          };
+        }
+        throw new Error('not registered');
+      },
+    } as never,
+  );
+  return { events, cards };
 }
 
 const longAgo = new Date(Date.now() - 24 * 60 * 60_000);
@@ -196,5 +242,43 @@ describe('the reconciler does not speak in the finaliser voice', () => {
         'a rescue was announced as a completed send',
       );
     }
+  });
+});
+
+describe('what the reconciler’s cards say', () => {
+  it('gives the stuck count as a detail, not as the explanation the incident card prints', async () => {
+    // The give-up event used to carry the reason as `why`, and the incident
+    // card prints `why` under «Почему это важно» — so the one section written
+    // to say what is at stake said «12 recipients still undispatched». Through
+    // the real event bus, so what is asserted is the card, not a metadata key.
+    const { events, cards } = cardCapturingEvents();
+    const { service } = build({
+      processing: [{ id: 'b-9' }],
+      pendingCount: 12,
+      totalCount: 400,
+      systemEvents: events,
+    });
+
+    // Three revivals (WARNING each), then the give-up (ERROR).
+    for (let i = 0; i < 4; i += 1) await service.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const incident = cards.find((card) => card.includes('<b>Почему это важно:</b>'));
+    assert.ok(incident !== undefined, `no incident card among ${cards.length}`);
+    const lines = incident.split('\n');
+    const why = lines[lines.indexOf('❗ <b>Почему это важно:</b>') + 1] ?? '';
+    assert.ok(!why.includes('recipients still undispatched'), `a count as the explanation: ${why}`);
+    assert.ok(why.includes('Рассылку'), `no explanation under «Почему это важно»: ${why}`);
+    // The count is still on the card — in the error message it belongs to.
+    assert.ok(incident.includes('12 recipients still undispatched'), incident);
+
+    const revival = cards.find((card) => card.includes('🔁 Попытка возобновления: 1'));
+    assert.ok(revival !== undefined, `no revival card among ${cards.length}`);
+    assert.ok(!revival.includes('Почему'), `a reason printed as an explanation:\n${revival}`);
+    assert.equal(
+      revival.split('12 recipients still undispatched').length - 1,
+      1,
+      `the reason is printed twice:\n${revival}`,
+    );
   });
 });

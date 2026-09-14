@@ -168,11 +168,24 @@ export class BroadcastReconcilerService {
       // отправлена», so a rescue notice arrived titled as a successful send and
       // fired the broadcast-sent webhook to every automation subscriber. Exactly
       // the mislabelling the finaliser was fixed for one commit earlier.
+      //
+      // The reason it was stuck travels as `detail`, not `why`. The incident
+      // card prints `why` under «Почему это важно», so «12 recipients still
+      // undispatched» stood where the card explains what is at stake; `why` is
+      // that explanation, and it is written here for a person.
       this.systemEvents.error(
         EVENT_TYPES.BROADCAST_STARTED,
         'SYSTEM',
         `Broadcast ${broadcastId} could not be resumed after ${BroadcastReconcilerService.MAX_REVIVALS} attempts (${why})`,
-        { broadcastId, attempts, why },
+        {
+          broadcastId,
+          attempts,
+          detail: why,
+          why:
+            'Рассылку уже несколько раз возвращали в очередь, и она снова останавливалась. ' +
+            'Автоматически её больше не перезапустят: кому она ещё не отправлена, те её не ' +
+            'получат, пока вы не разберётесь с рассылкой.',
+        },
       );
       return;
     }
@@ -183,7 +196,7 @@ export class BroadcastReconcilerService {
       EVENT_TYPES.BROADCAST_STARTED,
       'SYSTEM',
       `Broadcast ${broadcastId} was picked up again: ${why}`,
-      { broadcastId, attempts, why },
+      { broadcastId, attempts, detail: why },
     );
   }
 }

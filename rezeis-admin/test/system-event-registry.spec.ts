@@ -148,8 +148,12 @@ describe('the shared event registry against its producers and the operator catal
 
   it('gives every registered type a card of its own', () => {
     // Without an EVENT_PRESENTATION entry the card falls back to
-    // `severityEmoji` + `event.message`, i.e. the sentence the producer wrote
-    // for a log line. Delivered, but titled with machine text.
+    // `severityEmoji` + `event.message` AS ITS HEADER, i.e. the sentence the
+    // producer wrote for a log line. Delivered, but titled with machine text.
+    //
+    // With an entry the title is the header, and the message appears under
+    // it only for a type that opts in with `showMessage`. What this pins is
+    // only that no registered type goes without a title.
     const untitled = [...new Set<string>(Object.values(EVENT_TYPES))]
       .filter((type) => EVENT_PRESENTATION[type] === undefined)
       .sort();
@@ -160,6 +164,23 @@ describe('the shared event registry against its producers and the operator catal
       `Registered but untitled: ${untitled.join(', ')}. Add an EVENT_PRESENTATION entry, ` +
         'or the Telegram card shows the raw machine message as its header.',
     );
+  });
+
+  it('gives a warning header only where it says something the title does not', () => {
+    // A `warning` variant exists to stop a failure borrowing its success
+    // title. One that repeats the title, or is blank, is that defect with an
+    // extra field.
+    const pointless = Object.entries(EVENT_PRESENTATION)
+      .filter(
+        ([, present]) =>
+          present.warning !== undefined &&
+          (present.warning.title.trim().length === 0 ||
+            present.warning.title.trim() === present.title.trim()),
+      )
+      .map(([type]) => type)
+      .sort();
+
+    assert.deepStrictEqual(pointless, []);
   });
 
   it('catalogues nothing that is not a registered type', () => {
@@ -393,11 +414,20 @@ describe('an operational alert an operator has ticked', () => {
     );
     assert.ok(geo !== null, 'the geo concentration alert must survive the `selected` mode filter');
 
-    // Delivered AND titled: a type missing from EVENT_PRESENTATION arrives as
-    // the raw detector sentence, which is written for a log, not for a person.
-    assert.ok(hwid.includes('Событие: Среднее число устройств на пользователя выросло!'));
-    assert.ok(geo.includes('Событие: Концентрация онлайна в одной стране!'));
-    assert.ok(!hwid.includes('Panel-wide HWID average'));
+    // Delivered AND titled: a type missing from EVENT_PRESENTATION arrives
+    // with the raw detector sentence AS ITS HEADER, which is written for a
+    // log, not for a person.
+    assert.equal(
+      headerLine(hwid),
+      '📈 <b>Событие: Среднее число устройств на пользователя выросло!</b>',
+    );
+    assert.equal(headerLine(geo), '🌍 <b>Событие: Концентрация онлайна в одной стране!</b>');
+    // The sentence is not on the card at all — not as the header, and not
+    // under it either: neither type opts in to `showMessage`, because their
+    // blocks already carry the average and the share. Printed under the
+    // title, the HWID sentence repeated the Devices block in English.
+    assert.ok(!hwid.includes('Panel-wide HWID average'), `the detector sentence is on the card:\n${hwid}`);
+    assert.ok(hwid.includes('📊 В среднем на пользователя: 5.4'));
     assert.ok(!geo.includes('92% of online users'));
   });
 
@@ -419,8 +449,12 @@ describe('an operational alert an operator has ticked', () => {
     );
 
     assert.ok(card !== null, '`payment.refunded` must be deliverable once it is tickable');
-    assert.ok(card.includes('Событие: Платёж возвращён!'));
-    assert.ok(!card.includes('reversing side-effects'));
+    assert.equal(headerLine(card), '↩️ <b>Событие: Платёж возвращён!</b>');
+    // Titled, and the producer's log sentence is nowhere on it: the payment
+    // block carries the facts, and `payment.refunded` does not opt in to
+    // printing its message.
+    assert.ok(!card.includes('reversing side-effects'), `the raw sentence is on the card:\n${card}`);
+    assert.ok(card.includes('💰 <b>Платёж:</b>'));
   });
 
   it('does not widen a selection an operator saved before these types existed', async () => {
@@ -512,6 +546,11 @@ function readOperatorCatalogue(): readonly string[] {
     `parsed ${types.length} event types out of the catalogue — the parse, not the catalogue, is wrong`,
   );
   return types;
+}
+
+/** The card's `<b>Событие: …</b>` line — its header. */
+function headerLine(card: string): string | undefined {
+  return card.split('\n').find((line) => line.includes('<b>Событие:'));
 }
 
 /** The rendered Telegram card for one event, or `null` when it was filtered out. */

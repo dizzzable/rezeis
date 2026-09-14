@@ -433,6 +433,19 @@ describe('SettingsService.sendPaymentOpsAlertTest token resolution', () => {
     const metadata = (audits[0]?.metadata ?? {}) as Record<string, unknown>;
     assert.equal(metadata.via, 'direct');
   });
+
+  it('opens the test message with the default tag once, like the real alert', async () => {
+    const { service, posted } = buildSettingsService({ storedToken: 'panel-token-123' });
+
+    await service.sendPaymentOpsAlertTest({
+      currentAdmin: CURRENT_ADMIN,
+      requestMetadata: REQUEST_METADATA,
+      sendPaymentOpsAlertTestDto: {},
+    } as never);
+
+    const lines = String(posted[0]?.payload.text).split('\n');
+    assert.deepStrictEqual(lines.slice(0, 2), ['#payments_ops', '#event_test_alert']);
+  });
 });
 
 /**

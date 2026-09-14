@@ -98,9 +98,12 @@ describe('the two shortfall cards an operator sees', () => {
 
     assert.ok(held.includes('Событие: Оплачена неверная сумма!'));
     assert.ok(note.includes('Событие: Платёж проведён, но сумма в уведомлении меньше!'));
-    // Neither falls through to the raw message, and neither wears the other's
-    // title — the failure that made the two indistinguishable at a glance.
+    // Neither falls through to the raw message — not as the header, and not
+    // under it: neither type opts in to printing its message — and neither
+    // wears the other's title, the failure that made the two
+    // indistinguishable at a glance.
     assert.ok(!note.includes('raw machine message'));
+    assert.ok(!held.includes('raw machine message'));
     assert.ok(!note.includes('Оплачена неверная сумма'));
     assert.ok(!held.includes('Платёж проведён'));
     // Different lead emoji too, so the distinction survives a glance at the

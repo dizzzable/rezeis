@@ -112,7 +112,7 @@ describe('PaymentOpsAlertService Telegram delivery', () => {
     assert.equal(text.includes('abcdefabcdefabcdefabcdefabcdefabcd'), false);
   });
 
-  it('hides raw webhook identifiers and event links in payment ops alerts', async () => {
+  it('hides raw webhook identifiers and the admin host, and says where to look instead', async () => {
     const postedPayloads: Array<Record<string, unknown>> = [];
     const service = new PaymentOpsAlertService(
       {
@@ -155,11 +155,103 @@ describe('PaymentOpsAlertService Telegram delivery', () => {
     assert.equal(text.includes('event_id:hidden'), true);
     assert.equal(text.includes('payment_id:present'), true);
     assert.equal(text.includes('provider_event_id:present'), true);
-    assert.equal(text.includes('link:configured'), true);
     assert.equal(text.includes('evt_rawpaymentalertsecret123456'), false);
     assert.equal(text.includes('payment_rawpaymentalertsecret123456'), false);
     assert.equal(text.includes('provider_rawpaymentalertsecret123456'), false);
+    // No panel address of any shape: `1ae79ef9` took the admin host out of
+    // these alerts, and a `link: https://<host>/payments#webhooks` line put it
+    // back. The chat is not a place for it, and on the relay road Telegram
+    // fetched the page to draw a link preview. Words say where to go instead.
     assert.equal(text.includes('admin.example.internal'), false);
-    assert.equal(text.includes('/payments/webhooks?eventId='), false);
+    assert.equal(text.includes('/payments'), false);
+    assert.equal(text.includes('link:'), false);
+    assert.equal(text.includes('Подробности: панель → Платежи → Вебхуки'), true);
+  });
+
+  it('tags the alert with #payments_ops once when the operator kept the default tag', async () => {
+    const { text } = await sendReplayAlert({ hashtag: '#payments_ops', domain: null });
+    const lines = text.split('\n');
+    assert.equal(
+      lines.filter((line) => line === '#payments_ops').length,
+      1,
+      `the default tag is printed twice; got:\n${text}`,
+    );
+  });
+
+  it('keeps both tags once each when the operator chose their own', async () => {
+    const { text } = await sendReplayAlert({ hashtag: '#shop_money', domain: null });
+    const lines = text.split('\n');
+    assert.equal(lines.filter((line) => line === '#shop_money').length, 1);
+    assert.equal(lines.filter((line) => line === '#payments_ops').length, 1);
+  });
+
+  it('never names the admin host, on the direct road or the relay road', async () => {
+    // Every shape `REZEIS_DOMAIN` takes in the deployment guides, down both
+    // doors out of rezeis. The relay door matters most: the cabinet's
+    // `/notify-broadcast` sends with link previews on.
+    for (const domain of ['https://admin.example.internal', 'admin.example.internal', 'admin.example.internal/']) {
+      for (const road of ['direct', 'relay'] as const) {
+        const { text } = await sendReplayAlert({ hashtag: null, domain, road });
+        assert.ok(text.length > 0, `${road}/${domain}: nothing was sent`);
+        assert.equal(text.includes('admin.example.internal'), false, `${road}/${domain}:\n${text}`);
+        assert.equal(/https?:\/\//.test(text), false, `${road}/${domain}: a URL in\n${text}`);
+        assert.equal(text.includes('Подробности: панель → Платежи → Вебхуки'), true, `${road}/${domain}`);
+      }
+    }
   });
 });
+
+async function sendReplayAlert(options: {
+  readonly hashtag: string | null;
+  readonly domain: string | null;
+  /** `direct`: this host holds a token. `relay`: it does not, and the cabinet sends. */
+  readonly road?: 'direct' | 'relay';
+}): Promise<{ readonly text: string }> {
+  const road = options.road ?? 'direct';
+  const sent: string[] = [];
+  const relayQueue = {
+    isEnabled: true,
+    enqueue: async (_event: string, metadata: Record<string, unknown>): Promise<boolean> => {
+      sent.push(String(metadata.text ?? ''));
+      return true;
+    },
+  };
+  const service = new PaymentOpsAlertService(
+    {
+      settings: {
+        findFirst: async () => ({
+          systemNotifications: {
+            paymentOps: {
+              enabled: true,
+              chatId: '998877',
+              threadId: null,
+              hashtag: options.hashtag,
+            },
+          },
+        }),
+      },
+    } as never,
+    {
+      post: (_url: string, payload: Record<string, unknown>) => {
+        sent.push(String(payload.text ?? ''));
+        return of({ data: { ok: true } });
+      },
+    } as never,
+    { botToken: road === 'direct' ? 'bot-token' : null, domain: options.domain } as never,
+    { getDecryptedBotToken: async () => null } as never,
+    { get: () => relayQueue } as never,
+  );
+  await service.notifyWebhookReplay({
+    event: {
+      id: 'evt-1',
+      paymentId: 'payment-1',
+      providerEventId: 'provider-1',
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      status: 'ENQUEUED',
+      lastError: null,
+    } as never,
+    context: { force: false, reason: 'manual replay' },
+  });
+  assert.equal(sent.length, 1, `${road}: expected one alert, got ${sent.length}`);
+  return { text: sent[0] ?? '' };
+}

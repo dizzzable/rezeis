@@ -255,7 +255,11 @@ describe('payment.amount_mismatch operator card', () => {
 
     const text = cardText as string | null;
     assert.ok(text !== null, 'card text should be captured');
-    assert.ok(text.includes('Событие: Оплачена неверная сумма!'));
+    // Titled: the header is the presentation title, and the raw message is not
+    // on the card at all — `payment.amount_mismatch` does not opt in to
+    // printing its message, because the payment block carries its facts.
+    const header = text.split('\n').find((line) => line.includes('<b>Событие:'));
+    assert.equal(header, '⚠️ <b>Событие: Оплачена неверная сумма!</b>');
     assert.ok(!text.includes('raw machine message'));
   });
 });

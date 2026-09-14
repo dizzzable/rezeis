@@ -125,7 +125,6 @@ export class PaymentOpsAlertService {
       eventTag: input.eventTag,
       baseHashtag: settings.hashtag,
       details: input.details,
-      eventLink: this.buildEventLink(input.event.id),
     });
 
     const botToken = await this.resolveBotToken();
@@ -323,16 +322,21 @@ export class PaymentOpsAlertService {
         : `[${reason}] ${message}`,
     );
   }
-
-  private buildEventLink(eventId: string): string | null {
-    const adminPublicBaseUrl = this.configuration.domain;
-    if (typeof adminPublicBaseUrl !== 'string' || adminPublicBaseUrl.trim().length === 0) {
-      return null;
-    }
-    const normalizedBaseUrl = adminPublicBaseUrl.replace(/\/$/, '');
-    return `${normalizedBaseUrl}/payments/webhooks?eventId=${encodeURIComponent(eventId)}`;
-  }
 }
+
+/**
+ * Where in the panel an operator looks into one of these alerts.
+ *
+ * Words, not a link, and on purpose. `1ae79ef9` ("harden remediation
+ * baseline") took the admin host out of this alert, and a later change put a
+ * `link: https://<REZEIS_DOMAIN>/payments#webhooks` line back. That undid the
+ * hardening twice over: the panel's address went into a Telegram chat that may
+ * hold people who have no business knowing it, and on the relay path the
+ * cabinet's `/notify-broadcast` posts with link previews on, so Telegram
+ * itself fetched the admin page to draw one. The line it replaced,
+ * `link:configured`, told the operator nothing; this tells them where to go.
+ */
+const WEBHOOK_EVENTS_NAVIGATION_HINT = 'Подробности: панель → Платежи → Вебхуки';
 
 /**
  * Idempotency key for one relayed alert.
@@ -370,14 +374,18 @@ function buildWebhookAlertMessage(input: {
   readonly eventTag: string;
   readonly baseHashtag: string | null;
   readonly details: readonly string[];
-  readonly eventLink: string | null;
 }): string {
+  // The operator's own tag first, and `#payments_ops` always — it is what finds
+  // every payment alert whatever tag the operator chose. Once each: with the
+  // default tag the two are the same string, and the alert opened with it twice.
   const hashtags = [
-    input.baseHashtag ?? '#payments_ops',
-    '#payments_ops',
-    input.eventTag,
-    `#gateway_${normalizeTag(input.event.gatewayType)}`,
-    `#status_${normalizeTag(input.event.status ?? 'unknown')}`,
+    ...new Set([
+      input.baseHashtag ?? '#payments_ops',
+      '#payments_ops',
+      input.eventTag,
+      `#gateway_${normalizeTag(input.event.gatewayType)}`,
+      `#status_${normalizeTag(input.event.status ?? 'unknown')}`,
+    ]),
   ];
   const detailLines = [
     `event_id:${input.event.id.length > 0 ? 'hidden' : 'missing'}`,
@@ -386,7 +394,7 @@ function buildWebhookAlertMessage(input: {
     `gateway:${input.event.gatewayType}`,
     `status:${input.event.status}`,
     ...input.details,
-    `link:${input.eventLink === null ? 'not_configured' : 'configured'}`,
+    WEBHOOK_EVENTS_NAVIGATION_HINT,
   ];
   return [...hashtags, ...detailLines].join('\n');
 }

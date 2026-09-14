@@ -299,6 +299,8 @@ describe('AdminUserSubscriptionsController', () => {
       subscriptionId: 'unlinked-subscription',
       userId: 'user-9',
       remnawavePanelUsername: 'rz_gina_1',
+      // The operator card prints no message, so the consequence rides as a note.
+      note: 'Изменения сохранены только в rezeis: у подписки нет привязки к профилю Remnawave, и панель их не получит.',
     });
   });
 

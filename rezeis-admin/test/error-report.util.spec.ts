@@ -53,6 +53,57 @@ describe('error report formatter', () => {
     assert.ok(!card.includes('📍 Место:'));
   });
 
+  it('does not call an unreachable upstream an unhandled 500', () => {
+    // Emitted by the cabinet's error handler for `EAI_AGAIN` and friends
+    // (`reiwa/src/api/app.ts`), which answers the subscriber 503 with
+    // `Retry-After` — on purpose, see `reiwa/src/api/transient-upstream.ts`.
+    // The API surface default said «необработанная ошибка… ошибкой 500» and sent
+    // the operator looking for a crash in the cabinet.
+    const event: ErrorReportEvent = {
+      kind: 'event.reiwa.error',
+      severity: 'ERROR',
+      category: 'SYSTEM',
+      message: '[reiwa:api] getaddrinfo EAI_AGAIN panel.example.com',
+      timestamp: '2026-08-25T10:00:00.000Z',
+      metadata: {
+        source: 'api',
+        scope: 'api.upstream-unreachable',
+        path: '/api/v1/subscription',
+        code: 'EAI_AGAIN',
+      },
+    };
+    const card = formatErrorEventCardHtml(event, build, true);
+    const text = formatErrorReportTxt(event, build);
+
+    for (const [name, rendered] of [
+      ['card', card],
+      ['txt', text],
+    ] as const) {
+      assert.ok(!rendered.includes('ошибкой 500'), `${name} still claims a 500: ${rendered}`);
+      assert.ok(!rendered.includes('Необработанная ошибка'), `${name} still claims a crash`);
+      assert.ok(rendered.includes('503'), `${name} does not say what the subscriber got`);
+      assert.ok(rendered.includes('повторить запрос'), `${name} does not mention the retry hint`);
+      assert.ok(rendered.includes('EAI_AGAIN'), `${name} does not name the network code`);
+    }
+  });
+
+  it('keeps the 500 explanation for an error the cabinet did not handle', () => {
+    // The control: only the unreachable-upstream scope changed its words.
+    const card = formatErrorEventCardHtml(
+      {
+        kind: 'event.reiwa.error',
+        severity: 'ERROR',
+        category: 'SYSTEM',
+        message: '[reiwa:api] boom',
+        timestamp: '2026-08-25T10:00:00.000Z',
+        metadata: { source: 'api', scope: 'api.error-handler', path: '/api/v1/x' },
+      },
+      build,
+      false,
+    );
+    assert.ok(card.includes('ошибкой 500'));
+  });
+
   it('uses Reiwa build metadata instead of the panel build fallback', () => {
     const card = formatErrorEventCardHtml(
       browserError({

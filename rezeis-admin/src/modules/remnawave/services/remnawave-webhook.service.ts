@@ -83,8 +83,10 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
   'node.enabled': { type: EVENT_TYPES.NODE_ENABLED, category: 'NODE', severity: 'INFO' },
   'node.disabled': { type: EVENT_TYPES.NODE_DISABLED, category: 'NODE', severity: 'WARNING' },
   'node.traffic_notify': { type: EVENT_TYPES.NODE_TRAFFIC_NOTIFY, category: 'NODE', severity: 'WARNING' },
-  // Service
-  'service.panel_started': { type: EVENT_TYPES.REMNAWAVE_PANEL_STARTED, category: 'NODE', severity: 'INFO' },
+  // Service. REMNAWAVE, not NODE: it is a fact about the panel itself, its
+  // constant sits in the Remnawave block of `EVENT_TYPES`, and the operator's
+  // tick-box lives under «Remnawave» — while the card went to the NODE topic.
+  'service.panel_started': { type: EVENT_TYPES.REMNAWAVE_PANEL_STARTED, category: 'REMNAWAVE', severity: 'INFO' },
 };
 
 /**

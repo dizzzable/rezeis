@@ -40,7 +40,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../../modules/realtime/realtime.gateway';
 // Pure module, no Nest dependencies — see `chain-depth.ts` for why a delivery
 // job has to carry an automation hop count.
-import { chainDepthMetadata } from '../../modules/automations/chain-depth';
+import { chainDepthMetadata, chainDepthOf } from '../../modules/automations/chain-depth';
 import {
   resolveTelegramDeliveryTarget,
   isEventTelegramAllowed,
@@ -60,6 +60,16 @@ import type { ReiwaRelayEvent } from '../../modules/notifications/reiwa-relay.co
 import { isRelayLoopGuardedEvent } from '../../modules/notifications/reiwa-relay.policy';
 import { TelegramDirectQueueService } from '../../modules/notifications/services/telegram-direct-queue.service';
 import { isTelegramDirectLoopGuardedEvent } from '../../modules/notifications/telegram-direct.constants';
+// Read only for the strings their records carry — the repeat count an
+// undelivered alert appends to its sentence, and the event id a broadcast's
+// channel post is relayed under. Neither module imports anything that leads
+// back to this file.
+import {
+  describeRelayRepeats,
+  describeTelegramDirectRepeats,
+} from '../../modules/notifications/undelivered-record';
+import { BROADCAST_CHANNEL_EVENT_PREFIX } from '../../modules/broadcast/broadcast.constants';
+import { readPlatformBranding } from '../../modules/settings/utils/platform-branding.util';
 
 // ── Event Types ─────────────────────────────────────────────────────────────
 
@@ -935,12 +945,13 @@ export class SystemEventsService {
         } topic=${resolved?.topicId ?? 'none'} attachment=${attachTxt ? 'document' : 'card-only'}`,
       );
     }
+    const timeZone = tgConfig.timeZone;
     if (resolved === null) {
       // No operator group AND no manual devChatId configured → automatic
       // dev-fallback: route the event to the reiwa bot's BOT_DEV_ID via the
       // internal channel (the bot knows its dev id; rezeis doesn't). The
       // event filter is intentionally NOT applied — the dev firehose sees all.
-      await this.deliverToReiwaDev(enriched, { errorEvent, attachTxt, reportEvent });
+      await this.deliverToReiwaDev(enriched, { errorEvent, attachTxt, reportEvent, timeZone });
       return { kind: 'relayed' };
     }
 
@@ -953,7 +964,7 @@ export class SystemEventsService {
     // всё равно придут сюда в личку бота. Не потеряются."
     if (!tgConfig.botToken) {
       if (resolved.isDevFallback) {
-        await this.deliverToReiwaDev(enriched, { errorEvent, attachTxt, reportEvent });
+        await this.deliverToReiwaDev(enriched, { errorEvent, attachTxt, reportEvent, timeZone });
       } else {
         // Operator group/topic configured but rezeis has no local bot token
         // (split deployment). Route the card through the reiwa relay's
@@ -962,7 +973,7 @@ export class SystemEventsService {
         // actually work without a token on rezeis.
         const html = errorEvent
           ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), attachTxt)
-          : this.formatTelegramMessage(enriched);
+          : this.formatTelegramMessage(enriched, timeZone);
         await this.deliverViaReiwaBroadcast(enriched, {
           html,
           chatId: resolved.chatId,
@@ -980,7 +991,7 @@ export class SystemEventsService {
     // generic event formatter.
     const html = errorEvent
       ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), attachTxt)
-      : this.formatTelegramMessage(enriched);
+      : this.formatTelegramMessage(enriched, timeZone);
 
     // ── Durable, or inline? ────────────────────────────────────────────────
     // The queue is the normal path: it gives a panel-sent card the same four
@@ -999,6 +1010,11 @@ export class SystemEventsService {
     //    thing that failed. See `isTelegramDirectLoopGuardedEvent`.
     const queue = opts.synchronous ? null : this.resolveTelegramDirectQueue();
     if (queue !== null && !isTelegramDirectLoopGuardedEvent(event.type)) {
+      // The event's automation hop count rides on both jobs, so a card the panel
+      // cannot send hands it back on `telegram.direct_undelivered` instead of
+      // re-seeding the chain at zero (`TelegramDirectJobData.automationChainDepth`).
+      const chainDepth = chainDepthOf(event.metadata);
+      const carriedDepth = chainDepth === 0 ? {} : { automationChainDepth: chainDepth };
       await queue.enqueue(
         {
           kind: 'message',
@@ -1007,6 +1023,7 @@ export class SystemEventsService {
           text: clipHtmlCard(html, TELEGRAM_TEXT_LIMIT),
           parseMode: 'HTML',
           sourceEventType: event.type,
+          ...carriedDepth,
         },
         buildRelayEventId(event, 'direct'),
       );
@@ -1027,6 +1044,7 @@ export class SystemEventsService {
             filename: buildErrorReportFilename(reportEvent),
             content: formatErrorReportTxt(reportEvent, getRezeisBuildInfo()),
             sourceEventType: event.type,
+            ...carriedDepth,
           },
           buildRelayEventId(event, 'direct-document'),
         );
@@ -1242,11 +1260,12 @@ export class SystemEventsService {
       readonly errorEvent: boolean;
       readonly attachTxt: boolean;
       readonly reportEvent: ErrorReportEvent;
+      readonly timeZone: string;
     },
   ): Promise<void> {
     const html = opts.errorEvent
       ? formatErrorEventCardHtml(opts.reportEvent, getRezeisBuildInfo(), opts.attachTxt)
-      : this.formatTelegramMessage(event);
+      : this.formatTelegramMessage(event, opts.timeZone);
     try {
       if (opts.attachTxt) {
         // Single dev-DM message that mirrors the screenshot/operator layout:
@@ -1381,15 +1400,45 @@ export class SystemEventsService {
     }
   }
 
-  private formatTelegramMessage(event: SystemEventPayload & { timestamp: string }): string {
+  private formatTelegramMessage(
+    event: SystemEventPayload & { timestamp: string },
+    /**
+     * The zone every time on the card is written in, and named in. Resolved
+     * once per delivery from the operator's platform settings — see
+     * `resolveCardTimeZone`.
+     */
+    timeZone: string = 'UTC',
+  ): string {
     const hashtag = `#${eventTypeToHashtag(event.type)}`;
     const meta = event.metadata ?? {};
     const present = EVENT_PRESENTATION[event.type];
-    const emoji = present?.emoji ?? severityEmoji(event.severity);
+    // A producer that shares its type with a different situation wears its own
+    // header (`EventPresentation.variants`), and a failure raised under a type
+    // whose title announces a success wears the failure header — see
+    // `EventPresentation.warning` for why neither type is split.
+    const header = present === undefined ? undefined : headerFor(event, present);
+    const emoji = header?.emoji ?? severityEmoji(event.severity);
 
+    // The producer's sentence as printed under the title, when it is. Kept so
+    // the details block below does not print the same fact a second time.
+    let messageShown: string | null = null;
+    // Where that line sits, for an operator's text too long to leave the rest
+    // of the card room (see the budget at the end of this method).
+    let messageLineIndex = -1;
+    const rawDetail = typeof meta['detail'] === 'string' ? meta['detail'].trim() : '';
     const lines: string[] = [hashtag, ''];
-    if (present) {
-      lines.push(`${emoji} <b>Событие: ${escapeHtml(present.title)}!</b>`);
+    if (present !== undefined && header !== undefined) {
+      lines.push(`${emoji} <b>Событие: ${escapeHtml(header.title)}!</b>`);
+      // The producer's own sentence, directly under the title — ONLY for the
+      // types that opt in with `showMessage`: an operator's own text, and the
+      // Russian remedy for a card Telegram refused. No block below carries
+      // those. Every other type keeps title + blocks: its message is an
+      // English log line restating what the blocks say in Russian.
+      messageShown = cardMessageLine(event, present, header.title);
+      if (messageShown !== null) {
+        messageLineIndex = lines.length;
+        lines.push(`<blockquote>${sentenceHtml(messageShown, rawDetail)}</blockquote>`);
+      }
     } else {
       // No EVENT_PRESENTATION entry — a type chosen at runtime by an
       // automation rule or by the reiwa ingest, which by construction can
@@ -1477,11 +1526,30 @@ export class SystemEventsService {
       if (meta['amount']) payLines.push(`💷 Сумма: ${fmtAmount(meta['amount'], meta['currency'])}`);
       if (meta['purchaseType'])
         payLines.push(`💥 Тип покупки: ${humanizePurchaseType(meta['purchaseType'])}`);
+      // What a review card is ABOUT. A held underpayment, a partial refund and
+      // a short notification each put their one decisive figure in these keys,
+      // and the block printed only the booked sum — so «Оплачена неверная
+      // сумма!» arrived over «499.00 ₽» and nothing said how much did arrive.
+      // Money in the booked currency, formatted like the booked amount.
+      if (isPresent(meta['notifiedAmount']))
+        payLines.push(`📨 Сумма в уведомлении: ${fmtAmount(meta['notifiedAmount'], meta['currency'])}`);
+      if (isPresent(meta['refundedAmount']))
+        payLines.push(`↩️ Возвращено сейчас: ${fmtAmount(meta['refundedAmount'], meta['currency'])}`);
+      if (isPresent(meta['refundedAmountTotal']))
+        payLines.push(
+          `↩️ Возвращено всего: ${fmtAmount(meta['refundedAmountTotal'], meta['currency'])}`,
+        );
+      if (isPresent(meta['notificationClaimedStatus']))
+        payLines.push(`📨 Статус в уведомлении: <code>${escapeHtml(meta['notificationClaimedStatus'])}</code>`);
+      if (isPresent(meta['providerStatus']))
+        payLines.push(`📡 Статус у провайдера: <code>${escapeHtml(meta['providerStatus'])}</code>`);
+      if (isPresent(meta['verificationReason']))
+        payLines.push(`🛡 Проверка у провайдера: ${humanizeVerificationReason(meta['verificationReason'])}`);
       if (typeof meta['receiptUrl'] === 'string')
-        payLines.push(`📃 <a href="${escapeHtml(meta['receiptUrl'])}">Чек</a>`);
+        payLines.push(`📃 <a href="${escapeAttr(meta['receiptUrl'])}">Чек</a>`);
       else if (typeof meta['checkoutUrl'] === 'string')
-        payLines.push(`🧾 <a href="${escapeHtml(meta['checkoutUrl'])}">Ссылка на оплату</a>`);
-      if (meta['paidAt']) payLines.push(`⏰ Оплачено: ${fmtDate(meta['paidAt'])}`);
+        payLines.push(`🧾 <a href="${escapeAttr(meta['checkoutUrl'])}">Ссылка на оплату</a>`);
+      if (meta['paidAt']) payLines.push(`⏰ Оплачено: ${fmtDate(meta['paidAt'], timeZone)}`);
       lines.push(`<blockquote>${payLines.join('\n')}</blockquote>`);
     }
 
@@ -1493,7 +1561,7 @@ export class SystemEventsService {
       // Receipt here only when there's no dedicated Payment block above (e.g.
       // a subscription.created without payment metadata) — avoids duplicating.
       if (!meta['paymentId'] && !meta['amount'] && typeof meta['receiptUrl'] === 'string') {
-        planLines.push(`📃 <a href="${escapeHtml(meta['receiptUrl'])}">Чек</a>`);
+        planLines.push(`📃 <a href="${escapeAttr(meta['receiptUrl'])}">Чек</a>`);
       }
       if (meta['subscriptionId'])
         planLines.push(`🗳 ID: <code>${escapeHtml(meta['subscriptionId'])}</code>`);
@@ -1524,7 +1592,7 @@ export class SystemEventsService {
       if (expireRaw !== undefined && expireRaw !== null) {
         const remaining = fmtRemaining(expireRaw);
         if (remaining) planLines.push(`⏱ Осталось: ${remaining}`);
-        planLines.push(`📅 Действует до: ${fmtDate(expireRaw)}`);
+        planLines.push(`📅 Действует до: ${fmtDate(expireRaw, timeZone)}`);
       }
       if (meta['source']) planLines.push(`📌 Причина: ${humanizeSource(meta['source'])}`);
       lines.push(`<blockquote>${planLines.join('\n')}</blockquote>`);
@@ -1534,14 +1602,20 @@ export class SystemEventsService {
     // Rendered when the event carries a Remnawave uuid/login and it isn't
     // already covered by the fraud card or the HWID/device block.
     const remnaUuid = meta['remnawaveId'] ?? meta['remnawaveUuid'];
-    if ((remnaUuid || meta['remnawaveUsername']) && event.category !== 'FRAUD' && !meta['hwid']) {
+    // The sync jobs name the profile under the key their own code uses — and
+    // for a profile left live on the panel, the name IS what the operator has
+    // to go and find there.
+    const remnaUsername =
+      meta['remnawaveUsername'] ??
+      (event.type === EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC
+        ? (meta['remnawavePanelUsername'] ?? meta['panelUsername'])
+        : undefined);
+    if ((remnaUuid || remnaUsername) && event.category !== 'FRAUD' && !meta['hwid']) {
       lines.push('');
       lines.push('🌐 <b>Профиль Remnawave:</b>');
       const remnaLines: string[] = [];
-      if (meta['remnawaveUsername'])
-        remnaLines.push(
-          `🃏 Профиль на панели: <code>${escapeHtml(meta['remnawaveUsername'])}</code>`,
-        );
+      if (remnaUsername)
+        remnaLines.push(`🃏 Профиль на панели: <code>${escapeHtml(remnaUsername)}</code>`);
       if (remnaUuid) remnaLines.push(`🔹 UUID: <code>${escapeHtml(remnaUuid)}</code>`);
       // When a subscription block already owns usage/limit, skip the duplicate
       // traffic line here so first-connect / first-traffic cards stay clean.
@@ -1553,12 +1627,15 @@ export class SystemEventsService {
         remnaLines.push(`📊 Трафик: ${fmtBytes(meta['usedTrafficBytes'])}${limit}`);
       }
       if (meta['expireAt'] && !meta['planName'] && !meta['subscriptionId'])
-        remnaLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'])}`);
+        remnaLines.push(`📅 Действует до: ${fmtDate(meta['expireAt'], timeZone)}`);
       lines.push(`<blockquote>${remnaLines.join('\n')}</blockquote>`);
       const panelUrl = buildRemnawavePanelUrl();
       if (panelUrl)
-        lines.push(`🔗 <a href="${escapeHtml(panelUrl)}">Открыть в панели Remnawave</a>`);
+        lines.push(`🔗 <a href="${escapeAttr(panelUrl)}">Открыть в панели Remnawave</a>`);
     }
+    // Set when the backup block below has already said why the file is not in
+    // Telegram, so the details block does not repeat the raw status under it.
+    let backupDeliveryShown = false;
     if (meta['filename'] && (event.category === 'SYSTEM' || meta['backupId'])) {
       lines.push('');
       lines.push('🗄 <b>Бэкап:</b>');
@@ -1571,12 +1648,37 @@ export class SystemEventsService {
         backupLines.push(
           `📰 Контрольная сумма: <code>${escapeHtml(meta['checksum'].slice(0, 12))}</code>`,
         );
-      if (meta['deliveredToTelegram'] === false)
-        backupLines.push('📥 Доставка: только локально (слишком большой)');
+      if (meta['deliveredToTelegram'] === false) {
+        // Four producers raise this flag and the line used to name one reason
+        // — «слишком большой» — for all of them, so a relay that never
+        // confirmed, a missing crypt key and a retention sweep that deleted the
+        // only copy all read as an oversized file.
+        backupLines.push(`📥 Доставка: ${describeBackupDelivery(meta)}`);
+        backupDeliveryShown = true;
+      }
+      // A restore's one outcome that matters beyond "done" (`BackupProcessor`):
+      // whether the schema was brought forward to this build. It used to be
+      // said only in the English sentence under the title.
+      if (typeof meta['migrationsApplied'] === 'boolean')
+        backupLines.push(`🧱 Миграции: ${meta['migrationsApplied'] ? 'применены' : 'не применены'}`);
       if (meta['initiatedBy'])
         backupLines.push(`👤 Инициатор: <code>${escapeHtml(meta['initiatedBy'])}</code>`);
       lines.push(`<blockquote>${backupLines.join('\n')}</blockquote>`);
     }
+
+    // ── Facts that used to reach the card only as an English sentence ─────
+    //
+    // Broadcasts, imports and the Remnawave sync jobs said what happened in
+    // their `message` alone — the English text the audit log keeps — and their
+    // cards printed that sentence under the title. The numbers are all in the
+    // metadata, so the cards say them in Russian instead. An instruction the
+    // operator has to act on comes from its producer as a Russian `note`
+    // («📝 Заметка»), never as a sentence invented here.
+    if (typeof meta['broadcastId'] === 'string') lines.push(...formatBroadcastBlock(meta));
+    if (event.type.startsWith('import.') && typeof meta['importRecordId'] === 'string') {
+      lines.push(...formatImportBlock(event.type, meta));
+    }
+    if (event.type === EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC) lines.push(...formatRemnawaveSyncBlock(meta));
 
     // Node block — infrastructure events forwarded from the Remnawave panel.
     if (meta['nodeName'] || meta['nodeUuid']) {
@@ -1597,10 +1699,11 @@ export class SystemEventsService {
 
     // ── Three alerts that used to arrive as a frame with no facts ─────────
     //
-    // The card prints a per-type header INSTEAD of `event.message`, which is
-    // right — the message is a machine sentence and the header is written
-    // for a person. That works because every fact an operator needs is
-    // picked out of `metadata` by one of these blocks.
+    // The card's HEADER is a per-type title, not `event.message` — the title
+    // is written for a person. The card prints nothing more of the message
+    // (unless its type opts in with `showMessage`), which works because every
+    // fact an operator needs is picked out of `metadata` by one of these
+    // blocks.
     //
     // For these three it was not. Their whole content lived in the message
     // and their metadata keys matched no block, so the card announced
@@ -1669,11 +1772,11 @@ export class SystemEventsService {
       lines.push('🤝 <b>Партнёр:</b>');
       const partnerLines: string[] = [];
       if (meta['partnerId'])
-        partnerLines.push(`🗳 ID: <code>${String(meta['partnerId']).slice(0, 12)}</code>`);
-      if (meta['level']) partnerLines.push(`🏮 Уровень: ${meta['level']}`);
+        partnerLines.push(`🗳 ID: <code>${escapeHtml(String(meta['partnerId']).slice(0, 12))}</code>`);
+      if (meta['level']) partnerLines.push(`🏮 Уровень: ${escapeHtml(meta['level'])}`);
       if (meta['earning'])
         partnerLines.push(`💴 Начислено: ${(Number(meta['earning']) / 100).toFixed(2)} ₽`);
-      if (meta['percent']) partnerLines.push(`🏵 Процент: ${meta['percent']}%`);
+      if (meta['percent']) partnerLines.push(`🏵 Процент: ${escapeHtml(meta['percent'])}%`);
       lines.push(`<blockquote>${partnerLines.join('\n')}</blockquote>`);
     }
 
@@ -1722,7 +1825,7 @@ export class SystemEventsService {
         refLines.push(`🎊 Награда: ${humanizeRewardType(meta['rewardType'])}${rv}`);
       }
       if (meta['historicalPaymentsProcessed'] !== undefined)
-        refLines.push(`📈 Платежей обработано: ${meta['historicalPaymentsProcessed']}`);
+        refLines.push(`📈 Платежей обработано: ${escapeHtml(meta['historicalPaymentsProcessed'])}`);
       lines.push(`<blockquote>${refLines.join('\n')}</blockquote>`);
     }
 
@@ -1761,31 +1864,43 @@ export class SystemEventsService {
     }
 
     // Device/HWID block
+    //
+    // Every value escaped. A HWID is whatever the VPN client sent as its device
+    // header, and this card is parsed as HTML: an unescaped `<` either forged
+    // markup or — far more often — made Telegram refuse the whole card.
     if (meta['hwid']) {
       lines.push('');
       lines.push('📱 <b>Устройство:</b>');
       const deviceLines: string[] = [];
-      deviceLines.push(`🧬 HWID: <code>${meta['hwid']}</code>`);
+      deviceLines.push(`🧬 HWID: <code>${escapeHtml(meta['hwid'])}</code>`);
       if (meta['remainingDevices'] !== undefined)
-        deviceLines.push(`📱 Осталось устройств: ${meta['remainingDevices']}`);
+        deviceLines.push(`📱 Осталось устройств: ${escapeHtml(meta['remainingDevices'])}`);
       if (meta['planName']) deviceLines.push(`🏷 План: ${escapeHtml(meta['planName'])}`);
       if (meta['subscriptionId'])
         deviceLines.push(
-          `🗳 Подписка ID: <code>${String(meta['subscriptionId']).slice(0, 12)}</code>`,
+          `🗳 Подписка ID: <code>${escapeHtml(String(meta['subscriptionId']).slice(0, 12))}</code>`,
         );
       if (meta['remnawaveId'])
-        deviceLines.push(`🌊 Remnawave: <code>${String(meta['remnawaveId']).slice(0, 12)}</code>`);
+        deviceLines.push(
+          `🌊 Remnawave: <code>${escapeHtml(String(meta['remnawaveId']).slice(0, 12))}</code>`,
+        );
       lines.push(`<blockquote>${deviceLines.join('\n')}</blockquote>`);
     }
 
     // Error block
+    //
+    // `error` is usually an exception's `.message`, which quotes whatever it
+    // choked on — a URL with `&`, a tag from a provider page, a JSON body. It
+    // was interpolated raw, so the card describing a failure was the card
+    // Telegram refused to deliver. As `<code>`, like every raw diagnostic on
+    // the card: it is the library's words, untranslated, not the card's.
     if (meta['error'] || event.severity === 'ERROR') {
       lines.push('');
       lines.push('⚠️ <b>Ошибка:</b>');
       const errLines: string[] = [];
-      if (meta['error']) errLines.push(`💬 Сообщение: ${meta['error']}`);
-      if (meta['action']) errLines.push(`🧷 Действие: <code>${meta['action']}</code>`);
-      if (meta['attempt']) errLines.push(`🔁 Попытка: ${meta['attempt']}`);
+      if (meta['error']) errLines.push(`💬 Сообщение: <code>${escapeHtml(meta['error'])}</code>`);
+      if (meta['action']) errLines.push(`🧷 Действие: <code>${escapeHtml(meta['action'])}</code>`);
+      if (meta['attempt']) errLines.push(`🔁 Попытка: ${escapeHtml(meta['attempt'])}`);
       lines.push(`<blockquote>${errLines.join('\n')}</blockquote>`);
     }
 
@@ -1805,10 +1920,76 @@ export class SystemEventsService {
       extraLines.push(`👥 Получателей: ${escapeHtml(meta['recipients'])}`);
     if (meta['templateName']) extraLines.push(`🫧 Шаблон: ${escapeHtml(meta['templateName'])}`);
     if (meta['ticketId'])
-      extraLines.push(`🚓 Тикет: <code>${String(meta['ticketId']).slice(0, 12)}</code>`);
+      extraLines.push(`🚓 Тикет: <code>${escapeHtml(String(meta['ticketId']).slice(0, 12))}</code>`);
     if (meta['subject']) extraLines.push(`📨 Тема: ${escapeHtml(meta['subject'])}`);
     if (meta['oldRole'] && meta['newRole'])
       extraLines.push(`🥢 Роль: ${escapeHtml(meta['oldRole'])} → ${escapeHtml(meta['newRole'])}`);
+    // The evidence a failure card is about. Each of these was carried by a
+    // producer and matched no block, so a relay that did not deliver, a card
+    // Telegram refused, a broadcast that reached some of its audience and a
+    // rule that raised a notification arrived without the status, the chat,
+    // the counts or the rule's name.
+    if (typeof meta['relayStatus'] === 'string' && !backupDeliveryShown)
+      extraLines.push(`📡 Статус доставки: <code>${escapeHtml(meta['relayStatus'])}</code>`);
+    if (typeof meta['relayEvent'] === 'string')
+      extraLines.push(`📨 Маршрут реле: <code>${escapeHtml(meta['relayEvent'])}</code>`);
+    if (typeof meta['sourceEventType'] === 'string')
+      extraLines.push(`🏷 Карточка события: <code>${escapeHtml(meta['sourceEventType'])}</code>`);
+    // Which message was lost, on a relay card. A broadcast's channel copy is
+    // relayed under `broadcast-channel:<broadcastId>`, and since that loss no
+    // longer raises a card of its own this line is how the operator learns
+    // WHICH broadcast's public post is gone.
+    if (typeof meta['relayEventId'] === 'string' && meta['relayEventId'].length > 0) {
+      const relayEventId = meta['relayEventId'];
+      extraLines.push(
+        relayEventId.startsWith(BROADCAST_CHANNEL_EVENT_PREFIX)
+          ? `📣 Пост в канал рассылки: <code>${escapeHtml(relayEventId.slice(BROADCAST_CHANNEL_EVENT_PREFIX.length))}</code>`
+          : `🔑 Ключ события: <code>${escapeHtml(relayEventId)}</code>`,
+      );
+    }
+    if (typeof meta['chatId'] === 'string' || typeof meta['chatId'] === 'number')
+      extraLines.push(`💬 Чат: <code>${escapeHtml(meta['chatId'])}</code>`);
+    // The forum topic the lost card was addressed to — the relay record names
+    // it `topicId`, the relay job it came from `topicThreadId`.
+    const topicId = meta['topicId'] ?? meta['topicThreadId'];
+    if (typeof topicId === 'number' || (typeof topicId === 'string' && topicId.length > 0))
+      extraLines.push(`🧵 Топик: <code>${escapeHtml(topicId)}</code>`);
+    if (typeof meta['httpStatus'] === 'number')
+      extraLines.push(`🌐 Ответ HTTP: ${escapeHtml(meta['httpStatus'])}`);
+    // Not when the message printed under the title already says it: a revived
+    // broadcast's reason is both its detail and the tail of its sentence, and
+    // the card printed it twice. As `<code>` — a provider's or a library's
+    // words, untranslated.
+    if (rawDetail.length > 0 && !(messageShown?.includes(rawDetail) ?? false))
+      extraLines.push(`🧾 Подробности: <code>${escapeHtml(clipText(rawDetail, 300))}</code>`);
+    // Set only on the direct fallback a producer makes when the queue refused
+    // the job — the fact that says "Redis", not "Telegram" (`undelivered-record.ts`).
+    if (typeof meta['enqueueError'] === 'string' && meta['enqueueError'].trim().length > 0)
+      extraLines.push(
+        `🧯 Очередь не приняла задачу: <code>${escapeHtml(clipText(meta['enqueueError'].trim(), 300))}</code>`,
+      );
+    // How big the cause is. An undelivered alert is coalesced per cause, and
+    // the one that goes out carries how many it stands for — a relay refusing
+    // a whole broadcast is one card saying 999, not one card saying nothing.
+    if (typeof meta['repeatsSincePreviousAlert'] === 'number' && meta['repeatsSincePreviousAlert'] > 0)
+      extraLines.push(`🔁 Таких же с прошлого оповещения: ${escapeHtml(meta['repeatsSincePreviousAlert'])}`);
+    if (typeof meta['attemptsMade'] === 'number' && typeof meta['attempts'] === 'number')
+      extraLines.push(
+        `🔂 Попыток: ${escapeHtml(meta['attemptsMade'])} из ${escapeHtml(meta['attempts'])}`,
+      );
+    if (meta['sentCount'] !== undefined)
+      extraLines.push(`📬 Доставлено: ${escapeHtml(meta['sentCount'])}`);
+    if (Number(meta['failedCount'] ?? 0) > 0)
+      extraLines.push(`📭 Не доставлено: ${escapeHtml(meta['failedCount'])}`);
+    if (typeof meta['why'] === 'string' && meta['why'].length > 0)
+      extraLines.push(`💡 Почему: ${escapeHtml(meta['why'])}`);
+    if (typeof meta['ruleName'] === 'string' && meta['ruleName'].length > 0) {
+      extraLines.push(`🤖 Правило: ${escapeHtml(meta['ruleName'])}`);
+      // What set the rule off (`chainMetadata`). With the rule's default text
+      // no longer printed, this is the line that says what happened.
+      if (typeof meta['trigger'] === 'string' && meta['trigger'].length > 0)
+        extraLines.push(`⚡ Сработало на: <code>${escapeHtml(meta['trigger'])}</code>`);
+    }
     if (extraLines.length > 0) {
       lines.push('');
       lines.push('🧩 <b>Дополнительно:</b>');
@@ -1827,7 +2008,10 @@ export class SystemEventsService {
     ctxLines.push(`🧮 Уровень: ${event.severity}`);
     const channel = meta['channel'] ?? meta['purchaseChannel'];
     if (channel) ctxLines.push(`📣 Канал покупки: ${humanizeChannel(channel)}`);
-    ctxLines.push(`⏰ Время: ${new Date(event.timestamp).toLocaleString('ru-RU')}`);
+    // Written in the operator's zone and NAMED. It used to be the container's
+    // local time with no label — UTC under compose — so «15:30» on a card from
+    // an operator in Moscow meant 18:30 and nothing on the card said so.
+    ctxLines.push(`⏰ Время: ${fmtDate(event.timestamp, timeZone)}`);
     lines.push(`<blockquote>${ctxLines.join('\n')}</blockquote>`);
 
     // Build info — which release produced this event. Prefers values carried
@@ -1848,6 +2032,22 @@ export class SystemEventsService {
         `🔩 Коммит: <code>${escapeHtml(String(buildCommit).slice(0, 12))}</code>\n` +
         `⚙️ Ветка: <code>${escapeHtml(buildBranch)}</code></blockquote>`,
     );
+
+    // ── An operator's text gives way to the rest of the card ──────────────
+    //
+    // It is not capped like a producer's sentence (`isOperatorWrittenMessage`),
+    // and it sits directly under the title — so left to the card clipper, a
+    // long text kept itself and cut everything after it: «🤖 Правило», the
+    // context, the build. The text is the one part that can be shortened
+    // without losing what the card is, so it is shortened here, to exactly the
+    // room the rest of the card leaves, and says that it was.
+    if (messageLineIndex !== -1 && messageShown !== null && isOperatorWrittenMessage(event.type)) {
+      const card = lines.join('\n');
+      if (card.length > TELEGRAM_TEXT_LIMIT) {
+        const room = TELEGRAM_TEXT_LIMIT - (card.length - lines[messageLineIndex]!.length);
+        lines[messageLineIndex] = shortenedQuote(messageShown, room);
+      }
+    }
 
     return lines.join('\n');
   }
@@ -2017,6 +2217,8 @@ export class SystemEventsService {
     devChatId: string | null;
     errorReportMode: 'off' | 'manual' | 'auto';
     errorReportTelegramTxt: boolean;
+    /** IANA zone the card's times are written in; `UTC` unless the operator set one. */
+    timeZone: string;
   }> {
     // `orderBy` matches `SettingsService.getSettingsRecord` and
     // `PaymentOpsAlertService.readSettings`. It was absent here, and an
@@ -2025,9 +2227,14 @@ export class SystemEventsService {
     // read its Telegram config, and now its bot token, from a DIFFERENT row
     // than the one the Bot Token card writes to. One row is the intent; the
     // ordering is what makes every reader agree on which one that is.
+    //
+    // `platformPolicy` rides the same read for the operator's time zone — the
+    // setting customer notifications already use (`UserNotificationsService.
+    // resolveBranding`), so a card and a notification about one deadline name
+    // the same hour.
     const settings = await this.prismaService.settings.findFirst({
       orderBy: { updatedAt: 'asc' },
-      select: { systemNotifications: true },
+      select: { systemNotifications: true, platformPolicy: true },
     });
     if (!settings) {
       return {
@@ -2042,6 +2249,7 @@ export class SystemEventsService {
         errorReportMode: 'manual',
         errorTopicId: null,
         errorReportTelegramTxt: true,
+        timeZone: 'UTC',
       };
     }
     const json = settings.systemNotifications as Record<string, unknown>;
@@ -2086,6 +2294,7 @@ export class SystemEventsService {
       devChatId: typeof tg.devChatId === 'string' && tg.devChatId.length > 0 ? tg.devChatId : null,
       errorReportMode: mode === 'off' || mode === 'auto' ? mode : 'manual',
       errorReportTelegramTxt: errorReports.telegramTxt !== false,
+      timeZone: resolveCardTimeZone(readPlatformBranding(settings.platformPolicy).timezone),
     };
   }
 }
@@ -2198,7 +2407,7 @@ export function clipHtmlCard(html: string, limit: number): string {
     // out of 1024 and the message itself — the only part anybody reads — was
     // not in it. The card was shortened to the last thing that happened to end
     // in a newline.
-    kept = headOf(next, fits);
+    kept = headOf(next, fits, limit - marker.length);
     break;
   }
   return `${kept}${closersFor(kept)}${marker}`;
@@ -2212,15 +2421,23 @@ export function clipHtmlCard(html: string, limit: number): string {
  *   - an HTML entity: half of `&amp;` is not an entity, and Telegram refuses
  *     the whole body over it;
  *   - a tag: `<cod` is not markup, and `closersFor` cannot even see it to
- *     balance it;
+ *     balance it — nor is `<a href="https://recei`, however long the URL;
  *   - a surrogate pair: these cards are full of emoji, and `slice` counts
  *     UTF-16 code units, so an odd offset splits one in half.
  *
  * So the cut walks back from the naive offset to the nearest position that is
  * outside all three, then shrinks further if the closers still do not fit.
+ *
+ * The walk starts at `maxLength`, the most any candidate can keep, rather than
+ * at the end of the line: nothing longer can fit, and an automation's text —
+ * uncapped, and one line — made every character above it one more pass.
  */
-function headOf(value: string, fits: (candidate: string) => boolean): string {
-  let end = Math.min(value.length, MAX_SAFE_CUT_SEARCH);
+function headOf(
+  value: string,
+  fits: (candidate: string) => boolean,
+  maxLength: number,
+): string {
+  let end = Math.min(value.length, MAX_SAFE_CUT_SEARCH, Math.max(0, maxLength));
   while (end > 0) {
     const candidate = value.slice(0, safeCutBefore(value, end));
     if (candidate.length === 0) return '';
@@ -2233,9 +2450,11 @@ function headOf(value: string, fits: (candidate: string) => boolean): string {
 /**
  * Walk `end` back to the first index that splits nothing.
  *
- * Bounded: an unterminated `&` or `<` more than this far back is not a real
- * entity or tag, and treating it as one would throw away most of the card —
- * `AT&T` followed by five thousand characters used to cut down to `AT`.
+ * A tag is honoured however far back it opened — see {@link openTagAround}.
+ * An entity only within {@link MAX_MARKUP_LOOKBEHIND}: an unterminated `&`
+ * further back than that is not a real entity, and treating it as one would
+ * throw away most of the card — `AT&T` followed by five thousand characters
+ * used to cut down to `AT`.
  */
 function safeCutBefore(value: string, end: number): number {
   let index = end;
@@ -2244,16 +2463,35 @@ function safeCutBefore(value: string, end: number): number {
     const code = value.charCodeAt(index - 1);
     if (code >= 0xd800 && code <= 0xdbff) index -= 1;
   }
+  const openTag = openTagAround(value, index);
+  if (openTag !== -1) return openTag;
   const window = value.slice(Math.max(0, index - MAX_MARKUP_LOOKBEHIND), index);
-  const openTag = window.lastIndexOf('<');
-  if (openTag !== -1 && !window.slice(openTag).includes('>')) {
-    return index - (window.length - openTag);
-  }
   const amp = window.lastIndexOf('&');
   if (amp !== -1 && !window.slice(amp).includes(';')) {
     return index - (window.length - amp);
   }
   return index;
+}
+
+/**
+ * Where the tag that a cut at `index` would land inside begins, or -1.
+ *
+ * NOT bounded by {@link MAX_MARKUP_LOOKBEHIND}, which is what this replaced: a
+ * link is `<a href="…">` and is as long as its URL — a receipt, a checkout, a
+ * profile — so a cut inside the URL found no `<` in its sixteen-character
+ * window, kept `<a href="https://recei`, and Telegram refused the whole card
+ * for the half tag. The bound was there for prose, and prose cannot produce
+ * this: every card escapes the `<` of its text, so a raw `<` followed by a
+ * tag name is always markup the card wrote. A `<` that never reaches a `>`
+ * is not a tag at all and is left alone.
+ */
+function openTagAround(value: string, index: number): number {
+  if (index <= 0) return -1;
+  const open = value.lastIndexOf('<', index - 1);
+  if (open === -1) return -1;
+  if (value.lastIndexOf('>', index - 1) > open) return -1;
+  if (!/^<\/?[A-Za-z]/.test(value.slice(open, open + 3))) return -1;
+  return value.indexOf('>', open) === -1 ? -1 : open;
 }
 
 /**
@@ -2264,19 +2502,24 @@ function safeCutBefore(value: string, end: number): number {
  * comes out `</blockquote></code></b>`, which is exactly as malformed as
  * leaving them open — the closers have to mirror the order the tags were
  * actually opened in, and only the text knows that.
+ *
+ * Every tag, attributes and all, not a fixed list of four. The list was
+ * `b|i|code|blockquote`, so a cut through a link's text stranded its
+ * `<a href="…">` with no `</a>`, and Telegram refused the card over it.
  */
 function closersFor(kept: string): string {
   const stack: string[] = [];
-  const tag = /<(\/?)(b|i|code|blockquote)>/g;
+  const tag = /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?:\s[^>]*)?>/g;
   for (let match = tag.exec(kept); match !== null; match = tag.exec(kept)) {
-    const [, closing, name] = match;
+    const closing = match[1];
+    const name = match[2]!.toLowerCase();
     if (closing === '/') {
       // Pop the matching open, if there is one; a stray closer is ignored
       // rather than treated as an error, because the input is our own card.
-      const at = stack.lastIndexOf(name!);
+      const at = stack.lastIndexOf(name);
       if (at !== -1) stack.splice(at, 1);
     } else {
-      stack.push(name!);
+      stack.push(name);
     }
   }
   return stack
@@ -2425,6 +2668,291 @@ function escapeHtml(value: unknown): string {
 }
 
 /**
+ * Escaping for a value inside `href="…"`.
+ *
+ * `escapeHtml` leaves `"` alone, which is right for text and wrong here: a
+ * receipt URL carrying a quote closed the attribute early, and Telegram
+ * refuses a card whose markup it cannot parse — the whole card, not the link.
+ * `&quot;` is one of the four named entities the Bot API accepts.
+ */
+function escapeAttr(value: unknown): string {
+  return escapeHtml(value).replace(/"/g, '&quot;');
+}
+
+/**
+ * Trims text to `max` code points, marking the cut.
+ *
+ * Code points, not UTF-16 units: a message is free text and a cut through an
+ * emoji leaves half a surrogate pair, which is not valid UTF-8 on the wire.
+ */
+function clipText(value: string, max: number): string {
+  const points = Array.from(value);
+  return points.length > max ? `${points.slice(0, max).join('')}…` : value;
+}
+
+/**
+ * How much of the producer's message a card prints under its title.
+ *
+ * Generous, because for the types that print it the message is the substance —
+ * but bounded, so one runaway log sentence cannot push every block below it
+ * past Telegram's limit. Not applied to an automation's text: see
+ * {@link isOperatorWrittenMessage}.
+ */
+const CARD_MESSAGE_LIMIT = 1000;
+
+/**
+ * The producer's sentence to print under the title, or `null`.
+ *
+ * OPT-IN, per type, through `EventPresentation.showMessage`. It used to be
+ * printed on every WARNING, and on the busiest cards that was noise rather
+ * than news: «Профиль истёк (Remnawave)!» over `Remnawave: user.expired`,
+ * «Платёж не прошёл» over an enum, a device average restated in English under
+ * the block that already showed it. The types that opt in are the ones whose
+ * producers put facts in the message and nowhere else.
+ *
+ * Blank, the title again in other letters, or the title as the sentence's own
+ * lead-in (`«Title»: the actual news`) is not repeated. Nor is the coalesced
+ * repeat count an undelivered alert appends to its sentence: the details block
+ * states it from `repeatsSincePreviousAlert`, on both undelivered cards alike.
+ *
+ * And an automation's DEFAULT text is not printed at all. It is English, it
+ * names nothing the card does not already name («🤖 Правило»), and a rule
+ * saved with the editor's untouched draft text sends exactly it.
+ */
+function cardMessageLine(
+  event: SystemEventPayload,
+  presentation: EventPresentation,
+  title: string,
+): string | null {
+  const when = presentation.showMessage;
+  if (when === undefined) return null;
+  if (when === 'warning' && event.severity === 'INFO') return null;
+  const meta = event.metadata ?? {};
+  const message = withoutRepeatsSuffix(withoutLeadingTitle(event.message.trim(), title), meta);
+  if (message.length === 0) return null;
+  if (isOperatorWrittenMessage(event.type)) {
+    return isDefaultAutomationText(message, meta) ? null : message;
+  }
+  return clipText(message, CARD_MESSAGE_LIMIT);
+}
+
+/**
+ * `text` as a `<blockquote>` line of at most `room` characters of card HTML,
+ * cut on whole code points — an entity is never halved, an emoji never split —
+ * and ending in `…` because something was cut.
+ */
+function shortenedQuote(text: string, room: number): string {
+  const open = '<blockquote>';
+  const close = '</blockquote>';
+  const marker = '…';
+  const budget = room - open.length - close.length - marker.length;
+  let kept = '';
+  for (const point of text) {
+    const escaped = escapeHtml(point);
+    if (kept.length + escaped.length > budget) break;
+    kept += escaped;
+  }
+  return `${open}${kept}${marker}${close}`;
+}
+
+/**
+ * The text an automation sends when its rule was given none — never the
+ * operator's words.
+ *
+ * `AutomationActionRegistry` falls back to `Automation rule "<name>" fired`
+ * (notify) and `Automation "<name>" fired` (system event), and the rule
+ * editor's «new rule» draft carries `Triggered`, which is saved as the rule's
+ * text unless somebody replaces it. Matched exactly, against the rule name the
+ * event itself carries, so an operator's own sentence can never be mistaken
+ * for one of them.
+ */
+function isDefaultAutomationText(message: string, meta: Readonly<Record<string, unknown>>): boolean {
+  if (message === 'Triggered') return true;
+  const ruleName = meta['ruleName'];
+  if (typeof ruleName !== 'string') return false;
+  return (
+    message === `Automation rule "${ruleName}" fired` || message === `Automation "${ruleName}" fired`
+  );
+}
+
+/**
+ * `message` without the repeat count the undelivered-alert recorder appends
+ * (`createUndeliveredRecorder`), when the metadata says one was appended.
+ */
+function withoutRepeatsSuffix(message: string, meta: Readonly<Record<string, unknown>>): string {
+  const repeats = meta['repeatsSincePreviousAlert'];
+  if (typeof repeats !== 'number') return message;
+  for (const suffix of [describeTelegramDirectRepeats(repeats), describeRelayRepeats(repeats)]) {
+    if (message.endsWith(suffix)) return message.slice(0, message.length - suffix.length).trimEnd();
+  }
+  return message;
+}
+
+/**
+ * A sentence as card HTML, with a raw provider text it quotes marked as such.
+ *
+ * `describeTelegramOutcome` quotes Telegram's own refusal inside its Russian
+ * sentence — «Telegram отклонил сообщение: Bad Request: chat not found». Those
+ * are Telegram's words, not the card's, and they stay untranslated; `<code>`
+ * says so, the same way the details block shows every raw diagnostic.
+ */
+function sentenceHtml(sentence: string, rawQuote: string | null): string {
+  if (rawQuote === null || rawQuote.length === 0) return escapeHtml(sentence);
+  const at = sentence.lastIndexOf(rawQuote);
+  if (at === -1) return escapeHtml(sentence);
+  return (
+    `${escapeHtml(sentence.slice(0, at))}<code>${escapeHtml(rawQuote)}</code>` +
+    escapeHtml(sentence.slice(at + rawQuote.length))
+  );
+}
+
+/**
+ * The header a card wears: a matching `variants` entry first, then the failure
+ * header when the event is a failure, then the type's own title.
+ */
+function headerFor(
+  event: SystemEventPayload,
+  presentation: EventPresentation,
+): { readonly emoji: string; readonly title: string } {
+  const meta = event.metadata ?? {};
+  const variant = presentation.variants?.find((candidate) => candidate.when(meta));
+  if (variant !== undefined) return variant;
+  if (wearsWarningHeader(event, presentation)) return presentation.warning;
+  return presentation;
+}
+
+/** A metadata value worth a line: not absent, not null, not blank. */
+function isPresent(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  return typeof value !== 'string' || value.trim().length > 0;
+}
+
+/**
+ * Why YooKassa's own answer contradicted a completion, in the operator's words
+ * (`YookassaPaymentVerificationService`, the CONTRADICTED verdicts). A reason
+ * this map does not know is shown raw.
+ */
+function humanizeVerificationReason(value: unknown): string {
+  switch (String(value)) {
+    case 'PAYMENT_VERIFICATION_PROVIDER_CANCELED':
+      return 'ЮKassa сообщает, что платёж отменён';
+    case 'PAYMENT_VERIFICATION_PAYMENT_NOT_FOUND':
+      return 'ЮKassa не знает такого платежа';
+    case 'PAYMENT_VERIFICATION_PAYMENT_NOT_OURS':
+      return 'платёж в ЮKassa относится к другому счёту';
+    case 'PAYMENT_VERIFICATION_PAYMENT_ID_MISSING':
+      return 'в уведомлении нет ID платежа';
+    default:
+      return `<code>${escapeHtml(value)}</code>`;
+  }
+}
+
+/**
+ * An automation's message is not a producer's log line: it is the text the
+ * operator wrote into the rule, and for `automation.telegram_notify` it is the
+ * whole notification. Capping it at {@link CARD_MESSAGE_LIMIT} cut the one
+ * part of the card anybody reads and kept the frame around it; the card
+ * clipper already bounds the finished card at Telegram's own limit.
+ */
+function isOperatorWrittenMessage(type: string): boolean {
+  return type.startsWith('automation.');
+}
+
+/**
+ * `message` without a leading copy of `title`.
+ *
+ * Only when the title is followed by a separator — `Панель не доставила
+ * карточку в Telegram: Telegram отклонил токен…` becomes the part after the
+ * colon — so a sentence that merely begins with the same words keeps them.
+ * The title alone (any case, optional `!`) comes back empty.
+ */
+function withoutLeadingTitle(message: string, title: string): string {
+  const head = message.slice(0, title.length);
+  if (title.length === 0 || head.toLocaleLowerCase('ru-RU') !== title.toLocaleLowerCase('ru-RU')) {
+    return message;
+  }
+  const rest = message.slice(title.length);
+  if (rest.length === 0) return '';
+  const separator = /^\s*[:.!—–-]+\s*/.exec(rest);
+  return separator === null ? message : rest.slice(separator[0].length);
+}
+
+/**
+ * Whether this event wears its type's failure header rather than the title.
+ *
+ * Any non-INFO severity does. An INFO event does only when its presentation's
+ * `warning.whenMetadata` recognises a failure in the metadata — for a producer
+ * that reports a partial result at INFO.
+ */
+function wearsWarningHeader(
+  event: SystemEventPayload,
+  presentation: EventPresentation,
+): presentation is EventPresentation & { readonly warning: EventWarningHeader } {
+  const warning = presentation.warning;
+  if (warning === undefined) return false;
+  if (event.severity !== 'INFO') return true;
+  return warning.whenMetadata?.(event.metadata ?? {}) === true;
+}
+
+/**
+ * Why a backup is not in Telegram, in the operator's words.
+ *
+ * Keyed by the reasons `BackupService` records: its own terminal outcomes and
+ * the relay's `NotifyDeliveryStatus`. A reason nobody taught this map is shown
+ * raw rather than dropped — an untranslated truth beats a translated guess.
+ */
+const BACKUP_DELIVERY_REASONS: Readonly<Record<string, string>> = {
+  too_large_for_telegram: 'файл слишком большой для Telegram',
+  // `runTelegramDelivery` answers this for BOTH halves of its guard — delivery
+  // switched off, and delivery switched on with no Chat ID — so the words must
+  // not pick one of them.
+  not_configured: 'доставка в Telegram не настроена (выключена или не указан Chat ID)',
+  file_missing: 'файл не найден на диске',
+  telegram_api_rejected: 'Telegram отклонил файл',
+  telegram_api_threw: 'не удалось связаться с Telegram',
+  relay_unavailable: 'нет токена бота и связи с reiwa',
+  crypt_key_missing: 'не задан REZEIS_CRYPT_KEY',
+  unconfirmed: 'reiwa не подтвердила отправку',
+  rejected: 'reiwa отказала в отправке',
+  timeout: 'reiwa не ответила вовремя',
+  failed: 'не удалось передать файл через reiwa',
+  disabled: 'связь с reiwa выключена',
+};
+
+function describeBackupDelivery(meta: Record<string, unknown>): string {
+  if (meta['deletedByRetention'] === true) {
+    // Not «только локально»: there is no local copy any more. This is the one
+    // outcome where the backup itself is gone.
+    return 'копии больше нет — в Telegram она не попала, а локальный файл удалён ротацией';
+  }
+  const status = typeof meta['relayStatus'] === 'string' ? meta['relayStatus'] : null;
+  if (status === null) return 'только локально';
+  const reason = BACKUP_DELIVERY_REASONS[status] ?? `<code>${escapeHtml(status)}</code>`;
+  return `только локально — ${reason}`;
+}
+
+/**
+ * The zone a card writes its times in: the operator's IANA zone from platform
+ * settings, or `UTC` when none is set or the stored name is not one `Intl`
+ * knows. Never throws — a typo in a setting must not cost a card.
+ */
+function resolveCardTimeZone(timezone: string | null): string {
+  const candidate = (timezone ?? '').trim();
+  if (candidate.length === 0) return 'UTC';
+  try {
+    new Intl.DateTimeFormat('ru-RU', { timeZone: candidate });
+    return candidate;
+  } catch {
+    return 'UTC';
+  }
+}
+
+/** `14.09.2026, 18:30:00 GMT+3` — the instant in `timeZone`, with the zone named. */
+function fmtInstant(date: Date, timeZone: string): string {
+  return date.toLocaleString('ru-RU', { timeZone, timeZoneName: 'short' });
+}
+
+/**
  * Renders an ISO 3166-1 alpha-2 country code as a flag emoji + the code
  * (e.g. `DE` → `🇩🇪 DE`). Non-2-letter input is returned escaped as-is.
  */
@@ -2492,13 +3020,299 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
   out.push(`<blockquote>${who.join('\n')}</blockquote>`);
 
   if (typeof meta['fraudProfileUrl'] === 'string' && meta['fraudProfileUrl'].length > 0) {
-    out.push(`🔗 <a href="${escapeHtml(meta['fraudProfileUrl'])}">Открыть профиль в rezeis</a>`);
+    out.push(`🔗 <a href="${escapeAttr(meta['fraudProfileUrl'])}">Открыть профиль в rezeis</a>`);
   }
 
   return out;
 }
 
+/** A non-negative whole count, as producers put them in metadata. */
+function countOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** A block of `facts` under `heading`, or nothing when there are none. */
+function factBlock(heading: string, facts: readonly string[]): string[] {
+  return facts.length === 0 ? [] : ['', heading, `<blockquote>${facts.join('\n')}</blockquote>`];
+}
+
+/**
+ * A broadcast's facts, read from the keys its producers use:
+ * `BroadcastDeliveryService` (staging, recall, the channel copy),
+ * `BroadcastProcessor` (fan-out, each batch) and `BroadcastReconcilerService`
+ * (a revival). The sentences beside them are English and stay in the audit log.
+ */
+function formatBroadcastBlock(meta: Record<string, unknown>): string[] {
+  const facts: string[] = [`🆔 ID: <code>${escapeHtml(meta['broadcastId'])}</code>`];
+  const audience = countOf(meta['recipientCount']) ?? countOf(meta['totalMessages']);
+  if (audience !== null) facts.push(`👥 Получателей: ${audience}`);
+  const batches = countOf(meta['batches']);
+  if (batches !== null) facts.push(`📦 Партий: ${batches}`);
+  const batchSize = countOf(meta['batchSize']);
+  if (batchSize !== null) facts.push(`🧮 Сообщений в партии: ${batchSize}`);
+  const sent = countOf(meta['sent']);
+  if (sent !== null) facts.push(`📬 Отправлено: ${sent}`);
+  // A recall reports `deleted` and `failed`; a batch reports `sent` and
+  // `failed`. The same key means a different loss in each.
+  const deleted = countOf(meta['deleted']);
+  if (deleted !== null) facts.push(`🗑 Удалено у получателей: ${deleted}`);
+  const failed = countOf(meta['failed']);
+  if (failed !== null && failed > 0)
+    facts.push(deleted !== null ? `⚠️ Не удалось удалить: ${failed}` : `📭 Не доставлено: ${failed}`);
+  const unresolved = countOf(meta['unresolved']);
+  if (unresolved !== null && unresolved > 0) facts.push(`⏳ Ждут повторной отправки: ${unresolved}`);
+  const attempts = countOf(meta['attempts']);
+  if (attempts !== null) facts.push(`🔁 Попытка возобновления: ${attempts}`);
+  if (typeof meta['channelPost'] === 'string' && meta['channelPost'] !== 'skipped')
+    facts.push(`📡 Пост в канал: ${humanizeChannelPost(meta['channelPost'])}`);
+  return factBlock('📣 <b>Рассылка:</b>', facts);
+}
+
+/** What became of a broadcast's operator-channel copy (`postToChannelIfConfigured`). */
+function humanizeChannelPost(value: string): string {
+  switch (value) {
+    case 'queued':
+      return 'поставлен в очередь';
+    case 'delivered':
+      return 'опубликован';
+    case 'recorded':
+      return 'не доставлен — подробности в карточке «Вебхук в reiwa не доставлен»';
+    case 'dropped':
+      return 'не доставлен: пост не удалось собрать или отправить';
+    case 'disabled':
+      return 'не отправлен: связь панели с reiwa не настроена';
+    default:
+      return `<code>${escapeHtml(value)}</code>`;
+  }
+}
+
+/**
+ * An import's facts (`ImportProcessor`). `import.completed` keeps its counts in
+ * `result`, the importer's `ImportSummary`; the plan assignment and the sync
+ * enqueue put theirs at the top level. `import.failed` is ERROR and gets the
+ * incident card instead.
+ */
+function formatImportBlock(type: string, meta: Record<string, unknown>): string[] {
+  const facts: string[] = [`🆔 ID: <code>${escapeHtml(meta['importRecordId'])}</code>`];
+  if (typeof meta['sourceType'] === 'string')
+    facts.push(`📦 Источник: ${humanizeImportSource(meta['sourceType'])}`);
+  if (typeof meta['mode'] === 'string') facts.push(`🔀 Режим: ${humanizeImportMode(meta['mode'])}`);
+
+  if (type === EVENT_TYPES.IMPORT_COMPLETED) {
+    const result = meta['result'];
+    const summary =
+      typeof result === 'object' && result !== null ? (result as Record<string, unknown>) : {};
+    const counted: ReadonlyArray<readonly [string, string]> = [
+      ['fetched', '📥 Прочитано записей'],
+      ['created', '🆕 Создано пользователей'],
+      ['updated', '✏️ Обновлено пользователей'],
+      ['skipped', '⏭ Пропущено'],
+      ['subscriptionsCreated', '📦 Создано подписок'],
+      ['subscriptionsUpdated', '📦 Обновлено подписок'],
+      ['descriptionWritebacks', '📝 Описаний записано в панель'],
+    ];
+    for (const [key, label] of counted) {
+      const value = countOf(summary[key]);
+      if (value !== null) facts.push(`${label}: ${value}`);
+    }
+    if (Array.isArray(summary['errors']) && summary['errors'].length > 0)
+      facts.push(`⚠️ Ошибок: ${summary['errors'].length}`);
+  }
+
+  if (type === EVENT_TYPES.IMPORT_PLAN_ASSIGNED) {
+    if (typeof meta['planId'] === 'string')
+      facts.push(`🏷 Тариф: <code>${escapeHtml(meta['planId'])}</code>`);
+    const counted: ReadonlyArray<readonly [string, string]> = [
+      ['updated', '✅ Тариф назначен подпискам'],
+      ['skippedAlreadyAssigned', '⏭ Уже на этом тарифе'],
+      ['skippedDeleted', '⏭ Пропущено удалённых'],
+      ['skippedNoSubscription', '⏭ Без подписки'],
+      ['syncJobsCreated', '🔄 Задач синхронизации'],
+    ];
+    for (const [key, label] of counted) {
+      const value = countOf(meta[key]);
+      if (value !== null) facts.push(`${label}: ${value}`);
+    }
+    const errors = countOf(meta['errors']);
+    if (errors !== null && errors > 0) facts.push(`⚠️ Ошибок: ${errors}`);
+  }
+
+  if (type === EVENT_TYPES.IMPORT_SYNC_ENQUEUED) {
+    const enqueued = countOf(meta['enqueued']);
+    const total = countOf(meta['total']);
+    if (enqueued !== null)
+      facts.push(`🔄 Поставлено в очередь: ${enqueued}${total !== null ? ` из ${total}` : ''}`);
+    const skipped = countOf(meta['skipped']);
+    if (skipped !== null && skipped > 0)
+      facts.push(`⏭ Пропущено — синхронизация уже идёт: ${skipped}`);
+  }
+
+  return factBlock('📥 <b>Импорт:</b>', facts);
+}
+
+/** The donor an import read from (`ImportProcessor.handleRun`). Product names stay as they are. */
+function humanizeImportSource(value: string): string {
+  switch (value) {
+    case 'remnawave':
+      return 'Remnawave';
+    case '3xui':
+      return '3x-ui';
+    case 'remnashop':
+      return 'Remnashop';
+    case 'altshop':
+      return 'Altshop';
+    case 'stealthnet':
+      return 'StealthNet';
+    case 'bedolaga':
+      return 'Bedolaga';
+    default:
+      return `<code>${escapeHtml(value)}</code>`;
+  }
+}
+
+function humanizeImportMode(value: string): string {
+  switch (value) {
+    case 'import':
+      return 'импорт';
+    case 'sync':
+      return 'синхронизация';
+    default:
+      return `<code>${escapeHtml(value)}</code>`;
+  }
+}
+
+/**
+ * The facts of a `system.remnawave_sync` event, from every producer's keys:
+ * the expired-profile cleanup, the duplicate merge, the panel-link
+ * reconciliation, the user-row shape drift, subscription deletion, the admin
+ * subscription edit and the refund revocation.
+ *
+ * Gated on the type, because these keys — `scanned`, `linked`, `merged` — are
+ * generic words another producer may use for something else.
+ *
+ * Several of these events exist to tell the operator to DO something — run the
+ * reconciliation, delete a profile by hand. That instruction is not composed
+ * here: it belongs to the producer, as a Russian `note`.
+ */
+function formatRemnawaveSyncBlock(meta: Record<string, unknown>): string[] {
+  const facts: string[] = [];
+  if (meta['code'] === 'SUBSCRIPTION_DELETE_STALE_PANEL_LINK')
+    facts.push('🚫 Удаление профиля на панели отклонено: сохранённая привязка устарела');
+  const subscriptions = countOf(meta['subscriptions']);
+  if (subscriptions !== null) facts.push(`📦 Подписок: ${subscriptions}`);
+  if (typeof meta['dryRun'] === 'boolean')
+    facts.push(`🧪 Пробный прогон: ${meta['dryRun'] ? 'да' : 'нет'}`);
+  const counted: ReadonlyArray<readonly [string, string, boolean]> = [
+    // [key, label, show a zero]
+    ['scanned', '🔎 Проверено строк', true],
+    ['linked', '🔗 Привязано', true],
+    ['wouldLink', '🔗 Можно привязать', false],
+    ['unrepaired', '🛠 Не удалось исправить', false],
+    ['staleIdentityScanned', '🧬 Проверено устаревших привязок', false],
+    ['duplicatePairs', '👯 Пар-дубликатов', false],
+    ['sharedIdentityPairs', '🔀 Пар с общим профилем на панели', false],
+    ['pairsExamined', '🔎 Пар проверено', true],
+    ['merged', '🔗 Объединено', true],
+    ['wouldMerge', '🔗 Можно объединить', false],
+    ['refused', '⛔ Отказано', false],
+    ['suppressedSinceLastReport', '🔁 Таких же с прошлого оповещения', false],
+  ];
+  for (const [key, label, showZero] of counted) {
+    const value = countOf(meta[key]);
+    if (value !== null && (showZero || value > 0)) facts.push(`${label}: ${value}`);
+  }
+  if (meta['hasMore'] === true) facts.push('➕ Обработано не всё: остались строки на следующий запуск');
+  const fieldList = (value: unknown): string | null =>
+    Array.isArray(value) && value.length > 0
+      ? `<code>${escapeHtml(value.map((field) => String(field)).join(', '))}</code>`
+      : null;
+  const unknownFields = fieldList(meta['unknownFields']);
+  if (unknownFields !== null) facts.push(`🧬 Незнакомые поля: ${unknownFields}`);
+  const missingFields = fieldList(meta['missingFields']);
+  if (missingFields !== null) facts.push(`🕳 Нет ожидаемых полей: ${missingFields}`);
+  if (typeof meta['panelEra'] === 'string' && meta['panelEra'].length > 0)
+    facts.push(`🌊 Поколение панели: <code>${escapeHtml(meta['panelEra'])}</code>`);
+  if (typeof meta['panelVersion'] === 'string' && meta['panelVersion'].length > 0)
+    facts.push(`🏷 Версия панели: <code>${escapeHtml(meta['panelVersion'])}</code>`);
+  if (typeof meta['syncJobId'] === 'string')
+    facts.push(`🔄 Задача синхронизации: <code>${escapeHtml(meta['syncJobId'])}</code>`);
+  if (typeof meta['transactionId'] === 'string')
+    facts.push(`🧾 Транзакция: <code>${escapeHtml(meta['transactionId'])}</code>`);
+  return factBlock('🔄 <b>Синхронизация:</b>', facts);
+}
+
 // ── Event presentation (emoji + Russian title) ──────────────────────────────
+
+/** The failure header of a type whose title announces a success. */
+export interface EventWarningHeader {
+  readonly emoji: string;
+  readonly title: string;
+  /**
+   * Also wear this header at INFO when the metadata reports a failure.
+   *
+   * For a producer that raises a partial result without raising the severity:
+   * `broadcast.batch_completed` is INFO whether or not the batch lost
+   * recipients, and «Партия рассылки отправлена!» over «40 failed» is the same
+   * success-titled failure the warning header exists to end.
+   */
+  readonly whenMetadata?: (metadata: Readonly<Record<string, unknown>>) => boolean;
+}
+
+/** How one registered event type looks on its Telegram card. */
+export interface EventPresentation {
+  readonly emoji: string;
+  readonly title: string;
+  /**
+   * The header for this type when it is raised as a failure — any severity
+   * above INFO, or an INFO its `whenMetadata` recognises.
+   *
+   * For the handful of types whose title announces a success and whose
+   * producers also raise failures under the same type: a backup that never
+   * reached Telegram arrived as «Резервная копия создана!», a broadcast that
+   * reached 40 of 400 as «Рассылка отправлена!».
+   *
+   * A header, deliberately, and not a new event type per failure. A new type
+   * is not ticked in any saved `selected`-mode selection — registering makes a
+   * type tickable, never ticked — so every operator who ticked «backup
+   * completed» to hear about backups would have stopped hearing about the
+   * failed ones, and every automation rule and outbound webhook bound to the
+   * old type would have gone quiet the same way. Only the words on the card
+   * change; the stream, the audit log and every subscriber see what they saw.
+   */
+  readonly warning?: EventWarningHeader;
+  /**
+   * Headers for producers that raise this type about a different situation,
+   * chosen by what their metadata carries. Checked before `warning`.
+   *
+   * `payment.amount_mismatch` is the case: the manual-review hold is one
+   * mechanism for every "money situation a human must settle", so a completion
+   * YooKassa refused to confirm is held under it too — and arrived as «Оплачена
+   * неверная сумма!» about a payment whose sum nobody disputed.
+   */
+  readonly variants?: readonly EventHeaderVariant[];
+  /**
+   * Print the producer's message under the title: at WARNING and above
+   * (`'warning'`), or at every severity (`'always'`). Absent — the default,
+   * and right for almost every type — the card is title + blocks and the
+   * message stays in the audit log and the event feed.
+   *
+   * Opt in ONLY when the message is Russian text meant for the operator: an
+   * automation's own text, or a sentence written in Russian for the card.
+   * Producer messages are the English audit-log text. Printed, they put English
+   * sentences on Russian cards and restated in English what the blocks already
+   * said; a fact that lives only in a message belongs in its metadata, rendered
+   * by a block, and an instruction belongs in a Russian `note`.
+   * `test/system-events-card-language.spec.ts` renders every type that opts in.
+   */
+  readonly showMessage?: 'warning' | 'always';
+}
+
+/** A header one producer of a shared type wears, picked by its metadata. */
+export interface EventHeaderVariant {
+  readonly emoji: string;
+  readonly title: string;
+  readonly when: (metadata: Readonly<Record<string, unknown>>) => boolean;
+}
 
 /**
  * Per-event-type presentation: a distinctive emoji and a human Russian title
@@ -2506,7 +3320,7 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
  * type gets its own identity instead of a generic severity icon. Falls back to
  * `severityEmoji` + the raw `event.message` when a type isn't mapped here.
  */
-export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }> = {
+export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   // User
   'user.registered': { emoji: '🆕', title: 'Новый пользователь' },
   'user.web_registered': { emoji: '🆕', title: 'Регистрация через сайт' },
@@ -2546,11 +3360,31 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
 
   // Payment
   'payment.checkout_created': { emoji: '🧾', title: 'Создан счёт на оплату' },
-  'payment.completed': { emoji: '💰', title: 'Платёж получен' },
+  // WARNING: the money arrived and something about it needs a decision — today
+  // that is a customer blocked between invoice and payment.
+  'payment.completed': {
+    emoji: '💰',
+    title: 'Платёж получен',
+    warning: { emoji: '⚠️', title: 'Платёж получен, нужна проверка' },
+  },
   'payment.failed': { emoji: '❌', title: 'Платёж не прошёл' },
   'payment.refunded': { emoji: '↩️', title: 'Платёж возвращён' },
   'payment.refund_partial': { emoji: '⚠️', title: 'Частичный возврат платежа' },
-  'payment.amount_mismatch': { emoji: '⚠️', title: 'Оплачена неверная сумма' },
+  'payment.amount_mismatch': {
+    emoji: '⚠️',
+    title: 'Оплачена неверная сумма',
+    variants: [
+      {
+        // `PaymentReconciliationService.flagUnconfirmedCompletionForReview`:
+        // YooKassa's own answer contradicted a "succeeded" notification. Only
+        // that producer sets `verificationReason`; the underpayment hold never
+        // does, so the key is the whole difference.
+        emoji: '🛡',
+        title: 'Платёж не подтверждён провайдером',
+        when: (metadata) => isPresent(metadata['verificationReason']),
+      },
+    ],
+  },
   // Reads as a note, not as a task: ℹ️ against the ⚠️ above, and the outcome
   // («Платёж проведён») before the discrepancy. The operator has to be able to
   // skip this one and open the mismatch card without reading either.
@@ -2623,25 +3457,82 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
 
   // System
   'system.startup': { emoji: '🚀', title: 'Запуск системы' },
-  'system.backup_completed': { emoji: '🗄', title: 'Резервная копия создана' },
-  'system.restore_completed': { emoji: '♻️', title: 'База восстановлена из копии' },
-  'system.broadcast_sent': { emoji: '📢', title: 'Рассылка отправлена' },
+  // WARNING is every way a backup failed to get off the box: not delivered,
+  // too large, the relay never confirmed, or retention deleted the only copy.
+  // The «Доставка» line says which — no `showMessage`: every producer's
+  // sentence restates that line (and the file name) in English.
+  'system.backup_completed': {
+    emoji: '🗄',
+    title: 'Резервная копия создана',
+    warning: { emoji: '⚠️', title: 'Резервная копия не доставлена в Telegram' },
+  },
+  // WARNING is a restore whose pending migrations did not run; the backup
+  // block's «Миграции» line says so. What to do about it — restart the API
+  // container — is its producer's `note` to give, in Russian.
+  'system.restore_completed': {
+    emoji: '♻️',
+    title: 'База восстановлена из копии',
+    warning: { emoji: '⚠️', title: 'База восстановлена, но миграции не применены' },
+  },
+  // WARNING is the partial delivery; delivered-to-nobody is ERROR and gets the
+  // incident card. Both counts are in the details block, so no message.
+  'system.broadcast_sent': {
+    emoji: '📢',
+    title: 'Рассылка отправлена',
+    warning: { emoji: '⚠️', title: 'Рассылка доставлена не всем' },
+  },
   'system.bulk_users_executed': { emoji: '👥', title: 'Массовая операция над пользователями' },
   'system.error': { emoji: '🚨', title: 'Системная ошибка' },
   'system.web_push_unconfigured': { emoji: '🔕', title: 'Web-push не настроен' },
-  'broadcast.started': { emoji: '📣', title: 'Рассылка запущена' },
-  'broadcast.batch_completed': { emoji: '📬', title: 'Партия рассылки отправлена' },
+  // WARNING is a recall that removed only part of a batch, or a stalled or lost
+  // broadcast the reconciler put back in the queue. Every count, the channel
+  // copy's fate and the revival attempt are in the «Рассылка» block.
+  'broadcast.started': {
+    emoji: '📣',
+    title: 'Рассылка запущена',
+    warning: { emoji: '⚠️', title: 'Проблема с рассылкой' },
+  },
+  // Always INFO, failures or not (`BroadcastProcessor.handleBatch`); the
+  // «Рассылка» block carries its counts.
+  'broadcast.batch_completed': {
+    emoji: '📬',
+    title: 'Партия рассылки отправлена',
+    warning: {
+      emoji: '⚠️',
+      title: 'Партия рассылки доставлена не всем',
+      whenMetadata: (metadata) => Number(metadata['failed'] ?? 0) > 0,
+    },
+  },
+  // Why the copy did not go (`channelPost`: `dropped` / `disabled`) is a line
+  // of the «Рассылка» block.
   'broadcast.channel_post_undelivered': { emoji: '📭', title: 'Пост в канал не доставлен' },
+  // The «Импорт» block carries what the three INFO producers counted;
+  // `import.failed` is ERROR and never reaches this card.
   'import.completed': { emoji: '📥', title: 'Импорт завершён' },
   'import.plan_assigned': { emoji: '🏷', title: 'Массовое назначение плана' },
   'plan.retired_removed': { emoji: '🗑', title: 'Тариф удалён: на нём никого не осталось' },
-  'import.sync_enqueued': { emoji: '🔄', title: 'Синхронизация после импорта поставлена в очередь' },
-  'automation.telegram_notify': { emoji: '🤖', title: 'Автоматизация: уведомление' },
+  'import.sync_enqueued': {
+    emoji: '🔄',
+    title: 'Синхронизация после импорта поставлена в очередь',
+  },
+  // The message is the operator's own text from the rule; the card without it
+  // was a notification that notified nobody of anything. Never capped — see
+  // `isOperatorWrittenMessage` — and not printed when it is the rule's
+  // English default text (`isDefaultAutomationText`).
+  'automation.telegram_notify': {
+    emoji: '🤖',
+    title: 'Автоматизация: уведомление',
+    showMessage: 'always',
+  },
   // The DEFAULT type of the `system_event` action. A rule that names its own
   // type keeps doing so and lands under the catch-all tick-box instead — this
   // entry exists so the common case (no `type` in the action params) reads
   // like every other event rather than like an unregistered one.
-  'automation.custom': { emoji: '🤖', title: 'Автоматизация: своё событие' },
+  'automation.custom': {
+    emoji: '🤖',
+    title: 'Автоматизация: своё событие',
+    showMessage: 'always',
+  },
   // These three never reach `formatTelegramMessage` today: `isErrorEvent`
   // matches ERROR severity OR a kind ending in `.error`, and error events are
   // rendered by `formatErrorEventCardHtml`, which has its own fixed header.
@@ -2650,8 +3541,19 @@ export const EVENT_PRESENTATION: Record<string, { emoji: string; title: string }
   'import.failed': { emoji: '🚨', title: 'Импорт не удался' },
   'client.error': { emoji: '🖥', title: 'Ошибка в админ-панели' },
   'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },
+  // No message: its sentence is `Reiwa relay did not deliver <route>
+  // (<status>)`, and the route and the status are both in the details block.
   'reiwa.relay_undelivered': { emoji: '📡', title: 'Вебхук в reiwa не доставлен' },
-  'telegram.direct_undelivered': { emoji: '📵', title: 'Панель не доставила карточку в Telegram' },
+  // The message carries what the operator does about it («Telegram отклонил
+  // токен бота — проверьте…»), which no metadata key renders.
+  'telegram.direct_undelivered': {
+    emoji: '📵',
+    title: 'Панель не доставила карточку в Telegram',
+    showMessage: 'warning',
+  },
+  // Ten producers, all of whose sentences are English paragraphs. Their counts
+  // and identifiers are in the «Синхронизация» block; the instructions several
+  // of them exist to give are their producers' `note`s to write, in Russian.
   'system.remnawave_sync': { emoji: '🔄', title: 'Синхронизация с Remnawave' },
   'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
   'notification.template.created': { emoji: '📝', title: 'Создан шаблон уведомления' },
@@ -2754,6 +3656,9 @@ function humanizeSource(value: unknown): string {
     case 'WEB_CABINET':
     case 'WEB':
       return 'Веб-кабинет';
+    // `SubscriptionDeletionService`: the customer removed it in the cabinet.
+    case 'SELF_SERVICE_DELETE':
+      return 'Удаление пользователем в кабинете';
     case 'BOT':
       return 'Telegram-бот / Mini App';
     case 'API':
@@ -2776,25 +3681,26 @@ function humanizeSource(value: unknown): string {
 
 /**
  * Tolerant date formatter: ISO/Date-ish values render as `ru-RU` locale
- * date+time; anything else (already-formatted strings, plain labels) is
- * returned escaped as-is so the card never shows "Invalid Date".
+ * date+time in `timeZone`, with the zone named; anything else
+ * (already-formatted strings, plain labels) is returned escaped as-is so the
+ * card never shows "Invalid Date".
  */
-function fmtDate(value: unknown): string {
+function fmtDate(value: unknown, timeZone: string): string {
   if (value === null || value === undefined) return '';
   if (value instanceof Date) {
     return Number.isNaN(value.getTime())
       ? escapeHtml(String(value))
-      : value.toLocaleString('ru-RU');
+      : fmtInstant(value, timeZone);
   }
   if (typeof value === 'number') {
     const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? escapeHtml(String(value)) : d.toLocaleString('ru-RU');
+    return Number.isNaN(d.getTime()) ? escapeHtml(String(value)) : fmtInstant(d, timeZone);
   }
   if (typeof value === 'string') {
     // Only attempt parsing for ISO-like strings to avoid mangling labels.
     if (/^\d{4}-\d{2}-\d{2}[T\s]/.test(value) || /^\d{4}-\d{2}-\d{2}$/.test(value)) {
       const d = new Date(value);
-      if (!Number.isNaN(d.getTime())) return d.toLocaleString('ru-RU');
+      if (!Number.isNaN(d.getTime())) return fmtInstant(d, timeZone);
     }
     return escapeHtml(value);
   }

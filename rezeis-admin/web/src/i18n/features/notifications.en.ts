@@ -11,9 +11,10 @@ export const en = {
     subtitle: 'Manage user notifications, system alerts, and Telegram delivery settings',
     tabs: {
       user: 'User',
-      system: 'System',
       settings: 'Delivery settings',
     },
+    operatorCardsHint:
+      'Which events reach the admin Telegram group as cards is chosen on the “Delivery settings” tab: turn on “Only selected events” and tick the types in the list.',
     userLabels: {
       expires_in_3_days: 'Subscription expires in 3 days',
       expires_in_2_days: 'Subscription expires in 2 days',
@@ -35,21 +36,6 @@ export const en = {
       'advertising.request_rejected': 'Placement request declined',
       'advertising.request_activated': 'Placement is live',
     },
-    systemLabels: {
-      bot_lifetime: 'Bot uptime',
-      bot_update: 'Bot update',
-      user_registered: 'New user (bot)',
-      web_user_registered: 'New user (web)',
-      web_account_linked: 'Telegram linked to web account',
-      access_policy: 'Access policy change',
-      subscription: 'Subscription created/changed',
-      promocode_activated: 'Promo code activated',
-      trial_getted: 'Trial period received',
-      node_status: 'Remnawave node status',
-      user_first_connected: 'First VPN connection',
-      user_first_traffic: 'User started using traffic',
-      user_hwid: 'New device (HWID)',
-    },
     categoryLabels: {
       USER: 'Users',
       AUTH: 'Auth',
@@ -68,10 +54,6 @@ export const en = {
     userNotifications: {
       title: 'User notifications',
       description: 'Which notifications reach users via the Telegram bot and browser push. Turning one off keeps it in the in-app cabinet feed but stops the push.',
-    },
-    systemNotifications: {
-      title: 'System notifications',
-      description: 'Which system events are sent to the admin Telegram group',
     },
     templates: {
       title: 'Message templates',
@@ -126,8 +108,8 @@ export const en = {
       topicHint: 'If the group is a forum, specify the topic ID. Empty = general chat.',
       routingTitle: 'Category routing',
       routingDescription: 'Specify a topic ID for each event category. Empty = default topic.',
-      errorTopicLabel: 'Errors (ERROR)',
-      errorTopicHint: 'All ERROR-severity events (error logs) go to this topic regardless of category. Empty = follow category routing.',
+      errorTopicLabel: 'Error report topic',
+      errorTopicHint: 'Every error report goes to this topic regardless of category: ERROR-severity events, and events of any severity whose type ends in “.error” — for example client.error, reiwa.error and system.error, as well as such types raised by automation rules or reported by reiwa. Empty = follow category routing.',
       topicHelp: 'How to get a topic ID: open the topic → "Copy link". In a link like t.me/c/3713706224/10, the number after /c/ with a -100 prefix is the Chat ID (-1003713706224), and the last number (10) is the topic ID. The "General" topic has no ID — leave the field empty.',
       eventsSelectLabel: 'Only selected events',
       eventsSelectDescription: 'When on, only the ticked event types are delivered to Telegram. Unselected events go nowhere (not even the bot DM), yet remain visible and tracked in the rezeis panel.',

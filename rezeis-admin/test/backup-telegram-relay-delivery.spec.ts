@@ -97,7 +97,15 @@ describe('a failed Telegram relay is not recorded as an off-site delivery', () =
     {
       label: 'a non-2xx response',
       expectedStatus: 'rejected',
-      fetch: async () => ({ ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({}) }),
+      // `headers`, as a real `Response` always has: the client reads the
+      // cabinet's `Retry-After` off a refusal.
+      fetch: async () => ({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        headers: new Headers(),
+        json: async () => ({}),
+      }),
     },
     {
       label: 'a 204 with no body to carry a message id',
@@ -195,6 +203,30 @@ describe('a failed Telegram relay is not recorded as an off-site delivery', () =
     });
   }
 
+  it('names the size cap as the reason when the archive is too large to send', async () => {
+    // Every other non-delivery names its reason in `relayStatus`, and the card
+    // reads that one field for all of them. This alert used to carry none, so
+    // the card could only guess — and it guessed «too large» for everybody.
+    const saved = process.env.BACKUP_MAX_DELIVERY_BYTES;
+    process.env.BACKUP_MAX_DELIVERY_BYTES = '4';
+    try {
+      const h = buildHarness(async () => {
+        throw new Error('an oversized archive must never reach the relay');
+      });
+
+      const outcome = await h.service.attemptTelegramDelivery('backup-1', h.filename);
+
+      assert.equal(outcome.delivered, false);
+      assert.equal(h.fetchCalls.length, 0);
+      assert.equal(h.warnings.length, 1);
+      assert.equal(h.warnings[0]?.meta.deliveredToTelegram, false);
+      assert.equal(h.warnings[0]?.meta.relayStatus, 'too_large_for_telegram');
+    } finally {
+      if (saved === undefined) delete process.env.BACKUP_MAX_DELIVERY_BYTES;
+      else process.env.BACKUP_MAX_DELIVERY_BYTES = saved;
+    }
+  });
+
   it('still records a confirmed relay exactly as before', async () => {
     // The control. If the harness above ever stops reaching the relay path —
     // wrong env, missing file, size cap, a config typo — this goes red, so the
@@ -264,6 +296,9 @@ describe('retention spends duplicated copies before sole ones', () => {
     assert.equal(warnings.length, 1);
     assert.match(String(warnings[0]?.message), /only copy of doomed\.sql\.gz/);
     assert.equal(warnings[0]?.meta.deliveredToTelegram, false);
+    // What lets the card say «копии больше нет» instead of «только локально»:
+    // of every non-delivery this is the one with no local file left either.
+    assert.equal(warnings[0]?.meta.deletedByRetention, true);
   });
 
   it('leaves the count-and-recency policy untouched when every backup is off-site', async () => {

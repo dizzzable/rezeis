@@ -121,6 +121,30 @@ function defaultWhy(surface: string): string {
   }
 }
 
+/**
+ * "Why it matters" for the few scopes where the surface default would lie.
+ *
+ * `api.upstream-unreachable` is the cabinet's own name for a request that
+ * failed because something it depends on — in practice the panel — did not
+ * answer in time or could not be reached (`EAI_AGAIN`, `ECONNREFUSED`,
+ * `ETIMEDOUT`, …; see `reiwa/src/api/transient-upstream.ts`). The cabinet
+ * answers those with `503` and `Retry-After`, deliberately NOT `500`, and says
+ * so in that file. The `API` default below reads «необработанная ошибка… 500»,
+ * which sent the operator hunting for a crash in the cabinet when the thing to
+ * check was whether the panel was reachable from it.
+ */
+function scopeWhy(scope: string | null, meta: Record<string, unknown>): string | null {
+  if (scope === 'api.upstream-unreachable') {
+    const code = readStr(meta, 'code');
+    return (
+      `Панель (или другой сервис, от которого зависит запрос) не ответила кабинету вовремя ` +
+      `или была недоступна${code !== null ? ` (${code})` : ''}. Пользователь получил ответ 503 ` +
+      'с предложением повторить запрос — это сбой связи, а не ошибка 500 в кабинете.'
+    );
+  }
+  return null;
+}
+
 function defaultNextSteps(hasStack: boolean, txtAttached: boolean): string {
   if (txtAttached) {
     return 'Откройте приложенный .txt со stack trace и проверьте операцию, в которой возникла ошибка.';
@@ -165,7 +189,7 @@ export function deriveError(
     filename,
     lineno,
     colno,
-    why: readStr(meta, 'why') ?? defaultWhy(surface),
+    why: readStr(meta, 'why') ?? scopeWhy(readStr(meta, 'scope'), meta) ?? defaultWhy(surface),
     nextSteps: readStr(meta, 'nextSteps') ?? defaultNextSteps(stack !== null, txtAttached),
     build,
     stack,
@@ -294,12 +318,41 @@ export function formatErrorReportTxt(
 }
 
 /**
+ * THE rule for "this event is an incident report" — the one both halves of
+ * Telegram delivery have to agree on.
+ *
+ * ERROR severity qualifies, and so does a type named `*.error` at any
+ * severity: `client.error` is always WARNING (`ClientErrorsController`) and
+ * `reiwa.error` is WARNING whenever the cabinet reports at level `warning`,
+ * and both are still incidents with a stack trace worth a `.txt`.
+ *
+ * It used to exist twice. The card renderer asked this question; the topic
+ * router asked `severity === 'ERROR'` instead. So a WARNING `client.error` was
+ * drawn as an incident card with its `.txt` attached — and then filed in the
+ * category topic, «Система», instead of the error topic the operator set up
+ * for exactly those cards. `resolveTelegramDeliveryTarget` now calls this
+ * function rather than restating it.
+ *
+ * `type` is the bare event type (`client.error`), not the audit `kind`
+ * (`event.client.error`); `(^|\.)` keeps the two spellings answering alike.
+ */
+export function isErrorReportEvent(event: {
+  readonly severity?: string;
+  readonly type: string;
+}): boolean {
+  return event.severity === 'ERROR' || /(^|\.)error$/.test(event.type);
+}
+
+/**
  * `true` when an event should be treated as an error report (drives the
- * pretty card, .txt attachment, and auto-archive). ERROR severity OR a
- * `*.error` event kind both qualify.
+ * pretty card, .txt attachment, and auto-archive). The same answer as
+ * {@link isErrorReportEvent}, asked of the normalized report shape.
  */
 export function isErrorEvent(event: { readonly severity: string; readonly kind: string }): boolean {
-  return event.severity === 'ERROR' || /\.error$/.test(event.kind);
+  return isErrorReportEvent({
+    severity: event.severity,
+    type: event.kind.replace(/^event\./, ''),
+  });
 }
 
 /** Stable, filesystem-safe filename for an error .txt artifact. */

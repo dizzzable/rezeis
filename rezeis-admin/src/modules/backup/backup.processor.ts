@@ -176,6 +176,14 @@ export class BackupProcessor extends WorkerHost {
         migrationsApplied,
         customEmojiAssets,
         allowForeignArchive: allowForeignArchive === true,
+        // The card prints no message, so the instruction travels as its note.
+        ...(migrationsApplied
+          ? {}
+          : {
+              note:
+                'Данные восстановлены, но миграции этой сборки не применены — перезапустите контейнер API панели: ' +
+                'при запуске он применит их сам (если не задан RUID_SKIP_MIGRATIONS=true).',
+            }),
       },
       adminId: initiatedBy,
     });

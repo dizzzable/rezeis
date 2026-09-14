@@ -593,6 +593,8 @@ export class SubscriptionDeletionService {
           userId: outcome.userId,
           panelUsername,
           source,
+          // The operator card prints no message; the instruction is its note.
+          note: 'Подписка удалена, а её профиль на панели остался и работает без оплаты — удалите его в Remnawave вручную.',
         },
       );
     } catch (error: unknown) {

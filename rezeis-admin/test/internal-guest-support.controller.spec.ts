@@ -118,6 +118,27 @@ describe('InternalGuestSupportController', () => {
     await assert.rejects(() => controller.reply('wrong', body), isNotFound);
   });
 
+  it('names the conversation on the reply and attachment events', async () => {
+    // Without `ticketId` the operator's card said a guest had replied somewhere,
+    // and the admin push — which deep-links `/support-tickets?ticket=` off this
+    // exact field — opened the ticket list instead of the ticket.
+    const { controller, calls } = build();
+    await controller.reply('tok-abc', { content: 'still broken' });
+    assert.equal(calls.events[0].metadata.ticketId, 't-1');
+    assert.equal(calls.events[0].metadata.subject, 'Payment failed');
+
+    const withUpload = build();
+    (withUpload.controller as unknown as { guestService: { addAttachment: unknown } }).guestService.addAttachment =
+      async () => TICKET_ENTITY;
+    await withUpload.controller.upload('tok-abc', {
+      filename: 'screen.png',
+      mimeType: 'image/png',
+      dataBase64: 'iVBORw0KGgo=',
+    } as never);
+    assert.equal(withUpload.calls.events[0].type, 'support.ticket_user_reply');
+    assert.equal(withUpload.calls.events[0].metadata.ticketId, 't-1');
+  });
+
   it('close returns ok for a valid token and 404 otherwise', async () => {
     const { controller } = build();
     assert.deepEqual(await controller.close('tok-abc'), { ok: true });

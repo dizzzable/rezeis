@@ -1925,9 +1925,11 @@ function buildPaymentOpsAlertTestMessage(input: {
   readonly adminId: string;
 }): string {
   const note = input.note?.trim();
+  // Once each, as the real alert does (`buildWebhookAlertMessage`): with the
+  // default tag the operator's tag and `#payments_ops` are the same string.
+  const hashtags = [...new Set([input.settings.hashtag ?? '#payments_ops', '#payments_ops'])];
   const lines = [
-    input.settings.hashtag ?? '#payments_ops',
-    '#payments_ops',
+    ...hashtags,
     '#event_test_alert',
     'kind:payment_ops_test',
     `admin_id:${input.adminId}`,

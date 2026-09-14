@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 
+import { isErrorEvent } from '../src/common/services/error-report.util';
+import { SystemEventsService } from '../src/common/services/system-events.service';
 import { resolveTelegramDeliveryTarget, isEventTelegramAllowed } from '../src/common/services/telegram-delivery-target.util';
+import { BotNotifierClient } from '../src/modules/notifications/services/bot-notifier.client';
+import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 
 /**
  * System-events Telegram delivery fallback contract.
@@ -74,6 +78,121 @@ describe('resolveTelegramDeliveryTarget', () => {
 
   it('returns null when neither a primary chat nor a dev chat is set', () => {
     assert.equal(resolveTelegramDeliveryTarget(BASE, EVENT), null);
+  });
+
+  it('routes a WARNING `client.error` to the error topic, where its incident card belongs', () => {
+    // `ClientErrorsController` always raises `client.error` as WARNING, and the
+    // card renderer draws it as an incident card with a `.txt` because of its
+    // `.error` name. This router used to ask `severity === 'ERROR'` instead, so
+    // that incident card landed in the SYSTEM topic.
+    const target = resolveTelegramDeliveryTarget(
+      { ...BASE, enabled: true, chatId: '-100123', topicMap: { SYSTEM: 3 }, errorTopicId: 7 },
+      { type: 'client.error', severity: 'WARNING', category: 'SYSTEM' },
+    );
+    assert.equal(target?.topicId, 7);
+  });
+
+  it('files each way into an error report — and nothing else — in the error topic', () => {
+    // Every row states its answer outright. This case used to compare the
+    // router with `isErrorEvent`, which is now the router's own predicate, so
+    // a wrong rule agreed with itself and passed. Written-down topics (and the
+    // written-down card kind beside them) fail on a change to either side.
+    const config = {
+      ...BASE,
+      enabled: true,
+      chatId: '-100123',
+      topicMap: { SYSTEM: 3, PAYMENT: 42 },
+      errorTopicId: 7,
+    };
+    const table = [
+      // The three ways in: ERROR severity, and an `.error` type at any severity.
+      { type: 'client.error', severity: 'WARNING', category: 'SYSTEM', topic: 7, errorCard: true },
+      { type: 'reiwa.error', severity: 'WARNING', category: 'SYSTEM', topic: 7, errorCard: true },
+      { type: 'reiwa.error', severity: 'ERROR', category: 'SYSTEM', topic: 7, errorCard: true },
+      { type: 'payment.failed', severity: 'ERROR', category: 'PAYMENT', topic: 7, errorCard: true },
+      // And the near misses, which stay in their category's topic.
+      { type: 'system.backup_completed', severity: 'WARNING', category: 'SYSTEM', topic: 3, errorCard: false },
+      { type: 'payment.completed', severity: 'INFO', category: 'PAYMENT', topic: 42, errorCard: false },
+      { type: 'system.error_rate', severity: 'WARNING', category: 'SYSTEM', topic: 3, errorCard: false },
+      { type: 'client.errors', severity: 'WARNING', category: 'SYSTEM', topic: 3, errorCard: false },
+      { type: 'system.dberror', severity: 'WARNING', category: 'SYSTEM', topic: 3, errorCard: false },
+    ] as const;
+    for (const row of table) {
+      const label = `${row.type}@${row.severity}`;
+      assert.equal(resolveTelegramDeliveryTarget(config, row)?.topicId, row.topic, `${label}: topic`);
+      assert.equal(
+        isErrorEvent({ severity: row.severity, kind: `event.${row.type}` }),
+        row.errorCard,
+        `${label}: card kind`,
+      );
+    }
+  });
+});
+
+describe('an error report delivered by the real service', () => {
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it('sends the `client.error` incident card and its `.txt` to the error topic', async () => {
+    // End to end through `SystemEventsService.deliverTelegram` on the split
+    // deployment (no local token → reiwa relay), because the defect was two
+    // halves of that method disagreeing, not either helper alone.
+    const relayed: Array<{ event: string; meta: Record<string, unknown> }> = [];
+    const relayQueue = {
+      enqueue: async (event: string, meta: Record<string, unknown>) => {
+        relayed.push({ event, meta });
+        return true;
+      },
+    };
+    const service = new SystemEventsService(
+      {
+        settings: {
+          findFirst: async () => ({
+            systemNotifications: {
+              telegram: {
+                enabled: true,
+                chatId: '-100123',
+                topics: { SYSTEM: 3 },
+                errorTopicId: 7,
+              },
+            },
+          }),
+        },
+        adminAuditLog: { create: async () => ({}) },
+      } as never,
+      { enabled: false, urls: [] } as never,
+      {
+        post: () => {
+          throw new Error('Bot API must not be called without a token');
+        },
+      } as never,
+      {
+        get: (token: unknown) => {
+          if (token === ReiwaRelayQueueService) return relayQueue;
+          if (token === BotNotifierClient) return { deliverRelayEvent: async () => ({ status: 'confirmed' }) };
+          throw new Error('not registered');
+        },
+      } as never,
+    );
+
+    service.warn('client.error', 'SYSTEM', 'Cannot read properties of undefined', {
+      source: 'panel',
+      stack: 'TypeError: x\n    at y',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(relayed.length, 1, `expected one relayed card; got ${JSON.stringify(relayed)}`);
+    assert.equal(relayed[0].event, 'reiwa.channel.broadcast.document', 'an incident card with its .txt');
+    assert.equal(relayed[0].meta['topicThreadId'], 7);
   });
 });
 

@@ -15,7 +15,6 @@ import {
   Info,
   Loader2,
   Mail,
-  MessageSquare,
   Power,
   RotateCcw,
   Save,
@@ -102,21 +101,6 @@ const USER_NOTIFICATION_KEYS = [
   'advertising.request_countered',
   'advertising.request_rejected',
   'advertising.request_activated',
-] as const
-
-const SYSTEM_NOTIFICATION_KEYS = [
-  'bot_lifetime',
-  'bot_update',
-  'user_registered',
-  'web_user_registered',
-  'web_account_linked',
-  'access_policy',
-  'subscription',
-  'promocode_activated',
-  'trial_getted',
-  'node_status',
-  'user_first_connected',
-  'user_hwid',
 ] as const
 
 const EVENT_CATEGORIES = ['USER', 'AUTH', 'SUBSCRIPTION', 'DEVICE', 'PAYMENT', 'REFERRAL', 'PARTNER', 'PROMOCODE', 'SUPPORT', 'FRAUD', 'NODE', 'REMNAWAVE', 'SYSTEM'] as const
@@ -274,15 +258,17 @@ export default function NotificationsPage() {
         </div>
       </FadeIn>
 
+      {/* There was a «Системные» tab between these two: twelve switches saved
+          into `systemNotifications` that nothing in the panel or the cabinet
+          ever read, so turning one off changed nothing. What an operator
+          actually chooses is which event types reach the Telegram group, and
+          that is the event list inside «Доставка в Telegram» — the note below
+          sends them there instead of leaving a dead control in its place. */}
       <Tabs defaultValue="user">
         <TabsList className="flex-wrap">
           <TabsTrigger value="user" className="gap-1.5">
             <Users className="h-3.5 w-3.5" />
             {t('notificationsPage.tabs.user')}
-          </TabsTrigger>
-          <TabsTrigger value="system" className="gap-1.5">
-            <MessageSquare className="h-3.5 w-3.5" />
-            {t('notificationsPage.tabs.system')}
           </TabsTrigger>
           <TabsTrigger value="settings" className="gap-1.5">
             <Settings2 className="h-3.5 w-3.5" />
@@ -290,12 +276,13 @@ export default function NotificationsPage() {
           </TabsTrigger>
         </TabsList>
 
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          {t('notificationsPage.operatorCardsHint')}
+        </p>
+
         <TabsContent value="user" className="pt-4">
           <UserNotificationsTab />
-        </TabsContent>
-
-        <TabsContent value="system" className="pt-4">
-          <SystemNotificationsTab />
         </TabsContent>
 
         <TabsContent value="settings" className="pt-4">
@@ -580,67 +567,6 @@ function UserNotificationsTab() {
         </DialogContent>
       </Dialog>
     </div>
-  )
-}
-
-// ── System Notifications Tab ─────────────────────────────────────────────────
-
-function SystemNotificationsTab() {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-
-  const { data: settings, isLoading } = useQuery({
-    queryKey: adminQueryKeys.settings.all,
-    queryFn: async () => (await api.get('/admin/settings')).data,
-  })
-
-  const notifSettings = (settings?.systemNotifications ?? {}) as Record<string, boolean>
-
-  const toggleMutation = useMutation({
-    mutationFn: (data: { systemNotifications: Record<string, boolean> }) =>
-      api.patch('/admin/settings/notifications', data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: adminQueryKeys.settings.all })
-      toast.success(t('notificationsPage.toasts.settingUpdated'))
-    },
-    onError: () => toast.error(t('notificationsPage.toasts.settingFailed')),
-  })
-
-  // The flipped key alone. `systemNotifications` also holds the emoji packs,
-  // backup, Telegram routing, payment-ops and bot-emoji settings, which other
-  // pages save without refetching this query — sending the loaded object back
-  // restored all of them to what they were when this page loaded.
-  function handleToggle(key: string, current: boolean) {
-    toggleMutation.mutate({
-      systemNotifications: { [key]: !current },
-    })
-  }
-
-  if (isLoading) return <Skeleton className="h-64 w-full" />
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t('notificationsPage.systemNotifications.title')}</CardTitle>
-        <CardDescription>
-          {t('notificationsPage.systemNotifications.description')}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {SYSTEM_NOTIFICATION_KEYS.map((key) => {
-          const enabled = notifSettings[key] ?? true
-          return (
-            <div key={key} className="flex items-center justify-between py-1">
-              <div>
-                <Label className="text-sm">{t(String(`notificationsPage.systemLabels.${key}`))}</Label>
-                <p className="text-[11px] text-muted-foreground font-mono">{key}</p>
-              </div>
-              <Switch checked={enabled} onCheckedChange={() => handleToggle(key, enabled)} />
-            </div>
-          )
-        })}
-      </CardContent>
-    </Card>
   )
 }
 
