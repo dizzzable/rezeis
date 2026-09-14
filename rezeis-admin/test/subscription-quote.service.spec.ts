@@ -521,6 +521,45 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
+  // A deleted plan is switched off as it is stamped, but an older image running
+  // on the same database can switch the flags back on. `TRANSITION_TARGET_WHERE`
+  // reads the stamp too, so such a row is no replacement to renew onto — the
+  // same answer `SubscriptionRenewalService` and the delete dialog's
+  // `replacementOrphans` read from that one object.
+  it('does not offer a deleted replacement whose flags were turned back on', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'old-plan' })],
+      plans: [
+        createPlan({
+          id: 'old-plan',
+          availability: PlanAvailability.ALL,
+          isArchived: true,
+          archivedRenewMode: 'REPLACE_ON_RENEW',
+          replacementPlanIds: ['stamped-replacement'],
+        }),
+        {
+          ...createPlan({ id: 'stamped-replacement', availability: PlanAvailability.ALL }),
+          deletedAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+        createPlan({ id: 'catalog-a', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const discovery = await service.getQuote({
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      purchaseType: PurchaseType.RENEW,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      discovery.availablePlans.map((plan) => plan.id),
+      ['catalog-a'],
+      'a deleted plan was offered as the replacement to renew onto',
+    );
+  });
+
   it('calculates discount-aware quote pricing without creating transactions', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2, purchaseDiscount: 20 }),
@@ -608,6 +647,100 @@ describe('SubscriptionQuoteService', () => {
     assert.equal(
       actualQuote.warnings.some((warning) => warning.code === 'TRIAL_ALREADY_USED'),
       true,
+    );
+  });
+
+  // ── A paid trial the buyer cannot claim is not a reason to refuse other plans ─
+  //
+  // The catalogue lists a paid trial that requires a linked Telegram account to
+  // a web-only subscriber, so the NEW/ADDITIONAL quote met it on every request —
+  // and its claim warning rode on the quote for WHATEVER plan was chosen. The
+  // warning is blocking, so a regular plan quoted with a price and was then
+  // refused at checkout (PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE): while that trial was
+  // on sale, such a subscriber could buy nothing at all.
+  for (const purchaseType of [PurchaseType.NEW, PurchaseType.ADDITIONAL]) {
+    it(`keeps a regular plan eligible beside a paid trial the buyer cannot claim (${purchaseType})`, async () => {
+      const service = createService({
+        // No telegramId: a subscriber who registered on the web.
+        user: createUser({ maxSubscriptions: 2 }),
+        subscriptions: [],
+        plans: [
+          createPlan({
+            id: 'telegram-trial',
+            availability: PlanAvailability.TRIAL,
+            trialSettings: { free: false, requireTelegramLink: true },
+          }),
+          createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL }),
+        ],
+      });
+
+      const quote = await service.getQuote({
+        userId: 'user-1',
+        purchaseType,
+        planId: 'regular-plan',
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+      assert.equal(quote.isEligible, true, 'a regular plan was refused over a trial nobody picked');
+      assert.equal(quote.selectedPlan?.id, 'regular-plan');
+      assert.deepStrictEqual(quote.warnings, []);
+    });
+  }
+
+  it('still refuses the unclaimable paid trial itself, and says why', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [],
+      plans: [
+        createPlan({
+          id: 'telegram-trial',
+          availability: PlanAvailability.TRIAL,
+          trialSettings: { free: false, requireTelegramLink: true },
+        }),
+        createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const quote = await service.getQuote({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      planId: 'telegram-trial',
+      durationDays: 30,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(quote.isEligible, false);
+    // The reason first: it is what a client shows, ahead of the bare "not available".
+    assert.deepStrictEqual(
+      quote.warnings.map((warning) => warning.code),
+      ['TRIAL_REQUIRES_TELEGRAM', 'PLAN_NOT_AVAILABLE'],
+    );
+  });
+
+  it('still names the unclaimable paid trial while no plan is chosen', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 2 }),
+      subscriptions: [],
+      plans: [
+        createPlan({
+          id: 'telegram-trial',
+          availability: PlanAvailability.TRIAL,
+          trialSettings: { free: false, requireTelegramLink: true },
+        }),
+        createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL }),
+      ],
+    });
+
+    const discovery = await service.getQuote({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.deepStrictEqual(
+      discovery.warnings.map((warning) => warning.code),
+      ['TRIAL_REQUIRES_TELEGRAM', 'PLAN_SELECTION_REQUIRED'],
     );
   });
 
@@ -838,6 +971,7 @@ function createService(input: {
             readonly id?: { readonly in?: readonly string[] };
             readonly isActive?: boolean;
             readonly isArchived?: boolean;
+            readonly deletedAt?: null;
           };
         } = {},
       ) => {
@@ -853,6 +987,11 @@ function createService(input: {
           if (args.where?.isArchived === false && plan.isArchived === true) {
             return false;
           }
+          // Honoured only when the query asks, as SQL would: a query that stops
+          // asking for live plans must get the deleted one back.
+          if (args.where !== undefined && 'deletedAt' in args.where && args.where.deletedAt === null && plan.deletedAt != null) {
+            return false;
+          }
           return true;
         });
       },
@@ -863,7 +1002,8 @@ function createService(input: {
   const planCatalogService = {
     getCatalogPlans: async () =>
       input.plans
-        .filter((plan) => plan.isActive !== false && plan.isArchived !== true)
+        // The real catalogue filters `deletedAt: null` beside the flags.
+        .filter((plan) => plan.isActive !== false && plan.isArchived !== true && plan.deletedAt == null)
         .map((plan) => ({
           id: plan.id,
         })),

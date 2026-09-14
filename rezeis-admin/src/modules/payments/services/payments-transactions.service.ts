@@ -11,7 +11,10 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readTrialSettings, TrialSettings } from '../../plans/utils/trial-settings.util';
-import { SubscriptionQuoteService } from '../../subscriptions/services/subscription-quote.service';
+import {
+  isPlanAvailabilityRefusal,
+  SubscriptionQuoteService,
+} from '../../subscriptions/services/subscription-quote.service';
 import {
   countCommittedTrialClaimUnits,
   lockTrialClaimUser,
@@ -184,6 +187,18 @@ export class PaymentsTransactionsService {
       quote.selectedPlan === null ||
       quote.selectedDuration === null
     ) {
+      // A plan or term no longer offered gets a code of its own. The safe
+      // filter strips `warnings`, so under the shared code below a client
+      // cannot tell a withdrawn plan from any other refusal — and the cabinet's
+      // answer to a withdrawn plan (drop the stale list, choose again) is a
+      // loop for everything else. Allowlisted in `AdminSafeExceptionFilter`.
+      if (isPlanAvailabilityRefusal(quote.warnings)) {
+        throw new BadRequestException({
+          code: 'PAYMENT_DRAFT_PLAN_NOT_AVAILABLE',
+          message: 'The selected plan or duration is no longer available.',
+          warnings: quote.warnings,
+        });
+      }
       throw new BadRequestException({
         code: 'PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE',
         message: 'Quote is not eligible for transaction draft creation.',

@@ -149,16 +149,52 @@ function hasBlockingWarning(warnings: readonly SubscriptionQuoteWarningInterface
   return warnings.some((warning) => !INFORMATIONAL_WARNING_CODES.has(warning.code));
 }
 
+const AVAILABILITY_WARNING_CODES: ReadonlySet<string> = new Set([
+  'PLAN_NOT_AVAILABLE',
+  'DURATION_NOT_AVAILABLE',
+]);
+
 /**
- * What makes a plan a valid upgrade or replacement TARGET: on sale, not a trial.
+ * True when an ineligible quote is refused ONLY because the chosen plan or term
+ * is not offered to this buyer any more — withdrawn, archived, deleted, or no
+ * longer a target of this action.
+ *
+ * Exported for the checkout draft, which names this case with a code of its own
+ * (`PAYMENT_DRAFT_PLAN_NOT_AVAILABLE`): a client answers it by refetching the
+ * plan list, and that is only right when the plan is gone from that list. Any
+ * other blocking warning beside it explains the refusal better and keeps the
+ * generic code — a paid trial the buyer cannot claim is also "not available" to
+ * them, but it is still listed, so "choose from the updated list" would lead
+ * straight back to it.
+ */
+export function isPlanAvailabilityRefusal(
+  warnings: readonly SubscriptionQuoteWarningInterface[],
+): boolean {
+  const blocking = warnings.filter((warning) => !INFORMATIONAL_WARNING_CODES.has(warning.code));
+  return (
+    blocking.length > 0 &&
+    blocking.every((warning) => AVAILABILITY_WARNING_CODES.has(warning.code))
+  );
+}
+
+/**
+ * What makes a plan a valid upgrade or replacement TARGET: on sale, not a trial,
+ * not deleted.
  * Exported for `SubscriptionRenewalService`, which must know whether an archived
  * REPLACE_ON_RENEW plan still has a replacement to renew onto — if the two ever
  * disagreed, the renewal would either ask for a choice the quote does not offer,
- * or silently pick a plan the quote offered only to choose from.
+ * or silently pick a plan the quote offered only to choose from — and for
+ * `PlanReferenceGuardService`'s `replacementOrphans`, which warns about the set
+ * the renewal then asks to choose for. All three read this one object.
+ *
+ * `deletedAt: null` beside the flags: the delete switches a plan off as it stamps
+ * it, but an older image running on the same database can switch the flags back
+ * on, and a deleted plan is gone for everyone whatever they say.
  */
 export const TRANSITION_TARGET_WHERE = {
   isActive: true,
   isArchived: false,
+  deletedAt: null,
   availability: { not: PlanAvailability.TRIAL },
 } as const satisfies Prisma.PlanWhereInput;
 
@@ -300,6 +336,7 @@ export class SubscriptionQuoteService {
       purchaseType: input.purchaseType,
       sourceSubscription: context.sourceSubscription,
       excludeTrialTransactionId: input.excludeTrialTransactionId,
+      selectedPlanId: input.planId,
     });
     const selectedPlan =
       input.planId === undefined ? null : (plans.find((plan) => plan.id === input.planId) ?? null);
@@ -470,6 +507,8 @@ export class SubscriptionQuoteService {
     readonly purchaseType: SubscriptionQuoteAction;
     readonly sourceSubscription: SubscriptionRecord | null;
     readonly excludeTrialTransactionId?: string;
+    /** The plan being quoted, if any — see the NEW/ADDITIONAL branch. */
+    readonly selectedPlanId?: string;
   }): Promise<{
     readonly plans: readonly PlanRecord[];
     readonly warnings: readonly SubscriptionQuoteWarningInterface[];
@@ -509,9 +548,19 @@ export class SubscriptionQuoteService {
         plans: paidTrialPlans,
         excludeTrialTransactionId: input.excludeTrialTransactionId,
       });
+      // The claim warnings describe the trials that were DROPPED, so they belong
+      // to a quote for one of those trials, or to a quote with no plan chosen
+      // yet. On any other plan they are noise — and blocking noise: they are not
+      // informational, so a regular plan quoted with a price and was then refused
+      // at checkout. A web-only subscriber could buy nothing while a paid trial
+      // requiring Telegram was on sale.
+      const droppedTrialSelected = paidTrialPlans.some(
+        (plan) => plan.id === input.selectedPlanId && !claimable.plans.includes(plan),
+      );
       return {
         plans: [...nonTrialPlans, ...claimable.plans],
-        warnings: claimable.warnings,
+        warnings:
+          input.selectedPlanId === undefined || droppedTrialSelected ? claimable.warnings : [],
       };
     }
     return this.getSourceSelection({

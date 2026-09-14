@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { BadRequestException } from '@nestjs/common';
+import { ArgumentsHost, BadRequestException } from '@nestjs/common';
 import {
   Currency,
   PaymentGatewayType,
@@ -11,6 +11,7 @@ import {
   TransactionStatus,
 } from '@prisma/client';
 
+import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 import { CreateTransactionDraftDto } from '../src/modules/payments/dto/create-transaction-draft.dto';
 import { PaymentsTransactionsService } from '../src/modules/payments/services/payments-transactions.service';
 
@@ -156,6 +157,113 @@ describe('PaymentsTransactionsService', () => {
     assert.equal(state.transactionCreateCalls.length, 0);
   });
 
+  // ── A plan that is no longer offered is named apart from other refusals ────
+  //
+  // Every ineligible quote used to leave as PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE,
+  // and the safe filter strips the `warnings` that told the cases apart. The
+  // cabinet answers a withdrawn plan by dropping its catalogue and sending the
+  // subscriber back to it: right when the plan is gone, a loop when it is not —
+  // a paid trial the buyer cannot claim is still listed, so "no longer
+  // available" sent them back to the same trial. Checked through the real filter,
+  // because a code the filter strips is no code at all.
+  for (const scenario of [
+    {
+      name: 'the plan is no longer offered',
+      quote: { selectedPlan: null, selectedDuration: null },
+      warnings: [{ code: 'PLAN_NOT_AVAILABLE', message: 'The selected plan is not available for this action.' }],
+    },
+    {
+      name: 'the term is no longer offered',
+      quote: { selectedDuration: null },
+      warnings: [{ code: 'DURATION_NOT_AVAILABLE', message: 'The selected duration is not available for this plan.' }],
+    },
+    {
+      name: 'an upgrade target is no longer offered',
+      quote: { purchaseType: PurchaseType.UPGRADE, selectedPlan: null, selectedDuration: null },
+      warnings: [
+        { code: 'UPGRADE_RESETS_EXPIRY', message: 'Upgrade starts immediately and resets the expiration date.' },
+        { code: 'PLAN_NOT_AVAILABLE', message: 'The selected plan is not available for this action.' },
+      ],
+    },
+  ]) {
+    it(`answers PAYMENT_DRAFT_PLAN_NOT_AVAILABLE when ${scenario.name}, through the safe filter`, async () => {
+      const { service, state } = createService({
+        quoteResult: {
+          ...createEligibleQuote(),
+          ...scenario.quote,
+          isEligible: false,
+          price: null,
+          warnings: scenario.warnings,
+        },
+      });
+
+      const error = await captureRejection(() =>
+        service.createDraft({
+          userId: 'user-1',
+          purchaseType: scenario.quote.purchaseType ?? PurchaseType.NEW,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+        }),
+      );
+
+      assert.ok(error instanceof BadRequestException);
+      assert.equal((error.getResponse() as { code?: unknown }).code, 'PAYMENT_DRAFT_PLAN_NOT_AVAILABLE');
+      const wire = runSafeFilter(error);
+      assert.equal(wire.statusCode, 400);
+      assert.equal(wire.body['code'], 'PAYMENT_DRAFT_PLAN_NOT_AVAILABLE', 'the safe filter stripped the code');
+      assert.equal(state.transactionCreateCalls.length, 0);
+    });
+  }
+
+  for (const scenario of [
+    {
+      name: 'a paid trial the buyer cannot claim, which is still on sale',
+      warnings: [
+        {
+          code: 'TRIAL_REQUIRES_TELEGRAM',
+          message: 'This trial requires a linked Telegram account. Link Telegram in the cabinet first.',
+        },
+        { code: 'PLAN_NOT_AVAILABLE', message: 'The selected plan is not available for this action.' },
+      ],
+    },
+    {
+      name: 'a source subscription with no plan to act on',
+      warnings: [
+        { code: 'SOURCE_PLAN_MISSING', message: 'The source subscription plan is no longer available.' },
+        { code: 'PLAN_NOT_AVAILABLE', message: 'The selected plan is not available for this action.' },
+      ],
+    },
+  ]) {
+    it(`keeps PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE for ${scenario.name}`, async () => {
+      const { service } = createService({
+        quoteResult: {
+          ...createEligibleQuote(),
+          isEligible: false,
+          selectedPlan: null,
+          selectedDuration: null,
+          price: null,
+          warnings: scenario.warnings,
+        },
+      });
+
+      const error = await captureRejection(() =>
+        service.createDraft({
+          userId: 'user-1',
+          purchaseType: PurchaseType.NEW,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+        }),
+      );
+
+      assert.ok(error instanceof BadRequestException);
+      assert.equal((error.getResponse() as { code?: unknown }).code, 'PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE');
+    });
+  }
+
   it('rejects TRIAL transaction draft payloads before quoting', async () => {
     const { service, state } = createService({
       quoteResult: createEligibleQuote(),
@@ -268,6 +376,42 @@ describe('PaymentsTransactionsService', () => {
     assert.equal(state.transactionCreateCalls.length, 0);
   });
 });
+
+async function captureRejection(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await run();
+  } catch (error: unknown) {
+    return error;
+  }
+  assert.fail('expected a refusal');
+}
+
+/** What the BFF receives: the exception as `AdminSafeExceptionFilter` writes it. */
+function runSafeFilter(exception: unknown): {
+  readonly statusCode: number | undefined;
+  readonly body: Record<string, unknown>;
+} {
+  let statusCode: number | undefined;
+  let body: Record<string, unknown> = {};
+  const response = {
+    status(code: number) {
+      statusCode = code;
+      return response;
+    },
+    json(payload: Record<string, unknown>) {
+      body = payload;
+      return response;
+    },
+  };
+  const host = {
+    switchToHttp: () => ({
+      getRequest: () => ({ originalUrl: '/api/internal/payments/checkout', headers: {} }),
+      getResponse: () => response,
+    }),
+  } as unknown as ArgumentsHost;
+  new AdminSafeExceptionFilter().catch(exception, host);
+  return { statusCode, body };
+}
 
 function createService(input: {
   readonly quoteResult?: QuoteResult;

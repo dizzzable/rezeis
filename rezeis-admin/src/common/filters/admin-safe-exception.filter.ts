@@ -73,6 +73,13 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   'SERVICE_RESTRICTED',
   'PURCHASES_DISABLED',
   'PAYMENT_DRAFT_QUOTE_NOT_ELIGIBLE',
+  // The one ineligible quote a client answers differently: the plan or its term
+  // is no longer offered, so the cabinet drops its stale plan list and sends the
+  // subscriber back to choose. Under the shared code above that answer also met
+  // refusals that are not about the list (a paid trial the buyer cannot claim is
+  // still listed) and looped. Thrown by `PaymentsTransactionsService`; its spec
+  // checks the code through this filter.
+  'PAYMENT_DRAFT_PLAN_NOT_AVAILABLE',
   'PAYMENT_DRAFT_TRIAL_UNSUPPORTED',
   'PARTNER_BALANCE_DISABLED',
   'PARTNER_BALANCE_NOT_AVAILABLE',
