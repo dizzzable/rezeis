@@ -69,6 +69,7 @@ import { findHintCollisions } from './hint-collision';
 import { getEventCatalog } from './event-catalog-api';
 import { TriggerCatalogHint } from './trigger-catalog-hint';
 import { TriggerMapCard } from './trigger-map-card';
+import { useRuleDraft } from './use-rule-draft';
 import { useTabSync } from '@/lib/use-tab-sync';
 import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
@@ -469,10 +470,29 @@ export default function AutomationsPage() {
             </CardContent>
           </Card>
         ) : (
+          // ONE EDITOR PER RULE. Shared by every rule, it carried its own state
+          // onto the next one: «Выполнения» stayed selected — on a new draft,
+          // which has no such tab, the card had no body — and a save still
+          // running on one rule kept «Сохранить» spinning and disabled on the
+          // next.
           <RuleEditor
+            key={selectedId}
             ruleId={selectedId}
             actionCatalog={catalogQuery.data?.actionTypes ?? []}
             onSaved={(rule) => {
+              // THE ANSWER TO A SAVE IS THE RULE AS SAVED, so it becomes this
+              // rule's copy. Refreshing only the list left the copy read BEFORE
+              // the save in the cache, fresh for another half-minute: back on
+              // the rule, the editor was seeded from it — the old name, the old
+              // switch — and a second «Сохранить» wrote the old rule back over
+              // the new one. A rule just created opens from it at once, too.
+              //
+              // A read of this rule still out (after «Запустить», say) carries
+              // the rule as it stood before the save and would land on top of
+              // this answer, so it is called off first.
+              const ruleKey = ['admin', 'automations', 'rule', rule.id];
+              void queryClient.cancelQueries({ queryKey: ruleKey, exact: true });
+              queryClient.setQueryData(ruleKey, rule);
               setSelectedId(rule.id);
               queryClient.invalidateQueries({ queryKey: RULES_KEY });
             }}
@@ -782,34 +802,14 @@ function RuleEditor({
     enabled: !!ruleId,
   });
 
-  const [draft, setDraft] = useState<UpsertRulePayload | null>(null);
-
-  // Reset draft state whenever a different rule is loaded — using the
-  // "store previous prop in state and adjust during render" pattern.
-  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
-  const [ruleSnapshotKey, setRuleSnapshotKey] = useState<string | null>(null);
-  const nextRuleKey = ruleQuery.data
-    ? `${ruleQuery.data.id}|${ruleQuery.data.updatedAt}`
-    : null;
-  if (nextRuleKey !== ruleSnapshotKey) {
-    setRuleSnapshotKey(nextRuleKey);
-    if (!ruleQuery.data) {
-      setDraft(null);
-    } else {
-      setDraft({
-        name: ruleQuery.data.name,
-        description: ruleQuery.data.description ?? '',
-        isEnabled: ruleQuery.data.isEnabled,
-        triggerKind: ruleQuery.data.triggerKind,
-        triggerSpec: ruleQuery.data.triggerSpec,
-        conditions: ruleQuery.data.conditions,
-        actions: ruleQuery.data.actions,
-      });
-    }
-  }
+  // The rule under THIS id and the draft taken from it, as one value — never a
+  // draft left over from the rule that was open before. `useRuleDraft` holds
+  // the account of the render that took the whole page down after Create.
+  const { inHand, setDraft } = useRuleDraft(ruleQuery.data);
 
   const saveMutation = useMutation({
     mutationFn: () => {
+      const draft = inHand?.draft;
       if (!draft) return Promise.reject(new Error('No draft'));
       const payload: UpsertRulePayload = {
         ...draft,
@@ -873,7 +873,28 @@ function RuleEditor({
       ),
   });
 
-  if (!draft) {
+  if (!inHand) {
+    // A READ THAT FAILED SAYS SO. The skeleton used to stay up for ever: reads
+    // are not retried, and clicking the rule again changes nothing, because it
+    // is already the selected one. Pressing retry puts the skeleton back until
+    // the new answer.
+    if (ruleQuery.isError) {
+      return (
+        <Card>
+          <CardContent className="p-6">
+            <Alert variant="destructive">
+              <AlertTitle>{t('automationsPage.errors.title')}</AlertTitle>
+              <AlertDescription className="space-y-3">
+                <p>{translateApiError(t, ruleQuery.error)}</p>
+                <Button variant="outline" size="sm" onClick={() => void ruleQuery.refetch()}>
+                  {t('common.retry')}
+                </Button>
+              </AlertDescription>
+            </Alert>
+          </CardContent>
+        </Card>
+      );
+    }
     return (
       <Card>
         <CardContent className="p-6 space-y-3">
@@ -883,6 +904,15 @@ function RuleEditor({
       </Card>
     );
   }
+  const { rule, draft } = inHand;
+  // NOTHING IS TYPED INTO A RULE WHILE IT IS BEING SAVED. The answer to
+  // «Сохранить» becomes the rule's copy (`onSaved`), and a copy whose content
+  // moved starts the draft over (`useRuleDraft`): whatever was typed or
+  // switched after the payload left vanished without a word when the answer
+  // landed. «Создать» opens the created rule in an editor of its own, which
+  // had always dropped it. So the switch and every field take no input until
+  // the answer is in; a save that fails gives them back with the draft intact.
+  const saving = saveMutation.isPending;
 
   return (
     <Card>
@@ -893,6 +923,7 @@ function RuleEditor({
             <Switch
               checked={draft.isEnabled ?? false}
               onCheckedChange={(v) => setDraft({ ...draft, isEnabled: v })}
+              disabled={saving}
             />
           </div>
           <div className="flex items-center gap-2">
@@ -957,8 +988,8 @@ function RuleEditor({
           {isNew
             ? t('automationsPage.editor.newDescription')
             : t('automationsPage.editor.existingDescription', {
-                createdAt: formatDateTime(ruleQuery.data?.createdAt ?? ''),
-                runCount: ruleQuery.data?.runCount ?? 0,
+                createdAt: formatDateTime(rule.createdAt),
+                runCount: rule.runCount,
               })}
         </CardDescription>
       </CardHeader>
@@ -974,6 +1005,7 @@ function RuleEditor({
               setDraft={setDraft}
               actionCatalog={actionCatalog}
               ruleId={isNew ? undefined : ruleId}
+              disabled={saving}
             />
           </TabsContent>
           {!isNew && (
@@ -992,12 +1024,15 @@ function ConfigEditor({
   setDraft,
   actionCatalog,
   ruleId,
+  disabled,
 }: {
   draft: UpsertRulePayload;
   setDraft: (next: UpsertRulePayload) => void;
   actionCatalog: readonly AutomationActionType[];
   /** Undefined for an unsaved draft — it cannot collide with itself. */
   ruleId?: string;
+  /** True while the rule is being saved: every control here takes no input. */
+  disabled: boolean;
 }) {
   const { t } = useTranslation();
   // Read HERE rather than threaded down from the page: nothing above the field
@@ -1030,6 +1065,7 @@ function ConfigEditor({
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             maxLength={96}
+            disabled={disabled}
           />
         </div>
         <div className="space-y-1.5">
@@ -1037,6 +1073,7 @@ function ConfigEditor({
           <Select
             value={draft.triggerKind}
             onValueChange={(v) => setDraft({ ...draft, triggerKind: v as AutomationTriggerKind })}
+            disabled={disabled}
           >
             <SelectTrigger aria-label={t('automationsPage.config.trigger')}>
               <SelectValue />
@@ -1058,6 +1095,7 @@ function ConfigEditor({
           onChange={(e) => setDraft({ ...draft, description: e.target.value })}
           rows={2}
           maxLength={512}
+          disabled={disabled}
         />
       </div>
 
@@ -1076,6 +1114,7 @@ function ConfigEditor({
                 : t('automationsPage.config.cronPlaceholder')
             }
             maxLength={256}
+            disabled={disabled}
           />
           {/* WHAT THIS TRIGGER HAS ACTUALLY DONE HERE. The field is free text
               against a panel that declares 115 event types and emits fewer, and
@@ -1120,6 +1159,7 @@ function ConfigEditor({
           rows={6}
           placeholder={`{\n  "and": [\n    { "==": ["$severity", "HIGH"] },\n    { ">": ["$score", 70] }\n  ]\n}`}
           className="font-mono text-xs"
+          disabled={disabled}
         />
       </div>
 
@@ -1129,6 +1169,7 @@ function ConfigEditor({
         actions={draft.actions}
         actionCatalog={actionCatalog}
         onChange={(actions) => setDraft({ ...draft, actions })}
+        disabled={disabled}
       />
 
       <HintCollisionNotice ruleId={ruleId} draft={draft} />
@@ -1210,10 +1251,12 @@ function ActionsEditor({
   actions,
   actionCatalog,
   onChange,
+  disabled,
 }: {
   actions: AutomationActionDef[];
   actionCatalog: readonly AutomationActionType[];
   onChange: (actions: AutomationActionDef[]) => void;
+  disabled: boolean;
 }) {
   const { t } = useTranslation();
   // The hint library, for the picker below. Loaded here rather than passed in:
@@ -1242,7 +1285,7 @@ function ActionsEditor({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold">{t('automationsPage.actions.heading')}</h3>
-        <Button size="sm" variant="outline" onClick={add}>
+        <Button size="sm" variant="outline" onClick={add} disabled={disabled}>
           <Plus className="mr-2 h-4 w-4" />
           {t('automationsPage.actions.add')}
         </Button>
@@ -1259,6 +1302,7 @@ function ActionsEditor({
                 <Select
                   value={action.type}
                   onValueChange={(v) => update(idx, { ...action, type: v })}
+                  disabled={disabled}
                 >
                   <SelectTrigger
                     className="max-w-xs"
@@ -1280,6 +1324,7 @@ function ActionsEditor({
                   onClick={() => remove(idx)}
                   className="ml-auto"
                   aria-label={t('automationsPage.actions.removeAria', { index: idx + 1 })}
+                  disabled={disabled}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -1303,6 +1348,7 @@ function ActionsEditor({
                         params: { ...action.params, hintKey: v },
                       })
                     }
+                    disabled={disabled}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder={t('automationsPage.actions.pickHint')} />
@@ -1327,6 +1373,7 @@ function ActionsEditor({
                         onValueChange={(v) =>
                           update(idx, { ...action, params: { ...action.params, audience: v } })
                         }
+                        disabled={disabled}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder={t('automationsPage.actions.pickAudience')} />
@@ -1361,6 +1408,7 @@ function ActionsEditor({
                 rows={5}
                 className="font-mono text-xs"
                 placeholder='{ "text": "Hello" }'
+                disabled={disabled}
               />
               )}
             </CardContent>

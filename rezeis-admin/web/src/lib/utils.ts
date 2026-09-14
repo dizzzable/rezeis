@@ -56,22 +56,47 @@ export function formatCurrency(amount: number, currency = 'USD'): string {
   }).format(amount / 100)
 }
 
-export function formatDate(date: string | Date): string {
+/**
+ * The instant `date` names, or `null` when it names none.
+ *
+ * `Intl.DateTimeFormat#format` THROWS on an invalid date — `RangeError: Invalid
+ * time value` — and these helpers run while rendering, so one missing or
+ * malformed timestamp used to take down the whole screen through the route's
+ * error boundary instead of one cell. That is how the Automations page died
+ * right after «Правило создано» (panel 0.9.7.56).
+ *
+ * `null` and `undefined` are refused before `new Date` sees them: `new
+ * Date(null)` is the epoch, which would print 1 January 1970 as if it were a
+ * real date.
+ */
+function validDate(date: string | Date | null | undefined): Date | null {
+  if (date === null || date === undefined || date === '') return null
+  const value = date instanceof Date ? date : new Date(date)
+  return Number.isNaN(value.getTime()) ? null : value
+}
+
+/** A calendar date in the operator's locale; a dash when there is no valid date. */
+export function formatDate(date: string | Date | null | undefined): string {
+  const value = validDate(date)
+  if (value === null) return '—'
   return new Intl.DateTimeFormat(activeLocale(), {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
-  }).format(new Date(date))
+  }).format(value)
 }
 
-export function formatDateTime(date: string | Date): string {
+/** A date and time in the operator's locale; a dash when there is no valid date. */
+export function formatDateTime(date: string | Date | null | undefined): string {
+  const value = validDate(date)
+  if (value === null) return '—'
   return new Intl.DateTimeFormat(activeLocale(), {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(new Date(date))
+  }).format(value)
 }
 
 /**
