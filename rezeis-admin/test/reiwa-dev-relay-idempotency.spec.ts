@@ -210,8 +210,10 @@ describe('the panel stamps a dedup key on both dev relays', () => {
           return { status: 'timeout', messageId: null, httpStatus: null, detail: null };
         },
       } as never,
-      { warn: () => undefined } as never,
-          // The channel-post recorder's Prisma. These events are never
+      // The undelivered recorder: the last attempt records, and that is not
+      // what this case is about.
+      () => undefined,
+      // The channel-post recorder's Prisma. These events are never
       // `reiwa.channel.broadcast`, so it returns before touching it — but the
       // dependency is real and `tsc -p tsconfig.test.json` (which CI runs, and
       // `npm test` does not) is what noticed.

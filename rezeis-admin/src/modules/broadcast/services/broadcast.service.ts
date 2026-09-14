@@ -746,8 +746,11 @@ function mapBroadcast(
     // ── THREE STATES, NOT TWO ─────────────────────────────────────────────
     //
     // A boolean could not say "there is a public copy and we cannot address
-    // it", which is the NORMAL state wherever the bot answers a bodiless 204
-    // and echoes no message id. Folded into `false`, the panel hid the recall
+    // it". That is no longer the normal state — the cabinet now echoes the
+    // channel post's message id and the panel stores it on both delivery roads
+    // (`rememberRelayedChannelPost`) — but it is still real: a post relayed
+    // through an older cabinet that answered a bodiless 204, or one whose id
+    // could not be written. Folded into `false`, the panel hid the recall
     // button for exactly the broadcasts that most needed one — and the warning
     // that says "remove it by hand" was only reachable by pressing a button
     // that was never rendered.
@@ -773,8 +776,11 @@ function channelPostStateOf(record: Broadcast): 'none' | 'addressable' | 'unaddr
   const chatId = record.channelChatId ?? null;
   const messageId = record.channelMessageId ?? null;
   if (chatId !== null && messageId !== null) return 'addressable';
-  // A chat we stored and an id we no longer hold: a successful recall clears
-  // the id and keeps the chat, so the post is already down.
+  // A chat we stored and no id: there is no post up. Either a successful recall
+  // cleared the id and kept the chat, or the post certainly never went up —
+  // the relay writes the chat alone for a lost post (`rememberLostChannelPost`),
+  // so the page does not offer to recall, or tell the operator to delete by
+  // hand, a copy nobody published.
   if (chatId !== null) return 'none';
   const payload = record.payload as Record<string, unknown> | null;
   const configured =

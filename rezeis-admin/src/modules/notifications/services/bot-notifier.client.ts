@@ -345,14 +345,26 @@ export class BotNotifierClient {
         ...(controller === null ? {} : { signal: controller.signal }),
       });
       if (!response.ok) {
-        this.logger.warn(
-          `Bot notify ${event} returned ${response.status} ${response.statusText}`,
-        );
+        // The cabinet answers a Telegram flood-wait 503 with `Retry-After`,
+        // and the relay processor's backoff honours it. Carried only when it
+        // parses, so every other refusal keeps exactly the shape it had.
+        const retryAfterSeconds = readRetryAfterSeconds(response);
+        // And it says WHY Telegram refused a message: the 422's body carries
+        // Telegram's own description. It used to be dropped unread, so the
+        // operator's card said "HTTP 422" for a broken template, a bad button
+        // URL and a chat the bot was removed from alike — three different
+        // fixes behind one status. It is also what tells two refusals apart
+        // when the alert about them is coalesced.
+        const refusal = await readRefusalDetail(response);
+        const status = `HTTP ${response.status} ${response.statusText}`.trim();
+        const detail = refusal === null ? status : `${status}: ${refusal}`;
+        this.logger.warn(`Bot notify ${event} returned ${detail}`);
         return {
           status: 'rejected',
           messageId: null,
           httpStatus: response.status,
-          detail: `HTTP ${response.status} ${response.statusText}`.trim(),
+          detail,
+          ...(retryAfterSeconds === null ? {} : { retryAfterSeconds }),
         };
       }
       // 204 carries no body, so it can never carry a message id: reiwa accepted
@@ -413,8 +425,83 @@ export interface NotifyDeliveryResult {
   readonly messageId: number | null;
   /** Response status for `rejected`/`unconfirmed`; `null` when no response arrived. */
   readonly httpStatus: number | null;
-  /** Human-readable failure detail for `rejected`/`timeout`/`failed`. */
+  /**
+   * Human-readable failure detail for `rejected`/`timeout`/`failed`. For a
+   * `rejected` it is `HTTP <status> <text>`, followed by the cabinet's reason
+   * when its body named one (`HTTP 422 Unprocessable Entity: Bad Request: chat
+   * not found`).
+   */
   readonly detail: string | null;
+  /**
+   * The cabinet's `Retry-After`, in seconds, on a refusal that named a wait
+   * (a 503 for a Telegram flood-wait). Absent when none was named.
+   */
+  readonly retryAfterSeconds?: number;
+}
+
+/**
+ * `Retry-After` as delta-seconds, the only form the cabinet sends. The
+ * HTTP-date form, and anything else, reads as no wait — the retry then keeps
+ * its ordinary backoff, which is the behaviour before the header was read.
+ */
+export function parseRetryAfterSeconds(value: string | null): number | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return /^\d{1,6}$/.test(trimmed) ? Number(trimmed) : null;
+}
+
+/**
+ * The wait a refusal named, read so that reading it can never cost the
+ * refusal. This runs inside `deliver()`'s `try`, whose `catch` files anything
+ * thrown as `failed` — a transient, retried status. A header read that threw
+ * would therefore turn a permanent `rejected` (a 422 Telegram will refuse
+ * again) into three pointless retries. A fetch `Response` always carries
+ * `headers`; a proxy or a double need not, and neither is a reason to
+ * misclassify the answer.
+ */
+function readRetryAfterSeconds(response: Response): number | null {
+  try {
+    return parseRetryAfterSeconds(response.headers.get('retry-after'));
+  } catch {
+    return null;
+  }
+}
+
+/** Longest refusal reason kept. Telegram's descriptions are far shorter; a proxy's page need not be. */
+export const REFUSAL_DETAIL_LIMIT = 300;
+
+/** A body larger than this is not the cabinet's JSON answer, and is not parsed. */
+const REFUSAL_BODY_LIMIT = 16_384;
+
+/**
+ * The cabinet's `detail` from a refusal's JSON body — `{ message, detail }`,
+ * `detail` being Telegram's description — or `null`.
+ *
+ * Only a non-empty STRING `detail` is taken, whitespace collapsed and clipped to
+ * `REFUSAL_DETAIL_LIMIT`: it lands in an operator card and an audit row, and
+ * nothing else in a refusal body is meant for either. Like the header read
+ * above, it can never cost the refusal: an unreadable, non-JSON or oversized
+ * body is simply no detail, never a throw into `deliver()`'s `catch`, which
+ * would turn a permanent `rejected` into a retried `failed`.
+ */
+async function readRefusalDetail(response: Response): Promise<string | null> {
+  try {
+    const text = await response.text();
+    if (text.length === 0 || text.length > REFUSAL_BODY_LIMIT) return null;
+    const body: unknown = JSON.parse(text);
+    const detail =
+      typeof body === 'object' && body !== null ? (body as { detail?: unknown }).detail : undefined;
+    if (typeof detail !== 'string') return null;
+    const collapsed = detail.replace(/\s+/g, ' ').trim();
+    if (collapsed.length === 0) return null;
+    // The ellipsis counts against the limit, so a clipped reason is exactly
+    // `REFUSAL_DETAIL_LIMIT` long and never more.
+    return collapsed.length > REFUSAL_DETAIL_LIMIT
+      ? `${collapsed.slice(0, REFUSAL_DETAIL_LIMIT - 1)}…`
+      : collapsed;
+  } catch {
+    return null;
+  }
 }
 
 export interface NotifyButton {

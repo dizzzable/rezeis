@@ -1,8 +1,8 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Inject, Logger } from '@nestjs/common';
 import { Job, UnrecoverableError } from 'bullmq';
 
-import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { EVENT_TYPES, type SystemEventsService } from '../../common/services/system-events.service';
 import { isFinalProcessorAttempt } from '../backup/backup-delivery-retry.util';
 import {
   TELEGRAM_DIRECT_QUEUE,
@@ -10,12 +10,31 @@ import {
   resolveTelegramDirectBackoff,
   type TelegramDirectJobData,
 } from './telegram-direct.constants';
-import {
-  describeTelegramOutcome,
-  isRetryableTelegramOutcome,
-  type TelegramDirectResult,
-} from './telegram-direct.outcome';
+import { isRetryableTelegramOutcome, type TelegramDirectResult } from './telegram-direct.outcome';
 import { TelegramDirectClient } from './services/telegram-direct.client';
+import {
+  buildTelegramDirectUndeliveredRecord,
+  TELEGRAM_DIRECT_UNDELIVERED_RECORDER,
+  type UndeliveredRecord,
+  type UndeliveredRecorder,
+} from './undelivered-record';
+
+/**
+ * The one place a `telegram.direct_undelivered` record becomes a system event.
+ *
+ * Reached only through `TELEGRAM_DIRECT_UNDELIVERED_RECORDER`, which
+ * `TelegramDirectModule` binds to this behind the alert gate, and which both
+ * roads use: this processor (a job out of attempts, or refused for good) and
+ * `TelegramDirectQueueService` (the direct attempt it makes when Redis refused
+ * the job). The loop guard in `SystemEventsService` keys on this type, so both
+ * roads are covered by it for the same reason.
+ */
+export function emitTelegramDirectUndelivered(
+  events: Pick<SystemEventsService, 'warn'>,
+  record: UndeliveredRecord,
+): void {
+  events.warn(EVENT_TYPES.TELEGRAM_DIRECT_UNDELIVERED, 'SYSTEM', record.message, record.metadata);
+}
 
 /**
  * Three at a time.
@@ -72,11 +91,14 @@ export function telegramDirectBackoffStrategy(attemptsMade: number, _type?: stri
  *  - not sent, retryable, out of attempts → fail, so the job lands in the
  *    retained failed set next to the audit-log row.
  *
- * Every exit that is not "sent" first writes a `telegram.direct_undelivered`
- * system event. That row in `AdminAuditLog` is the durable trace, and it is
- * the whole reason this is a queue rather than a `fetch` in a `catch`: before,
- * the entire record of a lost operator card was a `logger.warn` in an
- * in-memory ring buffer that a restart erases.
+ * Every exit that is not "sent" first records a `telegram.direct_undelivered`
+ * system event — once per cause per cooldown, the rest counted into the next
+ * one (`undelivered-alert-gate.ts`): a revoked token refuses every card at
+ * once, and one card saying so is the alert, not a hundred. That row in
+ * `AdminAuditLog` is the durable trace, and it is the whole reason this is a
+ * queue rather than a `fetch` in a `catch`: before, the entire record of a lost
+ * operator card was a `logger.warn` in an in-memory ring buffer that a restart
+ * erases.
  */
 @Processor(TELEGRAM_DIRECT_QUEUE, {
   concurrency: TELEGRAM_DIRECT_CONCURRENCY,
@@ -87,7 +109,9 @@ export class TelegramDirectProcessor extends WorkerHost {
 
   public constructor(
     private readonly client: TelegramDirectClient,
-    private readonly systemEventsService: SystemEventsService,
+    /** The coalescing emitter, shared with the producer's direct fallback. */
+    @Inject(TELEGRAM_DIRECT_UNDELIVERED_RECORDER)
+    private readonly recordUndeliveredSend: UndeliveredRecorder,
   ) {
     super();
   }
@@ -119,7 +143,7 @@ export class TelegramDirectProcessor extends WorkerHost {
       );
     }
 
-    this.recordUndelivered(job, outcome);
+    await this.recordUndelivered(job, outcome);
 
     if (retryable) {
       throw new TelegramDirectRetryError(
@@ -132,37 +156,31 @@ export class TelegramDirectProcessor extends WorkerHost {
 
   /**
    * Leave a trace that survives the process, and say something the operator
-   * can act on.
-   *
-   * `describeTelegramOutcome` supplies the sentence; the metadata carries the
-   * raw evidence. The two most valuable cases are the ones a bare status code
-   * would hide: a 401 means the token in Settings is wrong, and a 400 with
-   * `migrate_to_chat_id` means the group became a supergroup and the stored
-   * Chat ID is now permanently dead — Telegram says so exactly once, on that
-   * first 400, and never again.
+   * can act on. What the sentence and the metadata carry, and why, is written
+   * beside `buildTelegramDirectUndeliveredRecord`.
    */
-  private recordUndelivered(job: Job<TelegramDirectJobData>, outcome: TelegramDirectResult): void {
-    this.systemEventsService.warn(
-      EVENT_TYPES.TELEGRAM_DIRECT_UNDELIVERED,
-      'SYSTEM',
-      `Панель не доставила карточку в Telegram: ${describeTelegramOutcome(outcome)}`,
-      {
-        sourceEventType: job.data.sourceEventType,
-        sendKind: job.data.kind,
-        chatId: job.data.chatId,
-        telegramStatus: outcome.status,
-        httpStatus: outcome.httpStatus,
-        detail: outcome.detail,
-        ...(outcome.retryAfterSeconds === null
-          ? {}
-          : { retryAfterSeconds: outcome.retryAfterSeconds }),
-        ...(outcome.migrateToChatId === null
-          ? {}
-          : { migrateToChatId: outcome.migrateToChatId }),
-        attemptsMade: job.attemptsMade + 1,
-        attempts: job.opts?.attempts ?? 1,
-      },
-    );
+  private async recordUndelivered(
+    job: Job<TelegramDirectJobData>,
+    outcome: TelegramDirectResult,
+  ): Promise<void> {
+    try {
+      await this.recordUndeliveredSend(
+        buildTelegramDirectUndeliveredRecord({
+          data: job.data,
+          outcome,
+          attemptsMade: job.attemptsMade + 1,
+          attempts: job.opts?.attempts ?? 1,
+        }),
+      );
+    } catch (err: unknown) {
+      // What the job does next must not depend on whether the record could be
+      // written; the log line is what is left.
+      this.logger.warn(
+        `Could not record the undelivered card for ${job.data.sourceEventType}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   @OnWorkerEvent('failed')

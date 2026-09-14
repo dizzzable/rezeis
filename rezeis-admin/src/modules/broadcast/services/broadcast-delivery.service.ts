@@ -10,6 +10,7 @@ import {
   type NotifyDeliveryResult,
 } from '../../notifications/services/bot-notifier.client';
 import { ReiwaRelayQueueService } from '../../notifications/services/reiwa-relay-queue.service';
+import { markChannelPostNeverPublished } from '../../notifications/relay-channel-post';
 import { isRelayDelivered } from '../../notifications/reiwa-relay.policy';
 import { isRetryableRelayOutcome } from '../../backup/backup-delivery-retry.util';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -403,13 +404,25 @@ export class BroadcastDeliveryService {
         broadcast.promoCode,
       );
       if (channelPost === 'dropped' || channelPost === 'disabled') {
-        // The operator asked for a channel copy and it never entered durable
-        // delivery. That has to be visible somewhere they look: the previous
-        // code's only record was a `logger.warn` into an in-memory ring
-        // buffer, and on the failure path that mattered most it did not even
-        // reach that (`notifyBroadcast` swallowed the outcome, so the `catch`
-        // never fired). A WARNING event is durable in `AdminAuditLog` and on
-        // the realtime stream.
+        // The operator asked for a channel copy, it was not delivered, and
+        // nothing else has said so. That has to be visible somewhere they
+        // look: the previous code's only record was a `logger.warn` into an
+        // in-memory ring buffer, and on the failure path that mattered most it
+        // did not even reach that (`notifyBroadcast` swallowed the outcome, so
+        // the `catch` never fired). A WARNING event is durable in
+        // `AdminAuditLog` and on the realtime stream.
+        //
+        // EXACTLY ONE card per lost post, and it names the broadcast. A post the
+        // relay itself gave up on AND carded — `recorded`: Redis refused the
+        // job, the one direct attempt did not deliver either, and a
+        // `reiwa.relay_undelivered` card about this very post went out — is
+        // already reported, with the status and the cabinet's reason. This
+        // event used to follow it for the same post, two cards saying one
+        // thing. It is now for every loss no card has named: the relay is not
+        // configured, the post could not be composed, or the relay's record of
+        // it was only COUNTED into an earlier alert — which named some other
+        // post, or none. "The relay recorded it" is not "the operator was
+        // told", and treating it as such lost the second broadcast's card.
         //
         // Its own type, not `system.broadcast_sent`. That one is presented as
         // 📢 «Рассылка отправлена», so this card arrived titled with the exact
@@ -420,7 +433,7 @@ export class BroadcastDeliveryService {
         this.systemEventsService.warn(
           EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED,
           'SYSTEM',
-          `Broadcast channel post not delivered (${channelPost})`,
+          `Broadcast ${broadcastId}: channel post not delivered (${channelPost})`,
           { broadcastId, channelPost },
         );
       }
@@ -1026,7 +1039,7 @@ export class BroadcastDeliveryService {
         ? BROADCAST_BLOCKED_REASON
         : hasMedia
           ? (mediaError ?? 'Media delivery failed')
-          : `telegram_relay_${relayOutcome?.status ?? 'failed'}`;
+          : relayFailureReason(relayOutcome);
       // A blocked recipient is never retryable. Retrying is what made this
       // class invisible in the first place.
       const retryable =
@@ -1074,8 +1087,8 @@ export class BroadcastDeliveryService {
     await this.checkAndFinalize(broadcastId);
     if (sentAfterCancel > 0) {
       this.logger.warn(
-         +
-          'cancellation reached them — recorded SENT with ',
+        `Broadcast ${broadcastId}: ${sentAfterCancel} message(s) had already left for Telegram when the ` +
+          "cancellation reached them — recorded SENT with errorMessage 'sent_after_cancel'",
       );
     }
     if (cancelledMidBatch > 0) {
@@ -1153,11 +1166,13 @@ export class BroadcastDeliveryService {
     if (chatId !== null && messageId !== null) {
       return { kind: 'addressable', chatId, messageId };
     }
-    // A stored chat with no message id means we HAD the address and used it —
-    // a successful recall clears the id and keeps the chat. Reporting that as
-    // unaddressable made a second recall (reachable whenever the first left
-    // some messages behind, e.g. one past Telegram's 48-hour window) warn about
-    // a post that had already been taken down.
+    // A stored chat with no message id means there is no post up. Either we HAD
+    // the address and used it — a successful recall clears the id and keeps
+    // the chat; reporting that as unaddressable made a second recall
+    // (reachable whenever the first left some messages behind, e.g. one past
+    // Telegram's 48-hour window) warn about a post that had already been taken
+    // down — or the post certainly never went up, which the relay records the
+    // same way (`rememberLostChannelPost`, `markChannelPostNeverPublished`).
     if (chatId !== null) return { kind: 'no-post' };
 
     const payload = broadcast?.payload as Record<string, unknown> | null;
@@ -2052,26 +2067,46 @@ export class BroadcastDeliveryService {
    * collapses an accidental double-enqueue and the bot's idempotency cache
    * collapses a replayed attempt — a retry cannot become a second post.
    *
-   * Reports what happened so the caller can record it. `queued` means the job
-   * is on the queue and the queue owns the outcome from there (an exhausted
-   * job raises `reiwa.relay_undelivered`); `dropped` means it never got there
-   * and nothing else will try.
+   * Reports what happened so the caller can record it — and knows what is
+   * recorded already:
+   *
+   *  - `queued` — the job is on the queue, which owns the outcome from there
+   *    (an exhausted or refused job raises `reiwa.relay_undelivered` naming
+   *    this post: the relay never coalesces one channel post with another).
+   *  - `delivered` — Redis did not take the job, and the relay's one direct
+   *    attempt posted it.
+   *  - `recorded` — Redis did not take the job, the direct attempt did not post
+   *    it, and a `reiwa.relay_undelivered` card about THIS post went out. Lost,
+   *    and already reported.
+   *  - `dropped` — lost, and no card names it: the post could not be composed,
+   *    or the relay's record of it was only counted, or not written.
+   *  - `disabled` / `skipped` — the relay is not configured / no channel set.
+   *
+   * A post that certainly never went up is also recorded as such on the row
+   * (`markChannelPostNeverPublished`), so the broadcast page stops offering to
+   * recall a public copy that does not exist. The relay does that itself for a
+   * post it lost; this method for the two losses the relay never saw.
    */
   private async postToChannelIfConfigured(
     broadcastId: string,
     rawPayload: Prisma.JsonValue,
     promoCode: string | null,
-  ): Promise<'skipped' | 'disabled' | 'queued' | 'dropped'> {
+  ): Promise<'skipped' | 'disabled' | 'queued' | 'delivered' | 'recorded' | 'dropped'> {
     const payload = rawPayload as Record<string, unknown> | null;
     const chatId =
       typeof payload?.telegramChannelChatId === 'string'
         ? payload.telegramChannelChatId.trim()
         : '';
     if (chatId.length === 0) return 'skipped';
+    const neverPublished = (): Promise<boolean> =>
+      markChannelPostNeverPublished(this.prismaService, broadcastId, chatId, (message) =>
+        this.logger.warn(message),
+      );
     if (!this.relayQueue.isEnabled) {
       this.logger.warn(
         `Broadcast ${broadcastId}: telegramChannelChatId set but the reiwa relay is disabled`,
       );
+      await neverPublished();
       return 'disabled';
     }
 
@@ -2089,30 +2124,51 @@ export class BroadcastDeliveryService {
       // The metadata has to stay JSON-serialisable (it becomes the BullMQ job
       // payload), so the optional button list is spread in rather than passed
       // as an explicit `undefined`.
-      const queued = await this.relayQueue.enqueue('reiwa.channel.broadcast', {
+      // `submit`, not `enqueue`: the boolean says whether the post is in hand,
+      // and a lost post needs one more fact — whether the relay already
+      // reported it — or the caller reports it a second time.
+      const submission = await this.relayQueue.submit('reiwa.channel.broadcast', {
         eventId: `${BROADCAST_CHANNEL_EVENT_PREFIX}${broadcastId}`,
         chatId,
         text: composed || ' ',
         parseMode: 'HTML',
         ...(promoButton !== null ? { buttons: [promoButton] } : {}),
       });
-      if (!queued) {
-        // `enqueue` answers `false` when the relay is unconfigured or when
-        // Redis refused the job and its direct fallback ran instead. Either
-        // way nothing durable is holding this post.
-        this.logger.warn(
-          `Broadcast ${broadcastId}: channel post to ${chatId} was not accepted for durable delivery`,
-        );
-        return 'dropped';
+      switch (submission) {
+        case 'queued':
+          this.logger.log(`Broadcast ${broadcastId}: channel post to ${chatId} queued`);
+          return 'queued';
+        case 'delivered':
+          this.logger.log(
+            `Broadcast ${broadcastId}: channel post to ${chatId} delivered by the relay's direct attempt`,
+          );
+          return 'delivered';
+        case 'lost-alerted':
+          this.logger.warn(
+            `Broadcast ${broadcastId}: channel post to ${chatId} was not delivered; ` +
+              'the relay raised reiwa.relay_undelivered for it',
+          );
+          return 'recorded';
+        case 'disabled':
+          await neverPublished();
+          return 'disabled';
+        default:
+          // `lost-counted` or `lost-unrecorded`: no card names this post.
+          this.logger.warn(
+            `Broadcast ${broadcastId}: channel post to ${chatId} was not delivered, and no alert ` +
+              `named it (${submission})`,
+          );
+          return 'dropped';
       }
-      this.logger.log(`Broadcast ${broadcastId}: channel post to ${chatId} queued`);
-      return 'queued';
     } catch (err: unknown) {
       this.logger.warn(
         `Broadcast ${broadcastId}: channel post to ${chatId} failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      // `submit` never throws, so this is the composition: nothing reached the
+      // relay, and nothing went up.
+      await neverPublished();
       return 'dropped';
     }
   }
@@ -2137,6 +2193,35 @@ export class BroadcastDeliveryService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Longest relay reason written after the status code on a recipient's row. */
+const RELAY_FAILURE_DETAIL_LIMIT = 300;
+
+/**
+ * Why a recipient's Telegram leg did not go through, as the row records it:
+ * `telegram_relay_<status>`, then the relay's own words when it has any.
+ *
+ * The status alone was every refusal at once. The cabinet's 422 says WHICH —
+ * "can't parse entities" is the template, `BUTTON_URL_INVALID` the promo
+ * button, "chat not found" the recipient — and a row written
+ * `telegram_relay_rejected` threw that away, leaving an operator looking at a
+ * failed broadcast with nothing to fix. The words are clipped: they come from
+ * the far side of two hops, and the column is not a log.
+ *
+ * The status stays first and unchanged, so a reader matching on the prefix
+ * reads what it always did; `BROADCAST_BLOCKED_REASON` is decided before this
+ * and never passes through it.
+ */
+function relayFailureReason(outcome: NotifyDeliveryResult | null): string {
+  const code = `telegram_relay_${outcome?.status ?? 'failed'}`;
+  const detail = outcome?.detail?.replace(/\s+/g, ' ').trim() ?? '';
+  if (detail.length === 0) return code;
+  const clipped =
+    detail.length > RELAY_FAILURE_DETAIL_LIMIT
+      ? `${detail.slice(0, RELAY_FAILURE_DETAIL_LIMIT - 1)}…`
+      : detail;
+  return `${code}: ${clipped}`;
 }
 
 function sanitizeTelegramDiagnostic(

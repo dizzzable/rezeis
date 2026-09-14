@@ -93,6 +93,21 @@ export interface TelegramDirectJobData {
    * poor way to find out.
    */
   readonly sourceEventType: string;
+  /**
+   * The notification template this card copies, for the operator mirror of a
+   * user notification (`sourceEventType` is `user_notification.operator_mirror`
+   * for every one of them). Never sent to Telegram: it keeps two templates
+   * Telegram refuses in the same words apart in the undelivered alert.
+   */
+  readonly notificationType?: string;
+  /**
+   * The automation hop count of the event this card is for, when a rule
+   * produced it (`chainDepthMetadata(event.metadata)` spread into the job).
+   * Never sent to Telegram. It exists so a card the panel cannot send hands the
+   * count back on `telegram.direct_undelivered` instead of re-seeding the chain
+   * at zero — see `buildTelegramDirectUndeliveredRecord`.
+   */
+  readonly automationChainDepth?: number;
 }
 
 /**

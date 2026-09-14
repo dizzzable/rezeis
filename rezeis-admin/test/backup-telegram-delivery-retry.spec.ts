@@ -46,16 +46,20 @@ const CONFIRMED: FetchStub = async () => ({
   statusText: 'OK',
   json: async () => ({ messageId: 4242 }),
 });
+// The refusals carry `headers`, as a real `Response` always does: the client
+// reads the cabinet's `Retry-After` off a non-2xx answer.
 const REJECTED_502: FetchStub = async () => ({
   ok: false,
   status: 502,
   statusText: 'Bad Gateway',
+  headers: new Headers(),
   json: async () => ({}),
 });
 const REJECTED_400: FetchStub = async () => ({
   ok: false,
   status: 400,
   statusText: 'Bad Request',
+  headers: new Headers(),
   json: async () => ({}),
 });
 const UNCONFIRMED_204: FetchStub = async () => ({

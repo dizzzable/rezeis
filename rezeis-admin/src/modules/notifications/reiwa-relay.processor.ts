@@ -1,8 +1,8 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Inject, Logger } from '@nestjs/common';
 import { Job, UnrecoverableError } from 'bullmq';
 
-import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { EVENT_TYPES, type SystemEventsService } from '../../common/services/system-events.service';
 // Imported from the backup module rather than reimplemented: that file is
 // where the relay-outcome retry classification was first reasoned out, in
 // detail, for exactly this question. Three modules now read it (backup,
@@ -13,15 +13,45 @@ import {
   isRetryableRelayOutcome,
 } from '../backup/backup-delivery-retry.util';
 import {
+  REIWA_RELAY_EVENTS,
   REIWA_RELAY_QUEUE,
   type ReiwaRelayEvent,
   type ReiwaRelayJobData,
 } from './reiwa-relay.constants';
-import { isRelayDelivered, shouldAlertOperator } from './reiwa-relay.policy';
+import {
+  isDevRelayDeadEnd,
+  isRelayDelivered,
+  RELAY_EVENT_POLICY,
+  resolveRelayBackoff,
+  shouldAlertOperator,
+  shouldFailRelayJob,
+} from './reiwa-relay.policy';
 import { BotNotifierClient, type NotifyDeliveryResult } from './services/bot-notifier.client';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { BROADCAST_CHANNEL_EVENT_PREFIX } from '../broadcast/broadcast.constants';
-import { chainDepthMetadata } from '../automations/chain-depth';
+import { rememberLostChannelPost, rememberRelayedChannelPost } from './relay-channel-post';
+import {
+  buildRelayUndeliveredRecord,
+  RELAY_UNDELIVERED_RECORDER,
+  type UndeliveredRecord,
+  type UndeliveredRecorder,
+} from './undelivered-record';
+
+/**
+ * The one place a `reiwa.relay_undelivered` record becomes a system event.
+ *
+ * Reached only through `RELAY_UNDELIVERED_RECORDER`, which `ReiwaRelayModule`
+ * binds to this behind the alert gate, and which both roads use: this processor
+ * (a job out of attempts) and `ReiwaRelayQueueService` (a direct attempt made
+ * because Redis refused the job). Same type, same category, same record builder
+ * — an operator reading the audit log cannot tell the two roads apart by shape,
+ * only by `enqueueError` — and the same cooldown window.
+ */
+export function emitRelayUndelivered(
+  events: Pick<SystemEventsService, 'warn'>,
+  record: UndeliveredRecord,
+): void {
+  events.warn(EVENT_TYPES.REIWA_RELAY_UNDELIVERED, 'SYSTEM', record.message, record.metadata);
+}
 
 /**
  * Five at a time. The relay is one HTTP hop into a single cabinet process
@@ -36,6 +66,49 @@ import { chainDepthMetadata } from '../automations/chain-depth';
 const RELAY_WORKER_CONCURRENCY = 5;
 
 /**
+ * An attempt another attempt might fix, carrying the wait the cabinet named.
+ *
+ * BullMQ hands the thrown error to a custom backoff strategy and to nothing
+ * else, so `retryAfterSeconds` rides on the error or it does not reach the
+ * scheduler at all. Same device as `TelegramDirectRetryError`.
+ */
+export class ReiwaRelayRetryError extends Error {
+  public readonly retryAfterSeconds: number | null;
+
+  public constructor(message: string, retryAfterSeconds: number | null) {
+    super(message);
+    this.name = 'ReiwaRelayRetryError';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * The worker's backoff for jobs of type `RELAY_BACKOFF_TYPE`: the event's own
+ * policy, pushed back to a cabinet `Retry-After` when one came with the error.
+ * The arithmetic lives in `resolveRelayBackoff`; this only finds the policy
+ * and the wait.
+ *
+ * A job whose payload names no known event keeps the delay it was enqueued
+ * with, fixed — the least surprising reading of a job this code did not write.
+ */
+export function relayBackoffStrategy(
+  attemptsMade: number,
+  _type?: string,
+  err?: Error,
+  job?: { readonly data?: unknown; readonly opts?: { readonly backoff?: unknown } },
+): number {
+  const retryAfter = err instanceof ReiwaRelayRetryError ? err.retryAfterSeconds : null;
+  const event = (job?.data as { event?: unknown } | undefined)?.event;
+  const policy = (REIWA_RELAY_EVENTS as readonly unknown[]).includes(event)
+    ? RELAY_EVENT_POLICY[event as ReiwaRelayEvent]
+    : null;
+  if (policy !== null) return resolveRelayBackoff(policy, attemptsMade, retryAfter);
+  const backoff = job?.opts?.backoff as { delay?: unknown } | undefined;
+  const delay = typeof backoff?.delay === 'number' ? backoff.delay : 0;
+  return resolveRelayBackoff({ backoff: { type: 'fixed', delay } }, attemptsMade, retryAfter);
+}
+
+/**
  * ReiwaRelayProcessor
  * ═══════════════════
  * The consumer half of durable panel → cabinet delivery, shaped after the one
@@ -43,79 +116,62 @@ const RELAY_WORKER_CONCURRENCY = 5;
  * outcome rather than assume it, retry only what a retry can fix, and make
  * sure that when nothing more is coming somebody is told.
  *
- * Four exits, one for each thing that can be true after an attempt:
+ * Five exits, one for each thing that can be true after an attempt:
  *
  *  - delivered → the job completes.
  *  - not delivered, retry might fix it, attempts remain → throw, so BullMQ
  *    retries with the event's backoff.
- *  - not delivered, final, and the failure is the operator's to act on →
- *    record it durably, alert, and FAIL the job.
- *  - not delivered, final, and the failure is a routine per-recipient fact
- *    (`shouldAlertOperator` says no) → record it in the log and COMPLETE the
- *    job carrying `delivered: false`. The branch in `process` carries the
- *    full reasoning.
+ *  - not delivered, final, and a failure of the link → record it (the alert is
+ *    coalesced per cause) and FAIL the job.
+ *  - not delivered, final, and Telegram refused the message → record it the
+ *    same way and COMPLETE the job carrying `delivered: false`: a verdict on
+ *    one message is not a slot in the bin of link failures
+ *    (`shouldFailRelayJob`).
+ *  - not delivered, final, and a routine per-recipient or dead-end fact
+ *    (`shouldAlertOperator` says no) → a log line, and COMPLETE the job
+ *    carrying `delivered: false`. The branch in `process` carries the full
+ *    reasoning.
  *
  * "Record it durably" is the point of the whole exercise. Until now the entire
  * trace of a lost relay was one `logger.warn` in a 5 000-entry in-memory ring
  * buffer that a restart wipes. A `SystemEventsService` emit writes an
  * `AdminAuditLog` row that outlives the process, pushes the card to connected
- * admins over the realtime socket, and only then tries Telegram.
+ * admins over the realtime socket, and only then tries Telegram — once per
+ * cause per cooldown, so that a template refused for a thousand subscribers is
+ * one card and a count rather than a thousand (`undelivered-alert-gate.ts`).
  */
-@Processor(REIWA_RELAY_QUEUE, { concurrency: RELAY_WORKER_CONCURRENCY })
+@Processor(REIWA_RELAY_QUEUE, {
+  concurrency: RELAY_WORKER_CONCURRENCY,
+  settings: { backoffStrategy: relayBackoffStrategy },
+})
 export class ReiwaRelayProcessor extends WorkerHost {
   private readonly logger = new Logger(ReiwaRelayProcessor.name);
 
   public constructor(
     private readonly botNotifier: BotNotifierClient,
-    private readonly systemEventsService: SystemEventsService,
+    /**
+     * The coalescing emitter, shared with the producer's direct fallback. Not
+     * `SystemEventsService` itself: an exhausted job and a failed fallback must
+     * count against one window per cause, or the gate halves nothing.
+     */
+    @Inject(RELAY_UNDELIVERED_RECORDER)
+    private readonly recordUndeliveredSend: UndeliveredRecorder,
     private readonly prismaService: PrismaService,
   ) {
     super();
   }
 
   /**
-   * Keep the address of a broadcast's operator-channel post.
-   *
-   * ── Why a generic processor knows this one event ──────────────────────────
-   *
-   * The message id exists for exactly one instant: in the bot's reply to this
-   * delivery. Nothing downstream can ask for it afterwards — Telegram has no
-   * "what did I post" call — so if it is not written here it is gone, and with
-   * it every way to edit or recall that post. Editing a sent broadcast then
-   * rewrote every private message and left the public copy showing the original
-   * text.
-   *
-   * Recognised by the event id the producer chose, not by inspecting content,
-   * and it fails quietly: a broadcast whose id could not be stored simply keeps
-   * a channel post that cannot be corrected — the same as before — and must
-   * never turn a delivered post into a failed job.
+   * Keep the address of a broadcast's operator-channel post — see
+   * `rememberRelayedChannelPost`, which the direct fallback shares.
    */
   private async rememberChannelPost(
     data: ReiwaRelayJobData,
     outcome: NotifyDeliveryResult,
   ): Promise<void> {
-    if (data.event !== 'reiwa.channel.broadcast') return;
-    const eventId = typeof data.metadata?.eventId === 'string' ? data.metadata.eventId : '';
-    if (!eventId.startsWith(BROADCAST_CHANNEL_EVENT_PREFIX)) return;
-    const broadcastId = eventId.slice(BROADCAST_CHANNEL_EVENT_PREFIX.length);
-    // An `unconfirmed` delivery (an older bot answering 204) carries no id.
-    // There is nothing to write, and writing the chat alone would claim an
-    // address that cannot be used.
-    if (broadcastId.length === 0 || outcome.messageId === null) return;
-    const chatId = typeof data.metadata?.chatId === 'string' ? data.metadata.chatId : null;
-    if (chatId === null) return;
-    try {
-      await this.prismaService.broadcast.updateMany({
-        where: { id: broadcastId },
-        data: { channelChatId: chatId, channelMessageId: BigInt(outcome.messageId) },
-      });
-    } catch (err: unknown) {
-      this.logger.warn(
-        `Could not record the channel post id for broadcast ${broadcastId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+    await rememberRelayedChannelPost(this.prismaService, data, outcome, (message) =>
+      this.logger.warn(message),
+    );
   }
 
   public async process(job: Job<ReiwaRelayJobData>): Promise<{
@@ -143,32 +199,49 @@ export class ReiwaRelayProcessor extends WorkerHost {
           job.opts?.attempts ?? 1
         }) — retrying`,
       );
-      throw new Error(`reiwa relay ${event} ${outcome.status}`);
+      // The cabinet's `Retry-After` rides on the error: it is the only thing
+      // `relayBackoffStrategy` is handed.
+      throw new ReiwaRelayRetryError(
+        `reiwa relay ${event} ${outcome.status}`,
+        outcome.retryAfterSeconds ?? null,
+      );
     }
 
-    this.recordUndelivered(job, outcome);
+    await this.recordUndelivered(job, outcome);
+    // Nothing further is coming for this relay. A broadcast's channel post
+    // that certainly never went up must stop reading as a public copy on the
+    // broadcast page — see `rememberLostChannelPost`.
+    await rememberLostChannelPost(this.prismaService, job.data, outcome, (message) =>
+      this.logger.warn(message),
+    );
 
-    if (!shouldAlertOperator(event, outcome)) {
+    if (!shouldFailRelayJob(event, outcome)) {
       // ── Why this COMPLETES instead of failing ──────────────────────────
-      // The one outcome `shouldAlertOperator` excludes is `reiwa.user.notify`
-      // + `unconfirmed`, i.e. overwhelmingly "this subscriber blocked the
-      // bot". It is also, by a wide margin, the highest-VOLUME undelivered
-      // outcome on this queue: on a platform with churn every blocked
-      // subscriber produces one per notification sent to them.
+      // Three outcomes end here. The dev relay's dead ends — nobody to
+      // deliver to, or a card Telegram refused to that nobody — are a
+      // deployment shape rather than an incident, and `isDevRelayDeadEnd`
+      // says why. `reiwa.user.notify` + `unconfirmed` is overwhelmingly "this
+      // subscriber blocked the bot". And a message Telegram refused (422) is
+      // alerted, once per cause, but it is a verdict on that message rather
+      // than on the link.
       //
-      // Failing it put those in `removeOnFail`'s bounded set, where they
-      // pushed out the jobs an operator actually needs — a relay that burned
-      // through its attempts because the cabinet was down. Raising the bound
-      // instead would only buy time, and the number that buys a day depends
-      // on a platform size nobody here knows.
+      // What they share is VOLUME. Every blocked subscriber produces one per
+      // notification sent to them; a template Telegram will not parse is
+      // refused once per recipient. Failing them put those in
+      // `removeOnFail`'s bounded set, where they pushed out the jobs an
+      // operator actually needs — a relay that burned through its attempts
+      // because the cabinet was down. Raising the bound instead would only buy
+      // time, and the number that buys a day depends on a platform size nobody
+      // here knows.
       //
       // Nothing that was ever actionable is lost by completing:
-      //   * every ALERTABLE undelivered outcome still fails the job AND
-      //     writes a `reiwa.relay_undelivered` row into `AdminAuditLog`, so
-      //     the retained set is now a bin of exactly those;
-      //   * this one is already recorded out of band — the bot flips
+      //   * every failure of the LINK still fails the job and writes (or
+      //     counts into) a `reiwa.relay_undelivered` alert, so the retained
+      //     set is now a bin of exactly those;
+      //   * a refusal writes that alert too, with the cabinet's reason in it;
+      //   * the blocked bot is recorded out of band — the bot flips
       //     `User.isBotBlocked`, and the cabinet-feed row the notification
-      //     belongs to is untouched — plus the `logger.warn` in
+      //     belongs to is untouched — plus the log line in
       //     `recordUndelivered`;
       //   * the completed job's own return value says `delivered: false`, so
       //     the terminal state answers "is more work coming?" honestly rather
@@ -179,17 +252,20 @@ export class ReiwaRelayProcessor extends WorkerHost {
     if (retryable) {
       // Transient, but out of attempts. Fail the job so it lands in BullMQ's
       // retained failed set alongside the audit-log row.
-      throw new Error(`reiwa relay ${event} ${outcome.status} (attempts exhausted)`);
+      throw new ReiwaRelayRetryError(
+        `reiwa relay ${event} ${outcome.status} (attempts exhausted)`,
+        outcome.retryAfterSeconds ?? null,
+      );
     }
-    // Permanent: a bad signature, a payload the bot refuses, a relay that was
-    // never configured. `UnrecoverableError` fails the job without burning the
-    // remaining attempts on a request whose answer cannot change.
+    // Permanent: a bad signature, a route the cabinet does not know, a relay
+    // that was never configured. `UnrecoverableError` fails the job without
+    // burning the remaining attempts on a request whose answer cannot change.
     throw new UnrecoverableError(`reiwa relay ${event} ${outcome.status} (permanent)`);
   }
 
   /**
    * Leave a trace that survives the process, and alert where the operator can
-   * act. `shouldAlertOperator` carries the one exclusion and its reasoning.
+   * act. `shouldAlertOperator` carries the exclusions and their reasoning.
    *
    * Two levels rather than one, because `SystemEventsService.emit` has a single
    * door: it persists to `AdminAuditLog`, pushes to the realtime socket AND
@@ -197,49 +273,57 @@ export class ReiwaRelayProcessor extends WorkerHost {
    * would mean a second, divergent path that writes events — worse than the
    * problem it solves.
    *
-   *  - Alertable: a `reiwa.relay_undelivered` system event — the `AdminAuditLog`
-   *    row plus the operator's card — and the job then fails, so BullMQ also
-   *    retains it (payload, error, attempt count) in Redis. Metadata mirrors
-   *    the backup relay's so the two read alike.
-   *  - Not alertable: the `logger.warn` below, and nothing in the retained
-   *    failed set — deliberately, because that set is bounded and this case is
-   *    the one that floods it. `process` explains the trade in full.
+   *  - Alertable: the record goes to `RELAY_UNDELIVERED_RECORDER`, which emits a
+   *    `reiwa.relay_undelivered` system event — the `AdminAuditLog` row plus
+   *    the operator's card — for the first record of its cause in a cooldown,
+   *    and counts the rest into the next one. Metadata mirrors the backup
+   *    relay's so the two read alike.
+   *  - Not alertable: the log line below, and nothing in the retained failed
+   *    set — deliberately, because that set is bounded and these are the cases
+   *    that flood it. `process` explains the trade in full.
    */
-  private recordUndelivered(job: Job<ReiwaRelayJobData>, outcome: NotifyDeliveryResult): void {
+  private async recordUndelivered(
+    job: Job<ReiwaRelayJobData>,
+    outcome: NotifyDeliveryResult,
+  ): Promise<void> {
     const { event, metadata } = job.data;
-    if (!shouldAlertOperator(event, outcome)) {
-      this.logger.warn(
-        `Relay ${event} ${outcome.status} — per-recipient Telegram state, not a link ` +
-          'failure; recorded on the failed job, no operator alert',
+    if (isDevRelayDeadEnd(event, outcome)) {
+      // Debug, not warn: on an install whose dev route reaches nobody this is
+      // every system event, and a warning per event is the same noise the
+      // alert would have been, moved to stdout.
+      this.logger.debug(
+        `Relay ${event}: the dev route reached nobody (${outcome.httpStatus}${
+          outcome.detail === null ? '' : `, ${outcome.detail}`
+        }) — no operator alert`,
       );
       return;
     }
-    const eventId = typeof metadata['eventId'] === 'string' ? metadata['eventId'] : null;
-    this.systemEventsService.warn(
-      EVENT_TYPES.REIWA_RELAY_UNDELIVERED,
-      'SYSTEM',
-      `Reiwa relay did not deliver ${event} (${outcome.status})`,
-      {
-        relayEvent: event,
-        relayStatus: outcome.status,
-        httpStatus: outcome.httpStatus,
-        detail: outcome.detail,
-        attemptsMade: job.attemptsMade + 1,
-        attempts: job.opts?.attempts ?? 1,
-        ...(eventId !== null ? { relayEventId: eventId } : {}),
-        // THE HOP COUNT, CARRIED THROUGH.
-        //
-        // This event is emitted from scratch, and building it without the count
-        // reset the automation loop guard once per relay generation: an action
-        // emits a stamped event, that event queues a relay job, the job
-        // exhausts, and this line put a fresh depth-zero event back on the bus.
-        // A rule bound to it — "tell me on Telegram when the relay breaks" —
-        // then re-armed itself for ever, four laps at a time, while the cabinet
-        // was down. `relaySystemEvent` copies the depth onto the job precisely
-        // so this can hand it back.
-        ...chainDepthMetadata(metadata),
-      },
-    );
+    if (!shouldAlertOperator(event, outcome)) {
+      this.logger.warn(
+        `Relay ${event} ${outcome.status} — per-recipient Telegram state, not a link ` +
+          'failure; recorded on the completed job, no operator alert',
+      );
+      return;
+    }
+    try {
+      // The automation hop count rides along inside the builder — see the note
+      // there on why losing it re-armed a rule bound to this event for ever.
+      await this.recordUndeliveredSend(
+        buildRelayUndeliveredRecord({
+          event,
+          metadata,
+          outcome,
+          attemptsMade: job.attemptsMade + 1,
+          attempts: job.opts?.attempts ?? 1,
+        }),
+      );
+    } catch (err: unknown) {
+      // What the job does next must not depend on whether the record could be
+      // written; the log line is what is left.
+      this.logger.warn(
+        `Could not record the undelivered ${event}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   @OnWorkerEvent('failed')

@@ -45,6 +45,8 @@ describe('UserNotificationsService', () => {
         telegramId: '12345',
         text: 'Manual message',
         parseMode: 'HTML',
+        // For the undelivered alert's signature only: the cabinet drops it.
+        notificationType: 'ADMIN_MESSAGE',
         buttons: undefined,
         bannerUrl: undefined,
       },
@@ -116,6 +118,8 @@ describe('UserNotificationsService', () => {
         telegramId: '12345',
         text: '<b>Expires soon</b>\n\nHello Nina, 3 day(s) left',
         parseMode: 'HTML',
+        // The template, so a refusal of it is an incident of its own.
+        notificationType: 'subscription_expiring_3d',
         buttons: undefined,
         bannerUrl: undefined,
       },
@@ -714,6 +718,39 @@ describe('the email leg', () => {
 
     assert.equal(typeof state.emailCalls[0].rawHtml, 'string');
     assert.equal(state.emailCalls[0].text, 'Скоро истекает.');
+  });
+
+  it('keeps the template’s line breaks in the letter, with the values escaped first', async () => {
+    // The body is Telegram HTML, whose lines are separated by `\n`. Telegram
+    // draws those; an inbox collapses them into spaces, so every letter
+    // arrived as one run-on paragraph — the title glued to the body, the
+    // subscription card's seven lines on one.
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: 42n, isBotBlocked: false, name: '<b>Ann</b>' },
+      template: {
+        isActive: true,
+        title: 'Через 3 дня',
+        body: 'Привет, {{name}}!\n<b>Тариф:</b> {{plan}}\n\n<a\nhref="https://example.com/renew">Продлить</a>',
+      },
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'expires_in_3_days', payload: { plan: 'Pro <Max>' } });
+    await flushFanout();
+
+    assert.equal(
+      state.emailCalls[0].rawHtml,
+      '<b>Через 3 дня</b><br><br>' +
+        // A value is escaped where it went in, so `<br>` can never be added to
+        // text that could still carry markup of its own.
+        'Привет, &lt;b&gt;Ann&lt;/b&gt;!<br>' +
+        '<b>Тариф:</b> Pro &lt;Max&gt;<br><br>' +
+        // A newline INSIDE a tag the operator wrote is whitespace between its
+        // attributes; a `<br>` there would break the tag.
+        '<a\nhref="https://example.com/renew">Продлить</a>',
+    );
   });
 
   it('does not take down the Telegram send when mail fails', async () => {

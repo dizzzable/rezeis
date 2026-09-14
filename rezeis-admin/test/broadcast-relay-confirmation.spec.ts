@@ -4,7 +4,10 @@ import { describe, it } from 'node:test';
 import { BroadcastMessageStatus, BroadcastStatus } from '@prisma/client';
 
 import { BroadcastDeliveryService } from '../src/modules/broadcast/services/broadcast-delivery.service';
-import { RELAY_CIRCUIT_BREAKER_THRESHOLD } from '../src/modules/broadcast/broadcast.constants';
+import {
+  BROADCAST_BLOCKED_REASON,
+  RELAY_CIRCUIT_BREAKER_THRESHOLD,
+} from '../src/modules/broadcast/broadcast.constants';
 
 /**
  * What a broadcast row is allowed to claim
@@ -64,6 +67,17 @@ function harness(input: {
    * pre-send re-read finds. Everything else still reads PENDING.
    */
   readonly cancelledMidBatch?: readonly string[];
+  /**
+   * Message ids whose cancellation lands WHILE their send is in flight: the
+   * pre-send re-read still says PENDING, the conditional SENT write after it
+   * finds the row no longer PENDING.
+   */
+  readonly cancelledInFlight?: readonly string[];
+  /** The relay's `detail` and `httpStatus` for the outcome (default: none). */
+  readonly detail?: string | null;
+  readonly httpStatus?: number | null;
+  /** What the recipient's `isBotBlocked` reads when the service re-reads it. */
+  readonly botBlocked?: boolean;
 }) {
   const updates: MessageUpdate[] = [];
   const updateManyCalls: Array<Record<string, unknown>> = [];
@@ -144,6 +158,14 @@ function harness(input: {
         // row and nothing else — treating it as the bulk reset below would
         // settle the whole batch and wreck the circuit-breaker bookkeeping.
         if (typeof args.where?.id === 'string') {
+          // The SENT claim of a send the operator cancelled mid-flight: the row
+          // is CANCELED by now, so the PENDING-conditioned write matches nothing.
+          if (
+            (input.cancelledInFlight ?? []).includes(args.where.id) &&
+            args.data['status'] === BroadcastMessageStatus.SENT
+          ) {
+            return { count: 0 };
+          }
           if (typeof args.data['status'] === 'string') settled.add(args.where.id);
           updates.push({ where: { id: args.where.id }, data: args.data } as MessageUpdate);
           return { count: 1 };
@@ -172,6 +194,7 @@ function harness(input: {
       findUnique: async () => ({
         telegramId: input.telegramId === undefined ? 12345n : input.telegramId,
         email: null,
+        isBotBlocked: input.botBlocked ?? false,
       }),
     },
   };
@@ -196,8 +219,15 @@ function harness(input: {
         return {
           status,
           messageId,
-          httpStatus: status === 'confirmed' ? 200 : status === 'unconfirmed' ? 204 : null,
-          detail: null,
+          httpStatus:
+            input.httpStatus !== undefined
+              ? input.httpStatus
+              : status === 'confirmed'
+                ? 200
+                : status === 'unconfirmed'
+                  ? 204
+                  : null,
+          detail: input.detail ?? null,
         };
       },
     } as never,
@@ -324,6 +354,97 @@ describe('a broadcast row only claims what the relay proved', () => {
     assert.equal(h.updates[0]?.data['telegramMessageId'], null);
     // The green row still says the Telegram leg did not happen.
     assert.equal(h.updates[0]?.data['errorMessage'], 'telegram_skipped_disabled');
+  });
+});
+
+describe('what a failed recipient row says about why', () => {
+  it('keeps the cabinet’s reason for a refusal, after the status', async () => {
+    // A 422 now carries Telegram's words — "can't parse entities" is the
+    // template, BUTTON_URL_INVALID the promo button, "chat not found" the
+    // recipient. The row kept `telegram_relay_rejected` and nothing else, so a
+    // failed broadcast gave its operator nothing to fix.
+    const h = harness({
+      recipients: 1,
+      relayStatus: 'rejected',
+      httpStatus: 422,
+      detail: 'HTTP 422 Unprocessable Entity: Bad Request: BUTTON_URL_INVALID',
+    });
+
+    const result = await h.service.deliverBatch('broadcast-1', h.ids);
+
+    assert.deepStrictEqual(result, { sent: 0, failed: 1, unresolved: 0, emailAttempted: 0, emailSent: 0 });
+    assert.equal(
+      h.updates.find((u) => u.data['status'] === BroadcastMessageStatus.FAILED)?.data['errorMessage'],
+      'telegram_relay_rejected: HTTP 422 Unprocessable Entity: Bad Request: BUTTON_URL_INVALID',
+    );
+  });
+
+  it('bounds the reason, and keeps the status first', async () => {
+    const h = harness({
+      recipients: 1,
+      relayStatus: 'rejected',
+      httpStatus: 422,
+      detail: `HTTP 422 Unprocessable Entity: ${'x'.repeat(5_000)}`,
+    });
+
+    await h.service.deliverBatch('broadcast-1', h.ids);
+
+    const reason = String(h.updates.find((u) => u.data['status'] === BroadcastMessageStatus.FAILED)?.data['errorMessage']);
+    assert.ok(reason.startsWith('telegram_relay_rejected: HTTP 422 '), reason.slice(0, 60));
+    assert.equal(reason.length, 'telegram_relay_rejected: '.length + 300, 'the relay words are clipped to 300');
+    assert.ok(reason.endsWith('…'));
+  });
+
+  it('keeps a blocked recipient’s reason exactly as it was', async () => {
+    // `getFailedMessageIds` and the blocked count match this string whole; a
+    // reason appended to it would move every blocked recipient back into
+    // "retry failed".
+    const h = harness({
+      recipients: 1,
+      relayStatus: 'unconfirmed',
+      botBlocked: true,
+      detail: 'bot was blocked by the user',
+    });
+
+    await h.service.deliverBatch('broadcast-1', h.ids);
+
+    assert.equal(
+      h.updates.find((u) => u.data['status'] === BroadcastMessageStatus.FAILED)?.data['errorMessage'],
+      BROADCAST_BLOCKED_REASON,
+    );
+  });
+
+  it('writes the bare status when the relay said nothing more', async () => {
+    const h = harness({ recipients: 1, relayStatus: 'unconfirmed' });
+
+    await h.service.deliverBatch('broadcast-1', h.ids);
+
+    assert.equal(
+      h.updates.find((u) => u.data['status'] === BroadcastMessageStatus.FAILED)?.data['errorMessage'],
+      'telegram_relay_unconfirmed',
+    );
+  });
+
+  it('names the broadcast and the count of sends a cancellation arrived too late for', async () => {
+    // The log line printed `NaN`: a template literal lost in an edit left
+    // `+'cancellation reached them…'`, a unary plus on a sentence.
+    const h = harness({
+      recipients: 2,
+      relayStatus: 'confirmed',
+      messageId: 777,
+      cancelledInFlight: ['message-1', 'message-2'],
+    });
+    const warnings: string[] = [];
+    (h.service as unknown as { logger: { warn: (message: unknown) => void } }).logger.warn = (message) =>
+      void warnings.push(String(message));
+
+    const result = await h.service.deliverBatch('broadcast-1', h.ids);
+
+    assert.equal(result.sent, 2, 'a send that happened is recorded as a send');
+    const line = warnings.find((w) => w.includes('cancellation reached them'));
+    assert.ok(line, `no warning about the late cancellation: ${JSON.stringify(warnings)}`);
+    assert.equal(line.includes('NaN'), false, line);
+    assert.match(line, /^Broadcast broadcast-1: 2 message\(s\) had already left/);
   });
 });
 

@@ -45,6 +45,8 @@ describe('AdminUserManagementController notify channels', () => {
           telegramId: '12345',
           text: 'Telegram only',
           parseMode: 'HTML',
+          // Read by nobody but the undelivered alert's signature.
+          notificationType: 'ADMIN_MESSAGE',
         },
       },
     ]);

@@ -4,6 +4,9 @@ import { Prisma } from '@prisma/client';
 
 import { appConfig } from '../../../common/config/app.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+// The one markup-safe clipper in the tree. Already in this file's import graph
+// (through `WebPushService`), so importing it directly adds no cycle.
+import { clipHtmlCard } from '../../../common/services/system-events.service';
 import { readAdminBotToken, readEnvBotToken } from '../../../common/utils/admin-bot-token.util';
 import { WebPushService } from '../../push/services/web-push.service';
 import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
@@ -128,6 +131,10 @@ interface CreateUserNotificationInput {
    * When true, the Telegram fanout is skipped (web-push + cabinet feed still
    * run). Used by the broadcast pipeline, which performs its own Telegram
    * delivery with media support and only needs the web-push + feed channels.
+   *
+   * BOTH Telegram legs: the subscriber's message and the operator mirror. The
+   * pipeline calls `create()` once per recipient, so a mirror here is one copy
+   * of the broadcast per subscriber in the operator's topic.
    */
   readonly skipTelegram?: boolean;
 }
@@ -478,7 +485,7 @@ export class UserNotificationsService {
     // Operator mirror, unchanged from the fanout path: it copies the message
     // into the OPERATOR's own chat, so it is not a user-facing channel and is
     // not one of the things being selected here.
-    await this.mirrorToOperatorChat(event.id, input.text).catch((err: unknown) => {
+    await this.mirrorToOperatorChat(event.id, input.text, input.userId, 'ADMIN_MESSAGE').catch((err: unknown) => {
       this.logger.warn(
         `Operator mirror failed for ${event.id}: ${
           err instanceof Error ? err.message : String(err)
@@ -517,6 +524,9 @@ export class UserNotificationsService {
         telegramId: user.telegramId.toString(),
         text,
         parseMode: 'HTML',
+        // Never read by the cabinet (its schema drops unknown keys); it is what
+        // tells this refusal apart from another template's in the alert.
+        notificationType: 'ADMIN_MESSAGE',
       });
       return queued
         ? {
@@ -669,6 +679,8 @@ export class UserNotificationsService {
           telegramId: true,
           isBotBlocked: true,
           name: true,
+          // Only for the operator mirror's "who was this for" block.
+          username: true,
           language: true,
           notificationPrefs: true,
         },
@@ -761,6 +773,10 @@ export class UserNotificationsService {
           telegramId: user.telegramId.toString(),
           text: rendered.html,
           parseMode: 'HTML',
+          // The template, for the undelivered alert's signature: two templates
+          // Telegram refuses in the same words are two things to fix. The
+          // cabinet's schema drops the key; the bot never sees it.
+          notificationType: input.type,
           buttons,
           bannerUrl:
             template !== null &&
@@ -845,8 +861,21 @@ export class UserNotificationsService {
       // this notification into the operator chat (routed to the USER
       // topic when configured). Variant A: one Telegram delivery
       // surface instead of a separate broadcast-channels table.
-      if (rendered !== null) {
-        await this.mirrorToOperatorChat(input.eventId, rendered.html);
+      //
+      // NEVER for a `skipTelegram` send. The broadcast pipeline is the one
+      // caller that sets it, and it calls `create()` once PER RECIPIENT — so
+      // the mirror posted one identical copy of the broadcast into the USER
+      // topic for every subscriber it reached, and a media-only broadcast,
+      // whose text is `' '`, posted that many blank cards. A broadcast already
+      // has its operator-facing copy: the channel post. And the flag's own
+      // words are "the Telegram legs of this notification are handled
+      // elsewhere"; the mirror is a Telegram leg.
+      if (rendered !== null && input.skipTelegram !== true) {
+        await this.mirrorToOperatorChat(input.eventId, rendered.html, input.userId, input.type, {
+          name: user.name,
+          username: user.username,
+          telegramId: user.telegramId,
+        });
       }
     } catch (err: unknown) {
       this.logger.warn(
@@ -863,12 +892,34 @@ export class UserNotificationsService {
    * same `systemNotifications.telegram` config the system-events
    * firehose uses, routing the copy to the `USER` topic (or the
    * default topic / general chat). Fire-and-forget — never throws.
+   *
+   * The copy NAMES ITS RECIPIENT. Every mirror lands in the same topic, and
+   * the notification text is written to the subscriber ("your subscription
+   * ends tomorrow"), so without a name the topic was a column of identical
+   * cards addressed to nobody an operator could find. `recipient` is the row
+   * the caller already read; without one it is read here, and only once the
+   * mirror is known to be wanted.
    */
-  private async mirrorToOperatorChat(eventId: string, html: string): Promise<void> {
+  private async mirrorToOperatorChat(
+    eventId: string,
+    html: string,
+    userId: string,
+    /** The notification's type — the template the copy is of; see the alert signature. */
+    notificationType: string,
+    recipient?: MirrorRecipient,
+  ): Promise<void> {
+    // A card with no words in it is not a copy of anything. The Telegram leg
+    // that sends such a text is not this one's to second-guess, but an
+    // operator topic has no use for it.
+    if (stripHtml(html).trim().length === 0) return;
     const config = await this.readTelegramDeliveryConfig();
     if (!config.enabled || !config.mirror || config.chatId === null) return;
     const topicThreadId =
       config.topics[USER_NOTIFICATION_CATEGORY] ?? config.defaultTopicId ?? undefined;
+    const card = composeMirrorCard(
+      html,
+      formatMirrorRecipient(userId, recipient ?? (await this.readMirrorRecipient(userId))),
+    );
     // This copy is for the OPERATOR, so the panel sends it itself when it can.
     // The subscriber's own delivery, a few lines above, still goes through the
     // bot and must: the bot owns the per-recipient state (`isBotBlocked`) and
@@ -880,9 +931,10 @@ export class UserNotificationsService {
           kind: 'message',
           chatId: config.chatId,
           topicId: topicThreadId ?? null,
-          text: html,
+          text: card,
           parseMode: 'HTML',
           sourceEventType: 'user_notification.operator_mirror',
+          notificationType,
         },
         `${eventId}:operator-mirror`,
       );
@@ -894,9 +946,33 @@ export class UserNotificationsService {
       eventId: `${eventId}:operator-mirror`,
       chatId: config.chatId,
       topicThreadId: topicThreadId ?? undefined,
-      text: html,
+      text: card,
       parseMode: 'HTML',
+      // For the undelivered alert only; the cabinet drops the keys.
+      sourceEventType: 'user_notification.operator_mirror',
+      notificationType,
     });
+  }
+
+  /**
+   * The recipient row for a mirror whose caller did not have it in hand.
+   * `null` on a miss or a failed read: the card then names the Reiwa id alone,
+   * which still finds the user, rather than not going out.
+   */
+  private async readMirrorRecipient(userId: string): Promise<MirrorRecipient | null> {
+    try {
+      return await this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { name: true, username: true, telegramId: true },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Could not read the recipient for the operator mirror of ${userId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -1149,7 +1225,9 @@ export class UserNotificationsService {
         subject: rendered.title,
         templateType: type,
         variables: {},
-        rawHtml: rendered.html,
+        // Telegram HTML separates its lines with `\n`, which an inbox collapses
+        // into a space — see `renderNotificationEmailHtml`.
+        rawHtml: renderNotificationEmailHtml(rendered.html),
         // The body is a template render, and 28 of the catalogue's bodies carry
         // `<b>` — so the plain-text alternative was shipping raw tags to the
         // one reader whose client refused the HTML part.
@@ -1237,6 +1315,10 @@ export class UserNotificationsService {
         },
         locale === 'en' ? 'en' : 'ru',
       ),
+      // After the payload, and only when the payload has no string `currency`
+      // of its own — so an emitter that names the unit keeps its word. See
+      // `rewardUnitFacts` for what the unit of a referral reward is.
+      ...rewardUnitFacts(payloadRecord, locale),
       name: userName ?? '',
       project_name: projectName,
       projectName,
@@ -1373,6 +1455,133 @@ function escapeHtml(input: string): string {
  */
 function stripHtml(input: string): string {
   return input.replace(/<[^>]*>/g, '');
+}
+
+/**
+ * The unit a referral reward is counted in, per `rewardType` and language.
+ *
+ * `referral_reward` renders «Вам начислено <b>{{amount}}</b> {{currency}} за
+ * активного реферала», and a referral reward is not money: it is points or
+ * days. The payment pipeline sends no `currency` for it on purpose — the unit
+ * is a word in the reader's language, and the language is known here, at
+ * render time, not when the notification is created (the same reason
+ * `buildSubscriptionFacts` formats at render time). Without this the sentence
+ * read «Вам начислено 50 за активного реферала».
+ *
+ * A Map, not an object literal: `rewardType` is stored JSON, and a lookup on a
+ * plain object answers `constructor` and `__proto__` with something.
+ */
+const REWARD_UNIT_BY_TYPE: ReadonlyMap<string, Readonly<Record<NotificationLocale, string>>> =
+  new Map([
+    ['POINTS', { ru: 'баллов', en: 'points' }],
+    ['EXTRA_DAYS', { ru: 'дн.', en: 'days' }],
+  ]);
+
+/**
+ * `{ currency }` for a referral reward whose payload names no unit, else
+ * nothing. A payload that carries a string `currency` keeps it; a reward type
+ * this table does not know adds nothing, and `{{currency}}` collapses exactly
+ * as it did before.
+ */
+function rewardUnitFacts(
+  payload: Record<string, unknown>,
+  locale: NotificationLocale,
+): Record<string, string> {
+  if (typeof payload['currency'] === 'string') return {};
+  const rewardType = payload['rewardType'];
+  const unit = typeof rewardType === 'string' ? REWARD_UNIT_BY_TYPE.get(rewardType) : undefined;
+  return unit === undefined ? {} : { currency: unit[locale] };
+}
+
+/** The recipient fields the operator mirror names. */
+interface MirrorRecipient {
+  readonly name: string | null;
+  readonly username: string | null;
+  readonly telegramId: bigint | null;
+}
+
+/**
+ * The "who was this for" block under a mirrored notification.
+ *
+ * Laid out like the 👤 block on the panel's own event cards — same labels,
+ * same order — so a topic that carries both reads as one vocabulary. Every
+ * value is escaped: `name` and `username` are Telegram profile fields the
+ * subscriber sets, and this text is parsed as HTML.
+ */
+function formatMirrorRecipient(userId: string, recipient: MirrorRecipient | null): string {
+  const lines: string[] = [];
+  if (recipient !== null && recipient.telegramId !== null) {
+    lines.push(`🪪 Telegram ID: <code>${recipient.telegramId.toString()}</code>`);
+  }
+  lines.push(`👾 Reiwa ID: <code>${escapeHtml(userId)}</code>`);
+  const name = recipient?.name?.trim() ?? '';
+  const username = recipient?.username?.trim() ?? '';
+  if (name.length > 0) {
+    const handle = username.length > 0 ? ` (@${escapeHtml(username)})` : '';
+    lines.push(`👤 Имя: ${escapeHtml(name)}${handle}`);
+  } else if (username.length > 0) {
+    lines.push(`👤 Username: @${escapeHtml(username)}`);
+  }
+  return `👤 <b>Получатель:</b>\n<blockquote>${lines.join('\n')}</blockquote>`;
+}
+
+/**
+ * What one Telegram message may hold, and what both roads of the mirror refuse
+ * past it: Telegram's own `sendMessage` limit, and the cabinet's
+ * `textSchema.max(4096)` on the relay. Both count less than `.length` does —
+ * Telegram counts characters after the markup is parsed, the cabinet code
+ * points — so a text that fits here fits there.
+ */
+const OPERATOR_MIRROR_TEXT_LIMIT = 4096;
+
+const MIRROR_BLOCK_SEPARATOR = '\n\n';
+
+/**
+ * The notification, then the recipient block — inside one message.
+ *
+ * The block is appended to a notification that may already sit at the limit:
+ * an operator's message or a long template can use every one of 4096
+ * characters, and ~200 more of recipient block made the copy a message that
+ * Telegram (or the cabinet, on the relay) refuses outright — one lost mirror
+ * and one operator alert per such notification. So the NOTIFICATION is clipped
+ * to the room the block leaves, by the same markup-safe clipper the system
+ * cards use, and the block goes on intact.
+ *
+ * The block never takes the notification's place: if it would need more room
+ * than it leaves the notification (a display name nobody could have), the copy
+ * goes out without it rather than as a block with a stub attached.
+ */
+function composeMirrorCard(html: string, recipientBlock: string): string {
+  const room = OPERATOR_MIRROR_TEXT_LIMIT - MIRROR_BLOCK_SEPARATOR.length - recipientBlock.length;
+  if (room < recipientBlock.length) return clipHtmlCard(html, OPERATOR_MIRROR_TEXT_LIMIT);
+  return `${clipHtmlCard(html, room)}${MIRROR_BLOCK_SEPARATOR}${recipientBlock}`;
+}
+
+/**
+ * A Telegram-rendered notification, laid out for an inbox.
+ *
+ * `rendered.html` is Telegram HTML, and Telegram draws its `\n` as line
+ * breaks; an e-mail client collapses them into single spaces. So every letter
+ * arrived as one run-on paragraph — the title glued to the body, and the
+ * subscription card's seven lines on one line. The branded layout has no
+ * `white-space: pre-line` to rescue it, and should not get one: the other
+ * `rawHtml` senders (the verification code, the SMTP test) indent their markup
+ * across lines, and every one of those newlines would become a gap.
+ *
+ * ESCAPED FIRST, THEN THE NEWLINES. Nothing here escapes, because the escaping
+ * already happened where the values went in: `renderFromTemplate` escapes the
+ * title and every substituted value, and leaves only the operator's own
+ * template markup live. Escaping again would print that markup as text; adding
+ * `<br>` before the values were escaped would have been the unsafe order.
+ * `<br>` goes only BETWEEN tags — a newline inside a tag is whitespace between
+ * its attributes, and a `<br>` there would break the tag. The capturing split
+ * puts every tag at an odd index, so the text runs are exactly the even ones.
+ */
+function renderNotificationEmailHtml(telegramHtml: string): string {
+  return telegramHtml
+    .split(/(<[^>]*>)/)
+    .map((part, index) => (index % 2 === 1 ? part : part.replace(/\r\n|\r|\n/g, '<br>')))
+    .join('');
 }
 
 /**

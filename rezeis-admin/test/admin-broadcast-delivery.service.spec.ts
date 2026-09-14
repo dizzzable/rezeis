@@ -5,6 +5,21 @@ import { BroadcastAudience, BroadcastMessageStatus, BroadcastStatus } from '@pri
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { BroadcastDeliveryService } from '../src/modules/broadcast/services/broadcast-delivery.service';
+import {
+  REIWA_RELAY_QUEUE,
+  type ReiwaRelayJobData,
+} from '../src/modules/notifications/reiwa-relay.constants';
+import { emitRelayUndelivered } from '../src/modules/notifications/reiwa-relay.processor';
+import {
+  ReiwaRelayQueueService,
+  type RelaySubmission,
+} from '../src/modules/notifications/services/reiwa-relay-queue.service';
+import {
+  createUndeliveredRecorder,
+  UndeliveredAlertGate,
+} from '../src/modules/notifications/undelivered-alert-gate';
+import { describeRelayRepeats } from '../src/modules/notifications/undelivered-record';
+import { OfflineBullMqQueue } from './helpers/bullmq-offline-queue';
 
 /**
  * Minimal BotNotifierClient stub.
@@ -69,21 +84,29 @@ function botNotifier(
 /**
  * Minimal ReiwaRelayQueueService stub.
  *
- * `enqueue` answers a boolean that means "accepted for durable delivery" and
- * never "delivered" — `false` is a job that Redis refused (the client's direct
- * fallback ran) or a relay that is not configured. Both are states the caller
- * has to be able to see, so the stub can produce either.
+ * `submit` answers what became of the relay (`RelaySubmission`), and `enqueue`
+ * the boolean derived from it — in hand or not. The channel post reads
+ * `submit`, because a lost post needs the one fact the boolean drops: whether
+ * the relay already recorded the loss. The stub can produce every answer.
  */
 function relayQueue(options?: {
   readonly enqueued?: Array<{ event: string; metadata: Record<string, unknown> }>;
   readonly isEnabled?: boolean;
+  /** Shorthand for `submission`: `false` is a loss nobody recorded. */
   readonly accepted?: boolean;
+  readonly submission?: RelaySubmission;
 }): never {
+  const submission: RelaySubmission =
+    options?.submission ?? (options?.accepted === false ? 'lost-unrecorded' : 'queued');
   return {
     isEnabled: options?.isEnabled ?? true,
     enqueue: async (event: string, metadata: Record<string, unknown>) => {
       options?.enqueued?.push({ event, metadata });
-      return options?.accepted ?? true;
+      return submission === 'queued' || submission === 'delivered';
+    },
+    submit: async (event: string, metadata: Record<string, unknown>) => {
+      options?.enqueued?.push({ event, metadata });
+      return submission;
     },
   } as never;
 }
@@ -254,11 +277,11 @@ describe('BroadcastDeliveryService', () => {
   });
 
   it('records a channel post the queue would not accept, instead of losing it', async () => {
-    // `enqueue` answers `false` when Redis refused the job (the client's single
-    // direct fallback ran) or the relay is unconfigured. Nothing durable is
-    // holding the post at that point, and the operator asked for it — so it
-    // has to reach a surface they can see. The old code could not report this
-    // at all: its `catch` was unreachable on a delivery failure.
+    // A post the relay lost WITHOUT recording it (`lost-unrecorded`). Nothing
+    // durable is holding it, nothing has reported it, and the operator asked
+    // for it — so it has to reach a surface they can see. The old code could
+    // not report this at all: its `catch` was unreachable on a delivery
+    // failure.
     const events: Array<{ type: string; severity: string; message: string; metadata?: unknown }> = [];
     const service = new BroadcastDeliveryService(
       {
@@ -374,6 +397,281 @@ describe('BroadcastDeliveryService', () => {
     assert.ok(warning, 'a configured channel that cannot be reached must be reported');
     assert.equal(JSON.stringify(warning.metadata).includes('disabled'), true);
     assert.equal(warning.type, EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED);
+  });
+
+  /**
+   * One lost post, one card, and it names the post. When Redis refuses the job
+   * and the relay's one direct attempt fails too, the relay records
+   * `reiwa.relay_undelivered` for the post — and this service used to add
+   * `broadcast.channel_post_undelivered` for the same post, two cards for one
+   * loss. Then it stopped adding its own whenever the relay had "recorded" the
+   * loss — and the relay's alert gate may only have COUNTED it into an earlier
+   * card, so a second broadcast's lost post produced no card at all.
+   *
+   * Run through the REAL producer and the REAL alert gate, over one broadcast
+   * table the relay and this service both write, because every one of those
+   * defects lived in a seam between them.
+   */
+  function broadcastTable(ids: readonly string[]) {
+    const rows = new Map(
+      ids.map((id) => [
+        id,
+        {
+          id,
+          status: BroadcastStatus.DRAFT as BroadcastStatus,
+          audience: BroadcastAudience.ALL,
+          audienceFilter: null,
+          payload: { text: `News ${id}`, telegramChannelChatId: '-100123' },
+          promoCode: null,
+          channelChatId: null as string | null,
+          channelMessageId: null as bigint | null,
+        },
+      ]),
+    );
+    const broadcast = {
+      findUnique: async (args: { where: { id: string } }) => rows.get(args.where.id) ?? null,
+      // Honours the two conditions the writers use: the staging claim's status,
+      // and the channel-post write's `channelMessageId: null`.
+      updateMany: async (args: {
+        where: { id: string; status?: { in: readonly string[] }; channelMessageId?: null };
+        data: Record<string, unknown>;
+      }) => {
+        const row = rows.get(args.where.id);
+        if (row === undefined) return { count: 0 };
+        if (args.where.status !== undefined && !args.where.status.in.includes(row.status)) return { count: 0 };
+        if ('channelMessageId' in args.where && row.channelMessageId !== null) return { count: 0 };
+        Object.assign(row, args.data);
+        return { count: 1 };
+      },
+      update: async () => undefined,
+    };
+    return { rows, broadcast };
+  }
+
+  function stagingWithRealRelay(
+    cabinet: () => Promise<Record<string, unknown>>,
+    ids: readonly string[] = ['broadcast-1'],
+  ) {
+    const alerts: Array<{ readonly type: string; readonly message: string; readonly metadata?: Record<string, unknown> }> =
+      [];
+    const events = {
+      info: () => undefined,
+      warn: (type: string, _c: string, message: string, metadata?: Record<string, unknown>) =>
+        alerts.push({ type, message, metadata }),
+    };
+    const table = broadcastTable(ids);
+    const queue = new OfflineBullMqQueue<ReiwaRelayJobData>(REIWA_RELAY_QUEUE);
+    queue.goDown();
+    const relay = new ReiwaRelayQueueService(
+      queue.asQueue(),
+      { isEnabled: true, deliverRelayEvent: cabinet } as never,
+      // The recorder as `ReiwaRelayModule` binds it: the gate, then the emit.
+      createUndeliveredRecorder({
+        gate: new UndeliveredAlertGate(null),
+        emit: (record) => emitRelayUndelivered(events, record),
+        describeRepeats: describeRelayRepeats,
+      }),
+      { broadcast: table.broadcast } as never,
+    );
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: table.broadcast,
+        user: { findMany: async () => [] },
+        broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
+      } as never,
+      configService('bot-token'),
+      events as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: true }),
+      relay,
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+    );
+    return { service, alerts, rows: table.rows };
+  }
+
+  /** The cards that name this broadcast's channel post, whichever producer raised them. */
+  function cardsNaming(
+    alerts: ReadonlyArray<{ readonly type: string; readonly metadata?: Record<string, unknown> }>,
+    broadcastId: string,
+  ) {
+    return alerts.filter(
+      (alert) =>
+        (alert.type === EVENT_TYPES.REIWA_RELAY_UNDELIVERED ||
+          alert.type === EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED) &&
+        alert.metadata?.['broadcastId'] === broadcastId,
+    );
+  }
+
+  it('raises one alert for a post the relay lost and carded, not two', async () => {
+    const { service, alerts } = stagingWithRealRelay(async () => ({
+      status: 'rejected',
+      messageId: null,
+      httpStatus: 422,
+      detail: 'HTTP 422 Unprocessable Entity: Bad Request: chat not found',
+    }));
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.deepStrictEqual(
+      alerts.map((alert) => alert.type),
+      [EVENT_TYPES.REIWA_RELAY_UNDELIVERED],
+      'the relay already said the post was lost, and why',
+    );
+    assert.equal(cardsNaming(alerts, 'broadcast-1').length, 1, 'and that card names the broadcast');
+  });
+
+  it('cards the second broadcast’s lost post too, while the cabinet stays unreachable', async () => {
+    // The reviewer's reproduction: Redis refuses the add, the cabinet is down,
+    // two broadcasts post to one channel within the cooldown. Broadcast B's
+    // post used to vanish without a card.
+    const { service, alerts, rows } = stagingWithRealRelay(
+      async () => ({ status: 'failed', messageId: null, httpStatus: null, detail: 'fetch failed' }),
+      ['broadcast-A', 'broadcast-B'],
+    );
+
+    await service.stageRecipients('broadcast-A');
+    await service.stageRecipients('broadcast-B');
+
+    for (const id of ['broadcast-A', 'broadcast-B']) {
+      assert.equal(cardsNaming(alerts, id).length, 1, `exactly one card names ${id}: ${JSON.stringify(alerts)}`);
+    }
+    assert.equal(alerts.length, 2, 'and nothing else');
+    // Neither post went up, and the page must not say one did.
+    for (const id of ['broadcast-A', 'broadcast-B']) {
+      assert.equal(await service.channelPostState(id), 'no-post', id);
+      assert.equal(rows.get(id)?.channelMessageId, null);
+    }
+  });
+
+  it('keeps presenting a post that may have gone up as one it cannot address', async () => {
+    // A timeout: the cabinet may have posted it after the panel stopped
+    // waiting. "No post" would hide a public copy.
+    const { service } = stagingWithRealRelay(async () => ({
+      status: 'timeout',
+      messageId: null,
+      httpStatus: null,
+      detail: 'timed out after 10000ms',
+    }));
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.equal(await service.channelPostState('broadcast-1'), 'unaddressable');
+  });
+
+  it('raises none for a post the relay’s direct attempt delivered', async () => {
+    const { service, alerts } = stagingWithRealRelay(async () => ({
+      status: 'confirmed',
+      messageId: 91,
+      httpStatus: 200,
+      detail: null,
+    }));
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.deepStrictEqual(alerts, []);
+    assert.equal(await service.channelPostState('broadcast-1'), 'addressable');
+  });
+
+  it('raises its own card, naming the broadcast, when the relay’s record was only counted', async () => {
+    const events: Array<{ type: string; message: string; metadata?: Record<string, unknown> }> = [];
+    const table = broadcastTable(['broadcast-1']);
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: table.broadcast,
+        user: { findMany: async () => [] },
+        broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
+      } as never,
+      configService('bot-token'),
+      {
+        info: () => undefined,
+        warn: (type: string, _c: string, message: string, metadata?: Record<string, unknown>) =>
+          events.push({ type, message, metadata }),
+      } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: true }),
+      relayQueue({ submission: 'lost-counted' }),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+    );
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.deepStrictEqual(
+      events.map((event) => event.type),
+      [EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED],
+      'counted is not carded: no card named this post yet',
+    );
+    assert.match(events[0]?.message ?? '', /broadcast-1/);
+  });
+
+  it('records a post the relay never saw as never published', async () => {
+    // The relay not configured: nothing was attempted, so there is no copy to
+    // recall or to remove by hand.
+    const table = broadcastTable(['broadcast-1']);
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: table.broadcast,
+        user: { findMany: async () => [] },
+        broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined, warn: () => undefined } as never,
+      { create: async () => 'evt' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, undefined, { isEnabled: false }),
+      relayQueue({ isEnabled: false }),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+    );
+
+    await service.stageRecipients('broadcast-1');
+
+    assert.equal(await service.channelPostState('broadcast-1'), 'no-post');
+  });
+
+  it('still raises its own alert for a post nobody else recorded', async () => {
+    for (const submission of ['lost-unrecorded', 'lost-counted', 'disabled'] as const) {
+      const events: Array<{ type: string; severity: string; metadata?: unknown }> = [];
+      const service = new BroadcastDeliveryService(
+        {
+          broadcast: {
+            findUnique: async () => ({
+              id: 'broadcast-1',
+              status: BroadcastStatus.DRAFT,
+              audience: BroadcastAudience.ALL,
+              audienceFilter: null,
+              payload: { text: 'Channel news', telegramChannelChatId: '-100123' },
+              promoCode: null,
+            }),
+            updateMany: async () => ({ count: 1 }),
+            update: async () => undefined,
+          },
+          user: { findMany: async () => [] },
+          broadcastMessage: { createMany: async () => undefined, findMany: async () => [] },
+        } as never,
+        configService('bot-token'),
+        {
+          info: (type: string, _c: string, _m: string, metadata?: unknown) =>
+            events.push({ type, severity: 'INFO', metadata }),
+          warn: (type: string, _c: string, _m: string, metadata?: unknown) =>
+            events.push({ type, severity: 'WARNING', metadata }),
+        } as never,
+        { create: async () => 'evt' } as never,
+        { getDecryptedBotToken: async () => null } as never,
+        botNotifier(null, undefined, { isEnabled: true }),
+        relayQueue({ submission }),
+        { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+      );
+
+      await service.stageRecipients('broadcast-1');
+
+      const warnings = events.filter((e) => e.severity === 'WARNING');
+      assert.deepStrictEqual(
+        warnings.map((w) => w.type),
+        [EVENT_TYPES.BROADCAST_CHANNEL_POST_UNDELIVERED],
+        submission,
+      );
+    }
   });
 
   it('no-ops staging (no channel post, no rows) when the atomic claim is lost to a retry', async () => {

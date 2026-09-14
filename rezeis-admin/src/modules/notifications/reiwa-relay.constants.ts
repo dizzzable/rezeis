@@ -60,7 +60,8 @@ export const RELAY_DIRECT_DELIVERY_EXCEPTIONS: Readonly<Record<string, string>> 
   'src/modules/notifications/services/reiwa-relay-queue.service.ts':
     'Producer fallback when Redis refuses the enqueue — one direct attempt keeps ' +
     'the floor at the pre-queue behaviour instead of turning a Redis blip into a ' +
-    'silently dropped notification.',
+    'silently dropped notification. It reads the outcome: a delivery is reported ' +
+    'as one, and a miss is recorded as `reiwa.relay_undelivered`, like an exhausted job.',
   'src/common/services/system-events.service.ts':
     'The relay-exhausted alert (`reiwa.relay_undelivered`) must not re-enter the ' +
     'queue it is reporting on, or the failure feeds itself for as long as the ' +

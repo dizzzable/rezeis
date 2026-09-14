@@ -197,15 +197,11 @@ describe('a chain that leaves through a delivery queue', () => {
    * because the automation hop launders the event into a different type on the
    * way past.
    *
-   * These read the source rather than run the processor: BullMQ's `Job`,
-   * Prisma and the bot notifier would all have to be stood up to observe one
-   * metadata key. The property is that the count is carried at both ends, and
-   * both ends are legible.
+   * The enqueue end is read from the source: `SystemEventsService` would have
+   * to be stood up whole to observe one metadata key there. The emitting end is
+   * run, because the processor is cheap to drive with doubles. The property is
+   * that the count is carried at both ends.
    */
-  const RELAY = readFileSync(
-    join(__dirname, '..', 'src', 'modules', 'notifications', 'reiwa-relay.processor.ts'),
-    'utf8',
-  );
   const EVENTS = readFileSync(
     join(__dirname, '..', 'src', 'common', 'services', 'system-events.service.ts'),
     'utf8',
@@ -247,20 +243,46 @@ describe('a chain that leaves through a delivery queue', () => {
     assert.match(call, /chainDepthMetadata\(\s*sourceMetadata\s*\)/);
   });
 
-  it('spreads it into the event it emits on the way back', () => {
-    // Bounded to the method, and asserting the SPREAD rather than the token:
-    // a dead `void chainDepthMetadata(metadata);` left anywhere below satisfied
-    // the old slice-to-end-of-file check while the emitted event carried no
-    // depth at all.
-    const start = RELAY.indexOf('private recordUndelivered(');
-    assert.ok(start >= 0, 'recordUndelivered is gone');
-    const body = RELAY.slice(start, RELAY.indexOf('\n  }', start));
+  it('spreads it into the event it emits on the way back', async () => {
+    // RUN, not read. This was a source scan of `recordUndelivered`, and the
+    // record is now built in `undelivered-record.ts` so that the producer's
+    // direct fallback writes the same event — a scan of one method can no
+    // longer see where the spread happens. The processor is cheap to drive
+    // (the relay durability spec does it), so the property is asserted on the
+    // event it actually emits: an exhausted relay of a stamped event hands the
+    // count back.
+    const { ReiwaRelayProcessor } = await import('../src/modules/notifications/reiwa-relay.processor');
+    const emitted: Array<Record<string, unknown> | undefined> = [];
+    const processor = new ReiwaRelayProcessor(
+      {
+        deliverRelayEvent: async () => ({ status: 'timeout', messageId: null, httpStatus: null, detail: null }),
+      } as never,
+      // The recorder the module binds hands this record, metadata untouched,
+      // to `reiwa.relay_undelivered` (behind the alert gate).
+      (record: { readonly metadata: Record<string, unknown> }) => {
+        emitted.push(record.metadata);
+      },
+      { broadcast: { updateMany: async () => ({ count: 0 }) } } as never,
+    );
 
-    const emitAt = body.indexOf('this.systemEventsService.warn(');
-    assert.ok(emitAt >= 0, 'recordUndelivered no longer emits');
-    const emit = callAt(body, body.indexOf('(', emitAt));
+    await assert.rejects(() =>
+      processor.process({
+        id: 'job-1',
+        data: {
+          event: 'reiwa.dev.notify',
+          metadata: { eventId: 'evt-1', text: 'card', [AUTOMATION_CHAIN_DEPTH_KEY]: 2 },
+        },
+        attemptsMade: 3,
+        opts: { attempts: 4 },
+      } as never),
+    );
 
-    assert.match(emit, /\.\.\.chainDepthMetadata\(\s*metadata\s*\)/);
+    assert.equal(emitted.length, 1, 'an exhausted relay no longer records anything');
+    assert.equal(
+      emitted[0]?.[AUTOMATION_CHAIN_DEPTH_KEY],
+      2,
+      'the undelivered event re-seeds the chain at zero, and the loop guard resets',
+    );
   });
 
   it('hands every relay caller the source event to carry it from', () => {
