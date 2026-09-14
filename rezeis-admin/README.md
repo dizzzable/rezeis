@@ -2,8 +2,8 @@
 
 Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
-- **Version:** `0.9.7.56`
-- **Backend:** NestJS 11 · Prisma 7 · PostgreSQL · Redis · BullMQ
+- **Version:** `0.9.7.57`
+- **Backend:** NestJS 12 · TypeScript 6 · Prisma 7 · PostgreSQL · Redis · BullMQ
 - **Frontend:** React 19 · Vite 8 · TanStack Query 5 · shadcn/ui · Tailwind 4
 
 ## Layout
@@ -23,6 +23,8 @@ Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 - **`remnawave-api.service.ts`** reads answers with the tolerant local decoders in `panel-response-decoders.ts`.
 - **`panel-infra.client.ts`, `panel-users.client.ts` and `panel-devices.client.ts`** go through `panel-command.executor.ts`, driven by the hand-owned command table in **`panel-commands.ts`**: the path, verb, description and request rules of the 21 commands production actually issues. Requests are validated before they are sent — bodies by the executor, path parameters and the two capped queries by the clients — with our own zod copy of the rules the vendor contract enforced for the inputs we send, and the executor sends the **parsed** body, so the vendor's defaults (`status: ACTIVE`, `trafficLimitStrategy: NO_RESET` on a create), key order and `expireAt` rendering still reach the wire. **Responses are not validated.** The clients hand back the panel's JSON behind their own envelope and array guards, which now run on every answer.
 
+**Remnawave 2.x panels are refused.** Once the version probe (`GET /api/system/metadata`, sent over the bare transport) reports a major below 3, `LegacyPanelRefusal` in `panel-transport.ts` answers every command of those three clients with `REZEIS_PANEL_TOO_OLD` instead of sending it, so profile, device and subscription sync stop until the panel is upgraded to 3.x. A panel whose version cannot be read yet is not refused; it is treated as 3.x. What `remnawave-api.service.ts` sends over its own HTTP helpers is not behind the refusal.
+
 Why the response parse went. The executor used to `safeParse` every answer with a pinned contract: parsed data on success, the raw body plus a "drift" warning on a mismatch. A contract describes ONE panel release, so a field a later release made required (`tags` on squads, from contract `3.4.11`) flagged every healthy 3.2/3.3 panel as drift, and the pin could never move past it. The parse did only two things to the answers rezeis reads — datetime strings became `Date`, undeclared keys were stripped — and an audit of every production reader found five that depended on either. Those five are now provided explicitly, per field (`panel-response-fields.ts`): `lastSeen` on both connection jobs and `requestAt` on the request log are decoded to `Date`, and the HWID stats `byPlatform` rows and the device inventory rows are projected to the declared keys; `test/panel-devices-client.spec.ts` and `test/panel-infra-client.spec.ts` hold each one to every era's own parse. The older lesson stands: the adapter once used `GetExternalSquadsCommand` from `@remnawave/backend-contract@2.7.3` as a hard gate, 3.x renamed `responseHeaders` to `responseHeadersAdd` + `responseHeadersRemove`, and every 3.x install with an external squad got `ServiceUnavailableException` from a healthy panel.
 
 **No `@remnawave/*` package is in the runtime image.** The contracts are devDependency oracles, one per panel release family, named by the panel release and pinned exactly to the contract that release ships (table below). `Dockerfile` stage 1 runs `npm ci --omit=dev`, so none of them — and none of their AGPL-3.0-only licences — ships. That is enforced, not asserted: `test/panel-command-conformance.spec.ts` fails if any file under `src/` imports `@remnawave/*` (by value, by type, dynamically or by `require`), if `package.json` lists one outside `devDependencies`, if the lockfile marks one as a production package, or if this prints anything:
@@ -34,7 +36,7 @@ npm ls --omit=dev zod                         # exactly one zod
 
 ### Contract versions follow panel releases, not the other way round
 
-Remnawave publishes the pairing at <https://docs.rw/sdk/typescript-sdk/> ("Always pick and pin the correct version of the SDK to match the version of the Remnawave backend"). The rows that matter for this fleet, cross-checked against `libs/contract/package.json` at each backend tag, and the devDependency alias that holds each one:
+Remnawave publishes the pairing at <https://docs.rw/sdk/typescript-sdk/> ("Always pick and pin the correct version of the SDK to match the version of the Remnawave backend"). The rows that matter for this fleet, cross-checked against `libs/contract/package.json` at each backend tag, and the devDependency alias that holds each one. The `2.7` and `2.8` rows are test oracles only — for era decoding, the 2.x route shapes, the tag rule and the request log's `size` cap — and a panel on either is refused (see above):
 
 | Live panel | Contract it ships | Test oracle |
 |------------|-------------------|-------------|
@@ -60,7 +62,7 @@ It does **not** validate responses (nothing does, by design), and it does not co
 
 It compares verdicts and parsed bodies, never error wording, and that is deliberate: zod keeps its message locale on `globalThis.__zod_globalConfig`, shared by every copy in a process, and the last copy loaded wins. In any test process that loads an oracle bundling its own zod 4.4.3 (`contract-panel-3.2.1`, `-3.2.3`, `-3.3`), the messages of rezeis's zod 4.5.4 are written by 4.4.3's locale — `expected number, received number` where production says `received Infinity`. Production has one zod, so this affects tests only; do not assert zod's default wording in a file that loads those oracles.
 
-Era detection keys on the MAJOR version only (`panel-version.util.ts`), so every 3.4.x is handled the same way with no list to extend.
+Era detection keys on the MAJOR version only (`panel-version.util.ts`, and `PanelVersionGate` in `panel-clients.providers.ts` for the refusal), so every 3.4.x is handled the same way with no list to extend, and every 2.x panel is refused alike.
 
 **Panel 3.4.4 (12.09.2026) needs nothing here, and that is a checked statement rather than a hopeful one.** The whole `3.4.3...3.4.4` diff is 27 files; on the surface rezeis reads, every change is additive: a `POST /api/hosts/actions/clone` endpoint with its route and one new error code (`A258`), and three new subscription-template variables. No host, user, node or internal-squad response schema moved. Specifically checked because it would have mattered:
 
@@ -99,11 +101,14 @@ cd web && npm run build # → dist/
 
 ## Docker
 
-Both images are published to GHCR on every push to `main`:
+One unified image (API + worker + SPA) is published to GHCR by `.github/workflows/docker-publish.yml`. Its tags are channels:
 
-- `ghcr.io/dizzzable/rezeis:v0.9.7.56`
-- `ghcr.io/dizzzable/rezeis:0.9.7`
-- `ghcr.io/dizzzable/rezeis:sha-<short>`
+- `ghcr.io/dizzzable/rezeis:latest` — the last release; it moves only when a `v*` tag is pushed
+- `ghcr.io/dizzzable/rezeis:v0.9.7.57` — a specific release (the current one)
+- `ghcr.io/dizzzable/rezeis:main` — the current `main` branch, not a release
+- `ghcr.io/dizzzable/rezeis:sha-<short>` — every built commit
+
+Release tags have four parts, which is not semver, so the workflow's `type=semver` lines publish no `major.minor.patch` or `major.minor` tags.
 
 Local build:
 

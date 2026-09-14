@@ -9,12 +9,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.7.56-blue" alt="Version" /></a>
+  <a href="https://github.com/dizzzable/rezeis/releases/latest"><img src="https://img.shields.io/badge/version-0.9.7.57-blue" alt="Version" /></a>
   <a href="https://github.com/dizzzable/rezeis/pkgs/container/rezeis"><img src="https://img.shields.io/badge/ghcr.io-rezeis-2496ED?logo=docker&logoColor=white" alt="GHCR" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
-  <a href="#"><img src="https://img.shields.io/badge/NestJS-11-red" alt="NestJS" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/NestJS-12-red" alt="NestJS" /></a>
   <a href="#"><img src="https://img.shields.io/badge/React-19-61dafb" alt="React" /></a>
-  <a href="#"><img src="https://img.shields.io/badge/TypeScript-5.9-3178c6" alt="TypeScript" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/TypeScript-6-3178c6" alt="TypeScript" /></a>
   <a href="#"><img src="https://img.shields.io/badge/Prisma-7-2d3748" alt="Prisma" /></a>
   <a href="#"><img src="https://img.shields.io/badge/PostgreSQL-17-336791" alt="PostgreSQL" /></a>
 </p>
@@ -36,7 +36,7 @@ Rezeis — продвинутая админ-панель для управле�
 **Что выделяет Rezeis:**
 
 - 🏗 **Монорепо** — backend, worker, и SPA в одном проекте, единый Docker-образ
-- 🔗 **Remnawave 2.7–3.4** — собственная таблица команд панели, в тестах сверяется с официальным контрактом каждой версии; вендорных пакетов в рантайме нет
+- 🔗 **Remnawave 3.2–3.4** — собственная таблица команд панели, в тестах сверяется с официальным контрактом каждой версии 3.x; вендорных пакетов в рантайме нет. Панели 2.x не поддерживаются: команды синхронизации профилей, устройств и инфраструктуры отклоняются с кодом `REZEIS_PANEL_TOO_OLD`, пока панель не обновлена до 3.x
 - 📊 **Real-time everything** — WebSocket-инвалидация кеша, live-метрики, optimistic UI
 - 🛡 **Anti-Abuse** с 8 детекторами и lifecycle сигналов
 - 💰 **15 платёжных шлюзов** с per-gateway аналитикой
@@ -49,17 +49,17 @@ Rezeis — продвинутая админ-панель для управле�
 
 ## 📦 Готовые Docker-образы
 
-GitHub Container Registry публикует образ при каждом push'е в `main` и при создании тега.
+GitHub Container Registry публикует образ при каждом push'е в `main` и при каждом теге `v*`, но `latest` двигает только тег.
 
 ```bash
-# Stable latest (main branch)
+# Latest release (moves only when a v* tag is pushed)
 docker pull ghcr.io/dizzzable/rezeis:latest
 
 # Pin to a specific release
-docker pull ghcr.io/dizzzable/rezeis:v0.9.7.56
+docker pull ghcr.io/dizzzable/rezeis:v0.9.7.57
 ```
 
-Доступные теги: `latest` (актуальный main), `v0.9.7.56` (текущий тег релиза), плюс `sha-<short>` для каждого коммита в `main`. Для воспроизводимого развёртывания указывайте версию релиза, а не `latest`.
+Доступные теги: `latest` (последний выпуск — двигается только push'ем тега `v*`), `v0.9.7.57` (текущий тег релиза), `main` (текущая ветка `main`, ещё не выпуск), плюс `sha-<short>` для каждого собранного коммита. Для воспроизводимого развёртывания указывайте версию релиза, а не `latest`.
 
 ---
 
@@ -391,15 +391,15 @@ rezeis/
 | NestJS | 12 | Application framework |
 | Prisma | 7 | ORM + migrations |
 | PostgreSQL | 17 | Primary database |
-| Valkey (Redis) | 8 | Cache + BullMQ broker |
+| Valkey (Redis) | 9 | Cache + BullMQ broker |
 | BullMQ | 5 | Job queues (profile sync, broadcast, email) |
 | Passport + JWT | — | Authentication |
 | `@simplewebauthn/server` | 13 | Passkey / WebAuthn |
 | Swagger | 12 | API documentation |
 | Socket.IO | 4 | Real-time WebSocket |
 | Helmet | 8 | Security headers |
-| `@remnawave/backend-contract` | 2.7–3.4, dev | Contract oracles for the panel command table (tests only) |
-| fast-check | 3 | Property-based testing |
+| `@remnawave/backend-contract` | 3.2–3.4 (+ 2.7/2.8 for era-decoding specs), dev | Contract oracles (tests only): the panel command table is checked against every 3.x contract; 2.x panels are refused at runtime |
+| fast-check | 4 | Property-based testing |
 
 ### Frontend
 
@@ -506,7 +506,7 @@ npx eslint . --quiet                  # ESLint (0 warnings policy)
 - `api` — только HTTP, без cron
 - `worker` — только фоновые задачи (миграции пропускает)
 
-Образы публикуются автоматически в GHCR через `.github/workflows/docker-publish.yml` при push в `main` и при тегах `v*`.
+Образы публикуются автоматически в GHCR через `.github/workflows/docker-publish.yml`: push в `main` даёт теги `main` и `sha-<short>`, push тега `v*` — тег версии, `latest` и `sha-<short>`.
 
 ---
 
