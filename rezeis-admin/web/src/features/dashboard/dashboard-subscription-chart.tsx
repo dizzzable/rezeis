@@ -7,12 +7,14 @@ import { DashboardClientApps } from './dashboard-client-apps'
 import { DashboardRing, DashboardRingHeading, type DashboardRingSlice } from './dashboard-ring'
 import type { DashboardSummaryInterface } from './dashboard-api'
 
-const COLORS = {
+/** The statuses' colours. Exported so the spec can hold the client-app palette beside them clear of them. */
+// eslint-disable-next-line react-refresh/only-export-components
+export const SUBSCRIPTION_STATUS_COLORS = {
   active: 'hsl(142, 71%, 45%)',
   limited: 'hsl(48, 96%, 53%)',
   expired: 'hsl(0, 84%, 60%)',
   expiring: 'hsl(25, 95%, 53%)',
-}
+} as const
 
 const TOOLTIP_STYLE = {
   borderRadius: '8px',
@@ -28,32 +30,48 @@ export function DashboardSubscriptionChart({
   const { t } = useTranslation()
   const titleId = useId()
 
-  const data = useMemo<DashboardRingSlice[]>(() => [
-    {
-      key: 'active',
-      name: t('dashboardPage.subscriptionChart.active'),
-      value: summary.subscriptions.active,
-      color: COLORS.active,
-    },
-    {
-      key: 'limited',
-      name: t('dashboardPage.subscriptionChart.limited'),
-      value: summary.subscriptions.limited,
-      color: COLORS.limited,
-    },
-    {
-      key: 'expired',
-      name: t('dashboardPage.subscriptionChart.expired'),
-      value: summary.subscriptions.expired,
-      color: COLORS.expired,
-    },
-    {
-      key: 'expiring',
-      name: t('dashboardPage.subscriptionChart.expiring'),
-      value: summary.subscriptions.expiring7d,
-      color: COLORS.expiring,
-    },
-  ], [summary, t])
+  const data = useMemo<DashboardRingSlice[]>(() => {
+    const { active, limited, expired, expiring7d } = summary.subscriptions
+    // "Expiring within 7 days" is PART of active, not a fifth status: the API
+    // counts it among ACTIVE subscriptions (`dashboard.service.ts`). Drawn as
+    // a slice of its own it is taken out of the active one, so each
+    // subscription sits in one slice and the slices add up to the total —
+    // which used to count those subscriptions twice, in the heading and in
+    // the ring's hole. `min`: the two are separate queries, and a subscription
+    // activated between them must not leave the active slice negative.
+    //
+    // So the green slice is NOT every active subscription, and its label says
+    // so ("> 7 days left"). Plain "Active" sat below the "Active subscriptions"
+    // card, which counts all of them, and read as the same count disagreeing
+    // with itself: 44 beside 52.
+    const expiring = Math.min(expiring7d, active)
+    return [
+      {
+        key: 'active',
+        name: t('dashboardPage.subscriptionChart.active'),
+        value: active - expiring,
+        color: SUBSCRIPTION_STATUS_COLORS.active,
+      },
+      {
+        key: 'limited',
+        name: t('dashboardPage.subscriptionChart.limited'),
+        value: limited,
+        color: SUBSCRIPTION_STATUS_COLORS.limited,
+      },
+      {
+        key: 'expired',
+        name: t('dashboardPage.subscriptionChart.expired'),
+        value: expired,
+        color: SUBSCRIPTION_STATUS_COLORS.expired,
+      },
+      {
+        key: 'expiring',
+        name: t('dashboardPage.subscriptionChart.expiring'),
+        value: expiring,
+        color: SUBSCRIPTION_STATUS_COLORS.expiring,
+      },
+    ]
+  }, [summary, t])
 
   const total = data.reduce((sum, d) => sum + d.value, 0)
 

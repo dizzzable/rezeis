@@ -34,13 +34,18 @@ export const CLIENT_APPS_SHOWN = 5
  * A theme is free to make those a monochrome ramp, and real ones do: on the
  * owner's panel three of the five were greys, so FlClash X, koala-clash and
  * v2raytun were three shades of grey next to a grey "Other" slice and could not
- * be told apart. Five clearly different hues at a lightness that reads on both
+ * be told apart. Five colours clearly apart, at a lightness that reads on both
  * the dark and the light card, in rank order — the largest app gets the first.
- * Green, yellow and red are left to the statuses in the ring beside this one.
+ * Green, yellow, orange and red are left to the statuses in the ring beside
+ * this one, which leaves too few hues for five: the lavender stands apart from
+ * the violet by lightness rather than hue. Orange was once missed — the first
+ * colour was an amber a hair from "expiring", and the largest app read as the
+ * expiring share — so the spec measures every colour here against every
+ * status colour and every other colour here.
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export const CLIENT_APP_COLORS = [
-  'oklch(0.75 0.16 62)', // amber
+  'oklch(0.76 0.1 290)', // lavender
   'oklch(0.62 0.19 258)', // blue
   'oklch(0.63 0.21 300)', // violet
   'oklch(0.72 0.13 195)', // teal

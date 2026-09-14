@@ -508,7 +508,9 @@ function GatewayDistributionCard({ from, to }: { readonly from: string; readonly
                   borderRadius: 8,
                   fontSize: 12,
                 }}
-                formatter={(value) => [formatKopecks(Number(value ?? 0)), '']}
+                // The value alone, so the slice keeps its gateway name: `[value, '']`
+                // made recharts print " : 1 234,56 ₽".
+                formatter={(value) => formatKopecks(Number(value ?? 0))}
               />
               <Legend wrapperStyle={{ fontSize: 11 }} />
             </PieChart>

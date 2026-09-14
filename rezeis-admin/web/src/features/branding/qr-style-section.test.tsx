@@ -12,6 +12,7 @@ import type { BrandingQrStyleDraft } from './branding-form-schema'
 import { createQrLogoCheckStore, type QrLogoChecker, type QrLogoCheckStore } from './qr-logo-check'
 import { createBrowserQrLogoChecker } from './qr-logo-check-browser'
 import type { QrLogoBitmap } from './qr-logo-check-run'
+import { createQrLogoUploadStore } from './qr-logo-upload'
 import {
   QR_PREVIEW_CONNECT_LINK,
   QR_PREVIEW_CONNECT_PX,
@@ -98,20 +99,47 @@ function renderSection(
   const onChange = vi.fn()
   const uploadLogo = options.uploadLogo ?? vi.fn(async () => LOGO.src)
   const logoCheck = options.logoCheck ?? createQrLogoCheckStore(idleChecker().checker)
-  const view = renderWithProviders(
+  // The page's store, reading the style the page holds — here, the one last rendered.
+  let held = value
+  const logoUpload = createQrLogoUploadStore({ upload: uploadLogo, read: () => held, write: onChange })
+  const section = (current: BrandingQrStyleDraft) => (
     <QrStyleSection
-      value={value}
+      value={current}
       onChange={onChange}
       darkError={options.darkError}
       logoError={options.logoError}
       brandLogoUrl={options.brandLogoUrl}
-      uploadLogo={uploadLogo}
+      logoUpload={logoUpload}
       logoCheck={logoCheck}
-    />,
-    { withRouter: false },
+    />
   )
-  return { onChange, uploadLogo, ...view }
+  const view = renderWithProviders(section(value), { withRouter: false })
+  /** The page handing the section the style it holds now — what a change the section asked for comes back as. */
+  const restyle = (next: BrandingQrStyleDraft): void => {
+    held = next
+    view.rerender(section(next))
+  }
+  return { onChange, uploadLogo, restyle, ...view }
 }
+
+/** An upload the case finishes, or fails, when it chooses to. */
+function heldUpload() {
+  const never = (): never => {
+    throw new Error('the upload was never started')
+  }
+  let finish: (src: string) => void = never
+  let fail: (error: unknown) => void = never
+  const uploadLogo = vi.fn(
+    () =>
+      new Promise<string>((resolve, reject) => {
+        finish = resolve
+        fail = reject
+      }),
+  )
+  return { uploadLogo, finish: (src: string) => finish(src), fail: (error: unknown) => fail(error) }
+}
+
+const UPLOADED = '/uploads/branding/fedcba9876543210fedcba9876543210.webp'
 
 const group = (name: string) => within(screen.getByRole('group', { name }))
 const dataUrl = (svg: string): string =>
@@ -146,6 +174,15 @@ const fileInput = (): HTMLInputElement => {
   const input = document.querySelector<HTMLInputElement>('[data-qr-logo-file]')
   if (input === null) throw new Error('the logo file input is not rendered')
   return input
+}
+/** The button that opens the file picker, whichever it reads: "Upload a logo", "Replace" or "Uploading…". */
+const uploadButton = (): HTMLElement => {
+  const names = new Set<string>([copy.logo.upload, copy.logo.replace, copy.logo.uploading])
+  const buttons = within(logoControls())
+    .getAllByRole('button')
+    .filter((button) => names.has(button.textContent?.trim() ?? ''))
+  if (buttons.length !== 1) throw new Error(`expected one upload button, found ${buttons.length}`)
+  return buttons[0] as HTMLElement
 }
 
 describe('QR style section — what it says', () => {
@@ -341,6 +378,181 @@ describe('QR style section — the logo controls', () => {
     expect(screen.getByLabelText(copy.colourLabel)).toHaveAttribute('aria-invalid', 'false')
   })
 
+  it('puts an upload that finishes late into the style as it stands then — a preset picked meanwhile stays', async () => {
+    const user = userEvent.setup()
+    const upload = heldUpload()
+    const { onChange, restyle } = renderSection(QR_STYLE_PLAIN, { uploadLogo: upload.uploadLogo })
+    await user.upload(fileInput(), new File([new Uint8Array(1024)], 'mark.webp', { type: 'image/webp' }))
+    await waitFor(() => expect(upload.uploadLogo).toHaveBeenCalledOnce())
+
+    // While it runs the operator picks "Dots", and the page hands that style back.
+    await user.click(group(copy.presetsLabel).getByRole('button', { name: copy.presets.dots }))
+    const dots = { modules: 'dots', eyes: 'rounded', dark: '#000000', logo: null } as const
+    expect(onChange).toHaveBeenLastCalledWith(dots)
+    restyle(dots)
+
+    upload.finish(UPLOADED)
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(2))
+    expect(onChange).toHaveBeenLastCalledWith({ ...dots, logo: { src: UPLOADED, size: 'small', plate: 'light' } })
+  })
+
+  it('keeps the size and plate the operator chose while the replacement was uploading', async () => {
+    const user = userEvent.setup()
+    const upload = heldUpload()
+    const { onChange, restyle } = renderSection({ ...NAVY_DOTS, logo: LOGO }, { uploadLogo: upload.uploadLogo })
+    await user.upload(fileInput(), new File([new Uint8Array(1024)], 'mark.webp', { type: 'image/webp' }))
+    await waitFor(() => expect(upload.uploadLogo).toHaveBeenCalledOnce())
+
+    const chosen = { ...NAVY_DOTS, logo: { ...LOGO, size: 'large', plate: 'dark' } } as const
+    restyle(chosen)
+
+    upload.finish(UPLOADED)
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange).toHaveBeenLastCalledWith({ ...chosen, logo: { ...chosen.logo, src: UPLOADED } })
+  })
+
+  it.each([
+    [
+      'takes the logo away',
+      { ...NAVY_DOTS, logo: LOGO },
+      async (user: ReturnType<typeof userEvent.setup>) =>
+        user.click(within(logoControls()).getByRole('button', { name: copy.logo.remove })),
+      NAVY_DOTS,
+    ],
+    [
+      'takes the brand logo',
+      NAVY_DOTS,
+      async (user: ReturnType<typeof userEvent.setup>) =>
+        user.click(within(logoControls()).getByRole('button', { name: copy.logo.useBrandLogo })),
+      { ...NAVY_DOTS, logo: { src: '/uploads/branding/99999999999999999999999999999999.svg', size: 'small', plate: 'light' } },
+    ],
+    [
+      'resets the code to plain',
+      { ...NAVY_DOTS, logo: LOGO },
+      async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: copy.reset })),
+      QR_STYLE_PLAIN,
+    ],
+  ] as const)('drops an upload that finishes after the operator %s', async (_name, start, act, decided) => {
+    const user = userEvent.setup()
+    const upload = heldUpload()
+    const { onChange, restyle } = renderSection(start, {
+      uploadLogo: upload.uploadLogo,
+      brandLogoUrl: '/uploads/branding/99999999999999999999999999999999.svg',
+    })
+    await user.upload(fileInput(), new File([new Uint8Array(1024)], 'mark.webp', { type: 'image/webp' }))
+    await waitFor(() => expect(upload.uploadLogo).toHaveBeenCalledOnce())
+
+    await act(user)
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenLastCalledWith(decided)
+    restyle(decided)
+    // The upload the operator overruled no longer reads as running: they may pick again.
+    expect(within(logoControls()).queryByRole('button', { name: copy.logo.uploading })).toBeNull()
+
+    upload.finish(UPLOADED)
+    // Give the finished upload its chance to land before asserting it did not.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('says nothing about an upload the operator overruled that then failed', async () => {
+    const user = userEvent.setup()
+    const upload = heldUpload()
+    const { onChange } = renderSection({ ...NAVY_DOTS, logo: LOGO }, { uploadLogo: upload.uploadLogo })
+    await user.upload(fileInput(), new File([new Uint8Array(1024)], 'mark.webp', { type: 'image/webp' }))
+    await waitFor(() => expect(upload.uploadLogo).toHaveBeenCalledOnce())
+    await user.click(within(logoControls()).getByRole('button', { name: copy.logo.remove }))
+
+    upload.fail(Object.assign(new Error('Bad Request'), { response: { data: { message: 'refused on upload' } } }))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(within(logoControls()).queryByRole('alert')).toBeNull()
+    expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * A refusal outlives the tab — the page keeps it, so one that arrived while
+   * the operator looked elsewhere is still there to read. It must not outlive
+   * the operator's next decision about the logo as well: beside the brand logo
+   * they took instead, "this file is too large" and a red upload button read
+   * as something wrong with the logo in front of them.
+   */
+  it.each([
+    [
+      'takes the logo away',
+      { ...NAVY_DOTS, logo: LOGO },
+      async (user: ReturnType<typeof userEvent.setup>) =>
+        user.click(within(logoControls()).getByRole('button', { name: copy.logo.remove })),
+      NAVY_DOTS,
+    ],
+    [
+      'takes the brand logo',
+      NAVY_DOTS,
+      async (user: ReturnType<typeof userEvent.setup>) =>
+        user.click(within(logoControls()).getByRole('button', { name: copy.logo.useBrandLogo })),
+      { ...NAVY_DOTS, logo: { src: '/uploads/branding/99999999999999999999999999999999.svg', size: 'small', plate: 'light' } },
+    ],
+    [
+      'resets the code to plain',
+      { ...NAVY_DOTS, logo: LOGO },
+      async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: copy.reset })),
+      QR_STYLE_PLAIN,
+    ],
+  ] as const)('retires a standing refusal when the operator %s', async (_name, start, act, decided) => {
+    const user = userEvent.setup()
+    const { onChange, restyle, uploadLogo } = renderSection(start, {
+      brandLogoUrl: '/uploads/branding/99999999999999999999999999999999.svg',
+    })
+    await user.upload(fileInput(), new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' }))
+    expect(await within(logoControls()).findByRole('alert')).toHaveTextContent('2 MB')
+    expect(uploadButton()).toHaveAttribute('aria-invalid', 'true')
+
+    await act(user)
+    expect(onChange).toHaveBeenLastCalledWith(decided)
+    restyle(decided)
+
+    expect(within(logoControls()).queryByRole('alert')).toBeNull()
+    expect(uploadButton()).toHaveAttribute('aria-invalid', 'false')
+    expect(uploadLogo).not.toHaveBeenCalled()
+  })
+
+  it('keeps a refusal while nothing about the logo has been decided — a preset, a size, a plate', async () => {
+    const user = userEvent.setup()
+    const { onChange, restyle } = renderSection({ ...NAVY_DOTS, logo: LOGO })
+    await user.upload(fileInput(), new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' }))
+    expect(await within(logoControls()).findByRole('alert')).toHaveTextContent('2 MB')
+
+    // Each change handed back the way the page hands it back.
+    const pick = async (control: HTMLElement): Promise<void> => {
+      await user.click(control)
+      restyle(onChange.mock.lastCall?.[0] as BrandingQrStyleDraft)
+    }
+    await pick(group(copy.presetsLabel).getByRole('button', { name: copy.presets.plain }))
+    await pick(group(copy.logo.sizeLabel).getByRole('button', { name: copy.logo.sizes.large }))
+    await pick(group(copy.logo.plateLabel).getByRole('button', { name: copy.logo.plates.dark }))
+    expect(onChange).toHaveBeenLastCalledWith({ ...QR_STYLE_PLAIN, logo: { ...LOGO, size: 'large', plate: 'dark' } })
+
+    // The file is still refused and nothing has taken its place.
+    expect(within(logoControls()).getByRole('alert')).toHaveTextContent('2 MB')
+    expect(uploadButton()).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('retires a refusal once the operator picks a file that uploads', async () => {
+    const user = userEvent.setup()
+    const upload = heldUpload()
+    const { onChange } = renderSection(NAVY_DOTS, { uploadLogo: upload.uploadLogo })
+    await user.upload(fileInput(), new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' }))
+    expect(await within(logoControls()).findByRole('alert')).toHaveTextContent('2 MB')
+
+    await user.upload(fileInput(), new File([new Uint8Array(1024)], 'mark.webp', { type: 'image/webp' }))
+    await waitFor(() => expect(upload.uploadLogo).toHaveBeenCalledOnce())
+    expect(within(logoControls()).queryByRole('alert')).toBeNull()
+
+    upload.finish(UPLOADED)
+    await waitFor(() => expect(onChange).toHaveBeenCalledOnce())
+    expect(within(logoControls()).queryByRole('alert')).toBeNull()
+    expect(uploadButton()).toHaveAttribute('aria-invalid', 'false')
+  })
+
   it('has its labels in both languages', () => {
     for (const bundle of [en.brandingPage.qr.logo, ru.brandingPage.qr.logo]) {
       for (const value of [bundle.label, bundle.upload, bundle.useBrandLogo, bundle.remove, bundle.check.unreadable, bundle.check.passed]) {
@@ -507,8 +719,9 @@ describe('QR style section — the partner advertising code', () => {
    *
    * What they cannot hold is the NUMBER: for this link the renderer draws the
    * same bytes at every size from 96 to 163 px, so a constant of 120 passes
-   * here exactly as 96 does. `qr-preview-cabinet.test.ts` reads the size off
-   * the cabinet's source instead.
+   * here exactly as 96 does. `qr-preview-cabinet.test.ts` holds it to the
+   * cabinet's number instead — on record in every run, and read off the
+   * cabinet's source beside a reiwa checkout.
    */
 
   it('has its captions and its note in both languages', () => {

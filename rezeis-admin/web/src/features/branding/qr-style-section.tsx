@@ -34,6 +34,7 @@ import {
 } from './branding-form-schema'
 import { formatByteLimit } from './format-byte-limit'
 import { qrLogoCheckKey, qrLogoVerdictMessage, type QrLogoCheckStore, type QrLogoVerdict } from './qr-logo-check'
+import { qrLogoWithSrc, type QrLogoUploadRefusal, type QrLogoUploadStore } from './qr-logo-upload'
 
 /**
  * The "QR codes" tab: how the codes a subscriber shows OTHER people look — the
@@ -106,10 +107,12 @@ export const QR_PREVIEW_PARTNER_LINK = 'https://cabinet.example.com/?campaign=ad
  * ON THE CARD: the code a partner taps open is a separate drawing at
  * `QR_PREVIEW_PARTNER_ENLARGED_PX`.
  *
- * Held to the cabinet's source by `qr-preview-cabinet.test.ts`, and it has to
- * be held there: no test of the image can do it. For this link the renderer
- * draws the same bytes at every size from 96 to 163 pixels, so a wrong number
- * here would leave every image-level assertion green.
+ * Held by `qr-preview-cabinet.test.ts` to a record of the cabinet's number in
+ * every run, and the record to the cabinet's source wherever both checkouts
+ * are present — and it has to be held that way: no test of the image can do
+ * it. For this link the renderer draws the same bytes at every size from 96 to
+ * 163 pixels, so a wrong number here would leave every image-level assertion
+ * green.
  */
 export const QR_PREVIEW_PARTNER_PX = 96
 
@@ -132,9 +135,6 @@ export const QR_PREVIEW_PARTNER_MAGNIFIED_PX = QR_PREVIEW_REFERRAL_PX
  */
 export const QR_PREVIEW_PARTNER_ENLARGED_PX = 256
 
-/** A new logo starts at the size and on the plate that spend the least. */
-const NEW_LOGO: Pick<QrLogo, 'size' | 'plate'> = { size: 'small', plate: 'light' }
-
 /** How long a style must stay put before its logo is checked — typing a colour is not six checks. */
 const LOGO_CHECK_DEBOUNCE_MS = 400
 
@@ -149,8 +149,12 @@ export interface QrStyleSectionProps {
   readonly logoError?: string
   /** The brand logo (`logoUrl`), offered as the QR logo when it is an upload the cabinet relays. */
   readonly brandLogoUrl?: string | null
-  /** Uploads a QR logo and answers its `/uploads/branding/<file>` address. */
-  readonly uploadLogo: (file: File) => Promise<string>
+  /**
+   * Uploads a QR logo — the page's, because an upload outlives this tab: it
+   * lands in the style as it stands when it finishes, and the tab mounted
+   * again still shows it running, or what refused it (`qr-logo-upload.ts`).
+   */
+  readonly logoUpload: QrLogoUploadStore
   /** Runs and remembers the logo checks — the page's, so its save reads the same verdicts. */
   readonly logoCheck: QrLogoCheckStore
 }
@@ -161,7 +165,7 @@ export function QrStyleSection({
   darkError,
   logoError,
   brandLogoUrl = null,
-  uploadLogo,
+  logoUpload,
   logoCheck,
 }: QrStyleSectionProps) {
   const { t } = useTranslation()
@@ -300,7 +304,7 @@ export function QrStyleSection({
             onLogoChange={(logo) => onChange({ ...value, logo })}
             logoError={logoError}
             brandLogoUrl={brandLogoUrl}
-            uploadLogo={uploadLogo}
+            logoUpload={logoUpload}
             verdict={logoVerdict}
             onRetry={() => logoCheck.retry(drawn)}
           />
@@ -309,7 +313,11 @@ export function QrStyleSection({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => onChange(QR_STYLE_PLAIN)}
+            onClick={() => {
+              // "Logo and all" — including a logo still uploading, or what refused one.
+              logoUpload.supersede()
+              onChange(QR_STYLE_PLAIN)
+            }}
             disabled={isPlainStyle(value)}
           >
             <RotateCcw className="mr-2 h-4 w-4" /> {t('brandingPage.qr.reset')}
@@ -373,7 +381,7 @@ function QrLogoControls({
   onLogoChange,
   logoError,
   brandLogoUrl,
-  uploadLogo,
+  logoUpload,
   verdict,
   onRetry,
 }: {
@@ -381,46 +389,20 @@ function QrLogoControls({
   readonly onLogoChange: (logo: QrLogo | null) => void
   readonly logoError: string | undefined
   readonly brandLogoUrl: string | null
-  readonly uploadLogo: (file: File) => Promise<string>
+  readonly logoUpload: QrLogoUploadStore
   readonly verdict: QrLogoVerdict | undefined
   readonly onRetry: () => void
 }) {
   const { t } = useTranslation()
   const inputRef = useRef<HTMLInputElement>(null)
-  const [uploading, setUploading] = useState(false)
-  const [refusal, setRefusal] = useState<string | null>(null)
+  const upload = useSyncExternalStore(logoUpload.subscribe, logoUpload.state)
+  const uploading = upload.uploading
+  const refusal = upload.refusal === null ? null : uploadRefusalMessage(t, upload.refusal)
   const brandLogoUsable = isQrLogoSrc(brandLogoUrl)
-  const withSrc = (src: string): QrLogo => ({ src, size: logo?.size ?? NEW_LOGO.size, plate: logo?.plate ?? NEW_LOGO.plate })
-
-  async function accept(file: File | undefined): Promise<void> {
-    if (file === undefined) return
-    // Guidance before the upload; the server re-checks every byte. The SVG
-    // ceiling is the cabinet loader's own number, from the kit.
-    const isSvg = file.type.toLowerCase() === 'image/svg+xml' || (file.type === '' && /\.svg$/i.test(file.name))
-    const limit = isSvg ? LOGO_SVG_MAX_BYTES : BRANDING_RASTER_MAX_BYTES
-    if (file.size > limit) {
-      setRefusal(
-        t(isSvg ? 'brandingPage.qr.logo.tooLargeSvg' : 'brandingPage.qr.logo.tooLargeRaster', {
-          actual: formatByteLimit(file.size),
-          limit: formatByteLimit(limit),
-        }),
-      )
-      return
-    }
-    setRefusal(null)
-    setUploading(true)
-    try {
-      onLogoChange(withSrc(await uploadLogo(file)))
-    } catch (error) {
-      const message = (error as { response?: { data?: { message?: unknown } } } | null)?.response?.data?.message
-      setRefusal(typeof message === 'string' && message.length > 0 ? message : t('brandingPage.qr.logo.uploadFailed'))
-    } finally {
-      setUploading(false)
-    }
-  }
 
   const onSelect = (event: ChangeEvent<HTMLInputElement>): void => {
-    void accept(event.target.files?.[0])
+    const file = event.target.files?.[0]
+    if (file !== undefined) logoUpload.pick(file)
     event.target.value = ''
   }
 
@@ -478,14 +460,24 @@ function QrLogoControls({
               size="sm"
               disabled={!brandLogoUsable || logo?.src === brandLogoUrl}
               onClick={() => {
-                if (isQrLogoSrc(brandLogoUrl)) onLogoChange(withSrc(brandLogoUrl))
+                if (!isQrLogoSrc(brandLogoUrl)) return
+                logoUpload.supersede()
+                onLogoChange(qrLogoWithSrc(logo, brandLogoUrl))
               }}
             >
               {t('brandingPage.qr.logo.useBrandLogo')}
             </Button>
           )}
           {logo !== null && (
-            <Button type="button" variant="ghost" size="sm" onClick={() => onLogoChange(null)}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                logoUpload.supersede()
+                onLogoChange(null)
+              }}
+            >
               <X className="mr-2 h-4 w-4" aria-hidden="true" /> {t('brandingPage.qr.logo.remove')}
             </Button>
           )}
@@ -549,6 +541,24 @@ function QrLogoControls({
       )}
     </div>
   )
+}
+
+/** What the operator is told about an upload that did not become the logo. */
+function uploadRefusalMessage(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  refusal: QrLogoUploadRefusal,
+): string {
+  switch (refusal.kind) {
+    case 'too-large':
+      return t(refusal.svg ? 'brandingPage.qr.logo.tooLargeSvg' : 'brandingPage.qr.logo.tooLargeRaster', {
+        actual: formatByteLimit(refusal.bytes),
+        limit: formatByteLimit(refusal.limit),
+      })
+    case 'refused':
+      return refusal.message
+    case 'failed':
+      return t('brandingPage.qr.logo.uploadFailed')
+  }
 }
 
 /** What the check is doing, or what it found, with the numbers it found it with. */

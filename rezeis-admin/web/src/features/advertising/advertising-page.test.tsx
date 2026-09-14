@@ -3,7 +3,7 @@ import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 
 import { en as advertisingEn } from '@/i18n/features/advertising.en'
 import { i18nReady, loadFeatureBundle } from '@/i18n/i18n'
-import { QUIET_ZONE_MODULES } from '@/lib/qr/kit/qr-options'
+import { MIN_PIXELS_PER_MODULE, QUIET_ZONE_MODULES } from '@/lib/qr/kit/qr-options'
 import { QR_STYLE_PLAIN, drawQr, qrSvg } from '@/lib/qr/kit/qr-style'
 import { renderWithProviders } from '@/test/test-utils'
 import AdvertisingPage, { PLACEMENT_QR_PX } from './advertising-page'
@@ -161,11 +161,11 @@ describe('AdvertisingPage', () => {
       return decodeURIComponent(src.slice(prefix.length))
     }
 
-    async function renderCodes(): Promise<{ bot: HTMLElement; web: HTMLElement }> {
+    async function renderCodes(botLink = BOT, webLink = WEB): Promise<{ bot: HTMLElement; web: HTMLElement }> {
       vi.mocked(listAdCampaigns).mockResolvedValue([
         {
           ...campaign,
-          placements: [{ ...placement, links: { botStart: BOT, miniAppStart: null, miniAppWeb: WEB } }],
+          placements: [{ ...placement, links: { botStart: botLink, miniAppStart: null, miniAppWeb: webLink } }],
         },
       ])
       // The labels are the codes' accessible names; they live in the lazy
@@ -205,6 +205,52 @@ describe('AdvertisingPage', () => {
         expect((Number(side) - modules) / 2, `quiet zone of ${link}`).toBe(4)
       }
       expect(QUIET_ZONE_MODULES).toBe(4)
+    })
+
+    it('shows each code at the size its argument is made for — bigger modules than the old tile, at every link length', async () => {
+      /**
+       * `PLACEMENT_QR_PX` is argued in its comment by pixels a module: 3.24 on
+       * a short bot link (version 3), 2.93 on an ordinary link (version 4),
+       * 2.67 on a long web address (version 5) — each above what the old 88 px
+       * bitmap with its one-module zone gave, and above the kit's floor. The
+       * cases above compare the drawing with the constant itself, so any size
+       * passed them. Measured here off what is drawn — the image's CSS width
+       * over the modules its viewBox spans, quiet zone included — a size that
+       * changes without its argument fails, and 88 px fails the floor outright.
+       */
+      const SHORT_BOT = 'https://t.me/VpnBot?start=ad_K7Q2M9XWab'
+      const LONG_WEB = 'https://cabinet.example-provider-network.com/?campaign=ad_K7Q2M9XWab'
+      const ARGUED_PIXELS_PER_MODULE: Readonly<Record<number, number>> = { 3: 3.24, 4: 2.93, 5: 2.67 }
+      const OLD_TILE_PX = 88
+      const OLD_QUIET_ZONE_MODULES = 1
+
+      const measured = new Map<number, number>()
+      for (const [botLink, webLink] of [
+        [SHORT_BOT, LONG_WEB],
+        [BOT, WEB],
+      ] as const) {
+        const { bot, web } = await renderCodes(botLink, webLink)
+        for (const image of [bot, web]) {
+          const side = Number(/viewBox="0 0 (\d+) \1"/.exec(decode(image))?.[1])
+          const version = (side - 2 * QUIET_ZONE_MODULES - 17) / 4
+          measured.set(version, Number(image.getAttribute('width')) / side)
+        }
+        cleanup()
+      }
+
+      // Anchor: all three lengths the argument names were really drawn.
+      expect([...measured.keys()].sort()).toEqual([3, 4, 5])
+      for (const [version, pixelsPerModule] of measured) {
+        const symbol = 17 + 4 * version
+        expect(pixelsPerModule, `version ${version}: the pixels a module PLACEMENT_QR_PX's comment argues for`).toBeCloseTo(
+          ARGUED_PIXELS_PER_MODULE[version] ?? Number.NaN,
+          2,
+        )
+        expect(pixelsPerModule, `version ${version}: no smaller than the old tile's`).toBeGreaterThan(
+          OLD_TILE_PX / (symbol + 2 * OLD_QUIET_ZONE_MODULES),
+        )
+        expect(pixelsPerModule, `version ${version}: the kit's floor`).toBeGreaterThanOrEqual(MIN_PIXELS_PER_MODULE)
+      }
     })
 
     it('never styles a company code — the markup is the plain writer, not the matrix renderer', async () => {

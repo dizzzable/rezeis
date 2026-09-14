@@ -36,7 +36,10 @@ import {
  * hole, unchecked until now.
  *
  * Those cases need the sibling `reiwa` checkout, as `qr-kit-manifest.test.ts`
- * does, and skip in this repository's CI. The reader they use is proven on
+ * does, and skip in this repository's CI. So the partner card's number is also
+ * kept on record here (`CABINET_PARTNER_CARD_PX`): the panel's constant is
+ * held to the record in every run, and the record to the cabinet's source
+ * wherever both checkouts are present. The reader they use is proven on
  * fixed sources here, which always run — including the shapes a
  * tap-to-enlarge view gives the partner card: a button around a thumbnail, a
  * dialog in the same component, and a dialog component of its own that takes
@@ -538,6 +541,17 @@ describe('reading LocalQr sizes off a source', () => {
 // by name instead of quietly skipping.
 const hasSibling = existsSync(REIWA_WEB_SRC)
 
+/**
+ * The size a partner sees an advertising code at on the placement card, as the
+ * cabinet's `partner-advertising-section.tsx` spells it out today
+ * (`<LocalQr size={96}>`). The kit names no such size — a card code carries no
+ * logo — so without this record nothing in this repository's CI would notice
+ * `QR_PREVIEW_PARTNER_PX` drifting: the cases that read the cabinet's source
+ * skip there, and for the sample link every size from 96 to 163 px draws the
+ * same bytes.
+ */
+const CABINET_PARTNER_CARD_PX = 96
+
 describe('the sample sizes are the cabinet’s own', () => {
   it('draws the samples that carry a logo at the sizes the kit names — the sizes the logo check verifies at', () => {
     // Always runs: the kit is vendored, so this half needs no sibling checkout.
@@ -547,6 +561,15 @@ describe('the sample sizes are the cabinet’s own', () => {
     expect(Object.values(LOGO_DISPLAY_PIXELS).sort(numerically)).toEqual(
       [QR_PREVIEW_REFERRAL_PX, QR_PREVIEW_PARTNER_ENLARGED_PX].sort(numerically),
     )
+  })
+
+  it('draws the partner sample at the card size on record — in every run, with or without the cabinet checkout', () => {
+    expect(
+      QR_PREVIEW_PARTNER_PX,
+      `the QR tab previews partner codes at QR_PREVIEW_PARTNER_PX = ${QR_PREVIEW_PARTNER_PX} px, but partners see them ` +
+        `at ${CABINET_PARTNER_CARD_PX} px on the card. If the cabinet's card really changed, change the record with it — ` +
+        'the case below that reads partner-advertising-section.tsx, run beside a reiwa checkout, says what it is now',
+    ).toBe(CABINET_PARTNER_CARD_PX)
   })
 
   it.skipIf(!hasSibling)('draws the partner sample at the size partners see their codes on the card', () => {
@@ -565,10 +588,11 @@ describe('the sample sizes are the cabinet’s own', () => {
       ).not.toBeNull()
       expect(
         use.size,
-        `partner-advertising-section.tsx:${use.line} shows partners their code at ${use.size} px, but the QR tab ` +
-          `previews it at QR_PREVIEW_PARTNER_PX = ${QR_PREVIEW_PARTNER_PX}. Whether dots survive depends on that ` +
-          'size, so the operator would approve a code partners do not get',
-      ).toBe(QR_PREVIEW_PARTNER_PX)
+        `partner-advertising-section.tsx:${use.line} shows partners their code at ${use.size} px, but the record ` +
+          `CABINET_PARTNER_CARD_PX says ${CABINET_PARTNER_CARD_PX}, and the QR tab previews it at that record's size. ` +
+          'Whether dots survive depends on that size, so the operator would approve a code partners do not get: ' +
+          'change the record and QR_PREVIEW_PARTNER_PX together',
+      ).toBe(CABINET_PARTNER_CARD_PX)
     }
   })
 

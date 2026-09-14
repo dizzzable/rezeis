@@ -81,8 +81,8 @@ beforeEach(() => {
 const page = en.brandingPage
 const copy = en.brandingPage.qr
 
-async function openPage() {
-  vi.spyOn(api, 'get').mockResolvedValue({ data: { ...DEFAULT_BRANDING_DRAFT } })
+async function openPage(stored: Partial<typeof DEFAULT_BRANDING_DRAFT> = {}) {
+  vi.spyOn(api, 'get').mockResolvedValue({ data: { ...DEFAULT_BRANDING_DRAFT, ...stored } })
   const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: { ...DEFAULT_BRANDING_DRAFT } })
   renderWithProviders(<WebReiwaPage />)
   await screen.findByRole('heading', { name: /WEB Reiwa/ })
@@ -192,4 +192,186 @@ describe('QR tab — saving a logo', () => {
       qrStyle: { modules: 'square', eyes: 'square', dark: '#000000', logo: { src: UPLOADED, size: 'small', plate: 'light' } },
     })
   }, 60_000)
+})
+
+describe('QR tab — a logo upload that is still running', () => {
+  /**
+   * A logo upload is a POST of up to 2 MB, and the operator does not stop
+   * while it runs. What the upload lands on is the style as it stands when it
+   * FINISHES — a preset, a colour, a size picked meanwhile all stay — unless
+   * the operator has since taken the logo away or thrown the changes out. And
+   * the tab unmounts behind every other tab, so the upload's state cannot live
+   * in it: coming back, the operator still sees it running, or what refused it.
+   */
+  const UPLOADED = '/uploads/branding/fedcba9876543210fedcba9876543210.png'
+  const STORED = '/uploads/branding/0123456789abcdef0123456789abcdef.png'
+
+  /** The upload POST, finished or failed when the case says so. */
+  function heldUpload() {
+    const settle: { finish: (url: string) => void; fail: (error: unknown) => void } = {
+      finish: () => {
+        throw new Error('the upload was never sent')
+      },
+      fail: () => {
+        throw new Error('the upload was never sent')
+      },
+    }
+    const postSpy = vi.spyOn(api, 'post').mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          settle.finish = (url) => resolve({ data: { url } })
+          settle.fail = reject
+        }),
+    )
+    return { postSpy, settle }
+  }
+
+  const tab = (name: string) => screen.getByRole('tab', { name })
+  const presets = () => within(screen.getByRole('group', { name: copy.presetsLabel }))
+  const logoControls = (): Promise<HTMLElement> =>
+    waitFor(() => {
+      const controls = document.querySelector<HTMLElement>('[data-qr-logo-controls]')
+      if (controls === null) throw new Error('the logo controls are not rendered')
+      return controls
+    })
+  const thumbnail = (): HTMLElement | null => document.querySelector('[data-qr-logo-thumbnail]')
+
+  async function pickLogo(user: ReturnType<typeof userEvent.setup>, postSpy: ReturnType<typeof heldUpload>['postSpy']) {
+    await user.click(tab(page.tabs.qr))
+    await screen.findByRole('group', { name: copy.presetsLabel })
+    const input = document.querySelector<HTMLInputElement>('[data-qr-logo-file]')
+    expect(input, 'the logo file input').not.toBeNull()
+    await user.upload(input as HTMLInputElement, new File([new Uint8Array(2048)], 'logo.png', { type: 'image/png' }))
+    await waitFor(() => expect(postSpy).toHaveBeenCalledOnce())
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.uploading })).toBeDisabled()
+  }
+
+  it('lands in the style as it stands when it finishes — a preset picked meanwhile stays', async () => {
+    picture.current = 'transparent'
+    const user = userEvent.setup()
+    await openPage()
+    const { postSpy, settle } = heldUpload()
+    await pickLogo(user, postSpy)
+
+    await user.click(presets().getByRole('button', { name: copy.presets.dots }))
+    expect(presets().getByRole('button', { name: copy.presets.dots })).toHaveAttribute('aria-pressed', 'true')
+
+    settle.finish(UPLOADED)
+    await waitFor(() => expect(thumbnail()).toHaveAttribute('src', UPLOADED))
+    expect(presets().getByRole('button', { name: copy.presets.dots })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.replace })).toBeEnabled()
+  }, 30_000)
+
+  it('is still uploading when the operator comes back from another tab, and lands then', async () => {
+    picture.current = 'transparent'
+    const user = userEvent.setup()
+    await openPage()
+    const { postSpy, settle } = heldUpload()
+    await pickLogo(user, postSpy)
+
+    await user.click(tab(page.tabs.brand))
+    await user.click(tab(page.tabs.qr))
+    // A second pick is exactly what an enabled button would invite.
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.uploading })).toBeDisabled()
+
+    settle.finish(UPLOADED)
+    await waitFor(() => expect(thumbnail()).toHaveAttribute('src', UPLOADED))
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.replace })).toBeEnabled()
+    expect(postSpy).toHaveBeenCalledOnce()
+  }, 30_000)
+
+  it('shows a refusal that arrived while the operator was on another tab', async () => {
+    const user = userEvent.setup()
+    await openPage()
+    const { postSpy, settle } = heldUpload()
+    await pickLogo(user, postSpy)
+
+    await user.click(tab(page.tabs.brand))
+    const refusal = 'SVG contains a disallowed element: <script>.'
+    settle.fail(Object.assign(new Error('Bad Request'), { response: { data: { message: refusal } } }))
+    await user.click(tab(page.tabs.qr))
+
+    expect(await within(await logoControls()).findByRole('alert')).toHaveTextContent(refusal)
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.upload })).toBeEnabled()
+  }, 30_000)
+
+  it('does not bring back a logo the operator took away while its replacement was uploading', async () => {
+    picture.current = 'transparent'
+    const user = userEvent.setup()
+    await openPage({ qrStyle: { modules: 'square', eyes: 'square', dark: '#000000', logo: { src: STORED, size: 'small', plate: 'light' } } })
+    const { postSpy, settle } = heldUpload()
+    await pickLogo(user, postSpy)
+
+    await user.click(within(await logoControls()).getByRole('button', { name: copy.logo.remove }))
+    expect(document.querySelector('[data-qr-logo-none]')).not.toBeNull()
+
+    settle.finish(UPLOADED)
+    // Let the finished upload have its chance to land before asserting it did not.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(thumbnail()).toBeNull()
+    expect(document.querySelector('[data-qr-logo-none]')).not.toBeNull()
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.upload })).toBeEnabled()
+  }, 30_000)
+
+  it('does not land in a page whose changes the operator threw out while it ran', async () => {
+    picture.current = 'transparent'
+    const user = userEvent.setup()
+    await openPage()
+    const { postSpy, settle } = heldUpload()
+    await pickLogo(user, postSpy)
+    await user.click(presets().getByRole('button', { name: copy.presets.dots }))
+
+    await user.click(screen.getByRole('button', { name: page.reset }))
+    expect(presets().getByRole('button', { name: copy.presets.plain })).toHaveAttribute('aria-pressed', 'true')
+
+    settle.finish(UPLOADED)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(thumbnail()).toBeNull()
+    expect(presets().getByRole('button', { name: copy.presets.plain })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: page.save })).toBeDisabled()
+  }, 30_000)
+})
+
+describe('QR tab — a refused upload', () => {
+  /**
+   * The page keeps what refused an upload, so the tab mounted again still
+   * shows it. That is right while nothing about the logo has changed, and
+   * wrong once the operator has thrown their changes out: the red line and
+   * the invalid upload button would stay for the rest of the page's life,
+   * about a file nobody is trying to use any more.
+   */
+  const tab = (name: string) => screen.getByRole('tab', { name })
+  const logoControls = (): Promise<HTMLElement> =>
+    waitFor(() => {
+      const controls = document.querySelector<HTMLElement>('[data-qr-logo-controls]')
+      if (controls === null) throw new Error('the logo controls are not rendered')
+      return controls
+    })
+
+  it('keeps the refusal across a look at another tab, and retires it with the changes the operator throws out', async () => {
+    const user = userEvent.setup()
+    await openPage()
+    const postSpy = vi.spyOn(api, 'post')
+
+    await user.click(tab(page.tabs.qr))
+    // A change for the page's Reset to throw out: until there is one, it is disabled.
+    await user.click(within(await screen.findByRole('group', { name: copy.presetsLabel })).getByRole('button', { name: copy.presets.dots }))
+    const input = document.querySelector<HTMLInputElement>('[data-qr-logo-file]')
+    expect(input, 'the logo file input').not.toBeNull()
+    await user.upload(input as HTMLInputElement, new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' }))
+    expect(await within(await logoControls()).findByRole('alert')).toHaveTextContent('2 MB')
+
+    // Nothing about the logo has changed: a look at another tab keeps it.
+    await user.click(tab(page.tabs.brand))
+    await user.click(tab(page.tabs.qr))
+    expect(await within(await logoControls()).findByRole('alert')).toHaveTextContent('2 MB')
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.upload })).toHaveAttribute('aria-invalid', 'true')
+
+    await user.click(screen.getByRole('button', { name: page.reset }))
+    const presets = within(screen.getByRole('group', { name: copy.presetsLabel }))
+    expect(presets.getByRole('button', { name: copy.presets.plain })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(await logoControls()).queryByRole('alert')).toBeNull()
+    expect(within(await logoControls()).getByRole('button', { name: copy.logo.upload })).toHaveAttribute('aria-invalid', 'false')
+    expect(postSpy).not.toHaveBeenCalled()
+  }, 30_000)
 })

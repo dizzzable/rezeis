@@ -149,7 +149,9 @@ describe('QR style — the logo, in the form', () => {
     expect(issues({ ...LOGO, size: 'small', plate: 'light', src: '/uploads/branding/mark.svg' })).toEqual([])
   })
 
-  it('reads a block without a logo key as no logo, as the API and the cabinet read it', () => {
+  it('reads a block without a logo key as no logo, as the cabinet reads one — the API keeps the stored logo instead', () => {
+    // Which is why the page never sends such a block: this `null` would
+    // delete a logo the API, given the same block without the key, keeps.
     const { logo: _none, ...threeMembers } = QR_STYLE_PLAIN
     const parsed = schema.safeParse(withQrStyle(threeMembers))
     expect(parsed.success).toBe(true)

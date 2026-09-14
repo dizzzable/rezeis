@@ -173,7 +173,7 @@ export const en = {
     subscriptionChart: {
       title: 'Subscription distribution',
       description: 'Total subscriptions: {{total}}',
-      active: 'Active',
+      active: 'Active (> 7d left)',
       limited: 'Limited',
       expired: 'Expired',
       expiring: 'Expiring (7d)',

@@ -263,7 +263,8 @@ function SurfaceDonut({
                 <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />
               ))}
             </Pie>
-            <Tooltip formatter={(v) => [Number(v ?? 0).toLocaleString(activeLocale()), '']} />
+            {/* The value alone, so the slice keeps its name: `[value, '']` made recharts print " : 12". */}
+            <Tooltip formatter={(v) => Number(v ?? 0).toLocaleString(activeLocale())} />
           </PieChart>
         </ResponsiveContainer>
       </div>
@@ -356,10 +357,11 @@ function RevenueTab({ days }: { days: number }) {
               <div className="h-52 w-52 shrink-0">
                 <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                   <PieChart>
-                    <Pie data={[...currencies]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="revenue">
+                    {/* `nameKey`: these rows have no `name`, and recharts names such a slice by its index. */}
+                    <Pie data={[...currencies]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="revenue" nameKey="currency">
                       {currencies.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
                     </Pie>
-                    <Tooltip formatter={(v) => [formatCurrency(Number(v ?? 0)), '']} />
+                    <Tooltip formatter={(v) => formatCurrency(Number(v ?? 0))} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -395,7 +397,7 @@ function RevenueTab({ days }: { days: number }) {
               <div className="h-52 w-52 shrink-0">
                 <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                   <PieChart>
-                    <Pie data={[...plans]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="total">
+                    <Pie data={[...plans]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="total" nameKey="plan">
                       {plans.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
                     </Pie>
                     <Tooltip />

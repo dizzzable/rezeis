@@ -862,11 +862,16 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         // `null` is no logo. The address is judged by the renderer's own
         // `isQrLogoSrc`, from the vendored kit, so the page refuses exactly
         // the addresses the cabinet would draw no logo from; the API
-        // (`QrLogoDto`) refuses the same set. A block that carries no `logo`
-        // key reads as no logo, as the API reads it (see `QrStyleDto.logo`):
-        // this page always sends one, but the draft type, not this line, is
-        // what keeps the member from being forgotten — the transform below
-        // cannot produce a `BrandingFormData` without it.
+        // (`QrLogoDto`) refuses the same set.
+        //
+        // A block that carries no `logo` key parses HERE as `logo: null`, and
+        // a save sending that null deletes the stored logo. The API reads the
+        // missing key the other way: it keeps the stored logo — such a block
+        // comes from a writer older than logos — and only an explicit `null`
+        // removes one (see `QrStyleDto.logo`). So this page always sends the
+        // member, and the draft type, not this line, is what keeps it from
+        // being forgotten — the transform below cannot produce a
+        // `BrandingFormData` without it.
         //
         // Whether codes carrying the logo still READ is not a schema question
         // — it takes decoding the operator's image — and is gated in the page's

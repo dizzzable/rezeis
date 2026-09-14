@@ -74,6 +74,7 @@ import { ServersGlobeSection } from "./servers-globe-section";
 import { QrStyleSection } from "./qr-style-section";
 import { createQrLogoCheckStore, qrLogoSaveRefusal } from "./qr-logo-check";
 import { createBrowserQrLogoChecker } from "./qr-logo-check-browser";
+import { createQrLogoUploadStore } from "./qr-logo-upload";
 import { AppBackgroundSection } from "./app-background-section";
 import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots-section";
 import { GradientBuilder } from "./gradient-builder";
@@ -290,6 +291,22 @@ export default function WebReiwaPage() {
     mode: 'onSubmit',
     reValidateMode: 'onBlur',
   });
+  // The QR logo upload, kept for the page's life like the check: the QR tab
+  // unmounts behind every other tab, and an upload outlives it. It lands in
+  // the style as the form holds it when the upload FINISHES
+  // (`qr-logo-upload.ts`).
+  const [qrLogoUpload] = useState(() =>
+    createQrLogoUploadStore({
+      upload: uploadQrLogo,
+      read: () => form.getValues('qrStyle'),
+      write: (next) => {
+        // As the tab's own changes do: a refusal about the logo this replaces
+        // would only contradict the check that is about to run.
+        form.clearErrors('qrStyle');
+        form.setValue('qrStyle', next, { shouldDirty: true });
+      },
+    }),
+  );
 
   useEffect(() => {
     if (branding) {
@@ -1014,7 +1031,12 @@ export default function WebReiwaPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => form.reset(branding)}
+            onClick={() => {
+              // Throwing the changes out throws out a logo still uploading too,
+              // and a refusal of one still on the QR tab.
+              qrLogoUpload.supersede();
+              form.reset(branding);
+            }}
             disabled={!form.formState.isDirty}
           >
             <RotateCcw className="mr-2 h-4 w-4" /> {t('brandingPage.reset')}
@@ -2270,7 +2292,7 @@ export default function WebReiwaPage() {
                     darkError={form.formState.errors.qrStyle?.dark?.message}
                     logoError={qrLogoErrorMessage(form.formState.errors.qrStyle?.logo)}
                     brandLogoUrl={watchedValues.logoUrl}
-                    uploadLogo={uploadQrLogo}
+                    logoUpload={qrLogoUpload}
                     logoCheck={qrLogoCheck}
                   />
                 ) : (

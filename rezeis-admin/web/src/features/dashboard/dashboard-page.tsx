@@ -104,7 +104,12 @@ function DashboardContent({
         <DashboardQuickActions />
       </AnimatedContent>
       <AnimatedContent delay={0.2}>
-        <div className="grid gap-4 lg:grid-cols-2">
+        {/* SIDE BY SIDE ONLY FROM `xl`. In a narrower half the subscription card
+            stacks its rings, legends under them, and grows to about 1000 px;
+            the row stretches the trend card to match, and its chart went
+            862–902 px tall at 1024–1256 px with the sidebar open. Below `xl`
+            the two stack at full width, as they already did below `lg`. */}
+        <div className="grid gap-4 xl:grid-cols-2">
           <Suspense fallback={<Skeleton className="h-72 w-full" />}>
             <DashboardOnlineTrend />
           </Suspense>
@@ -162,7 +167,10 @@ function DashboardLoadingState(): JSX.Element {
           <Skeleton key={index} className="h-[78px] w-full rounded-lg" />
         ))}
       </div>
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* The chart row's placeholder, on the loaded row's breakpoint: side by
+          side only from `xl`, so the page does not reflow the other way when
+          the summary answers. */}
+      <div data-testid="dashboard-chart-row-skeleton" className="grid gap-4 xl:grid-cols-2">
         <Skeleton className="h-64 w-full rounded-xl" />
         <Skeleton className="h-64 w-full rounded-xl" />
       </div>

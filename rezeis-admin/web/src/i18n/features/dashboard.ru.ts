@@ -173,7 +173,7 @@ export const ru = {
     subscriptionChart: {
       title: 'Распределение подписок',
       description: 'Всего подписок: {{total}}',
-      active: 'Активные',
+      active: 'Активные (> 7 дн.)',
       limited: 'Ограниченные',
       expired: 'Истёкшие',
       expiring: 'Истекают (7д)',

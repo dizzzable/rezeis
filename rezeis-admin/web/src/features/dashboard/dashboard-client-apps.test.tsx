@@ -135,6 +135,34 @@ describe('DashboardClientApps', () => {
     expect(await screen.findByText('dashboardPage.clientAppsChart.unknown')).toBeInTheDocument()
   })
 
+  it('prints a long app name whole in the legend, wrapping it instead of cutting it short', async () => {
+    // This ring shares its legend with the subscription ring beside it, which
+    // stopped truncating its labels. An app name is whatever Remnawave
+    // reports, and a package id is one unbroken word far wider than the
+    // column: it has to wrap, even mid-word, and stay inside the card.
+    grant('remnawave:view')
+    const longName = 'com.github.metacubex.clash.meta.android'
+    getHwidStats.mockResolvedValue({
+      byPlatform: [],
+      stats: STATS,
+      apps: [
+        { app: longName, count: 1234 },
+        { app: 'Happ', count: 12 },
+      ],
+    })
+
+    renderApps()
+
+    const label = await screen.findByText(longName)
+    expect(label.textContent).toBe(longName)
+    const clipping = /(^|\s)(truncate|text-ellipsis|text-clip|whitespace-nowrap|overflow-hidden|overflow-x-hidden|line-clamp-\d+)(\s|$)/
+    for (let box: HTMLElement | null = label; box !== null && box.tagName !== 'SECTION'; box = box.parentElement) {
+      expect(box.className, `the name is clipped by <${box.tagName.toLowerCase()} class="${box.className}">`).not.toMatch(clipping)
+    }
+    expect(label).toHaveClass('min-w-0', 'break-words')
+    expect(label.closest('li')).toHaveTextContent('1234')
+  })
+
   it('does not ask the panel at all without remnawave:view', async () => {
     grant('dashboard:view')
 
