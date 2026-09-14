@@ -7,6 +7,8 @@ import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule } from '@nestjs/config';
 
 import { AuthModule } from '../auth/auth.module';
+import { ReiwaCacheInvalidatorService } from '../bot-config/services/reiwa-cache-invalidator.service';
+import { ReiwaRelayModule } from '../notifications/reiwa-relay.module';
 import { EMAIL_QUEUE } from './email.constants';
 import { EmailProcessor } from './email.processor';
 import { AdminEmailController } from './controllers/admin-email.controller';
@@ -23,6 +25,11 @@ import { EmailTemplateRendererService } from './services/email-template-renderer
  *   - Branded HTML templates
  *   - Event bridge (auto-send on system events)
  *   - Admin API for SMTP settings + test
+ *
+ * `ReiwaCacheInvalidatorService` is declared here, with the `ReiwaRelayModule`
+ * it enqueues through, for the reason `LegalDocumentsModule` gives: an SMTP
+ * save has to drop the cabinet's public-config (`emailEnabled`), and importing
+ * `BotConfigModule` for one stateless dispatcher would pull the bot editor in.
  */
 @Global()
 @Module({
@@ -30,6 +37,7 @@ import { EmailTemplateRendererService } from './services/email-template-renderer
     AuthModule,
     ConfigModule,
     BullModule.registerQueue({ name: EMAIL_QUEUE }),
+    ReiwaRelayModule,
   ],
   controllers: [AdminEmailController],
   providers: [
@@ -37,6 +45,7 @@ import { EmailTemplateRendererService } from './services/email-template-renderer
     EmailTemplateRendererService,
     EmailEventBridgeService,
     EmailProcessor,
+    ReiwaCacheInvalidatorService,
   ],
   exports: [EmailDeliveryService],
 })

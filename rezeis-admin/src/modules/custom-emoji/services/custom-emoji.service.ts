@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto';
 
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { Prisma, Settings } from '@prisma/client';
 import { gunzipSync } from 'fflate';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import {
   mutateExistingSettingsRow,
@@ -81,6 +82,13 @@ export class CustomEmojiService {
     private readonly prismaService: PrismaService,
     private readonly assetUpload: EmojiAssetUploadService,
     private readonly settingsService: SettingsService,
+    /**
+     * Drops the bot's config and the cabinet's pack list after a pack edit
+     * (`announcePacksChanged`). Last and `@Optional()` so positional
+     * construction in the specs keeps working; `CustomEmojiModule` provides it.
+     */
+    @Optional()
+    private readonly reiwaCacheInvalidator?: ReiwaCacheInvalidatorService,
   ) {}
 
   public async listPacks(): Promise<CustomEmojiPackInterface[]> {
@@ -240,29 +248,39 @@ export class CustomEmojiService {
         restored.changed ||
         recovered.setName !== existing.setName ||
         recovered.builtin !== existing.builtin;
+      let result: CustomEmojiPackInterface = recovered;
       if (changed) {
-        // Replaced by id under the lock, so every other pack stays as it now
-        // stands. A pack deleted while its files downloaded stays deleted, and
-        // the files downloaded for it go with it.
-        const stillStored = await this.updatePacks(
-          (current) =>
-            current.some((pack) => pack.id === existing.id)
-              ? {
-                  next: current.map((pack) => (pack.id === existing.id ? recovered : pack)),
-                  result: true,
-                }
-              : { next: null, result: false },
-          { createRow: false },
+        // Landed on the pack as it is stored NOW, under the lock. The downloads
+        // above took seconds, and an edit made to this pack meanwhile — a
+        // glyph, a name, an id, through `updateEmoji` on the same page — is
+        // newer than the copy they started from; putting `recovered` back
+        // whole reverted it. `landRepair` applies only what the repair
+        // changed, where the stored value is still the one it started from.
+        // A pack deleted while its files downloaded stays deleted.
+        const landed = await this.updatePacks(
+          (current) => {
+            const stored = current.find((pack) => pack.id === existing.id);
+            if (stored === undefined) return { next: null, result: null };
+            const next = landRepair({ stored, before: existing, repaired: recovered });
+            return {
+              next: next === stored ? null : current.map((pack) => (pack === stored ? next : pack)),
+              result: next,
+            };
+          },
+          { createRow: false, reason: 'custom-emoji.repair' },
         );
-        if (!stillStored) {
-          await this.reapAssetsNotIn(recovered, existing);
+        // Every file it downloaded that the stored pack does not reference —
+        // all of them, for a deleted pack — goes again.
+        await this.reapAssetsNotIn(recovered, [existing, landed]);
+        if (landed === null) {
           throw new NotFoundException('The pack was deleted while it was being repaired');
         }
+        result = landed;
       }
       this.logger.log(
-        `Reused emoji set "${recovered.name}" (${setName}); restored ${restored.recoveredEmojiCount} missing asset(s), repaired ${restored.repairedEmojiCount} emoji id/fallback record(s)`,
+        `Reused emoji set "${result.name}" (${setName}); restored ${restored.recoveredEmojiCount} missing asset(s), repaired ${restored.repairedEmojiCount} emoji id/fallback record(s)`,
       );
-      return recovered;
+      return result;
     }
     const packSlug = slugify(name) || 'pack';
     const usedSlugs = new Set(indexEmojisBySlug(packs).keys());
@@ -327,10 +345,10 @@ export class CustomEmojiService {
         };
         return { next: [...current, pack], result: { pack, added: true } };
       },
-      { createRow: true },
+      { createRow: true, reason: 'custom-emoji.import' },
     );
     if (!stored.added) {
-      await this.reapAssetsNotIn(downloaded, null);
+      await this.reapAssetsNotIn(downloaded, []);
       this.logger.log(`Emoji set "${setName}" was imported concurrently; kept the pack already stored`);
       return stored.pack;
     }
@@ -402,26 +420,34 @@ export class CustomEmojiService {
       }
     }
     if (restoredById.size > 0) {
-      // Each recovered pack replaces its own id under the lock; recovery runs
-      // across Telegram round-trips, and an edit made meanwhile to any other
-      // pack must survive it. A pack deleted meanwhile is not brought back.
-      const gone = await this.updatePacks(
+      // Each recovered pack is landed on the pack as it is stored now, under
+      // the lock (`landRepair`): recovery runs across Telegram round-trips, and
+      // an edit made meanwhile — to any other pack, or to this one — must
+      // survive it. A pack deleted meanwhile is not brought back.
+      const landedById = await this.updatePacks(
         (current) => {
-          const stored = new Set(current.map((pack) => pack.id));
-          return {
-            next: current.map((pack) => restoredById.get(pack.id)?.pack ?? pack),
-            result: new Set([...restoredById.keys()].filter((id) => !stored.has(id))),
-          };
+          const landed = new Map<string, CustomEmojiPackInterface>();
+          let changedAny = false;
+          const next = current.map((stored) => {
+            const restored = restoredById.get(stored.id);
+            const before = packs.find((pack) => pack.id === stored.id);
+            if (restored === undefined || before === undefined) return stored;
+            const merged = landRepair({ stored, before, repaired: restored.pack });
+            landed.set(stored.id, merged);
+            if (merged !== stored) changedAny = true;
+            return merged;
+          });
+          return { next: changedAny ? next : null, result: landed };
         },
-        { createRow: false },
+        { createRow: false, reason: 'custom-emoji.recovery' },
       );
       for (const [id, restored] of restoredById) {
-        if (!gone.has(id)) {
-          recoveredEmojiCount += restored.recoveredEmojiCount;
-          continue;
-        }
         const original = packs.find((pack) => pack.id === id) ?? null;
-        await this.reapAssetsNotIn(restored.pack, original);
+        const landed = landedById.get(id) ?? null;
+        // The downloads the stored pack did not take — all of them for a pack
+        // deleted meanwhile — are removed again.
+        await this.reapAssetsNotIn(restored.pack, [original, landed]);
+        if (landed !== null) recoveredEmojiCount += restored.recoveredEmojiCount;
       }
     }
     return { recoveredEmojiCount, skippedPacks };
@@ -604,7 +630,7 @@ export class CustomEmojiService {
           ? { next: null, result: null }
           : { next: current.filter((p) => p.id !== packId), result: found };
       },
-      { createRow: false },
+      { createRow: false, reason: 'custom-emoji.delete' },
     );
     if (target === null) {
       throw new NotFoundException('Pack not found');
@@ -654,7 +680,7 @@ export class CustomEmojiService {
         const updated = { ...pack, emojis: pack.emojis.map((e) => (e.slug === input.slug ? patched : e)) };
         return { next: current.map((p) => (p.id === input.packId ? updated : p)), result: updated };
       },
-      { createRow: false },
+      { createRow: false, reason: 'custom-emoji.emoji' },
     );
   }
 
@@ -669,7 +695,7 @@ export class CustomEmojiService {
         if (target.builtin === true) return { next: null, result: true };
         return { next: current.map((p) => (p.id === packId ? { ...p, builtin: true } : p)), result: true };
       },
-      { createRow: false },
+      { createRow: false, reason: 'custom-emoji.builtin' },
     );
   }
 
@@ -699,7 +725,7 @@ export class CustomEmojiService {
           result: true,
         };
       },
-      { createRow: false },
+      { createRow: false, reason: 'custom-emoji.source' },
     );
   }
 
@@ -751,34 +777,63 @@ export class CustomEmojiService {
    *
    * `createRow: false` keeps an edit of a pack from creating the singleton on an
    * empty table; `apply` then sees an empty list and nothing is written.
+   *
+   * A list that was written is announced once the transaction has committed
+   * (`announcePacksChanged`), under `options.reason`.
    */
   private async updatePacks<T>(
     apply: (current: CustomEmojiPackInterface[]) => {
       readonly next: readonly CustomEmojiPackInterface[] | null;
       readonly result: T;
     },
-    options: { readonly createRow: boolean },
+    options: { readonly createRow: boolean; readonly reason: string },
   ): Promise<T> {
+    let wrote = false;
     const underLock = async ({ row: settings, write }: SettingsRowMutation): Promise<T> => {
       const systemNotifications = asObject(settings.systemNotifications);
       const { next, result } = apply(readCustomEmojiPacks(systemNotifications));
       if (next !== null) {
         systemNotifications.customEmojiPacks = next as unknown as Prisma.InputJsonValue;
         await write({ systemNotifications: systemNotifications as Prisma.InputJsonValue });
+        wrote = true;
       }
       return result;
     };
-    return options.createRow
-      ? mutateSettingsRow(this.prismaService, underLock)
-      : mutateExistingSettingsRow(this.prismaService, underLock, () => apply([]).result);
+    const result = options.createRow
+      ? await mutateSettingsRow(this.prismaService, underLock)
+      : await mutateExistingSettingsRow(this.prismaService, underLock, () => apply([]).result);
+    if (wrote) this.announcePacksChanged(options.reason);
+    return result;
   }
 
-  /** Remove files this instance downloaded that the stored pack does not reference. */
+  /**
+   * Tell the two caches outside the panel that hold the packs.
+   *
+   * The bot renders `:slug:` in dynamic screens, help and invite copy from its
+   * config, which it keeps for up to five minutes (`reiwa.bot.invalidate`
+   * drops it). The cabinet renders feed tokens from its pack list, kept for 60
+   * seconds (`reiwa.branding.invalidate` drops it). No pack edit sent either,
+   * so a changed glyph — or a freshly imported `:slug:`, shown as literal text
+   * — lasted until those caches ran out. Called after the commit, when the
+   * settings write generation is already bumped; the enqueue never throws.
+   */
+  private announcePacksChanged(reason: string): void {
+    if (this.reiwaCacheInvalidator === undefined) return;
+    void this.reiwaCacheInvalidator.invalidate(reason);
+    void this.reiwaCacheInvalidator.invalidateBranding(reason);
+  }
+
+  /**
+   * Remove files this instance downloaded that none of `kept` references —
+   * the copy the download started from, and the pack as it ended up stored.
+   */
   private async reapAssetsNotIn(
     downloaded: CustomEmojiPackInterface,
-    kept: CustomEmojiPackInterface | null,
+    kept: ReadonlyArray<CustomEmojiPackInterface | null>,
   ): Promise<void> {
-    const keep = new Set(kept === null ? [] : packAssetUrls(kept));
+    const keep = new Set(
+      kept.flatMap((pack) => (pack === null ? [] : packAssetUrls(pack))),
+    );
     await Promise.all(
       packAssetUrls(downloaded)
         .filter((url) => !keep.has(url))
@@ -789,6 +844,78 @@ export class CustomEmojiService {
   private async getSettings(): Promise<Settings | null> {
     return this.prismaService.settings.findFirst({ orderBy: { updatedAt: 'asc' } });
   }
+}
+
+/** The per-record fields a repair writes: the three files and the two delivery fields. */
+type RepairedEmojiField = 'imageUrl' | 'lottieUrl' | 'videoUrl' | 'customEmojiId' | 'fallback';
+
+const REPAIRED_EMOJI_FIELDS: readonly RepairedEmojiField[] = [
+  'imageUrl',
+  'lottieUrl',
+  'videoUrl',
+  'customEmojiId',
+  'fallback',
+];
+
+/**
+ * Land a repair on the pack as it is stored now — a three-way merge per field.
+ *
+ * `before` is the copy the repair read before its downloads, `repaired` is that
+ * copy with the repair applied, and `stored` is the pack under the settings row
+ * lock. A field takes the repaired value only where the repair changed it AND
+ * the stored value is still the one the repair started from. Anything edited
+ * meanwhile keeps the edit: it is newer intent than a sticker set fetched
+ * seconds ago, which is the rule `applyStickerIdentity` already follows for a
+ * glyph. A downloaded file another repair beat this one to is not taken either,
+ * and the caller removes it. Records pair by slug, which no edit changes; name
+ * and every field a repair does not write stay as stored. `setName` and
+ * `builtin` follow the same rule for the pack.
+ *
+ * Answers `stored` itself when nothing was taken, so the caller can skip the
+ * write with an identity check.
+ */
+function landRepair(input: {
+  readonly stored: CustomEmojiPackInterface;
+  readonly before: CustomEmojiPackInterface;
+  readonly repaired: CustomEmojiPackInterface;
+}): CustomEmojiPackInterface {
+  const { stored, before, repaired } = input;
+  const beforeBySlug = new Map(before.emojis.map((emoji) => [emoji.slug, emoji] as const));
+  const repairedBySlug = new Map(repaired.emojis.map((emoji) => [emoji.slug, emoji] as const));
+  let changed = false;
+  const emojis = stored.emojis.map((current) => {
+    const base = beforeBySlug.get(current.slug);
+    const next = repairedBySlug.get(current.slug);
+    if (base === undefined || next === undefined) return current;
+    const pick = <K extends RepairedEmojiField>(field: K): CustomEmojiInterface[K] =>
+      next[field] !== base[field] && current[field] === base[field] ? next[field] : current[field];
+    const merged: CustomEmojiInterface = {
+      ...current,
+      imageUrl: pick('imageUrl'),
+      lottieUrl: pick('lottieUrl'),
+      videoUrl: pick('videoUrl'),
+      customEmojiId: pick('customEmojiId'),
+      fallback: pick('fallback'),
+    };
+    if (REPAIRED_EMOJI_FIELDS.every((field) => merged[field] === current[field])) return current;
+    changed = true;
+    return merged;
+  });
+  const setName =
+    repaired.setName !== before.setName && stored.setName === before.setName
+      ? repaired.setName
+      : stored.setName;
+  const builtin =
+    repaired.builtin !== before.builtin && stored.builtin === before.builtin
+      ? repaired.builtin
+      : stored.builtin;
+  if (!changed && setName === stored.setName && builtin === stored.builtin) return stored;
+  return {
+    ...stored,
+    ...(setName === undefined ? {} : { setName }),
+    ...(builtin === true ? { builtin: true } : {}),
+    emojis,
+  };
 }
 
 /** Every uploaded file a pack references, for reaping what a lost race downloaded. */

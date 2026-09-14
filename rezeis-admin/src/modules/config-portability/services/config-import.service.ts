@@ -2,11 +2,13 @@ import {
   BadRequestException,
   Injectable,
   Logger,
+  Optional,
 } from '@nestjs/common';
 
 import { LegalDocumentKey, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import {
   LEGAL_DOCUMENT_KEYS,
 } from '../../legal-documents/services/legal-documents.service';
@@ -132,6 +134,44 @@ const SECTION_REQUIRED_PERMISSIONS: Readonly<
   legalDocuments: ['settings:edit'],
 };
 
+/** A cache outside the panel that serves something an import can write. */
+type ReiwaCache = 'publicConfig' | 'platformPolicy' | 'botConfig';
+
+/**
+ * The caches to drop once a section has committed — the same events the
+ * section's own screens send after a save:
+ *
+ *   - `publicConfig`   — `reiwa.branding.invalidate`: the cabinet's
+ *                        public-config (branding, custom icons, the default
+ *                        currency, project name and web title, whether e-mail
+ *                        is on) and its custom-emoji pack list, kept 60 s.
+ *   - `platformPolicy` — `reiwa.platform.policy_invalidated`: access mode, the
+ *                        rules and channel gates, the default currency, and the
+ *                        bot's copy of the legal documents, kept 60 s by the
+ *                        cabinet and by the bot.
+ *   - `botConfig`      — `reiwa.bot.invalidate`: the bot's config, which carries
+ *                        the custom emoji packs and the premium-emoji switch
+ *                        from `systemNotifications`, kept up to five minutes.
+ *
+ * `settings` is one row written whole, so all three go.
+ * `legalDocuments` drops the policy, as `LegalDocumentsService.update` does.
+ * Nothing else is cached outside the panel (FAQ is served uncached). TOTAL for
+ * the reason given above `SECTION_REQUIRED_PERMISSIONS`: a new section must say.
+ */
+const SECTION_REIWA_CACHES: Readonly<Record<ConfigExportSection, readonly ReiwaCache[]>> = {
+  roles: [],
+  permissions: [],
+  scopePolicies: [],
+  automations: [],
+  webhooks: [],
+  notificationTemplates: [],
+  settings: ['publicConfig', 'platformPolicy', 'botConfig'],
+  blockedIps: [],
+  adminIpAllowlist: [],
+  faqItems: [],
+  legalDocuments: ['platformPolicy'],
+};
+
 export interface ConfigImportInput {
   readonly payload: ConfigExportPayloadInterface;
   readonly sections: readonly ConfigExportSection[] | null;
@@ -252,7 +292,16 @@ export interface ConfigImportResultInterface {
 export class ConfigImportService {
   private readonly logger = new Logger(ConfigImportService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    /**
+     * Tells reiwa what a committed section changed (`announceCommittedSection`).
+     * Last and `@Optional()` so positional construction in the specs keeps
+     * working; `ConfigPortabilityModule` provides it.
+     */
+    @Optional()
+    private readonly reiwaCacheInvalidator?: ReiwaCacheInvalidatorService,
+  ) {}
 
   public async importConfig(input: ConfigImportInput): Promise<ConfigImportResultInterface> {
     this.validatePayload(input.payload);
@@ -444,8 +493,9 @@ export class ConfigImportService {
       section === 'settings'
         ? runSettingsWriteTransaction(this.prismaService, work)
         : this.prismaService.$transaction(work);
+    let counts: SectionCounts;
     try {
-      const counts = await transaction(async (tx) => {
+      counts = await transaction(async (tx) => {
         const applied = await this.importSection(
           tx,
           section,
@@ -460,7 +510,6 @@ export class ConfigImportService {
         }
         return applied;
       });
-      return { section, status: 'imported', ...counts, errors: [] };
     } catch (err) {
       if (err instanceof DryRunRollback) {
         return { section, status: 'imported', ...err.counts, errors: [] };
@@ -475,6 +524,40 @@ export class ConfigImportService {
           this.describeSectionFailure(section, rows, err, input.actor?.requestId ?? null),
         ],
       };
+    }
+    // Committed. Outside the `try`, so nothing on the way to reiwa can turn a
+    // committed section into a "rolled back" summary.
+    if (counts.created + counts.updated > 0) this.announceCommittedSection(section);
+    return { section, status: 'imported', ...counts, errors: [] };
+  }
+
+  /**
+   * Drop the caches outside the panel that serve what a section just committed
+   * (`SECTION_REIWA_CACHES`). Called after the commit — for the settings
+   * section, after the settings-write generation has moved — so the cabinet's
+   * and the bot's re-read cannot come back with the pre-import row. Nothing is
+   * sent for a dry run, a skipped row or a section that rolled back. The
+   * enqueue never throws, so the import's answer never depends on reiwa.
+   */
+  private announceCommittedSection(section: ConfigExportSection): void {
+    if (this.reiwaCacheInvalidator === undefined) return;
+    const reason = `config-import.${section}`;
+    for (const cache of SECTION_REIWA_CACHES[section]) {
+      switch (cache) {
+        case 'publicConfig':
+          void this.reiwaCacheInvalidator.invalidateBranding(reason);
+          break;
+        case 'platformPolicy':
+          void this.reiwaCacheInvalidator.invalidatePolicy(reason);
+          break;
+        case 'botConfig':
+          void this.reiwaCacheInvalidator.invalidate(reason);
+          break;
+        default: {
+          const exhaustive: never = cache;
+          throw new Error(`Unknown reiwa cache: ${String(exhaustive)}`);
+        }
+      }
     }
   }
 
@@ -1194,12 +1277,29 @@ function mergeAgainstExistingRow(
   const out: Record<string, unknown> = {};
   // Iterates the INCOMING keys only. A column the payload does not carry must
   // stay out of `data` entirely, so that Prisma's own partial-update semantics
-  // keep applying to it; this merge changes what happens inside a column, never
-  // which columns are written.
+  // keep applying to it; this merge changes what happens inside a column, and
+  // takes a carried column out of the write in one case only, the next one.
   for (const [column, value] of Object.entries(incoming)) {
+    // An empty top-level array. It passes `stripRelationFields` from any column
+    // (`[].every(...)` is true), so on its own it cannot say whether a
+    // `String[]` column was emptied or a `Json` array of objects —
+    // `settings.customIcons`, `notificationTemplates.buttons`,
+    // `automations.actions` — whose non-empty arrays that filter never lets
+    // through. It used to replace those lists with nothing. The stored value
+    // can say: only a `String[]` column holds a list of strings. Over anything
+    // else the empty array is left out, like the non-empty arrays of the same
+    // column, and the destination keeps its list.
+    if (Array.isArray(value) && value.length === 0 && !isListOfStrings(existing[column])) {
+      continue;
+    }
     out[column] = mergeJsonValue(existing[column], value);
   }
   return out;
+}
+
+/** Every element a string, as a `String[]` column reads back — `[]` included. */
+function isListOfStrings(value: unknown): boolean {
+  return Array.isArray(value) && value.every((element) => typeof element === 'string');
 }
 
 /** One level of the rule above. Returns `patch` whenever the pair cannot merge. */
@@ -1252,8 +1352,9 @@ const ARRAY_IDENTITY_KEYS: readonly string[] = ['id', 'slug', 'key', 'name'];
  * `String[]` column (`webhooks.eventTypes`, `faqItems.mediaUrls`, which have no
  * object elements and so replace wholesale). A TOP-LEVEL `Json` array column —
  * `settings.customIcons`, `automations.actions`, `notificationTemplates.buttons`
- * — never gets this far, because `stripRelationFields` drops it first. See the
- * note there before changing that.
+ * — never gets this far on an update: `stripRelationFields` drops its non-empty
+ * arrays, and `mergeAgainstExistingRow` leaves its empty one out of the write.
+ * See the note in `stripRelationFields` before changing that.
  */
 function mergeJsonArray(base: readonly unknown[], patch: readonly unknown[]): unknown[] {
   const identity = chooseArrayIdentityKey(base, patch);
@@ -1327,16 +1428,23 @@ function stripRelationFields(row: Record<string, unknown>): Record<string, unkno
       // `affectedUserIds`, `internalSquads`, `totpRecoveryCodes`.
       //
       // Consequence worth knowing before you widen this: a TOP-LEVEL `Json`
-      // array column is dropped here, so `settings.customIcons`,
-      // `automations.actions` and `notificationTemplates.buttons` are never
-      // written by an import at all. That is its own defect (those columns
-      // silently do not promote between environments) — but it is ALSO what
-      // currently keeps `automations.actions[].params.authorizationHeader`
-      // alive, since the export redacts that header and `actions` elements are
+      // array of objects is dropped here, so the lists in
+      // `settings.customIcons`, `automations.actions` and
+      // `notificationTemplates.buttons` never promote between environments.
+      // That is its own defect — but it is ALSO what currently keeps
+      // `automations.actions[].params.authorizationHeader` alive, since the
+      // export redacts that header and `actions` elements are
       // `{ type, params }` with no identity key for `mergeJsonArray` to pair
       // on. Start writing this column without giving its elements a stable id
       // and every automation's Authorization header is destroyed on the first
       // re-import, exactly the way the settings secrets were.
+      //
+      // An EMPTY array is kept here whatever its column, because `[]` is
+      // also what an emptied `String[]` column holds. On an update
+      // `mergeAgainstExistingRow` writes it only over a stored list of
+      // strings, so it cannot empty one of those three lists either. A create
+      // writes it as it is: there is no list to lose, and `[]` is those
+      // columns' default.
       if (value.every((v) => typeof v === 'string')) {
         out[key] = value;
       }

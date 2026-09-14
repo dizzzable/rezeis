@@ -156,11 +156,19 @@ export class BackupProcessor extends WorkerHost {
     // initiator surviving only inside `metadata.initiatedBy`. The job payload
     // has carried the admin all along; it just never reached the column an
     // incident responder filters on.
+    //
+    // WARNING when the schema was not brought forward: the data is in, but a
+    // build newer than the archive is now running against the archive's older
+    // schema, and queries on anything added since fail until migrations run.
+    // `migrationsApplied: false` used to sit in the metadata of an INFO event.
     this.systemEventsService.emit({
       type: EVENT_TYPES.SYSTEM_RESTORE_COMPLETED,
       category: 'SYSTEM',
-      severity: 'INFO',
-      message: `Database restored from ${filename}`,
+      severity: migrationsApplied ? 'INFO' : 'WARNING',
+      message: migrationsApplied
+        ? `Database restored from ${filename}`
+        : `Database restored from ${filename}, but the pending migrations were not applied — ` +
+          'restart the panel (API container) so its entrypoint applies them',
       metadata: {
         filename,
         initiatedBy,
@@ -235,6 +243,23 @@ export class BackupProcessor extends WorkerHost {
     this.logger.error(`Backup job ${job.name} (${job.id}) failed: ${error.message}`, error.stack);
     if (!isFinalFailedAttempt(job)) return;
     if (error instanceof BackupDeliveryRetryError && error.operatorAlerted) return;
+    if (job.name === BACKUP_JOBS.RESTORE) {
+      // A restore that throws — psql refusing a statement (it runs with
+      // `ON_ERROR_STOP` now, so a failing archive no longer passes for a
+      // restored one), an archive that no longer verifies, a missing file —
+      // used to leave only the log line above, after the operator had been
+      // told "restore started". Attributed like the completion event.
+      const { filename, initiatedBy } = (job.data ?? {}) as Partial<BackupRestoreJobData>;
+      this.systemEventsService.emit({
+        type: EVENT_TYPES.SYSTEM_ERROR,
+        category: 'SYSTEM',
+        severity: 'ERROR',
+        message: `Database restore from ${filename ?? 'an unknown archive'} failed: ${error.message}`,
+        metadata: { jobId: job.id, jobName: job.name, filename, initiatedBy, error: error.message },
+        adminId: initiatedBy ?? null,
+      });
+      return;
+    }
     if (job.name === BACKUP_JOBS.CREATE || job.name === BACKUP_JOBS.DELIVER_TELEGRAM) {
       this.systemEventsService.error(
         EVENT_TYPES.SYSTEM_ERROR,

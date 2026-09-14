@@ -64,8 +64,14 @@ import ts from 'typescript';
  *   - The transaction rule proves that a file calls both functions, not that
  *     the write actually happens inside the transaction the bump wraps.
  *   - None of this checks that a merge is written from the row the helper read
- *     rather than from something the caller computed earlier. Custom emoji
- *     packs are the known case: the pack list is computed outside the lock.
+ *     rather than from something computed earlier. Pack edits decide the list
+ *     under the lock (`CustomEmojiService.updatePacks`), re-import repair and
+ *     restore recovery land field by field on the pack as stored
+ *     (`landRepair`), and the notification toggles take booleans only
+ *     (`mergeToggleMap`) — each pinned by its own spec, not by this one. The
+ *     known case left is a whole value the CLIENT computed:
+ *     `PUT /admin/settings/icons` replaces the icon library with the list the
+ *     page loaded, so two admins editing icons at once keep the later list.
  *
  * The anchors matter as much as the verdict
  * ─────────────────────────────────────────

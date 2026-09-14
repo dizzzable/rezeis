@@ -751,8 +751,11 @@ export interface ServersGlobeSettings {
  * the three that draw every code and `mergeBrandingSettings` replaces the
  * stored block rather than merging a partial one over it, so there is no
  * request that changes the shape and quietly keeps — or quietly drops — a
- * colour. The logo belongs to the same block and is replaced with it: a block
- * that says nothing about a logo is a block without one (see `QrStyleDto`).
+ * colour. The logo belongs to the same block, with one exception at merge
+ * time: a block that carries no `logo` key at all comes from a writer older
+ * than logos (a tab left open across the upgrade, a script), so the stored
+ * logo is KEPT; only an explicit `logo: null` removes it
+ * (`mergeBrandingSettings`, `QrStyleDto.logo`).
  *
  * `dark` is `#rgb` or `#rrggbb` and at least 7:1 against white. Why seven and
  * not WCAG's 4.5 is written down in `utils/branding-qr-style.util.ts`.

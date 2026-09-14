@@ -8,6 +8,7 @@ import type { Transporter } from 'nodemailer';
 import { emailConfig } from '../../../common/config/email.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import { EMAIL_QUEUE, EMAIL_JOBS } from '../email.constants';
@@ -45,6 +46,13 @@ export class EmailDeliveryService {
     @Optional()
     @InjectQueue(EMAIL_QUEUE)
     private readonly emailQueue?: Queue,
+    /**
+     * Tells the cabinet to drop its public-config, whose `emailEnabled` comes
+     * from these settings. Last and `@Optional()` so positional construction
+     * in the specs keeps working; `EmailDeliveryModule` provides it.
+     */
+    @Optional()
+    private readonly reiwaCacheInvalidator?: ReiwaCacheInvalidatorService,
   ) {}
 
   // ── Public API ─────────────────────────────────────────────────────────
@@ -259,6 +267,11 @@ export class EmailDeliveryService {
           updatedFields,
         });
       }
+      // The cabinet's public-config carries `emailEnabled` (SMTP on and a
+      // host set) and keeps it for 60 seconds: without this, turning SMTP on
+      // left "link email" hidden, and turning it off kept offering codes that
+      // could not be delivered.
+      void this.reiwaCacheInvalidator?.invalidateBranding('email.smtp');
     }
 
     // Invalidate cached transporter

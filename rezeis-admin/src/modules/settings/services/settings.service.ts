@@ -542,9 +542,9 @@ export class SettingsService {
       this.prismaService,
       async ({ tx: transactionClient, row: existingSettings, write }): Promise<Settings> => {
         const data: Prisma.SettingsUpdateInput = { ...updateChanges.data };
-        // Platform-branding texts live in the (otherwise unused) platformPolicy
-        // JSON column; merge over the existing value so partial patches keep
-        // omitted keys.
+        // Platform-branding texts live in the platformPolicy JSON column, next
+        // to the External auth email policy (`externalAuth`). The merge starts
+        // from the row read under the lock and keeps every key it does not own.
         if (input.updatePlatformSettingsDto.platformBranding !== undefined) {
           data.platformPolicy = mergePlatformBranding({
             existing: existingSettings.platformPolicy,
@@ -604,6 +604,18 @@ export class SettingsService {
       )
     ) {
       void this.reiwaCacheInvalidator.invalidatePolicy(
+        `platform.${updateChanges.updatedFields.join(',')}`,
+      );
+    }
+    // `defaultCurrency`, the project name and the web title are also served
+    // from the cabinet's public-config, which the policy invalidation above
+    // does not drop in any cabinet released so far: tariff cards kept the old
+    // currency first and the tab the old title for a minute after the save.
+    if (
+      this.reiwaCacheInvalidator !== undefined &&
+      updateChanges.updatedFields.some((f) => ['defaultCurrency', 'platformBranding'].includes(f))
+    ) {
+      void this.reiwaCacheInvalidator.invalidateBranding(
         `platform.${updateChanges.updatedFields.join(',')}`,
       );
     }
@@ -894,6 +906,9 @@ export class SettingsService {
    * notifications. Either branch may be partially supplied — keys absent
    * from the patch keep their previous values.
    *
+   * Only toggles are written: see `mergeToggleMap` for why a value that is not
+   * a boolean, or a key that holds anything but one, is left as stored.
+   *
    * Both exits mask `systemNotifications` for the same reason `getOverview`
    * does: this response echoed the whole blob back, plaintext SMTP password
    * included, and the SPA's toggle handler re-reads it.
@@ -915,12 +930,12 @@ export class SettingsService {
         const data: Prisma.SettingsUpdateInput = {};
         const updatedFields: string[] = [];
         if (input.userNotifications !== undefined) {
-          const merged = mergeJsonObject(existing.userNotifications, input.userNotifications);
+          const merged = mergeToggleMap(existing.userNotifications, input.userNotifications);
           data.userNotifications = merged as Prisma.InputJsonValue;
           updatedFields.push('userNotifications');
         }
         if (input.systemNotifications !== undefined) {
-          const merged = mergeJsonObject(existing.systemNotifications, input.systemNotifications);
+          const merged = mergeToggleMap(existing.systemNotifications, input.systemNotifications);
           data.systemNotifications = merged as Prisma.InputJsonValue;
           updatedFields.push('systemNotifications');
         }
@@ -1622,6 +1637,14 @@ export class SettingsService {
       return { updated, previous };
     });
 
+    // The cabinet serves the library from its public-config cache, and this
+    // save deletes the files of the icons it removed just below: without the
+    // invalidation fresh cabinet loads drew those icons as broken images for a
+    // minute. Enqueued before the reaping, so a failed delete cannot skip it.
+    if (this.reiwaCacheInvalidator !== undefined) {
+      void this.reiwaCacheInvalidator.invalidateBranding('settings.customIcons');
+    }
+
     // Reap files for icons removed in this save (outside the txn — disk IO).
     const keptUrls = new Set(next.map((icon) => icon.url));
     const removed = settings.previous.filter((icon) => !keptUrls.has(icon.url));
@@ -1986,12 +2009,34 @@ function normalizeTestCategory(value: string | null | undefined): SystemEventCat
   return 'SYSTEM';
 }
 
-function mergeJsonObject(
+/**
+ * Merge a notification toggle patch into the stored map: booleans only, and
+ * never over a stored key that holds anything but a boolean.
+ *
+ * `systemNotifications` is not a toggle map alone. Beside the switches it holds
+ * the custom emoji packs, the backup schedule, Telegram routing, payment-ops
+ * alerts, the bot-emoji premium switch and two markers, each owned by its own
+ * endpoint. The System tab used to PATCH back the whole object it loaded, one
+ * key flipped, and this merge was a top-level spread — so every toggle click
+ * restored all of those to what they were when the page loaded. The page now
+ * sends the flipped key alone; a tab still running the old page sends the
+ * snapshot, and this is what keeps that snapshot from landing. A boolean aimed
+ * at a structured key is refused for the same reason: this endpoint writes
+ * switches, and nothing a switch can say replaces a pack list.
+ */
+function mergeToggleMap(
   existing: unknown,
   patch: Record<string, unknown>,
 ): Record<string, unknown> {
   const base = readJsonObject(existing);
-  return { ...base, ...patch };
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (typeof value !== 'boolean') continue;
+    const stored = base[key];
+    if (stored !== undefined && stored !== null && typeof stored !== 'boolean') continue;
+    merged[key] = value;
+  }
+  return merged;
 }
 
 /**
@@ -2008,12 +2053,13 @@ function mergeJsonObject(
  *   • `webPush`    — holds `privateKeyEnc`, the VAPID private key.
  *
  * They are DROPPED rather than blanked, and that is deliberate. The SPA's
- * system-notification toggle handler PATCHes back the whole object it last
- * read (`{ ...notifSettings, [key]: !current }`), and `mergeJsonObject`
- * replaces top-level keys wholesale. Returning `email` with `password`
- * nulled-out would therefore make the next toggle click ERASE the stored SMTP
- * password. A key that is absent from the patch is left untouched by the
- * merge, so dropping is the only masking that survives the round trip.
+ * system-notification toggle handler used to PATCH back the whole object it
+ * last read (`{ ...notifSettings, [key]: !current }`), and the merge replaced
+ * top-level keys wholesale, so an `email` returned with `password` nulled-out
+ * would have made the next toggle click ERASE the stored SMTP password. The
+ * page sends one key now and `mergeToggleMap` writes booleans only, but a tab
+ * left open on an older page still echoes what it was given: a secret that
+ * never leaves the server cannot come back in any shape.
  */
 const SECRET_SYSTEM_NOTIFICATION_KEYS: readonly string[] = ['email', 'botTokenEnc', 'webPush'];
 

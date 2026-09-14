@@ -416,9 +416,11 @@ function UserNotificationsTab() {
     onError: () => toast.error(t('notificationsPage.toasts.seedFailed')),
   })
 
+  // The flipped key alone: the server merges it into what is stored, and a
+  // copy of the loaded map would write back switches changed since it loaded.
   function handleToggle(key: string, current: boolean) {
     toggleMutation.mutate({
-      userNotifications: { ...notifSettings, [key]: !current },
+      userNotifications: { [key]: !current },
     })
   }
 
@@ -604,9 +606,13 @@ function SystemNotificationsTab() {
     onError: () => toast.error(t('notificationsPage.toasts.settingFailed')),
   })
 
+  // The flipped key alone. `systemNotifications` also holds the emoji packs,
+  // backup, Telegram routing, payment-ops and bot-emoji settings, which other
+  // pages save without refetching this query — sending the loaded object back
+  // restored all of them to what they were when this page loaded.
   function handleToggle(key: string, current: boolean) {
     toggleMutation.mutate({
-      systemNotifications: { ...notifSettings, [key]: !current },
+      systemNotifications: { [key]: !current },
     })
   }
 

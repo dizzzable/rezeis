@@ -7,6 +7,7 @@ import {
   type ReadStream,
 } from 'node:fs';
 import * as path from 'node:path';
+import { pipeline } from 'node:stream';
 import * as zlib from 'node:zlib';
 
 import { InjectQueue } from '@nestjs/bullmq';
@@ -780,6 +781,25 @@ export class BackupService implements OnModuleInit {
   /**
    * Restore database from a .sql.gz backup file.
    * Spawns gunzip | psql pipeline.
+   *
+   * `--single-transaction` makes the restore all or nothing: the first failing
+   * statement aborts the transaction and the COMMIT at the end completes as a
+   * ROLLBACK. Without `ON_ERROR_STOP` psql still exits 0 after that, so a
+   * restore that changed nothing — an archive older than a migration that
+   * added a foreign key to `users`, say — resolved `true` and the job reported
+   * "Database restored" with the ERROR lines thrown away. With it set, psql
+   * stops at the first error and exits 3, and the stderr it printed reaches
+   * the rejection below. It changes what is reported, never what is applied:
+   * inside one transaction every statement after a failure was refused anyway.
+   *
+   * Stopping at the first error also means psql stops READING, usually in the
+   * DROP section at the top of the dump with megabytes still to come, so the
+   * next write into its stdin fails with EPIPE. Every stream here therefore has
+   * an error listener: `pipe` re-emits an error on a destination nobody else
+   * listens to, and that uncaught exception took the whole API or worker
+   * process down before this promise could reject. The verdict is psql's own
+   * status, read on 'close' (its stderr is complete by then); see
+   * `restoreOutcome` for how that status and a broken input combine.
    */
   public async runRestore(filename: string, options: RestoreOptions = {}): Promise<boolean> {
     const fullPath = path.resolve(this.getBackupLocation(), filename);
@@ -807,27 +827,74 @@ export class BackupService implements OnModuleInit {
         '-U', this.databaseConfiguration.user,
         '-d', this.databaseConfiguration.name,
         '--single-transaction',
+        '-v', 'ON_ERROR_STOP=1',
       ];
 
       const gunzip = zlib.createGunzip();
-      const psql = spawn('psql', psqlArgs, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      // stdout is not piped: nothing reads psql's command tags ("ALTER TABLE",
+      // "COPY 42" — one per statement), and once an unread pipe is full psql
+      // blocks mid-restore, inside its transaction, and the job never settles.
+      const psql = spawn('psql', psqlArgs, { env, stdio: ['pipe', 'ignore', 'pipe'] });
+      const fileStream = createReadStream(fullPath);
 
       let stderr = '';
       psql.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      // A read error here costs some of the ERROR text; psql's status still decides.
+      psql.stderr.on('error', () => undefined);
 
-      psql.on('error', (err) => reject(new Error(`psql spawn failed: ${err.message}`)));
-      psql.on('exit', (code) => {
-        if (code === 0) {
-          resolve(true);
-        } else {
-          reject(new Error(`psql exited ${code}: ${stderr.trim() || 'unknown error'}`));
+      let archiveFailure: Error | null = null;
+      let inputCutShort: Error | null = null;
+      let psqlKilled = false;
+      let settled = false;
+
+      const stopFeeding = (): void => {
+        fileStream.unpipe(gunzip);
+        gunzip.unpipe(psql.stdin);
+        fileStream.destroy();
+        gunzip.destroy();
+      };
+      const settle = (error: Error | null): void => {
+        stopFeeding();
+        if (settled) return;
+        settled = true;
+        if (error === null) resolve(true);
+        else reject(error);
+      };
+      // A stream that fails half-way has already fed psql part of the script.
+      // An input that closes on psql while it runs ENDS the script, and psql
+      // COMMITs the half it has run. Killing it first closes the connection
+      // instead, and PostgreSQL rolls the transaction back — so the kill comes
+      // before anything that could close its input. psql's stdin itself is
+      // never ended or destroyed here; Node destroys it once psql has exited.
+      const stopPsql = (): void => {
+        if (!psqlKilled) {
+          psqlKilled = true;
+          psql.kill();
         }
+        stopFeeding();
+      };
+
+      psql.on('error', (err) => settle(new Error(`psql spawn failed: ${err.message}`)));
+      psql.on('close', (code, signal) => {
+        settle(restoreOutcome({ code, signal, stderr, archiveFailure, inputCutShort }));
       });
 
-      const fileStream = createReadStream(fullPath);
+      // EPIPE when psql has stopped reading (ON_ERROR_STOP, a crash, the kill
+      // above). The kill is a no-op on a psql that has already exited, and one
+      // that is still alive must not be left waiting for an input that stopped.
+      psql.stdin.on('error', (err) => {
+        inputCutShort ??= err;
+        stopPsql();
+      });
+      fileStream.on('error', (err) => {
+        archiveFailure ??= err;
+        stopPsql();
+      });
+      gunzip.on('error', (err) => {
+        archiveFailure ??= new Error(`Decompression failed: ${err.message}`);
+        stopPsql();
+      });
       fileStream.pipe(gunzip).pipe(psql.stdin);
-      fileStream.on('error', (err) => reject(err));
-      gunzip.on('error', (err) => reject(new Error(`Decompression failed: ${err.message}`)));
     });
   }
 
@@ -847,16 +914,31 @@ export class BackupService implements OnModuleInit {
    * already loaded). It is surfaced to the caller so the restore event can
    * flag that the operator should reconcile the schema (restart / restore a
    * matching build).
+   *
+   * Runs the Prisma CLI from `node_modules` with the node binary running this
+   * process — the CLI `docker-entrypoint.sh` runs as `./node_modules/.bin/prisma`.
+   * It used to spawn `npx prisma`, and the production Dockerfile deletes npm
+   * and npx from the runtime image, so in every published image this step
+   * failed with ENOENT and a restored older schema stayed old until a restart.
+   * Node needs no shell on any platform, so there is no Windows branch either.
    */
   public async runMigrateDeploy(): Promise<boolean> {
+    let prismaCli: string;
+    try {
+      prismaCli = require.resolve('prisma/build/index.js');
+    } catch (err: unknown) {
+      this.logger.error(
+        `Post-restore migrate deploy skipped: the Prisma CLI is not installed (${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      );
+      return false;
+    }
     return new Promise<boolean>((resolve) => {
-      const child = spawn('npx', ['prisma', 'migrate', 'deploy'], {
+      const child = spawn(process.execPath, [prismaCli, 'migrate', 'deploy'], {
         cwd: process.cwd(),
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],
-        // npx resolves to npx.cmd on Windows dev hosts; in the Linux container
-        // it's a plain binary on PATH.
-        shell: process.platform === 'win32',
       });
       let stderr = '';
       child.stdout.on('data', (chunk) => {
@@ -1268,6 +1350,27 @@ export class BackupService implements OnModuleInit {
     return typeof env === 'string' && env.length > 0 ? env : null;
   }
 
+  /**
+   * `pg_dump | gzip > destination`, resolved with the file's size once BOTH
+   * halves are done: every byte pg_dump wrote is in the file and the file is
+   * closed, and pg_dump has exited 0. Its status is read on 'close', when its
+   * stderr is complete, and it decides even when the file finished first.
+   *
+   * A failure on either half ends the other. The file half failing — the volume
+   * full (ENOSPC), a quota (EDQUOT), an I/O error, gzip itself — used to end
+   * only this promise. `pipe` unpiped the dead file stream, gzip filled up and
+   * paused, the pipe to pg_dump filled, and pg_dump blocked in write() for good:
+   * inside its REPEATABLE READ snapshot, holding an AccessShareLock on every
+   * table it had reached and a connection, until the process restarted. Every
+   * further failing backup left one more, and a restore's `--clean` DROPs
+   * queued behind those locks. gzip had no error listener at all, so its error
+   * was an uncaught exception that took the API or worker down, and the job
+   * never settled.
+   *
+   * Now every stream has a listener, pg_dump is killed first, and the streams
+   * are destroyed after it, its stdout included, so nothing is left waiting on
+   * anything.
+   */
   private spawnPgDumpToFile(destination: string): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const env = { ...process.env, PGPASSWORD: this.databaseConfiguration.password };
@@ -1289,26 +1392,30 @@ export class BackupService implements OnModuleInit {
 
       let stderr = '';
       dump.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      // A read error here costs some of the message; pg_dump's status still decides.
+      dump.stderr.on('error', () => undefined);
 
-      let exitedWithError: Error | null = null;
-      dump.on('error', (err) => {
-        exitedWithError = err;
+      let settled = false;
+      let dumpKilled = false;
+      let fileComplete = false;
+      let dumpSucceeded = false;
+
+      const fail = (error: Error): void => {
+        // pg_dump first, while its pipe is still open: a pg_dump that nothing
+        // reads from any more stays blocked in write(). Once, and only one that
+        // is still running — its own exit and a spawn failure need no kill.
+        if (!dumpKilled && dump.exitCode === null && dump.signalCode === null) {
+          dumpKilled = true;
+          dump.kill();
+        }
+        dump.stdout.destroy();
         gzip.destroy();
         out.destroy();
-        reject(new Error(`pg_dump spawn failed: ${err.message}`));
-      });
-      dump.on('exit', (code) => {
-        if (code !== 0 && !exitedWithError) {
-          exitedWithError = new Error(`pg_dump exited ${code}: ${stderr.trim() || 'unknown error'}`);
-          gzip.destroy();
-          out.destroy();
-          reject(exitedWithError);
-        }
-      });
-
-      out.on('error', (err) => reject(err));
-      out.on('finish', async () => {
-        if (exitedWithError) return;
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      const finish = async (): Promise<void> => {
         try {
           await fsp.chmod(destination, BACKUP_FILE_MODE);
           const stat = await fsp.stat(destination);
@@ -1316,9 +1423,38 @@ export class BackupService implements OnModuleInit {
         } catch (err) {
           reject(err);
         }
+      };
+      const succeedOnceBothAreDone = (): void => {
+        if (settled || !fileComplete || !dumpSucceeded) return;
+        settled = true;
+        void finish();
+      };
+
+      dump.on('error', (err) => fail(new Error(`pg_dump spawn failed: ${err.message}`)));
+      dump.on('close', (code, signal) => {
+        if (code !== 0) {
+          const status = code === null ? `was killed by ${signal ?? 'a signal'}` : `exited ${code}`;
+          fail(new Error(`pg_dump ${status}: ${stderr.trim() || 'unknown error'}`));
+          return;
+        }
+        dumpSucceeded = true;
+        succeedOnceBothAreDone();
       });
 
-      dump.stdout.pipe(gzip).pipe(out);
+      // Added before `pipeline` adds its own, so these run first on an error:
+      // pg_dump is killed before the pipe it writes into is torn down under it.
+      // They also stay for as long as the streams do.
+      dump.stdout.on('error', fail);
+      gzip.on('error', fail);
+      out.on('error', fail);
+      pipeline(dump.stdout, gzip, out, (err) => {
+        if (err) {
+          fail(err);
+          return;
+        }
+        fileComplete = true;
+        succeedOnceBothAreDone();
+      });
     });
   }
 
@@ -1460,6 +1596,44 @@ function toDto(row: {
 
 function isSafeFilename(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name) && !name.includes('..');
+}
+
+/**
+ * What a finished `psql` run means for a restore: `null` when it restored the
+ * archive, otherwise the error the job fails with.
+ *
+ *   - psql exited non-zero on its own: its status and stderr are the answer.
+ *     The EPIPE of a write it never read is only the echo of that exit.
+ *   - The archive broke (read or gunzip error): psql was killed for it, so the
+ *     transaction rolled back, and the broken archive is the answer.
+ *   - psql exited 0 but stopped reading first (`\q` in the script): part of it
+ *     never ran, so that is not a restore either.
+ *   - Stopped by a signal nobody here sent (OOM killer, container stop).
+ */
+function restoreOutcome(outcome: {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr: string;
+  readonly archiveFailure: Error | null;
+  readonly inputCutShort: Error | null;
+}): Error | null {
+  const detail = outcome.stderr.trim();
+  if (outcome.code !== null && outcome.code !== 0) {
+    return new Error(`psql exited ${outcome.code}: ${detail || 'unknown error'}`);
+  }
+  if (outcome.archiveFailure !== null) return outcome.archiveFailure;
+  if (outcome.code === 0) {
+    if (outcome.inputCutShort === null) return null;
+    return new Error(
+      `psql exited 0 before it had read the whole archive (${outcome.inputCutShort.message})`
+        + (detail ? `: ${detail}` : ''),
+    );
+  }
+  return new Error(
+    `psql was stopped by ${outcome.signal ?? 'an unknown signal'}: ${
+      detail || outcome.inputCutShort?.message || 'unknown error'
+    }`,
+  );
 }
 
 /** Read the first two bytes of a file and check the gzip magic (1f 8b). */

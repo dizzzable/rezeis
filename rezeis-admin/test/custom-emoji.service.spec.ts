@@ -24,6 +24,11 @@ function makeService(input: {
    * between whatever the service read earlier and the lock.
    */
   readonly beforeLock?: (row: { systemNotifications: Record<string, unknown> }) => void;
+  /**
+   * Records `write`, `commit` and every reiwa invalidation the service enqueues,
+   * in order. Given, the service is built with a recording invalidator.
+   */
+  readonly log?: string[];
 }): CustomEmojiService {
   const row = { id: 'settings-1', systemNotifications: input.settings.systemNotifications };
   const settingsDelegate = {
@@ -33,6 +38,7 @@ function makeService(input: {
       input.settings.systemNotifications = args.data.systemNotifications;
       row.systemNotifications = args.data.systemNotifications;
       input.onWrite?.();
+      input.log?.push('write');
       return row;
     },
   };
@@ -48,8 +54,24 @@ function makeService(input: {
         settings: typeof settingsDelegate;
         $queryRaw: typeof lockSettingsRow;
       }) => Promise<T>,
-    ) => callback({ settings: settingsDelegate, $queryRaw: lockSettingsRow }),
+    ) => {
+      const result = await callback({ settings: settingsDelegate, $queryRaw: lockSettingsRow });
+      input.log?.push('commit');
+      return result;
+    },
   };
+  const log = input.log;
+  const invalidator =
+    log === undefined
+      ? undefined
+      : {
+          invalidate: async (reason: string) => {
+            log.push(`bot:${reason}`);
+          },
+          invalidateBranding: async (reason: string) => {
+            log.push(`branding:${reason}`);
+          },
+        };
   return new CustomEmojiService(
     prisma as never,
     {
@@ -58,6 +80,7 @@ function makeService(input: {
       remove: input.assets.remove ?? (async () => undefined),
     } as never,
     { getDecryptedBotToken: async () => 'bot-token' } as never,
+    invalidator as never,
   );
 }
 
@@ -909,5 +932,348 @@ describe('CustomEmojiService — a pack edit decides on the list as it stands un
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('importBySetLink does not bring back a pack deleted while its repair downloaded, and removes what it downloaded', async () => {
+    const settings: StoredSettings = {
+      systemNotifications: {
+        customEmojiPacks: [
+          pack('repaired', [emoji('news_1', '/uploads/emoji/missing.webp')], { setName: 'NewsEmoji' }),
+        ],
+      },
+    };
+    const removed: string[] = [];
+    const service = makeService({
+      settings,
+      assets: {
+        exists: async (url) => url !== '/uploads/emoji/missing.webp',
+        persist: async () => ({ url: '/uploads/emoji/recovered.webp', size: 4 }),
+        remove: async (url) => {
+          removed.push(String(url));
+        },
+      },
+      // Another tab deletes the pack while this re-import downloads its files.
+      beforeLock: commitsBeforeLock(settings, []),
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stickerSetFetch([{ file_id: 'file-1', custom_emoji_id: '1001', emoji: '📰' }]);
+    try {
+      await assert.rejects(
+        () => service.importBySetLink({ packName: 'News', link: 'https://t.me/addemoji/NewsEmoji' }),
+        /deleted while it was being repaired/,
+      );
+
+      assert.deepEqual(storedPacks(settings), [], 'the deleted pack stays deleted');
+      assert.deepEqual(removed, ['/uploads/emoji/recovered.webp'], 'its download is not left on disk');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('CustomEmojiService — a repair lands on the pack as it is stored when its downloads finish', () => {
+  // Re-import repair and restore recovery build the repaired pack from a copy
+  // read BEFORE their Telegram downloads, which take seconds. They used to put
+  // that whole pack back by id under the lock, so an edit made to the same pack
+  // meanwhile — a glyph, a name, an id, set through `updateEmoji` on the same
+  // page — was silently reverted, with both requests answering 200. The repair
+  // now applies only what it changed, field by field, onto the stored record,
+  // and only where the stored value is still the one it started from.
+
+  interface Emoji {
+    readonly slug: string;
+    readonly name: string;
+    readonly imageUrl: string;
+    readonly lottieUrl: string | null;
+    readonly videoUrl: string | null;
+    readonly fallback: string | null;
+    readonly customEmojiId: string | null;
+  }
+
+  /** A record that lost its file AND its delivery fields: both halves get repaired. */
+  function brokenRecord(overrides: Partial<Emoji> = {}): Emoji {
+    return {
+      slug: 'news_1',
+      name: 'News 1',
+      imageUrl: '/uploads/emoji/missing.webp',
+      lottieUrl: null,
+      videoUrl: null,
+      fallback: null,
+      customEmojiId: null,
+      ...overrides,
+    };
+  }
+
+  function packOf(record: Emoji): Record<string, unknown> {
+    return { id: 'news', name: 'News Emoji', setName: 'NewsEmoji', emojis: [record] };
+  }
+
+  function storedRecord(settings: StoredSettings): Emoji | undefined {
+    const packs = settings.systemNotifications.customEmojiPacks as Array<{ emojis: Emoji[] }> | undefined;
+    return packs?.[0]?.emojis[0];
+  }
+
+  /** The operator's edit, committed once, as the repair's lock is granted. */
+  function editCommittedBeforeLock(settings: StoredSettings, edited: Emoji) {
+    let landed = false;
+    return (row: { systemNotifications: Record<string, unknown> }): void => {
+      if (landed) return;
+      landed = true;
+      const next = { ...row.systemNotifications, customEmojiPacks: [packOf(edited)] };
+      row.systemNotifications = next;
+      settings.systemNotifications = next;
+    };
+  }
+
+  function telegramSet(): typeof fetch {
+    return (async (url: string | URL) => {
+      const value = String(url);
+      if (value.includes('getStickerSet')) {
+        return telegramResponse({
+          ok: true,
+          result: { title: 'News Emoji', stickers: [{ file_id: 'file-1', custom_emoji_id: '1001', emoji: '📰' }] },
+        });
+      }
+      if (value.includes('getFile')) {
+        return telegramResponse({ ok: true, result: { file_path: 'emoji.webp' } });
+      }
+      return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+    }) as typeof fetch;
+  }
+
+  const repairs = [
+    [
+      're-import (importBySetLink)',
+      (service: CustomEmojiService) =>
+        service.importBySetLink({ packName: 'News Emoji', link: 'https://t.me/addemoji/NewsEmoji' }),
+    ],
+    ['restore recovery (rehydrateMissingAssets)', (service: CustomEmojiService) => service.rehydrateMissingAssets()],
+  ] as const;
+
+  for (const [label, run] of repairs) {
+    it(`${label} keeps a glyph and name edited during its downloads, and still stores the file and id it recovered`, async () => {
+      const settings: StoredSettings = { systemNotifications: { customEmojiPacks: [packOf(brokenRecord())] } };
+      const service = makeService({
+        settings,
+        assets: {
+          exists: async (url) => url !== '/uploads/emoji/missing.webp',
+          persist: async () => ({ url: '/uploads/emoji/recovered.webp', size: 4 }),
+        },
+        beforeLock: editCommittedBeforeLock(settings, brokenRecord({ fallback: '🔥', name: 'Channel' })),
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = telegramSet();
+      try {
+        await run(service);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      assert.deepStrictEqual(storedRecord(settings), {
+        slug: 'news_1',
+        // The operator's edits, made while the repair downloaded.
+        name: 'Channel',
+        fallback: '🔥',
+        // The repair's own work, on fields nobody touched meanwhile.
+        imageUrl: '/uploads/emoji/recovered.webp',
+        customEmojiId: '1001',
+        lottieUrl: null,
+        videoUrl: null,
+      });
+    });
+
+    it(`${label} keeps a file another writer stored meanwhile, and removes its own unused download`, async () => {
+      const settings: StoredSettings = { systemNotifications: { customEmojiPacks: [packOf(brokenRecord())] } };
+      const removed: string[] = [];
+      const service = makeService({
+        settings,
+        assets: {
+          exists: async (url) => url !== '/uploads/emoji/missing.webp',
+          persist: async () => ({ url: '/uploads/emoji/ours.webp', size: 4 }),
+          remove: async (url) => {
+            removed.push(String(url));
+          },
+        },
+        // A concurrent repair of the same pack committed its own file first.
+        beforeLock: editCommittedBeforeLock(settings, brokenRecord({ imageUrl: '/uploads/emoji/theirs.webp' })),
+      });
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = telegramSet();
+      try {
+        await run(service);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      assert.equal(storedRecord(settings)?.imageUrl, '/uploads/emoji/theirs.webp');
+      assert.deepStrictEqual(removed, ['/uploads/emoji/ours.webp']);
+    });
+  }
+});
+
+describe('CustomEmojiService — pack edits tell the bot and the cabinet', () => {
+  // The packs feed two caches outside the panel: the bot's config (`:slug:`
+  // rendering in screens, help and invite copy, kept up to five minutes) and
+  // the cabinet's pack list (60 seconds). No pack edit invalidated either, so a
+  // changed glyph or a newly imported `:slug:` showed the old emoji — or the
+  // literal token — until the caches ran out. Each case records the order of
+  // the write, the commit and the enqueues.
+
+  function recordingFixture() {
+    const log: string[] = [];
+    const settings: StoredSettings = {
+      systemNotifications: {
+        customEmojiPacks: [
+          {
+            id: 'pack-1',
+            name: 'Icons',
+            setName: 'IconsSet',
+            emojis: [
+              {
+                slug: 'icons_1',
+                name: 'Icons 1',
+                imageUrl: '/uploads/emoji/icons-1.webp',
+                lottieUrl: null,
+                videoUrl: null,
+                fallback: '🙂',
+                customEmojiId: '5188621441926438751',
+              },
+            ],
+          },
+        ],
+      },
+    };
+    return { log, settings };
+  }
+
+  function assertBothAfterCommit(log: readonly string[]): void {
+    const bot = log.filter((entry) => entry.startsWith('bot:custom-emoji.'));
+    const branding = log.filter((entry) => entry.startsWith('branding:custom-emoji.'));
+    assert.equal(bot.length, 1, `expected one bot-config invalidation, got ${JSON.stringify(log)}`);
+    assert.equal(branding.length, 1, `expected one cabinet invalidation, got ${JSON.stringify(log)}`);
+    const commit = log.lastIndexOf('commit');
+    assert.ok(commit >= 0 && commit < log.indexOf(bot[0]!) && commit < log.indexOf(branding[0]!), JSON.stringify(log));
+  }
+
+  it('updateEmoji enqueues both invalidations after its commit', async () => {
+    const { log, settings } = recordingFixture();
+    const service = makeService({ settings, assets: { exists: async () => true }, log });
+
+    await service.updateEmoji({ packId: 'pack-1', slug: 'icons_1', patch: { fallback: '🔥' } });
+
+    assertBothAfterCommit(log);
+  });
+
+  it('a refused updateEmoji enqueues nothing', async () => {
+    const { log, settings } = recordingFixture();
+    const service = makeService({ settings, assets: { exists: async () => true }, log });
+
+    await assert.rejects(() =>
+      service.updateEmoji({ packId: 'pack-1', slug: 'icons_404', patch: { fallback: '🔥' } }),
+    );
+
+    assert.deepStrictEqual(log.filter((entry) => !['write', 'commit'].includes(entry)), []);
+  });
+
+  it('deletePack enqueues both invalidations after its commit', async () => {
+    const { log, settings } = recordingFixture();
+    const service = makeService({ settings, assets: { exists: async () => true }, log });
+
+    await service.deletePack('pack-1');
+
+    assertBothAfterCommit(log);
+  });
+
+  it('importBySetLink of a new set enqueues both invalidations after its commit', async () => {
+    const { log, settings } = recordingFixture();
+    const service = makeService({
+      settings,
+      assets: { exists: async () => true, persist: async () => ({ url: '/uploads/emoji/new.webp', size: 4 }) },
+      log,
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const value = String(url);
+      if (value.includes('getStickerSet')) {
+        return telegramResponse({
+          ok: true,
+          result: { title: 'News', stickers: [{ file_id: 'file-9', custom_emoji_id: '9009', emoji: '📰' }] },
+        });
+      }
+      if (value.includes('getFile')) return telegramResponse({ ok: true, result: { file_path: 'emoji.webp' } });
+      return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await service.importBySetLink({ packName: 'News', link: 'https://t.me/addemoji/NewsEmoji' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assertBothAfterCommit(log);
+  });
+
+  it('a re-import that changes nothing enqueues nothing (control)', async () => {
+    const { log, settings } = recordingFixture();
+    const service = makeService({ settings, assets: { exists: async () => true }, log });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      telegramResponse({
+        ok: true,
+        result: {
+          title: 'Icons',
+          stickers: [{ file_id: 'file-1', custom_emoji_id: '5188621441926438751', emoji: '🙂' }],
+        },
+      })) as typeof fetch;
+    try {
+      await service.importBySetLink({ packName: 'Icons', link: 'https://t.me/addemoji/IconsSet' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.deepStrictEqual(log, []);
+  });
+
+  it('restore recovery that stored a file enqueues both invalidations after its commit', async () => {
+    const { log, settings } = recordingFixture();
+    const service = makeService({
+      settings,
+      assets: { exists: async (url) => url !== '/uploads/emoji/icons-1.webp' },
+      log,
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const value = String(url);
+      if (value.includes('getStickerSet')) {
+        return telegramResponse({
+          ok: true,
+          result: { stickers: [{ file_id: 'file-1', custom_emoji_id: '5188621441926438751', emoji: '🙂' }] },
+        });
+      }
+      if (value.includes('getFile')) return telegramResponse({ ok: true, result: { file_path: 'emoji.webp' } });
+      return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await service.rehydrateMissingAssets();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assertBothAfterCommit(log);
+  });
+
+  it('CustomEmojiModule provides the invalidator the service injects', async () => {
+    // `@Optional()` on the service, so a module that forgot the provider would
+    // boot and inject `undefined`: every case above green, nothing ever sent.
+    const { CustomEmojiModule } = await import('../src/modules/custom-emoji/custom-emoji.module');
+    const { ReiwaCacheInvalidatorService } = await import(
+      '../src/modules/bot-config/services/reiwa-cache-invalidator.service'
+    );
+    const { ReiwaRelayModule } = await import('../src/modules/notifications/reiwa-relay.module');
+    const providers = Reflect.getMetadata('providers', CustomEmojiModule) as readonly unknown[];
+    const imports = Reflect.getMetadata('imports', CustomEmojiModule) as readonly unknown[];
+    assert.ok(providers.includes(ReiwaCacheInvalidatorService), 'the module must provide the invalidator');
+    assert.ok(imports.includes(ReiwaRelayModule), 'the invalidator enqueues through ReiwaRelayModule');
+    const params = Reflect.getMetadata('design:paramtypes', CustomEmojiService) as readonly unknown[];
+    assert.ok(params.includes(ReiwaCacheInvalidatorService), 'the service must take it by injection');
   });
 });

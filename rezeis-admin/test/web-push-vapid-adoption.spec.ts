@@ -302,6 +302,85 @@ describe('WebPushService announces a deployment that cannot deliver push', () =>
   });
 });
 
+// ── 4. The container that loses the adoption race ────────────────────────────
+
+describe('WebPushService — the process that waited for the other one to adopt', () => {
+  // The api and the worker both run adoption on an upgrade boot. The second
+  // one's first config read and pre-check can both land before the first one
+  // commits; its row lock then waits, and once granted it reads the row the
+  // winner wrote: marker AND keypair. It used to see only the marker, answer
+  // `already-migrated` and emit "no VAPID keypair is configured. Generate one"
+  // — while push worked. An operator who obeyed replaced the adopted keypair
+  // and stranded every browser subscription.
+  const ADOPTED_BY_THE_OTHER_PROCESS = {
+    webPushEnvAdoptedAt: '2026-09-14T00:00:00.000Z',
+    webPush: {
+      publicKey: 'env-public-key',
+      privateKeyEnc: encryptTotpSecret('env-private-key', CRYPT_KEY),
+      contactEmail: 'ops@example.test',
+    },
+  };
+
+  it('stays silent when the row it reads under the lock already holds the adopted keypair', async () => {
+    const { service, state } = createService({
+      envKeys: true,
+      systemNotifications: {},
+      lockedSystemNotifications: ADOPTED_BY_THE_OTHER_PROCESS,
+    });
+
+    await service.onModuleInit();
+
+    assert.deepStrictEqual(state.events, [], 'push is configured; nothing may tell the operator otherwise');
+    assert.deepStrictEqual(state.updates, [], 'and the winner’s keypair is not written over');
+  });
+
+  it('stays silent when the other process committed before the pre-check', async () => {
+    // Its own first config read came from the settings cache, taken earlier.
+    const { service, state } = createService({
+      envKeys: true,
+      systemNotifications: ADOPTED_BY_THE_OTHER_PROCESS,
+    });
+
+    await service.onModuleInit();
+
+    assert.deepStrictEqual(state.events, []);
+    assert.deepStrictEqual(state.updates, []);
+  });
+
+  it('still warns when the marker is there but the keypair was removed (control)', async () => {
+    // "Remove keys" after the migration: push is off on purpose, and the
+    // warning is the only sign of it.
+    const { service, state } = createService({
+      envKeys: true,
+      systemNotifications: {},
+      lockedSystemNotifications: { webPushEnvAdoptedAt: '2026-09-14T00:00:00.000Z' },
+    });
+
+    await service.onModuleInit();
+
+    assert.equal(state.events.length, 1);
+    assert.equal(state.events[0]?.severity, 'WARNING');
+    assert.equal(state.events[0]?.metadata?.adoption, 'already-migrated');
+  });
+
+  it('still warns when the stored keypair will not decrypt (control)', async () => {
+    // A public key alone is not a working keypair: answering "adopted" for it
+    // would silence the one warning that push is actually broken.
+    const { service, state } = createService({
+      envKeys: true,
+      systemNotifications: {
+        webPushEnvAdoptedAt: '2026-09-14T00:00:00.000Z',
+        webPush: { publicKey: 'env-public-key', privateKeyEnc: 'not-a-valid-aes-gcm-envelope' },
+      },
+    });
+
+    await service.onModuleInit();
+
+    assert.equal(state.events.length, 1);
+    assert.equal(state.events[0]?.severity, 'WARNING');
+  });
+});
+
 // ── Harness ─────────────────────────────────────────────────────────────────
 
 function clearVapidEnv(): void {
@@ -337,6 +416,11 @@ interface Options {
   /** Put the legacy `VAPID_*` trio in the environment for this test. */
   readonly envKeys?: boolean;
   readonly systemNotifications?: Record<string, unknown>;
+  /**
+   * The column as the transaction reads it once the row lock is granted, when
+   * it differs from what the pre-check saw: another process committed between.
+   */
+  readonly lockedSystemNotifications?: Record<string, unknown>;
   readonly cryptKey?: string;
   readonly transactionError?: Error;
 }
@@ -358,11 +442,16 @@ function createService(options: Options) {
     systemNotifications: options.systemNotifications ?? {},
   };
 
+  const lockedRow =
+    options.lockedSystemNotifications === undefined
+      ? settingsRow
+      : { id: settingsRow.id, systemNotifications: options.lockedSystemNotifications };
+
   const tx = {
     // The settings row lock (`SELECT "id" FROM "settings" FOR UPDATE`) finding the row.
     $queryRaw: async () => [{ id: settingsRow.id }],
     settings: {
-      findFirst: async () => settingsRow,
+      findFirst: async () => lockedRow,
       update: async (args: { where: { id: number }; data: { systemNotifications: unknown } }) => {
         state.updates.push(args);
         return {};

@@ -13,7 +13,7 @@ import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { SettingsService } from '../../settings/services/settings.service';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
-import { encryptTotpSecret } from '../../two-factor/utils/secret-cipher';
+import { decryptTotpSecret, encryptTotpSecret } from '../../two-factor/utils/secret-cipher';
 
 /**
  * Outcome of the one-time `VAPID_*` env→panel migration.
@@ -443,9 +443,15 @@ export class WebPushService implements OnModuleInit {
    *
    * Both containers run this (`worker.ts` loads the full `AppModule`), so two
    * processes can race here on the same boot. The re-read inside the
-   * transaction is what makes that safe, and the loser reports `adopted`
-   * because the panel does now hold keys — which is the only thing the caller
-   * is asking about.
+   * transaction is what makes that safe. The loser's first config read and
+   * pre-check can both land before the winner commits, so the row it reads —
+   * under the lock, or already in the pre-check — holds the marker AND the
+   * adopted keypair. It used to see only the marker, answer `already-migrated`
+   * and warn "no VAPID keypair is configured. Generate one", which replaced a
+   * working keypair for any operator who obeyed. A marker next to a keypair
+   * that decrypts now answers `adopted`, the only thing the caller is asking
+   * about; a marker without one (the operator removed the keys, or they will
+   * not decrypt) still answers `already-migrated`, warning and all.
    *
    * A re-read inside a transaction is only safe under the row lock, though,
    * and there was none: under READ COMMITTED both processes read the column
@@ -465,10 +471,12 @@ export class WebPushService implements OnModuleInit {
       return { outcome: 'absent' };
     }
     const settings = await this.prismaService.settings.findFirst({ orderBy: { id: 'asc' } });
-    if (settings !== null && readJsonObject(settings.systemNotifications).webPushEnvAdoptedAt) {
-      return { outcome: 'already-migrated' };
-    }
     const cryptKey = this.applicationConfiguration?.cryptKey;
+    if (settings !== null && readJsonObject(settings.systemNotifications).webPushEnvAdoptedAt) {
+      return holdsUsableVapidKeypair(readJsonObject(settings.systemNotifications), cryptKey)
+        ? { outcome: 'adopted' }
+        : { outcome: 'already-migrated' };
+    }
     if (cryptKey === undefined || cryptKey === null || cryptKey.length === 0) {
       return {
         outcome: 'failed',
@@ -497,7 +505,11 @@ export class WebPushService implements OnModuleInit {
           // same shape `persistWebPush` uses.
           const nextSystemNotifications = readJsonObject(existing.systemNotifications);
           if (nextSystemNotifications.webPushEnvAdoptedAt) {
-            return { outcome: 'already-migrated' };
+            // Most often the other container, which adopted while this one
+            // waited on the lock: its keypair is here, and push works.
+            return holdsUsableVapidKeypair(nextSystemNotifications, cryptKey)
+              ? { outcome: 'adopted' }
+              : { outcome: 'already-migrated' };
           }
           if (readJsonObject(nextSystemNotifications.webPush).publicKey !== undefined) {
             // Someone configured the panel between our read and this write.
@@ -1042,6 +1054,29 @@ export class WebPushService implements OnModuleInit {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether a `systemNotifications` blob just read holds a keypair push can use:
+ * a public key, and a private key that decrypts with this deployment's key —
+ * the rule `SettingsService.getDecryptedWebPushConfig` applies. A public key
+ * alone is not enough: counting it would silence the one warning that says
+ * push is broken.
+ */
+function holdsUsableVapidKeypair(
+  systemNotifications: Record<string, unknown>,
+  cryptKey: string | null | undefined,
+): boolean {
+  const webPush = readJsonObject(systemNotifications.webPush);
+  const publicKey = typeof webPush.publicKey === 'string' ? webPush.publicKey.trim() : '';
+  const privateKeyEnc = typeof webPush.privateKeyEnc === 'string' ? webPush.privateKeyEnc : '';
+  if (publicKey.length === 0 || privateKeyEnc.length === 0 || !cryptKey) return false;
+  try {
+    decryptTotpSecret(privateKeyEnc, cryptKey);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

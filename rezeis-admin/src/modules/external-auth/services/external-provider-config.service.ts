@@ -228,10 +228,18 @@ export class ExternalProviderConfigService {
 
   /**
    * `platformPolicy` also carries the platform-branding texts that
-   * `SettingsService.updatePlatformSettings` merges into it, and both used to
-   * write the whole column back from their own read. This one read outside any
-   * transaction, so a policy save racing a branding save restored the other's
-   * previous value. The merge now starts from the row read under the lock.
+   * `SettingsService.updatePlatformSettings` merges into it, and each of the two
+   * writers used to lose the other's data in its own way:
+   *
+   *   - this one read the column outside any transaction, so a policy save
+   *     racing a branding save restored the branding texts it had read;
+   *   - the branding save did not need a race at all: `mergePlatformBranding`
+   *     built the column from the branding keys alone, so EVERY branding save
+   *     wrote `externalAuth` away and this policy fell back to its defaults.
+   *
+   * Both now merge onto the row read under the settings row lock, and each
+   * keeps every key it does not own
+   * (`test/settings-platform-branding-keeps-external-auth.spec.ts`).
    */
   public async updatePolicy(input: Partial<ExternalAuthPolicy>): Promise<ExternalAuthPolicy> {
     return mutateExistingSettingsRow(

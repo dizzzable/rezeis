@@ -235,18 +235,21 @@ describe('PATCH /admin/settings/notifications — systemNotifications masking', 
   });
 
   /**
-   * The reason the secrets are DROPPED rather than blanked. The SPA's toggle
-   * handler PATCHes back the whole object it last read, and `mergeJsonObject`
-   * replaces top-level keys wholesale — so an `email` object returned without
-   * its password would erase the stored password on the next click. An absent
-   * key is left alone by the merge.
+   * The reason the secrets are DROPPED rather than blanked. The System tab used
+   * to PATCH back the whole object it last read, and the server merged it with a
+   * top-level spread, so an `email` object returned without its password would
+   * have erased the stored password on the next click. The page now sends the
+   * flipped key alone, and `mergeToggleMap` writes booleans only and never over
+   * a stored key holding anything else. A tab still running the old page echoes
+   * the snapshot it was given, though, and a secret that never leaves the server
+   * cannot come back in any shape. This case sends that echo.
    */
   it('a masked blob echoed straight back does not erase the stored credentials', async () => {
     const record = buildSettingsRecord();
     const { service, updateCalls } = createTogglesService(record);
 
     const overview = await service.getOverview();
-    // Exactly what `handleToggle` sends: `{ ...notifSettings, [key]: !current }`.
+    // What a tab still on the old page sends: `{ ...notifSettings, [key]: !current }`.
     await service.updateNotificationToggles({
       currentAdmin: CURRENT_ADMIN,
       requestMetadata: REQUEST_METADATA,

@@ -266,6 +266,34 @@ describe('SettingsService row cache — a save is never answered with the row it
     assert.equal((await next).brandName, 'New Brand');
   });
 
+  it('does not let a slow read from before a save displace the entry cached after it', async () => {
+    // The store-time half of the rule. The serve-time check alone never serves
+    // the slow read's row — its generation is stale — but without this half the
+    // slow read still STORES it, over the fresh entry a later read cached, and
+    // the next read goes back to the database for nothing.
+    const h = harness({ relay: false });
+
+    const slow = h.service.getBrandingSettings();
+    await h.save('New Brand');
+
+    const fresh = h.service.getBrandingSettings();
+    assert.equal(h.pendingReads.length, 2, 'both reads went to the database');
+    // The read that started after the commit answers first...
+    h.pendingReads.splice(1, 1)[0]!(h.committed());
+    assert.equal((await fresh).brandName, 'New Brand');
+    // ...and the one that started before it answers last, with what it saw.
+    h.resolveNextRead(settingsRow('Old Brand'));
+    assert.equal((await slow).brandName, 'Old Brand');
+
+    const next = h.service.getBrandingSettings();
+    assert.equal(
+      h.pendingReads.length,
+      0,
+      'the entry the post-save read cached must still be there — the slow read may not have replaced it',
+    );
+    assert.equal((await next).brandName, 'New Brand');
+  });
+
   it('does not let a read taken between a save and its commit outlive the commit', async () => {
     const h = harness({ relay: false });
     const gate = h.holdCommit();

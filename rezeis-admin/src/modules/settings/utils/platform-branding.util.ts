@@ -63,6 +63,12 @@ export function readPlatformBranding(value: unknown): PlatformBrandingInterface 
  * Deep-merges a partial platform-branding patch over the existing value.
  * Only keys present on the patch override; nested verification locale maps
  * are merged field-by-field so a partial update preserves the other locale.
+ *
+ * The column is not branding's alone: `platformPolicy.externalAuth` is the
+ * External auth email policy (`ExternalProviderConfigService.updatePolicy`).
+ * The result used to hold the branding keys only, so every Branding save
+ * wrote that policy away and the policy page fell back to its defaults. Every
+ * key this function does not own is carried over from `existing` as it is.
  */
 export function mergePlatformBranding(input: {
   readonly existing: unknown;
@@ -80,6 +86,7 @@ export function mergePlatformBranding(input: {
   });
 
   return {
+    ...readRecord(input.existing),
     projectName:
       patch.projectName !== undefined
         ? readNullableString(patch.projectName)
