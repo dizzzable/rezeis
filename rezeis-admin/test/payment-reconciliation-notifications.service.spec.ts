@@ -20,7 +20,10 @@ import { PaymentSubscriptionMutationService } from '../src/modules/payments/serv
 import { PaymentWebhookInboxService } from '../src/modules/payments/services/payment-webhook-inbox.service';
 import { MoyNalogQueueService } from '../src/modules/payments/services/moy-nalog-queue.service';
 import { ProfileSyncQueueService } from '../src/modules/profile-sync/profile-sync-queue.service';
-import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
+import {
+  ReferralPurchaseOutcome,
+  ReferralQualificationService,
+} from '../src/modules/referrals/services/referral-qualification.service';
 
 type PaymentWebhookFindUniqueArgs = { where: { id: string } };
 type TransactionFindUniqueArgs = { where: { id: string } | { paymentId: string } };
@@ -135,7 +138,7 @@ type ReconciliationPartnerEarningsDouble = {
   reverseEarningsForTransaction: (transactionId: string) => Promise<number>;
 };
 type ReconciliationReferralQualificationDouble = {
-  qualifyReferralAfterPurchase: (transactionId: string) => Promise<void>;
+  qualifyReferralAfterPurchase: (transactionId: string) => Promise<ReferralPurchaseOutcome | null>;
   reverseQualificationForTransaction: (transactionId: string) => Promise<void>;
 };
 type ReconciliationProfileSyncQueueDouble = {
@@ -227,6 +230,79 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
 
       assert.deepStrictEqual(state.notifications, [], JSON.stringify(outcome));
     }
+  });
+
+  it('tells each inviter what the payment earned, only for rewards actually issued', async () => {
+    // `referral_reward` had a template and an operator switch and no sender:
+    // rewards waited for a manual «Выдать» and nobody was ever told. Now they
+    // are issued with the payment, and the pipeline — which holds the
+    // notification stack, like for the cashback — announces them.
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.PENDING,
+      refreshedSubscriptionId: null,
+      referralOutcome: {
+        transactionId: 'tx-1',
+        issued: [
+          { id: 'reward-l1', referralId: 'ref-1', userId: 'inviter-1', type: 'POINTS', amount: 50, syncJobId: null },
+          { id: 'reward-l2', referralId: 'ref-0', userId: 'ancestor-1', type: 'EXTRA_DAYS', amount: 3, syncJobId: 'sync-9' },
+        ],
+        pending: [
+          {
+            id: 'reward-pending',
+            referralId: 'ref-1',
+            userId: 'inviter-2',
+            type: 'EXTRA_DAYS',
+            amount: 7,
+            refusal: { kind: 'NO_ACTIVE_FINITE_SUBSCRIPTION' },
+          },
+        ],
+      } as unknown as ReferralPurchaseOutcome,
+    });
+
+    await createService(state).reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(state.notifications, [
+      {
+        userId: 'inviter-1',
+        type: 'referral_reward',
+        payload: { amount: 50, rewardType: 'POINTS', rewardId: 'reward-l1', referralId: 'ref-1', transactionId: 'tx-1' },
+      },
+      {
+        userId: 'ancestor-1',
+        type: 'referral_reward',
+        payload: { amount: 3, rewardType: 'EXTRA_DAYS', rewardId: 'reward-l2', referralId: 'ref-0', transactionId: 'tx-1' },
+      },
+    ], 'the pending reward has not arrived, so it is not announced');
+    assert.deepStrictEqual(
+      state.callOrder.slice(state.callOrder.indexOf('referral-qualification')),
+      ['referral-qualification', 'referral-notify', 'referral-notify', 'partner-earnings', 'cashback-credit'],
+      'the rewards are durable before the messages are attempted',
+    );
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
+  it('keeps the payment settled when the referral message cannot be sent', async () => {
+    const state = createState({
+      eventStatus: 'succeeded',
+      initialTransactionStatus: TransactionStatus.PENDING,
+      refreshedSubscriptionId: null,
+      notifyError: new Error('relay is down'),
+      referralOutcome: {
+        transactionId: 'tx-1',
+        issued: [
+          { id: 'reward-l1', referralId: 'ref-1', userId: 'inviter-1', type: 'POINTS', amount: 50, syncJobId: null },
+        ],
+        pending: [],
+      } as unknown as ReferralPurchaseOutcome,
+    });
+
+    await createService(state).reconcileWebhookEvent('event-1');
+
+    assert.equal(state.notifications.length, 1);
+    assert.ok(state.callOrder.includes('partner-earnings'), 'the partner hook still ran');
+    assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+    assert.deepStrictEqual(state.markFailedCalls, []);
   });
 
   it('skips duplicate subscription mutation when the refreshed transaction is already fulfilled', async () => {
@@ -357,13 +433,27 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
 
     await assert.rejects(() => service.reconcileWebhookEvent('event-1'), /redis:\/\//);
 
-    assert.deepStrictEqual(state.callOrder, ['update', 'mutation', 'enqueue:sync-1']);
+    // The hooks still ran, and ran BEFORE the failure surfaced. This used to
+    // pin the opposite — `['update', 'mutation', 'enqueue:sync-1']` and no
+    // referral or partner call — which was the defect: the retry early-returns
+    // on the row that is now COMPLETED and fulfilled, so nothing ever ran them
+    // afterwards and the payment's referral reward, partner earning and
+    // cashback were lost for good. The PENDING sync job is durable and the
+    // sweep re-drives it; the webhook still reads FAILED for the operator.
+    assert.deepStrictEqual(state.callOrder, [
+      'update',
+      'mutation',
+      'enqueue:sync-1',
+      'referral-qualification',
+      'partner-earnings',
+      'cashback-credit',
+    ]);
     assert.equal(state.markFailedCalls.length, 1);
     assert.deepStrictEqual(state.markFailedCalls[0], ['event-1', 'FAILED']);
     assert.equal(state.alertCalls.length, 1);
     assert.deepStrictEqual(state.markProcessedCalls, []);
-    assert.deepStrictEqual(state.referralQualificationCalls, []);
-    assert.deepStrictEqual(state.partnerEarningCalls, []);
+    assert.deepStrictEqual(state.referralQualificationCalls, ['tx-1']);
+    assert.equal(state.partnerEarningCalls.length, 1);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /secret-password/);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /redis:\/\//);
     assert.doesNotMatch(JSON.stringify(state.markFailedCalls), /sub_secret/);
@@ -1095,6 +1185,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     qualifyReferralAfterPurchase: async (transactionId: string) => {
       state.referralQualificationCalls.push(transactionId);
       state.callOrder.push('referral-qualification');
+      return state.referralOutcome;
     },
     reverseQualificationForTransaction: async (transactionId: string) => {
       state.referralReversalCalls.push(transactionId);
@@ -1155,7 +1246,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
     // by the points module, so this is where it is asserted.
     {
       create: async (input: Record<string, unknown>) => {
-        state.callOrder.push('cashback-notify');
+        state.callOrder.push(input.type === 'referral_reward' ? 'referral-notify' : 'cashback-notify');
         state.notifications.push(input);
         if (state.notifyError !== undefined) throw state.notifyError;
         return 'event-1';
@@ -1180,6 +1271,8 @@ function createState(input: {
   } | null;
   /** Makes the "cashback credited" message fail, to prove the credit survives. */
   readonly notifyError?: Error;
+  /** What the referral qualification answers for this payment. */
+  readonly referralOutcome?: ReferralPurchaseOutcome | null;
   readonly gatewayDataOverride?: Record<string, unknown> | null;
   /** Raw webhook payload override — used to model partial refunds. */
   readonly rawPayload?: Record<string, unknown>;
@@ -1246,6 +1339,7 @@ function createState(input: {
       | null,
     notifications: [] as Record<string, unknown>[],
     notifyError: input.notifyError,
+    referralOutcome: (input.referralOutcome ?? null) as ReferralPurchaseOutcome | null,
     alertCalls: [] as NotifyWebhookFailedArgs[],
     referralQualificationCalls: [] as string[],
     partnerEarningCalls: [] as ProcessPartnerEarningArg[],

@@ -199,3 +199,4 @@ jobs:
           test/subscription-device-limit-reduction.spec.ts
           test/plan-delete-postgres.spec.ts
           test/settings-row-lock-postgres.spec.ts
+          test/referral-rewards-postgres.spec.ts

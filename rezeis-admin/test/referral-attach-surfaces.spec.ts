@@ -88,6 +88,8 @@ interface UserRow {
   telegramId: bigint;
   email: string | null;
   createdAt: Date;
+  /** The wallet balance a retroactive POINTS reward is credited to. */
+  points?: number;
 }
 
 interface ReferralRow {
@@ -219,6 +221,15 @@ function makeDb(
       }
     },
     user: {
+      updateMany: async (args: {
+        where: { id: string };
+        data: { points: { increment?: number; decrement?: number } };
+      }) => {
+        const row = users.find((u) => u.id === args.where.id);
+        if (!row) return { count: 0 };
+        row.points = (row.points ?? 0) + (args.data.points.increment ?? 0) - (args.data.points.decrement ?? 0);
+        return { count: 1 };
+      },
       findUnique: async (args: {
         where: { id?: string; telegramId?: bigint };
         select?: Record<string, unknown>;
@@ -298,12 +309,50 @@ function makeDb(
       }),
     },
     referralReward: {
-      create: async (args: { data: Record<string, unknown> }) => {
-        rewards.push(args.data);
-        return args.data;
+      // A reward row now has an id, a per-payment key and an ISSUED mark: the
+      // replay issues what it creates, so the fake keeps the row it hands back.
+      create: async (args: { data: Record<string, unknown>; select?: Record<string, unknown> }) => {
+        const row = { id: `reward-${rewards.length + 1}`, isIssued: false, ...args.data };
+        rewards.push(row);
+        return project(row, args.select);
+      },
+      count: async (args: {
+        where: { referralId?: string; sourceKey?: { in?: unknown[]; not?: unknown }; NOT?: unknown };
+      }) =>
+        rewards.filter((r) => {
+          if (args.where.sourceKey?.in !== undefined) return args.where.sourceKey.in.includes(r['sourceKey']);
+          // The "imported with donor rewards" probe: keyed, not a payment key.
+          if (args.where.referralId !== undefined) {
+            const key = r['sourceKey'];
+            return (
+              r['referralId'] === args.where.referralId &&
+              typeof key === 'string' &&
+              !key.startsWith('referral-payment:')
+            );
+          }
+          return false;
+        }).length,
+      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        const row = rewards.find((r) => r['id'] === args.where.id);
+        if (row) Object.assign(row, args.data);
+        return row;
       },
     },
+    pointsLedgerEntry: {
+      findUnique: async () => null,
+      create: async (args: { data: Record<string, unknown> }) => ({ id: `ledger-${args.data['referenceKey']}` }),
+    },
     transaction: {
+      count: async (args: {
+        where: { userId?: string; status?: string; id?: { not?: string }; createdAt?: { lt?: Date } };
+      }) =>
+        transactions.filter(
+          (t) =>
+            t.userId === args.where.userId &&
+            t.status === args.where.status &&
+            t.id !== args.where.id?.not &&
+            (args.where.createdAt?.lt === undefined || t.createdAt.getTime() < args.where.createdAt.lt.getTime()),
+        ).length,
       findUnique: async (args: { where: { id?: string }; select?: Record<string, unknown> }) => {
         const row = transactions.find((t) => t.id === args.where.id);
         return row ? project(row as unknown as Record<string, unknown>, args.select) : null;
@@ -369,7 +418,12 @@ function makeDb(
   };
   const qualification =
     seed.realQualification === true
-      ? new ReferralQualificationService(client as never, events as never, new PointsWalletService())
+      ? new ReferralQualificationService(
+          client as never,
+          events as never,
+          new PointsWalletService(),
+          { enqueue: async () => undefined } as never,
+        )
       : { qualifyReferralAfterPurchase: async () => undefined };
 
   return {
@@ -915,19 +969,17 @@ describe('the replay honours both owner decisions about retroactive payment', ()
       operator: null,
     });
 
-    // The edge qualified against the OLD transaction, and the reward ROW for
-    // the referrer exists — the replay credited it, not just called a double.
+    // The edge qualified against the OLD transaction, and the referrer holds
+    // the reward — issued by the replay itself since rewards stopped waiting
+    // for a manual «Выдать» (owner, 2026-09-14), keyed on that old payment.
     assert.equal(result.historicalPaymentsProcessed, 1);
     assert.equal(db.state.referrals[0]?.qualifiedTransactionId, 'tx-old');
     assert.ok(db.state.referrals[0]?.qualifiedAt instanceof Date);
-    assert.deepEqual(db.rewards, [
-      {
-        referralId: 'ref-1',
-        userId: 'u-referrer',
-        type: ReferralRewardType.POINTS,
-        amount: 100,
-      },
-    ]);
+    assert.deepEqual(
+      db.rewards.map((r) => [r['referralId'], r['userId'], r['type'], r['amount'], r['sourceKey'], r['isIssued']]),
+      [['ref-1', 'u-referrer', ReferralRewardType.POINTS, 100, 'referral-payment:tx-old:L1', true]],
+    );
+    assert.equal(db.state.users.find((u) => u.id === 'u-referrer')?.points, 100);
   });
 
   it('РЕШЕНИЕ Б: no partner earning for payments made before the partner existed, but payments after activation are credited', async () => {

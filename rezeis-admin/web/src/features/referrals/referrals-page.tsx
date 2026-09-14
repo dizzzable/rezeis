@@ -525,9 +525,12 @@ function RewardsTab() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'issued' | 'pending'>('all')
   const [selected, setSelected] = useState<readonly string[]>([])
 
+  // The status filter goes to the server — see `listAdminRewards`. The
+  // invalidations below use the key prefix, so they refresh every status.
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['admin', 'referrals', 'rewards'],
-    queryFn: () => referralsAdminApi.listAdminRewards(),
+    queryKey: ['admin', 'referrals', 'rewards', statusFilter],
+    queryFn: () =>
+      referralsAdminApi.listAdminRewards(undefined, statusFilter === 'all' ? undefined : statusFilter === 'issued'),
   })
 
   const filtered = useMemo(() => {

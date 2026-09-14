@@ -278,8 +278,9 @@ const referralRewardSchema = adminReferralRewardSchema
  * body: an already-issued reward comes back unchanged and still 200
  * (`admin-rewards.service.ts:153-155`), a revoked one raises
  * `'Cannot issue a revoked reward'` (`:150-152`), and an EXTRA_DAYS reward for
- * a user with no finite subscription raises from `applyRewardEffect`
- * (`:433-438`). None of those bodies ever reaches this schema. `reason` exists
+ * a user with no finite subscription raises the refusal
+ * `applyReferralRewardEffect` returns (`referral-reward-effect.ts`), turned into
+ * a 400 by `referralRewardRefusalError`. None of those bodies ever reaches this schema. `reason` exists
  * nowhere in the module but `revoke`'s `revokeReason` column, which
  * `mapReward` does not map.
  *
@@ -367,9 +368,20 @@ export const referralsAdminApi = {
    * Returns the rows. See `adminReferralRewardsListSchema` for why the
    * envelope must be `{ items, total }` and why `total` is checked but not
    * handed back.
+   *
+   * `issued` narrows on the server (`?issued=true|false`, compared as a string
+   * by `ListRewardsQueryDto`). The tab used to fetch the newest rows of every
+   * status and filter them here, and since rewards are issued the moment a
+   * friend pays, those newest rows are issued ones: a pending reward older than
+   * them was never on the page, so «Ожидает» showed nothing to issue.
    */
-  async listAdminRewards(limit: number = REWARDS_LIST_LIMIT): Promise<readonly AdminReferralReward[]> {
-    const response = await api.get('/admin/referrals/rewards', { params: { limit } })
+  async listAdminRewards(
+    limit: number = REWARDS_LIST_LIMIT,
+    issued?: boolean,
+  ): Promise<readonly AdminReferralReward[]> {
+    const response = await api.get('/admin/referrals/rewards', {
+      params: { limit, ...(issued === undefined ? {} : { issued: issued ? 'true' : 'false' }) },
+    })
     return adminReferralRewardsListSchema.parse(response.data).items
   },
 

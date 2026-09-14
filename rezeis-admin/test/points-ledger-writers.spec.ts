@@ -74,6 +74,14 @@ describe('the referral reward reversal writes through the wallet', () => {
     const recorded: Array<{ op: string; args: unknown }> = [];
     const model = {
       ...walletFakes(row, recorded),
+      transaction: {
+        findUnique: async () => ({ userId: 'referred-1', planSnapshot: {}, gatewayData: null }),
+        update: async (args: unknown) => {
+          recorded.push({ op: 'transaction.update', args });
+          return {};
+        },
+      },
+      $queryRaw: async () => [],
       referral: {
         findFirst: async () => ({ id: 'referral-1' }),
         update: async (args: unknown) => {
@@ -82,13 +90,30 @@ describe('the referral reward reversal writes through the wallet', () => {
         },
       },
       referralReward: {
-        findMany: async () => [
-          { id: 'reward-1', userId: row.id, type: ReferralRewardType.POINTS, amount: reward.amount, isIssued: reward.isIssued },
-        ],
+        // The reversal asks three times: for the rewards keyed on the refunded
+        // payment, for the unkeyed rewards on the referral that payment
+        // qualified, and — once they are locked — for the state of the ones it
+        // found. The reward here is an unkeyed one — a referral qualified
+        // before rewards carried a per-payment key — so the keyed query finds
+        // nothing and the other two find it.
+        findMany: async (args: { where: { sourceKey?: unknown; OR?: unknown; id?: unknown } }) =>
+          args.where.OR !== undefined || args.where.id !== undefined
+            ? [
+                {
+                  id: 'reward-1',
+                  referralId: 'referral-1',
+                  userId: row.id,
+                  type: ReferralRewardType.POINTS,
+                  amount: reward.amount,
+                  isIssued: reward.isIssued,
+                },
+              ]
+            : [],
         update: async (args: unknown) => {
           recorded.push({ op: 'referralReward.update', args });
           return {};
         },
+        findFirst: async () => null,
       },
     };
     const client = {
@@ -99,6 +124,7 @@ describe('the referral reward reversal writes through the wallet', () => {
       client as never,
       { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
       new PointsWalletService(),
+      { enqueue: async () => undefined } as never,
     );
     return { service, recorded };
   }
@@ -142,6 +168,15 @@ describe('the referral reward reversal writes through the wallet', () => {
     assert.equal(row.points, 15);
     assert.deepEqual(ledgerRows(recorded), []);
     assert.equal(recorded.some((call) => call.op === 'user.updateMany'), false);
+    // The reversal swallows every error, so "nothing moved" alone also holds
+    // for one that crashed on its first statement: it must have reached the
+    // reward and revoked it.
+    assert.deepEqual(
+      recorded
+        .filter((call) => call.op === 'referralReward.update')
+        .map((call) => (call.args as { where: unknown }).where),
+      [{ id: 'reward-1' }],
+    );
   });
 });
 

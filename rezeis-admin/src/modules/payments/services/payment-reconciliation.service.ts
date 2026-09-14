@@ -21,7 +21,10 @@ import { PartnerEarningsService } from '../../partners/services/partner-earnings
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { PointsCashbackService } from '../../points/services/points-cashback.service';
-import { ReferralQualificationService } from '../../referrals/services/referral-qualification.service';
+import {
+  ReferralPurchaseOutcome,
+  ReferralQualificationService,
+} from '../../referrals/services/referral-qualification.service';
 import {
   PAYMENT_WEBHOOK_STATUS_FAILED,
   PaymentWebhookInboxService,
@@ -37,6 +40,7 @@ import {
   readRefundLedger,
   readRefundedTotal,
 } from '../utils/payment-refund-ledger.util';
+import { enqueueSyncJobsDeferringFailure } from './payment-fulfillment-claim.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { MoyNalogQueueService } from './moy-nalog-queue.service';
@@ -379,6 +383,7 @@ export class PaymentReconciliationService {
           where: { id: refreshedTransaction.id, fulfilledAt: null },
           data: { fulfilledAt: claimedAt },
         });
+        let syncEnqueueFailure: { readonly error: unknown } | null = null;
         if (claim.count === 1) {
           let syncJobs;
           try {
@@ -404,13 +409,18 @@ export class PaymentReconciliationService {
           // visibility + retry) WITHOUT releasing the claim: the retry early-
           // returns on the now-COMPLETED transaction and the PENDING sync jobs
           // are recovered by the profile-sync sweep cron. No double-provision.
-          for (const syncJob of syncJobs) {
-            await this.profileSyncQueueService.enqueue(syncJob.id);
-          }
+          //
+          // The failure is DEFERRED past the hooks below, not thrown here: that
+          // same early return is why nothing would ever run them again.
+          syncEnqueueFailure = await enqueueSyncJobsDeferringFailure(
+            this.profileSyncQueueService,
+            syncJobs,
+          );
         }
         // Saved method + referral/partner/МойНалог/ads — always best-effort after
         // a SUCCESS status (even if this worker lost the fulfill claim).
         await this.runPostFulfillmentHooks(refreshedTransaction, event.rawPayload);
+        if (syncEnqueueFailure !== null) throw syncEnqueueFailure.error;
       }
 
       if (nextStatus === TransactionStatus.FAILED) {
@@ -1215,6 +1225,8 @@ export class PaymentReconciliationService {
           transactionId: transaction.id,
           subscriptionId: subscription.id,
           panelUsername: subscription.remnawavePanelUsername,
+          // The operator card prints no message; the instruction is its note.
+          note: 'Подписка по возвращённой оплате отозвана только в rezeis: привязки к панели нет, и профиль в Remnawave продолжает работать — отключите его вручную.',
         });
       }
     } catch (error: unknown) {
@@ -1320,13 +1332,16 @@ export class PaymentReconciliationService {
    * Runs the referral qualification + partner earnings hooks after a
    * transaction is marked COMPLETED. Errors here are logged but do not
    * propagate — a failed accrual must not roll back a successful payment
-   * application. Both downstream services are idempotent on
-   * `(partnerId, sourceTransactionId)` and on `referral.qualifiedAt`, so
-   * a retried webhook event is safe.
+   * application. Both downstream services are idempotent — partner earnings
+   * on `(partnerId, sourceTransactionId)`, referral rewards on their
+   * per-payment `source_key` — so a retried webhook event is safe.
    */
   private async runReferralAndPartnerHooks(transaction: Transaction): Promise<void> {
+    let referralOutcome: ReferralPurchaseOutcome | null = null;
     try {
-      await this.referralQualificationService.qualifyReferralAfterPurchase(transaction.id);
+      referralOutcome = await this.referralQualificationService.qualifyReferralAfterPurchase(
+        transaction.id,
+      );
     } catch (error: unknown) {
       this.logger.error(
         `Referral qualification hook failed for transaction ${transaction.id}: ${
@@ -1334,6 +1349,7 @@ export class PaymentReconciliationService {
         }`,
       );
     }
+    await this.tellReferralEarners(referralOutcome);
 
     try {
       const minorUnits = decimalToMinorUnits(transaction.amount);
@@ -1349,6 +1365,51 @@ export class PaymentReconciliationService {
           error instanceof Error ? error.message : String(error)
         }`,
       );
+    }
+  }
+
+  /**
+   * Tells each inviter what a friend's payment has just earned them — the
+   * `referral_reward` notification, which had a template, an operator switch
+   * and no sender at all while rewards waited for a manual «Выдать».
+   *
+   * Composed here for the reason {@link creditCashbackAndTellTheBuyer} gives:
+   * the payment pipeline already holds the notification stack, the referral
+   * module does not. And split the same way: the reward is durable before the
+   * message is attempted, so an undelivered message never reads as a missing
+   * reward. Only ISSUED rewards are announced — a pending one has not arrived.
+   *
+   * No `currency` in the payload on purpose: the unit is the recipient's
+   * language («баллов» / «points», «дн.» / «days»), which is only known when
+   * the message is rendered, from `rewardType`.
+   */
+  private async tellReferralEarners(
+    outcome: ReferralPurchaseOutcome | null | undefined,
+  ): Promise<void> {
+    // `undefined` as well as `null`: this runs outside any try, and a caller
+    // double that answers the old `Promise<void>` must not turn "nothing to
+    // announce" into a thrown hook.
+    if (outcome === null || outcome === undefined) return;
+    for (const reward of outcome.issued) {
+      try {
+        await this.userNotifications.create({
+          userId: reward.userId,
+          type: 'referral_reward',
+          payload: {
+            amount: reward.amount,
+            rewardType: reward.type,
+            rewardId: reward.id,
+            referralId: reward.referralId,
+            transactionId: outcome.transactionId,
+          },
+        });
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Referral reward ${reward.id} issued for transaction ${outcome.transactionId} but the notification failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
   }
 

@@ -1,12 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import {
-  PointsLedgerSource,
-  Prisma,
-  SubscriptionStatus,
-  ReferralRewardType,
-  SyncAction,
-  SyncJobStatus,
-} from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
@@ -22,6 +15,7 @@ import {
   BulkIssueRewardsResultInterface,
 } from '../interfaces/admin-rewards.interface';
 import { ReferralUserSummaryInterface } from '../interfaces/referral.interface';
+import { applyReferralRewardEffect, referralRewardRefusalError } from './referral-reward-effect';
 import { buildReferralUserDisplayName } from './referral-user-identity';
 
 // Mirrors `REFERRAL_USER_SUMMARY_SELECT` in `referrals.service.ts`, and for
@@ -76,17 +70,20 @@ type RewardIssueSource = (typeof REWARD_ISSUE_SOURCE)[keyof typeof REWARD_ISSUE_
  * Admin-side reward management — list, manually grant, issue (apply
  * effect to the user), bulk issue, and revoke. Sister of
  * `ReferralQualificationService`, which runs the *automatic* path
- * triggered by qualifying purchases: it CREATES reward rows when a
- * referral qualifies, and stops there.
+ * triggered by qualifying purchases: it creates the reward rows when a
+ * referral qualifies and issues them on the spot (owner, 2026-09-14:
+ * «Сразу автоматически»). What reaches this service's «Выдать» is what that
+ * path could not issue — EXTRA_DAYS for an inviter with no finite active
+ * subscription — plus manual grants and manual qualifications.
  *
- * ISSUING A REWARD HAPPENS HERE AND NOWHERE ELSE. The qualification service
- * carried its own `issueReward` for a while — unreachable from anything, and
+ * THE EFFECT OF ISSUING HAS ONE IMPLEMENTATION: `applyReferralRewardEffect`
+ * in `referral-reward-effect.ts`, shared by both paths. The qualification
+ * service once carried its own `issueReward` — unreachable from anything, and
  * diverged: no `ProfileSyncJob`, so `EXTRA_DAYS` never reached the panel, and
  * a silent "issued" for a user with no eligible subscription. It is gone, and
- * a second copy must not come back. `applyRewardEffect` below is the single
- * implementation: POINTS bumps `User.points`; EXTRA_DAYS extends an ACTIVE
- * finite subscription resolved under a row lock and enqueues the sync that
- * pushes the new expiry to Remnawave.
+ * a second copy must not come back. POINTS go through the wallet; EXTRA_DAYS
+ * extend an ACTIVE finite subscription resolved under a row lock and create
+ * the sync that pushes the new expiry to Remnawave.
  */
 @Injectable()
 export class AdminRewardsService {
@@ -214,13 +211,17 @@ export class AdminRewardsService {
           return { updated: reward, syncJobId: null, effectApplied: false };
         }
 
-        const effect = await applyRewardEffect(tx, this.pointsWallet, {
+        const effect = await applyReferralRewardEffect(tx, this.pointsWallet, {
           id: reward.id,
           referralId: reward.referralId,
           userId: reward.userId,
           type: reward.type,
           amount: reward.amount,
         });
+        // The operator asked for THIS reward, so a refusal is an answer on
+        // screen, thrown inside the transaction like every other refusal
+        // here: nothing was written, and the reward stays payable.
+        if (!effect.applied) throw referralRewardRefusalError(reward, effect.refusal);
         const result = await tx.referralReward.update({
           where: { id: rewardId },
           data: {
@@ -504,188 +505,5 @@ function mapUser(
 async function lockReferralReward(tx: Prisma.TransactionClient, rewardId: string): Promise<void> {
   await tx.$queryRaw(
     Prisma.sql`SELECT "id" FROM "referral_rewards" WHERE "id" = ${rewardId} FOR UPDATE`,
-  );
-}
-
-async function lockSubscription(
-  tx: Prisma.TransactionClient,
-  subscriptionId: string,
-): Promise<void> {
-  await tx.$queryRaw(
-    Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`,
-  );
-}
-
-async function resolveActiveFiniteSubscription(
-  tx: Prisma.TransactionClient,
-  userId: string,
-  currentSubscriptionId: string | null,
-) {
-  const fallback = await tx.subscription.findFirst({
-    where: { userId, status: SubscriptionStatus.ACTIVE, expiresAt: { not: null } },
-    select: { id: true },
-    orderBy: [{ expiresAt: 'desc' }, { id: 'desc' }],
-  });
-  const candidateIds = Array.from(
-    new Set(
-      [currentSubscriptionId, fallback?.id ?? null].filter((id): id is string => id !== null),
-    ),
-  );
-
-  for (const subscriptionId of candidateIds) {
-    await lockSubscription(tx, subscriptionId);
-    const subscription = await tx.subscription.findUnique({
-      where: { id: subscriptionId },
-      select: {
-        id: true,
-        userId: true,
-        expiresAt: true,
-        status: true,
-        remnawaveId: true,
-      },
-    });
-    if (
-      subscription !== null &&
-      subscription.userId === userId &&
-      subscription.status === SubscriptionStatus.ACTIVE &&
-      subscription.expiresAt !== null
-    ) {
-      // A finite end date IS the eligibility rule for EXTRA_DAYS — a perpetual
-      // subscription has nothing to extend. Re-attaching the checked value
-      // carries that fact into the return type, so the caller cannot reach the
-      // date arithmetic without it.
-      return { ...subscription, expiresAt: subscription.expiresAt };
-    }
-  }
-  return null;
-}
-
-/**
- * Apply the reward effect inside a Prisma transaction. THE ONLY implementation
- * of reward issuance in this repository, and it must stay that way.
- *
- * It used to cite a second one — the private effect block of
- * `ReferralQualificationService.issueReward` — as the model it mirrored. That
- * method had no caller anywhere in `src/`, and it had diverged on every point
- * that decides whether an `EXTRA_DAYS` reward actually reaches the customer:
- * it targeted `user.currentSubscriptionId` alone with no fallback and no lock,
- * it marked the reward ISSUED and granted nothing when there was no eligible
- * subscription, and it created no `ProfileSyncJob`. Pointing a reader at it was
- * pointing them at the broken half, so it was deleted rather than re-synced.
- */
-async function applyRewardEffect(
-  tx: Prisma.TransactionClient,
-  wallet: PointsWalletService,
-  reward: {
-    id: string;
-    referralId: string;
-    userId: string;
-    type: ReferralRewardType;
-    amount: number;
-  },
-): Promise<{ readonly syncJobId: string | null }> {
-  if (reward.type === ReferralRewardType.POINTS) {
-    // Through the wallet, keyed on the reward: the ledger row is what the
-    // earner sees as "+N for an invited friend", and the key is what makes a
-    // re-driven issue a no-op instead of a second credit.
-    const moved = await wallet.apply(tx, {
-      userId: reward.userId,
-      delta: reward.amount,
-      source: PointsLedgerSource.REFERRAL_REWARD,
-      referenceKey: reward.id,
-      details: { rewardId: reward.id, referralId: reward.referralId },
-    });
-    if (!moved.applied) {
-      if (moved.reason === 'USER_NOT_FOUND') {
-        throw new NotFoundException('Cannot issue POINTS reward: the earner no longer exists');
-      }
-      // DUPLICATE: a ledger row for this reward exists while the reward is not
-      // marked issued. That state cannot be produced by this code — the row
-      // and the mark commit together — so it is refused rather than papered
-      // over with a second credit or a silent mark.
-      throw new BadRequestException(
-        `Cannot issue POINTS reward ${reward.id}: the points were already credited (${moved.reason})`,
-      );
-    }
-    return { syncJobId: null };
-  }
-  if (reward.type === ReferralRewardType.EXTRA_DAYS) {
-    const user = await tx.user.findUnique({
-      where: { id: reward.userId },
-      select: { currentSubscriptionId: true },
-    });
-    const subscription = await resolveActiveFiniteSubscription(
-      tx,
-      reward.userId,
-      user?.currentSubscriptionId ?? null,
-    );
-    if (subscription === null) {
-      throw new BadRequestException(
-        'Cannot issue EXTRA_DAYS reward: user has no finite active subscription. ' +
-          'Grant once an eligible subscription exists, or convert to POINTS.',
-      );
-    }
-    const newExpiresAt = new Date(
-      Math.max(subscription.expiresAt.getTime(), Date.now()) + reward.amount * 24 * 60 * 60 * 1000,
-    );
-    await tx.subscription.update({
-      where: { id: subscription.id },
-      data: { expiresAt: newExpiresAt },
-    });
-    // Push the extended expiry to Remnawave. Without this ProfileSyncJob the
-    // extra days only live in the local DB and never reach the user's real VPN
-    // profile ("дни выдались, только с задержкой" — the sync never fired).
-    const syncJob = await tx.profileSyncJob.create({
-      data: {
-        subscriptionId: subscription.id,
-        action: subscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
-        status: SyncJobStatus.PENDING,
-        payload: {
-          source: 'REFERRAL_EXTRA_DAYS_REWARD',
-          userId: reward.userId,
-          days: reward.amount,
-        } as Prisma.InputJsonObject,
-      },
-    });
-    return { syncJobId: syncJob.id };
-  }
-  // TWO different failures reach this line, and they need two different guards.
-  //
-  // The COMPILER one: `refuseUnhandledRewardType` takes `never`, so this call
-  // only type-checks while every `ReferralRewardType` member has been peeled off
-  // above. Add a third member to the enum and `tsc -p tsconfig.json` fails HERE
-  // — the developer who widened the type is made to decide what issuing it
-  // grants, at build time, instead of shipping a branch that grants nothing.
-  //
-  // The RUNTIME one: `reward.type` is read out of a database column, and the
-  // enum compiled into this process is only the compiler's BELIEF about that
-  // column. A row written by an older or newer deployment, by a migration in
-  // flight, or by hand carries whatever it carries, and no compile-time check
-  // ever inspects it. So the same guard also THROWS, inside the transaction and
-  // before the reward is marked issued, which rolls back the reward update, the
-  // audit row and anything the effect had already written.
-  //
-  // What must never come back is the bare `return { syncJobId: null }` that
-  // used to stand here. `issue()` marks the reward ISSUED on whatever this
-  // function returns, so an unhandled type produced a row claiming the customer
-  // had been paid with nothing granted — precisely the failure the deleted
-  // second copy of this logic was deleted for. Refusing is the safe direction:
-  // the operator sees an error and the reward stays payable.
-  return refuseUnhandledRewardType(reward.type);
-}
-
-/**
- * The `never` parameter is the compile-time half of the guard above: passing
- * anything that is not provably impossible is a type error at the call site.
- * The throw is the runtime half, for a `type` column that no longer matches the
- * enum. `BadRequestException` rather than a bare `Error` on purpose — Nest
- * hides a 500's message, and this one names the offending value, which is the
- * only thing that tells an operator (and `bulkIssue`'s `errors` array) what is
- * wrong with that reward.
- */
-function refuseUnhandledRewardType(type: never): never {
-  throw new BadRequestException(
-    `Cannot issue reward: reward type "${String(type)}" has no issuance branch in ` +
-      'applyRewardEffect. Nothing was granted and the reward is still unissued.',
   );
 }

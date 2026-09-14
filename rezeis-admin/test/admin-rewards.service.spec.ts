@@ -832,6 +832,8 @@ describe('AdminRewardsService.issue — EXTRA_DAYS', () => {
             source: 'REFERRAL_EXTRA_DAYS_REWARD',
             userId: 'earner-1',
             days: 14,
+            // Names the subscription these days went to, for a refund.
+            rewardId: 'reward-1',
           },
         },
       },

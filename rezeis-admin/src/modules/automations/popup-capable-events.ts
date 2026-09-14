@@ -185,6 +185,9 @@ export const POPUP_CAPABLE_EVENTS: readonly PopupCapableEvent[] = [
     emittedIn: 'src/modules/referrals/services/referral-qualification.service.ts',
     moment: 'Somebody they invited made a qualifying purchase',
   },
+  // Emitted in two places since 2026-09-14: the operator's «Выдать» here, and
+  // the automatic issue right after a qualifying payment
+  // (`referral-qualification.service.ts`). Both put the earner in `userId`.
   {
     type: 'referral.reward_issued',
     namedBy: 'userId',

@@ -351,6 +351,36 @@ describe('rewards tab', () => {
     expect(cellsOf(issued)[REWARD_STATUS]).toHaveTextContent('Issued')
   })
 
+  it('asks the server for pending rewards when «Pending» is chosen, instead of filtering the newest page', async () => {
+    // Rewards are issued the moment a friend pays, so the newest page is issued
+    // rows: a pending reward older than them was never there to filter.
+    const person = userEvent.setup()
+    const requests: Array<Record<string, unknown> | undefined> = []
+    vi.spyOn(api, 'get').mockImplementation(
+      async (path: string, config?: { params?: Record<string, unknown> }) => {
+        if (path === '/admin/referrals/stats') return { data: STATS }
+        if (path === '/admin/referrals/rewards') {
+          requests.push(config?.params)
+          const items = config?.params?.issued === 'false' ? [PENDING_REWARD] : [ISSUED_REWARD]
+          return { data: { items, total: items.length } }
+        }
+        return { data: [] }
+      },
+    )
+    renderWithProviders(<ReferralsPage />)
+    await openTab(person, 'Rewards')
+    await rowFor('ops@example.com')
+    expect(screen.queryByText('Inviter One')).not.toBeInTheDocument()
+
+    const statusFilter = screen.getAllByRole('combobox').find((el) => /All statuses/.test(el.textContent ?? ''))
+    expect(statusFilter).toBeDefined()
+    await person.click(statusFilter!)
+    await person.click(await screen.findByRole('option', { name: 'Pending' }))
+
+    expect(await screen.findByText('Inviter One')).toBeInTheDocument()
+    expect(requests.some((params) => params?.issued === 'false')).toBe(true)
+  })
+
   it('says the load failed rather than "no rewards yet" when an item does not validate', async () => {
     const person = userEvent.setup()
     serve({ rewards: { items: [LEGACY_REWARD], total: 1 } })
