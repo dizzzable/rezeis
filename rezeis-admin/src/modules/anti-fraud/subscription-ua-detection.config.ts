@@ -64,10 +64,13 @@ export interface SubscriptionUaDetectionConfig {
    * 500 is one request and matches the page size the adapter already uses for
    * the panel user walk.
    *
-   * The ceiling is 1000 because the panel's is: every supported release, 2.7
-   * through 3.4, refuses `size` above 1000. It used to be 2000, so any value
-   * from 1001 up was saved without complaint and then refused on every run,
-   * and the detector logged "request log is not readable" and saw nothing.
+   * The ceiling is 1000 because the panel's is: every contract oracle, 2.7
+   * through 3.4.4, refuses `size` above 1000. The 2.x ones are oracles only —
+   * once the version probe identifies a 2.x panel, `LegacyPanelRefusal` answers
+   * this read with `REZEIS_PANEL_TOO_OLD` before it is sent. The ceiling used
+   * to be 2000, so any value from 1001 up was saved without complaint and then
+   * refused on every run, and the detector logged "request log is not readable"
+   * and saw nothing.
    * `subscription-ua-page-size-cap.spec.ts` holds the ceiling to each contract.
    */
   readonly uaRequestPageSize: number;

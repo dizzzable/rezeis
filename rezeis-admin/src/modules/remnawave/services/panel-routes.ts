@@ -14,7 +14,15 @@
  * THIS TABLE SERVES `remnawave-api.service.ts`. The three contract-driven
  * clients (`panel-users`, `panel-devices`, `panel-infra`) take their routes from
  * the hand-owned command table in `panel-commands.ts`, which
- * `test/panel-command-conformance.spec.ts` holds to every era the same way.
+ * `test/panel-command-conformance.spec.ts` holds to the five 3.x contract
+ * oracles the same way. One of those commands reaches a panel of any era: the
+ * version probe, `GetMetadataCommand`, which `PanelInfraClient.forVersionProbe`
+ * sends over the bare transport, because its answer is what identifies a 2.x
+ * panel. Every other one goes through `LegacyPanelRefusal` in
+ * `panel-transport.ts`, which turns it away once the probe has reported a major
+ * below 3 — and lets it out as if to 3.x while the probe has no answer yet. The
+ * routes in THIS table are behind no refusal at all:
+ * `remnawave-api.service.ts` sends them over its own HTTP helpers.
  *
  * WHY NO VENDOR PACKAGE IS IMPORTED HERE — OR ANYWHERE IN `src/`. This spot has
  * held a claim about the vendor packages several times, and each time the claim
@@ -36,8 +44,8 @@
  * 2.7.3's `GetExternalSquadsCommand`, which requires a `responseHeaders` field
  * that panel 3.x renamed. Every 3.x install with at least one external squad
  * got `ServiceUnavailableException` from a perfectly healthy panel. A vendor
- * schema describes ONE era; this codebase serves every era its operators are
- * still running. See `panel-response-decoders.ts`.
+ * schema describes ONE era; the panels this codebase reads span several. See
+ * `panel-response-decoders.ts`.
  *
  * The reason THIS file imports nothing is unchanged and still good: its response
  * parsing is deliberately more tolerant than the published contract (see

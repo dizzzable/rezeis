@@ -111,3 +111,21 @@ export interface RemnawaveHostInterface {
    */
   readonly excludeFromSubscriptionTypes?: readonly string[];
 }
+
+/**
+ * An external squad that relabels the badge on every host its members receive.
+ *
+ * Remnawave applies a user's external squad `hostOverrides` to each host before
+ * it builds their config (`applyHostOverrides` in
+ * `src/modules/subscription-template/resolve-proxy/resolve-proxy-config.service.ts`,
+ * the same from 3.2 through 3.4.4), and `serverDescription` is the one override
+ * a customer reads: a string replaces every host's own, `null` removes it.
+ *
+ * Only a squad that overrides the badge is one of these. A squad that overrides
+ * nothing, or only routing, is simply absent — so "no entry" means "the host's
+ * own badge", and there is no third state to get wrong on a JSON round trip.
+ */
+export interface RemnawaveExternalSquadHostOverrideInterface {
+  readonly uuid: string;
+  readonly serverDescription: string | null;
+}

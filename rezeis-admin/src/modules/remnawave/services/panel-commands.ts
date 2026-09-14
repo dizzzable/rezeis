@@ -283,7 +283,8 @@ export const PANEL_COMMANDS = {
     description: 'Get Nodes Users Usage by Nodes UUIDs',
     // The window travels in the query and is NOT validated here — it never has
     // been, and the conformance spec checks the one query production sends
-    // against every era instead. The node list is validated: minimum one.
+    // against each of the five 3.x contract oracles instead. The node list is
+    // validated: minimum one.
     body: z.object({ nodesUuids: z.array(z.uuid()).min(1) }),
   },
 

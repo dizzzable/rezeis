@@ -98,14 +98,16 @@ export interface RemnawaveCapabilities {
  * answered on their trailing slash; `/api/connections/drop` existed and
  * `/api/ip-control/*` was gone, which is the 3.x shape this adapter expects.
  *
- * 2.7 AND 2.8 ARE GONE FROM THIS SET DELIBERATELY, and their absence is the
- * first half of withdrawing 2.x support rather than an oversight. The branches
- * that still address a 2.x panel are alive as this is written, so a 2.x
- * operator currently gets the banner and a working panel; the second half —
- * refusing 2.x out loud instead of letting it drift into silent 400s — is a
- * separate change against the deletion path and has not been made yet. If you
- * are here because a 2.x install broke, that is the expected direction of
- * travel, not a regression to undo.
+ * 2.7 AND 2.8 ARE GONE FROM THIS SET DELIBERATELY, and their absence is one
+ * half of withdrawing 2.x support rather than an oversight. The other half —
+ * refusing 2.x out loud instead of letting it drift into silent 400s — is in
+ * place as well: `LegacyPanelRefusal` in `panel-transport.ts` answers every
+ * command of the users, devices and infra clients with `REZEIS_PANEL_TOO_OLD`
+ * once the version probe reports a major below 3. So a 2.x operator gets the
+ * banner and a refused sync; besides the probe, only what
+ * `remnawave-api.service.ts` sends over its own HTTP helpers still reaches such
+ * a panel. If you are here because a 2.x install broke, that is the intended
+ * outcome, not a regression to undo.
  *
  * Being in this set means "the operator gets no banner", not "every screen is
  * equally capable". 3.x reports `liveIpControl: true`: it replaced the

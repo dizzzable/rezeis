@@ -245,7 +245,8 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
 });
 
 /**
- * WHO the webhook is about, across all three supported panel versions.
+ * WHO the webhook is about, across the three panel versions a webhook can
+ * still arrive from: a 2.x panel's commands are refused, its events are not.
  *
  * 2.7.4 and 2.8.x key a user by `uuid`. 3.x DELETED that column and keys every
  * user by the numeric `id`, so a 3.x panel sends no uuid anywhere — and the

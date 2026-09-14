@@ -27,8 +27,9 @@ export interface RemnawaveHwidTopUserInterface {
  * One row of the panel's subscription-request log (a hit on `/sub/<shortUuid>`).
  *
  * THE OWNER FIELD IS VERSION-DEPENDENT AND THE TWO ARE NOT INTERCHANGEABLE.
- * Per the OpenAPI specs for both supported builds, a record carries exactly
- * `id`, `requestIp`, `userAgent`, `requestAt` plus ONE owner field:
+ * Per the OpenAPI specs of the two 2.x builds this was written against, a
+ * record carries exactly `id`, `requestIp`, `userAgent`, `requestAt` plus ONE
+ * owner field:
  *
  *   - 2.7.4 → `userUuid`, `{ "type": "string", "format": "uuid" }`
  *   - 2.8.0 → `userId`,   `{ "type": "number" }` — the panel-internal row id,

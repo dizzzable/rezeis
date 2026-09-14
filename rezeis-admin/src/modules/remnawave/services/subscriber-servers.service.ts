@@ -6,7 +6,10 @@ import { SubscriptionStatus } from '@prisma/client';
 // the alias would make this service unloadable from a test.
 import { RawCacheService } from '../../../common/cache';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
+import {
+  RemnawaveExternalSquadHostOverrideInterface,
+  RemnawaveHostInterface,
+} from '../interfaces/remnawave-host.interface';
 import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
 import { RemnawaveInternalSquadDetailInterface } from '../interfaces/remnawave-squad-detail.interface';
 import {
@@ -28,18 +31,23 @@ import { RemnawaveApiService } from './remnawave-api.service';
  * inbounds themselves. It now keeps their UUIDs — and nothing else from them,
  * for the reason spelled out in that mapper.
  *
- * INTERNAL SQUADS ONLY. A user also carries a single `externalSquadUuid`, and
- * external squads are deliberately absent here: Remnawave's external-squad
+ * INTERNAL SQUADS DECIDE THE HOSTS. A user also carries a single
+ * `externalSquadUuid`, and it adds no host here: Remnawave's external-squad
  * payload has no `inbounds` array at all, so there is no way to learn which
  * hosts one contains. Listing external squads would mean either inventing that
- * membership or showing a customer an empty section they cannot act on.
+ * membership or showing a customer an empty section they cannot act on. What
+ * an external squad DOES change is a label — its `hostOverrides` replace the
+ * badge on every host its members receive — so that one field is read; see
+ * `badgeOverride`.
  *
  * ONE SNAPSHOT FOR EVERYONE. Hosts, nodes and squads are panel-wide: two
- * subscribers opening this screen at the same moment need the same three calls
+ * subscribers opening this screen at the same moment need the same four calls
  * to Remnawave. They are fetched once and cached for {@link SNAPSHOT_TTL_SECONDS}
  * seconds, after which the filtering is pure local work. The TTL is short
  * because node state is what the screen is for — but it is not zero, because
- * this opens on a double tap, and a double tap is cheap to repeat.
+ * this opens on a double tap, and a double tap is cheap to repeat. What belongs
+ * to one subscriber — the remark rendered for them, their external squad's
+ * badge — is applied over the snapshot on every request and never stored in it.
  */
 @Injectable()
 export class SubscriberServersService {
@@ -70,7 +78,16 @@ export class SubscriberServersService {
       // headed "available servers". Every other read of this table in the
       // codebase excludes DELETED for the same reason.
       where: { id: subscriptionId, userId, status: { not: SubscriptionStatus.DELETED } },
-      select: { internalSquads: true },
+      // The squads decide the hosts; the rest is what makes the list this
+      // subscriber's — their external squad's badge, and the values a remark
+      // is rendered with (see `SubscriberView`).
+      select: {
+        internalSquads: true,
+        externalSquad: true,
+        status: true,
+        expiresAt: true,
+        remnawavePanelUsername: true,
+      },
     });
 
     if (!subscription) {
@@ -91,7 +108,13 @@ export class SubscriberServersService {
     // more than anything this could add.
     if (!snapshot) return { servers: [], recommendedServerId: null };
 
-    const servers = buildServers(subscription.internalSquads, snapshot);
+    const servers = buildServers(subscription.internalSquads, snapshot, {
+      externalSquad: subscription.externalSquad,
+      status: subscription.status,
+      expiresAt: subscription.expiresAt,
+      panelUsername: subscription.remnawavePanelUsername,
+      now: Date.now(),
+    });
     if (servers.length === 0) {
       this.explain(subscriptionId, explainEmpty(subscription.internalSquads, snapshot));
     }
@@ -118,32 +141,50 @@ export class SubscriberServersService {
   }
 
   /**
-   * Hosts, nodes and internal squads as one cached triple.
+   * Hosts, nodes, internal squads and external squads' badges, cached as one.
    *
-   * All three or none: a partial snapshot would silently drop either the
-   * squad→host link or every server's state, and both failures look to the
+   * The first three all or none: a partial snapshot would silently drop either
+   * the squad→host link or every server's state, and both failures look to the
    * reader like "you have no servers" rather than like a panel that is down.
+   * The external squads are the exception, because they only relabel badges.
    */
   private async readSnapshot(): Promise<PanelSnapshot | null> {
     const cached = await this.cacheService.get<PanelSnapshot>(SNAPSHOT_CACHE_KEY);
     if (cached) return cached;
 
     try {
-      const [hosts, nodes, squads] = await Promise.all([
+      const [hosts, nodes, squads, externalSquads] = await Promise.all([
         this.remnawaveApiService.getAllHosts(),
         this.remnawaveApiService.getAllNodes(),
         this.remnawaveApiService.getInternalSquadDetails(),
+        // The one leg allowed to fail on its own, and it fails into "no squad
+        // overrides a badge": a customer in such a squad loses a label, never
+        // the list, which goes out with each host's own badge. Nothing is
+        // logged here — the transport has already warned with the upstream
+        // error, once for this read.
+        this.remnawaveApiService
+          .getExternalSquadHostOverrides()
+          .catch((): readonly RemnawaveExternalSquadHostOverrideInterface[] => []),
       ]);
-      const snapshot: PanelSnapshot = { hosts, nodes, squads };
+      const snapshot: PanelSnapshot = { hosts, nodes, squads, externalSquads };
       // NOT cached when a leg came back empty, and the docblock above says
-      // "all three or none" because of this. `getAllHosts` and `getAllNodes`
+      // "all or none" because of this. `getAllHosts` and `getAllNodes`
       // swallow their own failures and answer `[]`, so `Promise.all` resolves
       // happily with a snapshot that is missing half of what it needs — no
       // hosts reads as "you have no servers", no nodes turns every server
       // `unknown` with no recommendation — and caching it pinned that state
       // for twenty seconds for every subscriber at once. An install that
       // genuinely has no hosts simply re-reads; it is showing nothing either
-      // way, and the read is three cheap calls.
+      // way, and the read is four cheap calls.
+      //
+      // A failed external-squads read does NOT keep the snapshot out, and it
+      // used to. That read can fail for good on a healthy panel — a Remnawave
+      // 3.4.4 API token scoped without external squads is refused on every
+      // call — and while it decided the caching, every request by every
+      // subscriber made all four calls again and wrote one more warning, for
+      // a list that looked right. Cached without the overrides, a failure
+      // costs one failed call and one warning per TTL, not per request, and a
+      // brief one leaves those badges unrelabelled for one TTL at most.
       if (hosts.length > 0 && nodes.length > 0) {
         await this.cacheService.set(SNAPSHOT_CACHE_KEY, snapshot, SNAPSHOT_TTL_SECONDS);
       }
@@ -160,7 +201,7 @@ export class SubscriberServersService {
 }
 
 /**
- * The snapshot cache key, and the `:v2` on the end is load-bearing.
+ * The snapshot cache key, and the `:v3` on the end is load-bearing.
  *
  * What is stored under it is the POST-mapper snapshot — `RemnawaveHostInterface`
  * objects, serialised with `JSON.stringify` and read back with an unchecked
@@ -169,8 +210,9 @@ export class SubscriberServersService {
  * panel image is replaced, so for the rest of the TTL a freshly upgraded panel
  * reads rows written by the previous one.
  *
- * 3.4 support replaced `excludedInternalSquads` with `internalSquads`, so rows
- * from before that change are a different shape, and the two versions must not
+ * 3.4 support replaced `excludedInternalSquads` with `internalSquads` (`:v2`),
+ * and the external squads' badges joined the snapshot (`:v3`), so snapshots
+ * from before either change are a different shape, and the versions must not
  * meet. Bumping the suffix separates them: each version reads only what it
  * wrote, both while an upgrade settles and in a blue/green deployment where
  * both are live against one Redis at once. Rolling back is symmetric.
@@ -178,7 +220,7 @@ export class SubscriberServersService {
  * **Change the shape of `PanelSnapshot`, bump this suffix.** Nothing enforces
  * it — a stale row deserialises silently, which is the whole problem.
  */
-const SNAPSHOT_CACHE_KEY = 'remnawave:subscriber-servers:snapshot:v2';
+const SNAPSHOT_CACHE_KEY = 'remnawave:subscriber-servers:snapshot:v3';
 
 /**
  * What a host's squad rule means when it is absent — no restriction, which is
@@ -188,24 +230,60 @@ const SNAPSHOT_CACHE_KEY = 'remnawave:subscriber-servers:snapshot:v2';
 const NO_SQUAD_RULE = { mode: 'exclude', squads: [] } as const;
 /**
  * Short enough that a node going down shows up while the customer is still
- * looking; long enough that a burst of double taps is three calls, not three
+ * looking; long enough that a burst of double taps is four calls, not four
  * hundred.
  */
 const SNAPSHOT_TTL_SECONDS = 20;
 
 /** For the reason given before a snapshot has been read. */
-const EMPTY_SNAPSHOT: PanelSnapshot = { hosts: [], nodes: [], squads: [] };
+const EMPTY_SNAPSHOT: PanelSnapshot = { hosts: [], nodes: [], squads: [], externalSquads: [] };
 
 interface PanelSnapshot {
   readonly hosts: readonly RemnawaveHostInterface[];
   readonly nodes: readonly RemnawaveNodeInterface[];
   readonly squads: readonly RemnawaveInternalSquadDetailInterface[];
+  /**
+   * The external squads that relabel host badges. Optional for the reason
+   * `serverDescription` is optional on a host — the specs build snapshots by
+   * hand — and read as "none" when absent, which is also what a snapshot from
+   * before this field means.
+   */
+  readonly externalSquads?: readonly RemnawaveExternalSquadHostOverrideInterface[];
 }
 
 /**
- * Every format Remnawave builds a subscription in. The same six on every
- * version this panel talks to — the 2.7.4, 2.8.0 and 3.x contracts enumerate
- * exactly these — and each of its config generators skips a host whose
+ * The part of a list that belongs to ONE subscriber: applied over the shared
+ * snapshot on every request, and never stored in it.
+ */
+export interface SubscriberView {
+  /** `Subscription.externalSquad`, whose badge override applies. */
+  readonly externalSquad: string | null;
+  /** The subscription's status, for a remark's `{{STATUS}}`. */
+  readonly status: SubscriptionStatus | null;
+  /** The subscription's expiry, for `{{DAYS_LEFT}}` and `{{EXPIRE_UNIX}}`. */
+  readonly expiresAt: Date | null;
+  /** `Subscription.remnawavePanelUsername`, for `{{USERNAME}}`. */
+  readonly panelUsername: string | null;
+  /** Epoch milliseconds that `{{DAYS_LEFT}}` counts from. */
+  readonly now: number;
+}
+
+/**
+ * A subscriber nothing is known about — in no external squad, and every remark
+ * variable left out. What the pure functions assume when a spec does not say.
+ */
+const UNKNOWN_SUBSCRIBER: SubscriberView = {
+  externalSquad: null,
+  status: null,
+  expiresAt: null,
+  panelUsername: null,
+  now: 0,
+};
+
+/**
+ * Every format Remnawave builds a subscription in. The same six in every
+ * Remnawave contract from 2.7.4 through 3.x — each enumerates exactly these —
+ * and each of its config generators skips a host whose
  * `excludeFromSubscriptionTypes` names that generator's own format.
  */
 const SUBSCRIPTION_FORMATS = [
@@ -276,8 +354,8 @@ function isSeparator(host: RemnawaveHostInterface): boolean {
 }
 
 /**
- * Filters the snapshot down to what these squads reach, describes each one, and
- * drops any section header left with no server under it.
+ * Filters the snapshot down to what these squads reach, describes each one for
+ * this subscriber, and drops any section header left with no server under it.
  *
  * Exported for the spec: the interesting behaviour is all in here, and testing
  * it through the service would mean standing up Prisma and Redis to assert
@@ -286,11 +364,35 @@ function isSeparator(host: RemnawaveHostInterface): boolean {
 export function buildServers(
   squadUuids: readonly string[],
   snapshot: PanelSnapshot,
+  subscriber: SubscriberView = UNKNOWN_SUBSCRIBER,
 ): readonly SubscriberServerInterface[] {
   const nodesByUuid = new Map(snapshot.nodes.map((node) => [node.uuid, node]));
+  const badge = badgeOverride(snapshot, subscriber.externalSquad);
   return withoutEmptySections(
-    listedHosts(squadUuids, snapshot).map((host) => describeHost(host, nodesByUuid)),
+    listedHosts(squadUuids, snapshot).map((host) =>
+      describeHost(host, nodesByUuid, subscriber, badge),
+    ),
   );
+}
+
+/**
+ * The badge this subscriber's external squad puts on every host they receive:
+ * a string, `null` for no badge at all, or `undefined` when their squad
+ * overrides nothing — or they are in none — and each host keeps its own.
+ *
+ * Remnawave's rule, from `applyHostOverrides`: a squad's `serverDescription`,
+ * when it sets one, wins over every host's, `null` included. The mapper has
+ * already dropped every squad that sets none (`mapExternalSquadHostOverrides`).
+ * `?? []` for the reason `NO_SQUAD_RULE` exists: the snapshot comes back out of
+ * Redis unchecked.
+ */
+function badgeOverride(
+  snapshot: PanelSnapshot,
+  externalSquad: string | null,
+): string | null | undefined {
+  if (externalSquad === null) return undefined;
+  const squad = (snapshot.externalSquads ?? []).find((entry) => entry.uuid === externalSquad);
+  return squad?.serverDescription;
 }
 
 /**
@@ -413,9 +515,11 @@ export interface EmptyReason {
  *
  * Reads left to right along subscription -> squads -> inbounds -> hosts and
  * stops at the first break, because the first break explains every one after
- * it. The last link is the one past every filter: hosts that did reach the
- * customer, all of them section headers, which the list does not show without
- * a server under them. Counts rather than identifiers: this goes to a log an
+ * it. The host links are read over the SERVERS, and over the section headers
+ * only when there is no server at all: a header is never shown without a server
+ * under it, so while there are servers, their break is the reason. The last
+ * link is the one past every filter: headers that did reach the customer, with
+ * no server under them. Counts rather than identifiers: this goes to a log an
  * operator reads, and host UUIDs would tell them nothing they could act on.
  *
  * Exported for the spec, and pure for the same reason as its neighbours.
@@ -445,12 +549,19 @@ export function explainEmpty(
   if (snapshot.hosts.length === 0) {
     return { level: 'warn', reason: 'the panel returned no hosts' };
   }
-  const linked = snapshot.hosts.filter((host) => host.configProfileInboundUuid !== null);
+  // A header that passes every filter keeps every count below this line above
+  // zero, so a chain read over all hosts walked straight past a break on the
+  // servers under it and blamed the tag — at `debug`, which production never
+  // logs, for a server the operator has to fix. Headers are what is left to
+  // explain only when there are no servers.
+  const servers = snapshot.hosts.filter((host) => !isSeparator(host));
+  const hosts = servers.length > 0 ? servers : snapshot.hosts;
+  const linked = hosts.filter((host) => host.configProfileInboundUuid !== null);
   if (linked.length === 0) {
     // The shipped regression, in one line. Nobody configures this.
     return {
       level: 'warn',
-      reason: `none of the ${snapshot.hosts.length} host(s) name an inbound`,
+      reason: `none of the ${hosts.length} host(s) name an inbound`,
     };
   }
   const matching = linked.filter(
@@ -481,17 +592,17 @@ export function explainEmpty(
       reason: `${visible.length} matching host(s), all kept out of every subscription format`,
     };
   }
-  const listed = listedHosts(squadUuids, snapshot);
+  const listed = listedHosts(squadUuids, { ...snapshot, hosts });
   if (listed.length === 0) {
     return {
       level: 'debug',
       reason: `${delivered.length} matching host(s), none of them served to these squads`,
     };
   }
-  // Every filter passed, and the list is still empty: the only rows that can
-  // disappear after the filters are headers with no server under them, so
-  // everything that reached the customer was a header. The operator's own doing
-  // like the three above — they tagged them — so it does not shout. Last, so it
+  // Every filter passed, and the list is still empty. A server past every
+  // filter is always shown, so what passed is headers alone — `hosts` fell back
+  // to them above — none with a server under it. The operator's own doing like
+  // the three above — they tagged them — so it does not shout. Last, so it
   // never speaks over a break earlier in the chain: a tagged host that is also
   // hidden, or unticked, or not served to these squads, is reported as that.
   return {
@@ -583,10 +694,12 @@ function normalizeAddress(value: string): string {
 function describeHost(
   host: RemnawaveHostInterface,
   nodesByUuid: ReadonlyMap<string, RemnawaveNodeInterface>,
+  subscriber: SubscriberView,
+  badge: string | null | undefined,
 ): SubscriberServerInterface {
   // Before the node lookup, not after it: a header describes no server, so it
   // must not borrow the state of one.
-  if (isSeparator(host)) return describeSeparator(host);
+  if (isSeparator(host)) return describeSeparator(host, subscriber);
 
   const nodes = nodesServing(host, nodesByUuid);
 
@@ -603,18 +716,24 @@ function describeHost(
   // СЕРВЕР" five times over five countries. If a remark reads like internal
   // naming, the customer is reading it in Happ and Incy too, and the fix for
   // both is renaming the host in Remnawave — not a second opinion here.
-  const name = host.remark;
-  const described = host.serverDescription?.trim() ?? '';
+  //
+  // Rendered for this subscriber first, as Remnawave renders it before any
+  // client sees it — see `renderRemark`. Everything below reads the result.
+  const name = renderRemark(host.remark, subscriber);
+  // Their external squad's badge replaces the host's own, and its `null`
+  // removes it, exactly as `applyHostOverrides` does — see `badgeOverride`.
+  const label = badge !== undefined ? badge : host.serverDescription;
+  const described = label?.trim() ?? '';
   const description =
     described === '' || sameLabel(described, name) ? null : described;
 
   const { flag, countryCode } = resolveHostCountry(
-    // From the remark, then from the nodes — the flag belongs to the NAME,
+    // From the name, then from the nodes — the flag belongs to the NAME,
     // which the cabinet strips the flag back out of and draws beside it. A
     // flag inside the description stays inside the badge, as it does in the
     // client; it is not promoted into the flag slot, which would otherwise let
     // a category chip such as "🇪🇺 AUTO" relabel a German server as EU.
-    host.remark,
+    name,
     nodes.map((node) => node.countryCode),
   );
 
@@ -660,12 +779,18 @@ function describeHost(
  * `kind` drops it, and a row reading `unknown` with nothing else is the grey
  * "no data" row such a cabinet has always drawn for this host — only without
  * the badge.
+ *
+ * The heading is rendered like any remark: an info row such as "Осталось
+ * {{DAYS_LEFT}} дн." is the obvious thing to tag, and the client renders it.
  */
-function describeSeparator(host: RemnawaveHostInterface): SubscriberServerInterface {
+function describeSeparator(
+  host: RemnawaveHostInterface,
+  subscriber: SubscriberView,
+): SubscriberServerInterface {
   return {
     id: host.uuid,
     kind: 'separator',
-    name: host.remark,
+    name: renderRemark(host.remark, subscriber),
     description: null,
     flag: null,
     countryCode: null,
@@ -673,6 +798,161 @@ function describeSeparator(host: RemnawaveHostInterface): SubscriberServerInterf
     uptimeSeconds: null,
     usersOnline: null,
   };
+}
+
+/**
+ * Remnawave's own token pattern, `TEMPLATE_REGEX` in
+ * `src/common/utils/templates/template-parser.ts` (unchanged 3.2.1 through
+ * 3.4.4; the engine before that file, through 3.2.0, matched `{{KEY}}` alone):
+ * `{{KEY}}`, or `{{KEY:args}}` with args that hold no brace.
+ */
+const REMARK_TOKEN = /\{\{(\w+)(?::([^{}]*))?\}\}/g;
+
+/**
+ * The marker that asks Remnawave to send a remark encoded — `BASE64_ENCODE_PREFIX`
+ * in the same `template-parser.ts`, and the same string in the engine every
+ * earlier 3.x release shipped. See `renderRemark`.
+ */
+const BASE64_ENCODE_MARKER = 'rwEncodeBase64:';
+
+/**
+ * Every variable Remnawave substitutes into a remark, as of panel 3.4.4 —
+ * `libs/contract/constants/templates/template-keys.ts`. 3.2 through 3.4.3 know
+ * the same list less `LAST_TRAFFIC_RESET_AT`, `NEXT_TRAFFIC_RESET_AT_UNIX` and
+ * `NEXT_TRAFFIC_RESET_AT`, which those releases leave in braces; no operator on
+ * them types a token their clients print raw.
+ *
+ * The spec holds this to each 3.x contract oracle's own `TEMPLATE_KEYS`: a key
+ * missing here would reach a customer in braces.
+ */
+const REMARK_VARIABLES: ReadonlySet<string> = new Set([
+  'DAYS_LEFT',
+  'TRAFFIC_USED',
+  'TRAFFIC_LEFT',
+  'STATUS',
+  'TOTAL_TRAFFIC',
+  'USERNAME',
+  'EMAIL',
+  'TELEGRAM_ID',
+  'SUBSCRIPTION_URL',
+  'TAG',
+  'EXPIRE_UNIX',
+  'SHORT_UUID',
+  'ID',
+  'TRAFFIC_USED_BYTES',
+  'TRAFFIC_LEFT_BYTES',
+  'TOTAL_TRAFFIC_BYTES',
+  'RESET_STRATEGY',
+  'LIFETIME_USED_BYTES',
+  'CREATED_AT_UNIX',
+  'LAST_TRAFFIC_RESET_AT_UNIX',
+  'LAST_TRAFFIC_RESET_AT',
+  'NEXT_TRAFFIC_RESET_AT_UNIX',
+  'NEXT_TRAFFIC_RESET_AT',
+  'SS_HWID_LIMIT',
+  'DESCRIPTION',
+]);
+
+const DAY_MS = 86_400_000;
+
+/**
+ * A host remark as this subscriber's VPN client shows it.
+ *
+ * Remnawave never sends a remark as stored. Before a config goes out it renders
+ * the remark for that one user — `TemplateEngine.replace(inputHost.remark,
+ * userValueMap)` in `resolve-proxy-config.service.ts` — so an operator's info
+ * row "Осталось {{DAYS_LEFT}} дн." reads "Осталось 12 дн." in Happ and Incy.
+ * This renders it the same way, per request and never into the shared snapshot,
+ * because every value in it belongs to one subscriber.
+ *
+ * WHAT THE PANEL KNOWS, filled in the way `createUserValueMap` formats it:
+ *   • `DAYS_LEFT` — whole days until `expiresAt`, rounded down, never below 0;
+ *   • `EXPIRE_UNIX` — `expiresAt` in whole seconds;
+ *   • `STATUS` — the operator's own word for this status when the token gives
+ *     one (`{{STATUS:ACTIVE=…|EXPIRED=…}}`), otherwise "Active", "Expired", …;
+ *   • `USERNAME` — the panel username the profile was created or linked under.
+ *
+ * WHAT IT CANNOT KNOW is left out, and the gap closed — whitespace collapsed,
+ * the ends trimmed — so "Germany | {{TRAFFIC_LEFT}}" reads "Germany |". Every
+ * client shows some value there and none shows braces, so a blank is the only
+ * honest rendering. That covers every traffic figure (usage is counted in
+ * Remnawave and never stored here; the limit Remnawave holds can include add-on
+ * traffic written from the effective projection rather than the plan, and its
+ * wording comes from a byte-formatting library), the device limit (the same
+ * projection), and each fact about the panel's own copy of the user: email,
+ * Telegram id, tag, description, id, short uuid, subscription URL, creation and
+ * reset dates, reset strategy.
+ *
+ * A token Remnawave does not know stays exactly as written, as it does there,
+ * and a remark with nothing left out is returned exactly as the operator wrote
+ * it, less the marker below.
+ *
+ * THE `rwEncodeBase64:` MARKER is an instruction to the panel, never part of
+ * the name. A remark that starts with it is sent encoded: every 3.x panel cuts
+ * the marker off, renders what follows, and sends `base64:` plus the Base64 of
+ * the result (`parseTransform`, then `renderTemplate`). An app that reads
+ * `base64:` shows the rendered text, which is what this returns; the marker
+ * reaches no app. It counts only where `startsWith` finds it — at the very
+ * start, spelled exactly so, and once. Nothing is decoded here, because the
+ * panel decodes nothing: a remark the operator stored as `base64:…` goes out
+ * exactly as written.
+ */
+function renderRemark(remark: string, subscriber: SubscriberView): string {
+  const body = remark.startsWith(BASE64_ENCODE_MARKER)
+    ? remark.slice(BASE64_ENCODE_MARKER.length)
+    : remark;
+  let leftOut = false;
+  const rendered = body.replace(
+    REMARK_TOKEN,
+    (token: string, key: string, args: string | undefined): string => {
+      if (!REMARK_VARIABLES.has(key)) return token;
+      const value = remarkValue(key, args, subscriber);
+      if (value !== null) return value;
+      leftOut = true;
+      return '';
+    },
+  );
+  return leftOut ? rendered.replace(/\s+/g, ' ').trim() : rendered;
+}
+
+/** One variable's value for this subscriber, or `null` when the panel cannot know it. */
+function remarkValue(
+  key: string,
+  args: string | undefined,
+  { status, expiresAt, panelUsername, now }: SubscriberView,
+): string | null {
+  switch (key) {
+    case 'DAYS_LEFT':
+      // `Math.max(0, dayjs(expireAt).diff(dayjs(), 'day'))`.
+      return expiresAt === null
+        ? null
+        : String(Math.max(0, Math.floor((expiresAt.getTime() - now) / DAY_MS)));
+    case 'EXPIRE_UNIX':
+      return expiresAt === null ? null : String(Math.floor(expiresAt.getTime() / 1000));
+    case 'STATUS':
+      // `args[user.status] ?? USER_STATUS_LABELS[user.status]`.
+      return status === null
+        ? null
+        : (statusWords(args).get(status) ?? status.charAt(0) + status.slice(1).toLowerCase());
+    case 'USERNAME':
+      return panelUsername;
+    default:
+      return null;
+  }
+}
+
+/**
+ * `ACTIVE=✅|EXPIRED=⛔` as a map, split the way Remnawave's `parseArgs` splits
+ * it: pairs on `|`, the name trimmed, the word kept exactly as typed, and a pair
+ * with no `=` ignored.
+ */
+function statusWords(args: string | undefined): ReadonlyMap<string, string> {
+  const words = new Map<string, string>();
+  for (const pair of (args ?? '').split('|')) {
+    const at = pair.indexOf('=');
+    if (at !== -1) words.set(pair.slice(0, at).trim(), pair.slice(at + 1));
+  }
+  return words;
 }
 
 /**

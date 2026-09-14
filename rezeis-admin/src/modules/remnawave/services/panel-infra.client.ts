@@ -224,7 +224,7 @@ export class PanelInfraClient {
    * stored evidence in the form it has always had. Anything else is handed on as
    * the panel sent it, for the detector's own "undated" count.
    *
-   * THE QUERY IS NOT VALIDATED, as it never has been. Every supported contract,
+   * THE QUERY IS NOT VALIDATED, as it never has been. Every contract oracle,
    * 2.7 through 3.4, caps `size` at 1000, and a page size above that is refused
    * by the panel; the caller reports that as a read it could not make. The
    * `uaRequestPageSize` tunable used to allow up to 2000 and now stops at the

@@ -22,12 +22,15 @@
  * reads, which need `{ uuid, name }` and a handful of booleans respectively —
  * nothing that any panel era has ever spelled differently.
  *
- * BOTH ERAS BY CONSTRUCTION. rezeis ships to installations still on 2.x panels
- * and to installations on 3.x, upgrading on their own schedule. These decoders
- * read only fields present and identically spelled in every era, so there is
- * nothing here to narrow. The renamed field is simply never consulted. Pinned
- * per era, against fixtures derived mechanically from the vendor's own OpenAPI
- * documents, by `test/remnawave-squad-status-era-decode.spec.ts`.
+ * BOTH ERAS BY CONSTRUCTION. A panel that reports 2.x is refused only through
+ * the contract-driven clients (`LegacyPanelRefusal` in `panel-transport.ts`),
+ * `PanelInfraClient`'s squad reads among them; the same reads made by
+ * `remnawave-api.service.ts` still reach it, as they reach every 3.x panel.
+ * These decoders read only fields present and identically spelled in every
+ * era, so there is nothing here to narrow. The renamed field is simply never
+ * consulted. Pinned per era, against fixtures derived mechanically from the
+ * vendor's own OpenAPI documents, by
+ * `test/remnawave-squad-status-era-decode.spec.ts`.
  *
  * TOLERANT IS NOT CREDULOUS — the rule this module exists to enforce. Two
  * outcomes wear the same clothes and must never be collapsed:

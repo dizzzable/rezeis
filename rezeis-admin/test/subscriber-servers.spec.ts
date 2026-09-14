@@ -1,15 +1,28 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { RemnawaveHostInterface } from '../src/modules/remnawave/interfaces/remnawave-host.interface';
+import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
+import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
+import * as contractPanel33 from '@remnawave/contract-panel-3.3';
+import * as contractPanel343 from '@remnawave/contract-panel-3.4.3';
+import * as contractPanel344 from '@remnawave/contract-panel-3.4.4';
+
+import {
+  RemnawaveExternalSquadHostOverrideInterface,
+  RemnawaveHostInterface,
+} from '../src/modules/remnawave/interfaces/remnawave-host.interface';
 import { RemnawaveNodeInterface } from '../src/modules/remnawave/interfaces/remnawave-node.interface';
 import { RemnawaveInternalSquadDetailInterface } from '../src/modules/remnawave/interfaces/remnawave-squad-detail.interface';
 import { SubscriberServerInterface } from '../src/modules/remnawave/interfaces/subscriber-server.interface';
-import { mapInternalSquadDetails } from '../src/modules/remnawave/services/remnawave-squad-mappers';
+import {
+  mapExternalSquadHostOverrides,
+  mapInternalSquadDetails,
+} from '../src/modules/remnawave/services/remnawave-squad-mappers';
 import {
   buildServers,
   explainEmpty,
   pickRecommended,
+  SubscriberView,
 } from '../src/modules/remnawave/services/subscriber-servers.service';
 import {
   countryCodeFromFlag,
@@ -91,6 +104,20 @@ const squad = (
   inboundUuids: ['inbound-de'],
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
+  ...over,
+});
+
+/** The moment every rendered list below is built at, so day counts are exact. */
+const NOW = Date.UTC(2026, 8, 14, 12, 0, 0);
+const DAY_MS = 86_400_000;
+
+/** One subscriber, twelve and a half days from expiry, in no external squad. */
+const subscriber = (over: Partial<SubscriberView> = {}): SubscriberView => ({
+  externalSquad: null,
+  status: 'ACTIVE',
+  expiresAt: new Date(NOW + 12.5 * DAY_MS),
+  panelUsername: 'rz_4815',
+  now: NOW,
   ...over,
 });
 
@@ -970,6 +997,35 @@ describe('why the list came back empty', () => {
       assert.doesNotMatch(reason, /separator/);
     }
   });
+
+  it('reports a break on the servers, not the header that passed above them', () => {
+    // The mirror of the case above, and the one that went wrong: a header that
+    // passes every filter kept every count above zero, so a server broken
+    // under it read as "all of them separators" — at debug, below the Logs
+    // page — while the same panel without the header warned. The header is
+    // dropped either way (nothing is under it), so it explains nothing.
+    const header = host({ uuid: 'sep', viewPosition: 1, tags: ['REZEIS:SEPARATOR'] });
+    const cases: [RegExp, 'warn' | 'debug', Partial<RemnawaveHostInterface>][] = [
+      [/^1 linked host\(s\), none on the 1 inbound\(s\) these squads reach$/, 'warn', { configProfileInboundUuid: 'inbound-us' }],
+      [/^none of the 1 host\(s\) name an inbound$/, 'warn', { configProfileInboundUuid: null }],
+      [/all hidden or disabled/, 'debug', { isHidden: true }],
+      [
+        /all kept out of every subscription format/,
+        'debug',
+        { excludeFromSubscriptionTypes: ['XRAY_JSON', 'XRAY_BASE64', 'MIHOMO', 'STASH', 'CLASH', 'SINGBOX'] },
+      ],
+      [/none of them served to these squads/, 'debug', { internalSquads: { mode: 'exclude', squads: ['squad-eu'] } }],
+    ];
+    for (const [expected, level, over] of cases) {
+      const hosts = [header, host({ uuid: 'de', viewPosition: 2, ...over })];
+      // The premise: this customer really does see an empty list.
+      assert.deepEqual(buildServers(['squad-eu'], snapshot({ hosts })), [], String(expected));
+      const reason = explainEmpty(['squad-eu'], snapshot({ hosts }));
+      assert.match(reason.reason, expected);
+      assert.doesNotMatch(reason.reason, /separator/, String(expected));
+      assert.equal(reason.level, level, String(expected));
+    }
+  });
 });
 
 describe('the name a customer reads', () => {
@@ -1070,5 +1126,246 @@ describe('the name a customer reads', () => {
     });
     assert.equal(server.countryCode, 'DE');
     assert.equal(server.description, '🇪🇺 AUTO');
+  });
+});
+
+describe('the name as this subscriber’s VPN client renders it', () => {
+  // Remnawave never hands a client the remark as stored. Before a config goes
+  // out it runs the remark through its template engine for that one user —
+  // `TemplateEngine.replace(inputHost.remark, userValueMap)` in
+  // `resolve-proxy-config.service.ts`, the same from 3.2 through 3.4.4 — so an
+  // info row reading "Осталось {{DAYS_LEFT}} дн." is "Осталось 12 дн." in Happ
+  // and Incy, and the cabinet printed the braces.
+  const listFor = (hosts: RemnawaveHostInterface[], over: Partial<SubscriberView> = {}) =>
+    buildServers(['squad-eu'], { hosts, nodes: [node()], squads: [squad()] }, subscriber(over));
+  const nameOf = (remark: string, over: Partial<SubscriberView> = {}): string | undefined =>
+    listFor([host({ remark })], over)[0]?.name;
+
+  it('fills in what the panel knows about this subscription', () => {
+    assert.equal(nameOf('Осталось {{DAYS_LEFT}} дн.'), 'Осталось 12 дн.');
+    assert.equal(nameOf('{{USERNAME}} · Germany'), 'rz_4815 · Germany');
+    assert.equal(nameOf('Статус: {{STATUS}}'), 'Статус: Active');
+    assert.equal(nameOf('до {{EXPIRE_UNIX}}'), `до ${Math.floor((NOW + 12.5 * DAY_MS) / 1000)}`);
+  });
+
+  it('counts whole days the way Remnawave does, and never below zero', () => {
+    // `dayjs(expireAt).diff(dayjs(), 'day')`: whole days, rounded down.
+    assert.equal(nameOf('{{DAYS_LEFT}}', { expiresAt: new Date(NOW + 12 * DAY_MS - 1) }), '11');
+    assert.equal(nameOf('{{DAYS_LEFT}}', { expiresAt: new Date(NOW + 12 * DAY_MS) }), '12');
+    assert.equal(nameOf('{{DAYS_LEFT}}', { expiresAt: new Date(NOW - 3 * DAY_MS) }), '0');
+  });
+
+  it('uses the operator’s own word for a status when the token gives one', () => {
+    // `{{STATUS:ACTIVE=…|EXPIRED=…}}` — the args Remnawave reads, falling back
+    // to its own label for a status the token has no word for.
+    const remark = '{{STATUS:ACTIVE=✅ Активна|EXPIRED=⛔ Истекла}}';
+    assert.equal(nameOf(remark), '✅ Активна');
+    assert.equal(nameOf(remark, { status: 'EXPIRED' }), '⛔ Истекла');
+    assert.equal(nameOf(remark, { status: 'LIMITED' }), 'Limited');
+  });
+
+  it('leaves out a value the panel cannot know, instead of printing the token', () => {
+    // Traffic is counted in Remnawave and never stored here. Blank is what the
+    // cabinet can say truthfully; the braces are what no client ever shows.
+    assert.equal(nameOf('Germany | {{TRAFFIC_LEFT}}'), 'Germany |');
+    assert.equal(nameOf('Трафик  {{TRAFFIC_USED}} из {{TOTAL_TRAFFIC}}'), 'Трафик из');
+    assert.equal(nameOf('Осталось {{DAYS_LEFT}} дн.', { expiresAt: null }), 'Осталось дн.');
+    assert.equal(nameOf('{{USERNAME}} · Germany', { panelUsername: null }), '· Germany');
+    assert.equal(nameOf('Статус: {{STATUS}}', { status: null }), 'Статус:');
+  });
+
+  it('renders every variable any 3.x panel knows, and no other', () => {
+    // The oracles, not a copy of the list: each release's own `TEMPLATE_KEYS`.
+    // A key missing on this side would reach the customer in braces.
+    const eras = [contractPanel321, contractPanel323, contractPanel33, contractPanel343, contractPanel344];
+    const keys = new Set(eras.flatMap((contract) => [...contract.TEMPLATE_KEYS]));
+    assert.equal(keys.size, 25, 'the 3.4.4 list, which every earlier 3.x list is inside');
+    for (const key of keys) {
+      for (const remark of [`x {{${key}}}`, `x {{${key}:ACTIVE=y}}`]) {
+        const name = nameOf(remark, { expiresAt: null, panelUsername: null, status: null }) ?? '';
+        assert.equal(name.includes('{{'), false, `${remark} → ${JSON.stringify(name)}`);
+      }
+    }
+    // Remnawave keeps a token it does not know exactly as written — spelling,
+    // case and args — and so does this. Nothing is collapsed around it.
+    for (const remark of ['{{NOT_A_KEY}}  Germany', '{{days_left}} дн.', '{{ DAYS_LEFT }} дн.', '{{STATUS:{x}}}']) {
+      assert.equal(nameOf(remark), remark);
+    }
+  });
+
+  it('leaves a remark with no token exactly as the operator wrote it', () => {
+    assert.equal(nameOf('  Germany  -  1 🇩🇪 '), '  Germany  -  1 🇩🇪 ');
+  });
+
+  it('renders a section header’s remark the same way', () => {
+    const [header] = listFor([
+      host({ uuid: 'sep', viewPosition: 1, remark: '⏳ Осталось {{DAYS_LEFT}} дн. {{TRAFFIC_LEFT}}', tags: ['REZEIS:SEPARATOR'] }),
+      host({ uuid: 'de', viewPosition: 2 }),
+    ]);
+    assert.equal(header?.kind, 'separator');
+    assert.equal(header?.name, '⏳ Осталось 12 дн.');
+  });
+
+  it('compares the badge with the name as rendered, not as stored', () => {
+    // "Germany {{TRAFFIC_LEFT}}" reads "Germany" here, so a badge reading
+    // "GERMANY" only repeats it.
+    const [server] = listFor([host({ remark: 'Germany {{TRAFFIC_LEFT}}', serverDescription: 'GERMANY' })]);
+    assert.equal(server?.name, 'Germany');
+    assert.equal(server?.description, null);
+  });
+
+  it('takes the flag from the name as rendered', () => {
+    // The cabinet strips the flag back out of `name`, so it has to be the flag
+    // that `name` carries — here the one for this subscriber's status.
+    const remark = '{{STATUS:ACTIVE=🇩🇪 Germany|EXPIRED=🇳🇱 Netherlands}}';
+    const [server] = listFor([host({ remark })], { status: 'EXPIRED' });
+    assert.equal(server?.name, '🇳🇱 Netherlands');
+    assert.equal(server?.flag, '🇳🇱');
+    assert.equal(server?.countryCode, 'NL');
+  });
+
+  it('drops the rwEncodeBase64: marker, which no app ever shows', () => {
+    // A remark that STARTS with `rwEncodeBase64:` asks the panel to encode it:
+    // every 3.x panel cuts the marker off, renders the rest, and sends
+    // `base64:` + the Base64 of that (`parseTransform` and `renderTemplate` in
+    // `template-parser.ts`, the same transform in 3.0–3.2.0's engine). An app
+    // that reads `base64:` shows the rendered text, and that is the name here.
+    assert.equal(nameOf('rwEncodeBase64:🇩🇪 Germany - 1 · {{DAYS_LEFT}} дн.'), '🇩🇪 Germany - 1 · 12 дн.');
+    assert.equal(nameOf('rwEncodeBase64:Germany | {{TRAFFIC_LEFT}}'), 'Germany |');
+    // Nothing else changes: with no token left out, the rest is as written.
+    assert.equal(nameOf('rwEncodeBase64:  Germany  -  1 '), '  Germany  -  1 ');
+    // And the badge and the flag read the name without it.
+    const [server] = listFor([host({ remark: 'rwEncodeBase64:🇩🇪 Germany - 1', serverDescription: 'GERMANY - 1' })]);
+    assert.equal(server?.name, '🇩🇪 Germany - 1');
+    assert.equal(server?.description, null, 'a badge that only repeats the name');
+    assert.equal(server?.flag, '🇩🇪');
+    assert.equal(server?.countryCode, 'DE');
+  });
+
+  it('drops the marker only where the panel does, and decodes nothing', () => {
+    // `startsWith`, exactly as spelled, and once: anywhere else the panel sends
+    // the marker as text. Nor does the panel ever DECODE a remark — one the
+    // operator stored as `base64:…` goes out as it is — so neither does this.
+    const cases: ReadonlyArray<readonly [remark: string, name: string]> = [
+      [' rwEncodeBase64:Germany', ' rwEncodeBase64:Germany'],
+      ['Germany rwEncodeBase64:', 'Germany rwEncodeBase64:'],
+      ['rwencodebase64:Germany', 'rwencodebase64:Germany'],
+      ['rwEncodeBase64:rwEncodeBase64:Germany', 'rwEncodeBase64:Germany'],
+      ['base64:R2VybWFueQ==', 'base64:R2VybWFueQ=='],
+      ['rwEncodeBase64:base64:R2VybWFueQ==', 'base64:R2VybWFueQ=='],
+    ];
+    for (const [remark, name] of cases) {
+      assert.equal(nameOf(remark), name, remark);
+    }
+  });
+
+  it('drops the marker from a section header’s heading as well', () => {
+    const [header] = listFor([
+      host({ uuid: 'sep', viewPosition: 1, remark: 'rwEncodeBase64:⏳ Осталось {{DAYS_LEFT}} дн.', tags: ['REZEIS:SEPARATOR'] }),
+      host({ uuid: 'de', viewPosition: 2 }),
+    ]);
+    assert.equal(header?.kind, 'separator');
+    assert.equal(header?.name, '⏳ Осталось 12 дн.');
+  });
+});
+
+describe('the badge a subscriber’s external squad overrides', () => {
+  // Remnawave applies the user's external squad `hostOverrides` to every host
+  // it serves them (`applyHostOverrides` in `resolve-proxy-config.service.ts`,
+  // 3.2 through 3.4.4): a `serverDescription` there replaces each host's own,
+  // and `null` removes it, so Happ and Incy draw that chip — or none. The
+  // cabinet read only the host's own.
+  const BASE = 'ОСНОВНОЙ | СЕРВЕР';
+  const badgeFor = (
+    externalSquad: string | null,
+    externalSquads: RemnawaveExternalSquadHostOverrideInterface[] | undefined,
+    serverDescription: string | null = BASE,
+  ): string | null | undefined =>
+    buildServers(
+      ['squad-eu'],
+      {
+        hosts: [host({ remark: 'Germany - 1', serverDescription })],
+        nodes: [node()],
+        squads: [squad()],
+        ...(externalSquads === undefined ? {} : { externalSquads }),
+      },
+      subscriber({ externalSquad }),
+    )[0]?.description;
+  const PREMIUM: RemnawaveExternalSquadHostOverrideInterface = { uuid: 'ext-premium', serverDescription: 'PREMIUM' };
+  const BARE: RemnawaveExternalSquadHostOverrideInterface = { uuid: 'ext-bare', serverDescription: null };
+
+  it('shows the squad’s badge instead of the host’s', () => {
+    assert.equal(badgeFor('ext-premium', [BARE, PREMIUM]), 'PREMIUM');
+    // Also over a host that had none of its own.
+    assert.equal(badgeFor('ext-premium', [PREMIUM], null), 'PREMIUM');
+  });
+
+  it('shows no badge when the squad overrides it with null', () => {
+    assert.equal(badgeFor('ext-bare', [PREMIUM, BARE]), null);
+  });
+
+  it('keeps the host’s own badge when no squad of this subscriber overrides it', () => {
+    assert.equal(badgeFor(null, [PREMIUM, BARE]), BASE, 'in no external squad');
+    assert.equal(badgeFor('ext-other', [PREMIUM, BARE]), BASE, 'in a squad that overrides nothing');
+    assert.equal(badgeFor('ext-premium', []), BASE, 'no squad overrides anything');
+    // A snapshot written before this field existed overrides nothing.
+    assert.equal(badgeFor('ext-premium', undefined), BASE, 'a snapshot without the field');
+  });
+
+  it('holds the squad’s badge to the same rules as the host’s', () => {
+    assert.equal(badgeFor('ext-pad', [{ uuid: 'ext-pad', serverDescription: '  VIP  ' }]), 'VIP');
+    assert.equal(badgeFor('ext-empty', [{ uuid: 'ext-empty', serverDescription: '' }]), null);
+    assert.equal(badgeFor('ext-echo', [{ uuid: 'ext-echo', serverDescription: 'GERMANY - 1' }]), null);
+  });
+
+  it('takes from each external squad only the badge Remnawave would apply', () => {
+    // Remnawave applies `hostOverrides` only when it is an object with a key in
+    // it (`hasContent`), and then `serverDescription` only when it is present —
+    // `null` included, which removes the chip. Everything else on the squad is
+    // routing, headers, templates and settings, and none of it is a label.
+    const squadRow = (uuid: string, hostOverrides: unknown) => ({
+      uuid,
+      viewPosition: 1,
+      name: `name-${uuid}`,
+      tags: ['PAID'],
+      info: { membersCount: 3 },
+      templates: [{ templateUuid: 'tpl-uuid-secret', templateType: 'XRAY_JSON' }],
+      subscriptionSettings: { profileTitle: 'profile-title-secret' },
+      hostOverrides,
+      responseHeadersAdd: { 'x-secret-header': 'secret-value' },
+      responseHeadersRemove: [],
+      hwidSettings: null,
+      customRemarks: null,
+      subpageConfigUuid: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const mapped = mapExternalSquadHostOverrides({
+      response: {
+        total: 8,
+        externalSquads: [
+          squadRow('premium', { serverDescription: 'PREMIUM', vlessRouteId: 7 }),
+          squadRow('bare', { serverDescription: null }),
+          squadRow('empty-object', {}),
+          squadRow('null-overrides', null),
+          squadRow('route-only', { vlessRouteId: 3 }),
+          squadRow('junk-value', { serverDescription: 42 }),
+          squadRow('array-overrides', ['PREMIUM']),
+          { uuid: 'no-field', name: 'x' },
+          null,
+        ],
+      },
+    });
+    assert.deepEqual(mapped, [
+      { uuid: 'premium', serverDescription: 'PREMIUM' },
+      { uuid: 'bare', serverDescription: null },
+    ]);
+    const serialized = JSON.stringify(mapped);
+    for (const secret of ['vlessRouteId', 'tpl-uuid-secret', 'profile-title-secret', 'x-secret-header', 'name-premium', 'PAID']) {
+      assert.equal(serialized.includes(secret), false, secret);
+    }
+    // Not a list: nothing to override with, and no throw.
+    assert.deepEqual(mapExternalSquadHostOverrides({ response: { externalSquads: { premium: {} } } }), []);
+    assert.deepEqual(mapExternalSquadHostOverrides(null), []);
   });
 });

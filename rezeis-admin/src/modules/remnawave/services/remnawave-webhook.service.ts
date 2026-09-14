@@ -49,8 +49,9 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
   'user.enabled': { type: EVENT_TYPES.REMNAWAVE_USER_ENABLED, category: 'REMNAWAVE', severity: 'INFO' },
   'user.disabled': { type: EVENT_TYPES.REMNAWAVE_USER_DISABLED, category: 'REMNAWAVE', severity: 'WARNING' },
   'user.traffic_reset': { type: EVENT_TYPES.REMNAWAVE_USER_TRAFFIC_RESET, category: 'REMNAWAVE', severity: 'INFO' },
-  // Expiry warnings. ONE build serves both supported panel versions, so both
-  // spellings have to be here:
+  // Expiry warnings. A 2.x panel still delivers its webhooks — rezeis refuses
+  // the commands it would send such a panel, not the events it receives — so
+  // both spellings have to be here:
   //   * 2.7.4 raises one of four discrete names. Three are mapped below; the
   //     fourth, `user.expired_24_hours_ago`, is deliberately NOT mapped —
   //     `user.expired` has already produced a card by then and a second one a
@@ -878,8 +879,8 @@ export class RemnawaveWebhookService {
    * object — NESTED SHAPE FIRST.
    *
    * `RemnawaveWebhookUserEventsDto.data` declares no top-level
-   * `usedTrafficBytes` in EITHER supported version: 2.7.4 and 2.8.0 both put
-   * the counter inside the required `userTraffic` container, as
+   * `usedTrafficBytes` in EITHER contract it was checked in: 2.7.4 and 2.8.0
+   * both put the counter inside the required `userTraffic` container, as
    * `data.userTraffic.usedTrafficBytes`. Probing only the flat spelling
    * therefore read `undefined` out of every real payload and silently
    * disabled both consumers of this value — `User.firstTrafficAt` (nothing

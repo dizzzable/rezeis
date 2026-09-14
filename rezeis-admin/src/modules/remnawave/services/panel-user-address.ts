@@ -8,8 +8,8 @@ import type { RemnawaveUserAddressing } from './panel-version.util';
 import type { Prisma } from '@prisma/client';
 
 /**
- * How rezeis names ONE panel profile when talking to a panel, across all three
- * supported versions.
+ * How rezeis names ONE panel profile when talking to a panel, across the three
+ * panel versions a stored profile can come from.
  *
  * Remnawave 2.7.4 and 2.8.0 key users by a UUID. Remnawave 3.x deleted that
  * column outright — a 3.x user row has no `uuid` at all — and re-keyed every
@@ -363,12 +363,12 @@ export function panelUserAddress(
  * The key half of a `PATCH /api/users` body.
  *
  * This request is the one write that needs no version branch at all: every
- * supported panel accepts `username` as an alternative key (2.7.3's own
- * contract declares `uuid` and `username` both optional under an "at least one
- * of" refinement, and 3.2.1 answers `400 At least one of username, id must be
- * provided`). We still prefer the immutable identifier and keep the name as a
- * fallback — an operator who renames a profile by hand in the panel would
- * otherwise silently retarget every later write.
+ * contract from 2.7 through 3.4.4 accepts `username` as an alternative key
+ * (2.7.3's own contract declares `uuid` and `username` both optional under an
+ * "at least one of" refinement, and 3.2.1 answers `400 At least one of
+ * username, id must be provided`). We still prefer the immutable identifier
+ * and keep the name as a fallback — an operator who renames a profile by hand
+ * in the panel would otherwise silently retarget every later write.
  *
  * ON AN UNIDENTIFIED PANEL THE NAME IS STILL THE FALLBACK, NOT THE PREFERENCE.
  * This function used to invert its own rule there, reasoning that `{uuid}` is

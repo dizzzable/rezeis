@@ -68,7 +68,10 @@ import {
 } from '../interfaces/remnawave-system-stats.interface';
 import { normalizeBandwidthStats } from './remnawave-bandwidth-stats.normalizer';
 import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
-import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
+import {
+  RemnawaveExternalSquadHostOverrideInterface,
+  RemnawaveHostInterface,
+} from '../interfaces/remnawave-host.interface';
 import { withHwidApps } from './remnawave-hwid-stats-mapper';
 import { RemnawaveHwidStatsInterface } from '../interfaces/remnawave-hwid-stats.interface';
 import { RemnawaveConfigProfileInterface } from '../interfaces/remnawave-config-profile.interface';
@@ -88,6 +91,7 @@ import {
 import { normalizeSystemStats } from './remnawave-system-stats.normalizer';
 import {
   mapExternalSquadDetails,
+  mapExternalSquadHostOverrides,
   mapInternalSquadDetails,
 } from './remnawave-squad-mappers';
 import { mapNode } from './remnawave-node-mapper';
@@ -384,7 +388,7 @@ export interface RemnawavePanelUser {
   subscriptionUrl: string;
   telegramId: number | null;
   /**
-   * The panel's numeric user id. Present on every supported version — 2.x
+   * The panel's numeric user id. Present in every contract from 2.7 on — 2.x
    * carries it alongside the uuid, 3.x keys everything by it. On 3.x this is the
    * same value as {@link uuid}, parsed.
    */
@@ -469,8 +473,9 @@ export interface RemnawaveSubscriptionRequestPage {
 /**
  * The `records` array out of a subscription-request-history response.
  *
- * Both supported specs wrap it as `{ response: { records, total } }`. The bare
- * array and the `response.records`-less shapes are tolerated only because this
+ * Both specs this was written against (2.7.4, 2.8.0) wrap it as
+ * `{ response: { records, total } }`. The bare array and the
+ * `response.records`-less shapes are tolerated only because this
  * feeds the best-effort UI reader; the strict reader refuses anything that is
  * not the documented envelope instead.
  */
@@ -1066,10 +1071,11 @@ export class RemnawaveApiService {
 
   private readonly reportPanelUserShapeDrift = (drift: PanelUserShapeDrift): void => {
     const now = Date.now();
-    // The era is part of the identity of a drift. rezeis ships to deployments on
-    // 2.x panels and to deployments on 3.x panels; the SAME missing field means
-    // different things on each, and two operators reporting it must not produce
-    // indistinguishable events.
+    // The era is part of the identity of a drift. A panel that reports 2.x is
+    // still read here — every row this sees arrives over this service's own
+    // HTTP helpers, which `LegacyPanelRefusal` does not wrap — and the SAME
+    // missing field means different things on a 2.x and a 3.x panel, so two
+    // operators reporting it must not produce indistinguishable events.
     const signature = `era=${this.detectedPanelEra()}|${drift.signature}`;
     const seen = this.shapeDriftSeen.get(signature);
     if (seen !== undefined) {
@@ -1292,8 +1298,8 @@ export class RemnawaveApiService {
    * whose panel has since been upgraded to 3.x, and which nothing has touched
    * since — so no numeric id was ever recorded, and the panel's own migration
    * dropped the uuid without preserving it anywhere. `POST /api/users/resolve`
-   * by the stored username is the only way back, and it exists on every
-   * supported version (2.7.3's contract declares it too).
+   * by the stored username is the only way back, and it exists on every 3.x
+   * panel (2.7.3's contract declares it too).
    *
    * Returns `null` when the profile cannot be named on this panel at all.
    * Callers must treat that as "cannot act", never as "the profile is gone".
@@ -3108,6 +3114,24 @@ export class RemnawaveApiService {
       url: PANEL_ROUTES.externalSquads,
     });
     return mapExternalSquadDetails(payload);
+  }
+
+  /**
+   * The badge each external squad forces onto the hosts its members receive,
+   * for the subscriber server list — see `mapExternalSquadHostOverrides`.
+   *
+   * The same route as `getExternalSquadDetails` above, read for a different
+   * field through its own mapper, so the admin tab's rows do not grow it. Throws
+   * like that method does; the caller decides what a failure costs.
+   */
+  public async getExternalSquadHostOverrides(): Promise<
+    readonly RemnawaveExternalSquadHostOverrideInterface[]
+  > {
+    const payload = await this.requestJson<unknown>({
+      method: 'get',
+      url: PANEL_ROUTES.externalSquads,
+    });
+    return mapExternalSquadHostOverrides(payload);
   }
 
   public async getStatus(): Promise<RemnawaveStatusInterface> {

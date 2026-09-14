@@ -259,9 +259,9 @@ describe('RemnawaveWebhookService payload sanitization — user events', () => {
     assert.equal(emitted[0]?.metadata?.['remnawaveUsername'], 'anna_vpn');
     assert.equal(emitted[0]?.metadata?.['remnawaveId'], '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30');
     // …including the counter read out of the nested `userTraffic` container,
-    // which is where both supported panel versions put it. The formatter only
-    // renders the traffic line when this key is a number, so leaving it unset
-    // silently strips consumption from every Remnawave card.
+    // which is where every webhook contract, 2.7 through 3.4.4, puts it. The
+    // formatter only renders the traffic line when this key is a number, so
+    // leaving it unset silently strips consumption from every Remnawave card.
     assert.equal(emitted[0]?.metadata?.['usedTrafficBytes'], 53_687_091_200);
     // `meta.expiration` is 0 here on purpose: 0 is a legitimate value and a
     // truthiness check would drop it.

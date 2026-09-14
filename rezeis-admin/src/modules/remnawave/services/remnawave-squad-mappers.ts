@@ -1,3 +1,4 @@
+import { RemnawaveExternalSquadHostOverrideInterface } from '../interfaces/remnawave-host.interface';
 import {
   RemnawaveExternalSquadDetailInterface,
   RemnawaveInternalSquadDetailInterface,
@@ -12,10 +13,11 @@ import {
  * an `info` sub-object with the counters Remnawave's own UI shows. We
  * tolerate older panels where `info` is missing (counters fall back to 0).
  *
- * Everything beyond the counters, the identifying fields and each inbound's
- * UUID is dropped — the raw `inbounds[*].rawInbound` block alone is several KB
- * per squad and surfacing it through the admin API would leak panel internals
- * (raw Reality keys, public/private keypairs).
+ * Everything beyond the counters, the identifying fields, each inbound's UUID
+ * and an external squad's badge override is dropped — the raw
+ * `inbounds[*].rawInbound` block alone is several KB per squad and surfacing it
+ * through the admin API would leak panel internals (raw Reality keys,
+ * public/private keypairs).
  *
  * The UUID is the one field taken, and it is taken deliberately: it is the only
  * link from a subscriber's squad to the hosts they can reach, because a host
@@ -54,6 +56,8 @@ interface RawExternalSquad {
   readonly info?: {
     readonly membersCount?: unknown;
   };
+  /** Read only by `mapExternalSquadHostOverrides`, and only its badge. */
+  readonly hostOverrides?: unknown;
   readonly createdAt?: unknown;
   readonly updatedAt?: unknown;
 }
@@ -91,6 +95,41 @@ export function mapExternalSquadDetails(
     createdAt: toIsoString(squad.createdAt),
     updatedAt: toIsoString(squad.updatedAt),
   }));
+}
+
+/**
+ * The external squads that relabel host badges, and the label each one sets.
+ *
+ * Read by the subscriber server list, whose badge has to match the chip the
+ * customer's VPN client draws. Remnawave's own rule, which this mirrors:
+ * `hostOverrides` counts only when it is an object with at least one key in it
+ * (`hasContent` in `subscription.service.ts`), and inside it `serverDescription`
+ * counts only when present — `null` included, which removes the chip.
+ *
+ * The same explicit field read as `extractInboundUuids`, for the same reason:
+ * the rest of an external squad is response headers, templates, subscription
+ * settings and routing (`vlessRouteId`), none of it a label, and a spread here
+ * would carry it into a cache that feeds a customer-facing response.
+ */
+export function mapExternalSquadHostOverrides(
+  payload: unknown,
+): readonly RemnawaveExternalSquadHostOverrideInterface[] {
+  const list = (payload as RawSquadList | null)?.response?.externalSquads;
+  if (!Array.isArray(list)) return [];
+  const overrides: RemnawaveExternalSquadHostOverrideInterface[] = [];
+  for (const squad of list as readonly unknown[]) {
+    if (squad === null || typeof squad !== 'object') continue;
+    const { uuid, hostOverrides } = squad as RawExternalSquad;
+    if (typeof uuid !== 'string' || uuid.length === 0) continue;
+    if (hostOverrides === null || typeof hostOverrides !== 'object') continue;
+    // Absent reads `undefined` and is skipped with any other non-label: JSON has
+    // no `undefined`, so present-and-null is the only "remove" there is.
+    const value = (hostOverrides as Record<string, unknown>)['serverDescription'];
+    if (value === null || typeof value === 'string') {
+      overrides.push({ uuid, serverDescription: value });
+    }
+  }
+  return overrides;
 }
 
 /**

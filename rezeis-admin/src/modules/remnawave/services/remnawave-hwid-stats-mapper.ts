@@ -4,7 +4,8 @@
  * ── Why this exists ─────────────────────────────────────────────────────────
  *
  * `/api/hwid/devices/stats` has answered in two shapes, and both are in the
- * field — this project serves installs on 2.x and on 3.x at the same time:
+ * field — installs still run 2.x panels, and this read is not one the 2.x
+ * refusal (`LegacyPanelRefusal`) turns away:
  *
  *   - 2.7.x puts `byApp` at the TOP level, beside `byPlatform`;
  *   - 2.8, 3.2, contract 3.4.10 and panel 3.4.3 NEST it: every `byPlatform` entry carries its

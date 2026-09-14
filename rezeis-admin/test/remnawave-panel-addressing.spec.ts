@@ -20,10 +20,10 @@ import {
 } from '../src/modules/remnawave/services/stale-panel-link';
 
 /**
- * The layer that decides HOW a panel profile is named, across all three
- * supported panel versions.
+ * The layer that decides HOW a panel profile is named, across the three panel
+ * versions a stored profile can come from.
  *
- * This is the load-bearing piece of three-version support: seventeen adapter
+ * This is the load-bearing piece of reading all three: seventeen adapter
  * methods build their paths from it, and the failure it must never produce is
  * the quiet one — addressing SOMEBODY rather than nobody. Remnawave 2.x keys
  * users by UUID, 3.x deleted that column and keys them by a numeric id, and the
@@ -401,7 +401,8 @@ describe('RemnawaveApiService.getPanelShape', () => {
       // tie goes to what every panel this integration has run against serves.
       userLookups: { byTelegramId: true, byEmail: true },
       // And here the conservative choice is the opposite one: the offset route
-      // exists on every supported version, the stream does not.
+      // exists on every panel version this adapter has read, the stream only
+      // from 2.8 on.
       usersStream: false,
     });
   });

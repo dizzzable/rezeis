@@ -35,11 +35,16 @@ export interface SubscriberServerInterface {
    */
   readonly kind: 'server' | 'separator';
   /**
-   * The host's name exactly as the operator wrote it, flag and all.
+   * The host's name as the operator wrote it, flag and all — rendered for this
+   * subscriber the way Remnawave renders it.
    *
    * Not reformatted and not translated: this is the same string the customer
    * already reads inside their VPN client, and the two disagreeing would be
-   * worse than either wording alone.
+   * worse than either wording alone. That string is not the stored remark:
+   * Remnawave fills a remark's per-user variables ("Осталось {{DAYS_LEFT}} дн.")
+   * before any client sees it, so this does too, and leaves out the ones the
+   * panel cannot know rather than sending braces; see `renderRemark` in
+   * `subscriber-servers.service.ts`. The same holds for a separator's heading.
    */
   readonly name: string;
   /**
@@ -57,6 +62,10 @@ export interface SubscriberServerInterface {
    *
    * `null` also when it merely repeats the name, so a host whose operator
    * copied one field into the other does not show its name twice.
+   *
+   * For a subscriber whose external squad overrides `serverDescription`, it is
+   * the squad's value on every host — or `null` when the squad removes it —
+   * because that is what Remnawave puts in their client's config.
    */
   readonly description: string | null;
   /** The flag emoji in `name`, or one built from a node's country. */

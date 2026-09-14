@@ -26,10 +26,11 @@ export function mapHwidTopUser(raw: unknown): RemnawaveHwidTopUserInterface {
     //
     // 2.7.4 and 2.8.x both send `userUuid` beside a numeric `id` (verified in
     // the vendored contracts — the older comment here claimed 2.8 renamed it to
-    // `userId`, and no supported version declares that field on this row). 3.x
-    // sends NEITHER uuid form: its row is `{ id, username, devicesCount }` and
-    // the identity is the numeric `id`. `userId` is still accepted below in case
-    // a build does spell it that way; it costs nothing to read.
+    // `userId`, and no contract from 2.7 through 3.4.4 declares that field on
+    // this row). 3.x sends NEITHER uuid form: its row is `{ id, username,
+    // devicesCount }` and the identity is the numeric `id`. `userId` is still
+    // accepted below in case a build does spell it that way; it costs nothing
+    // to read.
     //
     // The 3.x branch has to be here, and it has to render the id as its decimal
     // string, because the ONLY consumer — the HWID-overage detector — looks the
@@ -62,9 +63,10 @@ export function mapHwidTopUser(raw: unknown): RemnawaveHwidTopUserInterface {
 
 /**
  * Client family from the UA's leading product token: `v2rayNG/1.8.5 (Android)`
- * → `v2rayNG`. The panel sends no client field on either supported build, so
- * this is derived rather than read — the alternative, which shipped before,
- * was a column that was blank for every row on every version.
+ * → `v2rayNG`. No contract from 2.7 through 3.4.4 puts a client field on a
+ * request-log row, so this is derived rather than read — the alternative,
+ * which shipped before, was a column that was blank for every row on every
+ * version.
  *
  * Deliberately dumb: the first `Product` of `Product/Version` per RFC 9110. No
  * allow-list, because an allow-list would silently label every client it has
@@ -105,11 +107,11 @@ export function mapSubscriptionRequestEntry(raw: unknown): RemnawaveSubscription
         ? Number(rawPanelId.trim())
         : null;
   return {
-    // `id` is `{"type": "number"}` on BOTH builds, and the shared `toString`
-    // helper returns '' for anything that is not already a string — so the
-    // previous `toString(r['id'])` produced an empty id for every row on every
-    // version, which the admin table then used as its React key. Stringify the
-    // number explicitly.
+    // `id` is a number in every contract, 2.7 through 3.4.4, and the shared
+    // `toString` helper returns '' for anything that is not already a string —
+    // so the previous `toString(r['id'])` produced an empty id for every row on
+    // every version, which the admin table then used as its React key.
+    // Stringify the number explicitly.
     id: typeof r['id'] === 'number' && Number.isFinite(r['id']) ? String(r['id']) : toString(r['id']),
     userUuid,
     panelUserId,
@@ -121,14 +123,15 @@ export function mapSubscriptionRequestEntry(raw: unknown): RemnawaveSubscription
 }
 
 /**
- * One entry of a provider's `billingNodes`. The two supported builds nest this
- * differently and BOTH are read, per the house rule of absorbing version drift
- * in the mapper rather than in the caller:
+ * One entry of a provider's `billingNodes`. The contracts nest this two ways
+ * and BOTH are read, per the house rule of absorbing version drift in the
+ * mapper rather than in the caller:
  *
- *   - 2.7.4 → `{ nodeUuid, name, countryCode }` (all three required)
- *   - 2.8.0 → `{ name, details: { nodeUuid, countryCode } | null }`
+ *   - 2.7 → `{ nodeUuid, name, countryCode }` (all three required)
+ *   - 2.8, and every 3.x contract through 3.4.4 →
+ *     `{ name, details: { nodeUuid, countryCode } | null }`
  *
- * A 2.8.0 row with `details: null` still has a name — it is a billing line
+ * A row with `details: null` still has a name — it is a billing line
  * whose node is gone — so it is kept with a null uuid rather than dropped,
  * because dropping it would quietly shrink the billed-node count the operator
  * is being asked to reconcile against an invoice.
@@ -146,9 +149,9 @@ function mapInfraBillingNode(raw: unknown): RemnawaveInfraBillingNodeInterface {
 /**
  * `GET /api/infra-billing/providers` → one provider.
  *
- * Reads only fields both specs declare. See
+ * Reads only fields every contract from 2.7 through 3.4.4 declares. See
  * {@link RemnawaveInfraProviderInterface} for the four that were being read
- * and exist upstream in neither version, and for why the amount carries no
+ * and exist upstream in none of them, and for why the amount carries no
  * currency.
  */
 export function mapInfraProvider(raw: unknown): RemnawaveInfraProviderInterface {
@@ -192,9 +195,10 @@ export function mapSubpageConfig(raw: unknown): RemnawaveSubpageConfigInterface 
     uuid: toString(r['uuid']),
     name: toString(r['name']),
     viewPosition: toNumber(r['viewPosition']),
-    // `config` is declared `{"nullable": true}` with no type on either build,
-    // so presence is the only honest thing to report about it. `undefined`
-    // (key absent) and `null` (key present, empty) both mean "not configured".
+    // `config` is declared nullable with no type in every contract, 2.7 through
+    // 3.4.4, so presence is the only honest thing to report about it.
+    // `undefined` (key absent) and `null` (key present, empty) both mean "not
+    // configured".
     hasConfig: r['config'] !== null && r['config'] !== undefined,
   };
 }
@@ -217,9 +221,10 @@ export function mapNodePlugin(raw: unknown): RemnawaveNodePluginInterface {
 
 export function mapUserSummary(raw: unknown): RemnawaveUserSummaryInterface {
   const r = (raw ?? {}) as Record<string, unknown>;
-  // Consumption lives in a nested block on BOTH builds. The row-level
-  // `trafficUsedBytes` this used to read belongs to the node dtos, not to any
-  // of the four user lookups that feed this mapper — see the interface note.
+  // Consumption lives in a nested block in every contract, 2.7 through 3.4.4.
+  // The row-level `trafficUsedBytes` this used to read belongs to the node
+  // dtos, not to any of the four user lookups that feed this mapper — see the
+  // interface note.
   const userTraffic = (r['userTraffic'] ?? {}) as Record<string, unknown>;
   // A 3.x row has no `uuid` field at all, and `toString` yields `''` for a
   // missing one — so every 3.x user came out of here with the SAME empty
