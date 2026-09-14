@@ -4,6 +4,7 @@ import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { runBullMqEnqueueWithTimeout } from '../../../common/queue/bullmq-enqueue-options';
+import { toBullMqJobId } from '../../../common/queue/bullmq-job-id';
 import {
   BROADCAST_BATCH_SIZE,
   BROADCAST_BLOCKED_REASON,
@@ -18,8 +19,16 @@ import {
  *
  * Exported so the producer and the two lookups cannot drift apart — they
  * did, and both lookups spent a release finding nothing.
+ *
+ * It was `broadcast-start:${broadcastId}` after that, which BullMQ refuses
+ * outright: two `:`-separated parts, "Custom Id cannot contain :". The add
+ * below is not wrapped, so the refusal went straight up through
+ * `sendBroadcast` as a 500 — no broadcast could be started or scheduled — and
+ * the reconciler's revival threw the same way. The broadcast id still travels
+ * in the job payload; only the queue's name for the job is digested.
  */
-export const startJobId = (broadcastId: string): string => `broadcast-start:${broadcastId}`;
+export const startJobId = (broadcastId: string): string =>
+  toBullMqJobId('broadcast-start', broadcastId);
 
 export interface BroadcastStartJobData {
   readonly broadcastId: string;

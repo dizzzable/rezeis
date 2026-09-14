@@ -3,7 +3,10 @@ import { afterEach, describe, it } from 'node:test';
 
 import { SyncJobStatus } from '@prisma/client';
 
-import { runBullMqEnqueueWithTimeout } from '../src/common/queue/bullmq-enqueue-options';
+import {
+  BullMqEnqueueError,
+  runBullMqEnqueueWithTimeout,
+} from '../src/common/queue/bullmq-enqueue-options';
 import { isBullMqJobAlreadyQueued } from '../src/common/queue/bullmq-duplicate-inspection';
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import {
@@ -56,6 +59,20 @@ describe('BullMQ duplicate inspection', () => {
   });
 });
 
+/**
+ * What an enqueue failure says, and what it must never say
+ * ═════════════════════════════════════════════════════════
+ * These cases used to check only `JSON.stringify(error)` — which, for an
+ * `Error`, never includes `message` at all — while the message itself was one
+ * constant sentence. So they passed for a reason unrelated to what they
+ * describe, and the constant sentence hid the one reason that mattered: every
+ * Telegram job in the panel was refused by BullMQ for its id ("Custom Id cannot
+ * contain :"), and the log said "BullMQ enqueue operation failed", nothing more.
+ *
+ * Both halves are now asserted on the MESSAGE, where a log line reads them:
+ * the cause's words are kept, a connection string is not. The serialised form
+ * is still checked, because that is what a structured logger emits.
+ */
 describe('BullMQ enqueue timeout', () => {
   it('fails stalled enqueue operations with a sanitized bounded error', async () => {
     let enqueueStarted = false;
@@ -67,8 +84,10 @@ describe('BullMQ enqueue timeout', () => {
       }, 5),
       (error: unknown) => {
         const serialized = JSON.stringify(error);
-        assert.equal(error instanceof Error, true);
+        assert.equal(error instanceof BullMqEnqueueError, true);
         assert.equal((error as Error).name, 'BullMqEnqueueError');
+        assert.equal((error as BullMqEnqueueError).reason, 'timeout');
+        assert.equal((error as Error).message, 'BullMQ enqueue operation timed out after 5ms');
         assert.equal(serialized.includes('profile-sync:secret-job'), false);
         assert.equal(serialized.includes('secret-password'), false);
         assert.equal(serialized.includes('redis://'), false);
@@ -79,6 +98,23 @@ describe('BullMQ enqueue timeout', () => {
     assert.equal(enqueueStarted, true);
   });
 
+  it('keeps BullMQ’s own reason in the message', async () => {
+    // THE regression. Without it a refused job id and a Redis outage read the
+    // same, and every caller took its Redis-is-down fallback for both.
+    await assert.rejects(
+      runBullMqEnqueueWithTimeout(() => Promise.reject(new Error('Custom Id cannot contain :')), 5),
+      (error: unknown) => {
+        assert.equal(error instanceof BullMqEnqueueError, true);
+        assert.equal((error as BullMqEnqueueError).reason, 'rejected');
+        assert.equal(
+          (error as Error).message,
+          'BullMQ enqueue operation failed: Custom Id cannot contain :',
+        );
+        return true;
+      },
+    );
+  });
+
   it('sanitizes rejected enqueue failures', async () => {
     const rawError = 'redis://admin:secret-password@queue.internal/0 payload subscription_id=sub_secret';
 
@@ -86,11 +122,20 @@ describe('BullMQ enqueue timeout', () => {
       runBullMqEnqueueWithTimeout(() => Promise.reject(new Error(rawError)), 5),
       (error: unknown) => {
         const serialized = JSON.stringify(error);
+        const message = (error as Error).message;
         assert.equal(error instanceof Error, true);
         assert.equal((error as Error).name, 'BullMqEnqueueError');
         assert.equal(serialized.includes('secret-password'), false);
         assert.equal(serialized.includes('redis://'), false);
         assert.equal(serialized.includes('sub_secret'), false);
+        // The connection string goes, host and credentials alike; the rest of
+        // the cause is its reason and stays — Redis and BullMQ do not put job
+        // payloads in their errors.
+        assert.equal(message.includes('secret-password'), false);
+        assert.equal(message.includes('redis://'), false);
+        assert.equal(message.includes('queue.internal'), false);
+        assert.equal(message, 'BullMQ enqueue operation failed: [url] payload subscription_id=sub_secret');
+        assert.equal((error as Error).stack, '', 'this helper’s frames say nothing about the enqueue');
         return true;
       },
     );
@@ -108,6 +153,24 @@ describe('BullMQ enqueue timeout', () => {
         assert.equal(serialized.includes('secret-password'), false);
         assert.equal(serialized.includes('redis://'), false);
         assert.equal(serialized.includes('sub_secret'), false);
+        assert.equal((error as Error).message.includes('secret-password'), false);
+        return true;
+      },
+    );
+  });
+
+  it('bounds a long cause and still says something for a cause with no words', async () => {
+    await assert.rejects(
+      runBullMqEnqueueWithTimeout(() => Promise.reject(new Error('x'.repeat(5_000))), 5),
+      (error: unknown) => {
+        assert.ok((error as Error).message.length < 400, 'a log line, not a dump');
+        return true;
+      },
+    );
+    await assert.rejects(
+      runBullMqEnqueueWithTimeout(() => Promise.reject({ weird: true }), 5),
+      (error: unknown) => {
+        assert.equal((error as Error).message, 'BullMQ enqueue operation failed');
         return true;
       },
     );

@@ -3,10 +3,16 @@ import { describe, it } from 'node:test';
 
 import { BroadcastStatus } from '@prisma/client';
 
+import { startJobId } from '../src/modules/broadcast/services/broadcast-queue.service';
 import { BroadcastService } from '../src/modules/broadcast/services/broadcast.service';
 
 /**
  * A scheduled broadcast is a record, not just a delayed job in Redis.
+ *
+ * The job id recorded below is the one `enqueueStart` returns, built by the
+ * same function. It used to be the literal `'broadcast-start:b-1'` — an id
+ * BullMQ refuses — which let this file pin a shape no real schedule could ever
+ * have (`broadcast-queue-start-job.spec.ts` is where BullMQ gets a say).
  *
  * The write is CONDITIONAL, and that is the part worth guarding. Unconditional,
  * it was a way to stamp SCHEDULED over PROCESSING: a send fires at 10:00, the
@@ -44,13 +50,13 @@ describe('recording a schedule', () => {
   it('writes the status, the due time and the job id together', async () => {
     const { service, updates } = serviceWith(BroadcastStatus.DRAFT);
 
-    const recorded = await service.recordSchedule('b-1', DUE, 'broadcast-start:b-1');
+    const recorded = await service.recordSchedule('b-1', DUE, startJobId('b-1'));
 
     assert.equal(recorded, true);
     assert.deepStrictEqual(updates[0]?.data, {
       status: BroadcastStatus.SCHEDULED,
       scheduledAt: DUE,
-      queueJobId: 'broadcast-start:b-1',
+      queueJobId: startJobId('b-1'),
     });
   });
 
@@ -60,11 +66,11 @@ describe('recording a schedule', () => {
     // reconciler's `scheduledAt < now` query could then never see again.
     const { service, updates } = serviceWith(BroadcastStatus.SCHEDULED);
 
-    const recorded = await service.recordSchedule('b-1', null, 'broadcast-start:b-1');
+    const recorded = await service.recordSchedule('b-1', null, startJobId('b-1'));
 
     assert.equal(recorded, true);
     assert.deepStrictEqual(updates[0]?.data, {
-      queueJobId: 'broadcast-start:b-1',
+      queueJobId: startJobId('b-1'),
       scheduledAt: null,
       status: BroadcastStatus.DRAFT,
     });
@@ -75,7 +81,7 @@ describe('recording a schedule', () => {
     // "quietly relabelled a send that is already going out".
     const { service, updates } = serviceWith(BroadcastStatus.PROCESSING);
 
-    const recorded = await service.recordSchedule('b-1', DUE, 'broadcast-start:b-1');
+    const recorded = await service.recordSchedule('b-1', DUE, startJobId('b-1'));
 
     assert.equal(recorded, false, 'a running broadcast was relabelled as scheduled');
     assert.equal(updates.length, 1, 'the write was not even attempted conditionally');
