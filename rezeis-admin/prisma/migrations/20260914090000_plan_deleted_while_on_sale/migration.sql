@@ -1,0 +1,15 @@
+-- Whether a deleted plan was still ON SALE when an operator deleted it.
+--
+-- `PlanDeletionService` switches a plan off and archives it as it stamps
+-- `deleted_at`, which erased the state it found. An ad placement's TARIFF signup
+-- bonus stops when its plan is archived or switched off, and keeps paying out a
+-- plan deleted while on sale (the delete dialog promises that) — so once the two
+-- looked the same, deleting an already archived plan turned a stopped bonus back
+-- on for every new signup.
+--
+-- NOT NULL DEFAULT false: a constant default is kept in the catalogue on
+-- PostgreSQL 11 and later, so adding it rewrites no table. `false` is the
+-- reading that grants nothing new for a plan deleted before this column
+-- existed. `IF NOT EXISTS` because `prisma migrate deploy` may replay a failed
+-- run.
+ALTER TABLE "plans" ADD COLUMN IF NOT EXISTS "deleted_while_on_sale" BOOLEAN NOT NULL DEFAULT false;

@@ -78,8 +78,8 @@ interface Wire {
   catalogue: Plan[]
   /** Per plan id; absent → `{ references: [] }`. A promise holds the answer back. */
   readonly references: Map<string, Reply | Promise<Reply>>
-  /** Per plan id; absent → `{ deleted: true, removed: true }`. */
-  readonly deletes: Map<string, Reply>
+  /** Per plan id; absent → `{ deleted: true, removed: true }`. A promise holds the answer back. */
+  readonly deletes: Map<string, Reply | Promise<Reply>>
   /** Every request the page made, in order. */
   readonly log: Exchange[]
 }
@@ -101,7 +101,7 @@ async function answer(method: string, url: string): Promise<Reply> {
   const planPath = PLAN_PATH.exec(url)
   if (method === 'DELETE' && planPath !== null) {
     const id = decodeURIComponent(planPath[1])
-    const reply = wire.deletes.get(id) ?? { status: 200, data: { deleted: true, removed: true } }
+    const reply = (await wire.deletes.get(id)) ?? { status: 200, data: { deleted: true, removed: true } }
     if ('status' in reply && reply.status === 200) {
       wire.catalogue = wire.catalogue.filter((listed) => listed.id !== id)
     }
@@ -371,6 +371,84 @@ describe('the confirmation', () => {
     expect(afterDelete).toEqual([{ method: 'GET', url: '/admin/plans' }])
     expect(toast.error).not.toHaveBeenCalled()
   })
+
+  it('sends exactly one DELETE when Delete is clicked again while the first is still pending', async () => {
+    grant('plans:delete')
+    let release: (reply: Reply) => void = () => undefined
+    wire.deletes.set(ARCHIVED.id, new Promise<Reply>((resolve) => (release = resolve)))
+    const user = await renderPage([ARCHIVED])
+
+    const dialog = await openDeleteDialog(user, ARCHIVED.name)
+    await referencesSettled(dialog)
+    const confirm = within(dialog).getByRole('button', { name: confirmLabel() })
+    await user.click(confirm)
+    await waitFor(() => expect(deletesSent()).toHaveLength(1))
+
+    expect(confirm).toBeDisabled()
+    await user.click(confirm)
+    await user.dblClick(confirm)
+    expect(deletesSent()).toHaveLength(1)
+
+    release({ status: 200, data: { deleted: true, removed: true } })
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(i18n.t('plansPage.deleted')))
+    expect(deletesSent()).toHaveLength(1)
+    expect(toast.success).toHaveBeenCalledTimes(1)
+  })
+
+  it('cannot be dismissed with Escape while its DELETE is pending, and closes once it is answered', async () => {
+    grant('plans:delete')
+    let release: (reply: Reply) => void = () => undefined
+    wire.deletes.set(ARCHIVED.id, new Promise<Reply>((resolve) => (release = resolve)))
+    const user = await renderPage([ARCHIVED])
+
+    const dialog = await openDeleteDialog(user, ARCHIVED.name)
+    await referencesSettled(dialog)
+    await user.click(within(dialog).getByRole('button', { name: confirmLabel() }))
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: confirmLabel() })).toBeDisabled())
+
+    await user.keyboard('{Escape}')
+
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: cancelLabel() })).toBeDisabled()
+
+    release({ status: 200, data: { deleted: true, removed: true } })
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(deletesSent()).toHaveLength(1)
+  })
+
+  it('asks again when the dialog is reopened, and holds Delete until the new answer arrives', async () => {
+    grant('plans:delete')
+    wire.references.set(ARCHIVED.id, referencesReply(ARCHIVED.id, [{ kind: 'quests', count: 1 }]))
+    const user = await renderPage([ARCHIVED])
+    const oneQuest = i18n.t('plansPage.deleteDialog.references.quests', { count: 1 })
+    const twoQuests = i18n.t('plansPage.deleteDialog.references.quests', { count: 2 })
+    expect(oneQuest).not.toBe(twoQuests)
+
+    const first = await openDeleteDialog(user, ARCHIVED.name)
+    await referencesSettled(first)
+    expect(first).toHaveTextContent(oneQuest)
+    await user.click(within(first).getByRole('button', { name: cancelLabel() }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+
+    // Another quest took the plan meanwhile, and this time the count is slow.
+    let release: (reply: Reply) => void = () => undefined
+    wire.references.set(ARCHIVED.id, new Promise<Reply>((resolve) => (release = resolve)))
+    const second = await openDeleteDialog(user, ARCHIVED.name)
+
+    // The previous opening's answer is not shown with Delete already live.
+    expect(second).toHaveTextContent(i18n.t('plansPage.deleteDialog.checking'))
+    expect(second).not.toHaveTextContent(oneQuest)
+    expect(within(second).getByRole('button', { name: confirmLabel() })).toBeDisabled()
+
+    release(referencesReply(ARCHIVED.id, [{ kind: 'quests', count: 2 }]))
+    await referencesSettled(second)
+    expect(second).toHaveTextContent(twoQuests)
+    expect(within(second).getByRole('button', { name: confirmLabel() })).toBeEnabled()
+    expect(
+      wire.log.filter((exchange) => exchange.url === `/admin/plans/${ARCHIVED.id}/references`),
+    ).toHaveLength(2)
+    expect(deletesSent()).toEqual([])
+  })
 })
 
 describe('what the dialog says about a plan in use', () => {
@@ -444,6 +522,94 @@ describe('what the dialog says about a plan in use', () => {
     // Direction-complete: a quest says nothing about subscribers or invoices.
     expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.consequences.subscribers'))
     expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.consequences.invoices'))
+  })
+
+  // An ad placement's bonus, unlike every other grant, stops when the plan goes
+  // off sale — and the server reports the placement only while its bonus still
+  // grants the plan. So the promise that it keeps granting is a line of its own,
+  // stated exactly when the placement is reported, and the shared grants line
+  // never speaks for ad bonuses.
+  it('says ad placements keep granting the plan only when the server reports them, in a line of their own', async () => {
+    grant('plans:delete')
+    wire.references.set(ON_SALE.id, referencesReply(ON_SALE.id, [{ kind: 'adPlacements', count: 1 }]))
+    const user = await renderPage([ON_SALE])
+
+    const dialog = await openDeleteDialog(user, ON_SALE.name)
+    await referencesSettled(dialog)
+
+    const adBonuses = i18n.t('plansPage.deleteDialog.consequences.adBonuses')
+    expect(adBonuses).not.toMatch(/^plansPage\./)
+    expect(dialog).toHaveTextContent(i18n.t('plansPage.deleteDialog.references.adPlacements', { count: 1 }))
+    expect(dialog).toHaveTextContent(adBonuses)
+    expect(dialog).toHaveTextContent(i18n.t('plansPage.deleteDialog.consequences.cleanup'))
+    // Direction-complete: no promo code, quest or gift is listed, so the shared
+    // grants line has nothing to say.
+    expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.consequences.grants'))
+  })
+
+  it('does not claim ad bonuses keep granting a plan that only other grants hold', async () => {
+    grant('plans:delete')
+    // What a server answers for an archived plan an active placement still
+    // names: its bonus has stopped, so the placement is not reported at all.
+    wire.references.set(ARCHIVED.id, referencesReply(ARCHIVED.id, [{ kind: 'promocodes', count: 1 }]))
+    const user = await renderPage([ARCHIVED])
+
+    const dialog = await openDeleteDialog(user, ARCHIVED.name)
+    await referencesSettled(dialog)
+
+    const grants = i18n.t('plansPage.deleteDialog.consequences.grants')
+    const adBonuses = i18n.t('plansPage.deleteDialog.consequences.adBonuses')
+    expect(adBonuses).not.toMatch(/^plansPage\./)
+    expect(dialog).toHaveTextContent(grants)
+    expect(dialog).not.toHaveTextContent(adBonuses)
+    expect(grants).not.toMatch(/\bad (bonus|placement)/i)
+  })
+
+  it('does not claim an unused plan still on sale is deleted permanently: it is hidden now and cleaned up at night', async () => {
+    grant('plans:delete')
+    const user = await renderPage([ON_SALE])
+
+    const dialog = await openDeleteDialog(user, ON_SALE.name)
+    await referencesSettled(dialog)
+
+    const onSaleLead = i18n.t('plansPage.deleteDialog.unusedOnSale', { name: ON_SALE.name })
+    expect(onSaleLead).not.toMatch(/^plansPage\./)
+    expect(onSaleLead).toContain(ON_SALE.name)
+    expect(dialog).toHaveTextContent(onSaleLead)
+    expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.unused', { name: ON_SALE.name }))
+    expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.used'))
+  })
+
+  it('says subscribers of an archived plan left without a replacement must choose, without claiming the plan lingers', async () => {
+    grant('plans:delete')
+    wire.references.set(
+      ON_SALE.id,
+      referencesReply(ON_SALE.id, [
+        { kind: 'transitions', count: 1 },
+        { kind: 'replacementOrphans', count: 1 },
+      ]),
+    )
+    const user = await renderPage([ON_SALE])
+
+    const dialog = await openDeleteDialog(user, ON_SALE.name)
+    await referencesSettled(dialog)
+
+    const list = within(dialog).getByRole('list', { name: i18n.t('plansPage.deleteDialog.usedBy') })
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual([
+      i18n.t('plansPage.deleteDialog.references.transitions', { count: 1 }),
+      i18n.t('plansPage.deleteDialog.references.replacementOrphans', { count: 1 }),
+    ])
+    const renewalChoice = i18n.t('plansPage.deleteDialog.consequences.renewalChoice')
+    expect(renewalChoice).not.toMatch(/^plansPage\./)
+    expect(dialog).toHaveTextContent(renewalChoice)
+    // Nothing holds the plan: no "removed once nothing uses it", no "used" lead.
+    expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.consequences.cleanup'))
+    expect(dialog).not.toHaveTextContent(i18n.t('plansPage.deleteDialog.used'))
+    expect(dialog).toHaveTextContent(i18n.t('plansPage.deleteDialog.unusedOnSale', { name: ON_SALE.name }))
   })
 
   it('does not claim a plan used only as an upgrade target lingers — the delete removes it for good', async () => {
@@ -606,11 +772,72 @@ describe('in Russian', () => {
     ])
     expect(dialog).toHaveTextContent('Подписчики сохранят доступ до конца срока')
     expect(dialog).toHaveTextContent('продолжат выдавать этот тариф')
+    // No placement was reported, so nothing may promise an ad bonus.
+    expect(dialog).not.toHaveTextContent('рекламн')
     expect(dialog).toHaveTextContent('Данные тарифа удалятся полностью, когда он перестанет где-либо использоваться.')
     expect(within(dialog).getByRole('button', { name: 'Удалить' })).toBeEnabled()
     expect(within(dialog).getByRole('button', { name: 'Отмена' })).toBeEnabled()
     // Not one word of the English copy leaked through as a fallback.
     expect(dialog).not.toHaveTextContent('Currently used by')
     expect(dialog).not.toHaveTextContent('subscription')
+  })
+
+  it('says in Russian that ad placements keep granting a plan, in their own line', async () => {
+    await i18n.changeLanguage('ru')
+    await waitFor(() => expect(i18n.t('plansPage.deleteDialog.confirm')).toBe('Удалить'))
+
+    grant('plans:delete')
+    wire.references.set(ON_SALE.id, referencesReply(ON_SALE.id, [{ kind: 'adPlacements', count: 2 }]))
+    const user = await renderPage([ON_SALE])
+
+    await user.click(within(controlsOf(ON_SALE.name)).getByRole('button', { name: 'Удалить тариф' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await referencesSettled(dialog)
+
+    const list = within(dialog).getByRole('list', { name: 'Сейчас используется:' })
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual(['2 рекламных размещения с бонусом за регистрацию'])
+    expect(dialog).toHaveTextContent('Рекламные размещения продолжат выдавать этот тариф как бонус за регистрацию.')
+    // The shared grants line is not stated: nothing else grants the plan.
+    expect(dialog).not.toHaveTextContent('Промокоды')
+    expect(dialog).not.toHaveTextContent('placement')
+  })
+
+  it('names archived plans left without a replacement in Russian, and what happens to their subscribers', async () => {
+    await i18n.changeLanguage('ru')
+    await waitFor(() => expect(i18n.t('plansPage.deleteDialog.confirm')).toBe('Удалить'))
+
+    grant('plans:delete')
+    wire.references.set(
+      ON_SALE.id,
+      referencesReply(ON_SALE.id, [
+        { kind: 'transitions', count: 3 },
+        { kind: 'replacementOrphans', count: 3 },
+      ]),
+    )
+    const user = await renderPage([ON_SALE])
+
+    await user.click(within(controlsOf(ON_SALE.name)).getByRole('button', { name: 'Удалить тариф' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await referencesSettled(dialog)
+
+    expect(dialog).toHaveTextContent(
+      'Тариф «Premium» будет удалён вместе с длительностями и ценами. Из панели и кабинета он исчезнет сразу, а его данные удалит ночная очистка.',
+    )
+    const list = within(dialog).getByRole('list', { name: 'Сейчас используется:' })
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual([
+      '3 тарифа, где он указан как улучшение или замена (оттуда он будет убран)',
+      '3 архивных тарифа, которые продлевают подписчиков на этот, и других замен в продаже у них нет',
+    ])
+    expect(dialog).toHaveTextContent('Подписчикам этих архивных тарифов при продлении придётся самим выбрать тариф')
+    expect(dialog).not.toHaveTextContent('Данные тарифа удалятся полностью')
+    expect(dialog).not.toHaveTextContent('archived')
   })
 })

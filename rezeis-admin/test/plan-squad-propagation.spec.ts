@@ -1088,7 +1088,8 @@ function createUpdateHarness(options: {
         return created.map((row) => ({ id: row.id }));
       },
     },
-    $queryRaw: async () => [],
+    // The row lock `updatePlan` takes before it writes: a live plan.
+    $queryRaw: async () => [{ deletedAt: null }],
   };
 
   const prismaService = {

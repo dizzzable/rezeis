@@ -11,6 +11,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
@@ -400,6 +401,7 @@ export class ReferralPointsExchangeService {
             trafficLimitStrategy: true,
             internalSquads: true,
             externalSquad: true,
+            deletedAt: true,
           },
         });
         if (plan === null) throw new BadRequestException('Gift subscription plan not found');
@@ -413,7 +415,12 @@ export class ReferralPointsExchangeService {
             rewardType: 'SUBSCRIPTION',
             reward: giftConfig.giftDurationDays,
             plan: {
-              ...(buildPlanSnapshot(plan) as Record<string, unknown>),
+              // Shown without the "(deleted …)" suffix a deleted gift plan wears
+              // once its name was reused.
+              ...(buildPlanSnapshot({
+                ...plan,
+                name: displayPlanName(plan),
+              }) as Record<string, unknown>),
               duration: giftConfig.giftDurationDays,
             } as Prisma.InputJsonValue,
             maxActivations: 1,

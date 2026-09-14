@@ -7,6 +7,7 @@ import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata
 import { compactLivePlanOrder } from '../utils/plan-deletion.util';
 
 import {
+  isUnreferenced,
   PlanReferenceGuardService,
   PlanReferenceInterface,
   presentReferences,
@@ -21,8 +22,9 @@ export interface PlanReferencesResponseInterface {
 
 /**
  * `DELETE /admin/plans/:planId`. The delete never refuses; `removed` says which
- * of the two outcomes happened — the row went (`true`), or it was hidden because
- * something still used it (`false`).
+ * of the two outcomes happened — the row went (`true`), or it was hidden
+ * (`false`): because something still used it, or because it was on sale at that
+ * moment, in which case the nightly sweep removes it once nothing uses it.
  */
 export interface PlanDeleteResultInterface {
   readonly deleted: true;
@@ -61,11 +63,13 @@ const PLAN_DELETE_TIMEOUT_MS = 30_000;
  *   1. The plan is removed from every other plan's upgrade and replacement
  *      lists. A transition therefore never keeps a plan alive.
  *   2. `PlanReferenceGuardService` counts what still uses it.
- *   3. Nothing → the row is deleted, and its durations and prices cascade.
- *      Something → the row is SOFT-deleted: `deletedAt` stamped, archived,
- *      inactive. It is gone from every listing, picker, sale and renewal, but a
- *      paid invoice, a promocode or a quest prize that names it still resolves
- *      it by id — which is the whole reason the row stays. The nightly
+ *   3. Nothing, and the plan already off sale → the row is deleted, and its
+ *      durations and prices cascade. Something, or a plan still on sale → the
+ *      row is SOFT-deleted: `deletedAt` stamped, archived, inactive (and
+ *      `deletedWhileOnSale` records which of those flags it had). It is gone
+ *      from every listing, picker, sale and renewal, but a paid invoice, a
+ *      promocode or a quest prize that names it still resolves it by id —
+ *      which is the whole reason the row stays. The nightly
  *      `RetiredPlanSweeperService` removes it once the same guard reports
  *      nothing.
  *
@@ -143,14 +147,24 @@ export class PlanDeletionService {
         // nightly sweep removes the row once the guard finds nothing — by then
         // no checkout can have started on it.
         const onSale = plan.isActive && !plan.isArchived;
-        const removed = references.length === 0 && !onSale;
+        // `isUnreferenced`, not "no kind listed": an informational kind such as
+        // `replacementOrphans` holds nothing (and is zero after the strip).
+        const removed = isUnreferenced(counts) && !onSale;
 
         if (removed) {
           await tx.plan.delete({ where: { id: planId } });
         } else {
           await tx.plan.update({
             where: { id: planId },
-            data: { deletedAt: new Date(), isArchived: true, isActive: false },
+            // `deletedWhileOnSale` keeps what the flags are about to lose: a
+            // grant the operator had stopped by archiving or switching the
+            // plan off must stay stopped once the plan is deleted.
+            data: {
+              deletedAt: new Date(),
+              deletedWhileOnSale: onSale,
+              isArchived: true,
+              isActive: false,
+            },
           });
         }
         // After BOTH outcomes: a hidden plan that kept its index would leave a

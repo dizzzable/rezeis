@@ -410,7 +410,8 @@ describe('PlansAdminService', () => {
             },
             adminAuditLog: { create: async () => undefined },
             subscription: { update: async () => undefined },
-            $queryRaw: async () => [],
+            // The row lock `updatePlan` takes before it writes: a live plan.
+            $queryRaw: async () => [{ deletedAt: null }],
           }),
       };
     const service = createService(
@@ -742,7 +743,8 @@ function createWriteHarness(currentPlan: Record<string, unknown> | null = null):
         },
         adminAuditLog: { create: async () => undefined },
         subscription: { update: async () => undefined },
-        $queryRaw: async () => [],
+        // The row lock `updatePlan` takes before it writes: a live plan.
+        $queryRaw: async () => [{ deletedAt: null }],
       }),
   };
   const service = createService(prismaService, {

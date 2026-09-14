@@ -53,11 +53,12 @@ const CONTRACT_KINDS = [
   'referralGift',
   'referralEligibility',
   'transitions',
+  'replacementOrphans',
 ]
 
 describe('the reference kind table', () => {
   it('names exactly the contract’s kinds, in the contract’s order', () => {
-    expect(CONTRACT_KINDS).toHaveLength(15)
+    expect(CONTRACT_KINDS).toHaveLength(16)
     expect([...PLAN_REFERENCE_KINDS]).toEqual(CONTRACT_KINDS)
     expect(Object.keys(PLAN_REFERENCE_KIND_SPECS).sort()).toEqual([...CONTRACT_KINDS].sort())
   })
@@ -86,19 +87,26 @@ describe('the reference kind table', () => {
       contests: 'grants',
       wheelSectors: 'grants',
       addOns: null,
-      adPlacements: 'grants',
+      // Its own line: the server reports an ad placement only while its bonus
+      // still grants the plan, which — unlike every other grant — stops when the
+      // plan goes off sale. The shared grants line cannot speak for it.
+      adPlacements: 'adBonuses',
       referralGift: 'grants',
       referralEligibility: null,
       transitions: null,
+      replacementOrphans: 'renewalChoice',
     })
-    expect([...PLAN_DELETE_CONSEQUENCES]).toEqual(['subscribers', 'invoices', 'grants'])
+    expect([...PLAN_DELETE_CONSEQUENCES]).toEqual(['subscribers', 'invoices', 'grants', 'adBonuses', 'renewalChoice'])
   })
 
   // The delete strips the plan out of other plans' upgrade and replacement
-  // lists before it decides, so a transition never keeps the row alive.
-  it('lets only a transition leave nothing behind', () => {
+  // lists before it decides, so a transition never keeps the row alive — and
+  // an archived plan left with no replacement is something the delete does to
+  // THAT plan's subscribers, not something that holds this one.
+  it('lets only a transition and a replacement orphan leave nothing behind', () => {
     expect(PLAN_REFERENCE_KINDS.filter((kind) => !PLAN_REFERENCE_KIND_SPECS[kind].keepsPlan)).toEqual([
       'transitions',
+      'replacementOrphans',
     ])
   })
 })
@@ -145,6 +153,13 @@ describe('describePlanReferences', () => {
       ]).consequences,
     ).toEqual(['subscribers', 'invoices', 'grants'])
     expect(describePlanReferences([{ kind: 'quests', count: 1 }]).consequences).toEqual(['grants'])
+    expect(
+      describePlanReferences([
+        { kind: 'adPlacements', count: 1 },
+        { kind: 'promocodes', count: 1 },
+      ]).consequences,
+    ).toEqual(['grants', 'adBonuses'])
+    expect(describePlanReferences([{ kind: 'adPlacements', count: 2 }]).consequences).toEqual(['adBonuses'])
     expect(describePlanReferences([{ kind: 'addOns', count: 2 }]).consequences).toEqual([])
     expect(describePlanReferences([{ kind: 'loyaltyTiers', count: 2 }]).consequences).toEqual([])
   })
@@ -153,6 +168,18 @@ describe('describePlanReferences', () => {
     const impact = describePlanReferences([{ kind: 'transitions', count: 2 }])
     expect(impact.keepsPlan).toBe(false)
     expect(impact.rows).toHaveLength(1)
+  })
+
+  // Nothing holds the plan, and still there is something to say: the renewal
+  // of another plan's subscribers changes.
+  it('states the renewal consequence of an orphaned archived plan without keeping the plan', () => {
+    const impact = describePlanReferences([
+      { kind: 'transitions', count: 1 },
+      { kind: 'replacementOrphans', count: 1 },
+    ])
+    expect(impact.keepsPlan).toBe(false)
+    expect(impact.consequences).toEqual(['renewalChoice'])
+    expect(impact.rows.map((row) => row.recognised)).toEqual([true, true])
   })
 
   // The conservative reading: this build cannot know what an unknown kind
@@ -235,5 +262,12 @@ describe('the dictionaries', () => {
       expect(typeof sentence, `${lng}: ${consequence}`).toBe('string')
     }
     expect(typeof valueAt(dictionary, 'plansPage.deleteDialog.consequences.cleanup')).toBe('string')
+    // Anti-vacuity for the loop above: the ad-bonus line is one of the consequences it read.
+    expect(PLAN_DELETE_CONSEQUENCES).toContain('adBonuses')
+    // Both unused leads name the plan: removed for good (off sale), or hidden
+    // now and removed by the nightly cleanup (still on sale).
+    for (const lead of ['unused', 'unusedOnSale']) {
+      expect(valueAt(dictionary, `plansPage.deleteDialog.${lead}`), `${lng}: ${lead}`).toContain('{{name}}')
+    }
   })
 })

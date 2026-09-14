@@ -199,6 +199,29 @@ export class PlansAdminService {
         : await this.plansAdminValidators.findDeletedPlanHoldingName(planId, normalizedInput.name);
     const { updated, propagation } = await this.prismaService.$transaction(
       async (transactionClient) => {
+        // ── LOCKED AND RE-READ BEFORE ANYTHING IS WRITTEN ──────────────────
+        //
+        // `currentPlan` was read outside this transaction, before validation —
+        // which asks Remnawave about squads and can take a while — and the
+        // write below carries `isActive` / `isArchived` from that read. A
+        // delete that committed in between used to be overwritten by them:
+        // the plan stamped deleted AND back on sale, sold by the catalogue
+        // while no panel screen could see it. `PlanDeletionService` takes the
+        // same `FOR UPDATE`, so the two queue on the row; read under the lock,
+        // a plan deleted in the meantime is not found, as it would have been
+        // had the edit arrived a moment later. First, so a refused edit has
+        // renamed no hidden plan either.
+        const locked = await transactionClient.$queryRaw<{ readonly deletedAt: Date | null }[]>(
+          Prisma.sql`
+            SELECT "deleted_at" AS "deletedAt"
+              FROM "plans"
+             WHERE "id" = ${planId}
+               FOR UPDATE
+          `,
+        );
+        if (locked[0] === undefined || locked[0].deletedAt !== null) {
+          throw new NotFoundException('Plan not found');
+        }
         const releasedName =
           nameHolder === null
             ? null

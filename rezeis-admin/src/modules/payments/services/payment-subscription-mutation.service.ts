@@ -41,6 +41,7 @@ import {
 import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
+import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
   patchSnapshotNumeric,
@@ -1663,7 +1664,7 @@ export class PaymentSubscriptionMutationService {
       planId: input.plan.id,
       planSnapshot: {
         id: input.plan.id,
-        name: input.plan.name,
+        name: displayPlanName(input.plan),
         description: input.plan.description,
         tag: input.plan.tag,
         type: input.plan.type,
@@ -1793,7 +1794,7 @@ export class PaymentSubscriptionMutationService {
       planId: input.plan.id,
       planSnapshot: {
         id: input.plan.id,
-        name: input.plan.name,
+        name: displayPlanName(input.plan),
         description: input.plan.description,
         tag: input.plan.tag,
         type: input.plan.type,
@@ -2054,7 +2055,9 @@ function buildPlanSnapshot(input: {
 }): Record<string, unknown> {
   return {
     id: input.purchasedPlan.id,
-    name: input.purchasedPlan.name,
+    // A plan deleted after the invoice was created is still fulfilled; it is
+    // shown without the "(deleted …)" suffix a reuse of its name put on the row.
+    name: displayPlanName(input.purchasedPlan),
     description: input.purchasedPlan.description,
     tag: input.purchasedPlan.tag,
     type: input.purchasedPlan.type,
@@ -2093,7 +2096,7 @@ function buildItemPlanSnapshot(input: {
 }): Record<string, unknown> {
   return {
     id: input.plan.id,
-    name: input.plan.name,
+    name: displayPlanName(input.plan),
     description: input.plan.description,
     tag: input.plan.tag,
     type: input.plan.type,

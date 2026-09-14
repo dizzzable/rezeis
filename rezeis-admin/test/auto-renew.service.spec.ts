@@ -3,9 +3,15 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import {
+  BadRequestException,
+  ForbiddenException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PaymentGatewayType, SubscriptionStatus, TransactionStatus } from '@prisma/client';
 
 import { AutoRenewService } from '../src/modules/auto-renew/auto-renew.service';
+import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/subscription-renewal.service';
 
 /**
  * Regression coverage for the createExpiryWarnings dedup after the N+1 removal:
@@ -424,4 +430,249 @@ describe('autopay and a renewal that needs the subscriber’s choice', () => {
     // and left ACTIVE — the non-vacuous half of the same case.
     assert.deepEqual(h.checkoutsFor, ['sub-ordinary']);
   });
+});
+
+/**
+ * A RENEWAL REFUSED BEFORE ANY PAYMENT EXISTS IS NOT RETRIED FOR EVER.
+ *
+ * Attempts are counted from transaction rows (`auto-renew:{id}:{expiresAtMs}:aN`).
+ * A renewal the checkout refuses BEFORE it writes a draft — a trial (never
+ * renewable), a plan with no price in the gateway's currency, the gateway
+ * switched off, a blocked owner — leaves no row, so the count never moved: the
+ * subscription stayed ACTIVE past its date, the past-due pass asked again every
+ * minute, and the `expired` notice (which selects EXPIRED rows) never went out.
+ *
+ * What these cases pin: a trial is not an autopay candidate at all; a refusal
+ * like that is final for this expiry, so the subscription expires on schedule;
+ * and a charge that really reached the provider and failed keeps its three
+ * attempts, as does a failure that may pass (a restricted service, a network
+ * error).
+ *
+ * The subscription double honours `status`, `isTrial` and the `expiresAt`
+ * window, and `updateMany` really moves a row to EXPIRED, so "expired on the
+ * first run" and "asked again on the second" are observable rather than
+ * assumed. The transaction double answers the attempt-key prefix from the rows
+ * a checkout actually wrote.
+ */
+describe('autopay and a renewal refused before any payment exists', () => {
+  interface Row {
+    readonly id: string;
+    readonly userId: string;
+    readonly expiresAt: Date;
+    readonly isTrial: boolean;
+    status: SubscriptionStatus;
+  }
+  interface AttemptRow {
+    readonly idempotencyKey: string;
+    readonly status: TransactionStatus;
+  }
+  type Checkout = (input: {
+    readonly subscriptionId: string;
+    readonly idempotencyKey: string;
+    readonly writeAttempt: (status: TransactionStatus) => void;
+  }) => Promise<{ paymentId: string; transactionStatus: TransactionStatus; checkoutUrl: null }>;
+
+  const PAST_DUE = new Date(Date.now() - 60_000);
+  const DUE_SOON = new Date(Date.now() + 60_000);
+
+  function matchesDate(value: Date, condition: Record<string, unknown> | undefined): boolean {
+    if (condition === undefined) return true;
+    const at = value.getTime();
+    if (condition.gt instanceof Date && !(at > condition.gt.getTime())) return false;
+    if (condition.lte instanceof Date && !(at <= condition.lte.getTime())) return false;
+    if (condition.lt instanceof Date && !(at < condition.lt.getTime())) return false;
+    return true;
+  }
+
+  function refusalHarness(options: {
+    readonly rows: ReadonlyArray<Omit<Row, 'status'>>;
+    readonly checkout: Checkout;
+  }) {
+    const rows: Row[] = options.rows.map((row) => ({ ...row, status: SubscriptionStatus.ACTIVE }));
+    const attempts: AttemptRow[] = [];
+    const checkoutsFor: string[] = [];
+    const expiredIds: string[][] = [];
+    const prisma = {
+      subscription: {
+        findMany: async (args: {
+          where: { status?: SubscriptionStatus; isTrial?: boolean; expiresAt?: Record<string, unknown> };
+        }) =>
+          rows
+            .filter((row) => args.where.status === undefined || row.status === args.where.status)
+            .filter((row) => args.where.isTrial === undefined || row.isTrial === args.where.isTrial)
+            .filter((row) => matchesDate(row.expiresAt, args.where.expiresAt))
+            .map((row) => ({ id: row.id, userId: row.userId, expiresAt: row.expiresAt, isTrial: row.isTrial })),
+        updateMany: async (args: { where: { id: { in: string[] } } }) => {
+          expiredIds.push([...args.where.id.in]);
+          let count = 0;
+          for (const row of rows) {
+            if (args.where.id.in.includes(row.id) && row.status === SubscriptionStatus.ACTIVE) {
+              row.status = SubscriptionStatus.EXPIRED;
+              count += 1;
+            }
+          }
+          return { count };
+        },
+      },
+      transaction: {
+        findMany: async (args: { where: { idempotencyKey: { startsWith: string } } }) =>
+          attempts
+            .filter((attempt) => attempt.idempotencyKey.startsWith(args.where.idempotencyKey.startsWith))
+            .map((attempt) => ({ ...attempt, checkoutUrl: null, gatewayId: 'provider-id' })),
+      },
+    };
+    const service = new AutoRenewService(
+      prisma as never,
+      { create: async () => undefined } as never,
+      {
+        renewalCheckout: async (input: { subscriptionIds: string[]; idempotencyKey: string }) => {
+          const subscriptionId = input.subscriptionIds[0]!;
+          checkoutsFor.push(subscriptionId);
+          return options.checkout({
+            subscriptionId,
+            idempotencyKey: input.idempotencyKey,
+            writeAttempt: (status) => attempts.push({ idempotencyKey: input.idempotencyKey, status }),
+          });
+        },
+      } as never,
+      {
+        findPreferredForCharge: async () => ({ id: 'method-1', gatewayType: PaymentGatewayType.YOOKASSA }),
+      } as never,
+      { build: async () => ({}) } as never,
+      // Not a plan-choice case: every plan here still exists.
+      { requiresPlanSelection: async () => false } as never,
+    );
+    const statusOf = (id: string): SubscriptionStatus | undefined => rows.find((row) => row.id === id)?.status;
+    return { service, checkoutsFor, expiredIds, statusOf };
+  }
+
+  const refuse = (error: Error): Checkout => async () => {
+    throw error;
+  };
+
+  it('leaves a trial subscription out of the pre-expiry charge', async () => {
+    const h = refusalHarness({
+      rows: [
+        { id: 'sub-trial', userId: 'user-1', expiresAt: DUE_SOON, isTrial: true },
+        { id: 'sub-ordinary', userId: 'user-2', expiresAt: DUE_SOON, isTrial: false },
+      ],
+      checkout: async ({ subscriptionId }) => ({
+        paymentId: `pay-${subscriptionId}`,
+        transactionStatus: TransactionStatus.PENDING,
+        checkoutUrl: null,
+      }),
+    });
+
+    const result = await h.service.processAutopayCharges();
+
+    // A trial is upgraded, never renewed (`TRIAL_NOT_RENEWABLE`): charging for
+    // one can only be refused.
+    assert.deepEqual(h.checkoutsFor, ['sub-ordinary'], 'a trial subscription was sent to the renewal checkout');
+    assert.equal(result.attempted, 1);
+  });
+
+  it('expires a trial subscription on its date without asking the checkout at all', async () => {
+    const h = refusalHarness({
+      rows: [{ id: 'sub-trial', userId: 'user-1', expiresAt: PAST_DUE, isTrial: true }],
+      checkout: refuse(renewalItemNotPriceable()),
+    });
+
+    await h.service.markExpiredSubscriptions();
+
+    assert.equal(h.statusOf('sub-trial'), SubscriptionStatus.EXPIRED, 'the trial was held ACTIVE past its date');
+    assert.deepEqual(h.checkoutsFor, [], 'a trial past its date was sent to the renewal checkout');
+  });
+
+  const refusedBeforeAnyPayment: ReadonlyArray<[string, () => Error]> = [
+    ['no price in the gateway currency (RENEWAL_ITEM_NOT_PRICEABLE)', () => renewalItemNotPriceable()],
+    ['the gateway switched off (PAYMENT_GATEWAY_NOT_ACTIVE)', () => new BadRequestException('PAYMENT_GATEWAY_NOT_ACTIVE')],
+    ['a blocked owner (USER_BLOCKED)', () => new ForbiddenException({ code: 'USER_BLOCKED', message: 'This account is blocked' })],
+  ];
+  for (const [what, error] of refusedBeforeAnyPayment) {
+    it(`expires on schedule, and asks once, when the renewal is refused for ${what}`, async () => {
+      const h = refusalHarness({
+        rows: [
+          { id: 'sub-refused', userId: 'user-1', expiresAt: PAST_DUE, isTrial: false },
+          { id: 'sub-failing-at-provider', userId: 'user-2', expiresAt: PAST_DUE, isTrial: false },
+        ],
+        checkout: async (input) => {
+          if (input.subscriptionId === 'sub-refused') throw error();
+          // The non-vacuous neighbour: a real charge that reached the provider
+          // and failed. Its row exists, so it keeps its remaining attempts.
+          input.writeAttempt(TransactionStatus.FAILED);
+          return { paymentId: `pay-${input.idempotencyKey}`, transactionStatus: TransactionStatus.FAILED, checkoutUrl: null };
+        },
+      });
+
+      await h.service.markExpiredSubscriptions();
+
+      assert.equal(h.statusOf('sub-refused'), SubscriptionStatus.EXPIRED, 'held ACTIVE past its date waiting for a retry that cannot succeed');
+      assert.equal(h.statusOf('sub-failing-at-provider'), SubscriptionStatus.ACTIVE, 'a real charge failure lost its remaining attempts');
+
+      await h.service.markExpiredSubscriptions();
+
+      assert.equal(
+        h.checkoutsFor.filter((id) => id === 'sub-refused').length,
+        1,
+        'the refused renewal was asked for again on the next tick',
+      );
+    });
+  }
+
+  it('still gives a charge that failed at the provider all three attempts before expiring it', async () => {
+    const h = refusalHarness({
+      rows: [{ id: 'sub-failing', userId: 'user-1', expiresAt: PAST_DUE, isTrial: false }],
+      checkout: async (input) => {
+        input.writeAttempt(TransactionStatus.FAILED);
+        return { paymentId: `pay-${input.idempotencyKey}`, transactionStatus: TransactionStatus.FAILED, checkoutUrl: null };
+      },
+    });
+
+    await h.service.markExpiredSubscriptions();
+    await h.service.markExpiredSubscriptions();
+    assert.equal(h.statusOf('sub-failing'), SubscriptionStatus.ACTIVE, 'expired before its third attempt');
+
+    await h.service.markExpiredSubscriptions();
+
+    assert.deepEqual(h.checkoutsFor, ['sub-failing', 'sub-failing', 'sub-failing']);
+    assert.equal(h.statusOf('sub-failing'), SubscriptionStatus.EXPIRED);
+  });
+
+  it('keeps the attempts of a charge refused AFTER its payment row was written', async () => {
+    // e.g. the saved card was revoked between the draft and the provider call:
+    // the attempt is on record, so it is an ordinary failed attempt, not a
+    // refusal of the renewal itself.
+    const h = refusalHarness({
+      rows: [{ id: 'sub-card-refused', userId: 'user-1', expiresAt: PAST_DUE, isTrial: false }],
+      checkout: async (input) => {
+        input.writeAttempt(TransactionStatus.FAILED);
+        throw new BadRequestException('SAVED_PAYMENT_METHOD_NOT_ACTIVE');
+      },
+    });
+
+    await h.service.markExpiredSubscriptions();
+
+    assert.equal(h.statusOf('sub-card-refused'), SubscriptionStatus.ACTIVE, 'a recorded attempt was treated as a final refusal');
+    await h.service.markExpiredSubscriptions();
+    assert.deepEqual(h.checkoutsFor, ['sub-card-refused', 'sub-card-refused']);
+  });
+
+  const mayPass: ReadonlyArray<[string, () => Error]> = [
+    ['a restricted service (SERVICE_RESTRICTED)', () => new ServiceUnavailableException({ code: 'SERVICE_RESTRICTED', message: 'Service is temporarily unavailable' })],
+    ['a network error', () => new Error('connect ECONNRESET')],
+  ];
+  for (const [what, error] of mayPass) {
+    it(`keeps the subscription ACTIVE and asks again after ${what}`, async () => {
+      const h = refusalHarness({
+        rows: [{ id: 'sub-transient', userId: 'user-1', expiresAt: PAST_DUE, isTrial: false }],
+        checkout: refuse(error()),
+      });
+
+      await h.service.markExpiredSubscriptions();
+      await h.service.markExpiredSubscriptions();
+
+      assert.equal(h.statusOf('sub-transient'), SubscriptionStatus.ACTIVE);
+      assert.deepEqual(h.checkoutsFor, ['sub-transient', 'sub-transient']);
+    });
+  }
 });

@@ -402,19 +402,24 @@ export class SubscriptionRenewalService {
     });
 
     // The subscriber has to CHOOSE the plan when there is none to renew onto:
-    // a plan-less (panel-imported) subscription, or one whose plan was deleted
-    // — the row gone, or soft-deleted and hidden. In both cases the discovery
-    // quote offers the active catalogue. Until a plan is picked the sub is
-    // reported renewable-but-needs-a-plan (no price yet); once chosen it is
-    // priced like a normal renewal onto that plan.
+    // a plan-less (panel-imported) subscription, one whose plan was deleted —
+    // the row gone, or soft-deleted and hidden — or an archived
+    // REPLACE_ON_RENEW plan with no replacement left on sale. In each case the
+    // discovery quote offers the active catalogue. Until a plan is picked the
+    // sub is reported renewable-but-needs-a-plan (no price yet); once chosen it
+    // is priced like a normal renewal onto that plan.
     //
-    // Read AFTER discovery, deliberately. A plan deleted between the two reads
-    // then still asks for a choice; read before, a plan deleted in between
-    // would meet a catalogue in `availablePlans` with no choice required, and
-    // `pickTargetPlan` would renew onto whichever plan is listed first — the
-    // silent pick this exists to prevent. A deletion is never undone, so the
-    // other ordering cannot happen.
-    const selectionRequired = await this.renewalPlanIsGone(original.planId);
+    // Read AFTER discovery, which settles one direction only: a plan deleted
+    // (or a last replacement taken off sale) between the two reads still asks
+    // for a choice. The other direction CAN happen — an operator puts a
+    // replacement back on sale, unarchives the plan or switches it to
+    // SELF_RENEW between the reads — and then this read says "no choice" while
+    // discovery has already offered the catalogue. That is why `pickTargetPlan`
+    // accepts nothing but the plan itself or one of its own replacements: a
+    // catalogue plan nobody chose is never the renewal target, whatever order
+    // the two reads land in.
+    const source = await this.readRenewalSource(original.planId);
+    const selectionRequired = source.selectionRequired;
     const chosenPlanId = input.chosenPlanId ?? null;
     if (selectionRequired && chosenPlanId === null) {
       const canSelect = discovery.availablePlans.length > 0;
@@ -436,7 +441,7 @@ export class SubscriptionRenewalService {
 
     const targetPlan = selectionRequired
       ? (discovery.availablePlans.find((plan) => plan.id === chosenPlanId) ?? null)
-      : pickTargetPlan(discovery.availablePlans, original.planId);
+      : pickTargetPlan(discovery.availablePlans, original.planId, source.replacementPlanIds);
     if (targetPlan === null) {
       return {
         subscriptionId: input.subscriptionId,
@@ -560,23 +565,39 @@ export class SubscriptionRenewalService {
    * `TRANSITION_TARGET_WHERE` is the quote's own definition of "on sale".
    */
   private async renewalPlanIsGone(planId: string | null): Promise<boolean> {
+    return (await this.readRenewalSource(planId)).selectionRequired;
+  }
+
+  /**
+   * {@link renewalPlanIsGone}, read together with the list an archived
+   * REPLACE_ON_RENEW plan renews onto — the only plans besides itself
+   * `pickTargetPlan` may pick, and empty for every other plan — so the renewal
+   * takes both from the same row.
+   */
+  private async readRenewalSource(planId: string | null): Promise<{
+    readonly selectionRequired: boolean;
+    readonly replacementPlanIds: readonly string[];
+  }> {
     if (planId === null) {
-      return true;
+      return { selectionRequired: true, replacementPlanIds: [] };
     }
     const plan = await this.prismaService.plan.findUnique({
       where: { id: planId },
       select: { deletedAt: true, isArchived: true, archivedRenewMode: true, replacementPlanIds: true },
     });
     if (plan === null || isPlanSoftDeleted(plan)) {
-      return true;
+      return { selectionRequired: true, replacementPlanIds: [] };
     }
     if (!plan.isArchived || plan.archivedRenewMode !== ArchivedPlanRenewMode.REPLACE_ON_RENEW) {
-      return false;
+      return { selectionRequired: false, replacementPlanIds: [] };
     }
     const replacementsOnSale = await this.prismaService.plan.count({
       where: { id: { in: plan.replacementPlanIds }, ...TRANSITION_TARGET_WHERE },
     });
-    return replacementsOnSale === 0;
+    return {
+      selectionRequired: replacementsOnSale === 0,
+      replacementPlanIds: plan.replacementPlanIds,
+    };
   }
 
   private async loadCandidateSubscriptions(
@@ -629,30 +650,32 @@ function readSnapshotSelection(planSnapshot: Prisma.JsonValue): {
 }
 
 /**
- * The renewal target for a subscription whose plan still EXISTS: the plan
- * itself, or — when the quote offers something else, which for an existing plan
- * means an archived `REPLACE_ON_RENEW` plan listing its replacements — the first
- * replacement.
+ * The renewal target for a subscription whose plan still EXISTS and needs no
+ * choice: the plan itself, or — for an archived `REPLACE_ON_RENEW` plan, whose
+ * quote offers its replacements — the first of its own replacements the quote
+ * offers.
  *
- * Never reached for a missing, soft-deleted or absent plan: those require the
- * subscriber's choice (`renewalPlanIsGone`). This fallback is exactly what used
- * to renew such a subscription onto the first catalogue plan — and have autopay
- * charge the saved card for a plan the subscriber never chose.
+ * Nothing else, and `null` when neither is offered. The fallback used to be
+ * "whatever the quote listed first", which for a missing, soft-deleted or
+ * replacement-less plan was the catalogue's first plan, and autopay charged the
+ * saved card for it. Those now require the subscriber's choice
+ * (`renewalPlanIsGone`), but its read and the discovery quote can still
+ * disagree for a moment (see `quoteSubscriptionRenewal`); a subscription caught
+ * in that moment is reported not renewable, which the next read corrects,
+ * rather than renewed onto a plan nobody picked.
  */
 function pickTargetPlan(
   availablePlans: readonly SubscriptionQuotePlanInterface[],
   originalPlanId: string | null,
+  replacementPlanIds: readonly string[],
 ): SubscriptionQuotePlanInterface | null {
-  if (availablePlans.length === 0) {
-    return null;
-  }
   if (originalPlanId !== null) {
     const exact = availablePlans.find((plan) => plan.id === originalPlanId);
     if (exact !== undefined) {
       return exact;
     }
   }
-  return availablePlans[0] ?? null;
+  return availablePlans.find((plan) => replacementPlanIds.includes(plan.id)) ?? null;
 }
 
 interface DurationChoice {

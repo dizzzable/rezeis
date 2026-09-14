@@ -10,6 +10,7 @@ import { PlansAdminService } from '../src/modules/plans/services/plans-admin.ser
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
 import {
   buildDeletedPlanName,
+  displayPlanName,
   PLAN_NAME_MAX_LENGTH,
   releasePlanNameFromDeletedPlan,
 } from '../src/modules/plans/utils/plan-deletion.util';
@@ -184,5 +185,54 @@ describe('the name a deleted plan is moved to', () => {
 
     assert.equal(released, null);
     assert.equal(db.plan('live-pro')?.name, 'Pro');
+  });
+});
+
+/**
+ * The rename is for the unique index only; what a subscriber is shown is the
+ * name without it (`displayPlanName`). The callers that write snapshots are
+ * pinned in `test/plan-deleted-name-snapshots.spec.ts`; these cases pin what
+ * the function strips and, as much, what it must leave alone.
+ */
+describe('the name a deleted plan is shown under', () => {
+  const hiddenAs = (name: string, id = HIDDEN_ID) => ({ id, name, deletedAt: DELETED_AT });
+
+  it('drops exactly the suffix the rename wrote, the widened attempts included', () => {
+    for (const attempt of [0, 1, 7]) {
+      const renamed = buildDeletedPlanName('Премиум 😀', HIDDEN_ID, attempt);
+      assert.notEqual(renamed, 'Премиум 😀', 'fixture: the rename changed nothing');
+      assert.equal(displayPlanName(hiddenAs(renamed)), 'Премиум 😀', `attempt ${attempt}: ${renamed}`);
+    }
+  });
+
+  it('shows a LIVE plan exactly as the operator named it, suffix-shaped or not', () => {
+    const named = 'Pro (deleted n33gtpbe)';
+
+    assert.equal(displayPlanName({ id: HIDDEN_ID, name: named, deletedAt: null }), named);
+  });
+
+  it('leaves a suffix that names ANOTHER plan’s id alone', () => {
+    const named = 'Pro (deleted zzzzzzzz)';
+
+    assert.equal(displayPlanName(hiddenAs(named)), named);
+  });
+
+  it('leaves a hidden plan that was never renamed alone', () => {
+    assert.equal(displayPlanName(hiddenAs('Pro')), 'Pro');
+  });
+
+  it('keeps the whole name when nothing but the suffix would be left', () => {
+    const onlySuffix = ' (deleted n33gtpbe)';
+
+    assert.equal(displayPlanName(hiddenAs(onlySuffix)), onlySuffix);
+  });
+
+  it('shows a name cut to fit 128 as cut — the characters that made room are not stored', () => {
+    const long = 'П'.repeat(PLAN_NAME_MAX_LENGTH);
+    const renamed = buildDeletedPlanName(long, HIDDEN_ID, 0);
+
+    const shown = displayPlanName(hiddenAs(renamed));
+
+    assert.equal(shown, 'П'.repeat(PLAN_NAME_MAX_LENGTH - ' (deleted n33gtpbe)'.length));
   });
 });

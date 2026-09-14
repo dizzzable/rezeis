@@ -245,9 +245,11 @@ export interface PlanReference {
 /**
  * `DELETE /admin/plans/:planId`. For an operator holding `plans:delete` the
  * delete always succeeds; `removed` says which of two things happened. `true`:
- * nothing used the plan, and the row went with its durations and prices.
- * `false`: something still did, so the plan was hidden everywhere and the
- * nightly sweeper removes it once nothing uses it.
+ * nothing used the plan and it was off sale, and the row went with its
+ * durations and prices. `false`: the plan was hidden everywhere — because
+ * something still used it, or because it was on sale at that moment (a checkout
+ * may have been writing its invoice) — and the nightly sweeper removes it once
+ * nothing uses it. `false` alone therefore does not mean "something uses it".
  */
 export interface PlanDeleteResult {
   readonly deleted: true
@@ -267,7 +269,8 @@ const PLAN_REFERENCES_TIMEOUT_MS = 10_000
  *
  * Anything that is not `{ references: [{ kind, count }] }` THROWS, and the
  * dialog renders that as "could not check" — never as an empty list. An empty
- * list is the sentence "this plan is deleted for good", and saying it about a
+ * list is the sentence "nothing uses this plan" (deleted for good, or — for a
+ * plan still on sale — hidden until the nightly cleanup), and saying it about a
  * plan whose usage this build could not read is the confident false statement
  * `expectArray` exists to prevent. `planId` is not required: the dialog already
  * knows which plan it asked about.

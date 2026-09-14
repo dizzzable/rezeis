@@ -162,6 +162,9 @@ export class InternalUserService {
       where: {
         isActive: true,
         isArchived: false,
+        // A deleted plan is never public, whatever an older image did to its
+        // flags — the catalogue branch above filters it the same way.
+        deletedAt: null,
         availability: PlanAvailability.ALL,
       },
       orderBy: {

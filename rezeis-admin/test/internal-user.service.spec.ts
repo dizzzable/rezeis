@@ -74,6 +74,8 @@ describe('InternalUserService', () => {
     const expectedWhere = {
       isActive: true,
       isArchived: false,
+      // A deleted plan is never public, whatever an older image did to its flags.
+      deletedAt: null,
       availability: PlanAvailability.ALL,
     };
     let actualWhere: unknown;

@@ -124,6 +124,7 @@ export function planRow(overrides: Row = {}): Row {
     cashbackMode: 'INHERIT',
     cashbackPercent: null,
     deletedAt: null,
+    deletedWhileOnSale: false,
     createdAt: BASE_DATE,
     updatedAt: BASE_DATE,
     durations: [],

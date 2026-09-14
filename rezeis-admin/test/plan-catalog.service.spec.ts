@@ -45,6 +45,9 @@ describe('PlanCatalogService', () => {
     assert.deepStrictEqual(actualPlanWhere, {
       isActive: true,
       isArchived: false,
+      // A deleted plan is never sold, whatever its flags say — defence in depth
+      // behind the delete, which switches them off.
+      deletedAt: null,
       availability: PlanAvailability.ALL,
     });
     assert.equal(actual.length, 1);
@@ -69,6 +72,7 @@ describe('PlanCatalogService', () => {
   });
 
   it('filters plans by authenticated user context and applies discounts to gateway-aware prices', async () => {
+    let actualPlanWhere: unknown;
     const prismaService = {
       paymentGateway: {
         findMany: async () => [
@@ -77,14 +81,17 @@ describe('PlanCatalogService', () => {
         ],
       },
       plan: {
-        findMany: async () => [
-          createPlanRecord({ id: 'plan-all', availability: PlanAvailability.ALL }),
-          createPlanRecord({ id: 'plan-new', availability: PlanAvailability.NEW }),
-          createPlanRecord({ id: 'plan-invited', availability: PlanAvailability.INVITED }),
-          createPlanRecord({ id: 'plan-allowed', availability: PlanAvailability.ALLOWED, allowedUserIds: ['user-1'] }),
-          createPlanRecord({ id: 'plan-trial', availability: PlanAvailability.TRIAL }),
-          createPlanRecord({ id: 'plan-existing', availability: PlanAvailability.EXISTING }),
-        ],
+        findMany: async (...args: readonly unknown[]) => {
+          actualPlanWhere = (args[0] as { readonly where: unknown }).where;
+          return [
+            createPlanRecord({ id: 'plan-all', availability: PlanAvailability.ALL }),
+            createPlanRecord({ id: 'plan-new', availability: PlanAvailability.NEW }),
+            createPlanRecord({ id: 'plan-invited', availability: PlanAvailability.INVITED }),
+            createPlanRecord({ id: 'plan-allowed', availability: PlanAvailability.ALLOWED, allowedUserIds: ['user-1'] }),
+            createPlanRecord({ id: 'plan-trial', availability: PlanAvailability.TRIAL }),
+            createPlanRecord({ id: 'plan-existing', availability: PlanAvailability.EXISTING }),
+          ];
+        },
       },
       user: {
         findUnique: async () => ({
@@ -116,6 +123,7 @@ describe('PlanCatalogService', () => {
       userId: 'user-1',
     });
 
+    assert.deepStrictEqual(actualPlanWhere, { isActive: true, isArchived: false, deletedAt: null });
     assert.deepStrictEqual(
       actual.map((plan) => plan.id),
       ['plan-all', 'plan-new', 'plan-invited', 'plan-allowed', 'plan-trial'],

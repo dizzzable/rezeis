@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { countCommittedTrialClaimUnits } from './trial-claim-ledger.util';
@@ -147,11 +148,20 @@ export class SubscriptionMutationsService {
         tag: true,
         availability: true,
         trialSettings: true,
+        // Read only to name the snapshot below; not copied into it.
+        deletedAt: true,
       },
     });
     if (plan === null) {
       throw new NotFoundException('Plan not found');
     }
+    // A deleted plan keeps being granted (a quest, an ad placement); it is
+    // shown without the "(deleted …)" suffix a reuse of its name put on the row.
+    const { deletedAt, ...planForSnapshot } = plan;
+    const planSnapshot = {
+      ...planForSnapshot,
+      name: displayPlanName({ id: plan.id, name: plan.name, deletedAt }),
+    };
 
     // Guard: enforce the trial's claim limit. A trial may be claimed up to
     // `maxClaims` times (counted by the user's existing `isTrial`
@@ -184,7 +194,7 @@ export class SubscriptionMutationsService {
           userId: input.userId,
           status: SubscriptionStatus.ACTIVE,
           isTrial: true,
-          planSnapshot: plan as unknown as Prisma.InputJsonValue,
+          planSnapshot: planSnapshot as unknown as Prisma.InputJsonValue,
           trafficLimit: plan.trafficLimit,
           deviceLimit: plan.deviceLimit,
           internalSquads: plan.internalSquads,

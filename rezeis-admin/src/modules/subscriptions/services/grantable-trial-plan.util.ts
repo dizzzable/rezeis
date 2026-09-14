@@ -64,12 +64,16 @@ export interface GrantableTrialPlanSelection {
  * NOTE what this does NOT do: no eligibility, no claim counting, no
  * invited-only scope. Those are per-caller policy, and the panel's button
  * skipping them is a deliberate operator override, not an omission.
+ *
+ * `deletedAt: null` beside the flags: a deleted plan is gone for every button.
+ * The delete switches a plan off as it stamps it, but an older image running on
+ * the same database can switch the flags back on.
  */
 export async function selectGrantableTrialPlan(
   client: TrialPlanClient,
 ): Promise<GrantableTrialPlanSelection | null> {
   const plan = await client.plan.findFirst({
-    where: { availability: 'TRIAL', isActive: true, isArchived: false },
+    where: { availability: 'TRIAL', isActive: true, isArchived: false, deletedAt: null },
     orderBy: [{ orderIndex: 'asc' }, { id: 'asc' }],
     select: {
       id: true,

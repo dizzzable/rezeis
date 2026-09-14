@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
 import {
   PurchaseChannel,
   PurchaseType,
@@ -118,6 +118,11 @@ export class AutoRenewService {
         // the retry budget and would still notify the customer about a payment
         // problem they cannot act on.
         user: { isBlocked: false },
+        // A trial is never renewed — it is upgraded to a regular plan instead
+        // (`TRIAL_NOT_RENEWABLE` in the quote, `assertRenewalPolicy` at
+        // checkout) — so a charge for one can only be refused. Excluded here for
+        // the same reason as a blocked owner: the attempt is never made.
+        isTrial: false,
       },
       select: {
         id: true,
@@ -242,8 +247,10 @@ export class AutoRenewService {
 
   /**
    * Marks expired subscriptions as EXPIRED only when they are not still
-   * eligible for further autopay retries (no method / 3 attempts exhausted /
-   * still pending settle is allowed to wait until past due without method).
+   * eligible for further autopay retries (no method / a trial / 3 attempts
+   * exhausted / a renewal that needs a plan choice / a renewal the checkout
+   * refused before any payment existed; a still-pending charge is allowed to
+   * settle).
    */
   public async markExpiredSubscriptions(): Promise<number> {
     const now = new Date();
@@ -252,7 +259,7 @@ export class AutoRenewService {
         status: SubscriptionStatus.ACTIVE,
         expiresAt: { lt: now, not: null },
       },
-      select: { id: true, userId: true, expiresAt: true },
+      select: { id: true, userId: true, expiresAt: true, isTrial: true },
       take: BATCH_SIZE,
     });
 
@@ -282,7 +289,12 @@ export class AutoRenewService {
         continue;
       }
 
-      const method = await this.savedPaymentMethodService.findPreferredForCharge(sub.userId);
+      // A trial has no renewal to wait for (see `processAutopayCharges`): it
+      // expires on its date like a subscription with no card, whatever card its
+      // owner holds for another one.
+      const method = sub.isTrial
+        ? null
+        : await this.savedPaymentMethodService.findPreferredForCharge(sub.userId);
       if (
         method !== null &&
         attemptState.usedAttempts < MAX_AUTOPAY_ATTEMPTS &&
@@ -361,12 +373,29 @@ export class AutoRenewService {
         const message = error instanceof Error ? error.message : String(error);
         this.logger.warn(`Past-due autopay failed for ${sub.id}: ${message}`);
         const after = await this.readAttemptState(sub.id, expiresAtMs);
-        if (!after.completed && !after.pending && after.usedAttempts >= MAX_AUTOPAY_ATTEMPTS) {
+        if (after.completed || after.pending) {
+          continue;
+        }
+        if (after.usedAttempts >= MAX_AUTOPAY_ATTEMPTS) {
           idsToExpire.push(sub.id);
-        } else if (after.usedAttempts === 0) {
-          // Charge threw before creating a tx — count as soft fail by creating
-          // a FAILED marker is heavy; instead expire only when no method or max.
-          // If throw left no row, usedAttempts stays same → may retry.
+        } else if (after.usedAttempts < nextAttempt && isRefusedBeforePayment(error)) {
+          // ── REFUSED BEFORE ANY PAYMENT EXISTED ─────────────────────────
+          //
+          // The checkout turned this renewal down before it wrote a draft — no
+          // price in the gateway's currency, the gateway switched off, a
+          // blocked owner. With no transaction row the attempt count never
+          // moves, so leaving the row ACTIVE meant asking again every minute,
+          // for ever, past a date the panel had already cut access at, and
+          // never sending the `expired` notice (it selects EXPIRED rows). The
+          // same request cannot get another answer within this expiry, so it
+          // is final for it: the subscription expires on schedule, and the
+          // notice with its "renew" button is what reaches the customer.
+          //
+          // Only a refusal (4xx), and only when no row was written for this
+          // attempt. A charge that reached the provider has its row and keeps
+          // its three attempts; a 5xx (a restricted service) or a thrown
+          // network error may pass, and is asked again next tick as before.
+          idsToExpire.push(sub.id);
         }
       }
     }
@@ -779,5 +808,24 @@ function buildAttemptIdempotencyKey(
   attempt: number,
 ): string {
   return `${IDEMPOTENCY_PREFIX}${subscriptionId}:${expiresAtMs}:a${attempt}`;
+}
+
+/**
+ * Whether the renewal checkout REFUSED the request (a 4xx) rather than failed
+ * at something that may pass.
+ *
+ * Decided by the status class, not by a list of codes, on purpose: the codes
+ * belong to the checkout and the quote (`RENEWAL_ITEM_NOT_PRICEABLE`,
+ * `PAYMENT_GATEWAY_NOT_ACTIVE`, `PAYMENT_GATEWAY_NOT_CONFIGURED`,
+ * `USER_BLOCKED`, …) and are renamed there, while "the request as composed is
+ * refused" is what a 4xx means by definition. The caller adds the other half —
+ * that no payment row was written for the attempt.
+ */
+function isRefusedBeforePayment(error: unknown): boolean {
+  if (!(error instanceof HttpException)) {
+    return false;
+  }
+  const status = error.getStatus();
+  return status >= 400 && status < 500;
 }
 

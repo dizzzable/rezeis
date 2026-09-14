@@ -116,8 +116,7 @@ enum SubscriptionStatus {
 /// it and reconciliation reverses the payment's side-effects from it. It was
 /// dropped from this block by accident in 3420598 (a diff hunk that mis-aligned
 /// this enum against a newly inserted `SyncJobStatus`); no migration ever
-/// removed it from the database, and both the runtime union in
-/// `src/common/types/prisma-enums.ts` and the en/ru status labels still name it.
+/// removed it from the database, and the en/ru status labels still name it.
 enum TransactionStatus {
   PENDING
   COMPLETED
@@ -2241,6 +2240,14 @@ model Plan {
   /// `RetiredPlanSweeperService` removes the row once nothing uses it. NULL for
   /// every plan that was never deleted.
   deletedAt            DateTime?             @map("deleted_at") @db.Timestamptz(3)
+  /// Whether the plan was ON SALE (active and not archived) when it was deleted.
+  /// The delete switches a plan off and archives it as it stamps `deletedAt`, so
+  /// this is the only record of the state it found. A grant that an archived or
+  /// switched-off plan stops — an ad placement's TARIFF signup bonus — keeps
+  /// honouring a deleted plan only when this is true, so deleting an already
+  /// archived plan does not turn a stopped bonus back on. Meaningless while
+  /// `deletedAt` is NULL.
+  deletedWhileOnSale   Boolean               @default(false) @map("deleted_while_on_sale")
   createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 

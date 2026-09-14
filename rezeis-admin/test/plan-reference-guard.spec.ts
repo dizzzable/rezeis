@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { PlanDeletionService } from '../src/modules/plans/services/plan-deletion.service';
 import {
+  isUnreferenced,
   PLAN_REFERENCE_KINDS,
   PlanReferenceCounts,
   PlanReferenceGuardService,
@@ -10,6 +12,7 @@ import {
   RECENT_CHECKOUT_REVIVAL_WINDOW_MS,
 } from '../src/modules/plans/services/plan-reference-guard.service';
 import { ReferralPointsExchangeService } from '../src/modules/referrals/services/referral-points-exchange.service';
+import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
 import { buildPlanReferenceDb, PlanReferenceDbSeed, Row } from './fixtures/plan-reference-db';
 
 /**
@@ -98,7 +101,7 @@ const placement = (overrides: Row): Row => ({
 });
 
 describe('the reference kinds are the contract', () => {
-  it('lists the fifteen kinds in the order the delete dialog reads them', () => {
+  it('lists the sixteen kinds in the order the delete dialog reads them', () => {
     // Spelled out, not imported from the SPA: the SPA pins the same literal list
     // in `web/src/features/plans/plan-delete.ts`, and two copies that each agree
     // with the contract is the only agreement worth having.
@@ -120,6 +123,9 @@ describe('the reference kinds are the contract', () => {
         'referralGift',
         'referralEligibility',
         'transitions',
+        // Appended, as the contract allows: an older SPA tab renders it as an
+        // unknown kind that keeps the plan, which is the conservative reading.
+        'replacementOrphans',
       ],
     );
   });
@@ -481,6 +487,51 @@ describe('adPlacements', () => {
   it('does NOT count a TARIFF bonus of another plan', async () => {
     await expectOnly({ adPlacements: [placement({ signupBonus: { tariffPlanId: OTHER } })] }, 'adPlacements', 0);
   });
+
+  // ── ONLY WHILE THE BONUS STILL GRANTS THE PLAN ──────────────────────────
+  //
+  // Archiving a plan or switching it off is how an operator stops a placement's
+  // bonus, and deleting a plan that was already off sale keeps it stopped
+  // (`deletedWhileOnSale`). A placement naming a plan its bonus no longer pays
+  // out holds nothing: counted, it kept an off-sale plan's row from ever being
+  // removed, and the delete dialog promised a bonus that had stopped.
+  const DELETED = new Date(NOW.getTime() - DAY_MS);
+  const stopped: ReadonlyArray<[string, Row]> = [
+    ['archived', { id: X, isArchived: true }],
+    ['switched off', { id: X, isActive: false }],
+    ['deleted while off sale', { id: X, isActive: false, isArchived: true, deletedAt: DELETED, deletedWhileOnSale: false }],
+    // A stamped row whose flags an older image turned back on: deleted is deleted.
+    ['deleted while off sale, then flagged on sale again', { id: X, deletedAt: DELETED, deletedWhileOnSale: false }],
+  ];
+  for (const [state, plan] of stopped) {
+    it(`does NOT count a placement on a plan that is ${state} — its bonus grants nothing`, async () => {
+      await expectOnly({ plans: [plan, { id: OTHER }], adPlacements: [placement({})] }, 'adPlacements', 0);
+    });
+  }
+
+  it('counts a placement on a plan deleted WHILE on sale — its bonus still grants it', async () => {
+    await expectOnly(
+      {
+        plans: [{ id: X, isActive: false, isArchived: true, deletedAt: DELETED, deletedWhileOnSale: true }, { id: OTHER }],
+        adPlacements: [placement({})],
+      },
+      'adPlacements',
+      1,
+    );
+  });
+
+  it('keeps the counts apart when one plan’s bonus has stopped and the other’s has not', async () => {
+    const db = buildPlanReferenceDb({
+      plans: [{ id: X }, { id: OTHER, isArchived: true }],
+      adPlacements: [placement({}), placement({ signupBonus: { tariffPlanId: OTHER } })],
+    });
+    const guard = new PlanReferenceGuardService(db.client as never);
+
+    const counts = await guard.countReferences([X, OTHER], { now: NOW });
+
+    assert.equal(counts.get(X)?.adPlacements, 1, 'anti-vacuity: the on-sale plan’s placement counts');
+    assert.equal(counts.get(OTHER)?.adPlacements, 0);
+  });
 });
 
 describe('referralGift', () => {
@@ -582,6 +633,137 @@ describe('transitions', () => {
 
   it('does NOT count a plan naming only other targets', async () => {
     await expectOnly({ plans: [{ id: X }, { id: OTHER, upgradeToPlanIds: ['plan-third'] }] }, 'transitions', 0);
+  });
+});
+
+/**
+ * An archived REPLACE_ON_RENEW plan renews its subscribers onto its replacements.
+ * When the plan being deleted is the LAST of them still on sale, the delete
+ * strips it from the list and those subscribers have nothing to renew onto:
+ * they must choose a plan, autopay stops charging them, and their subscriptions
+ * end with the paid term. Nothing about that keeps the deleted plan — it is
+ * counted so the dialog can say it.
+ */
+describe('replacementOrphans', () => {
+  const replacing = (overrides: Row): Row => ({
+    id: 'plan-legacy',
+    isActive: false,
+    isArchived: true,
+    archivedRenewMode: 'REPLACE_ON_RENEW',
+    replacementPlanIds: [X],
+    ...overrides,
+  });
+
+  /** The orphan count, with `transitions` — which the same plans always raise — beside it. */
+  async function orphansOf(plans: readonly Row[]): Promise<{ orphans: number; transitions: number; others: string[] }> {
+    const counts = await countsOf({ plans: [{ id: X }, { id: OTHER }, ...plans] });
+    return {
+      orphans: counts.replacementOrphans,
+      transitions: counts.transitions,
+      others: PLAN_REFERENCE_KINDS.filter(
+        (kind) => kind !== 'replacementOrphans' && kind !== 'transitions' && counts[kind] !== 0,
+      ),
+    };
+  }
+
+  it('counts an archived REPLACE_ON_RENEW plan whose only replacement on sale is this plan', async () => {
+    assert.deepEqual(await orphansOf([replacing({})]), { orphans: 1, transitions: 1, others: [] });
+  });
+
+  it('counts each plan left without a replacement', async () => {
+    const result = await orphansOf([replacing({ id: 'plan-legacy-1' }), replacing({ id: 'plan-legacy-2' })]);
+
+    assert.equal(result.orphans, 2);
+  });
+
+  it('does NOT count one that still has another replacement on sale', async () => {
+    assert.equal((await orphansOf([replacing({ replacementPlanIds: [X, OTHER] })])).orphans, 0);
+  });
+
+  const deadOther: ReadonlyArray<[string, Row]> = [
+    ['archived', { id: 'plan-dead', isArchived: true }],
+    ['switched off', { id: 'plan-dead', isActive: false }],
+    ['a trial', { id: 'plan-dead', availability: 'TRIAL' }],
+    ['deleted', { id: 'plan-dead', deletedAt: new Date(NOW.getTime() - DAY_MS), isActive: false, isArchived: true }],
+    // `TRANSITION_TARGET_WHERE` reads the stamp, not only the flags: a deleted
+    // row an older image switched back on is not a replacement anybody renews onto.
+    ['deleted, with its flags turned back on', { id: 'plan-dead', deletedAt: new Date(NOW.getTime() - DAY_MS) }],
+  ];
+  for (const [state, dead] of deadOther) {
+    it(`counts one whose other replacement is ${state}`, async () => {
+      const result = await orphansOf([dead, replacing({ replacementPlanIds: [X, 'plan-dead', 'plan-long-gone'] })]);
+
+      assert.equal(result.orphans, 1);
+    });
+  }
+
+  it('does NOT count anything when this plan is itself off sale — deleting it changes no renewal', async () => {
+    const counts = await countsOf({
+      plans: [{ id: X, isArchived: true }, replacing({})],
+    });
+
+    assert.equal(counts.replacementOrphans, 0);
+    assert.equal(counts.transitions, 1, 'anti-vacuity: the replacing plan is there');
+  });
+
+  const notReplacing: ReadonlyArray<[string, Row]> = [
+    ['a SELF_RENEW archived plan', replacing({ archivedRenewMode: 'SELF_RENEW' })],
+    ['a plan that is not archived', replacing({ isActive: true, isArchived: false })],
+    ['a plan that was itself deleted', replacing({ deletedAt: new Date(NOW.getTime() - DAY_MS) })],
+  ];
+  for (const [what, plan] of notReplacing) {
+    it(`does NOT count ${what} naming it as a replacement`, async () => {
+      const result = await orphansOf([plan]);
+
+      assert.equal(result.orphans, 0);
+      assert.equal(result.transitions, 1, 'anti-vacuity: the plan still names it');
+    });
+  }
+
+  it('does NOT count a plan naming it only as an UPGRADE target', async () => {
+    const result = await orphansOf([replacing({ replacementPlanIds: [OTHER], upgradeToPlanIds: [X] })]);
+
+    assert.equal(result.orphans, 0);
+  });
+
+  // What the dialog warns about is what the renewal then does. Both read
+  // `TRANSITION_TARGET_WHERE`; a deleted replacement whose flags were turned
+  // back on is exactly where a flag-only reading makes them disagree.
+  it('warns about exactly the renewal the delete then turns into a choice', async () => {
+    const db = buildPlanReferenceDb({
+      plans: [
+        { id: X },
+        { id: 'plan-dead', deletedAt: new Date(NOW.getTime() - DAY_MS) },
+        replacing({ replacementPlanIds: [X, 'plan-dead'] }),
+      ],
+      subscriptions: [subscription({ id: 'sub-legacy', planSnapshot: { id: 'plan-legacy' } })],
+    });
+    const guard = new PlanReferenceGuardService(db.client as never);
+    const renewal = new SubscriptionRenewalService(db.client as never, {} as never, {} as never);
+    assert.equal(await renewal.requiresPlanSelection('sub-legacy'), false, 'anti-vacuity: it renews onto X today');
+
+    const warned = (await guard.countReferences([X], { now: NOW })).get(X)?.replacementOrphans;
+    await new PlanDeletionService(db.client as never, guard).deletePlan(X, {
+      currentAdmin: { id: 'admin-1' } as never,
+      requestMetadata: { requestId: 'req-1', remoteAddress: '203.0.113.7', userAgent: 'spec' },
+    });
+    const asksToChoose = await renewal.requiresPlanSelection('sub-legacy');
+
+    // Both halves in one comparison, so a failure names every side that is wrong.
+    assert.deepEqual(
+      { dialogWarned: warned, renewalAsksToChoose: asksToChoose },
+      { dialogWarned: 1, renewalAsksToChoose: true },
+      'the dialog and the renewal disagree about a deleted replacement',
+    );
+  });
+
+  it('never keeps a plan: a count of orphans alone reads as unreferenced', () => {
+    const counts = Object.fromEntries(PLAN_REFERENCE_KINDS.map((kind) => [kind, 0])) as Record<PlanReferenceKind, number>;
+    counts.replacementOrphans = 3;
+
+    assert.equal(isUnreferenced(counts), true);
+    counts.transitions = 1;
+    assert.equal(isUnreferenced(counts), false, 'anti-vacuity: a keeping kind still keeps');
   });
 });
 

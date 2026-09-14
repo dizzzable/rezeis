@@ -579,6 +579,8 @@ export const en = {
       title: 'Delete plan "{{name}}"?',
       checking: 'Checking where the plan is used…',
       unused: 'Plan "{{name}}" will be deleted permanently, together with its durations and prices.',
+      unusedOnSale:
+        'Plan "{{name}}" will be deleted, together with its durations and prices. It disappears from the panel and the cabinet at once, and the nightly cleanup removes its data.',
       used: 'The plan will disappear from the panel and the cabinet, and nobody will be able to buy it.',
       usedBy: 'Currently used by:',
       checkFailed: 'Could not check where the plan is used. You can still delete it.',
@@ -587,10 +589,14 @@ export const en = {
       confirm: 'Delete',
       consequences: {
         subscribers:
-          'Subscribers keep access until their term ends and choose an active plan when they renew. Auto-renew will not move them to another plan on its own.',
+          'Subscribers keep access until their term ends and choose an active plan when they renew. Auto-renew stops for them: it will not charge a saved card or move them to another plan on its own.',
         invoices: 'Purchases from pending and paid payments will still be delivered.',
         grants:
-          'Promo codes, quests, contests, the wheel of fortune, ad bonuses and referral gifts will keep granting this plan. Change them if that is not what you want.',
+          'Promo codes, quests, contests, the wheel of fortune and referral gifts will keep granting this plan. Change them if that is not what you want.',
+        adBonuses:
+          'Ad placements will keep granting this plan as a signup bonus. Change their bonus if that is not what you want.',
+        renewalChoice:
+          'Subscribers of those archived plans will have to choose a plan themselves when they renew: auto-renew will not charge them, and their subscriptions end with the paid term. To avoid that, set a new replacement on those plans.',
         cleanup: 'The plan’s data is removed completely once nothing uses it.',
       },
       references: {
@@ -625,6 +631,10 @@ export const en = {
           '{{count}} plan that lists it as an upgrade or replacement (it will be removed from there)',
         transitions_other:
           '{{count}} plans that list it as an upgrade or replacement (it will be removed from there)',
+        replacementOrphans_one:
+          '{{count}} archived plan that renews its subscribers onto it and has no other replacement on sale',
+        replacementOrphans_other:
+          '{{count}} archived plans that renew their subscribers onto it and have no other replacement on sale',
         unknown: 'Other ({{kind}}): {{count}}',
       },
     },

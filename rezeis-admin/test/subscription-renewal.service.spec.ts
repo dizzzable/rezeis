@@ -50,6 +50,14 @@ interface SubFixture {
    * of its only replacement leaves behind.
    */
   readonly replacementsOffSale?: boolean;
+  /**
+   * The discovery quote saw no replacement on sale and offered the catalogue,
+   * but by the time the renewal asks, a replacement is back on sale (an
+   * operator unarchived it in between). The two reads a few milliseconds apart
+   * disagree, which is the one way the renewal can meet a catalogue without
+   * being asked for a choice.
+   */
+  readonly replacementBackOnSaleMidQuote?: boolean;
 }
 
 const GATEWAY = PaymentGatewayType.YOOKASSA;
@@ -515,6 +523,49 @@ describe('SubscriptionRenewalService — a subscription whose plan was deleted',
     assert.equal(result.items[0]?.planId, null, `silently renewed onto ${String(result.items[0]?.planId)}`);
   });
 
+  it('never renews onto a catalogue plan nobody chose when a replacement comes back on sale mid-quote', async () => {
+    // The discovery quote read "no replacement on sale" and offered the
+    // catalogue; the renewal's own read a moment later finds a replacement back
+    // on sale, so it asks for no choice. The fallback used to be the first
+    // plan of whatever discovery offered — here a catalogue plan the subscriber
+    // never picked, which autopay would then charge for.
+    const service = createService([
+      sub({
+        id: 's1',
+        planId: 'plan-archived',
+        replacementPlanIds: ['plan-new'],
+        replacementBackOnSaleMidQuote: true,
+        catalogPlanIds: ['cat-first', 'cat-second'],
+        price: '13.00',
+      }),
+    ]);
+
+    const result = await service.getRenewalOptions({ identity: { userId: 'u' }, gatewayType: GATEWAY });
+
+    const item = result.items[0];
+    assert.notEqual(item?.planId, 'cat-first', 'renewed onto the first catalogue plan nobody chose');
+    assert.equal(item?.planId, null);
+    assert.equal(item?.amount, null);
+    assert.equal(item?.renewable, false, 'offered to renew a subscription it could not price');
+    await assert.rejects(
+      () => service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY }),
+      isNotPriceableRefusal,
+    );
+  });
+
+  it('still renews onto the replacement itself when discovery offers it', async () => {
+    // The non-vacuous half: the same archived plan, read consistently, renews
+    // onto its replacement with no choice asked — the fallback that stays.
+    const service = createService([
+      sub({ id: 's1', planId: 'plan-archived', replacementPlanIds: ['plan-new'], price: '13.00' }),
+    ]);
+
+    const result = await service.getRenewalOptions({ identity: { userId: 'u' }, gatewayType: GATEWAY });
+
+    assert.equal(result.items[0]?.planId, 'plan-new');
+    assert.equal(result.items[0]?.amount, '13.00');
+  });
+
   it('answers requiresPlanSelection(subscriptionId) the way the renewal decides it', async () => {
     const service = createService([
       sub({ id: 'gone', planState: 'missing' }),
@@ -549,6 +600,7 @@ function sub(input: {
   readonly planState?: 'live' | 'missing' | 'softDeleted';
   readonly replacementPlanIds?: readonly string[];
   readonly replacementsOffSale?: boolean;
+  readonly replacementBackOnSaleMidQuote?: boolean;
 }): SubFixture {
   return {
     id: input.id,
@@ -564,6 +616,7 @@ function sub(input: {
     planState: input.planState,
     replacementPlanIds: input.replacementPlanIds,
     replacementsOffSale: input.replacementsOffSale,
+    replacementBackOnSaleMidQuote: input.replacementBackOnSaleMidQuote,
   };
 }
 
@@ -667,7 +720,8 @@ function createService(
         f.planLess ||
         f.planState === 'missing' ||
         f.planState === 'softDeleted' ||
-        (f.replacementPlanIds !== undefined && f.replacementsOffSale === true);
+        (f.replacementPlanIds !== undefined &&
+          (f.replacementsOffSale === true || f.replacementBackOnSaleMidQuote === true));
       const availablePlans = planGone
         ? (f.catalogPlanIds ?? ['cat-a', 'cat-b']).map((id) => buildPlan(id, durationDaysList))
         : f.replacementPlanIds !== undefined

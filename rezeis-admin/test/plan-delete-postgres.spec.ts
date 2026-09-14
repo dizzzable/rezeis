@@ -32,7 +32,9 @@ import { SubscriptionRenewalService } from '../src/modules/subscriptions/service
  * `array_remove` strips transitions; that the kept row still resolves where
  * money depends on it — a paid invoice is FULFILLED from it — and in the grant
  * paths the delete dialog promises; that the renewal asks for a choice; that
- * the unique name index lets a new plan take a deleted plan's name; and that
+ * the unique name index lets a new plan take a deleted plan's name, which the
+ * plan is still given away under; that an edit racing the delete on another
+ * connection is refused instead of putting the plan back on sale; and that
  * the nightly sweep removes the row the night after its last use and not before.
  *
  * Skipped without TEST_DATABASE_URL, like every live spec; CI's PostgreSQL job
@@ -594,6 +596,168 @@ run('plan deletion on PostgreSQL', () => {
       bonusJson: { tariffPlanId: plan, tariffDurationDays: 14 },
     });
     assert.equal(await planOf(adUser), plan, 'the ad bonus skipped a deleted plan it grants');
+    const stamped = await prisma.plan.findUniqueOrThrow({ where: { id: plan }, select: { deletedWhileOnSale: true } });
+    assert.equal(stamped.deletedWhileOnSale, true, 'a plan deleted on sale was not recorded as such');
+  });
+
+  it('does not resume an ad bonus an archived plan had stopped, once that plan is deleted', async () => {
+    const plan = await createPlan('grants-archived', { isArchived: true });
+    const quest = await prisma.quest.create({ data: { type: 'CUSTOM', rewardType: 'DAYS', rewardPlanId: plan }, select: { id: true } });
+    created.quests.push(quest.id);
+    assert.equal((await deletion.deletePlan(plan, CONTEXT())).removed, false);
+    const stamped = await prisma.plan.findUniqueOrThrow({ where: { id: plan }, select: { deletedWhileOnSale: true } });
+    assert.equal(stamped.deletedWhileOnSale, false);
+
+    const adUser = await createUser('grant-ad-archived');
+    await new AdSignupBonusService(prisma, new SubscriptionMutationsService(prisma, { enqueue: async () => undefined } as never)).grantIfEligible({
+      userId: adUser,
+      bonusType: 'TARIFF',
+      bonusJson: { tariffPlanId: plan, tariffDurationDays: 14 },
+    });
+
+    assert.equal(
+      await prisma.subscription.count({ where: { userId: adUser } }),
+      0,
+      'deleting an archived plan turned its stopped signup bonus back on',
+    );
+  });
+
+  it('lets an off-sale plan an active placement names go, and keeps one deleted on sale while the placement grants it', async () => {
+    const campaign = await prisma.adCampaign.create({ data: { name: `${prefix} placement-hold` }, select: { id: true } });
+    created.campaigns.push(campaign.id);
+    const placementOn = async (planId: string): Promise<string> => {
+      const row = await prisma.adPlacement.create({
+        data: {
+          campaignId: campaign.id,
+          platform: 'TELEGRAM',
+          trackingCode: `${prefix}-tc-${next()}`,
+          signupBonusType: 'TARIFF',
+          signupBonus: { tariffPlanId: planId, tariffDurationDays: 14 },
+          status: 'ACTIVE',
+        },
+        select: { id: true },
+      });
+      return row.id;
+    };
+
+    // Archived: its bonus has stopped, so the placement holds nothing — the
+    // dialog lists nothing and the row goes for good.
+    const archived = await createPlan('placement-archived', { isArchived: true });
+    await placementOn(archived);
+    assert.deepEqual(await guard.listReferences(archived), []);
+    assert.deepEqual(await deletion.deletePlan(archived, CONTEXT()), { deleted: true, removed: true });
+
+    // On sale: the placement still pays it out after the delete, so it keeps the
+    // row — until the placement is archived.
+    const selling = await createPlan('placement-selling');
+    const sellingPlacement = await placementOn(selling);
+    assert.deepEqual(await guard.listReferences(selling), [{ kind: 'adPlacements', count: 1 }]);
+    assert.equal((await deletion.deletePlan(selling, CONTEXT())).removed, false);
+    await sweeper.sweep();
+    assert.ok((await prisma.plan.findUnique({ where: { id: selling } })) !== null, 'swept while its placement still granted it');
+
+    await prisma.adPlacement.update({ where: { id: sellingPlacement }, data: { status: 'ARCHIVED' } });
+    const removed = await sweeper.sweep();
+    assert.ok(removed.some((plan) => plan.id === selling), 'the plan outlived the placement that held it');
+  });
+
+  it('refuses an edit that was validating while the plan was deleted, and leaves it off sale', async () => {
+    const plan = await createPlan('race-validating', { internalSquads: ['squad-core'] });
+    let markAsked!: () => void;
+    const asked = new Promise<void>((resolve) => (markAsked = resolve));
+    let release!: () => void;
+    const remnawave = {
+      getInternalSquadOptions: () =>
+        new Promise((resolve) => {
+          release = () => resolve([{ uuid: 'squad-core', name: 'Core' }]);
+          markAsked();
+        }),
+      getExternalSquadOptions: async () => [],
+    };
+    const slowEditor = new PlansAdminService(
+      prisma,
+      remnawave as never,
+      { syncPlanSnapshotMetadata: async () => 0 } as never,
+      new PlansAdminValidators(prisma, remnawave as never),
+      new PlanSquadPropagationService(prisma, { enqueue: async () => undefined } as never),
+    );
+
+    const editing = slowEditor.updatePlan(plan, { isActive: true, description: 'edited while deleting' }, CONTEXT());
+    await asked;
+    assert.equal((await deletion.deletePlan(plan, CONTEXT())).removed, false);
+    release();
+
+    await assert.rejects(editing, NotFoundException);
+    const row = await prisma.plan.findUniqueOrThrow({
+      where: { id: plan },
+      select: { deletedAt: true, isActive: true, isArchived: true, description: true },
+    });
+    assert.ok(row.deletedAt instanceof Date);
+    assert.equal(row.isActive, false, 'the deleted plan was put back on sale');
+    assert.equal(row.isArchived, true);
+    assert.notEqual(row.description, 'edited while deleting');
+  });
+
+  it('queues an edit behind a delete that holds the row, on two connections, and refuses it once the delete commits', async () => {
+    const plan = await createPlan('race-locked');
+    let markCounting!: () => void;
+    const counting = new Promise<void>((resolve) => (markCounting = resolve));
+    let releaseCount!: () => void;
+    const countGate = new Promise<void>((resolve) => (releaseCount = resolve));
+    // The real guard, entered only once the test lets it: the delete has taken
+    // `FOR UPDATE` on the plan and stripped transitions by then, and holds both
+    // until it commits.
+    const heldGuard = {
+      countReferences: async (...args: Parameters<PlanReferenceGuardService['countReferences']>) => {
+        markCounting();
+        await countGate;
+        return guard.countReferences(...args);
+      },
+    } as unknown as PlanReferenceGuardService;
+
+    const deleting = new PlanDeletionService(prisma, heldGuard).deletePlan(plan, CONTEXT());
+    await counting;
+    const editing = plansAdmin.updatePlan(plan, { isActive: true, description: 'edited while deleting' }, CONTEXT());
+    // Long enough for the edit to reach its own lock and wait on the delete's.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    releaseCount();
+
+    assert.equal((await deleting).removed, false);
+    await assert.rejects(editing, NotFoundException);
+    const row = await prisma.plan.findUniqueOrThrow({
+      where: { id: plan },
+      select: { deletedAt: true, isActive: true, isArchived: true, description: true },
+    });
+    assert.ok(row.deletedAt instanceof Date);
+    assert.equal(row.isActive, false, 'the queued edit put the deleted plan back on sale');
+    assert.equal(row.isArchived, true);
+    assert.notEqual(row.description, 'edited while deleting');
+  });
+
+  it('reports an archived plan the delete leaves with no replacement on sale, and keeps nothing for it', async () => {
+    const target = await createPlan('orphan-target');
+    const other = await createPlan('orphan-other');
+    await createPlan('orphan-legacy', {
+      isActive: false,
+      isArchived: true,
+      archivedRenewMode: 'REPLACE_ON_RENEW',
+      replacementPlanIds: [target],
+    });
+    await createPlan('orphan-covered', {
+      isActive: false,
+      isArchived: true,
+      archivedRenewMode: 'REPLACE_ON_RENEW',
+      replacementPlanIds: [target, other],
+    });
+
+    assert.deepEqual(await guard.listReferences(target), [
+      { kind: 'transitions', count: 2 },
+      { kind: 'replacementOrphans', count: 1 },
+    ]);
+    // The delete strips the replacement lists first, so nothing is left to hold
+    // the plan; it is hidden only because it was on sale.
+    const result = await deletion.deletePlan(target, CONTEXT());
+    assert.deepEqual(result, { deleted: true, removed: false });
   });
 
   it('lets a new plan take a deleted plan’s name, renaming the hidden one', async () => {
@@ -620,6 +784,20 @@ run('plan deletion on PostgreSQL', () => {
     assert.notEqual(renamed.name, name);
     assert.match(renamed.name, /\(deleted [a-z0-9-]+\)$/);
     assert.ok(renamed.deletedAt instanceof Date, 'the rename touched something other than the hidden plan');
+
+    // The hidden plan is still given away — and under the name it was given as.
+    const codeUser = await createUser('reuse-code');
+    const minted = await prisma.$transaction((tx) =>
+      new RewardGrantService(new PointsWalletService()).apply(tx, {
+        userId: codeUser,
+        grant: { kind: 'PROMOCODE', amount: 30, planId: hidden },
+        origin: { pointsSource: 'QUEST_REWARD', referenceKey: `${prefix}-reuse-quest`, details: {}, codePrefix: 'QUEST-' },
+      }),
+    );
+    assert.ok(minted.promoCode !== undefined);
+    created.mintedCodes.push(minted.promoCode);
+    const code = await prisma.promocode.findUniqueOrThrow({ where: { code: minted.promoCode }, select: { plan: true } });
+    assert.equal((code.plan as Record<string, unknown>).name, name, 'the code carries the "(deleted …)" name');
   });
 
   it('sweeps a deleted plan the night after its last use ends, and not before', async () => {

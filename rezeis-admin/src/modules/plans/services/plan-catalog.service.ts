@@ -81,16 +81,22 @@ export class PlanCatalogService {
       orderBy: [{ orderIndex: 'asc' }, { type: 'asc' }],
     })).filter((gateway) => isGatewayAvailableForChannel(gateway.type, channel));
     const candidatePlans = await this.prismaService.plan.findMany({
+      // `deletedAt: null` beside the flags, not instead of them. The delete
+      // switches a plan off as it stamps it, so the flags alone already hide a
+      // deleted plan — but a stamped row that is somehow still flagged on sale
+      // must not be sold, and nothing else in the catalogue would stop it.
       where:
         userContext === null
           ? {
               isActive: true,
               isArchived: false,
+              deletedAt: null,
               availability: PlanAvailability.ALL,
             }
           : {
               isActive: true,
               isArchived: false,
+              deletedAt: null,
             },
       include: PLAN_INCLUDE,
       orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],

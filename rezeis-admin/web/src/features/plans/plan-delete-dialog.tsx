@@ -19,9 +19,10 @@ import { usePlanReferences, type Plan } from './plans-api'
 export interface PlanDeleteDialogProps {
   /**
    * The plan the dialog is about. Kept by the page after the dialog closes, so
-   * the content does not blank out while it animates away.
+   * the content does not blank out while it animates away. Its sale flags pick
+   * the lead for an unused plan: one still on sale is hidden, not removed.
    */
-  readonly plan: Pick<Plan, 'id' | 'name'> | null
+  readonly plan: Pick<Plan, 'id' | 'name' | 'isActive' | 'isArchived'> | null
   readonly open: boolean
   /** A delete is in flight: both buttons hold, and the dialog cannot be dismissed. */
   readonly deleting: boolean
@@ -76,7 +77,7 @@ function PlanDeleteDialogBody({
   deleting,
   onConfirm,
 }: {
-  readonly plan: Pick<Plan, 'id' | 'name'>
+  readonly plan: Pick<Plan, 'id' | 'name' | 'isActive' | 'isArchived'>
   readonly deleting: boolean
   readonly onConfirm: (planId: string) => void
 }) {
@@ -89,6 +90,12 @@ function PlanDeleteDialogBody({
   if (references.isPending) lead = t('plansPage.deleteDialog.checking')
   else if (references.isError) lead = t('plansPage.deleteDialog.checkFailed')
   else if (impact?.keepsPlan === true) lead = t('plansPage.deleteDialog.used')
+  // Nothing uses it — and still an unused plan ON SALE is only hidden: the
+  // server keeps the row for a checkout that may be writing its invoice right
+  // now, and the nightly sweep removes it. "Deleted permanently" is for a plan
+  // already off sale.
+  else if (plan.isActive && !plan.isArchived)
+    lead = t('plansPage.deleteDialog.unusedOnSale', { name: plan.name })
   else lead = t('plansPage.deleteDialog.unused', { name: plan.name })
 
   return (
@@ -130,12 +137,16 @@ function PlanDeleteDialogBody({
               ))}
             </ul>
           </div>
-          {impact.keepsPlan && (
+          {/* Shown whenever there is something to say, not only when the plan
+              lingers: an archived plan left with no replacement changes other
+              subscribers' renewals even though nothing holds this plan. The
+              cleanup line is about the kept row, so it needs one. */}
+          {(impact.keepsPlan || impact.consequences.length > 0) && (
             <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
               {impact.consequences.map((consequence) => (
                 <li key={consequence}>{t(PLAN_DELETE_CONSEQUENCE_I18N_KEYS[consequence])}</li>
               ))}
-              <li>{t('plansPage.deleteDialog.consequences.cleanup')}</li>
+              {impact.keepsPlan && <li>{t('plansPage.deleteDialog.consequences.cleanup')}</li>}
             </ul>
           )}
         </div>

@@ -25,10 +25,15 @@ import {
  * customers on their old price for ever, so a plan wearing it is not retired at
  * all — emptiness today says nothing about tomorrow. A DELETED plan is swept
  * whatever its mode: the operator has already said it goes.
+ *
+ * Except a stamped row still flagged ON SALE. The delete switches a plan off as
+ * it stamps it, so this is a row something wrote over afterwards — and a plan on
+ * sale may have a checkout inserting its invoice right now, the very race the
+ * delete hides such a plan for instead of removing it. It is left alone.
  */
 const SWEEP_CANDIDATE_WHERE = {
   OR: [
-    { deletedAt: { not: null } },
+    { deletedAt: { not: null }, OR: [{ isActive: false }, { isArchived: true }] },
     { isArchived: true, archivedRenewMode: ArchivedPlanRenewMode.REPLACE_ON_RENEW },
   ],
 } satisfies Prisma.PlanWhereInput;

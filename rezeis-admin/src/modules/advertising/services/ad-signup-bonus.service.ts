@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AdSignupBonusType, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { AD_SIGNUP_BONUS_PLAN_WHERE } from '../../plans/utils/plan-deletion.util';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { readSignupBonus } from '../utils/advertising-mappers';
 
@@ -82,7 +83,9 @@ export class AdSignupBonusService {
 
       if (input.bonusType === 'TRIAL') {
         const trialPlan = await this.prismaService.plan.findFirst({
-          where: { availability: 'TRIAL', isActive: true, isArchived: false },
+          // `deletedAt: null` beside the flags: a deleted plan is gone for
+          // everyone, even when an older image switched its flags back on.
+          where: { availability: 'TRIAL', isActive: true, isArchived: false, deletedAt: null },
           include: { durations: { take: 1, orderBy: { days: 'asc' } } },
         });
         if (trialPlan === null) {
@@ -107,17 +110,11 @@ export class AdSignupBonusService {
           return;
         }
         const plan = await this.prismaService.plan.findFirst({
-          where: {
-            id: planId,
-            OR: [
-              { isActive: true, isArchived: false },
-              // A DELETED plan keeps paying out a placement that already grants
-              // it — the delete dialog promises exactly that, and the plan row is
-              // kept (soft-deleted) so it can. Taking a live plan off sale still
-              // stops the bonus, as before.
-              { deletedAt: { not: null } },
-            ],
-          },
+          // On sale, or deleted while on sale — the rule the reference guard
+          // holds a plan by, so a placement keeps exactly the plans it pays out
+          // and the delete dialog promises only a bonus that really keeps
+          // running (`AD_SIGNUP_BONUS_PLAN_WHERE`).
+          where: { AND: [{ id: planId }, AD_SIGNUP_BONUS_PLAN_WHERE] },
           select: { id: true },
         });
         if (plan === null) {

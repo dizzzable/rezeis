@@ -49,6 +49,8 @@ interface PlanRow {
   readonly availability: string;
   readonly isActive: boolean;
   readonly isArchived: boolean;
+  /** Soft-deleted when set (plan-deletion contract v2). */
+  readonly deletedAt: Date | null;
   readonly orderIndex: number;
   readonly trialSettings: Record<string, unknown>;
   readonly durations: readonly { readonly days: number }[];
@@ -81,6 +83,7 @@ const PLANS: readonly PlanRow[] = [
     availability: 'MONTHLY',
     isActive: true,
     isArchived: false,
+    deletedAt: null,
     orderIndex: 0,
     trialSettings: GRANTABLE,
     durations: [{ days: 1 }],
@@ -90,6 +93,7 @@ const PLANS: readonly PlanRow[] = [
     availability: 'TRIAL',
     isActive: true,
     isArchived: false,
+    deletedAt: null,
     orderIndex: 7,
     trialSettings: GRANTABLE,
     durations: [{ days: 14 }],
@@ -99,6 +103,7 @@ const PLANS: readonly PlanRow[] = [
     availability: 'TRIAL',
     isActive: true,
     isArchived: false,
+    deletedAt: null,
     orderIndex: 1,
     trialSettings: GRANTABLE,
     durations: [{ days: 9 }],
@@ -108,6 +113,7 @@ const PLANS: readonly PlanRow[] = [
     availability: 'TRIAL',
     isActive: true,
     isArchived: false,
+    deletedAt: null,
     orderIndex: 1,
     trialSettings: GRANTABLE,
     durations: [{ days: 30 }, { days: 5 }],
@@ -338,7 +344,7 @@ describe('the trial plan a free grant is about - one answer, both buttons', () =
     assert.equal(cabinet.queries.length, 2);
     for (const query of [...panel.queries, ...cabinet.queries]) {
       assert.deepStrictEqual(query, {
-        where: { availability: 'TRIAL', isActive: true, isArchived: false },
+        where: { availability: 'TRIAL', isActive: true, isArchived: false, deletedAt: null },
         orderBy: [{ orderIndex: 'asc' }, { id: 'asc' }],
         select: {
           id: true,
@@ -360,7 +366,7 @@ describe('the trial plan a free grant is about - one answer, both buttons', () =
   it('control: the fake honours orderBy, so the ordering assertions are not vacuous', async () => {
     const queries: PlanQuery[] = [];
     const table = planTable(PLANS, queries);
-    const trialOnly = { availability: 'TRIAL', isActive: true, isArchived: false };
+    const trialOnly = { availability: 'TRIAL', isActive: true, isArchived: false, deletedAt: null };
     const durations = { take: 1, orderBy: { days: 'asc' }, select: { days: true } };
 
     const unordered = (await table.findFirst({
@@ -428,6 +434,28 @@ describe('the trial plan a free grant is about - one answer, both buttons', () =
       trialSettings: GRANTABLE,
       durationDays: EXPECTED_DURATION_DAYS,
     });
+  });
+
+  /**
+   * A DELETED trial plan is gone for both buttons. The delete switches a plan
+   * off as it stamps it, but an older image running on the same database can
+   * switch the flags back on — and this row, first in the operator's order,
+   * would then be the trial every free grant hands out.
+   */
+  it('never selects a deleted trial plan, even one whose flags were turned back on', async () => {
+    const deleted: PlanRow = {
+      ...PLANS[3],
+      id: 'plan-00-deleted',
+      orderIndex: 0,
+      deletedAt: new Date('2026-09-01T00:00:00.000Z'),
+    };
+    const rows = [deleted, ...PLANS];
+
+    const cabinet = await cabinetActivate(rows);
+    const panel = await panelGrant(rows);
+
+    assert.equal(cabinet.grants[0]?.planId, EXPECTED_PLAN_ID, 'the cabinet granted a deleted trial plan');
+    assert.equal(panel.grants[0]?.planId, EXPECTED_PLAN_ID, 'the panel granted a deleted trial plan');
   });
 
   it('reports a trial plan with no duration rather than inventing one', async () => {

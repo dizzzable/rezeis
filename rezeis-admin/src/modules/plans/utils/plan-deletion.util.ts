@@ -4,9 +4,10 @@ import { Prisma } from '@prisma/client';
  * THE THREE RULES A DELETED PLAN LIVES BY, IN ONE PLACE.
  *
  * `DELETE /api/admin/plans/:planId` always succeeds (plan-deletion contract v2,
- * 13.09.2026). A plan nothing uses is removed; a plan something still uses is
- * SOFT-deleted — `deletedAt` stamped, `isArchived` on, `isActive` off — and the
- * row stays so the obligations already taken keep resolving it by id. What that
+ * 13.09.2026). A plan nothing uses and already off sale is removed; a plan
+ * something still uses, or one still on sale, is SOFT-deleted — `deletedAt`
+ * stamped, `isArchived` on, `isActive` off — and the row stays so the
+ * obligations already taken keep resolving it by id. What that
  * row may and may not do from then on is decided here, so the deletion service,
  * the nightly sweeper, the plan editor and the renewal quote cannot each grow a
  * slightly different idea of it.
@@ -29,6 +30,28 @@ export function isPlanSoftDeleted(plan: { readonly deletedAt: Date | null }): bo
 
 /** The `where` fragment every operator-facing listing of plans carries. */
 export const LIVE_PLAN_WHERE = { deletedAt: null } as const satisfies Prisma.PlanWhereInput;
+
+/**
+ * The plans an ad placement's TARIFF signup bonus GRANTS.
+ *
+ * A live plan while it is on sale: archiving a plan or switching it off is how
+ * an operator stops the bonus. A deleted plan only when it was on sale at the
+ * delete (`deletedWhileOnSale`) — the delete overwrites the flags, and for such
+ * a plan the dialog promised the bonus keeps running. A stamped row is never on
+ * sale by its flags alone, because an older image can switch them back on.
+ *
+ * ONE rule for the two readers that must agree: `AdSignupBonusService` grants
+ * by it, and `PlanReferenceGuardService` counts a placement as holding a plan
+ * only while it is true. A placement naming a plan its bonus no longer grants
+ * holds nothing — counted, it kept an off-sale plan's row from ever being
+ * removed, and the delete dialog promised a bonus that had stopped.
+ */
+export const AD_SIGNUP_BONUS_PLAN_WHERE = {
+  OR: [
+    { deletedAt: null, isActive: true, isArchived: false },
+    { deletedAt: { not: null }, deletedWhileOnSale: true },
+  ],
+} satisfies Prisma.PlanWhereInput;
 
 /**
  * Renumbers the VISIBLE plans to `0..n-1`, keeping their current order.
@@ -87,6 +110,36 @@ export function buildDeletedPlanName(name: string, planId: string, attempt: numb
     head += codePoint;
   }
   return `${head.trimEnd()}${suffix}`;
+}
+
+/**
+ * The name a plan is SHOWN to subscribers under: its own name, minus the
+ * ` (deleted <id tail>)` suffix `buildDeletedPlanName` gave a hidden plan when a
+ * live one took its name.
+ *
+ * The rename exists for the unique index and nothing else. A hidden plan keeps
+ * being granted and fulfilled — which is the reason it is kept — so every
+ * snapshot writer that copies a plan's name reads it through this: a code, a
+ * trial or a paid period minted after the rename must reach the cabinet, the bot
+ * and the notices as the plan the subscriber was given, not as a panel-internal
+ * "(deleted …)" label that earlier subscribers on the same plan never see.
+ *
+ * Only the exact suffix this module writes, built from the plan's OWN id, and
+ * only on a soft-deleted row: a live plan an operator named "X (deleted abc)"
+ * is shown as named. A name that was cut to fit the 128 limit stays cut — the
+ * characters that made room for the suffix are not stored anywhere.
+ */
+export function displayPlanName(plan: {
+  readonly id: string;
+  readonly name: string;
+  readonly deletedAt: Date | null;
+}): string {
+  if (!isPlanSoftDeleted(plan)) {
+    return plan.name;
+  }
+  const tail = plan.id.slice(-8).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const released = new RegExp(`^([\\s\\S]*\\S) \\(deleted ${tail}(?:-\\d+)?\\)$`).exec(plan.name);
+  return released?.[1] ?? plan.name;
 }
 
 const MAX_RENAME_ATTEMPTS = 20;

@@ -13,6 +13,7 @@ import { PlanReferenceGuardService } from '../src/modules/plans/services/plan-re
 import { PlanSquadPropagationService } from '../src/modules/plans/services/plan-squad-propagation.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
+import { RetiredPlanSweeperService } from '../src/modules/plans/services/retired-plan-sweeper.service';
 import { assertEffectiveRoutePermission } from './helpers/controller-routes';
 import { buildPlanReferenceDb, PlanReferenceDbSeed, Row } from './fixtures/plan-reference-db';
 
@@ -310,6 +311,31 @@ describe('GET /admin/plans/:planId/references', () => {
     assert.deepEqual(await deletion.getReferences('free'), { planId: 'free', references: [] });
   });
 
+  it('says when the plan is the last replacement on sale of an archived plan that renews onto it', async () => {
+    const { db, deletion } = harness({
+      plans: [
+        { id: 'new-pro', orderIndex: 0 },
+        { id: 'old-pro', orderIndex: 1, isActive: false, isArchived: true, archivedRenewMode: 'REPLACE_ON_RENEW', replacementPlanIds: ['new-pro'] },
+      ],
+    });
+
+    assert.deepEqual(await deletion.getReferences('new-pro'), {
+      planId: 'new-pro',
+      references: [
+        { kind: 'transitions', count: 1 },
+        { kind: 'replacementOrphans', count: 1 },
+      ],
+    });
+
+    // Informational: it keeps nothing. The delete strips the replacement first,
+    // so by the time it decides there is no orphan left to report — the plan is
+    // hidden only because it was on sale.
+    const result = await deletion.deletePlan('new-pro', CONTEXT);
+    assert.deepEqual(result, { deleted: true, removed: false });
+    assert.deepEqual((db.tables.adminAuditLog[0]?.metadata as Row).references, []);
+    assert.deepEqual(db.plan('old-pro')?.replacementPlanIds, []);
+  });
+
   it('404s an unknown plan', async () => {
     const { deletion } = harness({ plans: [] });
 
@@ -391,6 +417,117 @@ describe('a soft-deleted plan is gone from every operator surface', () => {
       () => service.setUserPlanAccess({ planId: 'hidden', userId: 'user-1', granted: true, context: CONTEXT }),
       NotFoundException,
     );
+  });
+});
+
+/**
+ * AN EDIT IN FLIGHT WHILE THE PLAN IS DELETED DOES NOT PUT IT BACK ON SALE.
+ *
+ * `updatePlan` reads the plan, validates — which asks Remnawave about squads,
+ * the slowest step of a save — and only then writes, and every write carries
+ * `isActive` / `isArchived` from that first read. A delete committing inside
+ * that window used to be overwritten by those stale flags: `deletedAt` stamped
+ * and the plan on sale, sold by the catalogue, invisible to every panel screen
+ * and swept by the nightly job while still on sale. The '404s an edit' case
+ * above only covers an edit that STARTS after the delete.
+ *
+ * The in-memory database does not model locks, so this proves the re-check the
+ * write now makes under the row lock, with the delete landing exactly where it
+ * used to do the damage; `test/plan-delete-postgres.spec.ts` races the two on
+ * two connections. The catalogue and the sweep are pinned too, as defence in
+ * depth for a stamped row that is somehow on sale.
+ */
+describe('an edit in flight while the plan is deleted', () => {
+  function racingEdit(seed: PlanReferenceDbSeed) {
+    const db = buildPlanReferenceDb(seed);
+    let markAsked!: () => void;
+    const squadsAsked = new Promise<void>((resolve) => (markAsked = resolve));
+    let releaseSquads!: () => void;
+    const remnawave = {
+      getInternalSquadOptions: () =>
+        new Promise((resolve) => {
+          releaseSquads = () => resolve([{ uuid: 'squad-core', name: 'Core' }]);
+          markAsked();
+        }),
+      getExternalSquadOptions: async () => [],
+    };
+    const service = new PlansAdminService(
+      db.client as never,
+      remnawave as never,
+      { syncPlanSnapshotMetadata: async () => 0 } as never,
+      new PlansAdminValidators(db.client as never, remnawave as never),
+      new PlanSquadPropagationService(db.client as never, { enqueue: async () => undefined } as never),
+    );
+    const deletion = new PlanDeletionService(db.client as never, new PlanReferenceGuardService(db.client as never));
+    return { db, service, deletion, squadsAsked, release: () => releaseSquads() };
+  }
+
+  it('404s the edit of an on-sale plan that was hidden under it, and writes nothing over the stamp', async () => {
+    const h = racingEdit({
+      plans: [{ id: 'pro', name: 'Pro', internalSquads: ['squad-core'], isActive: true, isArchived: false, orderIndex: 0 }],
+    });
+
+    const edit = h.service.updatePlan('pro', { isArchived: false, description: 'Faster' }, CONTEXT);
+    await h.squadsAsked;
+    assert.equal((await h.deletion.deletePlan('pro', CONTEXT)).removed, false);
+    h.release();
+
+    await assert.rejects(edit, NotFoundException);
+    const row = h.db.plan('pro');
+    assert.ok(row !== undefined && row.deletedAt instanceof Date, 'the deleted plan lost its stamp');
+    assert.equal(row.isActive, false, 'the deleted plan was switched back on');
+    assert.equal(row.isArchived, true, 'the deleted plan was taken out of the archive');
+    assert.equal(row.description, null, 'the edit was written over the deleted plan');
+    assert.deepEqual(
+      h.db.tables.adminAuditLog.map((entry) => entry.action),
+      ['plans.deleted'],
+      'the refused edit left an audit row',
+    );
+  });
+
+  it('404s, rather than failing on a missing row, an edit whose plan was removed for good under it', async () => {
+    const h = racingEdit({ plans: [{ id: 'pro', name: 'Pro', internalSquads: ['squad-core'], isActive: false }] });
+
+    // The operator flips the card's switch on; the save is waiting on Remnawave.
+    const edit = h.service.updatePlan('pro', { isActive: true }, CONTEXT);
+    await h.squadsAsked;
+    // Meanwhile another operator deletes the unused, off-sale plan: it goes.
+    assert.equal((await h.deletion.deletePlan('pro', CONTEXT)).removed, true);
+    h.release();
+
+    await assert.rejects(edit, NotFoundException);
+  });
+
+  it('still saves an edit that no delete raced — the non-vacuous half', async () => {
+    const h = racingEdit({
+      plans: [{ id: 'pro', name: 'Pro', internalSquads: ['squad-core'], isActive: false, isArchived: false }],
+    });
+
+    const edit = h.service.updatePlan('pro', { isActive: true }, CONTEXT);
+    await h.squadsAsked;
+    h.release();
+
+    assert.equal((await edit).isActive, true);
+    assert.equal(h.db.plan('pro')?.isActive, true);
+  });
+
+  it('never sweeps a stamped plan that is on sale, while a stamped off-sale one goes', async () => {
+    const db = buildPlanReferenceDb({
+      plans: [
+        { id: 'stamped-on-sale', deletedAt: EARLIER, isActive: true, isArchived: false, orderIndex: 0 },
+        { id: 'stamped-off-sale', deletedAt: EARLIER, isActive: false, isArchived: true, orderIndex: 1 },
+      ],
+    });
+    const sweeper = new RetiredPlanSweeperService(
+      db.client as never,
+      new PlanReferenceGuardService(db.client as never),
+      { warn: () => undefined } as never,
+    );
+
+    const removed = await sweeper.sweep();
+
+    assert.deepEqual(removed.map((plan) => plan.id), ['stamped-off-sale']);
+    assert.ok(db.plan('stamped-on-sale') !== undefined, 'a plan still on sale was hard-deleted by the sweep');
   });
 });
 

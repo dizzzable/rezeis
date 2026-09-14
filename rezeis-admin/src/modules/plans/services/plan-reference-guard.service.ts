@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   AdPlacementStatus,
   AdSignupBonusType,
+  ArchivedPlanRenewMode,
   ContestStatus,
   Prisma,
   PromocodeRewardType,
@@ -15,6 +16,8 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { normalizeReferralSettings } from '../../referrals/services/referral-qualification.service';
+import { TRANSITION_TARGET_WHERE } from '../../subscriptions/services/subscription-quote.service';
+import { AD_SIGNUP_BONUS_PLAN_WHERE } from '../utils/plan-deletion.util';
 
 /**
  * WHAT STILL USES A PLAN — ONE ANSWER FOR EVERY CALLER.
@@ -55,7 +58,12 @@ import { normalizeReferralSettings } from '../../referrals/services/referral-qua
  *   wheelSectors         a subscription code sector on it
  *   addOns               an add-on sold against it — its editor re-sends the
  *                        list and refuses an unknown id on every save
- *   adPlacements         an unarchived placement whose TARIFF signup bonus is it
+ *   adPlacements         an unarchived placement whose TARIFF signup bonus is it,
+ *                        while that bonus still GRANTS it: the plan is on sale,
+ *                        or was deleted while on sale (`AD_SIGNUP_BONUS_PLAN_WHERE`,
+ *                        the rule `AdSignupBonusService` grants by). A plan
+ *                        archived or switched off has stopped its bonus, so a
+ *                        placement naming it holds nothing
  *   referralGift         the points-exchange gift subscription is it
  *   referralEligibility  it is the last live plan left in the referral program's
  *                        eligible plan list — without it every purchase is skipped
@@ -63,6 +71,15 @@ import { normalizeReferralSettings } from '../../referrals/services/referral-qua
  *                        target. The delete strips these first, so a transition
  *                        alone never keeps a plan — but the dialog lists them,
  *                        because those plans change.
+ *   replacementOrphans   an archived REPLACE_ON_RENEW plan for which this plan,
+ *                        on sale, is the LAST replacement on sale. Once the
+ *                        delete strips it, that plan's subscribers have nothing
+ *                        to renew onto: they must choose a plan, autopay stops
+ *                        charging them and their subscriptions end with the paid
+ *                        term (`SubscriptionRenewalService.renewalPlanIsGone`).
+ *                        INFORMATIONAL — it never keeps a plan
+ *                        (`INFORMATIONAL_REFERENCE_KINDS`), and after the strip
+ *                        it is always zero; it exists so the dialog can say so.
  *
  * "Subscription code" means reward type SUBSCRIPTION or NULL: a PROMOCODE prize
  * with no reward type is minted as a SUBSCRIPTION code when it names a plan
@@ -91,9 +108,18 @@ export const PLAN_REFERENCE_KINDS = [
   'referralGift',
   'referralEligibility',
   'transitions',
+  'replacementOrphans',
 ] as const;
 
 export type PlanReferenceKind = (typeof PLAN_REFERENCE_KINDS)[number];
+
+/**
+ * Kinds that say what a delete does to OTHER things and hold nothing: a count
+ * above zero never keeps a plan's row. `isUnreferenced` skips them.
+ */
+export const INFORMATIONAL_REFERENCE_KINDS: ReadonlySet<PlanReferenceKind> = new Set([
+  'replacementOrphans',
+]);
 
 export type PlanReferenceCounts = Readonly<Record<PlanReferenceKind, number>>;
 
@@ -166,6 +192,18 @@ export class PlanReferenceGuardService {
       if (counts !== undefined) counts[kind] += count;
     };
 
+    // The plans an ad placement's TARIFF bonus still pays out, by the bonus's own
+    // rule. Read through the caller's client: inside the delete that is the
+    // locked row BEFORE the stamp, inside the sweep the stamped row itself.
+    const grantedBySignupBonus = new Set(
+      (
+        await client.plan.findMany({
+          where: { AND: [{ id: { in: ids } }, AD_SIGNUP_BONUS_PLAN_WHERE] },
+          select: { id: true },
+        })
+      ).map((plan) => plan.id),
+    );
+
     for (const planId of ids) {
       add(
         planId,
@@ -224,17 +262,22 @@ export class PlanReferenceGuardService {
           },
         }),
       );
-      add(
-        planId,
-        'adPlacements',
-        await client.adPlacement.count({
-          where: {
-            signupBonusType: AdSignupBonusType.TARIFF,
-            status: { not: AdPlacementStatus.ARCHIVED },
-            signupBonus: { path: ['tariffPlanId'], equals: planId },
-          },
-        }),
-      );
+      // Only while its bonus still grants the plan. A placement naming a plan
+      // the operator archived or switched off pays out nothing: counted, it kept
+      // an off-sale plan's row for ever and the dialog promised a stopped bonus.
+      if (grantedBySignupBonus.has(planId)) {
+        add(
+          planId,
+          'adPlacements',
+          await client.adPlacement.count({
+            where: {
+              signupBonusType: AdSignupBonusType.TARIFF,
+              status: { not: AdPlacementStatus.ARCHIVED },
+              signupBonus: { path: ['tariffPlanId'], equals: planId },
+            },
+          }),
+        );
+      }
     }
 
     const terms = await client.subscriptionTerm.groupBy({
@@ -315,7 +358,14 @@ export class PlanReferenceGuardService {
       where: {
         OR: [{ upgradeToPlanIds: { hasSome: ids } }, { replacementPlanIds: { hasSome: ids } }],
       },
-      select: { id: true, upgradeToPlanIds: true, replacementPlanIds: true },
+      select: {
+        id: true,
+        upgradeToPlanIds: true,
+        replacementPlanIds: true,
+        isArchived: true,
+        archivedRenewMode: true,
+        deletedAt: true,
+      },
     });
     for (const plan of referencing) {
       const targets = new Set([...plan.upgradeToPlanIds, ...plan.replacementPlanIds]);
@@ -323,6 +373,8 @@ export class PlanReferenceGuardService {
         if (planId !== plan.id) add(planId, 'transitions', 1);
       }
     }
+
+    await this.countReplacementOrphans(client, ids, referencing, add);
 
     await this.countReferralSettings(client, ids, add);
 
@@ -336,6 +388,55 @@ export class PlanReferenceGuardService {
   ): Promise<readonly PlanReferenceInterface[]> {
     const counts = (await this.countReferences([planId], options)).get(planId) ?? emptyCounts();
     return presentReferences(counts);
+  }
+
+  /**
+   * `replacementOrphans`: per plan asked about, the archived REPLACE_ON_RENEW
+   * plans whose ONLY replacement on sale it is.
+   *
+   * "On sale" is `TRANSITION_TARGET_WHERE`, the definition the renewal counts
+   * replacements with, so the dialog cannot warn about a different set than the
+   * renewal then asks to choose for. A plan that is itself off sale orphans
+   * nobody: its replacing plans already have no replacement on sale through it,
+   * and deleting it changes no renewal.
+   */
+  private async countReplacementOrphans(
+    client: PlanReferenceClient,
+    ids: readonly string[],
+    referencing: ReadonlyArray<{
+      readonly replacementPlanIds: readonly string[];
+      readonly isArchived: boolean;
+      readonly archivedRenewMode: ArchivedPlanRenewMode;
+      readonly deletedAt: Date | null;
+    }>,
+    add: (planId: string | null, kind: PlanReferenceKind, count: number) => void,
+  ): Promise<void> {
+    const replacing = referencing.filter(
+      (plan) =>
+        plan.deletedAt === null &&
+        plan.isArchived &&
+        plan.archivedRenewMode === ArchivedPlanRenewMode.REPLACE_ON_RENEW &&
+        plan.replacementPlanIds.some((id) => ids.includes(id)),
+    );
+    if (replacing.length === 0) return;
+    const named = [...new Set(replacing.flatMap((plan) => plan.replacementPlanIds))];
+    const onSale = new Set(
+      (
+        await client.plan.findMany({
+          where: { id: { in: named }, ...TRANSITION_TARGET_WHERE },
+          select: { id: true },
+        })
+      ).map((plan) => plan.id),
+    );
+    for (const plan of replacing) {
+      const replacementsOnSale = [
+        ...new Set(plan.replacementPlanIds.filter((id) => onSale.has(id))),
+      ];
+      const [only] = replacementsOnSale;
+      if (replacementsOnSale.length === 1 && only !== undefined && ids.includes(only)) {
+        add(only, 'replacementOrphans', 1);
+      }
+    }
   }
 
   private async countReferralSettings(
@@ -380,9 +481,14 @@ export function presentReferences(counts: PlanReferenceCounts): PlanReferenceInt
   }));
 }
 
-/** True when no kind at all references the plan — the only state it may be removed in. */
+/**
+ * True when no kind that holds a plan references it — the only state it may be
+ * removed in. Informational kinds (`INFORMATIONAL_REFERENCE_KINDS`) never hold.
+ */
 export function isUnreferenced(counts: PlanReferenceCounts): boolean {
-  return PLAN_REFERENCE_KINDS.every((kind) => counts[kind] === 0);
+  return PLAN_REFERENCE_KINDS.every(
+    (kind) => INFORMATIONAL_REFERENCE_KINDS.has(kind) || counts[kind] === 0,
+  );
 }
 
 /**

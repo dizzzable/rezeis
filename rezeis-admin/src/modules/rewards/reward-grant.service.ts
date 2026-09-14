@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import { clampDiscountPercent } from '../../common/utils/discount.util';
+import { displayPlanName } from '../plans/utils/plan-deletion.util';
 import { PointsWalletService } from '../points/services/points-wallet.service';
 import { patchSnapshotNumeric } from '../subscriptions/services/plan-inherited-limits.util';
 import { buildPlanSnapshot } from '../users/utils/plan-snapshot.util';
@@ -290,13 +291,16 @@ export class RewardGrantService {
           trafficLimitStrategy: true,
           internalSquads: true,
           externalSquad: true,
+          deletedAt: true,
         },
       });
       if (plan === null) {
         throw new BadRequestException('Reward plan not found');
       }
       const snapshot = {
-        ...(buildPlanSnapshot(plan) as Record<string, unknown>),
+        // A deleted plan keeps being given away; its name is shown without the
+        // "(deleted …)" suffix a reuse of that name put on the hidden row.
+        ...(buildPlanSnapshot({ ...plan, name: displayPlanName(plan) }) as Record<string, unknown>),
         duration: grant.amount,
       };
       // Minted last, once everything that can refuse has had its say: a code

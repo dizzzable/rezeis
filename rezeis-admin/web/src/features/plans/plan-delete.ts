@@ -3,10 +3,13 @@
  *
  * Deleting a plan always succeeds for an operator holding `plans:delete`
  * (plan-deletion contract v2, 13.09.2026). What the server does is decided by
- * whether anything still uses the plan: nothing → the row goes for good, with
- * its durations and prices; something → the plan is hidden everywhere (panel,
- * cabinet, pickers, renewal), obligations already taken keep being honoured,
- * and the nightly sweeper removes the row once nothing uses it.
+ * whether anything still uses the plan, and whether it is on sale: nothing, and
+ * off sale → the row goes for good, with its durations and prices; something,
+ * or a plan still on sale → the plan is hidden everywhere (panel, cabinet,
+ * pickers, renewal), obligations already taken keep being honoured, and the
+ * nightly sweeper removes the row once nothing uses it. An unused plan on sale
+ * is hidden rather than removed because a buyer's checkout may be writing its
+ * invoice at that very moment; the sweep removes it the next night.
  *
  * The dialog asks `GET /admin/plans/:planId/references` before the operator
  * confirms, and this module turns that answer into what is shown: one row per
@@ -23,13 +26,19 @@
  * generic label, the raw kind and its count instead, and it counts as keeping
  * the plan alive, which is the conservative reading.
  *
- * ── `transitions` DOES NOT KEEP THE PLAN ────────────────────────────────────
+ * ── `transitions` AND `replacementOrphans` DO NOT KEEP THE PLAN ─────────────
  *
  * The delete itself removes the plan from every other plan's upgrade and
  * replacement lists before it decides between the two outcomes, so a plan whose
- * only reference is a transition is deleted for good. The row is still listed —
+ * only references are transitions is not held by them — gone for good when off
+ * sale, hidden until the nightly sweep when on sale. The row is still listed —
  * the operator should know those lists are about to change — but the dialog
  * must not claim the plan lingers until "nothing uses it".
+ *
+ * `replacementOrphans` counts the archived REPLACE_ON_RENEW plans for which this
+ * plan is the last replacement on sale. It holds nothing either; it is listed,
+ * with its consequence, because their subscribers will have to choose a plan,
+ * autopay stops charging them and their subscriptions end with the paid term.
  */
 
 /**
@@ -53,6 +62,7 @@ export const PLAN_REFERENCE_KINDS = [
   'referralGift',
   'referralEligibility',
   'transitions',
+  'replacementOrphans',
 ] as const
 
 export type PlanReferenceKind = (typeof PLAN_REFERENCE_KINDS)[number]
@@ -62,14 +72,24 @@ export type PlanReferenceKind = (typeof PLAN_REFERENCE_KINDS)[number]
  * when a kind it applies to is present. A line about invoices on a plan that is
  * used by one quest is noise the operator has to read past on a destructive
  * confirmation.
+ *
+ * `adBonuses` is a line of its own rather than part of `grants`. An ad
+ * placement's signup bonus, unlike promo codes, quests, contests, the wheel and
+ * the referral gift, stops granting a plan once it goes off sale — and the
+ * server reports an ad placement only while its bonus still grants the plan
+ * (on sale, or deleted while on sale). A shared sentence naming ad bonuses
+ * promised a bonus that had stopped whenever any other grant held an archived
+ * plan; this one is said exactly when a placement is reported.
  */
-export type PlanDeleteConsequence = 'subscribers' | 'invoices' | 'grants'
+export type PlanDeleteConsequence = 'subscribers' | 'invoices' | 'grants' | 'adBonuses' | 'renewalChoice'
 
 /** The fixed order the consequence lines are shown in. */
 export const PLAN_DELETE_CONSEQUENCES: readonly PlanDeleteConsequence[] = [
   'subscribers',
   'invoices',
   'grants',
+  'adBonuses',
+  'renewalChoice',
 ]
 
 interface PlanReferenceKindSpec {
@@ -147,7 +167,7 @@ export const PLAN_REFERENCE_KIND_SPECS: Readonly<Record<PlanReferenceKind, PlanR
     },
     adPlacements: {
       i18nKey: 'plansPage.deleteDialog.references.adPlacements',
-      consequence: 'grants',
+      consequence: 'adBonuses',
       keepsPlan: true,
     },
     referralGift: {
@@ -165,6 +185,11 @@ export const PLAN_REFERENCE_KIND_SPECS: Readonly<Record<PlanReferenceKind, PlanR
       consequence: null,
       keepsPlan: false,
     },
+    replacementOrphans: {
+      i18nKey: 'plansPage.deleteDialog.references.replacementOrphans',
+      consequence: 'renewalChoice',
+      keepsPlan: false,
+    },
   })
 
 /** The row for a kind this build cannot name: `{{kind}}` and `{{count}}`. */
@@ -175,6 +200,8 @@ export const PLAN_DELETE_CONSEQUENCE_I18N_KEYS: Readonly<Record<PlanDeleteConseq
     subscribers: 'plansPage.deleteDialog.consequences.subscribers',
     invoices: 'plansPage.deleteDialog.consequences.invoices',
     grants: 'plansPage.deleteDialog.consequences.grants',
+    adBonuses: 'plansPage.deleteDialog.consequences.adBonuses',
+    renewalChoice: 'plansPage.deleteDialog.consequences.renewalChoice',
   })
 
 /**
@@ -206,9 +233,10 @@ export interface PlanDeleteImpact {
   /** The consequence lines that apply, in {@link PLAN_DELETE_CONSEQUENCES} order. */
   readonly consequences: readonly PlanDeleteConsequence[]
   /**
-   * Whether the delete leaves the row behind (hidden) instead of removing it.
-   * Decides between "deleted for good" and "disappears, removed once nothing
-   * uses it".
+   * Whether something still USES the plan, so the delete leaves the row behind
+   * (hidden) until it stops. Decides between "disappears, removed once nothing
+   * uses it" and the unused leads — which still tell a plan on sale (hidden now,
+   * removed by the nightly sweep) from one off sale (deleted for good).
    */
   readonly keepsPlan: boolean
 }

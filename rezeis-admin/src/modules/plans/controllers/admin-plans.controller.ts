@@ -198,9 +198,10 @@ export class AdminPlansController {
   /**
    * Deletes the plan — never refused for what uses it (contract v2).
    * `removed: true` means the row went with its durations and prices;
-   * `removed: false` means something still used it, so it was hidden everywhere
-   * and the nightly sweep removes it once nothing does. 404 for an unknown or
-   * already deleted plan. See `PlanDeletionService`.
+   * `removed: false` means it was hidden everywhere — because something still
+   * used it, or because it was on sale at that moment — and the nightly sweep
+   * removes it once nothing does. 404 for an unknown or already deleted plan.
+   * See `PlanDeletionService`.
    */
   @Delete(':planId')
   @RequirePermission('plans', 'delete')
