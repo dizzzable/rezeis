@@ -13,7 +13,8 @@
   // of truth: the editor and `ts-node` read THIS file and stay quiet, so new
   // code is written against the relaxed rules and only the extra CI step
   // objects — the ratchet slips by default. With the flags here, the editor,
-  // the build, the test runner and CI all ask the same question.
+  // the build and CI's type checks all ask the same question. (The test runner
+  // asks none: `npm test` is transpile-only — see the `ts-node` note below.)
   "compilerOptions": {
     "module": "commonjs",
     "declaration": true,
@@ -49,18 +50,20 @@
   // ignores `include` unless told otherwise. Ambient declarations that nothing
   // imports are therefore invisible to it — `src/types/express.d.ts`, which
   // augments `Express.Request` with `correlationId`, is the one we have.
+  // `files: true` makes ts-node load `include` as well, so a TYPE-CHECKING
+  // ts-node run — today that is `npm run admin-cli` — sees the declarations
+  // `npm run typecheck` sees, instead of silently reading
+  // `req['correlationId']` as `any`. Fixed here rather than with a triple-slash
+  // reference in each affected file, which would have to be remembered for
+  // every future declaration.
   //
-  // Until `noImplicitAny` was turned on this cost nothing visible: under the
-  // test runner `req['correlationId']` silently resolved to `any`, so the two
-  // correlation middlewares were checked against a DIFFERENT program than the
-  // one `npm run typecheck` compiles. That divergence is the same shape as the
-  // gap this whole change closes, so it is fixed here rather than papered over
-  // with a triple-slash reference in each affected file — which would have to
-  // be remembered for every future declaration.
-  //
-  // The cost is real and measured, not waved away: every spec process loads the
-  // whole `src` program, and the full suite went from 138s to 213s on a warm
-  // local run. That is the price of the runner and the compiler agreeing.
+  // It does nothing for the test suite. `npm test` loads the specs through
+  // `ts-node/register/transpile-only` (since 28.08.2026), which builds no
+  // program and checks no types, so a spec with a type error runs and can
+  // pass; `npm run typecheck:test` is the only type check the specs get. (This
+  // note used to say every spec process loads the whole `src` program, costing
+  // the suite 138s -> 213s. That described the runner before it went
+  // transpile-only; corrected 14.09.2026.)
   "ts-node": { "files": true },
   "include": ["src/**/*"],
   "exclude": [

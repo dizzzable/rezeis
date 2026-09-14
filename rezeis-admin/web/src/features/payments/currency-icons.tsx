@@ -1,8 +1,8 @@
 /**
  * Inline currency icons for the payment gateway settings UI.
  *
- * Each entry maps a `Currency` enum value to a vendor SVG asset shipped
- * with the SPA. We use Vite's default URL imports so unused icons are
+ * Each entry maps a currency code to a vendor SVG asset shipped with the
+ * SPA. We use Vite's default URL imports so unused icons are
  * tree-shaken automatically and the bundler hashes each file for
  * cache-busting.
  *
@@ -32,14 +32,22 @@ import usdcUrl from '@/assets/currency/Usdc.svg'
 import usdtUrl from '@/assets/currency/Usdt.svg'
 
 /**
- * Currency codes recognised by our backend. We keep this in sync with the
- * Prisma `Currency` enum manually — the source of truth is `enum Currency` in
- * `rezeis-admin/prisma/schema.prisma`. If a code is added there, add an entry
- * here too (and ship a vendor SVG into `src/assets/currency/`).
+ * Codes this file can draw an icon or a display name for. It is an ICON
+ * CATALOGUE, not the list of currencies the backend accepts, and it is
+ * deliberately wider: every value of `enum Currency` in
+ * `rezeis-admin/prisma/schema.prisma` (the only source of truth for what a
+ * gateway or a price can carry), plus EUR, BCH, DAI, AVAX and MATIC, which the
+ * enum does not have — the API refuses them. Do not type a request or build a
+ * currency picker from this union; the gateway settings page gets its choices
+ * from `GET /admin/payments/gateways/supported-currencies` and only looks the
+ * icons up here. When a code is added to the enum, add an entry here too (and
+ * ship a vendor SVG into `src/assets/currency/`).
  *
- * This used to point at a hand-written mirror, `src/common/types/prisma-enums.ts`,
- * which was deleted on 13.09.2026 after it was found to disagree with the schema
- * in five enums. A list maintained by hand drifts; point at the schema itself.
+ * The header used to call this list a copy of the enum and to point at a
+ * hand-written mirror, `src/common/types/prisma-enums.ts`, which was deleted on
+ * 13.09.2026 after it was found to disagree with the schema in five enums. The
+ * union below had drifted the same way, which is why it is described as what
+ * it is rather than as a mirror.
  */
 export type CurrencyCode =
   | 'USD'

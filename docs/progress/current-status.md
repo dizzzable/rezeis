@@ -1,6 +1,6 @@
 # Current Status
 
-Updated: 2026-09-13 — the Stack tables, the architecture line for NestJS and the Remnawave contract paragraph only. The status section directly below is from 2026-08-23 and has not been re-checked since.
+Updated: 2026-09-14 — the Stack tables (PostgreSQL and Valkey read from the images in `rezeis-admin/docker-compose.yml`, Node.js from the Dockerfile base image, the package rows from the lockfiles; `shadcn/ui` is copied-in source with no version), the architecture line for NestJS, the Remnawave contract paragraph and the `remnawave` module row only. The status section directly below is from 2026-08-23 and has not been re-checked since.
 
 ## Current Remnawave Status
 
@@ -23,12 +23,12 @@ Updated: 2026-09-13 — the Stack tables, the architecture line for NestJS and t
 | Prisma | 7.9.0 |
 | TypeScript | 6.0.3 |
 | Node.js | 24+ |
-| PostgreSQL | 15 |
-| Redis | 7 |
+| PostgreSQL | 17 |
+| Valkey (Redis) | 9 |
 | BullMQ | 5.76.10 |
 | zod | 4.5.4 |
 
-**No `@remnawave/*` package runs at runtime** — `npm ls --omit=dev` lists none, and `test/panel-command-conformance.spec.ts` fails if one appears. The 21 commands production issues live in rezeis's own table, `rezeis-admin/src/modules/remnawave/services/panel-commands.ts`: it validates and sends the parsed request body and hands responses on raw, and the few readers that need parsed fields use explicit decoders (`panel-response-fields.ts`). The vendor contracts are seven **devDependency** oracles, one per panel release line in the vendor's table at https://docs.rw/sdk/typescript-sdk/: `@remnawave/contract-panel-{2.7,2.8,3.2.1,3.2.3,3.3,3.4.3,3.4.4}` = `@remnawave/backend-contract` 2.7.2, 2.8.35, 3.2.0, 3.2.3, 3.4.2, 3.4.13, 3.4.15. The conformance spec holds the command table to every 3.x one. They are AGPL-3.0-only and `Dockerfile` stage 1 runs `npm ci --omit=dev`, so none ships in the image. A vendor schema describes ONE panel era; parsing live responses with one failed deterministically on healthy panels of another era (`decision-log.md`, 2026-08-23 and 2026-09-13).
+**No `@remnawave/*` package runs at runtime** — `npm ls --omit=dev` lists none, and `test/panel-command-conformance.spec.ts` fails if one appears. The 21 commands production issues live in rezeis's own table, `rezeis-admin/src/modules/remnawave/services/panel-commands.ts`: it validates and sends the parsed request body and hands responses on raw, and the few readers that need parsed fields use explicit decoders (`panel-response-fields.ts`). The vendor contracts are seven **devDependency** oracles, one per panel release line in the vendor's table at https://docs.rw/sdk/typescript-sdk/: `@remnawave/contract-panel-{2.7,2.8,3.2.1,3.2.3,3.3,3.4.3,3.4.4}` = `@remnawave/backend-contract` 2.7.2, 2.8.35, 3.2.0, 3.2.3, 3.4.2, 3.4.13, 3.4.15. The conformance spec holds the command table to every 3.x one; the 2.7 and 2.8 oracles are not part of that check, and other specs use them (era decoding, the tag rule, the page-size cap). A panel that reports major version 2 gets no command from the users, devices and infra clients: each is refused with `REZEIS_PANEL_TOO_OLD` until the panel is upgraded to 3.x. They are AGPL-3.0-only and `Dockerfile` stage 1 runs `npm ci --omit=dev`, so none ships in the image. A vendor schema describes ONE panel era; parsing live responses with one failed deterministically on healthy panels of another era (`decision-log.md`, 2026-08-23 and 2026-09-13).
 
 ### Frontend (rezeis-admin/web)
 | Technology | Version |
@@ -108,7 +108,7 @@ rezeis/
 ### Remnawave Integration
 | Module | Description |
 |---|---|
-| remnawave | Plain HTTP + local tolerant decoders — no runtime contract package (15+ endpoints, every panel era) |
+| remnawave | Plain HTTP + local tolerant decoders — no runtime contract package (15+ endpoints; panels 3.x, while 2.x is refused with `REZEIS_PANEL_TOO_OLD`) |
 
 ### Advanced Features (from remnawave panel + STEALTHNET)
 | Module | Description |

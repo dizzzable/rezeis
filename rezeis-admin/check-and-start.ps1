@@ -24,8 +24,9 @@ if ($LASTEXITCODE -ne 0) {
     # Check for missing imports
     $importErrors = $errors | Select-String "Cannot find module"
     if ($importErrors) {
-        Write-Host "Found missing module imports. Please ensure all dependencies are installed:" -ForegroundColor Yellow
-        Write-Host "  npm install winston @willsoto/nestjs-prometheus prom-client @nestjs/throttler" -ForegroundColor Cyan
+        Write-Host "Found missing module imports. Restore the lockfile's dependencies and the generated Prisma client, in this order (as CI and the Dockerfile do):" -ForegroundColor Yellow
+        Write-Host "  npm ci" -ForegroundColor Cyan
+        Write-Host "  npm run prisma:generate" -ForegroundColor Cyan
     }
     
     exit 1

@@ -18,8 +18,12 @@ import { describe, it } from 'node:test';
  *
  *   1. no lockfile in this repository resolves one of these packages below the
  *      version that fixed it, and
- *   2. the overrides that exist for them stay expressed as ranges, so the next
- *      patch is picked up instead of frozen out.
+ *   2. every override in both manifests stays expressed as a range, so the next
+ *      patch is picked up instead of frozen out. EVERY one, nested entries
+ *      included: this used to check a hand-kept list of three names, and
+ *      `multer: "2.2.0"` sat outside that list as an exact pin until an
+ *      advisory landed on 2.2.0 (11.09.2026) and the pin held the image on it.
+ *      A `$name` reference is allowed — it takes the root manifest's own range.
  *
  * The floor is keyed by major, because a lockfile legitimately holds several
  * majors of the same package side by side (jsdom pulls undici 7 while the app
@@ -85,13 +89,6 @@ const FLOORS: readonly Floor[] = [
   },
 ];
 
-/**
- * Packages this repository forces to a version its dependents did not ask for.
- * The value has to keep a range operator: an exact pin here is what turned two
- * fixed versions back into vulnerable ones.
- */
-const RANGED_OVERRIDES: readonly string[] = ['brace-expansion', 'fast-uri', 'js-yaml'];
-
 const LOCKFILES: readonly string[] = ['package-lock.json', 'web/package-lock.json'];
 const MANIFESTS: readonly string[] = ['package.json', 'web/package.json'];
 
@@ -137,6 +134,32 @@ function collectInstalled(lockfile: string, packageName: string): Installed[] {
   return found;
 }
 
+type OverrideLeaf = { readonly path: string; readonly value: unknown };
+
+/**
+ * Every leaf of an `overrides` map, with the names that lead to it. npm nests
+ * overrides under the dependent they apply to (`{ "@nestjs/throttler": {
+ * "@nestjs/common": "$@nestjs/common" } }`) and spells the package's own version
+ * `"."` inside such an object, so one level is not enough.
+ */
+function overrideLeaves(overrides: Record<string, unknown>, trail: readonly string[] = []): OverrideLeaf[] {
+  return Object.entries(overrides).flatMap(([name, value]) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? overrideLeaves(value as Record<string, unknown>, [...trail, name])
+      : [{ path: [...trail, name].join(' > '), value }],
+  );
+}
+
+/**
+ * The overrides that freeze a version: anything that is not a range (`^`, `~`,
+ * `>=`) and not a `$name` reference, which defers to the root manifest's range.
+ */
+function frozenOverrides(overrides: Record<string, unknown>): string[] {
+  return overrideLeaves(overrides)
+    .filter(({ value }) => typeof value !== 'string' || !(value.startsWith('$') || /^[\^~]|^>=/.test(value)))
+    .map(({ path: leafPath, value }) => `${leafPath}: ${JSON.stringify(value)}`);
+}
+
 describe('dependency security floor', () => {
   for (const lockfile of LOCKFILES) {
     for (const floor of FLOORS) {
@@ -158,28 +181,32 @@ describe('dependency security floor', () => {
     }
   }
 
+  it('the override walk reaches nested entries and lets $references through', () => {
+    // Anti-vacuity for the case below: a walk that read one level, or let
+    // everything through, would agree that no manifest pins anything.
+    assert.deepEqual(
+      frozenOverrides({
+        caret: '^1.2.3',
+        tilde: '~1.2.3',
+        floor: '>=1.2.3',
+        pinned: '1.2.3',
+        '@scope/dependent': { '@scope/dep': '$@scope/dep', '.': '^2.0.0', deeper: { leaf: '4.5.6' } },
+        notAVersion: 7,
+      }),
+      ['pinned: "1.2.3"', '@scope/dependent > deeper > leaf: "4.5.6"', 'notAVersion: 7'],
+    );
+  });
+
   for (const manifest of MANIFESTS) {
     it(`${manifest}: forced versions are ranges, not frozen pins`, () => {
       const overrides = (readJson(manifest)['overrides'] ?? {}) as Record<string, unknown>;
-      for (const packageName of RANGED_OVERRIDES) {
-        const value = overrides[packageName];
-        if (value === undefined) {
-          continue;
-        }
-        assert.equal(
-          typeof value,
-          'string',
-          `${manifest} overrides ${packageName} with a non-string value`,
-        );
-        assert.match(
-          value as string,
-          /^[\^~]|^>=/,
-          `${manifest} pins ${packageName} to the exact version ${String(value)}. ` +
-            'An exact override is a ceiling: when that version turns out to be the ' +
-            'vulnerable one, nothing can move off it. Use a range such as ' +
-            `"^${String(value)}".`,
-        );
-      }
+      assert.deepEqual(
+        frozenOverrides(overrides),
+        [],
+        `${manifest} freezes these overrides. An exact override is a ceiling: when that ` +
+          'version turns out to be the vulnerable one, nothing can move off it. Use a ' +
+          'range such as "^1.2.3", or a "$name" reference to a root dependency.',
+      );
     });
   }
 });
