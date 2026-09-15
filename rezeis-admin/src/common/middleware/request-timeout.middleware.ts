@@ -10,6 +10,7 @@ import { Request, Response, NextFunction } from 'express';
  *   - File uploads (/admin/imports/..., /admin/broadcast/upload-media,
  *     /admin/faq/uploads) - 120s
  *   - Backup download (/admin/backup/download/...) - 120s
+ *   - Plan migration start, preview and retry (/admin/plans/:id/migrations...) - 120s
  *
  * This prevents slow/hung requests from consuming worker threads
  * indefinitely and protects against slowloris-style attacks.
@@ -36,6 +37,17 @@ const LONG_TIMEOUT_PATTERNS = [
   // 2g` for that exact path. A restore large enough to need the raised ceiling
   // was killed by the app three seconds into the minute it needed.
   /\/admin\/backup\/restore(?:-upload)?(?:[/?]|$)/,
+  // MOVING A PLAN'S SUBSCRIPTIONS BEFORE ITS DELETE: start, preview, retry.
+  // Starting locks the plan, resolves every subscription on it (a JSON-path
+  // scan no index serves) and inserts the items inside a 60 s transaction
+  // (`PLAN_MIGRATION_CREATE_TIMEOUT_MS`); the preview's first page computes the
+  // whole plan's summary; a sync retry re-drives failed jobs one by one. The
+  // delete dialog waits 120 s for each. At the 30 s default the app answered a
+  // 408 while the handler went on and committed: the dialog read "could not
+  // start" and stayed on the preview while the move ran, and a large plan could
+  // never be previewed at all. The run's status, `current` and the subscription
+  // list stay at the default — they are short reads the dialog polls.
+  /\/admin\/plans\/[^/?]+\/migrations(?:\/preview|\/[^/?]+\/retry)?(?:[?]|$)/,
 ];
 
 // `:userRef` on the SSE stream is EITHER a numeric telegramId OR a CUID

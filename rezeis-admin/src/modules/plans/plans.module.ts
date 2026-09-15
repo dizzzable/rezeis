@@ -8,6 +8,7 @@ import { PlanSnapshotSyncService } from '../subscriptions/services/plan-snapshot
 import { AdminPlansController } from './controllers/admin-plans.controller';
 import { AdminPlansStatsController } from './controllers/admin-plans-stats.controller';
 import { InternalPlanCatalogController } from './controllers/internal-plan-catalog.controller';
+import { PlanMigrationsModule } from './migrations/plan-migrations.module';
 import { PlanCatalogService } from './services/plan-catalog.service';
 import { PlanDeletionService } from './services/plan-deletion.service';
 import { PlanReferenceGuardService } from './services/plan-reference-guard.service';
@@ -25,7 +26,11 @@ import { PricingService } from './services/pricing.service';
   // `PointsModule` supplies `PointsCashbackService` to the catalog: the "+N
   // points" a card shows must be computed by the same function that credits
   // after the payment, not by a second implementation beside it.
-  imports: [AuthModule, ProfileSyncModule, RemnawaveModule, PointsModule],
+  // `PlanMigrationsModule` owns the delete dialog's "move subscriptions off
+  // this plan" routes and worker. Imported rather than folded in: its
+  // controller has dependencies of its own, and this module's `controllers`
+  // array is read verbatim by `admin-plans-stats.http.spec.ts`.
+  imports: [AuthModule, ProfileSyncModule, RemnawaveModule, PointsModule, PlanMigrationsModule],
   // ORDER IS LOAD-BEARING. `AdminPlansStatsController` is mounted on
   // `admin/plans/stats`; `AdminPlansController` is mounted on `admin/plans` and
   // declares `@Get(':planId')`. Nest registers controllers in this array's

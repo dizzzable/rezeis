@@ -46,6 +46,24 @@ describe('request timeout route policy', () => {
     assert.equal(resolveRequestTimeoutMs('/api/admin/backup/restore/dump.sql.gz'), 120_000);
   });
 
+  it('gives the plan migration start, preview and retry the long timeout the delete dialog waits', () => {
+    // At 30 s the app answered 408 while the start went on and committed, and
+    // the first preview page of a large plan could never finish.
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/preview'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/preview?x=1'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/cmf2run/retry'), 120_000);
+  });
+
+  it('keeps the migration reads the dialog polls at the default', () => {
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/current'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/cmf2run'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/cmf2run?problemsCursor=abc'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/subscriptions?limit=50'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/preview-extra'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan'), 30_000);
+  });
+
   it('does not widen similarly named backup routes', () => {
     // The widened pattern must not swallow a neighbour: `restored-*` shares the
     // prefix, and the settings/list routes are ordinary JSON.

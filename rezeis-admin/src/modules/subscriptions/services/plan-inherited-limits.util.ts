@@ -472,8 +472,15 @@ export interface PlanInheritedLimitRefresh {
   readonly ownership: Readonly<Record<PlanInheritedLimitKey, PlanLimitOwnership>>;
 }
 
-/** Unlimited absorbs — `addTrafficLimit` cannot make an unlimited budget finite. */
-function withRecordedTraffic(planTrafficLimit: number | null, contributionBytes: bigint): number | null {
+/**
+ * Unlimited absorbs — `addTrafficLimit` cannot make an unlimited budget finite.
+ *
+ * Exported for the plan migration (`plans/migrations`), which hands a field
+ * whose ownership is UNDECIDABLE to the target plan: it must keep the recorded
+ * add-on share exactly as this refresh does for an INHERITED one, and a second
+ * copy of this arithmetic is how the two would drift.
+ */
+export function withRecordedTraffic(planTrafficLimit: number | null, contributionBytes: bigint): number | null {
   if (planTrafficLimit === null) return null;
   if (contributionBytes <= 0n) return planTrafficLimit;
   // Unreachable while the field is INHERITED — the decomposition above already
@@ -484,8 +491,11 @@ function withRecordedTraffic(planTrafficLimit: number | null, contributionBytes:
   return planTrafficLimit + Number(contributionBytes / GIB_BYTES);
 }
 
-/** `<= 0` is the canonical unlimited device limit, and it absorbs too. */
-function withRecordedDevices(planDeviceLimit: number, contribution: number): number {
+/**
+ * `<= 0` is the canonical unlimited device limit, and it absorbs too. Exported
+ * for the same reader as {@link withRecordedTraffic}.
+ */
+export function withRecordedDevices(planDeviceLimit: number, contribution: number): number {
   if (planDeviceLimit <= 0) return planDeviceLimit;
   if (!Number.isInteger(contribution) || contribution <= 0) return planDeviceLimit;
   return planDeviceLimit + contribution;

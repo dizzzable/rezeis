@@ -5169,3 +5169,103 @@ model ContestWinner {
   @@index([manualTicketId])
   @@map("contest_winners")
 }
+
+// =============================================================================
+//  PLAN MIGRATION — moving subscriptions off a plan before it is deleted
+// =============================================================================
+
+/// Lifecycle of one "move these subscriptions off plan P" request. QUEUED until
+/// the worker first picks it up, RUNNING while any item is PENDING, COMPLETED
+/// when none is. A retry of failed items puts a COMPLETED run back to QUEUED.
+enum PlanMigrationRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+}
+
+/// One subscription's outcome inside a run. MOVED is written in the SAME
+/// transaction that rewrote the subscription, so `moved_at` is the commit
+/// instant of the move — the late-renewal guard in payment fulfilment compares
+/// it with the payment's creation time.
+enum PlanMigrationItemStatus {
+  PENDING
+  MOVED
+  SKIPPED
+  FAILED
+}
+
+/// Why an item is part of its run: named in an operator group, resolved from
+/// "every other subscription on the plan", or pulled in because it shares a
+/// Remnawave profile with a subscription the operator did select.
+enum PlanMigrationItemOrigin {
+  GROUP
+  REST
+  SHARED_PROFILE
+}
+
+model PlanMigrationRun {
+  id               String                 @id @default(cuid()) @map("id")
+  /// No foreign key: the nightly sweep may hard-delete the plan later, and the
+  /// run is history that must outlive it.
+  sourcePlanId     String                 @map("source_plan_id")
+  status           PlanMigrationRunStatus @default(QUEUED) @map("status")
+  createdByAdminId String?                @map("created_by_admin_id")
+  /// The request the run was created by. The worker writes the per-subscription
+  /// audit rows long after that request ended, and an audit row carries the
+  /// operator's address and client — so they are kept here.
+  requestId        String?                @map("request_id")
+  ipAddress        String?                @map("ip_address")
+  userAgent        String?                @map("user_agent")
+  totalItems       Int                    @default(0) @map("total_items")
+  startedAt        DateTime?              @map("started_at") @db.Timestamptz(3)
+  finishedAt       DateTime?              @map("finished_at") @db.Timestamptz(3)
+  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  items PlanMigrationItem[]
+
+  @@index([sourcePlanId, createdAt])
+  @@index([status])
+  @@map("plan_migration_runs")
+}
+
+model PlanMigrationItem {
+  id             String                  @id @default(cuid()) @map("id")
+  runId          String                  @map("run_id")
+  /// No foreign key, like the history rows: a subscription row is never removed
+  /// while its run could still be read, and a run is history.
+  subscriptionId String                  @map("subscription_id")
+  fromPlanId     String                  @map("from_plan_id")
+  toPlanId       String                  @map("to_plan_id")
+  status         PlanMigrationItemStatus @default(PENDING) @map("status")
+  origin         PlanMigrationItemOrigin @default(GROUP) @map("origin")
+  /// Stable machine code (`NOT_ON_SOURCE_PLAN`, `SCHEDULED_TERM`, …) the SPA
+  /// translates. NULL while PENDING and once MOVED.
+  reason         String?                 @map("reason")
+  /// Short operator-safe text, at most 500 characters. Never a raw error.
+  detail         String?                 @map("detail")
+  /// The profile-sync job the move queued, when it queued one.
+  syncJobId      String?                 @map("sync_job_id")
+  attempts       Int                     @default(0) @map("attempts")
+  movedAt        DateTime?               @map("moved_at") @db.Timestamptz(3)
+  /// Who asked for the CURRENT attempt when it was not the run's creator: a
+  /// retry (`POST …/migrations/:runId/retry`) stamps the items it puts back to
+  /// PENDING, and the move audits under this admin and request. NULL on all
+  /// four = the run's creator (`plan_migration_runs.created_by_admin_id` and its
+  /// request columns).
+  actorAdminId   String?                 @map("actor_admin_id")
+  actorRequestId String?                 @map("actor_request_id")
+  actorIpAddress String?                 @map("actor_ip_address")
+  actorUserAgent String?                 @map("actor_user_agent")
+  createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  run PlanMigrationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, subscriptionId])
+  /// The late-renewal guard's lookup in payment fulfilment: "was this
+  /// subscription moved off the paid plan after the payment was created".
+  @@index([subscriptionId, fromPlanId, status, movedAt], map: "plan_migration_items_guard_lookup_idx")
+  @@index([runId, status])
+  @@map("plan_migration_items")
+}

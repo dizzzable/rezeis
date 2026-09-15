@@ -250,6 +250,25 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   'PLAN_EXTERNAL_SQUAD_NOT_FOUND',
   'PLAN_SQUAD_VALIDATION_UNAVAILABLE',
   'PLAN_DELETE_REFERENCED',
+  // The plan delete dialog's "move subscriptions off this plan" refusals
+  // (`plans/migrations/plan-migration.codes.ts`). Here for the same reason as
+  // the `PLAN_*` block above — the SPA translates them and branches on them:
+  // a target that is the plan itself, gone, or a trial plan points the operator
+  // back at the target picker; a duplicate or oversized selection at the list;
+  // an already running migration at the run in progress. Stripped, all seven
+  // are one untyped 400/409 the dialog can only print.
+  //
+  // Unprefixed because they are the wire names the dialog's contract fixed.
+  // Restated as literals, never imported, for the reason given on the block
+  // above; `plan-migration.controller.spec.ts` checks the correspondence by
+  // value.
+  'TARGET_IS_SOURCE',
+  'TARGET_NOT_FOUND',
+  'TARGET_IS_TRIAL',
+  'DUPLICATE_SUBSCRIPTION',
+  'EMPTY_ASSIGNMENT',
+  'TOO_MANY_IDS',
+  'MIGRATION_ALREADY_RUNNING',
   // The per-user invite quota, refused at the one place a `ReferralInvite` row
   // is written (`ReferralsService.createInvite`). Here for the same reason as
   // the `PLAN_*` block above: the panel has to TRANSLATE the refusal and the

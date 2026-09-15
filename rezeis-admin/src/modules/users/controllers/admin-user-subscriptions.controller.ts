@@ -168,11 +168,18 @@ function panelProfileNumericId(panelId: number | null, pastedIdentity: string): 
  * field back to inherited — assigning a plan legitimately re-copies all four
  * and rewrites the snapshot with them. `source = 'operator_edit'` marks each
  * key present under `changes` as individually overridden from that moment on.
- * Whatever is still marked overridden at the end is an operator's deliberate
- * value; a column that disagrees with its snapshot and appears nowhere in this
- * log drifted, and is a repair candidate.
+ * `source = 'plan_migration'` is NOT a reset, though it also carries
+ * `assignedPlanId`: moving a subscription off a plan being deleted
+ * (`plans/migrations/plan-migration-move.service.ts`) marks each key present
+ * under `changes` as inherited from `assignedPlanId`'s plan; keys absent from
+ * `changes` did not change, and a key that was individually overridden stays
+ * overridden — the move keeps it and never lists it. A replay that keys on
+ * `assignedPlanId` alone would read a move as a full reset and wipe exactly the
+ * overrides the move preserved. Whatever is still marked overridden at the end
+ * is an operator's deliberate value; a column that disagrees with its snapshot
+ * and appears nowhere in this log drifted, and is a repair candidate.
  *
- * ONE action for both kinds, discriminated by `source`, rather than two: a
+ * ONE action for every kind, discriminated by `source`, rather than several: a
  * replay that has to remember to union a second action name is a replay that
  * will one day be written with only the first, and it would then read every
  * plan assignment's reset as an override.
@@ -183,8 +190,11 @@ function panelProfileNumericId(panelId: number | null, pastedIdentity: string): 
  */
 const SUBSCRIPTION_LIMITS_CHANGED_ACTION = 'user.subscription.limits_changed';
 
-/** What produced the change — see {@link SUBSCRIPTION_LIMITS_CHANGED_ACTION}. */
-type SubscriptionLimitChangeSource = 'operator_edit' | 'plan_assignment';
+/**
+ * What produced the change — see {@link SUBSCRIPTION_LIMITS_CHANGED_ACTION}.
+ * `plan_migration` is written by the plan migration, never by this controller.
+ */
+type SubscriptionLimitChangeSource = 'operator_edit' | 'plan_assignment' | 'plan_migration';
 
 /** The four values as a `Subscription` row holds them. */
 interface SubscriptionLimitValues {

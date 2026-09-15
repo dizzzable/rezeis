@@ -7,7 +7,6 @@ import {
   Prisma,
   PromocodeRewardType,
   QuestRewardType,
-  SubscriptionStatus,
   SubscriptionTermStatus,
   TransactionStatus,
   TrialClaimStatus,
@@ -18,6 +17,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { normalizeReferralSettings } from '../../referrals/services/referral-qualification.service';
 import { TRANSITION_TARGET_WHERE } from '../../subscriptions/services/subscription-quote.service';
 import { AD_SIGNUP_BONUS_PLAN_WHERE } from '../utils/plan-deletion.util';
+import { subscriptionsOnPlanWhere } from '../utils/subscriptions-on-plan.util';
 
 /**
  * WHAT STILL USES A PLAN — ONE ANSWER FOR EVERY CALLER.
@@ -208,15 +208,9 @@ export class PlanReferenceGuardService {
       add(
         planId,
         'subscriptions',
-        await client.subscription.count({
-          where: {
-            status: { not: SubscriptionStatus.DELETED },
-            OR: [
-              { planSnapshot: { path: ['id'], equals: planId } },
-              { planSnapshot: { path: ['planId'], equals: planId } },
-            ],
-          },
-        }),
+        // The ONE definition of "on this plan" — the delete dialog's migration
+        // list and the move's lock re-check read the same function.
+        await client.subscription.count({ where: subscriptionsOnPlanWhere(planId) }),
       );
       add(
         planId,
