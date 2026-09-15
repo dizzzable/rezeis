@@ -200,3 +200,5 @@ jobs:
           test/plan-delete-postgres.spec.ts
           test/settings-row-lock-postgres.spec.ts
           test/referral-rewards-postgres.spec.ts
+          test/plan-migration-postgres.spec.ts
+          test/payment-plan-migration-guard-postgres.spec.ts

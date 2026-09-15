@@ -597,6 +597,10 @@ function createEnv(input: {
             typeof query === 'object' && query !== null && 'sql' in query
               ? String((query as { readonly sql: unknown }).sql)
               : String(query);
+          // The late-renewal guard's lookup (was this subscription moved off
+          // the paid plan after the payment?) is its own statement, not a lock:
+          // no plan migration exists in this scenario.
+          if (statement.includes('"plan_migration_items"')) return [];
           assert.match(statement.replace(/\s+/g, ' '), /\bFOR\s+UPDATE\b/i);
           lockStatements.push(statement);
           return [{ id: 'sub-early', status: 'ACTIVE' }];

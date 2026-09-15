@@ -52,6 +52,16 @@ import {
   consumePaidTrialClaim,
   countCommittedTrialClaimUnits,
 } from '../../subscriptions/services/trial-claim-ledger.util';
+import {
+  describeLatePlanMigrationRenewal,
+  describeLatePlanMigrationRenewals,
+  findLatePlanMigrationRenewal,
+  LATE_PLAN_MIGRATION_RENEWAL_CODE,
+  LATE_PLAN_MIGRATION_RENEWAL_MESSAGE,
+  latePlanMigrationRenewalMetadata,
+  type LatePlanMigrationRenewal,
+  withPaidRenewalDuration,
+} from './payment-renewal-plan-migration-guard.util';
 
 /**
  * One operator card per identical `subscriptionId:termId:addOnType` per hour —
@@ -114,6 +124,15 @@ interface UpgradeTermDeferral {
   readonly boundEntitlements: number;
 }
 
+/** The durable term a fulfilled renewal appended, as its add-on lines read it. */
+interface ScheduledRenewalTerm {
+  readonly id: string;
+  readonly startsAt: Date;
+  readonly endsAt: Date | null;
+  readonly baseTrafficLimitBytes: bigint | null;
+  readonly baseDeviceLimit: number | null;
+}
+
 @Injectable()
 export class PaymentSubscriptionMutationService {
   private readonly logger = new Logger(PaymentSubscriptionMutationService.name);
@@ -157,8 +176,13 @@ export class PaymentSubscriptionMutationService {
       // but each LINE was priced with its own — so a grant restricted to one of
       // them was applied and has to be settled. Passing `null` alone said
       // nothing applied, and the grant survived every combined renewal.
-      await this.consumePurchaseDiscount(transaction.userId, null, items);
-      return combined;
+      await this.consumePurchaseDiscount(
+        transaction.userId,
+        null,
+        items,
+        combined.latePlanMigrationRenewals,
+      );
+      return { syncJobs: combined.syncJobs };
     }
 
     // Add-on top-ups carry a marker in planSnapshot and have no plan/
@@ -173,7 +197,12 @@ export class PaymentSubscriptionMutationService {
     const purchasedPlan = await this.getRequiredPlan(transaction);
     const selectedDurationDays = readSelectedDurationDays(transaction);
 
-    let result: { readonly subscription: Subscription; readonly syncJob: ProfileSyncJob };
+    let result: {
+      readonly subscription: Subscription;
+      readonly syncJob: ProfileSyncJob;
+      /** Set by the RENEW path only; see {@link findLatePlanMigrationRenewal}. */
+      readonly latePlanMigrationRenewal?: LatePlanMigrationRenewal | null;
+    };
 
     switch (transaction.purchaseType) {
       case PurchaseType.NEW:
@@ -232,6 +261,14 @@ export class PaymentSubscriptionMutationService {
     // webhook bound to the type, and — with a receipt template active — two
     // receipt emails to the customer. The warning now IS the completion: the
     // same metadata, raised as WARNING with the note the operator has to act on.
+    // A renewal a plan migration kept on the subscription's CURRENT plan
+    // (decision 10) is announced by this same completion, raised as WARNING —
+    // for the reason the blocked purchaser's is: a second event for the same
+    // payment is a second card to reconcile against the first, and the type
+    // already wears «Платёж получен, нужна проверка» when raised above INFO.
+    // `planName` and the limits above stay the PAID plan's: they describe what
+    // was bought; the note and the keys below say where the period went.
+    const latePlanMigrationRenewal = result.latePlanMigrationRenewal ?? null;
     const completedMetadata = {
       userId: transaction.userId,
       paymentId: transaction.paymentId,
@@ -248,24 +285,38 @@ export class PaymentSubscriptionMutationService {
       channel: transaction.channel,
       subscriptionId: result.subscription.id,
       remnawaveId: result.subscription.remnawaveId ?? undefined,
+      ...(latePlanMigrationRenewal === null
+        ? {}
+        : latePlanMigrationRenewalMetadata(latePlanMigrationRenewal)),
     };
+    const latePlanMigrationNote =
+      latePlanMigrationRenewal === null ? null : describeLatePlanMigrationRenewal(latePlanMigrationRenewal);
     if (purchaserBlocked) {
       // In Russian, both of them: the operator reads the message in the event
       // feed and the note on the card («📝 Заметка»), and this one asks them
       // for a decision about money.
+      //
+      // Spelled out because this is the operator's decision, not ours: the
+      // subscription exists and the VPN profile is disabled, so the customer
+      // has paid for something they cannot use until unblocked.
+      const blockedNote =
+        'Счёт создан до блокировки, а оплачен после неё. Подписка записана, VPN-профиль ' +
+        'отключён. Решите, нужен ли возврат средств.';
       this.events.warn(
         EVENT_TYPES.PAYMENT_COMPLETED,
         'PAYMENT',
         'Платёж получен от заблокированного пользователя',
         {
           ...completedMetadata,
-          // Spelled out because this is the operator's decision, not ours: the
-          // subscription exists and the VPN profile is disabled, so the
-          // customer has paid for something they cannot use until unblocked.
-          note:
-            'Счёт создан до блокировки, а оплачен после неё. Подписка записана, VPN-профиль ' +
-            'отключён. Решите, нужен ли возврат средств.',
+          note: latePlanMigrationNote === null ? blockedNote : `${blockedNote} ${latePlanMigrationNote}`,
         },
+      );
+    } else if (latePlanMigrationNote !== null) {
+      this.events.warn(
+        EVENT_TYPES.PAYMENT_COMPLETED,
+        'PAYMENT',
+        LATE_PLAN_MIGRATION_RENEWAL_MESSAGE,
+        { ...completedMetadata, note: latePlanMigrationNote },
       );
     } else {
       this.events.info(
@@ -292,17 +343,33 @@ export class PaymentSubscriptionMutationService {
    */
   private async resolveCombinedRenewalPlanIds(
     items: readonly { readonly subscriptionId: string | null }[],
+    /**
+     * Lines fulfilment kept on their subscription's current plan. Their
+     * snapshot was deliberately NOT replaced with the paid plan, so it names
+     * the plan a migration moved them to — which is not the plan the line was
+     * priced with. The paid plan is what a normal renewal of the line leaves
+     * in the snapshot, so it is what they contribute here.
+     */
+    latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[] = [],
   ): Promise<string[]> {
     const ids = items
       .map((item) => item.subscriptionId)
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
     if (ids.length === 0) return [];
+    const pricedPlanBySubscription = new Map(
+      latePlanMigrationRenewals.map((renewal) => [renewal.subscriptionId, renewal.paidPlanId] as const),
+    );
     const subscriptions = await this.prismaService.subscription.findMany({
       where: { id: { in: ids } },
-      select: { planSnapshot: true },
+      select: { id: true, planSnapshot: true },
     });
     const planIds = new Set<string>();
     for (const subscription of subscriptions) {
+      const pricedPlanId = pricedPlanBySubscription.get(subscription.id);
+      if (pricedPlanId !== undefined) {
+        planIds.add(pricedPlanId);
+        continue;
+      }
       const snapshot = subscription.planSnapshot as Record<string, unknown> | null;
       const planId = typeof snapshot?.id === 'string' ? snapshot.id : null;
       if (planId !== null) planIds.add(planId);
@@ -341,6 +408,8 @@ export class PaymentSubscriptionMutationService {
      * combined renewal, indefinitely.
      */
     combinedItems: readonly { readonly subscriptionId: string | null }[] = [],
+    /** See {@link resolveCombinedRenewalPlanIds}. */
+    latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[] = [],
   ): Promise<void> {
     // Best-effort: this runs AFTER the subscription has been committed. It must
     // never throw out of `applyCompletedTransaction`, otherwise the reconciler's
@@ -375,7 +444,9 @@ export class PaymentSubscriptionMutationService {
       // re-provisions an already-provisioned payment on retry. A missed
       // discount settlement is harmless next to that.
       const candidatePlans =
-        planId === null ? await this.resolveCombinedRenewalPlanIds(combinedItems) : [planId];
+        planId === null
+          ? await this.resolveCombinedRenewalPlanIds(combinedItems, latePlanMigrationRenewals)
+          : [planId];
       // A combined renewal prices each line separately, so the grant to settle
       // is the best one that applied to ANY of them.
       let chosen = pickBestDiscount({
@@ -423,10 +494,14 @@ export class PaymentSubscriptionMutationService {
   private async applyCombinedRenewal(
     transaction: Transaction,
     items: readonly TransactionItem[],
-  ): Promise<{ readonly syncJobs: readonly ProfileSyncJob[] }> {
+  ): Promise<{
+    readonly syncJobs: readonly ProfileSyncJob[];
+    /** Lines kept on their subscription's current plan; see the completion below. */
+    readonly latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[];
+  }> {
     const pending = items.filter((item) => item.appliedAt === null);
     if (pending.length === 0) {
-      return { syncJobs: [] };
+      return { syncJobs: [], latePlanMigrationRenewals: [] };
     }
 
     const committed = await this.prismaService.$transaction(async (transactionClient) => {
@@ -435,6 +510,9 @@ export class PaymentSubscriptionMutationService {
       // re-driven attempt starts from an empty buffer and cannot inherit the
       // lines of an attempt that was rolled back.
       const dormantAddOnLines: DormantRenewalAddOnLine[] = [];
+      // The same holds for the lines a plan migration keeps on the current
+      // plan: announced once, on the completion, and only for a commit.
+      const latePlanMigrationRenewals: LatePlanMigrationRenewal[] = [];
       // Lock the transaction items inside the fulfillment transaction and claim
       // each row conditionally. The caller's pre-transaction snapshot is only
       // a candidate list; it is never authoritative under concurrent replay.
@@ -450,7 +528,7 @@ export class PaymentSubscriptionMutationService {
         }
       }
       if (claimedItems.length === 0) {
-        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines };
+        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines, latePlanMigrationRenewals };
       }
       const jobs: ProfileSyncJob[] = [];
       const now = new Date();
@@ -473,15 +551,30 @@ export class PaymentSubscriptionMutationService {
           currentSubscription,
           readPersistedPlanAvailability(item.planSnapshot),
         );
+        // Moved by a plan migration after the checkout priced it? Then
+        // the line keeps its subscription on the plan it is on now: the term,
+        // snapshot and limit decisions below all branch on this. Asked here,
+        // under the row lock just taken — see `findLatePlanMigrationRenewal`.
+        // `plan.id` is `item.planId`: the parsed snapshot is verified against
+        // it and the live row is looked up by it.
+        const latePlanMigrationRenewal = await findLatePlanMigrationRenewal(transactionClient, {
+          subscription: currentSubscription,
+          paidPlan: plan,
+          transactionId: transaction.id,
+        });
+        if (latePlanMigrationRenewal !== null) {
+          latePlanMigrationRenewals.push(latePlanMigrationRenewal);
+        }
 
         const addOnLines = readRenewalAddOnLines(item.addOnLines);
         const durableTermRequired =
           resolveAddOnRolloutFlags().entitlementShadow || addOnLines.length > 0;
         const term = durableTermRequired
-          ? await this.scheduleRenewalTermInTransaction(transactionClient, {
+          ? await this.scheduleFulfilledRenewalTermInTransaction(transactionClient, {
               subscriptionId: currentSubscription.id,
-              plan,
+              paidPlan: plan,
               durationDays: item.durationDays,
+              latePlanMigrationRenewal,
             })
           : null;
         if (addOnLines.length > 0 && term === null) {
@@ -555,15 +648,29 @@ export class PaymentSubscriptionMutationService {
         // customer's paid add-on from the mirrored column AND makes the next
         // projection recompute subtract the contribution a SECOND time,
         // pinning the operator baseline that much lower for good.
-        const inheritedLimitRefresh = resolveInheritedPlanLimitRefresh({
-          current: lockedSubscription,
-          planSnapshot: lockedSubscription.planSnapshot,
-          plan,
-          recorded: await resolveRecordedAddOnContribution(
-            transactionClient,
-            currentSubscription.id,
-          ),
-        });
+        //
+        // ── NONE OF IT FOR A LINE WHOSE SUBSCRIPTION A MIGRATION MOVED ──────
+        //
+        // Decision 10: that line buys its period on the plan the subscription
+        // is on NOW. So the paid plan's snapshot, limits and squads are not
+        // applied at all — `null` here — and the columns stay exactly as the
+        // move left them. The snapshot below records only the paid duration,
+        // where a normal renewal records it (`withPaidRenewalDuration`).
+        // Everything else a renewal does is unchanged: status, expiry, the
+        // sync job with its traffic reset, the `appliedAt` claim, add-on
+        // capture and the payment's `fulfilledAt`.
+        const inheritedLimitRefresh =
+          latePlanMigrationRenewal !== null
+            ? null
+            : resolveInheritedPlanLimitRefresh({
+                current: lockedSubscription,
+                planSnapshot: lockedSubscription.planSnapshot,
+                plan,
+                recorded: await resolveRecordedAddOnContribution(
+                  transactionClient,
+                  currentSubscription.id,
+                ),
+              });
         // THE SNAPSHOT MOVES WITH THE COLUMNS. `inheritedLimitRefresh` writes
         // the plan's value into a column precisely because the stored snapshot
         // still agreed with it; leaving the snapshot behind makes the very row
@@ -580,12 +687,16 @@ export class PaymentSubscriptionMutationService {
         // mirror the LIVE plan through `PlanSnapshotSyncService` and are not
         // part of the override comparison.
         const planSnapshotWrite =
-          term === null
-            ? buildItemPlanSnapshot({ item, plan, gatewayType: transaction.gatewayType })
-            : patchSnapshotInheritedLimits(
-                lockedSubscription.planSnapshot,
-                inheritedLimitRefresh.snapshot,
-              );
+          inheritedLimitRefresh === null
+            ? term === null
+              ? withPaidRenewalDuration(lockedSubscription.planSnapshot, item.durationDays)
+              : undefined
+            : term === null
+              ? buildItemPlanSnapshot({ item, plan, gatewayType: transaction.gatewayType })
+              : patchSnapshotInheritedLimits(
+                  lockedSubscription.planSnapshot,
+                  inheritedLimitRefresh.snapshot,
+                );
         const renewedSubscription = await transactionClient.subscription.update({
           where: { id: currentSubscription.id },
           data: {
@@ -594,7 +705,7 @@ export class PaymentSubscriptionMutationService {
             ...(planSnapshotWrite === undefined
               ? {}
               : { planSnapshot: planSnapshotWrite as Prisma.InputJsonValue }),
-            ...inheritedLimitRefresh.columns,
+            ...(inheritedLimitRefresh === null ? {} : inheritedLimitRefresh.columns),
           },
         });
         const syncJob = await transactionClient.profileSyncJob.create({
@@ -765,29 +876,47 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return { jobs, dormantAddOnLines };
+      return { jobs, dormantAddOnLines, latePlanMigrationRenewals };
     });
 
-    this.events.info(
-      EVENT_TYPES.PAYMENT_COMPLETED,
-      'PAYMENT',
-      `Payment completed: RENEW x${pending.length}`,
-      {
-        userId: transaction.userId,
-        paymentId: transaction.paymentId,
-        purchaseType: transaction.purchaseType,
-        itemCount: pending.length,
-        amount: transaction.amount.toString(),
-        currency: transaction.currency,
-        gatewayType: transaction.gatewayType,
-      },
-    );
+    const completedMetadata = {
+      userId: transaction.userId,
+      paymentId: transaction.paymentId,
+      purchaseType: transaction.purchaseType,
+      itemCount: pending.length,
+      amount: transaction.amount.toString(),
+      currency: transaction.currency,
+      gatewayType: transaction.gatewayType,
+    };
+    if (committed.latePlanMigrationRenewals.length === 0) {
+      this.events.info(
+        EVENT_TYPES.PAYMENT_COMPLETED,
+        'PAYMENT',
+        `Payment completed: RENEW x${pending.length}`,
+        completedMetadata,
+      );
+    } else {
+      // ONE announcement for the payment, however many of its lines a plan
+      // migration kept on their current plan: the completion itself, raised as
+      // WARNING, exactly as the single renewal does. The list is metadata for
+      // machines; the note names each subscription, because this card has no
+      // subscription block of its own.
+      this.events.warn(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', LATE_PLAN_MIGRATION_RENEWAL_MESSAGE, {
+        ...completedMetadata,
+        code: LATE_PLAN_MIGRATION_RENEWAL_CODE,
+        planMigrationRenewals: committed.latePlanMigrationRenewals.map((renewal) => ({ ...renewal })),
+        note: describeLatePlanMigrationRenewals(committed.latePlanMigrationRenewals),
+      });
+    }
 
     // After the completion card, and only now that the capture is durable: the
     // paid lines this renewal recorded as adding nothing at their baseline.
     this.announceDormantRenewalAddOns(committed.dormantAddOnLines);
 
-    return { syncJobs: committed.jobs };
+    return {
+      syncJobs: committed.jobs,
+      latePlanMigrationRenewals: committed.latePlanMigrationRenewals,
+    };
   }
 
   /**
@@ -1462,7 +1591,11 @@ export class PaymentSubscriptionMutationService {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
-  }): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+  }): Promise<{
+    readonly subscription: Subscription;
+    readonly syncJob: ProfileSyncJob;
+    readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
+  }> {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
@@ -1475,11 +1608,29 @@ export class PaymentSubscriptionMutationService {
         currentSubscription,
         readPersistedPlanAvailability(input.transaction.planSnapshot),
       );
+      // ── MOVED BY A PLAN MIGRATION AFTER THE CHECKOUT PRICED IT ───────────
+      //
+      // A renewal checkout priced before a plan migration moved this
+      // subscription — for the plan it left, or for that plan's replacement or
+      // a plan chosen on it (decision 10). Asked here, under the row lock just
+      // taken and before anything is written — see
+      // `findLatePlanMigrationRenewal` for why it cannot be asked earlier, and
+      // for the ten-minute window before the payment's creation it allows.
+      // When it answers, the period is bought on the plan the subscription is
+      // on NOW: the term below is that plan's, and neither the paid plan's
+      // snapshot nor its limits or squads are applied. The completion event
+      // tells the operator.
+      const latePlanMigrationRenewal = await findLatePlanMigrationRenewal(transactionClient, {
+        subscription: currentSubscription,
+        paidPlan: input.purchasedPlan,
+        transactionId: input.transaction.id,
+      });
       const term = resolveAddOnRolloutFlags().entitlementShadow
-        ? await this.scheduleRenewalTermInTransaction(transactionClient, {
+        ? await this.scheduleFulfilledRenewalTermInTransaction(transactionClient, {
             subscriptionId: currentSubscription.id,
-            plan: input.purchasedPlan,
+            paidPlan: input.purchasedPlan,
             durationDays: input.selectedDurationDays,
+            latePlanMigrationRenewal,
           })
         : null;
       const now = new Date();
@@ -1513,31 +1664,44 @@ export class PaymentSubscriptionMutationService {
       // the row, `snapshot` (the plan's raw value) goes to the stored snapshot;
       // swapping them corrupts the baseline permanently in one direction or the
       // other.
-      const inheritedLimitRefresh = resolveInheritedPlanLimitRefresh({
-        current: lockedSubscription,
-        planSnapshot: lockedSubscription.planSnapshot,
-        plan: input.purchasedPlan,
-        recorded: await resolveRecordedAddOnContribution(
-          transactionClient,
-          currentSubscription.id,
-        ),
-      });
+      //
+      // Skipped entirely — `null` — for a renewal a plan migration keeps on the
+      // current plan, exactly as at the combined call site above: the columns
+      // stay as the move left them, and the snapshot below records only the
+      // paid duration, where a normal renewal records it
+      // (`withPaidRenewalDuration`).
+      const inheritedLimitRefresh =
+        latePlanMigrationRenewal !== null
+          ? null
+          : resolveInheritedPlanLimitRefresh({
+              current: lockedSubscription,
+              planSnapshot: lockedSubscription.planSnapshot,
+              plan: input.purchasedPlan,
+              recorded: await resolveRecordedAddOnContribution(
+                transactionClient,
+                currentSubscription.id,
+              ),
+            });
       // Same rule, same reason as the combined renewal above: a column that is
       // refreshed from the plan must say so in the snapshot, or this row reads
       // OVERRIDDEN from now on and the SECOND plan edit never reaches it. See
       // `patchSnapshotInheritedLimits` for which keys move and which are
       // deliberately left mirroring the live plan.
       const planSnapshotWrite =
-        term === null
-          ? buildPlanSnapshot({
-              transaction: input.transaction,
-              purchasedPlan: input.purchasedPlan,
-              selectedDurationDays: input.selectedDurationDays,
-            })
-          : patchSnapshotInheritedLimits(
-              lockedSubscription.planSnapshot,
-              inheritedLimitRefresh.snapshot,
-            );
+        inheritedLimitRefresh === null
+          ? term === null
+            ? withPaidRenewalDuration(lockedSubscription.planSnapshot, input.selectedDurationDays)
+            : undefined
+          : term === null
+            ? buildPlanSnapshot({
+                transaction: input.transaction,
+                purchasedPlan: input.purchasedPlan,
+                selectedDurationDays: input.selectedDurationDays,
+              })
+            : patchSnapshotInheritedLimits(
+                lockedSubscription.planSnapshot,
+                inheritedLimitRefresh.snapshot,
+              );
       const renewedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
@@ -1546,7 +1710,7 @@ export class PaymentSubscriptionMutationService {
           ...(planSnapshotWrite === undefined
             ? {}
             : { planSnapshot: planSnapshotWrite as Prisma.InputJsonValue }),
-          ...inheritedLimitRefresh.columns,
+          ...(inheritedLimitRefresh === null ? {} : inheritedLimitRefresh.columns),
         },
       });
       const syncJob = await transactionClient.profileSyncJob.create({
@@ -1579,6 +1743,7 @@ export class PaymentSubscriptionMutationService {
       return {
         subscription: renewedSubscription,
         syncJob,
+        latePlanMigrationRenewal,
       };
     });
 
@@ -1626,13 +1791,7 @@ export class PaymentSubscriptionMutationService {
   private async scheduleRenewalTermInTransaction(
     tx: Prisma.TransactionClient,
     input: { readonly subscriptionId: string; readonly plan: Plan; readonly durationDays: number },
-  ): Promise<{
-    readonly id: string;
-    readonly startsAt: Date;
-    readonly endsAt: Date | null;
-    readonly baseTrafficLimitBytes: bigint | null;
-    readonly baseDeviceLimit: number | null;
-  } | null> {
+  ): Promise<ScheduledRenewalTerm | null> {
     const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"
       FROM "subscriptions"
@@ -1698,6 +1857,81 @@ export class PaymentSubscriptionMutationService {
       resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, startsAt),
     });
     return { id: created.id, startsAt, endsAt, baseTrafficLimitBytes, baseDeviceLimit };
+  }
+
+  /**
+   * The durable term a FULFILLED renewal appends.
+   *
+   * Normally the paid plan's. For a renewal whose subscription a plan migration
+   * moved after its checkout priced it (decision 10), it is the term a
+   * renewal of the subscription's CURRENT plan appends: the same method, handed
+   * that plan's row. Appending the paid plan's term instead would put the
+   * subscription back on it the moment the term activates — the boundary sweep
+   * writes a term's snapshot and squads onto the subscription — so the move
+   * would be undone later rather than now.
+   *
+   * The current plan is read from its live row, as a single renewal reads the
+   * plan it fulfils (`getRequiredPlan`) and as the move itself does. A
+   * soft-deleted row still resolves — it is how a paid period is fulfilled on a
+   * plan deleted after its invoice.
+   *
+   * FAIL CLOSED, in one case only: the current plan's row is gone AND the
+   * subscription has a term chain to extend. There is no plan to mint the
+   * term from, and extending expiry without one leaves the chain ending at
+   * the OLD expiry — an ACTIVE term is only ended by its successor, so add-ons
+   * bound "until subscription end" would lapse early and later add-on
+   * purchases would fall back to the legacy increment. So nothing is written
+   * and the payment stays paid-but-unfulfilled, where every other payment
+   * that cannot be applied goes: the webhook is marked FAILED with this error,
+   * the operator alert fires, and it can be replayed once the plan is
+   * resolved. Without a term chain there is nothing to extend, and the
+   * renewal proceeds on the column path.
+   */
+  private async scheduleFulfilledRenewalTermInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly subscriptionId: string;
+      readonly paidPlan: Plan;
+      readonly durationDays: number;
+      readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
+    },
+  ): Promise<ScheduledRenewalTerm | null> {
+    if (input.latePlanMigrationRenewal === null) {
+      return this.scheduleRenewalTermInTransaction(tx, {
+        subscriptionId: input.subscriptionId,
+        plan: input.paidPlan,
+        durationDays: input.durationDays,
+      });
+    }
+    const currentPlan = await tx.plan.findUnique({
+      where: { id: input.latePlanMigrationRenewal.currentPlanId },
+    });
+    if (currentPlan !== null) {
+      return this.scheduleRenewalTermInTransaction(tx, {
+        subscriptionId: input.subscriptionId,
+        plan: currentPlan,
+        durationDays: input.durationDays,
+      });
+    }
+    const activeTerm = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
+      select: { id: true },
+    });
+    if (activeTerm === null) {
+      return null;
+    }
+    // The exception carries the bare code: the webhook inbox keeps an error
+    // text only when it is a bounded code (`normalizePaymentProviderError`),
+    // so a sentence would reach the operator's failed-webhook alert as a
+    // plain «FAILED». The particulars go to the log.
+    this.logger.warn(
+      `LATE_RENEWAL_CURRENT_PLAN_NOT_FOUND subscription=${input.subscriptionId} ` +
+        `paidPlan=${input.latePlanMigrationRenewal.paidPlanId} ` +
+        `currentPlan=${input.latePlanMigrationRenewal.currentPlanId} ` +
+        `run=${input.latePlanMigrationRenewal.planMigrationRunId}: moved by a plan migration after the ` +
+        'checkout priced it, and the current plan has no row to append the renewal term from',
+    );
+    throw new ConflictException('LATE_RENEWAL_CURRENT_PLAN_NOT_FOUND');
   }
 
   /**
