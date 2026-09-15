@@ -637,6 +637,220 @@ export const en = {
           '{{count}} archived plans that renew their subscribers onto it and have no other replacement on sale',
         unknown: 'Other ({{kind}}): {{count}}',
       },
+      // Moving the subscriptions still on the plan to other plans before the
+      // delete (plan migration, 15.09.2026). Warning, reason and problem-kind
+      // keys are listed in `plan-migration.ts`; `unknown` is a code this build
+      // has no words for.
+      migrate: {
+        needsSubscriptionAccess:
+          'To move these subscriptions to another plan before deleting, you need access to subscriptions.',
+        subscriptionsUnavailable:
+          'Could not load the subscriptions on this plan, so they cannot be moved now. You can still delete the plan.',
+        choose: {
+          lead_one:
+            '{{count}} subscription is on this plan. Move it to another plan before deleting — the plan is deleted after the move.',
+          lead_other:
+            '{{count}} subscriptions are on this plan. Move them to other plans before deleting — the plan is deleted after the move.',
+          newSubscriptions:
+            'While the move was running, new subscriptions landed on this plan: {{count}}. Assign a plan to them and run the move again.',
+          searchLabel: 'Search subscriptions',
+          searchPlaceholder: 'Name, @username, Telegram ID, email or subscription ID',
+          listLabel: 'Subscriptions on the plan',
+          selectShown: 'Select all shown',
+          selected: 'Selected: {{count}}',
+          selectAll_one: 'Select all {{count}} subscription of the plan',
+          selectAll_other: 'Select all {{count}} subscriptions of the plan',
+          allSelected: 'All subscriptions of the plan are selected: {{count}}',
+          clearSelection: 'Clear selection',
+          selectRow: 'Select: {{name}}',
+          targetLabel: 'Plan to move to',
+          targetPlaceholder: 'Choose a plan',
+          archivedTag: 'archived',
+          inactiveTag: 'inactive',
+          targetsLoading: 'Loading plans…',
+          targetsFailed: 'Could not load the plans to move to.',
+          targetsEmpty: 'There are no other plans except trial ones.',
+          assign: 'Assign to selected',
+          unassigned: 'No plan assigned',
+          targetUnavailable: 'Plan unavailable',
+          expires: 'until {{date}}',
+          noExpiry: 'no end date',
+          telegramId: 'TG {{id}}',
+          listLoading: 'Loading subscriptions…',
+          listFailed: 'Could not load the subscriptions.',
+          searchEmpty: 'No subscriptions match the search.',
+          loadMore: 'Show more',
+          loadMoreFailed: 'Could not load more subscriptions.',
+          assignedSummary: '{{assigned}} of {{total}} assigned',
+          group: '{{plan}}: {{count}}',
+          restGroup: 'Everyone else → {{plan}}',
+          unassignedHint_one:
+            '{{count}} subscription has no plan to move to. Assign one, or delete the plan without moving.',
+          unassignedHint_other:
+            '{{count}} subscriptions have no plan to move to. Assign one, or delete the plan without moving.',
+          ineligibleHint:
+            'A plan assigned earlier is no longer available. Assign another plan to those subscriptions.',
+          needsEditPermission:
+            'You can review the changes, but the move itself needs permission to edit subscriptions.',
+          deleteWithoutMove: 'Delete without moving',
+          next: 'Next',
+        },
+        flags: {
+          pendingRenewal: 'Renewal payment',
+          pendingRenewalHint:
+            'The subscriber started paying for a renewal, and the payment has not finished. The subscription is moved anyway: if the payment goes through later, the term is extended on the new plan.',
+          scheduledTerm: 'Renewed in advance',
+          scheduledTermHint:
+            'The subscription is already renewed in advance, so the move skips it. After the delete it stays on the deleted plan until its term ends.',
+          sharedProfile: 'Shared profile',
+          sharedProfileHint:
+            'Uses the same Remnawave profile as another subscription. If that one is on this plan too, assign both the same plan.',
+        },
+        withoutMove: {
+          back: 'Back',
+        },
+        preview: {
+          lead: 'This is how the subscriptions change. Expiry and status stay as they are, no money is charged, and subscribers are not notified.',
+          loading: 'Calculating the changes…',
+          summaryLabel: 'By plan',
+          count_one: '{{count}} subscription',
+          count_other: '{{count}} subscriptions',
+          skippedCount: 'Will be skipped: {{count}}',
+          rowsLabel: 'Changes per subscription',
+          traffic: 'Traffic',
+          devices: 'Devices',
+          squads: 'Squads',
+          externalSquad: 'External squad',
+          type: 'Type',
+          unlimited: 'Unlimited',
+          gigabytes: '{{value}} GB',
+          none: 'none',
+          trial: 'trial',
+          regular: 'regular',
+          srBefore: 'was',
+          srAfter: 'becomes',
+          srRemoved: 'removed',
+          srAdded: 'added',
+          kept: 'set manually',
+          keptHint: 'This limit was set for the subscription by hand, so it stays as it is.',
+          willSkip: 'The move skips this subscription: {{reason}}',
+          loadMore: 'Show more',
+          loadMoreFailed: 'Could not load more rows.',
+          back: 'Back',
+          confirm: 'Move and delete',
+          needsEditPermission: 'Moving needs permission to edit subscriptions.',
+        },
+        warnings: {
+          count: '{{label}}: {{count}}',
+          fewerDevices: 'Fewer devices',
+          fewerDevicesHint: 'The device limit becomes lower than it is now.',
+          lessTraffic: 'Less traffic',
+          lessTrafficHint: 'The traffic limit becomes lower than it is now.',
+          squadsRemoved: 'Squads removed',
+          squadsRemovedHint: 'Some of the subscription’s squads are removed, or its external squad changes.',
+          targetNotRenewable: 'Cannot be renewed',
+          targetNotRenewableHint:
+            'The new plan cannot renew this subscription: it has no prices in the currency of the enabled payment systems, or it is archived with no replacement on sale.',
+          trialBecomesRegular: 'Trial becomes regular',
+          trialBecomesRegularHint:
+            'The trial subscription becomes a regular one and renews at the new plan’s prices.',
+          unknownLimitTakesTarget: 'Limit taken from the new plan',
+          unknownLimitTakesTargetHint:
+            'It cannot be told whether the limit was set by hand (for example, on an imported subscription), so it takes the new plan’s value.',
+          pendingRenewalForSource: 'Renewal payment',
+          pendingRenewalForSourceHint:
+            'A renewal payment for the subscription has not finished. If it goes through after the move, the term is extended on the new plan.',
+          localOnly: 'Remnawave later',
+          localOnlyHint:
+            'Only the panel changes now. The Remnawave profile, if there is one, is updated on the subscription’s next sync — on renewal or once it is enabled.',
+          unknown: 'Warning {{code}}',
+          unknownHint: 'This version of the panel does not know this warning.',
+        },
+        reasons: {
+          notOnSourcePlan: 'the subscription is no longer on this plan',
+          subscriptionDeleted: 'the subscription was deleted',
+          scheduledTerm: 'the subscription is already renewed in advance',
+          targetDeleted: 'the plan to move to was deleted',
+          targetIsTrial: 'the plan to move to is a trial plan',
+          sharedProfileTargetConflict:
+            'subscriptions sharing one Remnawave profile were assigned different plans',
+          sharedProfileTwinBlocked:
+            'another subscription on the same Remnawave profile cannot be moved, and they only move together',
+          internalError: 'internal server error',
+          syncFailed: 'the Remnawave profile could not be updated',
+          unknown: 'could not be moved',
+        },
+        refusals: {
+          targetIsSource: 'Subscriptions cannot be moved to the plan that is being deleted.',
+          targetNotFound:
+            'One of the chosen plans has been deleted. The list of plans is refreshed — assign another one.',
+          targetIsTrial: 'Subscriptions cannot be moved to a trial plan. Assign another plan.',
+          duplicateSubscription:
+            'A subscription is assigned to two plans at once. Go back and assign it again.',
+          emptyAssignment: 'No plan is assigned.',
+          tooManyIds:
+            'Too many subscriptions are selected one by one. Select all subscriptions of the plan at once and assign them a plan.',
+          alreadyRunning:
+            'A move of this plan is already running or has just finished. Close the window and open the delete again.',
+          previewFailed: 'Could not calculate the changes.',
+          startFailed: 'Could not start the move.',
+        },
+        running: {
+          lead: 'The subscriptions are moving to their new plans.',
+          starting: 'Starting the move…',
+          queued: 'The move is queued…',
+          moving: 'Moving subscriptions: {{done}} of {{total}}',
+          syncing: 'Updating profiles in Remnawave: {{done}} of {{total}}',
+          moveLabel: 'Move',
+          moveCounts: 'moved {{moved}}, skipped {{skipped}}, failed {{failed}}',
+          syncLabel: 'Remnawave',
+          syncCounts: 'updated {{completed}}, failed {{failed}}',
+          stayOpen:
+            'If everything moves without errors, the plan is deleted and the window closes. If you close the window or the tab, the server still finishes the move, but the plan stays — delete it later.',
+          statusFailed: 'Could not get the state of the move. Trying again…',
+          statusUnavailable:
+            'Could not get the state of the move. You can close the window: the server finishes the move, but the plan is not deleted.',
+        },
+        success: {
+          title: 'All subscriptions moved',
+          moved: 'Subscriptions moved: {{count}}.',
+          checking: 'Checking that no new subscriptions landed on the plan…',
+          deleting: 'Deleting the plan…',
+          checkFailed:
+            'Could not check whether new subscriptions landed on the plan. If you delete it now, any new ones stay on the deleted plan until their term ends.',
+          deleteFailed: 'The subscriptions are moved, but the plan was not deleted. Try deleting it again.',
+        },
+        announce: {
+          started: 'The move has started.',
+          succeeded: 'The move has finished: all subscriptions moved.',
+          problems: 'The move has finished, but not everything worked.',
+          newSubscriptions: 'New subscriptions landed on the plan: {{count}}.',
+        },
+        problems: {
+          title: 'The move finished with problems',
+          lead: 'Moved {{moved}} of {{total}}. Below is what did not work and why.',
+          listLabel: 'What did not work',
+          kinds: {
+            moveFailed: 'Not moved',
+            moveSkipped: 'Skipped',
+            syncFailed: 'Not updated in Remnawave',
+            unknown: 'Problem {{code}}',
+          },
+          retryFailed: 'Retry the failed ones',
+          retrySync: 'Retry synchronisation',
+          chooseAnotherTarget: 'Choose another plan for the rest',
+          twinReason: 'Why that one cannot move: {{reason}}',
+          retryNeedsEdit: 'Retrying needs permission to edit subscriptions.',
+          retryRefused: 'Could not start the retry.',
+          deleteAnyway: 'Delete anyway',
+          deleteAnywayConsequence:
+            'Subscriptions that were not moved and are still on this plan stay on the deleted plan until their term ends.',
+          syncConsequence:
+            'Subscriptions not updated in Remnawave are already on their new plan in the panel, but their Remnawave profile still has the old limits.',
+          loadMore: 'Show more',
+          loadMoreFailed: 'Could not load more problems.',
+        },
+      },
     },
     tabs: {
       list: 'List',

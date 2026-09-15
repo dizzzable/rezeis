@@ -25,6 +25,7 @@ import { valueAt } from '@/test/i18n-key-paths'
 
 import {
   describePlanReferences,
+  describePlanReferencesAfterMove,
   isPlanAlreadyGone,
   PLAN_DELETE_CONSEQUENCE_I18N_KEYS,
   PLAN_DELETE_CONSEQUENCES,
@@ -205,6 +206,50 @@ describe('describePlanReferences', () => {
         { recognised: false, kind, count: 1, i18nKey: PLAN_REFERENCE_UNKNOWN_I18N_KEY },
       ])
     }
+  })
+})
+
+// The delete that follows a move: the subscriptions are the move's, everything else is said as before.
+describe('describePlanReferencesAfterMove', () => {
+  it('leaves out the subscriptions and what their subscribers are told, and keeps every other kind', () => {
+    const impact = describePlanReferencesAfterMove([
+      { kind: 'subscriptions', count: 12 },
+      { kind: 'promocodes', count: 2 },
+      { kind: 'scheduledTerms', count: 1 },
+      { kind: 'unsettledPayments', count: 1 },
+      { kind: 'adPlacements', count: 1 },
+      { kind: 'replacementOrphans', count: 1 },
+      { kind: 'loyaltyTiers', count: 3 },
+    ])
+    expect(impact.rows.map((row) => row.kind)).toEqual([
+      'promocodes',
+      'scheduledTerms',
+      'unsettledPayments',
+      'adPlacements',
+      'replacementOrphans',
+      'loyaltyTiers',
+    ])
+    expect(impact.rows.at(-1)).toMatchObject({ recognised: false, kind: 'loyaltyTiers', count: 3 })
+    expect(impact.consequences).toEqual(['invoices', 'grants', 'adBonuses', 'renewalChoice'])
+    expect(impact.keepsPlan).toBe(true)
+    // Before any other delete, the same references say more.
+    expect(describePlanReferences([{ kind: 'subscriptions', count: 12 }, { kind: 'promocodes', count: 2 }])).toMatchObject({
+      consequences: ['subscribers', 'grants'],
+    })
+  })
+
+  it('does not keep a plan only its moved subscriptions kept', () => {
+    expect(describePlanReferencesAfterMove([{ kind: 'subscriptions', count: 3 }])).toEqual({
+      rows: [],
+      consequences: [],
+      keepsPlan: false,
+    })
+    expect(
+      describePlanReferencesAfterMove([
+        { kind: 'subscriptions', count: 3 },
+        { kind: 'transitions', count: 1 },
+      ]),
+    ).toMatchObject({ keepsPlan: false, consequences: [] })
   })
 })
 

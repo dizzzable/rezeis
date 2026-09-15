@@ -270,6 +270,22 @@ export function describePlanReferences(
 }
 
 /**
+ * What to say about a plan that is deleted AFTER its subscriptions are moved off
+ * it — in the preview, before «Перенести и удалить». The subscriptions are the
+ * move's to handle, so neither their row nor the subscribers' consequence is
+ * said; every other kind, its consequence and whether it keeps the plan are
+ * exactly as {@link describePlanReferences} says them before any other delete.
+ * The subscriptions the move leaves behind are named after it runs, with the
+ * problems.
+ */
+export function describePlanReferencesAfterMove(
+  references: ReadonlyArray<{ readonly kind: string; readonly count: number }>,
+): PlanDeleteImpact {
+  const impact = describePlanReferences(references.filter((reference) => reference.kind !== 'subscriptions'))
+  return { ...impact, consequences: impact.consequences.filter((consequence) => consequence !== 'subscribers') }
+}
+
+/**
  * Whether a failed delete means the plan is already gone. The contract answers
  * 404 for an unknown or already-deleted plan — another tab, another operator —
  * which is the outcome the operator asked for, and is reported as such rather
@@ -280,4 +296,21 @@ export function isPlanAlreadyGone(error: unknown): boolean {
   const response = (error as { response?: unknown }).response
   if (typeof response !== 'object' || response === null) return false
   return (response as { status?: unknown }).status === 404
+}
+
+/**
+ * How a confirmed delete ended, as the dialog needs to know it.
+ *
+ * The page owns the DELETE — its toasts, its list refresh, closing the dialog —
+ * and the dialog used to hand it a plan id and hear nothing back. That was
+ * enough while Delete was the dialog's last word. After a move it is not: the
+ * delete runs on its own once the success state has played, and when it fails
+ * the dialog is still open on "everything moved", with no button left to try
+ * again unless it learns the delete did not happen. `gone` (404, deleted
+ * elsewhere) closes the dialog like `deleted`; only `failed` leaves it open.
+ */
+export type PlanDeleteOutcome = 'deleted' | 'gone' | 'failed'
+
+export function planDeleteOutcomeOfError(error: unknown): Exclude<PlanDeleteOutcome, 'deleted'> {
+  return isPlanAlreadyGone(error) ? 'gone' : 'failed'
 }

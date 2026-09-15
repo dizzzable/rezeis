@@ -42,7 +42,7 @@ import {
   type Plan,
   type PlanUpdateResult,
 } from './plans-api'
-import { isPlanAlreadyGone } from './plan-delete'
+import { isPlanAlreadyGone, planDeleteOutcomeOfError } from './plan-delete'
 import { PlanDeleteDialog } from './plan-delete-dialog'
 import { resolvePlanWriteRefusal } from './plan-write-refusals'
 import { PlansStatsTab } from './plans-stats-tab'
@@ -398,7 +398,17 @@ export default function PlansPage() {
         plan={planToDelete}
         open={deleteDialogOpen}
         deleting={deleteMutation.isPending}
-        onConfirm={(id) => deleteMutation.mutate(id)}
+        onConfirm={async (id) => {
+          // The mutation's own callbacks still toast, refresh and close; the
+          // dialog only needs to hear how it ended — after a move the delete is
+          // its last step, and a failure must leave it a way to try again.
+          try {
+            await deleteMutation.mutateAsync(id)
+            return 'deleted'
+          } catch (error) {
+            return planDeleteOutcomeOfError(error)
+          }
+        }}
         onOpenChange={setDeleteDialogOpen}
       />
     </div>
