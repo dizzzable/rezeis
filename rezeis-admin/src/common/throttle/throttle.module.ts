@@ -9,7 +9,8 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
  *   - 600 requests per 60 seconds per IP (general API)
  *     Generous to accommodate the admin SPA's polling endpoints
  *     (dashboard summary 30 s, system-health 10 s, system-logs 2 s,
- *     support-tickets detail 5 s, online-trend / activity-feed 30 s,
+ *     support-tickets detail 5 s, activity-feed 30 s, the online card's
+ *     online-overview / online-distribution 60 s,
  *     webhooks / broadcast 10 s). All admin endpoints sit behind
  *     `AdminJwtAuthGuard` so login itself is the abuse vector — that
  *     uses a much tighter per-endpoint override (see below).

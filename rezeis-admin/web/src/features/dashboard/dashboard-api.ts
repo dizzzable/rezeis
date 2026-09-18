@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
 
@@ -194,9 +196,14 @@ export const dashboardApi = {
     return response.data && typeof response.data === 'object' ? response.data : null
   },
 
-  async getOnlineTrend(hours = 24): Promise<OnlineTrendPoint[]> {
-    const response = await api.get(`/admin/remnawave/metrics/online-trend?hours=${hours}`)
-    return expectArray<OnlineTrendPoint>(response.data)
+  async getOnlineOverview(range: OnlineRange): Promise<OnlineOverview> {
+    const response = await api.get('/admin/remnawave/metrics/online-overview', { params: { range } })
+    return onlineOverviewSchema.parse(response.data)
+  },
+
+  async getOnlineDistribution(range: OnlineRange): Promise<OnlineDistribution> {
+    const response = await api.get('/admin/remnawave/metrics/online-distribution', { params: { range } })
+    return onlineDistributionSchema.parse(response.data)
   },
 
   async getActivityFeed(limit = 30): Promise<ActivityFeedItem[]> {
@@ -205,13 +212,77 @@ export const dashboardApi = {
   },
 }
 
-// ── Online Trend Types ───────────────────────────────────────────────────────
+// ── «Онлайн пользователей» ───────────────────────────────────────────────────
 
-export interface OnlineTrendPoint {
-  readonly time: string
-  readonly onlineNow: number
-  readonly totalUsers: number
-  readonly nodesOnline: number
+/** The card's two windows; the server refuses any other. */
+export const ONLINE_RANGES = ['24h', '7d'] as const
+export type OnlineRange = (typeof ONLINE_RANGES)[number]
+
+/**
+ * Parsed, not asserted: the card reads nested fields off every part of these
+ * answers, and an HTML error page or a half-deployed backend must reach its
+ * error branch, not a `.map` of undefined inside the chart.
+ */
+const onlineOverviewSchema = z.object({
+  range: z.enum(ONLINE_RANGES),
+  generatedAt: z.string(),
+  bucketMinutes: z.number(),
+  points: z.array(z.object({ time: z.string(), onlineNow: z.number().nullable() })),
+  sampleCount: z.number(),
+  peak: z.object({ value: z.number(), at: z.string() }).nullable(),
+  latestSample: z.object({ onlineNow: z.number(), at: z.string() }).nullable(),
+  live: z.object({ onlineNow: z.number(), uniqueUsers: z.number(), checkedAt: z.string() }).nullable(),
+})
+
+/**
+ * The card's chart for one window (`GET /admin/remnawave/metrics/online-overview`).
+ * `points` are 5-minute samples for 24 hours and hourly maxima for 7 days, and
+ * `onlineNow: null` is a bucket nothing was measured in. `live` is Remnawave's
+ * own figures, `null` when it did not answer. `generatedAt` is the server's
+ * clock at the answer: «today» and «out of date» are judged by it, since every
+ * other time here was stamped by that same clock and the browser's may be off.
+ */
+export type OnlineOverview = z.infer<typeof onlineOverviewSchema>
+
+const onlineDistributionSchema = z.object({
+  range: z.enum(ONLINE_RANGES),
+  generatedAt: z.string(),
+  sampledAt: z.string().nullable(),
+  nodeReadFailedAt: z.string().nullable(),
+  totalUsersOnline: z.number(),
+  nodes: z.array(
+    z.object({
+      uuid: z.string(),
+      name: z.string(),
+      countryCode: z.string(),
+      usersOnline: z.number(),
+      peak: z.number(),
+      isConnected: z.boolean(),
+    }),
+  ),
+  countries: z.array(
+    z.object({
+      countryCode: z.string(),
+      usersOnline: z.number(),
+      nodes: z.number(),
+      nodesConnected: z.number(),
+    }),
+  ),
+})
+
+/**
+ * Online users by node and by country, from the newest stored sample
+ * (`GET /admin/remnawave/metrics/online-distribution`). Counts are connections,
+ * so shares are of `totalUsersOnline`; `countryCode` is `''` for no country.
+ * `sampledAt` is the newest sample whose node list was READ; `nodeReadFailedAt`
+ * says the newest sample could not read it, so the lists are that much older.
+ */
+export type OnlineDistribution = z.infer<typeof onlineDistributionSchema>
+
+/** Both carry the window, so switching it is a new request and never a stale answer. */
+export const onlineCardKeys = {
+  overview: (range: OnlineRange) => ['admin', 'remnawave', 'online-overview', range] as const,
+  distribution: (range: OnlineRange) => ['admin', 'remnawave', 'online-distribution', range] as const,
 }
 
 export interface ActivityFeedItem {

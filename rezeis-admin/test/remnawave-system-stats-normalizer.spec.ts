@@ -20,6 +20,7 @@ describe('normalizeSystemStats', () => {
 
     const result = normalizeSystemStats(upstream);
 
+    assert.ok(result !== null, 'a real answer is read');
     assert.equal(result.users.totalUsers, 76);
     assert.deepStrictEqual(result.users.statusCounts, {
       ACTIVE: 74,
@@ -57,7 +58,7 @@ describe('normalizeSystemStats', () => {
 
     const result = normalizeSystemStats(upstream);
 
-    assert.deepStrictEqual(result.users.onlineStats, {
+    assert.deepStrictEqual(result?.users.onlineStats, {
       onlineNow: 3,
       lastDay: 5,
       lastWeek: 7,
@@ -65,8 +66,28 @@ describe('normalizeSystemStats', () => {
     });
   });
 
-  it('returns sensible zeros when fields are missing', () => {
-    const result = normalizeSystemStats({});
+  it('treats a body without the online counts as no answer at all', () => {
+    // A proxy's `{}`, an HTML page, another service's JSON. Folded into zeros,
+    // this drew a green «Сейчас 0» on the dashboard and stored a sample of
+    // nobody online; `getSystemStats` hands the `null` on as a failure.
+    for (const body of [{}, null, 'Bad gateway', [], { users: {} }, { status: 'ok' }]) {
+      assert.equal(normalizeSystemStats(body), null, JSON.stringify(body));
+    }
+    // The counts must be counts: all three that are read, each a number.
+    for (const onlineStats of [
+      { onlineNow: null, lastDay: 1, lastWeek: 2 },
+      { onlineNow: 1, lastDay: 'x', lastWeek: 2 },
+      { onlineNow: 1, lastDay: 2 },
+      { onlineNow: -1, lastDay: 2, lastWeek: 3 },
+      { onlineNow: NaN, lastDay: 2, lastWeek: 3 },
+      { onlineNow: '', lastDay: 2, lastWeek: 3 },
+    ]) {
+      assert.equal(normalizeSystemStats({ onlineStats }), null, JSON.stringify(onlineStats));
+    }
+  });
+
+  it('returns sensible zeros for every other field that is missing', () => {
+    const result = normalizeSystemStats({ onlineStats: { onlineNow: 0, lastDay: 0, lastWeek: 0 } });
 
     assert.deepStrictEqual(result, {
       users: {
@@ -82,12 +103,13 @@ describe('normalizeSystemStats', () => {
     });
   });
 
-  it('coerces invalid types to zeros without throwing', () => {
+  it('coerces invalid types in the other fields to zeros without throwing', () => {
     const result = normalizeSystemStats({
       users: {
         totalUsers: 'not-a-number',
         statusCounts: 'should-be-object',
-        onlineStats: { onlineNow: null, lastDay: undefined, lastWeek: NaN, neverOnline: 'x' },
+        // Decimal text is still a count; `neverOnline` is not one the card reads.
+        onlineStats: { onlineNow: '3', lastDay: 4, lastWeek: 5, neverOnline: 'x' },
       },
       nodes: { totalOnline: true, totalBytesLifetime: '   ' },
       cpu: { cores: [] },
@@ -96,12 +118,13 @@ describe('normalizeSystemStats', () => {
       timestamp: false,
     } as unknown);
 
+    assert.ok(result !== null, 'a partially degraded answer is still an answer');
     assert.equal(result.users.totalUsers, 0);
     assert.deepStrictEqual(result.users.statusCounts, {});
     assert.deepStrictEqual(result.users.onlineStats, {
-      onlineNow: 0,
-      lastDay: 0,
-      lastWeek: 0,
+      onlineNow: 3,
+      lastDay: 4,
+      lastWeek: 5,
       neverOnline: 0,
     });
     assert.equal(result.nodes.totalOnline, 0);

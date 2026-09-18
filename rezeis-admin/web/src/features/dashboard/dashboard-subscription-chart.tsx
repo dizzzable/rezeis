@@ -24,8 +24,11 @@ const TOOLTIP_STYLE = {
 
 export function DashboardSubscriptionChart({
   summary,
+  className,
 }: {
   readonly summary: DashboardSummaryInterface
+  /** How the card sits in the page's grid — the whole row when the online card is not shown. */
+  readonly className?: string
 }): JSX.Element {
   const { t } = useTranslation()
   const titleId = useId()
@@ -76,7 +79,7 @@ export function DashboardSubscriptionChart({
   const total = data.reduce((sum, d) => sum + d.value, 0)
 
   return (
-    <Card>
+    <Card className={className}>
       {/* A CONTAINER query, not a viewport one. This card is the full page
           width below `lg` and half of a two-column grid above it, so the page
           width says nothing about how much room the card itself has. The ring

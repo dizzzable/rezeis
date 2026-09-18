@@ -20,6 +20,15 @@ import { RemnawaveSystemStatsInterface } from '../interfaces/remnawave-system-st
  * The function never throws on missing fields — it returns sensible zeros
  * so the admin dashboard renders without crashes when the upstream is
  * partially degraded.
+ *
+ * EXCEPT THE ONLINE COUNTS. A body without an `onlineStats` block holding
+ * numeric `onlineNow`, `lastDay` and `lastWeek` is not a partially degraded
+ * answer but no answer at all — a proxy's `{}`, an HTML error page served as
+ * 200, another service's JSON — and it is `null`, exactly like a failed call
+ * (`getSystemStats` hands it on as such). Folded into zeros, it drew a green
+ * «Сейчас 0» on the dashboard for the two minutes the answer is cached, and the
+ * metrics collector stored a sample of nobody online. Every other field keeps
+ * the forgiving zero.
  */
 
 interface RawOnlineStats {
@@ -54,13 +63,23 @@ interface RawSystemStats {
   readonly timestamp?: unknown;
 }
 
-export function normalizeSystemStats(raw: unknown): RemnawaveSystemStatsInterface {
-  const root = (raw ?? {}) as RawSystemStats;
+export function normalizeSystemStats(raw: unknown): RemnawaveSystemStatsInterface | null {
+  if (!isPlainRecord(raw)) return null;
+  const root = raw as RawSystemStats;
 
-  const rawUsers = root.users ?? {};
+  const rawUsers: RawUsers = isPlainRecord(root.users) ? root.users : {};
   // Newer Remnawave keeps `onlineStats` at the response root; older panels
   // nested it inside `users`. Either form is accepted.
-  const rawOnline = rawUsers.onlineStats ?? root.onlineStats ?? {};
+  const rawOnline = isPlainRecord(rawUsers.onlineStats)
+    ? rawUsers.onlineStats
+    : isPlainRecord(root.onlineStats)
+      ? root.onlineStats
+      : null;
+  if (rawOnline === null) return null;
+  const onlineNow = readCount(rawOnline.onlineNow);
+  const lastDay = readCount(rawOnline.lastDay);
+  const lastWeek = readCount(rawOnline.lastWeek);
+  if (onlineNow === null || lastDay === null || lastWeek === null) return null;
 
   const statusCounts = isPlainRecord(rawUsers.statusCounts)
     ? (rawUsers.statusCounts as Record<string, number>)
@@ -71,10 +90,10 @@ export function normalizeSystemStats(raw: unknown): RemnawaveSystemStatsInterfac
       totalUsers: toNumber(rawUsers.totalUsers),
       statusCounts,
       onlineStats: {
-        lastDay: toNumber(rawOnline.lastDay),
-        lastWeek: toNumber(rawOnline.lastWeek),
+        lastDay,
+        lastWeek,
         neverOnline: toNumber(rawOnline.neverOnline),
-        onlineNow: toNumber(rawOnline.onlineNow),
+        onlineNow,
       },
     },
     nodes: {
@@ -106,6 +125,16 @@ function toNumber(value: unknown): number {
     return Number(value);
   }
   return 0;
+}
+
+/**
+ * A count of people as the panel sends it — a non-negative number, or its
+ * decimal text — or `null` when the field is missing or anything else.
+ */
+function readCount(value: unknown): number | null {
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && value.trim().length > 0 ? Number(value) : NaN;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

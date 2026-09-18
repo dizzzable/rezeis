@@ -32,9 +32,11 @@ import {
   RemnawaveSystemStatsInterface,
 } from '../interfaces/remnawave-system-stats.interface';
 import { RemnawaveApiService, type RemnawaveNodeUserIps, type RemnawaveUserNodeIps, type RemnawaveDropConnectionsInput } from '../services/remnawave-api.service';
+import { OnlineRangeQueryDto } from '../dto/online-range-query.dto';
 import {
   GeoDistribution,
-  OnlineTrendPoint,
+  OnlineDistribution,
+  OnlineOverview,
   RemnawaveMetricsCollectorService,
 } from '../services/remnawave-metrics-collector.service';
 import { RemnawaveCapabilities, RemnawaveVersionService } from '../services/remnawave-version.service';
@@ -115,12 +117,26 @@ export class AdminRemnawaveController {
 
   // ── Metrics (stored trends) ────────────────────────────────────────────────
 
-  @Get('metrics/online-trend')
-  public async getOnlineTrend(
-    @Query('hours') hours?: string,
-  ): Promise<OnlineTrendPoint[]> {
-    const h = hours ? Math.min(parseInt(hours, 10) || 24, 168) : 24;
-    return this.metricsCollector.getOnlineTrend(h);
+  /**
+   * The dashboard's «Онлайн пользователей» card for `range` (`24h` or `7d`):
+   * the chart, its peak, and Remnawave's own online-now and unique counts.
+   *
+   * Replaces `metrics/online-trend?hours=N`, which handed the card every raw
+   * sample — 2016 of them for a week — and left it to find the peak itself.
+   *
+   * The query is a DTO so the global `ValidationPipe` checks all of it: an
+   * unknown window, a repeated `range`, or any other parameter (`hours`
+   * included) is a 400 before this runs. See `OnlineRangeQueryDto`.
+   */
+  @Get('metrics/online-overview')
+  public async getOnlineOverview(@Query() query: OnlineRangeQueryDto): Promise<OnlineOverview> {
+    return this.metricsCollector.getOnlineOverview(query.range ?? '24h');
+  }
+
+  /** The same card turned over by its globe button: online users by node and by country. */
+  @Get('metrics/online-distribution')
+  public async getOnlineDistribution(@Query() query: OnlineRangeQueryDto): Promise<OnlineDistribution> {
+    return this.metricsCollector.getOnlineDistribution(query.range ?? '24h');
   }
 
   @Get('metrics/activity-feed')

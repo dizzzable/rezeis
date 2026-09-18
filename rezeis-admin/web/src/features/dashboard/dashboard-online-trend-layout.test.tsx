@@ -12,12 +12,23 @@
  * made the chart as tall as the band had been: 862–902 px at 1024–1180 with the
  * sidebar open. The row is now two columns only from `xl` (see
  * `dashboard-chart-row-layout.test.tsx`), and the chart stops at 32rem, centred
- * in what the card has left. Measured in Chromium 152 against the compiled
- * classes (Geist and IBM Plex Mono, ru and en, sidebar open and collapsed,
- * 768–2600 px), the chart is 436–452 px at 1920 with no band, as before; 512 px
- * at 1280–1576 with the sidebar open (1280–1384 collapsed), where the cap
- * leaves at most 22 px, split above and below it; and 192 px below 1280, where
- * the cards stack.
+ * in what the card has left.
+ *
+ * Measured again on 18.09.2026, after the card's header gained its three
+ * figures and its window switch (Chromium, the default font, ru and en, sidebar
+ * open and collapsed, 768–2560 px): side by side the chart is 370 px at 1920
+ * with the sidebar open, 386 px at 1576–1600, 452–468 px at 1384–1440 and
+ * 436–468 px at 1280, each time filling the card down to its padding; stacked,
+ * below 1280, it is 192 px. None of those reaches the 32rem ceiling any more —
+ * it stays for a subscription card that grows taller still (large font size,
+ * long app names). Where the subscription card is short — 1920 without the
+ * sidebar, 2560 with it — this card is now the taller of the two, at 382 px,
+ * and the one beside it gets about 18 px more than its content.
+ *
+ * The other side of the card («Ноды и страны») takes the same height from the
+ * row and scrolls inside it, so turning the card over does not move the row:
+ * 560 and 560 px at 1920, 642 and 642 at 1440 (see
+ * `dashboard-online-distribution.tsx`).
  *
  * jsdom has no layout engine, so what is held here is the arrangement those
  * measurements depend on: a column card whose content takes the rest of the
@@ -27,11 +38,12 @@
  */
 import { cloneElement, isValidElement, type ReactElement, type ReactNode } from 'react'
 import { waitFor } from '@testing-library/react'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { usePermissionStore } from '@/features/rbac/use-permission-store'
 import { loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
-import { dashboardApi, type OnlineTrendPoint } from './dashboard-api'
+import { dashboardApi, type OnlineOverview } from './dashboard-api'
 import { DashboardOnlineTrend } from './dashboard-online-trend'
 
 const handedToContainer = vi.hoisted(() => [] as Array<{ width?: unknown; height?: unknown }>)
@@ -69,12 +81,28 @@ beforeAll(async () => {
 
 beforeEach(() => {
   handedToContainer.length = 0
-  const trend: OnlineTrendPoint[] = [
-    { time: '2026-09-14T08:00:00.000Z', onlineNow: 120, totalUsers: 900, nodesOnline: 3 },
-    { time: '2026-09-14T09:00:00.000Z', onlineNow: 180, totalUsers: 900, nodesOnline: 3 },
-    { time: '2026-09-14T10:00:00.000Z', onlineNow: 150, totalUsers: 901, nodesOnline: 4 },
-  ]
-  vi.spyOn(dashboardApi, 'getOnlineTrend').mockResolvedValue(trend)
+  window.localStorage.clear()
+  // The card only exists for an operator who may view Remnawave.
+  usePermissionStore.setState({ loaded: true, role: 'ADMIN', granted: new Set(['remnawave:view']) })
+  const overview: OnlineOverview = {
+    range: '24h',
+    generatedAt: '2026-09-14T08:11:30.000Z',
+    bucketMinutes: 5,
+    points: [
+      { time: '2026-09-14T08:00:00.000Z', onlineNow: 120 },
+      { time: '2026-09-14T08:05:00.000Z', onlineNow: 180 },
+      { time: '2026-09-14T08:10:00.000Z', onlineNow: 150 },
+    ],
+    sampleCount: 3,
+    peak: { value: 180, at: '2026-09-14T08:05:00.000Z' },
+    latestSample: { onlineNow: 150, at: '2026-09-14T08:10:00.000Z' },
+    live: { onlineNow: 151, uniqueUsers: 900, checkedAt: '2026-09-14T08:11:00.000Z' },
+  }
+  vi.spyOn(dashboardApi, 'getOnlineOverview').mockResolvedValue(overview)
+})
+
+afterEach(() => {
+  usePermissionStore.getState().reset()
 })
 
 describe('the online trend card', () => {
@@ -100,5 +128,40 @@ describe('the online trend card', () => {
     // recharts draws at the size of that box.
     expect(handedToContainer).not.toHaveLength(0)
     for (const props of handedToContainer) expect(props).toMatchObject({ width: '100%', height: '100%' })
+  })
+
+  it('turned over, takes the height the row gives the card and scrolls inside it — side by side only', async () => {
+    window.localStorage.setItem('rezeis.dashboard.onlineCard', JSON.stringify({ range: '24h', view: 'distribution' }))
+    vi.spyOn(dashboardApi, 'getOnlineDistribution').mockResolvedValue({
+      range: '24h',
+      generatedAt: '2026-09-14T08:11:30.000Z',
+      sampledAt: '2026-09-14T08:10:00.000Z',
+      nodeReadFailedAt: null,
+      totalUsersOnline: 3,
+      nodes: [{ uuid: 'n', name: 'Node', countryCode: 'DE', usersOnline: 3, peak: 4, isConnected: true }],
+      countries: [{ countryCode: 'DE', usersOnline: 3, nodes: 1, nodesConnected: 1 }],
+    })
+    renderWithProviders(<DashboardOnlineTrend />)
+    const lists = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-online-lists]')
+      if (found === null) throw new Error('the lists were never drawn')
+      return found
+    })
+    const side = lists.parentElement as HTMLElement
+    const card = side.closest<HTMLElement>('[data-concept-surface="card"]') as HTMLElement
+
+    // Every box from the card down fills what its parent leaves…
+    for (let box = side.parentElement; box !== null && box !== card; box = box.parentElement) {
+      expect(box).toHaveClass('flex-1')
+    }
+    // …and from `xl`, where the row sets the height, the side adds none of its
+    // own (a zero basis, no content minimum) and the lists scroll instead.
+    expect(side).toHaveClass('xl:flex-1', 'xl:basis-0', 'xl:min-h-0')
+    expect(lists).toHaveClass('xl:flex-1', 'xl:min-h-0', 'xl:overflow-y-auto')
+    // Below `xl` the cards stack and nothing scrolls inside the card: no
+    // unprefixed ceiling or scroll.
+    for (const box of [side, lists]) {
+      expect(box.className).not.toMatch(/(^|\s)(max-h-\S+|overflow-y-auto|overflow-auto)(\s|$)/)
+    }
   })
 })

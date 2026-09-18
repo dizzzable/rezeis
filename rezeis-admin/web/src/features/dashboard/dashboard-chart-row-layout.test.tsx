@@ -12,13 +12,18 @@
  * rings side by side, with the sidebar open or collapsed. From `xl` up the row
  * is as it was, and 1920 px with it.
  *
+ * The online card exists only for an operator who may view Remnawave (its
+ * data sits behind `remnawave:view`). Without it the row holds the subscription
+ * card alone, spanning both columns, rather than a card beside a hole.
+ *
  * jsdom has no layout engine, so what is held here is the class the layout
  * depends on. The chart's own ceiling is held in
  * `dashboard-online-trend-layout.test.tsx`.
  */
 import { screen } from '@testing-library/react'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { usePermissionStore } from '@/features/rbac/use-permission-store'
 import { loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 import { dashboardApi, type DashboardSummaryInterface } from './dashboard-api'
@@ -29,8 +34,14 @@ vi.mock('./dashboard-online-trend', () => ({
 }))
 
 vi.mock('./dashboard-subscription-chart', () => ({
-  DashboardSubscriptionChart: () => <section data-testid="subscription-chart" />,
+  DashboardSubscriptionChart: ({ className }: { className?: string }) => (
+    <section data-testid="subscription-chart" className={className} />
+  ),
 }))
+
+function grant(...permissions: string[]): void {
+  usePermissionStore.setState({ loaded: true, role: 'ADMIN', granted: new Set(permissions) })
+}
 
 const SUMMARY: DashboardSummaryInterface = {
   checkedAt: '2026-09-14T10:00:00.000Z',
@@ -58,7 +69,11 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.spyOn(dashboardApi, 'getSummary').mockResolvedValue(SUMMARY)
-  vi.spyOn(dashboardApi, 'getOnlineTrend').mockResolvedValue([])
+  grant('remnawave:view')
+})
+
+afterEach(() => {
+  usePermissionStore.getState().reset()
 })
 
 describe('the dashboard chart row', () => {
@@ -76,6 +91,21 @@ describe('the dashboard chart row', () => {
     // No column count at any breakpoint below `xl`, so below it the cards stack.
     expect(row.className).not.toMatch(/(^|\s)(sm|md|lg|@[\w-]+|min-\[[^\]]+\]):grid-cols-/)
     expect(row.className.match(/(^|\s)grid-cols-/g)).toBeNull()
+    // Side by side, each card keeps its own column.
+    expect(subscriptions.className).not.toMatch(/col-span/)
+  })
+
+  it('gives the subscription card the whole row when the operator may not view Remnawave', async () => {
+    grant('dashboard:view')
+    renderWithProviders(<DashboardPage />)
+    const subscriptions = await screen.findByTestId('subscription-chart')
+
+    expect(screen.queryByTestId('online-trend')).toBeNull()
+    const row = subscriptions.parentElement as HTMLElement
+    expect(row).toHaveClass('grid', 'xl:grid-cols-2')
+    expect(row.children).toHaveLength(1)
+    // Spanning both columns from `xl`, where the row has two; below it the card is full width anyway.
+    expect(subscriptions).toHaveClass('xl:col-span-2')
   })
 
   it('shows the loading placeholder of that row on the same breakpoint', async () => {
@@ -88,5 +118,16 @@ describe('the dashboard chart row', () => {
     // The placeholder must not promise two columns where the loaded row stacks.
     expect(row.className).not.toMatch(/(^|\s)(sm|md|lg|@[\w-]+|min-\[[^\]]+\]):grid-cols-/)
     expect(row.className.match(/(^|\s)grid-cols-/g)).toBeNull()
+    expect(row.children).toHaveLength(2)
+  })
+
+  it('holds one placeholder across the row for an operator who will get one card', async () => {
+    grant('dashboard:view')
+    vi.spyOn(dashboardApi, 'getSummary').mockReturnValue(new Promise(() => {}))
+    renderWithProviders(<DashboardPage />)
+    const row = await screen.findByTestId('dashboard-chart-row-skeleton')
+
+    expect(row.children).toHaveLength(1)
+    expect(row.children[0]).toHaveClass('xl:col-span-2')
   })
 })

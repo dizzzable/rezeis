@@ -31,7 +31,17 @@ const DashboardOnlineTrend = lazy(() =>
 )
 import { DashboardAttentionSection } from './dashboard-attention'
 import { DashboardTimelinesSection } from './dashboard-timelines'
+import { usePermissionStore } from '@/features/rbac/use-permission-store'
 import { activeLocale } from '@/lib/utils'
+
+/**
+ * Whether this operator gets the «Онлайн пользователей» card. Its data sits
+ * behind `remnawave:view`; without it the card does not render, and the
+ * subscription card takes the whole row instead of leaving a hole beside it.
+ */
+function useCanViewOnline(): boolean {
+  return usePermissionStore((s) => s.hasPermission('remnawave', 'view'))
+}
 
 export default function DashboardPage(): JSX.Element {
   const { t } = useTranslation()
@@ -95,6 +105,7 @@ function DashboardContent({
   readonly reiwaHealth: SystemHealthResponse | null
   readonly reiwaHealthLoading: boolean
 }): JSX.Element {
+  const canViewOnline = useCanViewOnline()
   return (
     <div className="space-y-6">
       <DashboardHeader summary={summary} />
@@ -111,11 +122,13 @@ function DashboardContent({
             862–902 px tall at 1024–1256 px with the sidebar open. Below `xl`
             the two stack at full width, as they already did below `lg`. */}
         <div className="grid gap-4 xl:grid-cols-2">
-          <Suspense fallback={<Skeleton className="h-72 w-full" />}>
-            <DashboardOnlineTrend />
-          </Suspense>
-          <Suspense fallback={<Skeleton className="h-72 w-full" />}>
-            <DashboardSubscriptionChart summary={summary} />
+          {canViewOnline ? (
+            <Suspense fallback={<Skeleton className="h-72 w-full" />}>
+              <DashboardOnlineTrend />
+            </Suspense>
+          ) : null}
+          <Suspense fallback={<Skeleton className={canViewOnline ? 'h-72 w-full' : 'h-72 w-full xl:col-span-2'} />}>
+            <DashboardSubscriptionChart summary={summary} className={canViewOnline ? undefined : 'xl:col-span-2'} />
           </Suspense>
         </div>
       </AnimatedContent>
@@ -157,6 +170,7 @@ function DashboardHeader({ summary }: { readonly summary: DashboardSummaryInterf
 
 function DashboardLoadingState(): JSX.Element {
   const { t } = useTranslation()
+  const canViewOnline = useCanViewOnline()
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -172,8 +186,8 @@ function DashboardLoadingState(): JSX.Element {
           side only from `xl`, so the page does not reflow the other way when
           the summary answers. */}
       <div data-testid="dashboard-chart-row-skeleton" className="grid gap-4 xl:grid-cols-2">
-        <Skeleton className="h-64 w-full rounded-xl" />
-        <Skeleton className="h-64 w-full rounded-xl" />
+        {canViewOnline ? <Skeleton className="h-64 w-full rounded-xl" /> : null}
+        <Skeleton className={canViewOnline ? 'h-64 w-full rounded-xl' : 'h-64 w-full rounded-xl xl:col-span-2'} />
       </div>
     </div>
   )

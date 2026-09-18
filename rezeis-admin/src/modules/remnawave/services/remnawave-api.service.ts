@@ -2122,8 +2122,27 @@ export class RemnawaveApiService {
    *
    * Tolerates both `{ response: [...] }` and `{ response: { total, nodes } }`
    * shapes seen across Remnawave versions.
+   *
+   * Answers `[]` for EVERY failure as well — unreachable, 4xx/5xx, a body over
+   * the outbound size cap, a shape neither version sends — and several callers
+   * are built on exactly that, so it stays so. A caller that must tell "no
+   * nodes" from "could not read them" uses {@link readAllNodes}.
    */
   public async getAllNodes(): Promise<RemnawaveNodeInterface[]> {
+    return (await this.readAllNodes()) ?? [];
+  }
+
+  /**
+   * The node list, or `null` when it could not be read: every failure
+   * `getAllNodes` folds into `[]`, including a 2xx body that is neither the
+   * bare array nor the `{ total, nodes }` wrapper. `[]` here means the panel
+   * answered and has no nodes.
+   *
+   * Written for the metrics collector, which stores the list every five
+   * minutes: stored as `[]`, a failed read made the dashboard say "no enabled
+   * nodes" for as long as the failure lasted.
+   */
+  public async readAllNodes(): Promise<RemnawaveNodeInterface[] | null> {
     try {
       const response = await this.requestJson<unknown>({
         method: 'get',
@@ -2134,10 +2153,10 @@ export class RemnawaveApiService {
         ? root
         : Array.isArray((root as { nodes?: unknown })?.nodes)
           ? ((root as { nodes: unknown[] }).nodes)
-          : [];
-      return list.map(mapNode);
+          : null;
+      return list === null ? null : list.map(mapNode);
     } catch {
-      return [];
+      return null;
     }
   }
 

@@ -1,5 +1,5 @@
 import { cloneElement, isValidElement, type ReactElement, type ReactNode } from 'react'
-import { describe, expect, it, vi, beforeAll, beforeEach } from 'vitest'
+import { afterEach, describe, expect, it, vi, beforeAll, beforeEach } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 
 vi.mock('@/features/dashboard/dashboard-online-trend', () => ({
@@ -14,6 +14,7 @@ import DashboardPage from '@/features/dashboard/dashboard-page'
 import { dashboardApi } from '@/features/dashboard/dashboard-api'
 import { renderWithProviders } from '@/test/test-utils'
 import { loadFeatureBundle } from '@/i18n/i18n'
+import { usePermissionStore } from '@/features/rbac/use-permission-store'
 
 // Preserve the real chart components and only replace Recharts' browser-size
 // adapter. jsdom has no layout engine, so give each chart the deterministic
@@ -41,7 +42,12 @@ describe('DashboardPage', () => {
   })
 
   beforeEach(() => {
-    vi.spyOn(dashboardApi, 'getOnlineTrend').mockResolvedValue([])
+    // The page renders the online card only for an operator who may view Remnawave.
+    usePermissionStore.setState({ loaded: true, role: 'ADMIN', granted: new Set(['remnawave:view']) })
+  })
+
+  afterEach(() => {
+    usePermissionStore.getState().reset()
   })
 
   it('uses generic bounded copy for dashboard summary load errors', async () => {
