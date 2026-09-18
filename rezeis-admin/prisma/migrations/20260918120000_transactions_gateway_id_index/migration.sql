@@ -1,0 +1,25 @@
+-- The payment system's own id, looked up by equality.
+--
+-- The admin payments search (`GET /admin/payments/transactions?q=`) matches one
+-- reference against `payment_id`, `gateway_id` and `id` at once, and support
+-- quotes the payment system's id more than either of ours. `payment_id` is
+-- unique and `id` is the key, but `gateway_id` had no index, so the OR could
+-- not be answered from indexes at all: every search, every opened payment and
+-- every Cmd+K jump scanned the whole `transactions` table — twice, for the page
+-- and for its count. With this index the three branches combine as a
+-- BitmapOr of index scans.
+--
+-- The webhook reconciler's `findFirst({ where: { gatewayId } })` fallback (a
+-- YooKassa refund notice names only the gateway's payment id) reads the same
+-- column and benefits the same way.
+--
+-- CONCURRENTLY so a busy install does not block payment writes on
+-- `transactions` for the length of the build, the choice
+-- `20260910000000_audit_log_action_created_at_index` makes for the same reason;
+-- it has to stay the only statement in this file to run outside a transaction.
+-- `IF NOT EXISTS` keeps a re-run cheap; an interrupted build leaves the index
+-- INVALID and it has to be dropped by hand before this will replace it. The
+-- name is Prisma's own for `@@index([gatewayId])`, so `migrate diff` sees no
+-- drift.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "transactions_gateway_id_idx"
+  ON "transactions" ("gateway_id");

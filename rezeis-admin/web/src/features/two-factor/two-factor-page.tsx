@@ -17,6 +17,7 @@ import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { copyTextToClipboard } from '@/components/ui/copyable-id'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { LocalQr } from '@/components/ui/local-qr'
@@ -584,10 +585,18 @@ function EnabledControls(props: {
   )
 }
 
-function RecoveryCodesPanel({ codes }: { readonly codes: readonly string[] }): JSX.Element {
+export function RecoveryCodesPanel({ codes }: { readonly codes: readonly string[] }): JSX.Element {
   const { t } = useTranslation()
-  const copy = (): void => {
-    navigator.clipboard?.writeText(codes.join('\n'))
+  // Said out loud either way. It used to write and say nothing — no word when
+  // it worked, and none when the browser refused, which left an operator
+  // believing codes shown "only this once" were saved when they were not.
+  const copy = (event: { readonly currentTarget: HTMLElement }): void => {
+    void copyTextToClipboard(codes.join('\n'), { container: event.currentTarget.parentElement }).then(
+      (copied) => {
+        if (copied) toast.success(t('copyableId.copiedPlain'))
+        else toast.error(t('copyableId.copyFailedPlain'))
+      },
+    )
   }
   return (
     <div className="rounded-md border border-amber-300 bg-amber-50 p-4 dark:border-amber-900/40 dark:bg-amber-950/30">

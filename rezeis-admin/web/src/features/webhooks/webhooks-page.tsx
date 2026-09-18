@@ -18,6 +18,7 @@ import { DataUnavailable } from '@/components/data-unavailable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { copyTextToClipboard } from '@/components/ui/copyable-id'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -316,7 +317,7 @@ function CreateSubscriptionCard({
   )
 }
 
-function SecretRevealCard({
+export function SecretRevealCard({
   title,
   secret,
   onClose,
@@ -326,7 +327,14 @@ function SecretRevealCard({
   onClose: () => void
 }) {
   const { t } = useTranslation()
-  const copy = () => navigator.clipboard?.writeText(secret)
+  // A secret shown once is copied once: the operator has to KNOW whether it
+  // reached the clipboard. It used to write and say nothing either way.
+  const copy = (event: { readonly currentTarget: HTMLElement }): void => {
+    void copyTextToClipboard(secret, { container: event.currentTarget.parentElement }).then((copied) => {
+      if (copied) toast.success(t('copyableId.copiedPlain'))
+      else toast.error(t('copyableId.copyFailedPlain'))
+    })
+  }
   return (
     <Card className="border-amber-300 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-950/30">
       <CardContent className="py-4">

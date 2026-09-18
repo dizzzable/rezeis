@@ -2371,6 +2371,9 @@ model Transaction {
   @@index([subscriptionId])
   @@index([status])
   @@index([gatewayType])
+  /// The payment system's own id, which the admin payments search matches
+  /// exactly and support quotes. Created by 20260918120000.
+  @@index([gatewayId])
   @@index([purchaseType])
   @@index([createdAt])
   /// Backs the anti-fraud failed-payment groupBy + payment analytics

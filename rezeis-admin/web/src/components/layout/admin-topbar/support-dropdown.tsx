@@ -1,7 +1,9 @@
 import { useTranslation } from 'react-i18next'
 import { Heart, Wallet } from 'lucide-react'
+import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { copyTextToClipboard } from '@/components/ui/copyable-id'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,8 +53,16 @@ export function SupportDropdown() {
           </a>
         </DropdownMenuItem>
         <DropdownMenuItem
-          onClick={() => {
-            navigator.clipboard?.writeText(CRYPTO_ADDRESS)
+          onClick={(event) => {
+            // Said either way. It used to write and say nothing: no word when it
+            // worked, none when it did not — and the menu closes on the click,
+            // so a refusal left no address on screen to copy by hand. The toast
+            // carries it then.
+            const label = t('adminShell.support.crypto')
+            void copyTextToClipboard(CRYPTO_ADDRESS, { container: event.currentTarget }).then((copied) => {
+              if (copied) toast.success(t('copyableId.copied', { label }))
+              else toast.error(t('copyableId.copyFailed', { label }), { description: CRYPTO_ADDRESS })
+            })
           }}
           className="flex items-center gap-2"
         >

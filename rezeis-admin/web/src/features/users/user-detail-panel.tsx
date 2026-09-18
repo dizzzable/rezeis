@@ -29,6 +29,7 @@ import {
   Loader2,
   Monitor,
   Plus,
+  Receipt,
   RefreshCw,
   Save,
   Send,
@@ -105,6 +106,8 @@ import {
 import { PermissionGate, useHasPermission } from '@/features/rbac'
 import { usersApi, type AccountMergePreview, type AccountMergeChoices, type UserOperation } from './users-api'
 import { PointsLedgerSheet } from './points-ledger-sheet'
+import { CopyableId, copyTextToClipboard } from '@/components/ui/copyable-id'
+import { clientPaymentsHref, paymentHref } from '@/features/payments/payments-filters'
 
 /** The reason codes the backend accepts for a manual points adjustment; the subscriber sees the label. */
 const POINTS_ADJUSTMENT_REASONS = ['COMPENSATION', 'PROMOTION', 'CORRECTION', 'VIOLATION', 'OTHER'] as const
@@ -253,7 +256,7 @@ export default function UserDetailPanel({ telegramId }: UserDetailPanelProps) {
           <InviteSettingsTab user={user} telegramId={telegramId} queryKey={queryKey} />
         </TabsContent>
         <TabsContent value="operations">
-          <OperationsTab telegramId={telegramId} />
+          <OperationsTab telegramId={telegramId} userId={user.id} />
         </TabsContent>
         <TabsContent value="web">
           <WebCabinetTab user={user} telegramId={telegramId} queryKey={queryKey} />
@@ -424,9 +427,14 @@ function AnalyticsRow({
           size="icon"
           variant="ghost"
           className="h-6 w-6 shrink-0"
+          aria-label={t('copyableId.copy', { label })}
           onClick={() => {
-            void navigator.clipboard.writeText(value)
-            toast.success(t('userDetailPanel.analytics.copied'))
+            // "Copied" only once the clipboard said yes. This toasted success on
+            // the line after an un-awaited write, so a refused copy read the same.
+            void copyTextToClipboard(value).then((copied) => {
+              if (copied) toast.success(t('userDetailPanel.analytics.copied'))
+              else toast.error(t('copyableId.copyFailed', { label }), { description: value })
+            })
           }}
         >
           <Copy className="h-3 w-3" />
@@ -1395,8 +1403,17 @@ function RemnawaveProfileRow({
 
   function handleCopy(): void {
     if (!remnawaveId) return
-    void navigator.clipboard.writeText(remnawaveId)
-    toast.success(t('userDetailPanel.subscriptions.remnawaveProfile.copied'))
+    // Reported after the clipboard answered, and a refusal is reported as one.
+    void copyTextToClipboard(remnawaveId).then((copied) => {
+      if (copied) {
+        toast.success(t('userDetailPanel.subscriptions.remnawaveProfile.copied'))
+        return
+      }
+      toast.error(
+        t('copyableId.copyFailed', { label: t('userDetailPanel.subscriptions.remnawaveProfile.label') }),
+        { description: remnawaveId },
+      )
+    })
   }
 
   return (
@@ -3028,7 +3045,25 @@ function SubscriptionCard({
                 </div>
                 <div className="flex gap-1">
                   {sub.configUrl && (
-                    <Button size="sm" variant="ghost" className="h-6 px-1.5 text-muted-foreground" onClick={() => { navigator.clipboard.writeText(sub.configUrl ?? ''); toast.success(t('userDetailPanel.subscriptions.linkCopied')) }} aria-label={t('userDetailPanel.subscriptions.copyLink')}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-1.5 text-muted-foreground"
+                      onClick={() => {
+                        const link = sub.configUrl ?? ''
+                        // The card never prints the link, so a refused copy
+                        // hands it over in the toast to be copied by hand.
+                        void copyTextToClipboard(link).then((copied) => {
+                          if (copied) toast.success(t('userDetailPanel.subscriptions.linkCopied'))
+                          else
+                            toast.error(
+                              t('copyableId.copyFailed', { label: t('userDetailPanel.subscriptions.linkName') }),
+                              { description: link },
+                            )
+                        })
+                      }}
+                      aria-label={t('userDetailPanel.subscriptions.copyLink')}
+                    >
                       <Link2 className="h-3 w-3" />
                     </Button>
                   )}
@@ -4534,8 +4569,11 @@ function TransactionsTab({ user }: { user: UserDetail }) {
 // Merge accounts — operator consolidation of two accounts into one
 // ══════════════════════════════════════════════════════════════════════════════
 
-function OperationsTab({ telegramId }: { telegramId: string }) {
+function OperationsTab({ telegramId, userId }: { telegramId: string; userId: string }) {
   const { t, i18n } = useTranslation()
+  // The Payments page is `payments:view`; a link into it for an operator
+  // without that would open a refusal.
+  const canViewPayments = useHasPermission('payments', 'view')
   const [page, setPage] = useState(1)
   const locale = i18n.language?.startsWith('ru') ? 'ru-RU' : 'en-US'
   const { data, isLoading, isError, refetch } = useQuery({
@@ -4564,15 +4602,32 @@ function OperationsTab({ telegramId }: { telegramId: string }) {
     <div className="space-y-3">
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">{t('userDetailPanel.operations.title')}</CardTitle>
-          <CardDescription>{t('userDetailPanel.operations.hint')}</CardDescription>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="space-y-1.5">
+              <CardTitle className="text-base">{t('userDetailPanel.operations.title')}</CardTitle>
+              <CardDescription>{t('userDetailPanel.operations.hint')}</CardDescription>
+            </div>
+            {canViewPayments ? (
+              <Button asChild size="sm" variant="outline" className="h-7 px-2 text-xs">
+                <Link to={clientPaymentsHref(userId)}>
+                  <Receipt className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+                  {t('userDetailPanel.operations.allPayments')}
+                </Link>
+              </Button>
+            ) : null}
+          </div>
         </CardHeader>
         <CardContent className="space-y-2">
           {data.items.length === 0 ? (
             <p className="py-5 text-center text-sm text-muted-foreground">{t('userDetailPanel.operations.empty')}</p>
           ) : (
             data.items.map((operation) => (
-              <OperationCard key={`${operation.kind}:${operation.id}`} operation={operation} locale={locale} />
+              <OperationCard
+                key={`${operation.kind}:${operation.id}`}
+                operation={operation}
+                locale={locale}
+                canViewPayments={canViewPayments}
+              />
             ))
           )}
         </CardContent>
@@ -4594,18 +4649,42 @@ function OperationsTab({ telegramId }: { telegramId: string }) {
   )
 }
 
-function OperationCard({ operation, locale }: { operation: UserOperation; locale: string }) {
+function OperationCard({
+  operation,
+  locale,
+  canViewPayments,
+}: {
+  operation: UserOperation
+  locale: string
+  canViewPayments: boolean
+}) {
   const { t } = useTranslation()
   const occurredAt = new Date(operation.occurredAt).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' })
 
   if (operation.kind === 'PAYMENT') {
+    const paymentId = operation.payload.paymentId
     return (
       <div className="space-y-2 rounded-lg border p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2"><Badge variant="success">{t('userDetailPanel.operations.payment')}</Badge><span className="text-xs text-muted-foreground">{occurredAt}</span></div>
           <span className="font-mono text-sm">{operation.payload.amount} {operation.payload.currency}</span>
         </div>
-        <p className="font-mono text-xs text-muted-foreground">{operation.payload.paymentId ?? t('userDetailPanel.operations.noPaymentId')}</p>
+        <div className="flex flex-wrap items-center justify-between gap-1.5 text-xs text-muted-foreground">
+          <CopyableId
+            value={paymentId}
+            label={t('userDetailPanel.operations.paymentId')}
+            empty={t('userDetailPanel.operations.noPaymentId')}
+          />
+          {canViewPayments && paymentId ? (
+            <Link
+              to={paymentHref(paymentId)}
+              className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline"
+            >
+              <Receipt className="h-3 w-3" aria-hidden="true" />
+              {t('userDetailPanel.operations.openPayment')}
+            </Link>
+          ) : null}
+        </div>
         <div className="flex flex-wrap items-center justify-between gap-1.5 text-xs">
           <div className="flex flex-wrap gap-1.5">
             <Badge variant="secondary">
@@ -5028,15 +5107,26 @@ function WebCabinetTab({
   const [telegramInput, setTelegramInput] = useState(
     user.telegramId !== undefined && user.telegramId !== null ? String(user.telegramId) : '',
   )
+  // Whether the issued login and password are on the clipboard, as the
+  // clipboard answered — the dialog's hint says «already copied» only then.
+  const [credentialsOnClipboard, setCredentialsOnClipboard] = useState<'pending' | 'copied' | 'failed'>(
+    'pending',
+  )
 
-  // Auto-copies "login / password" together. Used right after issuing a temp
-  // password so the operator can paste both into the user's chat in one go.
-  const copyCredentials = (login: string | null, password: string) => {
+  // Copies "login / password" together, so the operator can paste both into
+  // the user's chat in one go, and answers whether it actually worked. The
+  // automatic copy after a reset runs without a click, and browsers may refuse
+  // exactly that; it used to fail silently under a hint that said it had not.
+  const copyCredentials = async (
+    login: string | null,
+    password: string,
+    container?: Element | null,
+  ): Promise<boolean> => {
     const text = `${t('userDetailPanel.web.currentLogin')}: ${login ?? '—'}\n${t('userDetailPanel.web.tempPasswordLabel')}: ${password}`
-    navigator.clipboard.writeText(text).then(
-      () => toast.success(t('userDetailPanel.web.credentialsCopied')),
-      () => {/* clipboard blocked — the modal still shows the values */},
-    )
+    const copied = await copyTextToClipboard(text, { container })
+    if (copied) toast.success(t('userDetailPanel.web.credentialsCopied'))
+    else toast.error(t('userDetailPanel.web.credentialsCopyFailed'))
+    return copied
   }
 
   const resetMutation = useMutation({
@@ -5050,8 +5140,12 @@ function WebCabinetTab({
         expiresAt: res.data.expiresAt,
       }
       setTempCredentials(creds)
-      // Auto-copy login+password for hand-off (requirement).
-      copyCredentials(creds.login, creds.temporaryPassword)
+      // Auto-copy login+password for hand-off (requirement) — and the dialog
+      // says what the clipboard answered.
+      setCredentialsOnClipboard('pending')
+      void copyCredentials(creds.login, creds.temporaryPassword).then((copied) =>
+        setCredentialsOnClipboard(copied ? 'copied' : 'failed'),
+      )
       toast.success(t('userDetailPanel.web.passwordReset'))
     },
     onError: (err) =>
@@ -5193,10 +5287,14 @@ function WebCabinetTab({
                     <Button
                       variant="outline"
                       size="icon"
-                      onClick={() =>
-                        copyCredentials(webAccount.login ?? null, tempPwQuery.data!.temporaryPassword!)
+                      onClick={(event) =>
+                        void copyCredentials(
+                          webAccount.login ?? null,
+                          tempPwQuery.data!.temporaryPassword!,
+                          event.currentTarget.parentElement,
+                        )
                       }
-                      aria-label={t('userDetailPanel.web.credentialsCopied')}
+                      aria-label={t('userDetailPanel.web.copyCredentials')}
                     >
                       <Copy className="h-4 w-4" />
                     </Button>
@@ -5311,8 +5409,12 @@ function WebCabinetTab({
           </DialogHeader>
           {tempCredentials && (
             <div className="space-y-3 text-sm">
-              <p className="text-xs text-muted-foreground">
-                {t('userDetailPanel.web.tempIssuedHint')}
+              <p className="text-xs text-muted-foreground" role="status">
+                {credentialsOnClipboard === 'copied'
+                  ? t('userDetailPanel.web.tempIssuedHint')
+                  : credentialsOnClipboard === 'failed'
+                    ? t('userDetailPanel.web.tempIssuedHintNotCopied')
+                    : t('userDetailPanel.web.tempIssuedHintShownOnce')}
               </p>
               <div className="space-y-1">
                 <Label className="text-xs">{t('userDetailPanel.web.currentLogin')}</Label>
@@ -5329,10 +5431,17 @@ function WebCabinetTab({
                   <Button
                     variant="outline"
                     size="icon"
-                    onClick={() =>
-                      copyCredentials(tempCredentials.login, tempCredentials.temporaryPassword)
+                    onClick={(event) =>
+                      void copyCredentials(
+                        tempCredentials.login,
+                        tempCredentials.temporaryPassword,
+                        // Inside the dialog, so its focus trap leaves the copy alone.
+                        event.currentTarget.parentElement,
+                      ).then((copied) => {
+                        if (copied) setCredentialsOnClipboard('copied')
+                      })
                     }
-                    aria-label={t('userDetailPanel.web.credentialsCopied')}
+                    aria-label={t('userDetailPanel.web.copyCredentials')}
                   >
                     <Copy className="h-4 w-4" />
                   </Button>
@@ -5341,8 +5450,14 @@ function WebCabinetTab({
               <Button
                 variant="secondary"
                 className="w-full"
-                onClick={() =>
-                  copyCredentials(tempCredentials.login, tempCredentials.temporaryPassword)
+                onClick={(event) =>
+                  void copyCredentials(
+                    tempCredentials.login,
+                    tempCredentials.temporaryPassword,
+                    event.currentTarget.parentElement,
+                  ).then((copied) => {
+                    if (copied) setCredentialsOnClipboard('copied')
+                  })
                 }
               >
                 <Copy className="mr-2 h-4 w-4" />

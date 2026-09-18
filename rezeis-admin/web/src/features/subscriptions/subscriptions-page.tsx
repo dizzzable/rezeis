@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
-import { CreditCard, RefreshCw, Filter, ExternalLink } from 'lucide-react'
+import { CreditCard, RefreshCw, Filter, ExternalLink, Receipt } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
@@ -21,6 +21,8 @@ import { PanelLinkReconciliationPanel } from './panel-link-reconciliation-panel'
 import { DuplicateSubscriptionMergePanel } from './duplicate-subscription-merge-panel'
 import { UnknownSquadPanel } from './unknown-squad-panel'
 import { activeLocale } from '@/lib/utils'
+import { useHasPermission } from '@/features/rbac'
+import { subscriptionPaymentsHref } from '@/features/payments/payments-filters'
 
 const STATUSES = ['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED', 'DELETED']
 
@@ -89,6 +91,10 @@ interface SubscriptionsList {
 export default function SubscriptionsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  // The payments of a subscription live on the Payments page, which needs
+  // `payments:view`; a button that led an operator without it to a refusal
+  // would be a dead end.
+  const canViewPayments = useHasPermission('payments', 'view')
   const [statusFilter, setStatusFilter] = useState('__all__')
   const [trialOnly, setTrialOnly] = useState(false)
 
@@ -224,7 +230,7 @@ export default function SubscriptionsPage() {
                   <TableHead>{t('subscriptionsPage.table.traffic')}</TableHead>
                   <TableHead>{t('subscriptionsPage.table.devices')}</TableHead>
                   <TableHead>{t('subscriptionsPage.table.expires')}</TableHead>
-                  <TableHead className="w-10" />
+                  <TableHead className={canViewPayments ? 'w-20' : 'w-10'} />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -281,7 +287,23 @@ export default function SubscriptionsPage() {
                         ? t('subscriptionsPage.unlimitedExpiry')
                         : new Date(sub.expireAt).toLocaleDateString(activeLocale())}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="whitespace-nowrap">
+                      {canViewPayments ? (
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7"
+                          aria-label={t('subscriptionsPage.openPayments', { id: String(sub.id) })}
+                          title={t('subscriptionsPage.openPayments', { id: String(sub.id) })}
+                          onClick={(e) => {
+                            // The row itself opens the user; this opens the payments.
+                            e.stopPropagation()
+                            navigate(subscriptionPaymentsHref(String(sub.id)))
+                          }}
+                        >
+                          <Receipt className="h-3.5 w-3.5" />
+                        </Button>
+                      ) : null}
                       <Button
                         size="icon"
                         variant="ghost"

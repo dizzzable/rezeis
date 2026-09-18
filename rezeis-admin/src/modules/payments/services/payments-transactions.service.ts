@@ -23,7 +23,34 @@ import {
 } from '../../subscriptions/services/trial-claim-ledger.util';
 import { CreateTransactionDraftDto } from '../dto/create-transaction-draft.dto';
 import { ListTransactionsQueryDto } from '../dto/list-transactions-query.dto';
-import { AdminPaymentTransactionInterface } from '../interfaces/admin-payment-transaction.interface';
+import {
+  AdminPaymentTransactionInterface,
+  AdminPaymentTransactionListItemInterface,
+} from '../interfaces/admin-payment-transaction.interface';
+
+/**
+ * The namespaces the importers put in front of a donor platform's payment id,
+ * so an imported row can never collide with a live checkout:
+ *
+ *   - `altshop-importer.service.ts`   → `altshop:${source.id}`
+ *   - `bedolaga-importer.service.ts`  → `bedolaga:${donor.id}`
+ *   - `remnashop-importer.service.ts` → `'remnashop:' + transaction.id`
+ *
+ * (The StealthNet importer keeps the donor's `order_id` as it was.) The cabinet
+ * shows a subscriber such a payment's number WITHOUT the namespace — it would
+ * name the platform they came from — so a number quoted to support is looked
+ * up under each of these too. `payments-transactions-list-filters.spec.ts`
+ * reads the importers and fails when this list no longer matches them.
+ */
+export const IMPORTED_PAYMENT_ID_PREFIXES = ['altshop', 'bedolaga', 'remnashop'] as const;
+
+/**
+ * Upper bound of Postgres `int8`, which `users.telegram_id` is. A digit string
+ * above it cannot be a Telegram id, and binding it anyway fails the whole
+ * request in Postgres (`22003 value out of range for type bigint`, Prisma
+ * P2020) — a 500 for what is only a search that matches nobody.
+ */
+const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 
 @Injectable()
 export class PaymentsTransactionsService {
@@ -34,11 +61,46 @@ export class PaymentsTransactionsService {
 
   public async listTransactions(
     query: ListTransactionsQueryDto,
-  ): Promise<{ readonly items: readonly AdminPaymentTransactionInterface[]; readonly total: number }> {
+  ): Promise<{ readonly items: readonly AdminPaymentTransactionListItemInterface[]; readonly total: number }> {
     const where: Prisma.TransactionWhereInput = {};
+    // Filters that are themselves a choice between columns. Collected apart and
+    // joined under `AND`: written straight into `where.OR`, the second would
+    // silently replace the first.
+    const alternatives: Prisma.TransactionWhereInput[] = [];
 
-    if (query.userId) {
+    if (query.userId !== undefined) {
       where.userId = query.userId;
+    }
+    if (query.subscriptionId !== undefined) {
+      // A combined renewal names no subscription of its own; each one it pays
+      // for is a line item. Those payments are resolved FIRST, by the indexed
+      // `transaction_items.subscription_id`, and joined in as plain ids: written
+      // as `subscriptionId = X OR items: { some: … }` the second branch is a
+      // subquery, Postgres cannot combine it with the first, and it scanned
+      // every row of `transactions` (twice — page and count). As ids, the OR is
+      // a BitmapOr of the `subscription_id` index and the primary key.
+      const lineItems = await this.prismaService.transactionItem.findMany({
+        where: { subscriptionId: query.subscriptionId },
+        select: { transactionId: true },
+      });
+      const lineItemTransactionIds = [...new Set(lineItems.map((item) => item.transactionId))];
+      alternatives.push({
+        OR: [
+          { subscriptionId: query.subscriptionId },
+          ...(lineItemTransactionIds.length > 0 ? [{ id: { in: lineItemTransactionIds } }] : []),
+        ],
+      });
+    }
+    if (query.q !== undefined) {
+      // Exact on all three, so each branch is an index lookup (`payment_id` is
+      // unique, `gateway_id` indexed since 20260918120000, `id` the key).
+      alternatives.push({
+        OR: [
+          { paymentId: { in: paymentIdCandidates(query.q) } },
+          { gatewayId: query.q },
+          { id: query.q },
+        ],
+      });
     }
     if (query.status) {
       where.status = query.status;
@@ -63,6 +125,13 @@ export class PaymentsTransactionsService {
       const search = query.userSearch.trim();
       if (search.length > 0) {
         const isNumeric = /^\d+$/.test(search);
+        if (isNumeric && BigInt(search) > MAX_POSTGRES_BIGINT) {
+          // All digits and past `int8`: not a Telegram id, and the other three
+          // things this searches (a cuid, an email, a username) are never all
+          // digits. Nobody matches — said without asking Postgres, which would
+          // fail the request instead (see MAX_POSTGRES_BIGINT).
+          return { items: [], total: 0 };
+        }
         const matchingUsers = await this.prismaService.user.findMany({
           where: isNumeric
             ? { telegramId: BigInt(search) }
@@ -76,13 +145,24 @@ export class PaymentsTransactionsService {
           select: { id: true },
           take: 50,
         });
-        if (matchingUsers.length > 0) {
-          where.userId = { in: matchingUsers.map((u) => u.id) };
-        } else {
+        if (matchingUsers.length === 0) {
           // No matching users — return empty result immediately
           return { items: [], total: 0 };
         }
+        const matchingUserIds = matchingUsers.map((u) => u.id);
+        if (query.userId === undefined) {
+          where.userId = { in: matchingUserIds };
+        } else if (!matchingUserIds.includes(query.userId)) {
+          // Both filters name a customer, and not the same one. This used to
+          // overwrite `where.userId`, so the search box silently replaced the
+          // client a `?userId=` link had opened the list on — showing another
+          // customer's payments under the first one's filter.
+          return { items: [], total: 0 };
+        }
       }
+    }
+    if (alternatives.length > 0) {
+      where.AND = alternatives;
     }
 
     const limit = query.limit ?? 50;
@@ -93,6 +173,7 @@ export class PaymentsTransactionsService {
         where,
         include: {
           user: { select: { id: true, telegramId: true, username: true, name: true, email: true } },
+          items: { select: { subscriptionId: true } },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
@@ -102,7 +183,11 @@ export class PaymentsTransactionsService {
     ]);
 
     return {
-      items: transactions.map((tx) => mapAdminPaymentTransaction(tx, tx.user)),
+      items: transactions.map((tx) => ({
+        ...mapAdminPaymentTransaction(tx, tx.user),
+        fulfilledAt: tx.fulfilledAt?.toISOString() ?? null,
+        lineItemSubscriptionIds: [...new Set(tx.items.map((item) => item.subscriptionId))],
+      })),
       total,
     };
   }
@@ -425,6 +510,19 @@ function mapAdminPaymentTransaction(
     createdAt: transaction.createdAt.toISOString(),
     updatedAt: transaction.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Every `payment_id` a searched reference can name: itself, and — unless it
+ * already carries one — the same number under each importer's namespace, the
+ * form the cabinet shows an imported payment in (IMPORTED_PAYMENT_ID_PREFIXES).
+ * All equalities on the unique `payment_id` index.
+ */
+function paymentIdCandidates(reference: string): string[] {
+  const namespaced = IMPORTED_PAYMENT_ID_PREFIXES.some((prefix) => reference.startsWith(`${prefix}:`));
+  return namespaced
+    ? [reference]
+    : [reference, ...IMPORTED_PAYMENT_ID_PREFIXES.map((prefix) => `${prefix}:${reference}`)];
 }
 
 function buildTransactionDraftSnapshot(input: {

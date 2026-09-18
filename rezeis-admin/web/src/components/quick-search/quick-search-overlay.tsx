@@ -17,6 +17,7 @@ import {
   type NavItem,
 } from '@/components/layout/admin-nav-config';
 import { usePermissionStore } from '@/features/rbac';
+import { paymentHref } from '@/features/payments/payments-filters';
 
 interface SearchResult {
   type: 'user' | 'subscription' | 'transaction' | 'promocode' | 'partner' | 'navigation';
@@ -35,7 +36,10 @@ const TYPE_META: Record<
 > = {
   user: { icon: User, color: 'text-blue-500', route: (id) => `/users/${id}` },
   subscription: { icon: CreditCard, color: 'text-green-500', route: (_id) => `/subscriptions` },
-  transaction: { icon: CreditCard, color: 'text-yellow-500', route: (_id) => `/payments` },
+  // The hit's id is the payment's `paymentId` (quick-search.service.ts). It
+  // opens THAT payment's details; the bare `/payments` it used to open left the
+  // operator to find it again in the full ledger.
+  transaction: { icon: CreditCard, color: 'text-yellow-500', route: (id) => paymentHref(id) },
   promocode: { icon: Tag, color: 'text-purple-500', route: (_id) => `/promocodes` },
   partner: { icon: Handshake, color: 'text-orange-500', route: (_id) => `/partners` },
   // `navigation` rows always carry their own `to`; the route() is a safe

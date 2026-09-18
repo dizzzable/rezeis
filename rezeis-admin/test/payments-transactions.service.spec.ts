@@ -628,8 +628,12 @@ function createStoredTransaction(input: {
     gatewayId: null,
     planSnapshot: input.planSnapshot ?? createDraftSnapshot(input.purchaseType ?? PurchaseType.NEW),
     deviceTypes: [...(input.deviceTypes ?? [])],
+    fulfilledAt: null,
     createdAt: new Date('2026-04-19T12:00:00.000Z'),
     updatedAt: new Date('2026-04-19T12:00:00.000Z'),
     user: input.user,
+    // What the list query's `include: { items: … }` makes Prisma return for a
+    // single-subscription payment.
+    items: [],
   };
 }

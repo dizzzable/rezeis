@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, TransactionStatus } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
@@ -257,10 +257,11 @@ export class QuickSearchService {
           type: 'transaction' as const,
           id: tx.paymentId,
           label: `${tx.gatewayType} · ${tx.amount.toString()} ${tx.currency}`,
-          subtitle:
-            tx.status === TransactionStatus.COMPLETED
-              ? `${tx.status} · ${tx.paymentId.slice(0, 12)}`
-              : `${tx.status} · pending payment`,
+          // The real status, and the id, for every status. Anything but
+          // COMPLETED used to read "pending payment" — a FAILED or a REFUNDED
+          // payment included — and the id was hidden exactly where an operator
+          // needed to tell two unfinished attempts apart.
+          subtitle: `${tx.status} · ${tx.paymentId}`,
         },
       })),
     );
