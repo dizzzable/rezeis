@@ -218,6 +218,7 @@ export const en = {
       runNow: 'Runs the rule right now, even if it is switched off. This run carries no event data, so a rule with conditions will most likely be skipped. The result shows up on the Executions tab.',
       runNowDialog: "Opens the run dialog: you pick a customer, and the rule's actions really run for them, as if the event had happened to them.",
       runNowForbidden: 'Your role is not allowed to run rules (automations:run).',
+      runNowOffConfirm: 'The rule is switched off, and a manual run executes it regardless of the switch. The panel asks first and shows exactly what will run.',
       create: 'Saves the draft as a rule. It is switched on only if the Enabled switch in the header is on.',
       createWithCompanions:
         'Saves the draft as a rule, and the rules listed below along with it. They are switched on only if the Enabled switch in the header is on.',
@@ -230,6 +231,20 @@ export const en = {
       dropCompanions: 'Takes the rules off this list: Create saves only this rule.',
     },
     // The Run now dialog, for a rule that shows a hint.
+    // ── «Run now» on a switched-off rule that opens no dialog ─────────────
+    //
+    // A manual run ignores the switch, and a rule with no "show a hint" action
+    // opens no dialog: one press and the rule really ran. This asks first.
+    runConfirm: {
+      title: 'This rule is switched off. Run it anyway?',
+      body: 'The rule "{{name}}" is switched off: it does not fire on its own. "Run now" executes it regardless of the switch — once, right now, for real. It does not switch the rule back on.',
+      unsavedSwitch: 'The Enabled switch in the editor is already on, but that is not saved yet: what runs is the saved rule, which is switched off.',
+      actionsTitle: 'What will run:',
+      blockWarning: 'One of the actions is a block: {{actions}}. It applies to real people and addresses, and this dialog cannot undo it — it has to be lifted by hand.',
+      confirm: 'Run it anyway',
+      confirmTip: 'Runs the rule right now, once. The switch stays off.',
+      cancelTip: 'Closes this dialog. The rule does not run and nothing changes.',
+    },
     runDialog: {
       title: 'Run "{{name}}"',
       what: "The rule's actions run now for the customer you pick, as if the event had happened to them. If the hint is queued, they see it when they open the cabinet somewhere it is allowed — after any hints already waiting for them.",

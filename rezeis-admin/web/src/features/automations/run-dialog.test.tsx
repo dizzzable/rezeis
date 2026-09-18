@@ -714,6 +714,166 @@ describe('a rule without a hint', () => {
   })
 })
 
+/**
+ * The tip of ONE control, found through the `aria-describedby` Radix hangs on
+ * its trigger while the tip is open. `expectTip` above asks the document for
+ * «the tooltip», which is enough where only one can be open; inside a dialog
+ * that focuses a button as it opens, two are.
+ */
+async function expectOwnTip(
+  user: ReturnType<typeof userEvent.setup>,
+  target: HTMLElement,
+  sentence: string,
+) {
+  await user.hover(target)
+  const trigger = target.parentElement ?? target
+  await waitFor(() => expect(trigger).toHaveAttribute('aria-describedby'))
+  const id = trigger.getAttribute('aria-describedby')!
+  await waitFor(() => expect(document.getElementById(id)).toHaveTextContent(sentence))
+}
+
+describe('a switched-off rule that opens no dialog', () => {
+  /**
+   * The most dangerous press on this page.
+   *
+   * A manual run IGNORES the switch (the executor stopped answering such a run
+   * with SKIPPED «rule disabled» in this release), and a rule with no
+   * `show_hint` action opens no dialog at all — so one press on a rule
+   * switched off months ago used to ban a customer, block an address or post a
+   * webhook with nothing asked and nothing to undo it. The sentence that says
+   * the switch is ignored lives in the run dialog, which these rules never open.
+   */
+  const BANHAMMER = savedRule({
+    id: 'rule-ban',
+    name: 'Бан за фрод',
+    isEnabled: false,
+    triggerKind: 'MANUAL',
+    triggerSpec: '',
+    actions: [
+      { type: 'block_user', params: { reason: 'fraud' } },
+      { type: 'notify_telegram', params: { text: 'banned' } },
+    ],
+  })
+
+  it('asks first, and names the rule, the switch and every action about to run', async () => {
+    const user = userEvent.setup()
+    serve(BANHAMMER)
+    renderWithProviders(<AutomationsPage />)
+    await screen.findByRole('button', { name: says('automationsPage.editor.save') })
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.runNow') }))
+
+    const ask = await screen.findByRole('alertdialog', { name: says('automationsPage.runConfirm.title') })
+    // Nothing has run: this is a question, not a progress report.
+    expect(runRuleManually).not.toHaveBeenCalled()
+    expect(within(ask).getByText(says('automationsPage.runConfirm.body', { name: BANHAMMER.name }))).toBeInTheDocument()
+    // What will run, by the names the editor uses for the same actions.
+    expect(within(ask).getByText(says('automationsPage.runConfirm.actionsTitle'))).toBeInTheDocument()
+    expect(within(ask).getByText(says('automationsPage.actionTypes.block_user'))).toBeInTheDocument()
+    expect(within(ask).getByText(says('automationsPage.actionTypes.notify_telegram'))).toBeInTheDocument()
+    // And that one of them cannot be taken back.
+    expect(
+      within(ask).getByText(
+        says('automationsPage.runConfirm.blockWarning', {
+          actions: says('automationsPage.actionTypes.block_user'),
+        }),
+      ),
+    ).toBeInTheDocument()
+
+    await user.click(within(ask).getByRole('button', { name: says('automationsPage.runConfirm.confirm') }))
+
+    await waitFor(() => {
+      expect(runRuleManually).toHaveBeenCalledWith(BANHAMMER.id, {})
+    })
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    // The keyboard comes back to the button that asked.
+    expect(screen.getByRole('button', { name: says('automationsPage.editor.runNow') })).toHaveFocus()
+  })
+
+  it('runs nothing when the question is answered with «Отмена»', async () => {
+    const user = userEvent.setup()
+    serve(BANHAMMER)
+    renderWithProviders(<AutomationsPage />)
+    await screen.findByRole('button', { name: says('automationsPage.editor.save') })
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.runNow') }))
+    const ask = await screen.findByRole('alertdialog', { name: says('automationsPage.runConfirm.title') })
+    await user.click(within(ask).getByRole('button', { name: says('common.cancel') }))
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(runRuleManually).not.toHaveBeenCalled()
+    expect(toastMock.success).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: says('automationsPage.editor.runNow') })).toHaveFocus()
+  })
+
+  it('says on hover that it will ask, and what both buttons of the question do', async () => {
+    const user = userEvent.setup()
+    serve(BANHAMMER)
+    renderWithProviders(<AutomationsPage />)
+    await screen.findByRole('button', { name: says('automationsPage.editor.save') })
+
+    const runNow = screen.getByRole('button', { name: says('automationsPage.editor.runNow') })
+    await expectTip(user, runNow, says('automationsPage.tips.runNowOffConfirm'))
+
+    await user.click(runNow)
+    const ask = await screen.findByRole('alertdialog', { name: says('automationsPage.runConfirm.title') })
+    // Matched through the id Radix hangs on the hovered trigger, not by
+    // «the tooltip on screen»: the dialog focuses «Отмена» as it opens, so its
+    // tip is already up and a search by role would answer with that one.
+    await expectOwnTip(
+      user,
+      within(ask).getByRole('button', { name: says('automationsPage.runConfirm.confirm') }),
+      says('automationsPage.runConfirm.confirmTip'),
+    )
+    await expectOwnTip(
+      user,
+      within(ask).getByRole('button', { name: says('common.cancel') }),
+      says('automationsPage.runConfirm.cancelTip'),
+    )
+    expect(runRuleManually).not.toHaveBeenCalled()
+  })
+
+  it('says when the switch flipped in the editor has not been saved', async () => {
+    const user = userEvent.setup()
+    serve(BANHAMMER)
+    renderWithProviders(<AutomationsPage />)
+    await screen.findByRole('button', { name: says('automationsPage.editor.save') })
+
+    // Switched on in the editor, not saved: the run still executes the saved
+    // rule, which is the switched-off one.
+    await user.click(screen.getByRole('switch', { name: says('automationsPage.editor.enabledLabel') }))
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.runNow') }))
+
+    const ask = await screen.findByRole('alertdialog', { name: says('automationsPage.runConfirm.title') })
+    expect(within(ask).getByText(says('automationsPage.runConfirm.unsavedSwitch'))).toBeInTheDocument()
+  })
+
+  it('leaves a rule that is switched ON running on one press, as it always did', async () => {
+    // What changed is the switched-off case. An enabled rule with no hint
+    // action is not new and asks nothing.
+    const user = userEvent.setup()
+    serve({ ...BANHAMMER, id: 'rule-ban-on', isEnabled: true })
+    renderWithProviders(<AutomationsPage />)
+    await screen.findByRole('button', { name: says('automationsPage.editor.save') })
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.runNow') }))
+
+    await waitFor(() => expect(runRuleManually).toHaveBeenCalledWith('rule-ban-on', {}))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('leaves a switched-off rule WITH a hint action opening the customer dialog', async () => {
+    // That dialog already says the switch is ignored and asks whom to run for,
+    // so it must not be preceded by a second question.
+    const user = userEvent.setup()
+    const dialog = await openRunDialog(user, { ...WELCOME, isEnabled: false })
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(within(dialog).getByText(says('automationsPage.runDialog.disabledNote'))).toBeInTheDocument()
+    expect(runRuleManually).not.toHaveBeenCalled()
+  })
+})
+
 describe('the run log', () => {
   it('words a result from its code, and keeps the message of a result written before codes', async () => {
     serve(savedRule({ id: 'rule-log', name: 'С журналом' }))

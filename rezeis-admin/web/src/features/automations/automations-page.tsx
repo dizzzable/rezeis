@@ -69,7 +69,7 @@ import { listUserHints } from '@/features/user-hints/user-hints-api';
 import { ArrivalTemplateCard } from './arrival-template-card';
 import { findHintCollisionsWithCompanions } from './hint-collision';
 import { getEventCatalog } from './event-catalog-api';
-import { ACTION_LABEL_KEYS } from './rule-action-labels';
+import { ACTION_LABEL_KEYS, actionLabel } from './rule-action-labels';
 import { ButtonTip } from './rule-button-tip';
 import {
   companionPayload,
@@ -1059,6 +1059,7 @@ function RuleEditorBody({
   const queryClient = useQueryClient();
   const mayRun = useHasPermission('automations', 'run');
   const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [runConfirmOpen, setRunConfirmOpen] = useState(false);
   // Where keyboard focus goes when the run dialog closes: back to the button it
   // was opened from, which Radix cannot do for a dialog with no trigger.
   const runButton = useRef<HTMLButtonElement>(null);
@@ -1258,6 +1259,23 @@ function RuleEditorBody({
   // SAVED rule: the run executes what is on the server, not the draft.
   const runAsksForCustomer = !isNew && rule.actions.some((action) => action.type === 'show_hint');
   const runBlocked = !mayRun || runMutation.isPending;
+  // ── «Запустить сейчас» ON A RULE THAT IS SWITCHED OFF ────────────────────
+  //
+  // A manual run IGNORES the switch (the executor stopped grading such a run
+  // SKIPPED «rule disabled» in this release), and a rule with no `show_hint`
+  // opens no dialog: one press ran it. So a rule switched off months ago — and
+  // a rule is switched off precisely because it must not act — could ban a
+  // customer, block an address or post a webhook on a single press, with the
+  // one sentence that explains this living inside the dialog these rules never
+  // open. Now the panel asks first, and the question names the rule, the
+  // switch, and every action that is about to run.
+  //
+  // Read off the SAVED rule, like `runAsksForCustomer`: the run executes what
+  // is on the server, not what is typed into the editor.
+  const runNeedsConfirming = !isNew && !runAsksForCustomer && rule.isEnabled === false;
+  const blockingActions = rule.actions
+    .filter((action) => action.type === 'block_user' || action.type === 'block_ip')
+    .map((action) => actionLabel(t, action.type));
   // AN AUDIENCE ACTION WITH NO AUDIENCE. The server refuses the whole rule for
   // it, and the refusal names neither the action nor the field, so the operator
   // was left to guess which of several actions it meant. The panel knows before
@@ -1301,7 +1319,9 @@ function RuleEditorBody({
                     ? t('automationsPage.tips.runNowForbidden')
                     : runAsksForCustomer
                       ? t('automationsPage.tips.runNowDialog')
-                      : t('automationsPage.tips.runNow')
+                      : runNeedsConfirming
+                        ? t('automationsPage.tips.runNowOffConfirm')
+                        : t('automationsPage.tips.runNow')
                 }
                 disabled={runBlocked}
               >
@@ -1309,7 +1329,17 @@ function RuleEditorBody({
                   ref={runButton}
                   variant="outline"
                   size="sm"
-                  onClick={() => (runAsksForCustomer ? setRunDialogOpen(true) : runMutation.mutate())}
+                  onClick={() => {
+                    if (runAsksForCustomer) {
+                      setRunDialogOpen(true);
+                      return;
+                    }
+                    if (runNeedsConfirming) {
+                      setRunConfirmOpen(true);
+                      return;
+                    }
+                    runMutation.mutate();
+                  }}
                   disabled={runBlocked}
                 >
                   {runMutation.isPending ? (
@@ -1328,6 +1358,59 @@ function RuleEditorBody({
                 rule={rule}
                 returnFocusTo={runButton}
               />
+            )}
+            {runNeedsConfirming && (
+              <AlertDialog open={runConfirmOpen} onOpenChange={setRunConfirmOpen}>
+                <AlertDialogContent
+                  onCloseAutoFocus={(event) => {
+                    // Back to the button that opened it, as the run dialog does:
+                    // nothing here is a Radix trigger, so focus would fall to the
+                    // page body and the next Tab would start from the top.
+                    const opener = runButton.current;
+                    if (opener === null) return;
+                    event.preventDefault();
+                    opener.focus();
+                  }}
+                >
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t('automationsPage.runConfirm.title')}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t('automationsPage.runConfirm.body', { name: rule.name })}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  {/* The switch in the editor is not the switch that decides:
+                      a run executes the SAVED rule. Said only when the two
+                      disagree, which is the case an operator can misread. */}
+                  {draft.isEnabled === true && (
+                    <p className="text-sm text-muted-foreground">
+                      {t('automationsPage.runConfirm.unsavedSwitch')}
+                    </p>
+                  )}
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">{t('automationsPage.runConfirm.actionsTitle')}</p>
+                    <ul className="list-disc space-y-0.5 pl-5 text-sm text-muted-foreground">
+                      {rule.actions.map((action, index) => (
+                        <li key={`${action.type}-${index}`}>{actionLabel(t, action.type)}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  {blockingActions.length > 0 && (
+                    <p className="text-sm font-medium text-destructive">
+                      {t('automationsPage.runConfirm.blockWarning', { actions: blockingActions.join(', ') })}
+                    </p>
+                  )}
+                  <AlertDialogFooter>
+                    <ButtonTip tip={t('automationsPage.runConfirm.cancelTip')}>
+                      <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+                    </ButtonTip>
+                    <ButtonTip tip={t('automationsPage.runConfirm.confirmTip')}>
+                      <AlertDialogAction onClick={() => runMutation.mutate()}>
+                        {t('automationsPage.runConfirm.confirm')}
+                      </AlertDialogAction>
+                    </ButtonTip>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             )}
             <ButtonTip
               tip={
