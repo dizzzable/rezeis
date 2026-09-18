@@ -49,6 +49,31 @@ const MAX_USERS_PER_RUN = 500;
  * and nobody has connected" and "we cannot tell who has connected" are
  * different facts, and only the first is safe to act on.
  */
+/**
+ * WHAT BOUNDS ONE RESOLVE.
+ *
+ * The two reads below run inside one interactive transaction, and the reason is
+ * the TIMER, not the atomicity. An ordinary Prisma query waits for a pooled
+ * connection with no timer at all — pg-pool arms one only when
+ * `connectionTimeoutMillis` is set, and it is not — so on a pool held by an
+ * export or a plan migration this call does not fail, it HANGS. Inside a
+ * transaction `maxWait` covers the checkout itself, because Prisma races
+ * `startTransaction` — which is what acquires the connection — against it.
+ *
+ * WHY IT MATTERS MORE HERE THAN ANYWHERE ELSE IN A RUN. This resolves the
+ * cohort BEFORE the audience loop exists, so nothing downstream can stop it:
+ * the loop's wall-clock budget and its failure streak only start counting once
+ * there is a cohort to walk. A run that hangs here hangs with no counts, no
+ * `audience_partial` and nothing in the panel log — the operator's request is
+ * answered 408 at 120 s while the job still holds a worker.
+ *
+ * THE SAME TWO NUMBERS AS ONE RAISE, deliberately: they are argued at length
+ * over `RAISE_TRANSACTION_OPTIONS` in `user-hint-delivery.service.ts`, and the
+ * pool they are protecting is the same one. 10 s + 20 s means a resolve answers
+ * or throws within 30 s, well inside the 60 s budget the loop after it is given.
+ */
+const RESOLVE_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 20_000 } as const;
+
 @Injectable()
 export class HintAudienceService {
   private readonly logger = new Logger(HintAudienceService.name);
@@ -73,12 +98,51 @@ export class HintAudienceService {
       };
     }
 
-    // ── Can we tell who has connected at all? ──────────────────────────
-    const anyConnected = await this.prismaService.user.count({
-      where: { firstTrafficAt: { not: null } },
-      take: 1,
-    });
-    if (anyConnected === 0) {
+    // A WINDOW, not "older than": an open-ended lower bound would re-scan the
+    // entire history on every run, and the hint's own once-only rule would be
+    // the only thing standing between that and a daily sweep of every customer
+    // who ever failed to connect. Bounding it here keeps the query small and
+    // the intent honest — this is about people who bought RECENTLY.
+    const createdAfter = new Date(now.getTime() - beforeHours * 60 * 60 * 1000);
+    const createdBefore = new Date(now.getTime() - afterHours * 60 * 60 * 1000);
+
+    const rows = await this.prismaService.$transaction(async (tx) => {
+      // ── Can we tell who has connected at all? ────────────────────────
+      //
+      // IN HERE TOO. It is one cheap count, but it is the FIRST statement of
+      // the run, so it is the one that queues for a connection — and a count
+      // that never returns is indistinguishable from a cohort that is slow to
+      // build. Bounded, it throws, and the action reports a failed run.
+      const anyConnected = await tx.user.count({
+        where: { firstTrafficAt: { not: null } },
+        take: 1,
+      });
+      // `null` is blindness, answered below. The reason is a paragraph written
+      // for an operator, and none of it is the transaction's business.
+      if (anyConnected === 0) return null;
+
+      return tx.user.findMany({
+        where: {
+          isBlocked: false,
+          firstTrafficAt: null,
+          subscriptions: {
+            some: {
+              createdAt: { gte: createdAfter, lte: createdBefore },
+              // A trial counts: somebody who took a free trial and never
+              // connected is precisely who this is for.
+              status: { in: ['ACTIVE', 'LIMITED'] },
+            },
+          },
+        },
+        select: { id: true },
+        // Oldest first, so a run that hits the ceiling takes the people who
+        // have been waiting longest rather than an arbitrary slice.
+        orderBy: { createdAt: 'asc' },
+        take: MAX_USERS_PER_RUN + 1,
+      });
+    }, RESOLVE_TRANSACTION_OPTIONS);
+
+    if (rows === null) {
       return {
         kind: 'blind',
         reason:
@@ -88,34 +152,6 @@ export class HintAudienceService {
           'relying on this audience.',
       };
     }
-
-    // A WINDOW, not "older than": an open-ended lower bound would re-scan the
-    // entire history on every run, and the hint's own once-only rule would be
-    // the only thing standing between that and a daily sweep of every customer
-    // who ever failed to connect. Bounding it here keeps the query small and
-    // the intent honest — this is about people who bought RECENTLY.
-    const createdAfter = new Date(now.getTime() - beforeHours * 60 * 60 * 1000);
-    const createdBefore = new Date(now.getTime() - afterHours * 60 * 60 * 1000);
-
-    const rows = await this.prismaService.user.findMany({
-      where: {
-        isBlocked: false,
-        firstTrafficAt: null,
-        subscriptions: {
-          some: {
-            createdAt: { gte: createdAfter, lte: createdBefore },
-            // A trial counts: somebody who took a free trial and never
-            // connected is precisely who this is for.
-            status: { in: ['ACTIVE', 'LIMITED'] },
-          },
-        },
-      },
-      select: { id: true },
-      // Oldest first, so a run that hits the ceiling takes the people who have
-      // been waiting longest rather than an arbitrary slice.
-      orderBy: { createdAt: 'asc' },
-      take: MAX_USERS_PER_RUN + 1,
-    });
 
     const truncated = rows.length > MAX_USERS_PER_RUN;
     if (truncated) {

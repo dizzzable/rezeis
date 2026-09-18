@@ -77,6 +77,10 @@ interface RegistryOptions {
   readonly raise?: (input: Record<string, unknown>) => Promise<unknown>;
   /** What the audience resolves to. */
   readonly audience?: unknown;
+  /** …or what resolving it throws, which a bounded resolve now does on a busy pool. */
+  readonly resolveThrows?: unknown;
+  /** Run while the audience is being resolved — for spending the mocked clock. */
+  readonly onResolve?: () => void;
   /** What `hintStatus` answers. Default: active. */
   readonly hintStatus?: 'missing' | 'inactive' | 'active';
   /** The customer ids `user.findUnique` knows. Default: every id. */
@@ -132,6 +136,8 @@ function buildRegistry(options: RegistryOptions = {}) {
     {
       resolve: async (input: Record<string, unknown>) => {
         resolved.push(input);
+        options.onResolve?.();
+        if (options.resolveThrows !== undefined) throw options.resolveThrows;
         return options.audience ?? { kind: 'ok', userIds: ['u-1', 'u-2'], truncated: false };
       },
     } as never,
@@ -642,6 +648,95 @@ describe('the scheduled audience action', () => {
       capped: false,
     });
     assert.equal(raised.length, 6);
+  });
+
+  it('fails a run whose audience could not be worked out, without repeating the database', async () => {
+    // Bounding the resolve turned a hang into a throw — an improvement that
+    // opens a door: an UNNAMED throw becomes the result's `message` verbatim,
+    // and that message travels in a 200 body and into
+    // `automation_executions.error_message`, neither of which passes through
+    // `AdminSafeExceptionFilter`. So the pool sentence stops here.
+    const warnings: string[] = [];
+    const warn = mock.method(Logger.prototype, 'warn', (...args: unknown[]) => {
+      warnings.push(String(args[0]));
+    });
+    try {
+      const { registry, raised } = buildRegistry({
+        resolveThrows: new Error(
+          'Timed out fetching a new connection from the connection pool (limit: 5)',
+        ),
+      });
+
+      const result = await registry.execute(0, AUDIENCE_ACTION as never, CRON_CONTEXT as never);
+
+      assert.equal(result.status, 'failed');
+      assert.equal(result.code, undefined, 'named a failure that never attempted anything');
+      assert.deepStrictEqual(raised, [], 'raised somebody anyway');
+      assert.match(
+        String(result.message),
+        /could not work out who to hint for audience "paid-not-connected"/,
+      );
+      assert.doesNotMatch(
+        String(result.message),
+        /connection pool|Timed out|connection limit/i,
+        `the driver sentence reached the operator: ${String(result.message)}`,
+      );
+      assert.equal(
+        warnings.some((line) => line.includes('connection pool') && line.includes('paid-not-connected')),
+        true,
+        `the reason left no panel log line: ${JSON.stringify(warnings)}`,
+      );
+    } finally {
+      warn.mock.restore();
+    }
+  });
+
+  it('spends that budget on working out the audience as well as on raising', async () => {
+    // Bounding the cohort resolve put a SECOND 30 s wait inside a run. While
+    // the clock started at the loop, a resolve that took most of a minute
+    // still handed the loop a fresh 60 s: 30 s for the hint-status read plus
+    // 30 s resolving plus 60 s of loop is 120 s, which is exactly what the
+    // route allows (`LONG_TIMEOUT_PATTERNS`) — so the operator would be
+    // answered 408, untranslatably, by the very run this budget exists to end
+    // politely with counts.
+    mock.timers.enable({ apis: ['Date'] });
+    try {
+      const { registry, raised } = buildRegistry({
+        audience: { kind: 'ok', userIds: ['u-1', 'u-2', 'u-3', 'u-4'], truncated: false },
+        // A pool busy enough that the cohort alone took fifty of the sixty.
+        onResolve: () => mock.timers.tick(50_000),
+        raise: async (input) => {
+          mock.timers.tick(6_000);
+          return { id: `del-${String(input.userId)}` };
+        },
+      });
+
+      const result = await registry.execute(0, AUDIENCE_ACTION as never, CRON_CONTEXT as never);
+
+      // 50 s resolving; the first raise runs from there to 56 s, the second to
+      // 62 s, and the check before a third finds the budget already spent.
+      assert.equal(result.status, 'failed');
+      assert.equal(result.code, 'audience_partial');
+      assert.deepStrictEqual(result.details, {
+        hintKey: 'connect',
+        audience: 'paid-not-connected',
+        matched: 4,
+        queued: 2,
+        failed: 0,
+        notAttempted: 2,
+        stoppedEarly: true,
+        stoppedBy: 'time',
+        capped: false,
+      });
+      assert.deepStrictEqual(
+        raised.map((input) => input.userId),
+        ['u-1', 'u-2'],
+        'the loop took a fresh sixty seconds of its own',
+      );
+      assert.match(String(result.message), /stopped after 60 seconds, leaving 2 not attempted/);
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   it('stops on its wall-clock budget even when every raise works', async () => {

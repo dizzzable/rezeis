@@ -33,16 +33,60 @@ function build(options: {
   readonly matches?: number;
 }) {
   const queries: Array<Record<string, unknown>> = [];
+  /**
+   * What the resolve did, in order: `begin`/`commit` for the transaction,
+   * `tx.<method>` for a read made THROUGH the transaction client, and
+   * `root.<method>` for one that went past it and took its own connection.
+   */
+  const ops: string[] = [];
+  /** The options every `$transaction` was opened with, in order. */
+  const transactionOptions: unknown[] = [];
+  /** Greater than zero while the transaction client is delegating to the root one. */
+  let delegating = 0;
   const prisma = {
     user: {
-      count: async () => (options.anyConnected === false ? 0 : 1),
+      count: async () => {
+        if (delegating === 0) ops.push('root.count');
+        return options.anyConnected === false ? 0 : 1;
+      },
       findMany: async (args: Record<string, unknown>) => {
+        if (delegating === 0) ops.push('root.findMany');
         queries.push(args);
         return Array.from({ length: options.matches ?? 0 }, (_, i) => ({ id: `u-${i}` }));
       },
     },
+    $transaction: async (run: (tx: unknown) => Promise<unknown>, txOptions?: unknown) => {
+      transactionOptions.push(txOptions);
+      ops.push('begin');
+      const result = await run(transactionClient);
+      ops.push('commit');
+      return result;
+    },
   };
-  return { service: new HintAudienceService(prisma as never), queries };
+  const transactionClient = {
+    ...prisma,
+    user: {
+      count: async () => {
+        ops.push('tx.count');
+        delegating += 1;
+        try {
+          return await prisma.user.count();
+        } finally {
+          delegating -= 1;
+        }
+      },
+      findMany: async (args: Record<string, unknown>) => {
+        ops.push('tx.findMany');
+        delegating += 1;
+        try {
+          return await prisma.user.findMany(args);
+        } finally {
+          delegating -= 1;
+        }
+      },
+    },
+  };
+  return { service: new HintAudienceService(prisma as never), queries, ops, transactionOptions };
 }
 
 describe('standing down when the signal is not working', () => {
@@ -154,5 +198,72 @@ describe('the query it builds', () => {
     const outcome = await service.resolve({ audience: 'paid-not-connected', now: NOW });
 
     assert.equal((outcome as { truncated: boolean }).truncated, false);
+  });
+});
+
+describe('the wait nothing downstream can stop', () => {
+  /**
+   * An ordinary Prisma query waits for a pooled connection with NO timer:
+   * pg-pool arms one only when `connectionTimeoutMillis` is set, and it is
+   * not. So on a pool held by an export or a plan migration, this resolve did
+   * not fail — it hung.
+   *
+   * That is worse here than anywhere else in a run. The cohort is resolved
+   * BEFORE the audience loop exists, so the loop's wall-clock budget and its
+   * failure streak — the two things that stop a slow run — have nothing to
+   * count yet. A run hung here produces no counts, no `audience_partial` and
+   * no panel log line; the operator's request is answered 408 at 120 s while
+   * the job still holds a worker.
+   *
+   * Inside a transaction, `maxWait` covers the checkout itself: Prisma races
+   * `startTransaction`, which is what acquires the connection, against that
+   * timer. The numbers are the raise path's, argued over
+   * `RAISE_TRANSACTION_OPTIONS` in `user-hint-delivery.service.ts`.
+   */
+  const BOUND = { maxWait: 10_000, timeout: 20_000 };
+
+  it('resolves the cohort inside one bounded transaction', async () => {
+    const { service, ops, transactionOptions } = build({ matches: 2 });
+
+    const outcome = await service.resolve({ audience: 'paid-not-connected', now: NOW });
+
+    assert.equal(outcome.kind, 'ok');
+    assert.deepStrictEqual(ops, ['begin', 'tx.count', 'tx.findMany', 'commit']);
+    assert.equal(
+      ops.filter((op) => op.startsWith('root.')).length,
+      0,
+      `a read went past the transaction and waited on its own checkout: ${ops.join(" ")}`,
+    );
+    assert.deepStrictEqual(transactionOptions, [BOUND]);
+  });
+
+  it('keeps the blindness probe inside it, because that read is the one that queues first', async () => {
+    // It is one cheap count, but it is the FIRST statement of the run — the
+    // one that waits for the connection. A count that never returns looks
+    // exactly like a cohort that is slow to build.
+    const { service, ops, queries, transactionOptions } = build({ anyConnected: false, matches: 999 });
+
+    const outcome = await service.resolve({ audience: 'paid-not-connected', now: NOW });
+
+    assert.equal(outcome.kind, 'blind');
+    assert.deepStrictEqual(ops, ['begin', 'tx.count', 'commit']);
+    assert.deepStrictEqual(queries, [], 'the cohort query ran after all');
+    assert.deepStrictEqual(transactionOptions, [BOUND]);
+  });
+
+  it('opens no transaction at all for a window that cannot match anybody', async () => {
+    // The backwards window is refused from its arguments. Taking a connection
+    // to say so would be the one wait this file exists to remove.
+    const { service, ops } = build({ matches: 5 });
+
+    const outcome = await service.resolve({
+      audience: 'paid-not-connected',
+      afterHours: 72,
+      beforeHours: 24,
+      now: NOW,
+    });
+
+    assert.equal(outcome.kind, 'blind');
+    assert.deepStrictEqual(ops, []);
   });
 });

@@ -21,6 +21,7 @@ import { UserBlockService } from '../../users/services/user-block.service';
 import {
   HINT_AUDIENCES,
   HintAudienceService,
+  type AudienceOutcome,
   type HintAudienceName,
 } from '../../user-hints/services/hint-audience.service';
 import { UserHintDeliveryService } from '../../user-hints/services/user-hint-delivery.service';
@@ -489,6 +490,15 @@ export class AutomationActionRegistry {
       );
     }
 
+    // THE RUN CLOCK STARTS HERE, above the first read rather than at the loop
+    // below, because everything from this line on can WAIT. The hint-status
+    // read and the cohort resolve are bounded at 30 s each; a budget that only
+    // started counting after them would let a slow run spend 30 + 30 before its
+    // first raise and still take its own 60 s on top — 120 s, exactly what the
+    // route allows, so the operator would be answered 408 by the run this
+    // budget exists to end politely. Counted from here, working out WHO to hint
+    // comes out of the same sixty seconds as hinting them.
+    const startedAt = Date.now();
     const hintStatus = await this.userHintDeliveryService.hintStatus(hintKey);
     if (hintStatus === 'missing') {
       throw new ActionFailure(
@@ -505,11 +515,37 @@ export class AutomationActionRegistry {
       );
     }
 
-    const outcome = await this.hintAudienceService.resolve({
-      audience: audience as HintAudienceName,
-      afterHours: readNumber(action.params, 'afterHours'),
-      beforeHours: readNumber(action.params, 'beforeHours'),
-    });
+    // A THROW HERE IS A DATABASE SENTENCE. An unnamed throw becomes the
+    // result's `message` verbatim (see `execute` above), and that message
+    // travels in a 200 body and into `automation_executions.error_message` —
+    // the one path `AdminSafeExceptionFilter` never sees. Until the resolve
+    // was bounded this path was a WAIT rather than a throw; now that a busy
+    // pool fails it in 10 s, the reason belongs where the per-customer
+    // failures below already put it: the panel log.
+    let outcome: AudienceOutcome;
+    try {
+      outcome = await this.hintAudienceService.resolve({
+        audience: audience as HintAudienceName,
+        afterHours: readNumber(action.params, 'afterHours'),
+        beforeHours: readNumber(action.params, 'beforeHours'),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `show_hint_to_audience: could not work out the audience "${audience}" for rule ` +
+          `${context.ruleId}: ${describeFailure(err)}`,
+      );
+      // Deliberately UNNAMED: nothing was attempted, so there are no counts
+      // to report and no new word for the panel to learn. It fails the run
+      // exactly as any other blown-up call does.
+      //
+      // `cause` keeps the chain for anyone reading a stack; it is not copied
+      // into the result, which takes `.message` and nothing else, so it adds
+      // no database text to anything an operator is shown.
+      throw new ErrorWithCause(
+        `could not work out who to hint for audience "${audience}"; why is in the panel log`,
+        { cause: err },
+      );
+    }
     if (outcome.kind === 'blind') {
       // A BACKWARDS WINDOW IS THE OPERATOR'S MISTAKE, and grading it green
       // hides it for ever. The justification for reporting blindness as
@@ -553,10 +589,11 @@ export class AutomationActionRegistry {
     // a connection and its statements — and a run that is merely slow trips no
     // streak: five hundred raises at a second each is eight minutes, and
     // «Запустить сейчас» would be answered 408 at two of them while the loop
-    // kept queueing behind the operator. So the loop carries a WALL-CLOCK
-    // budget as well, and stops on it with the same partial answer.
+    // kept queueing behind the operator. So the action carries a WALL-CLOCK
+    // budget as well — started at the top, before the first read, so that
+    // working out who to hint is spent out of it too — and the loop stops on it
+    // with the same partial answer.
     const matched = outcome.userIds.length;
-    const startedAt = Date.now();
     let queued = 0;
     let failed = 0;
     let attempted = 0;
@@ -684,17 +721,23 @@ export class AutomationActionRegistry {
  *
  * One failure is one customer — deleted after the audience was resolved, say —
  * and the rest of the audience is still owed its hint. Several in a row are the
- * database: out of connections, or gone. Each failed raise can take up to 30 s
- * (`RAISE_TRANSACTION_OPTIONS` in the delivery service: 10 s to get a
- * connection, 20 s to finish), so three cost at most 90 s — inside the 120 s a
- * manual run's request has — where grinding through the rest of a 500-customer
- * audience would cost hours to fail the same way.
+ * database: out of connections, or gone, and grinding through the rest of a
+ * 500-customer audience would cost hours to fail the same way.
+ *
+ * WHAT THREE COST, AND WHY IT IS NOT ADDED TO ANYTHING. Each failed raise can
+ * take up to 30 s (`RAISE_TRANSACTION_OPTIONS` in the delivery service: 10 s to
+ * get a connection, 20 s to finish), so three would be 90 s on their own. They
+ * are not spent on top of the budget below: that clock starts at the top of the
+ * action and is read before every raise, so against a database that slow the
+ * TIME limit trips first — after two failures, at 60 s — and this limit is what
+ * ends a run whose raises fail FAST. Whichever of the two trips, the action is
+ * finished by 90 s.
  */
 const AUDIENCE_RAISE_FAILURE_STREAK_LIMIT = 3;
 
 /**
- * How long an audience run may spend raising before it stops and reports what
- * it managed.
+ * How long an audience run may spend — working out who to hint AND raising —
+ * before it stops and reports what it managed.
  *
  * The streak limit above bounds only a run whose raises FAIL. One that merely
  * crawls — a busy pool handing each raise its connection after nine seconds,
@@ -703,15 +746,33 @@ const AUDIENCE_RAISE_FAILURE_STREAK_LIMIT = 3;
  * while the loop goes on queueing, which is the outcome the streak limit and
  * this budget both exist to prevent.
  *
- * Sixty seconds, checked between raises, so a raise already under way can carry
- * it to 90 s at worst (its own 30 s) — still inside a manual run’s 120 s with
- * the audience query and the rule’s other actions. A nightly run on a healthy
- * install spends a second or two here; one that reaches this budget says so,
- * and the customers it did not reach are counted rather than lost.
+ * THE CLOCK STARTS AT THE TOP OF THE ACTION, not at the top of the loop, and
+ * that is load-bearing arithmetic rather than tidiness. The hint-status read
+ * and the cohort resolve are bounded at 30 s EACH by their own transactions; a
+ * budget that began only after them would allow 30 + 30 + 60 = 120 s, which is
+ * exactly what the route allows (`LONG_TIMEOUT_PATTERNS`), so the operator
+ * would be answered 408 by the very run this exists to end politely. Counted
+ * from the top, those two reads spend the same sixty seconds the raises do.
+ *
+ * Read BEFORE each raise, so the one already under way can carry the action to
+ * 90 s at worst (its own 30 s) — a 30 s margin under a manual run's 120 s,
+ * whichever limit trips. A nightly run on a healthy install spends a second or
+ * two here; one that reaches this budget says so, and the customers it did not
+ * reach are counted rather than lost.
  */
 const AUDIENCE_RUN_BUDGET_MS = 60_000;
 
-/** An error as one line of text for a log and a result message, never unbounded. */
+/**
+ * `Error` with ES2022's `cause`. `target` is ES2021 here, so the two-argument
+ * constructor is not in the type library — the runtime (Node 24) has had it
+ * for years, and the chain is worth keeping for whoever reads a stack.
+ */
+const ErrorWithCause = Error as unknown as new (
+  message: string,
+  options: { readonly cause: unknown },
+) => Error;
+
+/** An error as one line of text for a LOG LINE — never for an operator — and never unbounded. */
 function describeFailure(err: unknown): string {
   const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
   return text.length > 300 ? `${text.slice(0, 297)}...` : text;
