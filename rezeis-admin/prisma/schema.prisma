@@ -1722,7 +1722,8 @@ model WebAccount {
   passwordBootstrapPending   Boolean   @default(false) @map("password_bootstrap_pending")
   /// Every cabinet session of this account opened before this moment is
   /// signed out. Written by a password reset (any channel), a password change,
-  /// a first password and «Выйти на всех устройствах»; the cabinet compares it
+  /// a first password, a temporary password an operator issues and «Выйти на
+  /// всех устройствах»; the cabinet compares it
   /// with each session's start, at most once a minute per session. Null: no
   /// session was ever signed out this way.
   sessionsRevokedAt          DateTime? @map("sessions_revoked_at") @db.Timestamptz(3)
