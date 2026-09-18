@@ -1,11 +1,12 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createBrowserRouter, Navigate, useLocation } from 'react-router';
-import { lazy as reactLazy, Suspense, type ComponentType, type LazyExoticComponent } from 'react';
+import { Suspense } from 'react';
 import ProtectedRoute from './protected-route';
 import AdminShell from '@/components/layout/admin-shell';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { withFeatureBundle } from '@/i18n/i18n';
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk';
 
 /**
  * Wraps children in an ErrorBoundary that resets whenever the
@@ -15,50 +16,6 @@ import { withFeatureBundle } from '@/i18n/i18n';
 function RouteErrorBoundary({ children }: { readonly children: React.ReactNode }) {
   const { pathname } = useLocation();
   return <ErrorBoundary key={pathname}>{children}</ErrorBoundary>;
-}
-
-const CHUNK_RELOAD_KEY = 'reiwa:chunk-reload';
-
-/**
- * Recover from stale lazy chunks after a deploy.
- *
- * When a new build ships, an old `index.html` still live in a user's tab or
- * PWA cache references chunk hashes that no longer exist on the server, so the
- * dynamic import 404s ("Failed to fetch dynamically imported module"). We force
- * a single full reload to pull the fresh `index.html` + asset graph. A
- * sessionStorage guard prevents a reload loop when the failure is genuine, and
- * is cleared on every successful load so a later deploy can recover again.
- */
-function reloadOnStale<T extends { default: ComponentType<unknown> }>(
-  factory: () => Promise<T>,
-): () => Promise<T> {
-  return async () => {
-    try {
-      const mod = await factory();
-      sessionStorage.removeItem(CHUNK_RELOAD_KEY);
-      return mod;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const isStaleChunk =
-        /failed to fetch dynamically imported module|error loading dynamically imported module|importing a module script failed/i.test(
-          message,
-        );
-      if (isStaleChunk && sessionStorage.getItem(CHUNK_RELOAD_KEY) !== '1') {
-        sessionStorage.setItem(CHUNK_RELOAD_KEY, '1');
-        window.location.reload();
-        // Never resolve so React keeps the Suspense fallback while the page reloads.
-        return new Promise<T>(() => {});
-      }
-      throw error;
-    }
-  };
-}
-
-/** Drop-in for `React.lazy` that auto-recovers from stale chunks post-deploy. */
-function lazy<T extends ComponentType<unknown>>(
-  factory: () => Promise<{ default: T }>,
-): LazyExoticComponent<T> {
-  return reactLazy(reloadOnStale(factory));
 }
 
 // Lazy-load pages

@@ -9,7 +9,7 @@
  * PixelTrail, BlobCursor) anchor to the viewport instead of collapsing to
  * the document flow.
  */
-import { lazy, Suspense, type ReactNode } from 'react'
+import { Suspense, type ReactNode } from 'react'
 import {
   useEffectsStore,
   type CursorEffectId,
@@ -18,6 +18,7 @@ import {
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import { usePrefersReducedMotion } from '@/lib/theme/effects-active'
 import { ClickSparkOverlay } from './effects/ClickSparkOverlay'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 // ── Lazy-loaded cursor effects ───────────────────────────────────────────────
 

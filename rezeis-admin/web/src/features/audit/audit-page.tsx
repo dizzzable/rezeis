@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { ClipboardList, AlertCircle, ChevronDown, Filter, ScrollText, X, Activity, Bell, Download } from 'lucide-react';
@@ -36,6 +36,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 interface AuditEvent {
   id: string;

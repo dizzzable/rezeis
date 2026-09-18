@@ -6,11 +6,12 @@
  * Numbers tween smoothly via `@number-flow/react` — no jarring jumps when
  * counters update from auto-refresh queries. Strings render as-is.
  */
-import { Suspense, lazy } from 'react'
+import { Suspense } from 'react'
 import type { ComponentType, SVGProps } from 'react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { activeLocale, cn } from '@/lib/utils'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 // Number-flow ships an animated `<NumberFlow value={…}/>` widget; we lazy-load
 // it so dashboards that don't render any tiles never pull the runtime.

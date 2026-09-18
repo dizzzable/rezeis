@@ -16,7 +16,7 @@
  *   <TitleEffect>{t('dashboardPage.title')}</TitleEffect>
  *   <TitleEffect text="Static text" />
  */
-import { lazy, Suspense, useRef, type ReactNode } from 'react'
+import { Suspense, useRef, type ReactNode } from 'react'
 import { motion } from 'motion/react'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import {
@@ -24,6 +24,7 @@ import {
   type TextAnimationId,
 } from '@/lib/theme/effects-store'
 import { cn } from '@/lib/utils'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 // ── Lazy-loaded text animation components ────────────────────────────────────
 

@@ -15,7 +15,7 @@
  * rendered inline (no separate route needed).
  */
 
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -30,6 +30,7 @@ import { PermissionGate } from '@/features/rbac'
 import { downloadCsv } from '@/features/partners/csv-download'
 import { UserExportDialog } from './user-export-dialog'
 import { UsersFilterPanel } from './users-filter-panel'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 // Ленивый, как и на прежнем месте: вкладка со списком заблокированных
 // личностей тянет свой диалог и таблицу, а открывают её редко.

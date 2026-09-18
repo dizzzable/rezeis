@@ -43,6 +43,26 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id: string) {
+          // ── The two always-loaded theme stores travel with the state
+          // layer they are built on.
+          //
+          // They live in the entry chunk when only the shell reads them
+          // (AppearanceProvider, EffectsProvider). As soon as a LAZY page
+          // reads one as well — the analytics surfaces card asks whether the
+          // operator has animations on — rolldown lifts it into a chunk of
+          // its own, and the entry then has to preload it: two more requests
+          // on the login route for 3.9 KB, which is what took the eager chunk
+          // count from 14 to 16 and tripped the build-graph check. Naming them
+          // here puts them inside the eager vendor-state chunk instead —
+          // same bytes, no extra request, and the zustand singleton these
+          // stores are built on is in that very chunk.
+          if (
+            id.includes('/src/lib/theme/appearance-store') ||
+            id.includes('/src/lib/theme/effects-store')
+          ) {
+            return 'vendor-state'
+          }
+
           if (id.includes('node_modules')) {
             // Country-flag assets are emitted as URL strings via
             // `import.meta.glob`, so they don't show up here. The page-level

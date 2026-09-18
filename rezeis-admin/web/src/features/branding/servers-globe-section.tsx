@@ -1,4 +1,4 @@
-import { lazy, Suspense, useMemo } from 'react'
+import { Suspense, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Globe2, Info } from 'lucide-react'
 
@@ -24,6 +24,7 @@ import {
   type GlobeVariant,
 } from '@/components/reactbits/originkit/globe-preferences'
 import type { BrandingServersGlobeDraft } from './branding-form-schema'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 /**
  * The "Servers" tab: which planet a subscriber sees, and how it is set up.

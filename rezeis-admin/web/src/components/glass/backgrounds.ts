@@ -16,8 +16,9 @@
  * until React renders it. `GlassBackground` relies on that, and
  * `GlassBackground.test.tsx` asserts it rather than trusting it.
  */
-import { lazy, type LazyExoticComponent, type ComponentType } from 'react'
+import { type LazyExoticComponent, type ComponentType } from 'react'
 import type { BackgroundId } from '@/lib/theme/glass-store'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 type BgProps = Record<string, unknown>
 type BgComponent = LazyExoticComponent<ComponentType<BgProps>>

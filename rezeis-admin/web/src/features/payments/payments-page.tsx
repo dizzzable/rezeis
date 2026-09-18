@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -21,6 +21,7 @@ import { ReconciliationHealthCard } from './reconciliation-health-card'
 import { WebhookReplayControl } from './webhook-replay-control'
 import { PermissionRequiredNotice } from './permission-required-notice'
 import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 const PaymentsAnalyticsTab = lazy(() => import('./payments-analytics-tab'))
 

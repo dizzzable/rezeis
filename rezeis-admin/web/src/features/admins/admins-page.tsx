@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { AlertCircle, Network, Pencil, Plus, Shield, ShieldBan, ShieldCheck, Trash2, Webhook } from 'lucide-react'
@@ -71,6 +71,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 const RolesTab = lazy(() => import('@/features/rbac/roles-page'))
 const IpAllowlistTab = lazy(() => import('@/features/two-factor/admin-ip-allowlist-page'))

@@ -13,9 +13,10 @@
  * — is a compile error rather than an empty tile in the grid.
  */
 
-import { lazy, type ComponentType, type LazyExoticComponent } from 'react'
+import { type ComponentType, type LazyExoticComponent } from 'react'
 
 import type { CardEffectId } from './card-effect-catalog'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 type EffectComponent = LazyExoticComponent<ComponentType<Record<string, unknown>>>
 

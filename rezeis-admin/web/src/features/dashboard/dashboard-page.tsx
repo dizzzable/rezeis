@@ -1,4 +1,4 @@
-import { lazy, Suspense, type JSX } from 'react'
+import { Suspense, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Loader2, LayoutDashboard } from 'lucide-react'
@@ -18,6 +18,7 @@ import { DashboardKpiGrid } from './dashboard-kpi-grid'
 import { DashboardQuickActions } from './dashboard-quick-actions'
 import { DashboardSystemHealth } from './dashboard-system-health'
 import { DashboardActivityFeed } from './dashboard-activity-feed'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 // Charts pull Recharts (~439 KB). They sit below the KPI fold, so lazy-load
 // them off the dashboard's critical path — Recharts no longer blocks first

@@ -14,13 +14,14 @@
  * delegates all rendering and mutations to the panel, ensuring there
  * is exactly one source of truth for user-detail UX.
  */
-import { lazy, Suspense } from 'react'
+import { Suspense } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { ArrowLeft } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 const UserDetailPanel = lazy(() => import('./user-detail-panel'))
 

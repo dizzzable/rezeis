@@ -20,7 +20,7 @@
  *   Конфигурация → Настройки панели
  */
 
-import { lazy, Suspense } from 'react'
+import { Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Archive, FileCog, Key, Paintbrush, Palette, Settings, Shield, ShieldAlert } from 'lucide-react'
 
@@ -31,6 +31,7 @@ import { useTabSync } from '@/lib/use-tab-sync'
 import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { withFeatureBundle } from '@/i18n/i18n'
 import { PermissionGate } from '@/features/rbac'
+import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk'
 
 /**
  * Tab values addressable by `#hash`. Every one of them is a documented deep
