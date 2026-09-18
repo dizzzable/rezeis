@@ -16,7 +16,6 @@ import { InternalUpdateLanguageDto } from '../src/modules/internal-user/dto/inte
 import { IssueWebAccountEmailVerificationChallengeDto } from '../src/modules/internal-user/dto/issue-web-account-email-verification-challenge.dto';
 import { InternalUserSessionQueryDto } from '../src/modules/internal-user/dto/internal-user-session-query.dto';
 import { LinkedWebAccountSignInDto } from '../src/modules/internal-user/dto/linked-web-account-sign-in.dto';
-import { SetWebAccountPasswordDto } from '../src/modules/internal-user/dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../src/modules/internal-user/dto/snooze-web-account-link-prompt.dto';
 import { InternalUserController } from '../src/modules/internal-user/controllers/internal-user.controller';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../src/modules/internal-user/interfaces/internal-web-account-email-verification-challenge.interface';
@@ -53,7 +52,6 @@ describe('InternalUserController', () => {
       'acceptRules',
       'setOnboarding',
       'snoozeWebAccountLinkPrompt',
-      'setWebAccountPassword',
       'issueWebAccountEmailVerificationChallenge',
       'completeWebAccountEmailVerification',
       'getPlans',
@@ -122,10 +120,6 @@ describe('InternalUserController', () => {
           calls.push(['snoozeWebAccountLinkPrompt', input]);
           return session;
         },
-        setWebAccountPassword: async (input: SetWebAccountPasswordDto) => {
-          calls.push(['setWebAccountPassword', input]);
-          return session;
-        },
         issueWebAccountEmailVerificationChallenge: async (input: IssueWebAccountEmailVerificationChallengeDto) => {
           calls.push(['issueWebAccountEmailVerificationChallenge', input]);
           return challenge;
@@ -142,7 +136,6 @@ describe('InternalUserController', () => {
     await controller.acceptRules({ userId: 'cmphfcr6i007v01jg0lcu653h' } as AcceptInternalUserRulesDto);
     await controller.setOnboarding({ userId: 'cmphfcr6i007v01jg0lcu653h' }, { completed: false });
     await controller.snoozeWebAccountLinkPrompt({ userId: 'cmphfcr6i007v01jg0lcu653h' } as SnoozeWebAccountLinkPromptDto);
-    await controller.setWebAccountPassword({ userId: 'cmphfcr6i007v01jg0lcu653h', login: 'login', password: 'secret-password' } as SetWebAccountPasswordDto);
     assert.deepStrictEqual(
       await controller.issueWebAccountEmailVerificationChallenge({ userId: 'cmphfcr6i007v01jg0lcu653h' } as IssueWebAccountEmailVerificationChallengeDto),
       challenge,
@@ -155,7 +148,6 @@ describe('InternalUserController', () => {
       'acceptRules',
       'setOnboardingCompleted',
       'snoozeWebAccountLinkPrompt',
-      'setWebAccountPassword',
       'issueWebAccountEmailVerificationChallenge',
       'completeWebAccountEmailVerification',
     ]);
@@ -336,7 +328,6 @@ const INTERNAL_USER_ROUTES: readonly InternalUserRoute[] = [
   { handler: handlers.acceptRules, method: RequestMethod.PATCH, path: 'session/rules-acceptance' },
   { handler: handlers.setOnboarding, method: RequestMethod.PATCH, path: 'session/onboarding' },
   { handler: handlers.snoozeWebAccountLinkPrompt, method: RequestMethod.PATCH, path: 'session/web-account-link-prompt-snooze' },
-  { handler: handlers.setWebAccountPassword, method: RequestMethod.PATCH, path: 'session/web-account-password' },
   { handler: handlers.issueWebAccountEmailVerificationChallenge, method: RequestMethod.PATCH, path: 'session/web-account-email-verification-challenge' },
   { handler: handlers.completeWebAccountEmailVerification, method: RequestMethod.PATCH, path: 'session/web-account-email-verification-completion' },
   { handler: handlers.getPlans, method: RequestMethod.GET, path: 'plans' },

@@ -45,7 +45,6 @@ The first concrete `ruid -> rezeis-admin` contract is the narrow `internal/user`
 - `POST /api/internal/user/web-account/password-reset-by-telegram-code` for admin-owned linked web-account password reset completion from the Telegram-issued code flow.
 - `PATCH /api/internal/user/session/rules-acceptance` for current-session rules acceptance.
 - `PATCH /api/internal/user/session/web-account-link-prompt-snooze` for current-session linked-account reminder snooze.
-- `PATCH /api/internal/user/session/web-account-password` for current-session linked-account password handoff.
 - `PATCH /api/internal/user/session/web-account-email-verification-challenge` for current-session linked email-verification challenge issuance.
 - `PATCH /api/internal/user/session/web-account-email-verification-completion` for current-session linked email-verification completion.
 - `GET /api/internal/user/activity/transactions` for admin-owned user transaction history reads.

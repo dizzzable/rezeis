@@ -55,9 +55,15 @@ export interface WebAuthChangePasswordResultInterface {
  * once a minute per session. A session that started before `sessionsRevokedAt`
  * is signed out; `null` means nothing was ever revoked for this account (or it
  * has no web account at all).
+ *
+ * `now` is the panel's clock when it answered. The moment is on that clock and
+ * a session's start on the cabinet's: the cabinet estimates the difference from
+ * `now` and the round trip, and compares the two on one clock. A panel older
+ * than this field sends none, and the cabinet then assumes the clocks agree.
  */
 export interface WebSessionsStateResultInterface {
   readonly sessionsRevokedAt: string | null;
+  readonly now: string;
 }
 
 /** `POST /api/internal/web-auth/sessions/revoke` — «Выйти на всех устройствах». */

@@ -62,6 +62,7 @@ import {
   type RecoveryWithdrawalHoldReader,
 } from '../src/modules/web-auth/utils/recovery-withdrawal-hold.util';
 import { escapeLikeLiteral, parseSubscriptionLink } from '../src/modules/web-auth/utils/subscription-link.util';
+import { applySessionsRevokedAtRaise } from './helpers/sessions-revoked-at-sql';
 
 /**
  * A customer who forgot the password gets back in without support.
@@ -260,6 +261,8 @@ class FakeDatabase implements PasswordResetDatabase {
   public state: DatabaseState;
   /** Successful password writes, in order. */
   public readonly passwordWrites: Array<{ id: string; passwordHash: string }> = [];
+  /** The sign-out moment statements that landed, with the rows each reported. */
+  public readonly raises: number[] = [];
   /** Every subscription lookup's LIKE patterns, as Postgres receives them. */
   public readonly subscriptionQueries: string[][] = [];
 
@@ -402,7 +405,13 @@ class FakeDatabase implements PasswordResetDatabase {
   public async $transaction<R>(fn: (tx: PasswordResetTransaction) => Promise<R>): Promise<R> {
     const staged = structuredClone(this.state);
     const writes: Array<{ id: string; passwordHash: string }> = [];
+    const raises: number[] = [];
     const tx: PasswordResetTransaction = {
+      $executeRaw: async (query) => {
+        const count = applySessionsRevokedAtRaise(query, staged.accounts);
+        raises.push(count);
+        return count;
+      },
       webAccount: {
         updateMany: async (args) => {
           const where = args.where as Record<string, unknown>;
@@ -446,6 +455,7 @@ class FakeDatabase implements PasswordResetDatabase {
     const result = await fn(tx);
     this.state = staged;
     this.passwordWrites.push(...writes);
+    this.raises.push(...raises);
     return result;
   }
 
@@ -717,11 +727,15 @@ function harness(options: HarnessOptions = {}) {
     },
   };
   // A pass-through: every decision is the real hasher's; the seam only lets a
-  // case change the stored row between "checked" and "written".
+  // case change the stored row between "checked" and "written", and tells it
+  // when the last hash was done.
+  let hashedAt = 0;
   class SeamHasher extends PasswordHashService {
     public override async hashPassword(input: Parameters<PasswordHashService['hashPassword']>[0]): Promise<string> {
       options.duringHash?.(db);
-      return super.hashPassword(input);
+      const hash = await super.hashPassword(input);
+      hashedAt = Date.now();
+      return hash;
     }
   }
 
@@ -756,6 +770,10 @@ function harness(options: HarnessOptions = {}) {
     pushes,
     tasks,
     realHasher,
+    /** When the last new password finished hashing (ms). */
+    get hashedAt(): number {
+      return hashedAt;
+    },
     async runTasks(): Promise<void> {
       while (tasks.length > 0) await tasks.shift()!();
     },
@@ -905,7 +923,7 @@ describe('password reset: what a consume writes', () => {
     assert.equal(h.redis.store.has('web-auth:temp-password:wa-alice'), false, 'the temporary password stayed readable');
   });
 
-  it('signs every older session out in the same write as the new password — whatever the channel', async () => {
+  it('signs every older session out in the same transaction as the new password — whatever the channel', async () => {
     // A link sent to Telegram, a link sent to a verified e-mail, and a link won
     // with the subscription link: each is a new password, and each names the
     // moment before which every cabinet session of the account ends.
@@ -936,6 +954,56 @@ describe('password reset: what a consume writes', () => {
       assert.ok(row.sessionsRevokedAt instanceof Date, `${id}: older sessions stay signed in`);
       assert.equal((result as { sessionsRevokedAt: string }).sessionsRevokedAt, row.sessionsRevokedAt.toISOString());
       assert.ok(Date.now() - row.sessionsRevokedAt.getTime() < 60_000);
+      assert.deepEqual(h.db.raises, [1], `${id}: the moment was not written through the statement that never moves it back`);
+    }
+  });
+
+  it('takes the sign-out moment once the new password is hashed, not before', async () => {
+    // scrypt takes a while. A moment taken BEFORE it is older than the write
+    // that carries it, by the whole hash — and a session opened in that gap
+    // survives the reset.
+    const h = harness();
+    const token = await telegramToken(h);
+
+    const result = await h.service.consume(token, NEW_PASSWORD);
+
+    assert.equal(result.status, 'ok');
+    const moment = Date.parse((result as { sessionsRevokedAt: string }).sessionsRevokedAt);
+    assert.ok(h.hashedAt > 0, 'no new password was hashed');
+    assert.ok(moment >= h.hashedAt, `the moment ${new Date(moment).toISOString()} predates the hash (${new Date(h.hashedAt).toISOString()})`);
+    assert.equal(h.db.account('wa-alice').sessionsRevokedAt?.getTime(), moment);
+  });
+
+  it('never moves the sign-out moment back — whatever the channel', async () => {
+    // While this reset hashes, another writer (a password change elsewhere,
+    // «Выйти на всех устройствах») commits a LATER moment. This reset must not
+    // pull it back: every session opened between the two would survive it.
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    const stampLater = (id: string) => (db: FakeDatabase) => {
+      db.account(id).sessionsRevokedAt = new Date(later);
+    };
+
+    const viaTelegram = harness({ duringHash: stampLater('wa-alice') });
+    const telegram = await viaTelegram.service.consume(await telegramToken(viaTelegram), NEW_PASSWORD);
+
+    const viaEmail = harness({ duringHash: stampLater('wa-bob') });
+    await viaEmail.service.request({ identifier: 'bob', cabinetUrl: CABINET });
+    await viaEmail.runTasks();
+    const email = await viaEmail.service.consume(tokenOf(viaEmail.mails[0].link), NEW_PASSWORD);
+
+    const viaSubscription = harness({ duringHash: stampLater('wa-gina') });
+    const verified = await recover(viaSubscription, `https://sub.example.com/${GINA_SHORT}`, 'gina');
+    const subscription = await viaSubscription.service.consume((verified as { token: string }).token, NEW_PASSWORD);
+
+    for (const [h, result, id] of [
+      [viaTelegram, telegram, 'wa-alice'],
+      [viaEmail, email, 'wa-bob'],
+      [viaSubscription, subscription, 'wa-gina'],
+    ] as const) {
+      assert.equal(result.status, 'ok', id);
+      assert.deepEqual(h.db.account(id).sessionsRevokedAt, later, `${id}: the stored moment moved back`);
+      // The browser that reset it counts from ITS moment.
+      assert.ok(Date.parse((result as { sessionsRevokedAt: string }).sessionsRevokedAt) < later.getTime(), id);
     }
   });
 

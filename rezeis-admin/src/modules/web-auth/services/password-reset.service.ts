@@ -37,6 +37,7 @@ import {
   RECOVERY_WITHDRAWAL_HOLD_PURPOSE,
 } from '../utils/recovery-withdrawal-hold.util';
 import { canReceiveResetLink, hasVerifiedEmail, smtpCanDeliver } from '../utils/reset-channels.util';
+import { raiseSessionsRevokedAt, type SessionsRevokedAtWriter } from '../utils/sessions-revoked-at.util';
 import { escapeLikeLiteral, parseSubscriptionLink } from '../utils/subscription-link.util';
 
 // ── Limits ─────────────────────────────────────────────────────────────────
@@ -114,7 +115,7 @@ export const LINK_OWNER_SELECT = {
 
 export type LinkOwnerRow = Prisma.SubscriptionGetPayload<{ select: typeof LINK_OWNER_SELECT }>;
 
-export interface PasswordResetTransaction {
+export interface PasswordResetTransaction extends SessionsRevokedAtWriter {
   readonly webAccount: {
     updateMany(args: {
       where: Prisma.WebAccountWhereInput;
@@ -549,11 +550,13 @@ export class PasswordResetService {
       plainTextPassword: password,
       audience: 'subscriber',
     });
+    // The moment every older session is signed out as of: taken once the new
+    // password is hashed. `now` above predates scrypt by the whole hash, and a
+    // session opened in that gap would survive the reset.
+    const writtenAt = new Date();
     const applied = await this.db.$transaction(async (tx) => {
       // Conditional on the hash we just checked the fingerprint of: a password
       // changed between that read and this write wins, and this link loses.
-      // `sessionsRevokedAt` rides in the same statement, whatever the channel:
-      // no new password without every older session signed out.
       const { count } = await tx.webAccount.updateMany({
         where: { id: account.id, passwordHash: account.passwordHash },
         data: {
@@ -561,11 +564,13 @@ export class PasswordResetService {
           requiresPasswordChange: false,
           temporaryPasswordExpiresAt: null,
           passwordBootstrapPending: false,
-          credentialsBootstrappedAt: account.credentialsBootstrappedAt ?? now,
-          sessionsRevokedAt: now,
+          credentialsBootstrappedAt: account.credentialsBootstrappedAt ?? writtenAt,
         },
       });
       if (count !== 1) return false;
+      // In the same transaction, whatever the channel: no new password without
+      // every older session signed out — and never a moment moved back.
+      await raiseSessionsRevokedAt(tx, account.id, writtenAt);
       if (stored.channel === 'subscription_link') {
         // In the same transaction: no hold, no new password.
         await tx.authChallenge.create({
@@ -574,7 +579,7 @@ export class PasswordResetService {
             purpose: RECOVERY_WITHDRAWAL_HOLD_PURPOSE,
             channel: RECOVERY_WITHDRAWAL_HOLD_CHANNEL,
             destination: account.userId,
-            expiresAt: new Date(now.getTime() + RECOVERY_WITHDRAWAL_HOLD_HOURS * HOUR_SECONDS * 1000),
+            expiresAt: new Date(writtenAt.getTime() + RECOVERY_WITHDRAWAL_HOLD_HOURS * HOUR_SECONDS * 1000),
           },
           select: { id: true },
         });
@@ -612,7 +617,7 @@ export class PasswordResetService {
       status: 'ok',
       userId: account.userId,
       login: account.login,
-      sessionsRevokedAt: now.toISOString(),
+      sessionsRevokedAt: writtenAt.toISOString(),
     };
   }
 

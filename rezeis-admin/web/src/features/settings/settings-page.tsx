@@ -43,9 +43,9 @@ interface BrandingSettings {
 }
 
 /**
- * How long partner withdrawals wait after a recovery by subscription link —
- * `RECOVERY_WITHDRAWAL_HOLD_HOURS` on the server. Stated in the (i) of the
- * switch that turns that recovery on.
+ * How long the partner balance is held after a recovery by subscription link —
+ * no withdrawal, and no purchase paid with it — `RECOVERY_WITHDRAWAL_HOLD_HOURS`
+ * on the server. Stated in the (i) of the switch that turns that recovery on.
  */
 export const RECOVERY_WITHDRAWAL_HOLD_HOURS = 72
 

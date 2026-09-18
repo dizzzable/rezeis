@@ -11,7 +11,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { ReferralInviteSource } from '@prisma/client';
+import { ReferralInviteSource, type Prisma } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PasswordHashService } from '../src/modules/auth/services/password-hash.service';
@@ -21,6 +21,7 @@ import {
 } from '../src/modules/referrals/services/referral-manual-attach.service';
 import { AccessModeGuard } from '../src/modules/settings/services/access-mode-guard.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
+import { applySessionsRevokedAtRaise } from './helpers/sessions-revoked-at-sql';
 
 describe('WebAuthService', () => {
   it('registers a web-first user with sanitized login, normalized email, and hashed password', async () => {
@@ -399,24 +400,25 @@ describe('WebAuthService', () => {
       newPassword: 'new-password',
     });
 
-    // The same write signs every other cabinet session of the account out
-    // (`web-session-revocation.spec.ts`); its moment goes back to the cabinet.
-    assert.equal(prisma.webAccountUpdates.length, 1);
-    const [update] = prisma.webAccountUpdates;
-    const revokedAt = (update.data as Record<string, unknown>)['sessionsRevokedAt'];
-    assert.ok(revokedAt instanceof Date, 'the password change left older sessions signed in');
-    assert.deepStrictEqual(result, { success: true, sessionsRevokedAt: revokedAt.toISOString() });
-    assert.deepStrictEqual(prisma.webAccountUpdates, [
+    // The same transaction signs every other cabinet session of the account
+    // out (`web-session-revocation.spec.ts`), through the statement that never
+    // moves the moment back; the moment goes back to the cabinet.
+    assert.equal(prisma.transactionCallsCount, 1);
+    assert.deepStrictEqual(prisma.webAccountUpdates, [], 'a write went around the transaction');
+    assert.deepStrictEqual(prisma.webAccountUpdatesInTransaction, [
       {
         where: { id: 'web-account-1' },
         data: {
           passwordHash: 'hashed:new-password',
           requiresPasswordChange: false,
           temporaryPasswordExpiresAt: null,
-          sessionsRevokedAt: revokedAt,
         },
       },
     ]);
+    assert.equal(prisma.sessionsRevokedAtRaises.length, 1, 'the password change left older sessions signed in');
+    const [raise] = prisma.sessionsRevokedAtRaises;
+    assert.equal(raise.id, 'web-account-1');
+    assert.deepStrictEqual(result, { success: true, sessionsRevokedAt: raise.moment.toISOString() });
   });
 
   it('clears the cached temporary password when the user changes their password', async () => {
@@ -856,6 +858,10 @@ interface PrismaMock extends PrismaService {
   readonly createdWebAccounts: CreatedWebAccountRecord[];
   readonly userEmailUpdateCalls: Array<{ readonly where: unknown; readonly data: unknown }>;
   readonly webAccountUpdates: Array<{ readonly where: unknown; readonly data: unknown }>;
+  /** Web-account updates made through the TRANSACTION client. */
+  readonly webAccountUpdatesInTransaction: Array<{ readonly where: unknown; readonly data: unknown }>;
+  /** Sign-out moments raised through the transaction client, by web account. */
+  readonly sessionsRevokedAtRaises: Array<{ readonly id: string; readonly moment: Date }>;
   readonly referrerLookupCodes: string[];
   readonly inviteConsumeCalls: Array<{ readonly id: string; readonly consumedAt: unknown }>;
   readonly transactionCallsCount: number;
@@ -959,6 +965,8 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
   const createdWebAccounts: CreatedWebAccountRecord[] = [];
   const userEmailUpdateCalls: Array<{ where: unknown; data: unknown }> = [];
   const webAccountUpdates: Array<{ where: unknown; data: unknown }> = [];
+  const webAccountUpdatesInTransaction: Array<{ where: unknown; data: unknown }> = [];
+  const sessionsRevokedAtRaises: Array<{ id: string; moment: Date }> = [];
   const referrerLookupCodes: string[] = [];
   const inviteConsumeCalls: Array<{ id: string; consumedAt: unknown }> = [];
   let transactionCallsCount = 0;
@@ -999,6 +1007,24 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
         createdWebAccounts.push(args.data);
         return { id: `web-account-${createdWebAccounts.length}` };
       },
+      update: async (args: { readonly where: unknown; readonly data: unknown }) => {
+        webAccountUpdatesInTransaction.push(args);
+        return { id: 'web-account-1' };
+      },
+    },
+    // The one raw statement a writer of the sign-out moment runs, as
+    // PostgreSQL would apply it to the accounts this mock knows.
+    $executeRaw: async (query: Prisma.Sql) => {
+      const rows = [...(options.accountsByUserId?.entries() ?? [])].map(([userId, account]) => ({
+        id: account.id,
+        userId,
+        sessionsRevokedAt: null as Date | null,
+      }));
+      const count = applySessionsRevokedAtRaise(query, rows);
+      for (const row of rows) {
+        if (row.sessionsRevokedAt !== null) sessionsRevokedAtRaises.push({ id: row.id, moment: row.sessionsRevokedAt });
+      }
+      return count;
     },
   };
 
@@ -1014,6 +1040,12 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
     },
     get webAccountUpdates() {
       return webAccountUpdates;
+    },
+    get webAccountUpdatesInTransaction() {
+      return webAccountUpdatesInTransaction;
+    },
+    get sessionsRevokedAtRaises() {
+      return sessionsRevokedAtRaises;
     },
     get referrerLookupCodes() {
       return referrerLookupCodes;

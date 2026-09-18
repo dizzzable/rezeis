@@ -15,6 +15,7 @@ import { PointsWalletService } from '../../points/services/points-wallet.service
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccountMergeInput, AccountMergeResult } from '../interfaces/account-merge.interface';
 import { lockTrialClaimUser } from '../../subscriptions/services/trial-claim-ledger.util';
+import { RECOVERY_WITHDRAWAL_HOLD_PURPOSE } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 
 type Tx = Prisma.TransactionClient;
 
@@ -189,12 +190,22 @@ export class AccountMergeService {
       }
 
       // 7. Web account — at most one survives (unique userId/login/email).
+      //
+      //    The recovery hold on a partner balance (72 hours after a password
+      //    recovery by subscription link) is a row on the WEB ACCOUNT and
+      //    cascades with it. Step 5 already put the source's balance on the
+      //    survivor; deleting either web account here would delete its hold
+      //    with it and make held money withdrawable at once. So a standing hold
+      //    moves to the web account that is kept, first. With a hold on each
+      //    side both land there, and the lookup takes the later end.
       if (source.webAccount !== null) {
         const keepSource = input.choices.keepLogin === 'source';
         if (target.webAccount !== null && keepSource) {
+          await this.carryRecoveryHold(tx, target.webAccount.id, source.webAccount.id, target.id);
           await tx.webAccount.delete({ where: { id: target.webAccount.id } });
           await tx.webAccount.update({ where: { id: source.webAccount.id }, data: { userId: target.id } });
         } else if (target.webAccount !== null) {
+          await this.carryRecoveryHold(tx, source.webAccount.id, target.webAccount.id, target.id);
           await tx.webAccount.delete({ where: { id: source.webAccount.id } });
         } else {
           await tx.webAccount.update({ where: { id: source.webAccount.id }, data: { userId: target.id } });
@@ -372,6 +383,29 @@ export class AccountMergeService {
       movedCounts: result.movedCounts,
       remnawaveSubscriptionIds: result.remnawaveSubscriptionIds,
     };
+  }
+
+  /**
+   * Moves every standing recovery hold of the web account about to be deleted
+   * onto the one that is kept, so the delete's cascade takes only holds that
+   * already ended. `destination` names the surviving customer, as a hold
+   * written for that account would.
+   */
+  private async carryRecoveryHold(
+    tx: Tx,
+    fromWebAccountId: string,
+    toWebAccountId: string,
+    survivorUserId: string,
+  ): Promise<void> {
+    await tx.authChallenge.updateMany({
+      where: {
+        webAccountId: fromWebAccountId,
+        purpose: RECOVERY_WITHDRAWAL_HOLD_PURPOSE,
+        consumedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      data: { webAccountId: toWebAccountId, destination: survivorUserId },
+    });
   }
 
   /**

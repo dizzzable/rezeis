@@ -15,9 +15,11 @@
 -- session it ended. Lost here, it cannot be.
 --
 -- Written by: a password reset (any channel), a password change, a first
--- password set from the Mini App, and «Выйти на всех устройствах». NULL means
--- no session of the account was ever signed out this way, which is what every
--- existing row starts as.
+-- password set from the Mini App, an operator's temporary password, and
+-- «Выйти на всех устройствах» — every one of them through one statement that
+-- keeps the later of the stored moment and its own, so a slower writer never
+-- moves it back. NULL means no session of the account was ever signed out
+-- this way, which is what every existing row starts as.
 --
 -- Nullable, no default: a catalogue change on "web_accounts", no table
 -- rewrite, and nothing reads it until a cabinet that knows about it asks.
@@ -30,3 +32,9 @@
 SET lock_timeout = '5s';
 
 ALTER TABLE "web_accounts" ADD COLUMN IF NOT EXISTS "sessions_revoked_at" TIMESTAMPTZ(3);
+
+-- `migrate deploy` applies every pending migration over ONE connection, so a
+-- session setting left behind here would bound every later file of the same
+-- deploy to 5 s — and one that is not allow-listed for a replay would stop the
+-- panel from booting. The bound is this file's alone.
+RESET lock_timeout;

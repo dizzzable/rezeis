@@ -499,6 +499,9 @@ export const en = {
         subs: 'Subscriptions',
         tx: 'Transactions',
         partner: 'Partner balance',
+        balanceHeld: 'Balance held until {{until}}',
+        holdCarriesOver:
+          'The hold on a partner balance after a password recovery by subscription link carries over to the account that survives. With one on each side, the later end stays.',
         conflictsTitle: 'Conflicts — choose whose value to keep',
         conflict: {
           login: 'Login',

@@ -7,7 +7,8 @@ import type { ExternalUserProfile } from '../src/modules/external-auth/interface
 
 interface MockState {
   linkByIdentity?: { userId: string; blocked: boolean } | null;
-  accountByEmail?: { userId: string; blocked: boolean; passwordHash?: string | null } | null;
+  /** `emailVerifiedAt` is OUR verification of the address, not the provider's. */
+  accountByEmail?: { userId: string; blocked: boolean; passwordHash?: string | null; emailVerifiedAt?: Date | null } | null;
   shellWebAccount?: { id: string; passwordHash: string | null } | null;
   loginConflict?: { id: string } | null;
   userByTelegramId?: { userId: string; blocked: boolean } | null;
@@ -19,6 +20,7 @@ function createService(state: MockState) {
     linkUpdated: 0,
     userCreated: 0,
     webAccountCreated: 0,
+    webAccountCreatedData: [] as Array<Record<string, unknown>>,
     webAccountUpdated: [] as Array<Record<string, unknown>>,
     snapshotChannels: [] as string[],
     events: 0,
@@ -32,12 +34,15 @@ function createService(state: MockState) {
       },
     },
     webAccount: {
-      create: async () => {
+      create: async (args: { data: Record<string, unknown> }) => {
         calls.webAccountCreated += 1;
+        calls.webAccountCreatedData.push(args.data);
         return { id: 'web-1' };
       },
-      findUnique: async (args: { where: { userId?: string; loginNormalized?: string } }) => {
+      findUnique: async (args: { where: { userId?: string; loginNormalized?: string; emailNormalized?: string } }) => {
         if (args.where.loginNormalized !== undefined) return state.loginConflict ?? null;
+        // The account that already holds an address, as the unique column would find it.
+        if (args.where.emailNormalized !== undefined) return state.accountByEmail ? { id: 'web-taken' } : null;
         return state.shellWebAccount ?? null;
       },
       update: async (args: { data: Record<string, unknown> }) => {
@@ -81,6 +86,7 @@ function createService(state: MockState) {
             ? {
                 userId: state.accountByEmail.userId,
                 passwordHash: state.accountByEmail.passwordHash ?? null,
+                emailVerifiedAt: state.accountByEmail.emailVerifiedAt ?? null,
                 user: { isBlocked: state.accountByEmail.blocked },
               }
             : null;
@@ -179,7 +185,12 @@ describe('ExternalAuthService.resolve', () => {
   it('auto-links a verified-email match (with credentials) and logs in', async () => {
     const { service, calls } = createService({
       linkByIdentity: null,
-      accountByEmail: { userId: 'user-2', blocked: false, passwordHash: 'scrypt:existing' },
+      accountByEmail: {
+        userId: 'user-2',
+        blocked: false,
+        passwordHash: 'scrypt:existing',
+        emailVerifiedAt: new Date('2026-09-01T00:00:00.000Z'),
+      },
     });
     const result = await service.resolve(profile());
     assert.deepStrictEqual(result, { action: 'login', userId: 'user-2' });
@@ -189,7 +200,12 @@ describe('ExternalAuthService.resolve', () => {
   it('auto-links a verified-email match to a credential-less shell → finish_setup', async () => {
     const { service, calls } = createService({
       linkByIdentity: null,
-      accountByEmail: { userId: 'user-2', blocked: false, passwordHash: null },
+      accountByEmail: {
+        userId: 'user-2',
+        blocked: false,
+        passwordHash: null,
+        emailVerifiedAt: new Date('2026-09-01T00:00:00.000Z'),
+      },
     });
     const result = await service.resolve(profile());
     assert.deepStrictEqual(result, { action: 'finish_setup', userId: 'user-2' });
@@ -213,6 +229,13 @@ describe('ExternalAuthService.resolve', () => {
     // No verified match path → falls through to a new shell + finish_setup.
     assert.equal(result.action, 'finish_setup');
     assert.equal(calls.userCreated, 1);
+    assert.equal(calls.linkCreated, 1, 'the new identity is linked to the new shell');
+    // The address belongs to the other account (`email_normalized` is unique):
+    // the shell is created without it, instead of colliding with that row.
+    assert.equal(calls.webAccountCreatedData.length, 1);
+    assert.equal(calls.webAccountCreatedData[0].email, null);
+    assert.equal(calls.webAccountCreatedData[0].emailNormalized, null);
+    assert.equal(calls.webAccountCreatedData[0].emailVerifiedAt, null);
   });
 
   it('creates a shell + finish_setup for a brand-new identity', async () => {

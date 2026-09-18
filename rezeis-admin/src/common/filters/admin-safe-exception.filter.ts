@@ -335,6 +335,11 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // only "Withdrawal request failed". Its `holdUntil` rides along through
   // `CODES_CARRYING_HOLD_UNTIL` below.
   'WITHDRAWAL_HOLD_AFTER_RECOVERY',
+  // Sign-in with Google, Yandex or Mail.ru whose e-mail matches an account
+  // where this panel never verified that address (`external-auth.service.ts`).
+  // Refused, not linked — and without the code the cabinet could only say
+  // "external sign-in failed", which sends the customer to try again forever.
+  'EXTERNAL_EMAIL_UNVERIFIED_ACCOUNT',
 ]);
 /**
  * Codes whose refusal is meaningless without naming the credential it wants.

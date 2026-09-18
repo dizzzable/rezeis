@@ -29,7 +29,6 @@ import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-acco
 import { IssueWebAccountEmailVerificationChallengeDto } from '../dto/issue-web-account-email-verification-challenge.dto';
 import { InternalUserSessionQueryDto } from '../dto/internal-user-session-query.dto';
 import { LinkedWebAccountSignInDto } from '../dto/linked-web-account-sign-in.dto';
-import { SetWebAccountPasswordDto } from '../dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../dto/snooze-web-account-link-prompt.dto';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
 import { InternalPartnerStatusInterface } from '../interfaces/internal-partner-status.interface';
@@ -51,7 +50,6 @@ import {
   getRequiredEmailVerificationWebAccount,
   getRequiredWebAccountEmail,
   hasSnoozedLinkPromptUntilOrBeyond,
-  isWebAccountLoginConflictError,
   InternalUserTransactionClient,
   lockWebAccountRow,
   revokeIssuedEmailVerificationChallenge,
@@ -306,7 +304,7 @@ export class InternalUserService {
    *
    * THE AUDIENCE IS `'subscriber'`, and it is decided by the CREDENTIAL, not by
    * the caller. The row being verified and rewritten here is a `WebAccount` —
-   * the same row `setWebAccountPassword` a few methods below mints at
+   * the same row a password reset and a password change mint at
    * `audience: 'subscriber'`, and the same row `WebAuthService` verifies. That
    * this method is reached over the internal admin API changes nothing: an
    * admin-facing endpoint that touches a subscriber credential is still minting
@@ -438,58 +436,6 @@ export class InternalUserService {
         linkPromptSnoozeUntil: snoozeUntil,
       },
     });
-    const refreshedUser = await this.getRequiredUserById(userId);
-    return mapInternalUserSession(refreshedUser);
-  }
-
-  /**
-   * Sets the resolved user's linked web-account password and returns the refreshed session payload.
-   */
-  public async setWebAccountPassword(
-    input: SetWebAccountPasswordDto,
-  ): Promise<InternalUserSessionInterface> {
-    const userId = this.getRequiredUserId(input.userId);
-    const currentUser = await this.getRequiredUserById(userId);
-    const webAccount = getRequiredActionableWebAccount(currentUser);
-    if (!loginPolicy.isValidLogin(input.login)) {
-      throw new BadRequestException('webAccount login is invalid');
-    }
-    const login: string = loginPolicy.sanitizeLogin(input.login);
-    const loginNormalized: string = loginPolicy.normalizeLogin(input.login);
-    // SUBSCRIBER: the resolved user's own `WebAccount`, set from the cabinet.
-    const passwordHash: string = await this.passwordHashService.hashPassword({
-      plainTextPassword: input.password,
-      audience: 'subscriber',
-    });
-    const credentialsBootstrappedAt: Date =
-      webAccount.credentialsBootstrappedAt ?? new Date(Date.now());
-    let updateResult: { readonly count: number };
-    try {
-      updateResult = await this.prismaService.webAccount.updateMany({
-        where: {
-          userId,
-          requiresPasswordChange: webAccount.requiresPasswordChange,
-          credentialsBootstrappedAt: webAccount.credentialsBootstrappedAt,
-        },
-        data: {
-          login,
-          loginNormalized,
-          passwordHash,
-          credentialsBootstrappedAt,
-          requiresPasswordChange: false,
-          temporaryPasswordExpiresAt: null,
-          linkPromptSnoozeUntil: null,
-        },
-      });
-    } catch (err: unknown) {
-      if (isWebAccountLoginConflictError(err)) {
-        throw new BadRequestException('webAccount login is already taken');
-      }
-      throw err;
-    }
-    if (updateResult.count === 0) {
-      throw new BadRequestException('webAccount password handoff is not actionable');
-    }
     const refreshedUser = await this.getRequiredUserById(userId);
     return mapInternalUserSession(refreshedUser);
   }

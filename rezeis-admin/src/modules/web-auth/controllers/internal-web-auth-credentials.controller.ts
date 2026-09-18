@@ -41,7 +41,7 @@ export class InternalWebAuthCredentialsController {
   @ApiOperation({
     summary: 'The moment before which every cabinet session of the customer is signed out',
     description:
-      'Asked by the cabinet at most once a minute per session; a session that started before `sessionsRevokedAt` is ended. `null`: nothing revoked.',
+      'Asked by the cabinet at most once a minute per session, and afresh before a money or credential action; a session that started before `sessionsRevokedAt` is ended. `null`: nothing revoked. `now`: the panel\'s clock at the answer, so the cabinet compares its sessions\' starts on one clock.',
   })
   public sessionsState(@Body() body: WebAuthUserDto): Promise<WebSessionsStateResultInterface> {
     return this.revocation.state(body.userId);

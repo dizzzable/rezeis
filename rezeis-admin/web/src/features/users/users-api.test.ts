@@ -108,6 +108,7 @@ function accountSummary(overrides: Record<string, unknown>) {
     subscriptions: { total: 2, active: 1, trial: 0 },
     transactionsCount: 7,
     partner: { isPartner: false, balanceMinor: 0 },
+    balanceHoldUntil: null,
     createdAt: DAYS_AGO(200),
     ...overrides,
   }
@@ -336,6 +337,24 @@ describe('usersApi.getAccountMergePreview', () => {
     expect(preview.counterpart.hasWebAccount).toBe(false)
     expect(preview.conflicts).toEqual(['telegram'])
     expect(preview.current.subscriptions.active).toBe(1)
+  })
+
+  it('keeps the standing recovery hold of each side — the card shows it before the merge', async () => {
+    // A merge carries a hold on the partner balance over to the account it
+    // keeps. Stripped here, the operator would merge without ever seeing it.
+    const holdUntil = new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString()
+    mockedGet.mockResolvedValue({
+      data: {
+        current: accountSummary({}),
+        counterpart: accountSummary({ userId: 'user-2', balanceHoldUntil: holdUntil }),
+        conflicts: ['login'],
+      },
+    })
+
+    const preview = await usersApi.getAccountMergePreview({ userId: 'user-1', ref: 'bob' })
+
+    expect(preview.current.balanceHoldUntil).toBeNull()
+    expect(preview.counterpart.balanceHoldUntil).toBe(holdUntil)
   })
 })
 

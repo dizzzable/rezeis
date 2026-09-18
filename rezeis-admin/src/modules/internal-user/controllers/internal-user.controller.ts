@@ -25,7 +25,6 @@ import { IssueWebAccountEmailVerificationChallengeDto } from '../dto/issue-web-a
 import { InternalUserSessionQueryDto } from '../dto/internal-user-session-query.dto';
 import { ReportDeviceSignalsDto } from '../dto/report-device-signals.dto';
 import { LinkedWebAccountSignInDto } from '../dto/linked-web-account-sign-in.dto';
-import { SetWebAccountPasswordDto } from '../dto/set-web-account-password.dto';
 import { SnoozeWebAccountLinkPromptDto } from '../dto/snooze-web-account-link-prompt.dto';
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
 import {
@@ -147,16 +146,6 @@ export class InternalUserController {
     @Query() query: SnoozeWebAccountLinkPromptDto,
   ): Promise<InternalUserSessionInterface> {
     return this.internalUserService.snoozeWebAccountLinkPrompt(query);
-  }
-
-  /**
-   * Sets the resolved user's linked web-account password through the internal handoff path.
-   */
-  @Patch('session/web-account-password')
-  public async setWebAccountPassword(
-    @Body() input: SetWebAccountPasswordDto,
-  ): Promise<InternalUserSessionInterface> {
-    return this.internalUserService.setWebAccountPassword(input);
   }
 
   /**

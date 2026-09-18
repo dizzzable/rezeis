@@ -7,6 +7,7 @@ import type {
   WebFirstPasswordResultInterface,
   WebPasswordStateResultInterface,
 } from '../interfaces/web-auth.interface';
+import { raiseSessionsRevokedAt, type SessionsRevokedAtWriter } from '../utils/sessions-revoked-at.util';
 
 /**
  * A first password, set from a session the customer already has
@@ -25,7 +26,9 @@ import type {
  *   - the account is the one of the cabinet's own server session — the cabinet
  *     sends `userId` from its session, never from the browser;
  *   - like any new password it signs every older session out
- *     (`sessionsRevokedAt`), in the same statement.
+ *     (`sessionsRevokedAt`), in the same transaction, with a moment taken once
+ *     the password is hashed and a statement that never moves it back
+ *     (`sessions-revoked-at.util.ts`).
  *
  * It clears `passwordBootstrapPending` and `requiresPasswordChange`, which are
  * what sent the customer to the password page, so the cabinet lets them in.
@@ -43,17 +46,24 @@ export type FirstPasswordAccountRow = Prisma.WebAccountGetPayload<{
   select: typeof FIRST_PASSWORD_ACCOUNT_SELECT;
 }>;
 
+/** What the write needs of a transaction: the password, then the sign-out moment. */
+export interface WebFirstPasswordTransaction extends SessionsRevokedAtWriter {
+  readonly webAccount: {
+    updateMany(args: {
+      where: Prisma.WebAccountWhereInput;
+      data: Prisma.WebAccountUpdateManyMutationInput;
+    }): PromiseLike<Prisma.BatchPayload>;
+  };
+}
+
 export interface WebFirstPasswordDatabase {
   readonly webAccount: {
     findUnique(args: {
       where: Prisma.WebAccountWhereUniqueInput;
       select: typeof FIRST_PASSWORD_ACCOUNT_SELECT;
     }): PromiseLike<FirstPasswordAccountRow | null>;
-    updateMany(args: {
-      where: Prisma.WebAccountWhereInput;
-      data: Prisma.WebAccountUpdateManyMutationInput;
-    }): PromiseLike<Prisma.BatchPayload>;
   };
+  $transaction<R>(fn: (tx: WebFirstPasswordTransaction) => Promise<R>): Promise<R>;
 }
 
 /** DI token for the database port. */
@@ -85,10 +95,16 @@ export class WebFirstPasswordService {
     return { hasPassword: account.passwordHash !== null, login: account.login };
   }
 
+  /**
+   * `moment` fixes the sign-out moment (a spec does); otherwise it is taken
+   * once the password is hashed — a moment taken before scrypt would be older
+   * than the write that carries it, and a session opened in that gap would
+   * survive the new password.
+   */
   public async set(
     userId: string,
     newPassword: string,
-    now: Date = new Date(),
+    moment?: Date,
   ): Promise<WebFirstPasswordResultInterface> {
     const account = await this.db.webAccount.findUnique({
       where: { userId },
@@ -103,21 +119,26 @@ export class WebFirstPasswordService {
       plainTextPassword: newPassword,
       audience: 'subscriber',
     });
-    // The `where` is the guard, not the check above: between that read and
-    // this write another request may have set a password, and then this one
-    // matches nothing.
-    const { count } = await this.db.webAccount.updateMany({
-      where: { id: account.id, passwordHash: null },
-      data: {
-        passwordHash,
-        passwordBootstrapPending: false,
-        requiresPasswordChange: false,
-        temporaryPasswordExpiresAt: null,
-        credentialsBootstrappedAt: account.credentialsBootstrappedAt ?? now,
-        sessionsRevokedAt: now,
-      },
+    const now = moment ?? new Date();
+    const written = await this.db.$transaction(async (tx) => {
+      // The `where` is the guard, not the check above: between that read and
+      // this write another request may have set a password, and then this one
+      // matches nothing — and signs nobody out.
+      const { count } = await tx.webAccount.updateMany({
+        where: { id: account.id, passwordHash: null },
+        data: {
+          passwordHash,
+          passwordBootstrapPending: false,
+          requiresPasswordChange: false,
+          temporaryPasswordExpiresAt: null,
+          credentialsBootstrappedAt: account.credentialsBootstrappedAt ?? now,
+        },
+      });
+      if (count !== 1) return false;
+      await raiseSessionsRevokedAt(tx, account.id, now);
+      return true;
     });
-    if (count !== 1) return { status: 'has_password' };
+    if (!written) return { status: 'has_password' };
     this.logger.log(`A first password was set from a signed-in session (web account ${account.id})`);
     return { status: 'set', login: account.login, sessionsRevokedAt: now.toISOString() };
   }

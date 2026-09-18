@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { findRecoveryWithdrawalHold } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 import {
   AccountMergeConflict,
   AccountMergePreview,
@@ -102,11 +103,12 @@ export class AccountMergePreviewService {
     if (user === null) {
       throw new NotFoundException(`User ${userId} not found`);
     }
-    const [total, active, trial, transactionsCount] = await Promise.all([
+    const [total, active, trial, transactionsCount, balanceHoldUntil] = await Promise.all([
       this.prismaService.subscription.count({ where: { userId } }),
       this.prismaService.subscription.count({ where: { userId, status: 'ACTIVE' } }),
       this.prismaService.subscription.count({ where: { userId, isTrial: true } }),
       this.prismaService.transaction.count({ where: { userId } }),
+      findRecoveryWithdrawalHold(this.prismaService, userId, new Date()),
     ]);
     return {
       userId: user.id,
@@ -123,6 +125,7 @@ export class AccountMergePreviewService {
         isPartner: user.partner !== null,
         balanceMinor: user.partner?.balance ?? 0,
       },
+      balanceHoldUntil: balanceHoldUntil?.toISOString() ?? null,
       createdAt: user.createdAt.toISOString(),
     };
   }

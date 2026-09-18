@@ -53,6 +53,9 @@ const accountMergeSummarySchema = z.object({
   subscriptions: z.object({ total: z.number(), active: z.number(), trial: z.number() }),
   transactionsCount: z.number(),
   partner: z.object({ isPartner: z.boolean(), balanceMinor: z.number() }),
+  // The end of a standing hold on the partner balance (72 hours after a
+  // password recovery by subscription link); a merge carries it over.
+  balanceHoldUntil: z.string().nullable().default(null),
   createdAt: z.string(),
 })
 

@@ -32,6 +32,7 @@ import {
   WebSessionRevocationService,
   type WebSessionRevocationDatabase,
 } from '../src/modules/web-auth/services/web-session-revocation.service';
+import { applySessionsRevokedAtRaise } from './helpers/sessions-revoked-at-sql';
 
 /**
  * Signing a customer's other cabinet sessions out — the panel's half
@@ -42,18 +43,25 @@ import {
  * the next time the cabinet asks (`sessions/state`, at most once a minute per
  * session). This file pins who writes the moment and what the cabinet can ask:
  *
- *   - a password change writes it in the same statement as the new password,
+ *   - a password change writes it in the same transaction as the new password,
  *     and a refused one writes nothing;
  *   - «Выйти на всех устройствах» (`sessions/revoke`) writes it for that
  *     customer only;
- *   - `sessions/state` reports it, and reports nothing for a customer who has
- *     no web account (a Telegram-only one);
+ *   - neither ever moves it back: a later moment another writer already put
+ *     there stands (`GREATEST`, `sessions-revoked-at.util.ts`);
+ *   - `sessions/state` reports it, with the panel's own clock beside it so the
+ *     cabinet can compare its sessions' starts on ONE clock, and reports
+ *     nothing revoked for a customer who has no web account (a Telegram-only
+ *     one);
  *   - the routes sit where the cabinet calls them, and refuse a body without a
  *     customer, through the real validation pipe and error filter.
  *
  * A password reset writes it on every channel — pinned in
  * `web-auth-reset.spec.ts` ("signs every older session out…"). A first
- * password writes it too — `web-first-password.spec.ts`.
+ * password writes it too — `web-first-password.spec.ts`; an operator's
+ * temporary password — `operator-password-reset-sessions.spec.ts`. That the
+ * statement keeps the later moment on a real database, under a real lock wait,
+ * is `web-first-password-postgres.spec.ts`.
  */
 
 interface AccountRow {
@@ -68,9 +76,29 @@ interface AccountRow {
 const CURRENT = 'c0ffee'.repeat(10) + 'c0ff';
 const NEXT = 'bead'.repeat(16);
 
-/** The web accounts both services read and write, and every write they made. */
+/**
+ * One write a service made: through the typed client (`update` /
+ * `updateMany`, which ASSIGN what they are given) or through the one raw
+ * statement that raises the sign-out moment, and whether it ran inside a
+ * transaction.
+ */
+interface Write {
+  readonly via: 'update' | 'updateMany' | 'raise';
+  readonly inTransaction: boolean;
+  readonly where?: Record<string, unknown>;
+  readonly data?: Record<string, unknown>;
+}
+
+/**
+ * The web accounts both services read and write, and every write they made.
+ * Both ways Prisma offers to write the moment are here — a plain assignment
+ * through the typed client, and the raw statement — so a service that wrote it
+ * the plain way would be caught by the value it leaves, not by a missing
+ * method.
+ */
 function accounts(rows: AccountRow[]) {
-  const writes: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+  const writes: Write[] = [];
+  let transactions = 0;
   const matches = (row: AccountRow, where: Record<string, unknown>): boolean => {
     const unmodelled = Object.keys(where).filter((key) => key !== 'id' && key !== 'userId');
     assert.deepEqual(unmodelled, [], 'the fake models id and userId filters only');
@@ -82,41 +110,68 @@ function accounts(rows: AccountRow[]) {
       (row as unknown as Record<string, unknown>)[field] = value;
     }
   };
-  const revocationPort: WebSessionRevocationDatabase = {
+  const update = (target: AccountRow[], inTransaction: boolean) =>
+    async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      writes.push({ via: 'update', inTransaction, where: args.where, data: args.data });
+      const row = target.find((candidate) => candidate.id === args.where.id);
+      assert.ok(row, `no account ${args.where.id}`);
+      apply(row, args.data);
+      return row;
+    };
+  const raise = (target: AccountRow[], inTransaction: boolean) => async (query: Prisma.Sql) => {
+    writes.push({ via: 'raise', inTransaction });
+    return applySessionsRevokedAtRaise(query, target);
+  };
+  const revocationPort = {
     webAccount: {
-      findUnique: async (args) => {
+      findUnique: async (args: { where: Prisma.WebAccountWhereUniqueInput; select: { sessionsRevokedAt: true } }) => {
         assert.deepEqual(args.select, { sessionsRevokedAt: true });
         const where = args.where as Record<string, unknown>;
         const row = rows.find((candidate) => matches(candidate, where));
         return row === undefined ? null : { sessionsRevokedAt: row.sessionsRevokedAt };
       },
-      updateMany: async (args) => {
+      updateMany: async (args: { where: Prisma.WebAccountWhereInput; data: Prisma.WebAccountUpdateManyMutationInput }) => {
         const where = args.where as Record<string, unknown>;
         const data = args.data as Record<string, unknown>;
-        writes.push({ where, data });
+        writes.push({ via: 'updateMany', inTransaction: false, where, data });
         const hit = rows.filter((row) => matches(row, where));
         for (const row of hit) apply(row, data);
         return { count: hit.length } satisfies Prisma.BatchPayload;
       },
     },
+    $executeRaw: raise(rows, false),
   };
-  /** What `WebAuthService.changePassword` touches of Prisma: one read by user, one update by id. */
+  const port: WebSessionRevocationDatabase = revocationPort;
+  /**
+   * What `WebAuthService.changePassword` touches of Prisma: one read by user,
+   * and writes — outside a transaction, or inside one that lands whole or not
+   * at all.
+   */
   const prisma = {
     webAccount: {
       findUnique: async (args: { where: { userId?: string } }) => {
         assert.deepEqual(Object.keys(args.where), ['userId']);
         return rows.find((row) => row.userId === args.where.userId) ?? null;
       },
-      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
-        writes.push({ where: args.where, data: args.data });
-        const row = rows.find((candidate) => candidate.id === args.where.id);
-        assert.ok(row, `no account ${args.where.id}`);
-        apply(row, args.data);
-        return row;
-      },
+      update: update(rows, false),
+    },
+    $transaction: async <R>(fn: (tx: { webAccount: { update: ReturnType<typeof update> }; $executeRaw: ReturnType<typeof raise> }) => Promise<R>): Promise<R> => {
+      transactions += 1;
+      const staged = rows.map((row) => ({ ...row }));
+      const result = await fn({ webAccount: { update: update(staged, true) }, $executeRaw: raise(staged, true) });
+      staged.forEach((row, index) => Object.assign(rows[index], row));
+      return result;
     },
   };
-  return { rows, writes, revocationPort, prisma };
+  return {
+    rows,
+    writes,
+    revocationPort: port,
+    prisma,
+    get transactions() {
+      return transactions;
+    },
+  };
 }
 
 function row(id: string, overrides: Partial<AccountRow> = {}): AccountRow {
@@ -152,7 +207,7 @@ async function webAuthService(db: ReturnType<typeof accounts>) {
 }
 
 describe('a password change signs every older session out', () => {
-  it('writes the moment in the same statement as the new password, and hands it to the cabinet', async () => {
+  it('writes the new password and the moment in one transaction, and hands the moment to the cabinet', async () => {
     const db = accounts([row('alice'), row('bob')]);
     const { service, hasher } = await webAuthService(db);
     db.rows[0].passwordHash = await hasher.hashPassword({ plainTextPassword: CURRENT, audience: 'subscriber' });
@@ -160,13 +215,38 @@ describe('a password change signs every older session out', () => {
 
     const result = await service.changePassword({ userId: 'u-alice', currentPassword: CURRENT, newPassword: NEXT });
 
-    assert.equal(db.writes.length, 1, 'one write, not a password and a revocation apart');
-    const [write] = db.writes;
-    assert.ok(typeof write.data['passwordHash'] === 'string' && write.data['sessionsRevokedAt'] instanceof Date);
+    assert.equal(db.transactions, 1, 'the password and the moment were not written in one transaction');
+    assert.deepEqual(
+      db.writes.map((write) => [write.via, write.inTransaction]),
+      [
+        ['update', true],
+        ['raise', true],
+      ],
+      'the new password, then the moment through the statement that never moves it back — both inside the transaction',
+    );
+    const [password] = db.writes;
+    assert.ok(typeof password.data?.['passwordHash'] === 'string');
+    assert.equal(password.data?.['sessionsRevokedAt'], undefined, 'the moment was assigned with the password, so a later one could be overwritten');
     const alice = db.rows[0];
     assert.ok(alice.sessionsRevokedAt !== null && alice.sessionsRevokedAt.getTime() >= before);
     assert.deepEqual(result, { success: true, sessionsRevokedAt: alice.sessionsRevokedAt.toISOString() });
     assert.equal(db.rows[1].sessionsRevokedAt, null, 'somebody else’s sessions were signed out');
+  });
+
+  it('never moves the moment back: a later one another writer already stored stands', async () => {
+    // Another writer — «Выйти на всех устройствах», a reset — took a later
+    // moment and committed first. This change must not pull it back, or every
+    // session opened between the two moments would survive it.
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    const db = accounts([row('alice', { sessionsRevokedAt: new Date(later) })]);
+    const { service, hasher } = await webAuthService(db);
+    db.rows[0].passwordHash = await hasher.hashPassword({ plainTextPassword: CURRENT, audience: 'subscriber' });
+
+    const result = await service.changePassword({ userId: 'u-alice', currentPassword: CURRENT, newPassword: NEXT });
+
+    assert.deepEqual(db.rows[0].sessionsRevokedAt, later, 'the stored moment moved back');
+    // The browser that changed the password still counts from ITS moment.
+    assert.ok(Date.parse(result.sessionsRevokedAt) < later.getTime());
   });
 
   it('writes nothing when the current password is wrong', async () => {
@@ -189,21 +269,58 @@ describe('«Выйти на всех устройствах» and the question t
     const db = accounts([row('alice'), row('bob')]);
     const revocation = new WebSessionRevocationService(db.revocationPort);
 
-    assert.deepEqual(await revocation.state('u-alice'), { sessionsRevokedAt: null });
+    assert.equal((await revocation.state('u-alice')).sessionsRevokedAt, null);
 
     const now = new Date('2026-09-18T10:00:00.123Z');
     assert.deepEqual(await revocation.revokeAll('u-alice', now), { sessionsRevokedAt: '2026-09-18T10:00:00.123Z' });
 
-    assert.deepEqual(await revocation.state('u-alice'), { sessionsRevokedAt: '2026-09-18T10:00:00.123Z' });
-    assert.deepEqual(await revocation.state('u-bob'), { sessionsRevokedAt: null }, 'revoked for the wrong customer');
-    assert.deepEqual(db.writes.map((write) => write.where), [{ userId: 'u-alice' }]);
+    assert.equal((await revocation.state('u-alice')).sessionsRevokedAt, '2026-09-18T10:00:00.123Z');
+    assert.equal((await revocation.state('u-bob')).sessionsRevokedAt, null, 'revoked for the wrong customer');
+    assert.deepEqual(
+      db.writes.map((write) => write.via),
+      ['raise'],
+      'the moment was not written through the statement that never moves it back',
+    );
+    assert.deepEqual(db.rows[1].sessionsRevokedAt, null);
+  });
+
+  it('never moves the moment back: a later one another writer already stored stands', async () => {
+    const later = new Date('2026-09-18T11:00:00.000Z');
+    const db = accounts([row('alice', { sessionsRevokedAt: new Date(later) })]);
+    const revocation = new WebSessionRevocationService(db.revocationPort);
+
+    const result = await revocation.revokeAll('u-alice', new Date('2026-09-18T10:00:00.000Z'));
+
+    assert.equal((await revocation.state('u-alice')).sessionsRevokedAt, later.toISOString(), 'the stored moment moved back');
+    // The browser that pressed it counts from ITS moment; the later one still
+    // signs out whatever started before it.
+    assert.deepEqual(result, { sessionsRevokedAt: '2026-09-18T10:00:00.000Z' });
+  });
+
+  it('tells the cabinet the panel’s own clock with every answer, so it can compare on one clock', async () => {
+    // The cabinet stamps a session's start with ITS clock and this moment is
+    // the panel's. Two servers' clocks disagree by seconds, sometimes more; the
+    // cabinet estimates the difference from this `now` and the round trip.
+    const db = accounts([row('alice', { sessionsRevokedAt: new Date('2026-09-18T10:00:00.000Z') })]);
+    const revocation = new WebSessionRevocationService(db.revocationPort);
+    const before = Date.now();
+
+    const state = await revocation.state('u-alice');
+
+    const after = Date.now();
+    assert.equal(typeof state.now, 'string', 'no clock beside the moment');
+    const now = Date.parse(state.now);
+    assert.equal(new Date(now).toISOString(), state.now, 'not an exact instant');
+    assert.ok(now >= before && now <= after, `${state.now} is not the time of the answer`);
+    const nobody = await revocation.state('u-telegram-only');
+    assert.equal(typeof nobody.now, 'string', 'the clock is missing when nothing was ever revoked');
   });
 
   it('reports nothing revoked for a customer with no web account, and refuses to revoke for one', async () => {
     const db = accounts([row('alice')]);
     const revocation = new WebSessionRevocationService(db.revocationPort);
 
-    assert.deepEqual(await revocation.state('u-telegram-only'), { sessionsRevokedAt: null });
+    assert.equal((await revocation.state('u-telegram-only')).sessionsRevokedAt, null);
     await assert.rejects(() => revocation.revokeAll('u-telegram-only'), { status: 404 });
     assert.equal(db.rows[0].sessionsRevokedAt, null);
   });
@@ -272,7 +389,10 @@ describe('the routes the cabinet calls', () => {
 
     const state = await request(server).post('/api/internal/web-auth/sessions/state').send({ userId: 'u-alice' });
     assert.equal(state.status, 200, state.text);
-    assert.deepEqual(state.body, { sessionsRevokedAt: at });
+    const body = state.body as { sessionsRevokedAt: string; now: string };
+    assert.deepEqual(Object.keys(body).sort(), ['now', 'sessionsRevokedAt']);
+    assert.equal(body.sessionsRevokedAt, at);
+    assert.equal(new Date(body.now).toISOString(), body.now);
   });
 
   it('refuses a body that names no customer, or carries anything else', async () => {

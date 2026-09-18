@@ -258,14 +258,3 @@ export function attachRevokeFailureContext(primaryError: unknown, _revokeError: 
 export function shouldRevokeIssuedChallengeAfterDeliveryFailure(error: unknown): boolean {
   return error instanceof EmailDeliveryException && error.deliveryState === 'definitely-not-delivered';
 }
-
-export function isWebAccountLoginConflictError(error: unknown): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
-    return false;
-  }
-  if (error.code !== 'P2002') {
-    return false;
-  }
-  const target = error.meta?.target;
-  return Array.isArray(target) && target.includes('loginNormalized');
-}

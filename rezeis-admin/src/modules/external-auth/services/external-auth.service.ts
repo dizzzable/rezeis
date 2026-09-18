@@ -33,6 +33,27 @@ import { ExternalProviderConfigService } from './external-provider-config.servic
 import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
 
 /**
+ * The refusal code of a sign-in by a provider's e-mail that matches an account
+ * whose address this panel never verified. On the filter's product allowlist;
+ * the cabinet turns it into a sentence on the sign-in page.
+ */
+export const EXTERNAL_EMAIL_UNVERIFIED_ACCOUNT = 'EXTERNAL_EMAIL_UNVERIFIED_ACCOUNT';
+
+/**
+ * A 409, not a 500 and not `denied` — `denied` tells every caller "this person
+ * is banned", and nobody here is. The message names no address: the filter
+ * forwards it, and the address is the provider's claim, not ours.
+ */
+export function externalEmailUnverifiedRefusal(): ConflictException {
+  return new ConflictException({
+    statusCode: 409,
+    error: 'Conflict',
+    message: 'An account with this e-mail exists, and the e-mail was never confirmed on it',
+    code: EXTERNAL_EMAIL_UNVERIFIED_ACCOUNT,
+  });
+}
+
+/**
  * Core external-auth engine: builds authorization URLs, runs OAuth adapters,
  * verifies Telegram (pre-verified by reiwa), and resolves a verified profile to
  * a login / register(finish-setup) / denied decision. Login + password stays
@@ -191,15 +212,31 @@ export class ExternalAuthService {
         : { action: 'finish_setup', userId: link.userId };
     }
 
-    // 2. Verified-email match → auto-link.
+    // 2. Verified-email match → auto-link — to an account whose address WE
+    //    verified, and to no other.
+    //
+    // The provider's `emailVerified` proves that whoever signed in owns the
+    // address TODAY. It proves nothing about the account here that carries the
+    // same address: AltShop imports bring a donor's e-mail over unverified and
+    // with no password, so the owner of a mistyped or re-registered address
+    // would land in that account and set its password on finish-setup. Such an
+    // account is refused — no link, no session, a 409 the cabinet explains —
+    // and never handed to step 3, which would mint a second account colliding
+    // with this one on the unique address.
     if (profile.emailVerified && profile.email) {
       const emailNormalized = profile.email.trim().toLowerCase();
       const account = await this.prismaService.webAccount.findUnique({
         where: { emailNormalized },
-        select: { userId: true, passwordHash: true, user: { select: { isBlocked: true } } },
+        select: { userId: true, passwordHash: true, emailVerifiedAt: true, user: { select: { isBlocked: true } } },
       });
       if (account) {
         if (account.user.isBlocked) return { action: 'denied' };
+        if (!(account.emailVerifiedAt instanceof Date)) {
+          this.logger.warn(
+            `resolve: branch=verified-email action=refused reason=address-unverified-here provider=${profile.provider}`,
+          );
+          throw externalEmailUnverifiedRefusal();
+        }
         await this.createLink(account.userId, profile);
         // Same guard: a matched account without credentials (e.g. a shell from
         // another provider's abandoned sign-up) must finish setup first.
@@ -403,8 +440,7 @@ export class ExternalAuthService {
   }
 
   private async createShellAccount(profile: ExternalUserProfile): Promise<string> {
-    const attachEmail = await this.emailAttachable(profile);
-    const emailNormalized = attachEmail ? attachEmail.toLowerCase() : null;
+    const attachable = await this.emailAttachable(profile);
     // Stamp `User.telegramId` on a new Telegram shell so the cabinet session
     // carries it (credential-gate toggle) and bot notifications work.
     // `parseTelegramId` range-guards it: a non-Telegram provider or an opaque
@@ -415,11 +451,25 @@ export class ExternalAuthService {
         : null;
 
     const userId = await this.prismaService.$transaction(async (tx) => {
+      // The address is unique on `web_accounts`. Step 2 proves it free only for
+      // an address the PROVIDER verified; one it did not verify may already
+      // belong to another account, and a second row with it would fail the
+      // whole sign-up on the constraint (a 500). The new account then goes
+      // without it — an unverified claim is no reason to attach the address
+      // anyway.
+      const taken =
+        attachable !== null &&
+        (await tx.webAccount.findUnique({
+          where: { emailNormalized: attachable.toLowerCase() },
+          select: { id: true },
+        })) !== null;
+      const attachEmail = taken ? null : attachable;
+      const emailNormalized = attachEmail ? attachEmail.toLowerCase() : null;
       // NB: `User.email` is a unique column and is intentionally left unset —
       // the email identity lives on the `WebAccount` (unique `emailNormalized`,
-      // already proven free by the step-2 match). Setting `User.email` here
-      // would collide with an admin-created / imported `User` that has the same
-      // email but no `WebAccount`.
+      // checked free just above). Setting `User.email` here would collide with
+      // an admin-created / imported `User` that has the same email but no
+      // `WebAccount`.
       const user = await tx.user.create({
         data: { name: profile.name ?? '', ...(telegramId !== null ? { telegramId } : {}) },
         select: { id: true },

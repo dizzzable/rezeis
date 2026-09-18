@@ -33,6 +33,14 @@ export interface AccountSummary {
   readonly subscriptions: AccountSubscriptionStats;
   readonly transactionsCount: number;
   readonly partner: AccountPartnerStats;
+  /**
+   * When the hold on this account's partner balance ends (ISO), `null` when
+   * none stands — the 72 hours after a password recovery by subscription link
+   * (`recovery-withdrawal-hold.util.ts`). A merge carries a standing hold over
+   * to the account it keeps, the later end winning, so the operator is shown it
+   * before merging.
+   */
+  readonly balanceHoldUntil: string | null;
   readonly createdAt: string;
 }
 

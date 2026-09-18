@@ -40,6 +40,7 @@ import {
   WebAuthTelegramClaimResultInterface,
 } from '../interfaces/web-auth.interface';
 import { canReceiveResetLink, hasVerifiedEmail, smtpCanDeliver } from '../utils/reset-channels.util';
+import { raiseSessionsRevokedAt } from '../utils/sessions-revoked-at.util';
 import { RegistrationSnapshotService } from './registration-snapshot.service';
 
 /**
@@ -940,18 +941,22 @@ export class WebAuthService {
       audience: 'subscriber',
     });
     // Every cabinet session opened before this moment is signed out — in the
-    // same statement as the new password, so there is never one without the
-    // other. The cabinet hands the browser that asked a fresh session that
-    // starts after it.
+    // same transaction as the new password, so there is never one without the
+    // other, and through the statement that never moves an already later
+    // moment back (`sessions-revoked-at.util.ts`). The moment is taken once the
+    // new password is hashed. The cabinet hands the browser that asked a fresh
+    // session that starts after it.
     const now = new Date();
-    await this.prismaService.webAccount.update({
-      where: { id: webAccount.id },
-      data: {
-        passwordHash: newPasswordHash,
-        requiresPasswordChange: false,
-        temporaryPasswordExpiresAt: null,
-        sessionsRevokedAt: now,
-      },
+    await this.prismaService.$transaction(async (tx) => {
+      await tx.webAccount.update({
+        where: { id: webAccount.id },
+        data: {
+          passwordHash: newPasswordHash,
+          requiresPasswordChange: false,
+          temporaryPasswordExpiresAt: null,
+        },
+      });
+      await raiseSessionsRevokedAt(tx, webAccount.id, now);
     });
     // Clear the operator-viewable temporary password — the user has set their
     // own, so it must no longer be retrievable from the admin panel.

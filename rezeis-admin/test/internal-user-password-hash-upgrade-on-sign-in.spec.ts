@@ -225,8 +225,8 @@ describe('a correct linked-web-account sign-in upgrades a password stored below 
 
   it('mints at the SUBSCRIBER cost — the audience follows the credential, not the caller', async () => {
     // This door is reached over the INTERNAL ADMIN API, and the credential it
-    // verifies is a `WebAccount` row — the same row `setWebAccountPassword` in
-    // this very service mints at `audience: 'subscriber'`. Picking `'admin'`
+    // verifies is a `WebAccount` row — the same row a password reset and a
+    // password change mint at `audience: 'subscriber'`. Picking `'admin'`
     // because of the caller is not correctable later: `needsRehash` compares
     // total work and only ever moves a hash UP, so an admin-strength row
     // written here is never brought back down and every future sign-in through

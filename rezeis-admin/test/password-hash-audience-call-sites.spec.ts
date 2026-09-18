@@ -34,13 +34,14 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { UserRole } from '@prisma/client';
+import { UserRole, type Prisma } from '@prisma/client';
 
 import { AdminAdminsController } from '../src/modules/rbac/controllers/admin-admins.controller';
 import { AdminAuthService } from '../src/modules/auth/services/admin-auth.service';
 import { AdminUserWebController } from '../src/modules/users/controllers/admin-user-web.controller';
 import { PasswordHashService } from '../src/modules/auth/services/password-hash.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
+import { applySessionsRevokedAtRaise } from './helpers/sessions-revoked-at-sql';
 
 /** Pinned as literals: these are the numbers that land in the database. */
 const ADMIN_ROW = { N: 65_536, r: 8, p: 2 } as const;
@@ -189,7 +190,7 @@ describe('SUBSCRIBER mint sites write the subscriber parameter block', () => {
     // it, into `WebAuthService.login`, against `web_accounts.password_hash`.
     // The audience follows the credential, not the caller.
     const updates: Array<{ where: unknown; data: Record<string, unknown> }> = [];
-    const prisma = {
+    const client = {
       user: { findFirst: async () => ({ id: 'user-1', telegramId: BigInt(123456789) }) },
       webAccount: {
         findFirst: async () => ({ id: 'web-account-1', userId: 'user-1', login: 'subscriber' }),
@@ -198,8 +199,12 @@ describe('SUBSCRIBER mint sites write the subscriber parameter block', () => {
           return { id: 'web-account-1' };
         },
       },
+      // The sign-out moment the same transaction raises (`sessions-revoked-at.util.ts`).
+      $executeRaw: async (query: Prisma.Sql) =>
+        applySessionsRevokedAtRaise(query, [{ id: 'web-account-1', userId: 'user-1', sessionsRevokedAt: null }]),
       adminAuditLog: { create: async () => null },
     };
+    const prisma = { ...client, $transaction: async <R>(fn: (tx: typeof client) => Promise<R>): Promise<R> => fn(client) };
     const controller = new AdminUserWebController(
       prisma as never,
       new PasswordHashService(),
@@ -223,7 +228,7 @@ describe('SUBSCRIBER mint sites write the subscriber parameter block', () => {
       plainTextPassword: 'the-old-password',
       audience: 'subscriber',
     });
-    const prisma = {
+    const client = {
       webAccount: {
         findUnique: async () => ({ id: 'web-account-1', userId: 'user-1', passwordHash: stored }),
         update: async (args: { where: unknown; data: Record<string, unknown> }) => {
@@ -231,7 +236,11 @@ describe('SUBSCRIBER mint sites write the subscriber parameter block', () => {
           return { id: 'web-account-1' };
         },
       },
+      // The sign-out moment the same transaction raises (`sessions-revoked-at.util.ts`).
+      $executeRaw: async (query: Prisma.Sql) =>
+        applySessionsRevokedAtRaise(query, [{ id: 'web-account-1', userId: 'user-1', sessionsRevokedAt: null }]),
     };
+    const prisma = { ...client, $transaction: async <R>(fn: (tx: typeof client) => Promise<R>): Promise<R> => fn(client) };
     const service = new WebAuthService(
       prisma as never,
       hasher,
@@ -278,13 +287,13 @@ const EXPECTED_AUDIENCES: Readonly<Record<string, readonly string[]>> = {
   // Subscriber credential: external-registration finish-setup writes
   // `WebAccount.passwordHash`.
   'modules/external-auth/services/external-auth.service.ts': ['subscriber'],
-  // Subscriber credentials, both writing `WebAccount.passwordHash`: the
-  // opportunistic re-hash on the linked-web-account sign-in (the SECOND
-  // subscriber door — `WebAuthService.login` is the first), and the cabinet
-  // setting the user's own web-account password. The sign-in one is reached
-  // over the INTERNAL ADMIN API and is still `subscriber`, because the audience
-  // follows the credential and the credential is a `WebAccount` row.
-  'modules/internal-user/services/internal-user.service.ts': ['subscriber', 'subscriber'],
+  // Subscriber credential writing `WebAccount.passwordHash`: the opportunistic
+  // re-hash on the linked-web-account sign-in (the SECOND subscriber door —
+  // `WebAuthService.login` is the first). It is reached over the INTERNAL ADMIN
+  // API and is still `subscriber`, because the audience follows the credential
+  // and the credential is a `WebAccount` row. The cabinet's old «set my
+  // password» route that sat beside it asked for no proof and was deleted.
+  'modules/internal-user/services/internal-user.service.ts': ['subscriber'],
   // Subscriber credential minted BY an operator — see the behavioural case above.
   'modules/users/controllers/admin-user-web.controller.ts': ['subscriber'],
   // Subscriber credential: a reset link — Telegram, e-mail or the subscription

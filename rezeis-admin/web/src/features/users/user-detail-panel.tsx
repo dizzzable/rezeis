@@ -4898,7 +4898,7 @@ function RefundPaymentAction({
   )
 }
 
-function MergeAccountsCard({
+export function MergeAccountsCard({
   currentUserId,
   queryKey,
 }: {
@@ -4990,6 +4990,13 @@ function MergeAccountsCard({
           {t('userDetailPanel.web.merge.partner')}: {(acc.partner.balanceMinor / 100).toFixed(0)}₽
         </p>
       )}
+      {acc.balanceHoldUntil !== null && (
+        <p className="font-medium text-amber-600 dark:text-amber-400">
+          {t('userDetailPanel.web.merge.balanceHeld', {
+            until: new Date(acc.balanceHoldUntil).toLocaleString(activeLocale()),
+          })}
+        </p>
+      )}
     </button>
   )
 
@@ -5024,6 +5031,11 @@ function MergeAccountsCard({
               {renderColumn('current', preview.current)}
               {renderColumn('counterpart', preview.counterpart)}
             </div>
+            {(preview.current.balanceHoldUntil !== null || preview.counterpart.balanceHoldUntil !== null) && (
+              <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300">
+                {t('userDetailPanel.web.merge.holdCarriesOver')}
+              </p>
+            )}
 
             {conflictFields.length > 0 && (
               <div className="space-y-1.5 rounded-md border border-border p-2">

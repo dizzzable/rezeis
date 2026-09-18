@@ -8,6 +8,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException, type ArgumentsHost } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Currency, PurchaseType } from '@prisma/client';
+import * as ts from 'typescript';
 
 import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -37,8 +38,11 @@ import {
  * with the same code and end-of-hold, and the refusal is asserted where the
  * cabinet actually receives it: after `AdminSafeExceptionFilter`.
  *
- * The last case inventories every debit of a partner balance in `src/`, so a
- * third customer-facing one cannot appear without being classified.
+ * The last cases inventory every WRITE of a partner balance in `src/` — read
+ * as TypeScript, whatever its shape: a `decrement`, an `increment` by a
+ * negative amount, an assigned or computed value, raw SQL — so a third
+ * customer-facing debit cannot appear without being classified, and neither can
+ * a credit whose amount may be negative.
  */
 
 const USER_ID = 'user-held';
@@ -363,13 +367,112 @@ describe('the filter forwards the end of the hold only for this code, and only a
   });
 });
 
-describe('every debit of a partner balance in src/ is classified', () => {
+/** How a write moves a partner balance. */
+type BalanceWriteShape = 'decrement' | 'negative increment' | 'increment' | 'assigned value' | 'raw SQL';
+
+/** The shapes that can take money OUT of a balance whatever the numbers. */
+const DEBIT_SHAPES: ReadonlySet<BalanceWriteShape> = new Set(['decrement', 'negative increment', 'assigned value', 'raw SQL']);
+
+/** Prisma delegate methods that write an EXISTING row's columns. `create` starts a balance, it moves none. */
+const PARTNER_UPDATES = new Set(['update', 'updateMany', 'upsert']);
+
+/** `-x`, `0 - x`, `-(a + b)`: an increment by something negative. */
+function isNegative(expression: ts.Expression): boolean {
+  if (ts.isParenthesizedExpression(expression)) return isNegative(expression.expression);
+  if (ts.isPrefixUnaryExpression(expression)) return expression.operator === ts.SyntaxKind.MinusToken;
+  if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.MinusToken) {
+    return ts.isNumericLiteral(expression.left) && Number(expression.left.text) === 0;
+  }
+  return false;
+}
+
+/** The shape of `balance: <value>` in the data of an update. */
+function balanceShape(value: ts.Expression): BalanceWriteShape {
+  if (!ts.isObjectLiteralExpression(value)) return 'assigned value';
+  const operations = new Map<string, ts.Expression>();
+  for (const property of value.properties) {
+    if (!ts.isPropertyAssignment(property)) return 'assigned value';
+    operations.set(property.name.getText(), property.initializer);
+  }
+  if (operations.has('decrement')) return 'decrement';
+  const increment = operations.get('increment');
+  if (increment !== undefined && operations.size === 1) return isNegative(increment) ? 'negative increment' : 'increment';
+  return 'assigned value';
+}
+
+/** The method or function a node sits in — the unit the inventory names. */
+function enclosingName(node: ts.Node): string {
+  for (let current: ts.Node | undefined = node.parent; current !== undefined; current = current.parent) {
+    if ((ts.isMethodDeclaration(current) || ts.isFunctionDeclaration(current)) && current.name !== undefined) {
+      return current.name.getText();
+    }
+  }
+  return '(top level)';
+}
+
+const RAW_PARTNER_BALANCE = /\b(?:UPDATE|INSERT\s+INTO)\s+"?partners"?\b[\s\S]*\bbalance\b/i;
+
+/**
+ * Every write of a partner balance in one file: through the Prisma delegate
+ * (`<client>.partner.update|updateMany|upsert` with `balance` in what it
+ * writes — including a spread, which could carry it) and through raw SQL (a
+ * string or template, never a comment, naming the table and the column).
+ */
+function balanceWrites(fileName: string, text: string): Array<{ readonly method: string; readonly shape: BalanceWriteShape; readonly at: number }> {
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+  const found: Array<{ method: string; shape: BalanceWriteShape; at: number }> = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const owner = node.expression.expression;
+      const argument = node.arguments[0];
+      if (
+        PARTNER_UPDATES.has(node.expression.name.text) &&
+        ts.isPropertyAccessExpression(owner) &&
+        owner.name.text === 'partner' &&
+        argument !== undefined &&
+        ts.isObjectLiteralExpression(argument)
+      ) {
+        for (const property of argument.properties) {
+          if (!ts.isPropertyAssignment(property)) continue;
+          const key = property.name.getText();
+          if (key !== 'data' && key !== 'update') continue;
+          const data = property.initializer;
+          if (!ts.isObjectLiteralExpression(data)) {
+            found.push({ method: enclosingName(node), shape: 'assigned value', at: node.getStart() });
+            continue;
+          }
+          for (const field of data.properties) {
+            if (ts.isSpreadAssignment(field)) {
+              found.push({ method: enclosingName(node), shape: 'assigned value', at: field.getStart() });
+            } else if (ts.isPropertyAssignment(field) && field.name.getText() === 'balance') {
+              found.push({ method: enclosingName(node), shape: balanceShape(field.initializer), at: field.getStart() });
+            } else if (ts.isShorthandPropertyAssignment(field) && field.name.text === 'balance') {
+              found.push({ method: enclosingName(node), shape: 'assigned value', at: field.getStart() });
+            }
+          }
+        }
+      }
+    }
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) {
+      if (RAW_PARTNER_BALANCE.test(node.getText())) found.push({ method: enclosingName(node), shape: 'raw SQL', at: node.getStart() });
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
+describe('every write of a partner balance in src/ is classified', () => {
   const SRC = join(__dirname, '..', 'src');
 
-  /** The customer-initiated debits: each must run the shared hold check before its decrement. */
+  /**
+   * The customer-initiated debits: each must run the shared hold check before
+   * its write. Keyed `file#method#shape`.
+   */
   const CUSTOMER_DEBITS: Readonly<Record<string, string>> = {
-    'modules/partners/services/partners.service.ts': 'createWithdrawalRequest',
-    'modules/payments/services/partner-balance-payment.service.ts': 'pay',
+    'modules/partners/services/partners.service.ts#createWithdrawalRequest#decrement': 'a withdrawal request',
+    'modules/payments/services/partner-balance-payment.service.ts#pay#decrement': 'a subscription paid with the balance',
   };
   /**
    * System-initiated: a commission clawed back when the payment it was earned
@@ -377,7 +480,23 @@ describe('every debit of a partner balance in src/ is classified', () => {
    * leaving at anybody's request.
    */
   const SYSTEM_DEBITS: Readonly<Record<string, string>> = {
-    'modules/partners/services/partner-earnings.service.ts': 'refund clawback',
+    'modules/partners/services/partner-earnings.service.ts#reverseEarningsForTransaction#decrement': 'refund clawback',
+  };
+  /**
+   * Increments. Listed, not waved through: an increment by an amount that can
+   * be negative IS a debit, and only a reading of the call site can tell.
+   */
+  const INCREMENTS: Readonly<Record<string, string>> = {
+    'modules/account-merge/services/account-merge.service.ts#merge#increment':
+      'an operator merging two accounts: the source balance moves to the survivor, and the source hold moves with it',
+    'modules/partners/services/partner-earnings.service.ts#processPartnerEarning#increment': 'a commission earned',
+    'modules/partners/services/partners.service.ts#applyBalanceAdjustment#increment':
+      'an OPERATOR adjustment, signed: it may debit, by the operator and never the customer, so no hold check',
+    'modules/partners/services/partners.service.ts#processWithdrawalWithBalanceMutation#increment': 'a rejected withdrawal handed back',
+    'modules/payments/services/partner-balance-payment.service.ts#restoreBalanceAndReleaseTrial#increment':
+      'a balance payment whose purchase failed, handed back',
+    'modules/payments/services/partner-balance-payment.service.ts#settleOwedBalanceRestore#increment':
+      'a hand-back that failed at the time, settled later',
   };
 
   function sourceFiles(directory: string): string[] {
@@ -388,21 +507,58 @@ describe('every debit of a partner balance in src/ is classified', () => {
     });
   }
 
-  it('finds exactly the known debits, and the customer ones check the hold first', () => {
+  it('reads every shape a debit can take — the inventory is only as good as its reader', () => {
+    const shapesOf = (body: string): string[] =>
+      balanceWrites('probe.ts', `async function probe(tx, amount, current) { ${body} }`).map((write) => write.shape);
+
+    assert.deepEqual(shapesOf('await tx.partner.updateMany({ where: {}, data: { balance: { decrement: amount } } });'), ['decrement']);
+    assert.deepEqual(shapesOf('await tx.partner.update({ where: {}, data: { balance: { increment: -amount } } });'), ['negative increment']);
+    assert.deepEqual(shapesOf('await tx.partner.update({ where: {}, data: { balance: { increment: 0 - amount } } });'), ['negative increment']);
+    assert.deepEqual(shapesOf('await tx.partner.update({ where: {}, data: { balance: current - amount } });'), ['assigned value']);
+    assert.deepEqual(shapesOf('await tx.partner.update({ where: {}, data: { balance: { set: 0 } } });'), ['assigned value']);
+    assert.deepEqual(shapesOf('await tx.partner.upsert({ where: {}, create: { balance: 0 }, update: { balance: { decrement: amount } } });'), ['decrement']);
+    assert.deepEqual(shapesOf('await tx.partner.update({ where: {}, data: { ...patch } });'), ['assigned value']);
+    assert.deepEqual(
+      shapesOf('await tx.$executeRaw`UPDATE "partners" SET "balance" = "balance" - ${amount} WHERE "id" = ${current}`;'),
+      ['raw SQL'],
+    );
+    assert.deepEqual(shapesOf('await tx.$executeRawUnsafe(\'UPDATE partners SET balance = balance - $1\', amount);'), ['raw SQL']);
+    // A credit is still seen — and a new partner row moves no existing balance.
+    assert.deepEqual(shapesOf('await tx.partner.update({ where: {}, data: { balance: { increment: amount } } });'), ['increment']);
+    assert.deepEqual(shapesOf('await tx.partner.create({ data: { userId: current, balance: 0 } });'), []);
+    // A comment that names the table and the column is not a write.
+    assert.deepEqual(shapesOf('// UPDATE partners SET balance = 0 was the old way\n return amount;'), []);
+  });
+
+  it('finds exactly the known writes, and the customer debits check the hold first', () => {
     const found: string[] = [];
+    const positions = new Map<string, number>();
     for (const file of sourceFiles(SRC)) {
       const text = readFileSync(file, 'utf8');
-      if (!/balance:\s*\{\s*decrement/.test(text)) continue;
-      found.push(relative(SRC, file).split(sep).join('/'));
+      const name = relative(SRC, file).split(sep).join('/');
+      for (const write of balanceWrites(name, text)) {
+        const key = `${name}#${write.method}#${write.shape}`;
+        found.push(key);
+        positions.set(key, write.at);
+      }
     }
-    assert.deepEqual(found.sort(), [...Object.keys(CUSTOMER_DEBITS), ...Object.keys(SYSTEM_DEBITS)].sort());
+    assert.deepEqual(
+      [...new Set(found)].sort(),
+      [...Object.keys(CUSTOMER_DEBITS), ...Object.keys(SYSTEM_DEBITS), ...Object.keys(INCREMENTS)].sort(),
+      'a write of a partner balance nobody classified — decide whether it is a customer debit (then it checks the recovery hold first), a system one, or a credit',
+    );
+    for (const key of [...Object.keys(CUSTOMER_DEBITS), ...Object.keys(SYSTEM_DEBITS)]) {
+      assert.ok(DEBIT_SHAPES.has(key.split('#')[2] as BalanceWriteShape), `${key} is listed as a debit and is not one`);
+    }
+    assert.equal(found.filter((key) => key in CUSTOMER_DEBITS).length, Object.keys(CUSTOMER_DEBITS).length, 'a customer debit occurs twice');
 
-    for (const [file, method] of Object.entries(CUSTOMER_DEBITS)) {
+    for (const key of Object.keys(CUSTOMER_DEBITS)) {
+      const [file, method] = key.split('#');
       const text = readFileSync(join(SRC, file), 'utf8');
       const start = text.search(new RegExp(`public async ${method}\\(`));
       assert.ok(start >= 0, `${file}: ${method} not found`);
       const check = text.indexOf('await assertPartnerBalanceNotHeld(', start);
-      const debit = text.slice(start).search(/balance:\s*\{\s*decrement/) + start;
+      const debit = positions.get(key) ?? -1;
       assert.ok(check > start && check < debit, `${file}: ${method} debits before it checks the recovery hold`);
     }
   });

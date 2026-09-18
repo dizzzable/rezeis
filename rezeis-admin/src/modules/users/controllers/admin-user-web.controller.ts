@@ -48,6 +48,7 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
+import { raiseSessionsRevokedAt } from '../../web-auth/utils/sessions-revoked-at.util';
 import { BindTelegramIdDto } from '../dto/bind-telegram-id.dto';
 import { RenameWebLoginDto } from '../dto/rename-web-login.dto';
 import {
@@ -89,9 +90,10 @@ export class AdminUserWebController {
    *     customer is signed out at its next check, within a minute. This is the
    *     support case of a taken-over account — an operator resets it, and
    *     whoever was signed in with the old password must not stay signed in.
-   *     In the same statement as the password, as a reset link writes it
+   *     In the same transaction as the password, as a reset link writes it
    *     (`PasswordResetService.consume`), so there is never one without the
-   *     other.
+   *     other — and through the statement that never moves a later moment
+   *     back (`sessions-revoked-at.util.ts`).
    */
   @Post(':telegramId/web/reset-password')
   @HttpCode(HttpStatus.OK)
@@ -126,14 +128,16 @@ export class AdminUserWebController {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + TEMPORARY_PASSWORD_TTL_HOURS * 60 * 60 * 1000);
 
-    await this.prismaService.webAccount.update({
-      where: { id: webAccount.id },
-      data: {
-        passwordHash,
-        requiresPasswordChange: true,
-        temporaryPasswordExpiresAt: expiresAt,
-        sessionsRevokedAt: now,
-      },
+    await this.prismaService.$transaction(async (tx) => {
+      await tx.webAccount.update({
+        where: { id: webAccount.id },
+        data: {
+          passwordHash,
+          requiresPasswordChange: true,
+          temporaryPasswordExpiresAt: expiresAt,
+        },
+      });
+      await raiseSessionsRevokedAt(tx, webAccount.id, now);
     });
 
     // Persist the plaintext temporarily (Redis, 24h TTL) so the operator can

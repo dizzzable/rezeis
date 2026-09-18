@@ -207,5 +207,6 @@ jobs:
           test/analytics-surfaces-postgres.spec.ts
           test/analytics-reports-postgres.spec.ts
           test/web-first-password-postgres.spec.ts
+          test/account-merge-recovery-hold-postgres.spec.ts
           test/imported-payments-backfill-postgres.spec.ts
           test/moy-nalog-receipt-race-postgres.spec.ts

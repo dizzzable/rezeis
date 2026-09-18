@@ -181,6 +181,11 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
       update: async (a: Record<string, unknown>) => { rec('webAccount', 'update', a); return { id: 'w' }; },
       delete: async (a: Record<string, unknown>) => { rec('webAccount', 'delete', a); return { id: 'w' }; },
     },
+    // The recovery hold moving to the kept web account before the other one is
+    // deleted (the cascade itself is `account-merge-recovery-hold-postgres.spec.ts`).
+    authChallenge: {
+      updateMany: async (a: Record<string, unknown>) => { rec('authChallenge', 'updateMany', a); return { count: 0 }; },
+    },
   };
 
   const prisma = {
@@ -525,6 +530,12 @@ describe('AccountMergeService', () => {
 
     const waDelete = calls.find((c) => c.model === 'webAccount' && c.op === 'delete');
     assert.deepStrictEqual((waDelete?.args as { where: unknown }).where, { id: 'WA_SRC' });
+    // A standing recovery hold on the deleted one moves to the kept one first.
+    const carry = calls.findIndex((c) => c.model === 'authChallenge' && c.op === 'updateMany');
+    assert.ok(carry >= 0 && carry < calls.indexOf(waDelete!), 'the hold was not carried over before the delete');
+    const carried = calls[carry]?.args as { where: { webAccountId: string }; data: { webAccountId: string } };
+    assert.equal(carried.where.webAccountId, 'WA_SRC');
+    assert.equal(carried.data.webAccountId, 'WA_TGT');
   });
 
   it('keeps the source login when keepLogin=source (deletes target web account, re-points source)', async () => {
@@ -542,6 +553,11 @@ describe('AccountMergeService', () => {
 
     const waDelete = calls.find((c) => c.model === 'webAccount' && c.op === 'delete');
     assert.deepStrictEqual((waDelete?.args as { where: unknown }).where, { id: 'WA_TGT' });
+    const carry = calls.findIndex((c) => c.model === 'authChallenge' && c.op === 'updateMany');
+    assert.ok(carry >= 0 && carry < calls.indexOf(waDelete!), 'the hold was not carried over before the delete');
+    const carried = calls[carry]?.args as { where: { webAccountId: string }; data: { webAccountId: string } };
+    assert.equal(carried.where.webAccountId, 'WA_TGT');
+    assert.equal(carried.data.webAccountId, 'WA_SRC');
     const waUpdate = calls.find((c) => c.model === 'webAccount' && c.op === 'update');
     assert.deepStrictEqual((waUpdate?.args as { data: unknown }).data, { userId: 'TGT' });
   });
