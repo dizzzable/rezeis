@@ -31,8 +31,9 @@ export class MultiSubscriptionSettingsDto {
 }
 
 /**
- * Verification template locales (RU/EN). Each is optional and nullable; a
- * cleared field is sent as null/empty and falls back to the default message.
+ * Template locales (RU/EN) of the retired Telegram templates below. Still
+ * validated as they always were, so a body an older admin SPA sends is refused
+ * or accepted exactly as before — and then ignored.
  */
 export class VerificationLocalesDto {
   @IsOptional()
@@ -49,7 +50,20 @@ export class VerificationLocalesDto {
 }
 
 /**
- * Telegram verification / password-reset message templates.
+ * ACCEPTED AND IGNORED — both templates.
+ *
+ * «Верификация (RU/EN)» and «Сброс пароля (RU/EN)» were never sent by anything
+ * in the panel, the cabinet or the bot: a reset link goes out with the bot's
+ * own text, and an e-mail code with the e-mail's own. So the Branding card no
+ * longer offers them, the panel no longer presents or writes them, and what an
+ * install stored stays in `platformPolicy.verification` untouched
+ * (`mergePlatformBranding` carries every key it does not own).
+ *
+ * Still declared because an admin SPA loaded before this release sends both
+ * with every Branding save, and the global `ValidationPipe`
+ * (`forbidNonWhitelisted`) would answer that save with a 400. An exported
+ * configuration does not need them: config import writes the `platformPolicy`
+ * column as it is and never meets this DTO.
  */
 export class VerificationTemplatesDto {
   @IsOptional()
@@ -108,6 +122,12 @@ export class PlatformBrandingDto {
   @IsBoolean()
   public requireTelegramWebCredentials?: boolean;
 
+  /** «Восстановление пароля по ссылке подписки» — see `PlatformBrandingInterface`. */
+  @IsOptional()
+  @IsBoolean()
+  public subscriptionLinkRecovery?: boolean;
+
+  /** Accepted and ignored — see `VerificationTemplatesDto`. */
   @IsOptional()
   @ValidateNested()
   @Type(() => VerificationTemplatesDto)

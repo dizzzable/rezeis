@@ -16,6 +16,7 @@ import { WebAuthLoginDto } from '../src/modules/web-auth/dto/web-auth-login.dto'
 import { WebAuthRecoverDto } from '../src/modules/web-auth/dto/web-auth-recover.dto';
 import { WebAuthRegisterDto } from '../src/modules/web-auth/dto/web-auth-register.dto';
 import { BotSigninTokenService } from '../src/modules/web-auth/services/bot-signin-token.service';
+import type { PasswordResetFacade } from '../src/modules/web-auth/services/password-reset.service';
 import { WebAuthService } from '../src/modules/web-auth/services/web-auth.service';
 import {
   assertRoute,
@@ -49,6 +50,12 @@ describe('InternalWebAuthController', () => {
       'changePassword',
       'issueBotSigninToken',
       'consumeBotSigninToken',
+      'requestPasswordReset',
+      'inspectPasswordReset',
+      'consumePasswordReset',
+      'issuePasswordResetForTelegram',
+      'recoverPasswordBySubscription',
+      'sendFirstPasswordLink',
     ]);
 
     for (const route of WEB_AUTH_ROUTES) {
@@ -78,6 +85,7 @@ describe('InternalWebAuthController', () => {
     const controller = new InternalWebAuthController(
       webAuthService,
       createBotSigninTokenServiceMock(),
+      createPasswordResetServiceMock(calls),
     );
     const registerDto: WebAuthRegisterDto = {
       login: 'new-user',
@@ -110,8 +118,66 @@ describe('InternalWebAuthController', () => {
       { method: 'register', payload: registerDto },
       { method: 'checkLoginAvailable', payload: 'new-user' },
       { method: 'login', payload: loginDto },
-      { method: 'recover', payload: recoverDto },
+      // The legacy route answers only; it must not reach the method that sends.
+      { method: 'legacyRecover', payload: 'new-user' },
       { method: 'changePassword', payload: changePasswordDto },
+    ]);
+  });
+
+  it('delegates the password-reset routes to PasswordResetService with what the cabinet sent', async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const controller = new InternalWebAuthController(
+      createWebAuthServiceMock([]),
+      createBotSigninTokenServiceMock(),
+      createPasswordResetServiceMock(calls),
+    );
+    const token = 'c'.repeat(64);
+
+    assert.deepStrictEqual(
+      await controller.requestPasswordReset({ identifier: 'new-user', cabinetUrl: 'https://cabinet.example' }),
+      { method: 'telegram', resetLinks: true },
+    );
+    await controller.requestPasswordReset({ identifier: 'user@example.com' });
+    await controller.inspectPasswordReset({ token });
+    await controller.consumePasswordReset({ token, password: 'd'.repeat(64) });
+    await controller.issuePasswordResetForTelegram({ telegramId: '123456789' });
+    await controller.recoverPasswordBySubscription({
+      link: 'https://sub.example/abcdef12',
+      login: 'new-user',
+      clientIp: '198.51.100.7',
+      cabinetUrl: 'https://cabinet.example',
+    });
+    await controller.recoverPasswordBySubscription({ link: 'abcdef12', login: 'new-user' });
+    assert.deepStrictEqual(
+      await controller.sendFirstPasswordLink({ login: 'imported_user', cabinetUrl: 'https://cabinet.example' }),
+      { status: 'sent', channel: 'telegram' },
+    );
+    await controller.sendFirstPasswordLink({ login: 'imported_user' });
+
+    assert.deepStrictEqual(calls, [
+      { method: 'request', payload: { identifier: 'new-user', cabinetUrl: 'https://cabinet.example' } },
+      { method: 'request', payload: { identifier: 'user@example.com', cabinetUrl: null } },
+      { method: 'inspect', payload: token },
+      { method: 'consume', payload: { token, password: 'd'.repeat(64) } },
+      { method: 'issueForTelegram', payload: '123456789' },
+      {
+        method: 'recoverBySubscription',
+        payload: {
+          link: 'https://sub.example/abcdef12',
+          login: 'new-user',
+          clientIp: '198.51.100.7',
+          cabinetUrl: 'https://cabinet.example',
+        },
+      },
+      {
+        method: 'recoverBySubscription',
+        payload: { link: 'abcdef12', login: 'new-user', clientIp: null, cabinetUrl: null },
+      },
+      {
+        method: 'sendFirstPasswordLink',
+        payload: { login: 'imported_user', cabinetUrl: 'https://cabinet.example' },
+      },
+      { method: 'sendFirstPasswordLink', payload: { login: 'imported_user', cabinetUrl: null } },
     ]);
   });
 
@@ -120,6 +186,7 @@ describe('InternalWebAuthController', () => {
     const controller = new InternalWebAuthController(
       createWebAuthServiceMock([]),
       createBotSigninTokenServiceMock(calls, { issueResult: null }),
+      createPasswordResetServiceMock([]),
     );
     const dto: BotSigninIssueDto = { telegramId: '123456789' };
 
@@ -139,6 +206,7 @@ describe('InternalWebAuthController', () => {
         issueResult,
         consumeResult: { userId: 'user-1' },
       }),
+      createPasswordResetServiceMock([]),
     );
     const issueDto: BotSigninIssueDto = { telegramId: '123456789' };
     const consumeDto: BotSigninConsumeDto = { token: 'a'.repeat(64) };
@@ -155,6 +223,7 @@ describe('InternalWebAuthController', () => {
     const controller = new InternalWebAuthController(
       createWebAuthServiceMock([]),
       createBotSigninTokenServiceMock([], { consumeResult: null }),
+      createPasswordResetServiceMock([]),
     );
 
     assert.deepStrictEqual(
@@ -184,6 +253,24 @@ const WEB_AUTH_ROUTES: readonly WebAuthRoute[] = [
   { handler: handlers.changePassword, method: RequestMethod.POST, path: 'change-password' },
   { handler: handlers.issueBotSigninToken, method: RequestMethod.POST, path: 'bot-signin/issue' },
   { handler: handlers.consumeBotSigninToken, method: RequestMethod.POST, path: 'bot-signin/consume' },
+  { handler: handlers.requestPasswordReset, method: RequestMethod.POST, path: 'password-reset/request' },
+  { handler: handlers.inspectPasswordReset, method: RequestMethod.POST, path: 'password-reset/inspect' },
+  { handler: handlers.consumePasswordReset, method: RequestMethod.POST, path: 'password-reset/consume' },
+  {
+    handler: handlers.issuePasswordResetForTelegram,
+    method: RequestMethod.POST,
+    path: 'password-reset/telegram',
+  },
+  {
+    handler: handlers.recoverPasswordBySubscription,
+    method: RequestMethod.POST,
+    path: 'password-reset/subscription',
+  },
+  {
+    handler: handlers.sendFirstPasswordLink,
+    method: RequestMethod.POST,
+    path: 'password-reset/first-password',
+  },
 ];
 
 function createWebAuthServiceMock(
@@ -207,15 +294,51 @@ function createWebAuthServiceMock(
         emailVerified: true,
       };
     },
-    recover: async (payload: WebAuthRecoverDto) => {
-      calls.push({ method: 'recover', payload });
-      return { method: 'telegram' };
-    },
     changePassword: async (payload: WebAuthChangePasswordDto) => {
       calls.push({ method: 'changePassword', payload });
       return { success: true };
     },
   } as WebAuthService;
+}
+
+/**
+ * The reset service as the controller sees it. Typed by the controller's own
+ * narrow dependency, so every method it can call has to be written here and the
+ * compiler checks each one — no cast.
+ */
+function createPasswordResetServiceMock(
+  calls: Array<{ method: string; payload: unknown }>,
+): PasswordResetFacade {
+  return {
+    request: async (payload) => {
+      calls.push({ method: 'request', payload });
+      return { method: 'telegram', resetLinks: true };
+    },
+    legacyRecover: async (payload) => {
+      calls.push({ method: 'legacyRecover', payload });
+      return { method: 'telegram' };
+    },
+    inspect: async (payload) => {
+      calls.push({ method: 'inspect', payload });
+      return { status: 'expired' };
+    },
+    consume: async (token, password) => {
+      calls.push({ method: 'consume', payload: { token, password } });
+      return { status: 'expired' };
+    },
+    issueForTelegram: async (payload) => {
+      calls.push({ method: 'issueForTelegram', payload });
+      return { status: 'no_account' };
+    },
+    recoverBySubscription: async (payload) => {
+      calls.push({ method: 'recoverBySubscription', payload });
+      return { status: 'mismatch' };
+    },
+    sendFirstPasswordLink: async (payload) => {
+      calls.push({ method: 'sendFirstPasswordLink', payload });
+      return { status: 'sent', channel: 'telegram' };
+    },
+  };
 }
 
 function createBotSigninTokenServiceMock(

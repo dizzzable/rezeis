@@ -49,7 +49,7 @@ describe('MultiSubTab accessibility', () => {
 })
 
 describe('BrandingTab accessibility', () => {
-  it('names branding inputs and template editors', () => {
+  it('names branding inputs', () => {
     renderWithProviders(
       <BrandingTab
         settings={{
@@ -57,10 +57,6 @@ describe('BrandingTab accessibility', () => {
             projectName: 'Rezeis',
             webTitle: 'Rezeis VPN',
             channelUsername: '@rezeis',
-            verification: {
-              telegramTemplate: { ru: 'Код: {code}', en: 'Code: {code}' },
-              passwordResetTelegramTemplate: { ru: 'Сброс: {code}', en: 'Reset: {code}' },
-            },
           },
         }}
       />,
@@ -69,9 +65,7 @@ describe('BrandingTab accessibility', () => {
     expect(screen.getByRole('textbox', { name: 'Project Name' })).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Web Title' })).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Channel Username' })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Verification (RU)' })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Verification (EN)' })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Password Reset (RU)' })).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: 'Password Reset (EN)' })).toBeInTheDocument()
+    // The Telegram templates («Верификация», «Сброс пароля») are no longer
+    // offered — nothing ever sent them (`settings-page-retired-templates.test.tsx`).
   })
 })

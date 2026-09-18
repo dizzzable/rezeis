@@ -31,16 +31,15 @@ import { tempPasswordCacheKey } from '../../users/utils/temp-password-cache.util
 import { WebAuthChangePasswordDto } from '../dto/web-auth-change-password.dto';
 import { WebAuthClaimDto } from '../dto/web-auth-claim.dto';
 import { WebAuthLoginDto } from '../dto/web-auth-login.dto';
-import { WebAuthRecoverDto } from '../dto/web-auth-recover.dto';
 import { WebAuthRegisterDto } from '../dto/web-auth-register.dto';
 import { WebAuthTelegramClaimDto } from '../dto/web-auth-telegram-claim.dto';
 import {
   WebAuthChangePasswordResultInterface,
   WebAuthLoginResultInterface,
-  WebAuthRecoverResultInterface,
   WebAuthRegisterResultInterface,
   WebAuthTelegramClaimResultInterface,
 } from '../interfaces/web-auth.interface';
+import { canReceiveResetLink, hasVerifiedEmail, smtpCanDeliver } from '../utils/reset-channels.util';
 import { RegistrationSnapshotService } from './registration-snapshot.service';
 
 /**
@@ -53,10 +52,8 @@ import { RegistrationSnapshotService } from './registration-snapshot.service';
  *    credentials inside the Mini App) or against a brand-new web-first
  *    `User`. The canonical `reiwa_id` is the `User.id` CUID either way.
  *  - **login**: verify login + password and return a session payload.
- *  - **recover**: pick the recovery channel based on what the user has
- *    linked. Implementations of the actual delivery (email / telegram)
- *    live in `EmailModule` / future telegram realtime stream — this
- *    method only signals which channel the SPA should advertise.
+ *  - **recover**: moved to `PasswordResetService` — `request` sends a
+ *    reset link, `legacyRecover` keeps the old route's answers.
  *  - **change-password**: rotates the stored hash after verifying the
  *    current password.
  *
@@ -790,33 +787,28 @@ export class WebAuthService {
     if (webAccount.user.isBlocked) {
       throw new UnauthorizedException('Invalid login or password');
     }
-    // Claim-on-first-login: a migrated web-only account (importer-flagged) has
-    // no password yet. Adopt whatever password the user submits, clear the
-    // pending flag, and force a reset on entry. Confined to the explicit flag
-    // so no ordinary null-hash account is claimable.
+    // An account with NO PASSWORD YET is refused like a wrong password, and the
+    // typed password is never looked at.
+    //
+    // The AltShop importer creates these: a login that is the donor's
+    // `username` — usually the customer's PUBLIC Telegram username — no
+    // password, and `passwordBootstrapPending`. This branch used to adopt
+    // whatever password was typed ("claim on first login"), so anybody who knew
+    // the username took the account, and the owner was locked out of it.
+    //
+    // The owner gets in through a reset link instead: on this refusal the
+    // cabinet asks `PasswordResetService.sendFirstPasswordLink`, which sends the
+    // ordinary link to the account's Telegram. An account no link can reach
+    // has no way in of its own — only support can help it, with a temporary
+    // password from the customer's card — so the operator is told here.
     if (webAccount.passwordHash === null) {
-      if (!webAccount.passwordBootstrapPending) {
-        throw new UnauthorizedException('Invalid login or password');
+      if (webAccount.passwordBootstrapPending && !(await this.canReceiveFirstPasswordLink(webAccount))) {
+        this.logger.warn(
+          `Sign-in refused: web account ${webAccount.id} has no password yet and neither Telegram nor a ` +
+            'verified e-mail to set one through; it needs a temporary password from support',
+        );
       }
-      const claimedHash = await this.passwordHashService.hashPassword({
-        plainTextPassword: input.password,
-        audience: 'subscriber',
-      });
-      await this.prismaService.webAccount.update({
-        where: { id: webAccount.id },
-        data: {
-          passwordHash: claimedHash,
-          passwordBootstrapPending: false,
-          requiresPasswordChange: true,
-          credentialsBootstrappedAt: webAccount.credentialsBootstrappedAt ?? new Date(),
-        },
-      });
-      return {
-        userId: webAccount.userId,
-        requiresPasswordChange: true,
-        telegramLinked: webAccount.user.telegramId !== null,
-        emailVerified: webAccount.emailVerifiedAt !== null,
-      };
+      throw new UnauthorizedException('Invalid login or password');
     }
     const ok = await this.passwordHashService.verifyPassword({
       plainTextPassword: input.password,
@@ -836,6 +828,26 @@ export class WebAuthService {
       telegramLinked: webAccount.user.telegramId !== null,
       emailVerified: webAccount.emailVerifiedAt !== null,
     };
+  }
+
+  /** `canReceiveResetLink`, with SMTP asked only when an e-mail would decide. */
+  private async canReceiveFirstPasswordLink(webAccount: {
+    readonly email: string | null;
+    readonly emailVerifiedAt: Date | null;
+    readonly user: { readonly telegramId: bigint | null };
+  }): Promise<boolean> {
+    const smtpOn =
+      webAccount.user.telegramId === null && hasVerifiedEmail(webAccount)
+        ? smtpCanDeliver(await this.emailDeliveryService.getSmtpSettings())
+        : false;
+    return canReceiveResetLink(
+      {
+        telegramId: webAccount.user.telegramId,
+        email: webAccount.email,
+        emailVerifiedAt: webAccount.emailVerifiedAt,
+      },
+      smtpOn,
+    );
   }
 
   /**
@@ -903,36 +915,9 @@ export class WebAuthService {
     }
   }
 
-  public async recover(input: WebAuthRecoverDto): Promise<WebAuthRecoverResultInterface> {
-    const loginNormalized = loginPolicy.normalizeLogin(input.login);
-    const webAccount = await this.prismaService.webAccount.findUnique({
-      where: { loginNormalized },
-      include: { user: { select: { telegramId: true } } },
-    });
-    if (webAccount === null) {
-      // Do not leak existence — pretend the recovery flow is "none".
-      return { method: 'none' };
-    }
-    if (webAccount.user.telegramId !== null) {
-      // Telegram-first: the actual delivery is handled by the bot's
-      // recovery handler, which polls / streams for pending challenges.
-      // Recovery code persistence (and TTL) is covered by the linking
-      // module's `auth_challenges` rows when the SPA initiates flow.
-      return { method: 'telegram' };
-    }
-    if (webAccount.email !== null && webAccount.emailVerifiedAt !== null) {
-      // Only advertise email recovery when platform email delivery is actually
-      // configured + enabled — otherwise the code can't be delivered and the
-      // SPA would show a dead-end "check your email" screen.
-      const smtp = await this.emailDeliveryService.getSmtpSettings();
-      const emailEnabled =
-        smtp.enabled === true && typeof smtp.host === 'string' && smtp.host.trim().length > 0;
-      if (emailEnabled) {
-        return { method: 'email' };
-      }
-    }
-    return { method: 'none' };
-  }
+  // `recover` moved to `PasswordResetService`: `legacyRecover` gives the old
+  // route its old answers (and still sends nothing — those cabinets have no page
+  // for a link), and `request` is the route that sends a reset link.
 
   public async changePassword(
     input: WebAuthChangePasswordDto,
@@ -954,18 +939,24 @@ export class WebAuthService {
       plainTextPassword: input.newPassword,
       audience: 'subscriber',
     });
+    // Every cabinet session opened before this moment is signed out — in the
+    // same statement as the new password, so there is never one without the
+    // other. The cabinet hands the browser that asked a fresh session that
+    // starts after it.
+    const now = new Date();
     await this.prismaService.webAccount.update({
       where: { id: webAccount.id },
       data: {
         passwordHash: newPasswordHash,
         requiresPasswordChange: false,
         temporaryPasswordExpiresAt: null,
+        sessionsRevokedAt: now,
       },
     });
     // Clear the operator-viewable temporary password — the user has set their
     // own, so it must no longer be retrievable from the admin panel.
     await this.cacheService.del(tempPasswordCacheKey(webAccount.id));
-    return { success: true };
+    return { success: true, sessionsRevokedAt: now.toISOString() };
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────

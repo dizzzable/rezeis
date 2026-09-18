@@ -979,20 +979,17 @@ export const en = {
       requireTgWebCreds: 'Require login/password on Telegram sign-in',
       requireTgWebCredsHint:
         'When on, a user signing in via Telegram for the first time (web widget or Mini App) must set a cabinet login and password. Already-registered users pass straight through. When off, Telegram is accepted as a sufficient credential and the user enters the cabinet without a login/password.',
-      verificationTemplates: 'Verification Templates',
-      verificationTemplatesHint:
-        'Templates for Telegram verification messages. Use {project_name} and {code} as placeholders.',
-      verificationRu: 'Verification (RU)',
-      verificationEn: 'Verification (EN)',
-      passwordResetRu: 'Password Reset (RU)',
-      passwordResetEn: 'Password Reset (EN)',
+      subscriptionLinkRecovery: 'Password recovery by subscription link',
+      subscriptionLinkRecoveryHint:
+        'For customers with neither Telegram nor an email. When off, the cabinet offers support instead of this option.',
+      subscriptionLinkRecoveryInfoLabel: 'About password recovery by subscription link',
+      subscriptionLinkRecoveryInfo_one:
+        'A customer whose account has neither Telegram nor an email linked can set a new password by pasting the subscription link from their VPN app.\n\nAnyone else who has that link can do the same — for example, someone they share the VPN with.\n\nAfter such a recovery, the partner balance is held for {{count}} hour: it can be neither withdrawn nor used to pay for a subscription. Operators get a notice.',
+      subscriptionLinkRecoveryInfo_other:
+        'A customer whose account has neither Telegram nor an email linked can set a new password by pasting the subscription link from their VPN app.\n\nAnyone else who has that link can do the same — for example, someone they share the VPN with.\n\nAfter such a recovery, the partner balance is held for {{count}} hours: it can be neither withdrawn nor used to pay for a subscription. Operators get a notice.',
       projectNamePlaceholder: 'Rezeis VPN',
       webTitlePlaceholder: 'Rezeis — Fast VPN',
       channelUsernamePlaceholder: '@yourchannel',
-      verifyTelegramRuPlaceholder: '{project_name} код верификации\nКод: {code}',
-      verifyTelegramEnPlaceholder: '{project_name} verification code\nCode: {code}',
-      passwordResetRuPlaceholder: 'Код сброса пароля {project_name}\nКод: {code}',
-      passwordResetEnPlaceholder: 'Your {project_name} password reset code:\n{code}',
       saved: 'Branding saved',
       saveFailed: 'Failed to save branding',
       saveButton: 'Save Branding',

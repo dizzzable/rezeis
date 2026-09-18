@@ -8,7 +8,6 @@
 import {
   DEFAULT_PLATFORM_BRANDING,
   PlatformBrandingInterface,
-  VerificationTemplateLocales,
 } from '../interfaces/platform-branding.interface';
 
 function readRecord(value: unknown): Record<string, unknown> {
@@ -26,17 +25,8 @@ function readNullableString(value: unknown): string | null {
   return null;
 }
 
-function readLocales(value: unknown): VerificationTemplateLocales {
-  const record = readRecord(value);
-  return {
-    ru: readNullableString(record['ru']),
-    en: readNullableString(record['en']),
-  };
-}
-
 export function readPlatformBranding(value: unknown): PlatformBrandingInterface {
   const record = readRecord(value);
-  const verification = readRecord(record['verification']);
   return {
     projectName: readNullableString(record['projectName']),
     timezone: readNullableString(record['timezone']),
@@ -50,25 +40,27 @@ export function readPlatformBranding(value: unknown): PlatformBrandingInterface 
       typeof record['requireTelegramWebCredentials'] === 'boolean'
         ? (record['requireTelegramWebCredentials'] as boolean)
         : DEFAULT_PLATFORM_BRANDING.requireTelegramWebCredentials,
-    verification: {
-      telegramTemplate: readLocales(verification['telegramTemplate']),
-      passwordResetTelegramTemplate: readLocales(
-        verification['passwordResetTelegramTemplate'],
-      ),
-    },
+    // Absent — every install from before the switch existed — reads as the
+    // default, ON: the path has worked since it shipped, and a save of any
+    // other branding field must not switch it off by omission.
+    subscriptionLinkRecovery:
+      typeof record['subscriptionLinkRecovery'] === 'boolean'
+        ? (record['subscriptionLinkRecovery'] as boolean)
+        : DEFAULT_PLATFORM_BRANDING.subscriptionLinkRecovery,
   };
 }
 
 /**
- * Deep-merges a partial platform-branding patch over the existing value.
- * Only keys present on the patch override; nested verification locale maps
- * are merged field-by-field so a partial update preserves the other locale.
+ * Merges a partial platform-branding patch over the existing value. Only keys
+ * present on the patch override.
  *
  * The column is not branding's alone: `platformPolicy.externalAuth` is the
  * External auth email policy (`ExternalProviderConfigService.updatePolicy`).
  * The result used to hold the branding keys only, so every Branding save
  * wrote that policy away and the policy page fell back to its defaults. Every
- * key this function does not own is carried over from `existing` as it is.
+ * key this function does not own is carried over from `existing` as it is —
+ * `verification` among them, the retired Telegram templates an install may
+ * have stored, which no save writes any more.
  */
 export function mergePlatformBranding(input: {
   readonly existing: unknown;
@@ -76,14 +68,6 @@ export function mergePlatformBranding(input: {
 }): Record<string, unknown> {
   const current = readPlatformBranding(input.existing);
   const { patch } = input;
-
-  const mergeLocales = (
-    base: VerificationTemplateLocales,
-    next: Partial<VerificationTemplateLocales> | undefined,
-  ): VerificationTemplateLocales => ({
-    ru: next?.ru !== undefined ? readNullableString(next.ru) : base.ru,
-    en: next?.en !== undefined ? readNullableString(next.en) : base.en,
-  });
 
   return {
     ...readRecord(input.existing),
@@ -105,19 +89,18 @@ export function mergePlatformBranding(input: {
       patch.requireTelegramWebCredentials !== undefined
         ? patch.requireTelegramWebCredentials
         : current.requireTelegramWebCredentials,
-    verification: {
-      telegramTemplate: mergeLocales(
-        current.verification.telegramTemplate,
-        patch.verification?.telegramTemplate,
-      ),
-      passwordResetTelegramTemplate: mergeLocales(
-        current.verification.passwordResetTelegramTemplate,
-        patch.verification?.passwordResetTelegramTemplate,
-      ),
-    },
+    subscriptionLinkRecovery:
+      patch.subscriptionLinkRecovery !== undefined
+        ? patch.subscriptionLinkRecovery
+        : current.subscriptionLinkRecovery,
   };
 }
 
+/**
+ * No `verification`: the retired Telegram templates an older admin SPA still
+ * sends are accepted by the DTO (`VerificationTemplatesDto`) and never reach
+ * this merge.
+ */
 export interface PlatformBrandingPatch {
   readonly projectName?: string | null;
   readonly timezone?: string | null;
@@ -125,8 +108,5 @@ export interface PlatformBrandingPatch {
   readonly channelUsername?: string | null;
   readonly channelRecheck?: boolean;
   readonly requireTelegramWebCredentials?: boolean;
-  readonly verification?: {
-    readonly telegramTemplate?: Partial<VerificationTemplateLocales>;
-    readonly passwordResetTelegramTemplate?: Partial<VerificationTemplateLocales>;
-  };
+  readonly subscriptionLinkRecovery?: boolean;
 }

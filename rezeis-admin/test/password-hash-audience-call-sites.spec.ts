@@ -287,15 +287,24 @@ const EXPECTED_AUDIENCES: Readonly<Record<string, readonly string[]>> = {
   'modules/internal-user/services/internal-user.service.ts': ['subscriber', 'subscriber'],
   // Subscriber credential minted BY an operator — see the behavioural case above.
   'modules/users/controllers/admin-user-web.controller.ts': ['subscriber'],
-  // Subscriber credentials: register, claim, claim-on-first-login, the
-  // opportunistic re-hash on sign-in, and rotation.
+  // Subscriber credential: a reset link — Telegram, e-mail or the subscription
+  // link — writes `WebAccount.passwordHash`, verified by `WebAuthService.login`.
+  'modules/web-auth/services/password-reset.service.ts': ['subscriber'],
+  // Subscriber credentials: register, claim, the opportunistic re-hash on
+  // sign-in, and rotation. "Claim on first login" — which adopted whatever
+  // password was typed for an imported account — is gone: such an account
+  // gets its first password through a reset link (`password-reset.service.ts`).
   'modules/web-auth/services/web-auth.service.ts': [
     'subscriber',
     'subscriber',
     'subscriber',
     'subscriber',
-    'subscriber',
   ],
+  // Subscriber credential: the first password of an account imported without
+  // one, set from a session its owner already holds (the Mini App). It writes
+  // `WebAccount.passwordHash`, verified by `WebAuthService.login`; its own
+  // parameter block is read back in `web-first-password.spec.ts`.
+  'modules/web-auth/services/web-first-password.service.ts': ['subscriber'],
 };
 
 function listTypeScriptFiles(directory: string, prefix = ''): string[] {

@@ -4,6 +4,8 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
+import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
+import { findRecoveryWithdrawalHold } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 import { PartnersService } from '../services/partners.service';
 
 /**
@@ -42,15 +44,16 @@ export class InternalPartnerController {
     });
     if (!partner) return null;
 
-    const [settingsRow, userRow] = await Promise.all([
+    const [settingsRow, userRow, holdUntil] = await Promise.all([
       this.prismaService.settings.findUnique({
         where: { id: 1 },
-        select: { partnerSettings: true, defaultCurrency: true },
+        select: { partnerSettings: true, defaultCurrency: true, platformPolicy: true },
       }),
       this.prismaService.user.findUnique({
         where: { id: user.id },
         select: { partnerBalanceCurrencyOverride: true },
       }),
+      findRecoveryWithdrawalHold(this.prismaService, user.id, new Date()),
     ]);
     const partnerSettings = (settingsRow?.partnerSettings ?? {}) as Record<string, unknown>;
     const balanceCurrency =
@@ -86,6 +89,21 @@ export class InternalPartnerController {
        * older panel never sent.
        */
       referralPoints: user.points,
+      /**
+       * The hold after a password recovery by subscription link, while it
+       * stands: no withdrawal and no purchase paid with the balance until
+       * `until`. `timezone` is the operator's own (Settings → Branding), for
+       * showing that moment the way the operator's other dates are shown;
+       * `null` means none is set and the moment is UTC. ALWAYS sent, `null`
+       * when there is no hold — for the reason `referralPoints` gives.
+       */
+      balanceHold:
+        holdUntil === null
+          ? null
+          : {
+              until: holdUntil.toISOString(),
+              timezone: readPlatformBranding(settingsRow?.platformPolicy ?? null).timezone,
+            },
       createdAt: partner.createdAt.toISOString(),
     };
   }
@@ -256,6 +274,12 @@ export class InternalPartnerController {
       return { error: 'PARTNER_PROGRAM_INVITED_ONLY' };
     }
 
+    // Three days after the password was reset by subscription link, money
+    // waits: a subscription link is often shared, and for an account with no
+    // Telegram and no e-mail that link was the whole proof. The check lives in
+    // `createWithdrawalRequest` itself, before its debit — as it does in
+    // `PartnerBalancePaymentService.pay` — so it holds for every caller; its
+    // refusal carries `WITHDRAWAL_HOLD_AFTER_RECOVERY` and `holdUntil`.
     const withdrawal = await this.partnersService.createWithdrawalRequest({
       partnerId: partner.id,
       amount: body.amount,

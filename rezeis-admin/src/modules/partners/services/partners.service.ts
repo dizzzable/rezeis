@@ -5,6 +5,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { assertPartnerBalanceNotHeld } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 import {
   ListPartnersQueryDto,
   ListPartnerWithdrawalsQueryDto,
@@ -334,9 +335,20 @@ export class PartnersService {
    * against money never taken. Creating first and letting the throw roll it
    * back would make that invariant depend on the rollback actually happening;
    * debiting first makes it structural, because the refusal returns before
-   * anything has been created. Nothing is read from the partner row on the
-   * path that succeeds: the create needs only `input.partnerId`, which the
-   * caller already supplied.
+   * anything has been created.
+   *
+   * THE RECOVERY HOLD. For three days after the password was reset by
+   * subscription link, no money leaves the balance
+   * (`assertPartnerBalanceNotHeld`, the same check `PartnerBalancePaymentService
+   * .pay` runs). It is checked HERE rather than by the caller, so no future
+   * caller can forget it, and the user it is checked for is the owner of this
+   * very partner row, never a user id somebody passed in. It runs BEFORE the
+   * transaction opens, so the transaction still reads nothing ahead of its
+   * guarded debit (`partner-withdrawal-races.spec.ts` pins that). Inside the
+   * transaction it would protect nothing more: under READ COMMITTED a hold
+   * committed after the read is invisible to either placement, and the hold is
+   * written in the same transaction as the new password, before anyone holding
+   * that password can ask for money.
    *
    * The three refusals are told apart only when the write matched nothing, and
    * in the order the JS checks used to run, so callers see exactly the
@@ -350,6 +362,13 @@ export class PartnersService {
   }): Promise<PartnerWithdrawalInterface> {
     if (input.amount <= 0) {
       throw new BadRequestException('Withdrawal amount must be positive');
+    }
+    const owner = await this.prismaService.partner.findUnique({
+      where: { id: input.partnerId },
+      select: { userId: true },
+    });
+    if (owner !== null) {
+      await assertPartnerBalanceNotHeld(this.prismaService, owner.userId);
     }
     const result = await this.prismaService.$transaction(async (tx) => {
       // Deduct balance immediately (altshop pattern), conditionally: the

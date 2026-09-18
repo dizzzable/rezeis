@@ -85,6 +85,13 @@ export class AdminUserWebController {
    *   • `passwordHash`               ← scrypt(SHA256(temp))
    *   • `requiresPasswordChange`     ← true (cabinet forces a reset on next login)
    *   • `temporaryPasswordExpiresAt` ← now + TTL
+   *   • `sessionsRevokedAt`          ← now: every cabinet session of the
+   *     customer is signed out at its next check, within a minute. This is the
+   *     support case of a taken-over account — an operator resets it, and
+   *     whoever was signed in with the old password must not stay signed in.
+   *     In the same statement as the password, as a reset link writes it
+   *     (`PasswordResetService.consume`), so there is never one without the
+   *     other.
    */
   @Post(':telegramId/web/reset-password')
   @HttpCode(HttpStatus.OK)
@@ -116,7 +123,8 @@ export class AdminUserWebController {
       plainTextPassword: sha256Hex(temporaryPassword),
       audience: 'subscriber',
     });
-    const expiresAt = new Date(Date.now() + TEMPORARY_PASSWORD_TTL_HOURS * 60 * 60 * 1000);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + TEMPORARY_PASSWORD_TTL_HOURS * 60 * 60 * 1000);
 
     await this.prismaService.webAccount.update({
       where: { id: webAccount.id },
@@ -124,6 +132,7 @@ export class AdminUserWebController {
         passwordHash,
         requiresPasswordChange: true,
         temporaryPasswordExpiresAt: expiresAt,
+        sessionsRevokedAt: now,
       },
     });
 

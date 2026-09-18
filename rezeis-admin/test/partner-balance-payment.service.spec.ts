@@ -5,6 +5,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PurchaseType, TransactionStatus } from '@prisma/client';
 
 import { PartnerBalancePaymentService } from '../src/modules/payments/services/partner-balance-payment.service';
+import { RECOVERY_WITHDRAWAL_HOLD_PURPOSE } from '../src/modules/web-auth/utils/recovery-withdrawal-hold.util';
 
 /**
  * A compensating action that failed silently
@@ -213,6 +214,16 @@ function build(overrides: Overrides = {}) {
     user: {
       findUnique: async () => ({ id: 'user-1', partnerBalanceCurrencyOverride: null }),
       findFirst: async () => ({ id: 'user-1', partnerBalanceCurrencyOverride: null }),
+    },
+    // The recovery hold `pay()` checks before its draft. No fixture here is
+    // under one, so the lookup for the payer finds nothing; the hold itself is
+    // pinned in `partner-balance-recovery-hold.spec.ts`.
+    authChallenge: {
+      findFirst: async (args: { where: { purpose?: string; webAccount?: { userId?: string } } }) => {
+        assert.equal(args.where.purpose, RECOVERY_WITHDRAWAL_HOLD_PURPOSE);
+        assert.equal(args.where.webAccount?.userId, 'user-1');
+        return null;
+      },
     },
     partner: {
       findUnique: async () => partner,

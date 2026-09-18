@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { InternalPartnerController } from '../src/modules/partners/controllers/internal-partner.controller';
+import { RECOVERY_WITHDRAWAL_HOLD_PURPOSE } from '../src/modules/web-auth/utils/recovery-withdrawal-hold.util';
 
 /**
  * `GET /internal/user/:ref/partner/info` — the referral points a partner still owns.
@@ -139,6 +140,18 @@ function buildPrisma(input: FakeInput) {
     referral: {
       findUnique: async () => (input.invitedEdge === true ? { id: 'edge-1' } : null),
     },
+    /**
+     * The recovery hold `getInfo` reports as `balanceHold`. No fixture here is
+     * under one, so the lookup for the partner's own user finds nothing; the
+     * hold itself is pinned in `partner-balance-recovery-hold.spec.ts`.
+     */
+    authChallenge: {
+      findFirst: async (args: { where: { purpose?: string; webAccount?: { userId?: string } } }) => {
+        assert.equal(args.where.purpose, RECOVERY_WITHDRAWAL_HOLD_PURPOSE);
+        assert.equal(args.where.webAccount?.userId, input.user?.id);
+        return null;
+      },
+    },
   };
 }
 
@@ -271,6 +284,7 @@ describe('InternalPartnerController.getInfo — referral points', () => {
     assert.deepStrictEqual(Object.keys(info).sort(), [
       'balance',
       'balanceCurrency',
+      'balanceHold',
       'balancePaymentEnabled',
       'createdAt',
       'id',
@@ -284,6 +298,8 @@ describe('InternalPartnerController.getInfo — referral points', () => {
     assert.equal(info['balanceCurrency'], 'USD');
     assert.equal(info['balancePaymentEnabled'], true);
     assert.equal(info['programAvailable'], true);
+    // Sent as null, not left out, when the balance is not on hold.
+    assert.equal(info['balanceHold'], null);
   });
 
   it('resolves the same points through a reiwa_id as through a telegramId', async () => {

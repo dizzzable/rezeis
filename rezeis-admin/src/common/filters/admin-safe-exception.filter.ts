@@ -29,6 +29,11 @@ interface SafeErrorResponse {
    * by the codes in `CODES_CARRYING_ISSUES` — see `extractSafeIssues`.
    */
   issues?: readonly SafeIssue[];
+  /**
+   * When a temporary refusal ends, as an ISO-8601 instant. Carried only by the
+   * codes in `CODES_CARRYING_HOLD_UNTIL` — see `extractSafeHoldUntil`.
+   */
+  holdUntil?: string;
   error?: string;
 }
 
@@ -323,6 +328,13 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // reached from the save path at all. The dry run showed the rows only because
   // it answers 200 and never meets this filter.
   'CONNECT_PAGE_CATALOG_INVALID',
+  // The partner balance held for three days after a password recovery by
+  // subscription link (`recovery-withdrawal-hold.util.ts`), refused alike by a
+  // withdrawal request and by paying with the balance. The customer has to be
+  // told it is temporary and until when; stripped of the code the cabinet had
+  // only "Withdrawal request failed". Its `holdUntil` rides along through
+  // `CODES_CARRYING_HOLD_UNTIL` below.
+  'WITHDRAWAL_HOLD_AFTER_RECOVERY',
 ]);
 /**
  * Codes whose refusal is meaningless without naming the credential it wants.
@@ -378,6 +390,18 @@ const SAFE_REAUTH_FACTORS = new Set<string>(['totp', 'password'] satisfies SafeR
  */
 export const CODES_CARRYING_ISSUES: ReadonlySet<string> = new Set<string>([
   'CONNECT_PAGE_CATALOG_INVALID',
+]);
+/**
+ * Codes whose refusal names the moment it ends. Same subset rule as the two
+ * sets above, on a third field: a code listed only here forwards nothing.
+ *
+ * The value is not copied either. `extractSafeHoldUntil` accepts only a string
+ * that IS an ISO-8601 instant — one `new Date(value).toISOString()` gives back
+ * unchanged — and writes that re-serialised instant, so a `holdUntil` carrying
+ * anything else leaves nothing behind.
+ */
+export const CODES_CARRYING_HOLD_UNTIL: ReadonlySet<string> = new Set<string>([
+  'WITHDRAWAL_HOLD_AFTER_RECOVERY',
 ]);
 /**
  * Caps on the list, so a refusal cannot become a payload.
@@ -529,6 +553,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       const productCode = payload?.code;
       const factor = extractSafeReauthFactor(payload);
       const issues = extractSafeIssues(payload);
+      const holdUntil = extractSafeHoldUntil(payload);
       return {
         timestamp,
         path,
@@ -541,6 +566,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
         ...(productCode ? { code: productCode } : {}),
         ...(factor ? { factor } : {}),
         ...(issues ? { issues } : {}),
+        ...(holdUntil ? { holdUntil } : {}),
         ...(error ? { error } : {}),
       };
     }
@@ -665,6 +691,24 @@ function extractSafeReauthFactor(
   return typeof candidate === 'string' && SAFE_REAUTH_FACTORS.has(candidate)
     ? (candidate as SafeReauthFactor)
     : undefined;
+}
+
+/**
+ * The `holdUntil` passthrough, gated twice like `factor`: the code must be one
+ * that declares it carries the moment, and the value must be an exact
+ * ISO-8601 instant. What is written is the re-serialised instant, never the
+ * string the body held.
+ */
+function extractSafeHoldUntil(
+  payload: { readonly code: string; readonly body: Record<string, unknown> } | undefined,
+): string | undefined {
+  if (!payload || !CODES_CARRYING_HOLD_UNTIL.has(payload.code)) return undefined;
+  const candidate = payload.body.holdUntil;
+  if (typeof candidate !== 'string') return undefined;
+  const instant = new Date(candidate);
+  if (Number.isNaN(instant.getTime())) return undefined;
+  const serialised = instant.toISOString();
+  return serialised === candidate ? serialised : undefined;
 }
 
 /**

@@ -20,6 +20,12 @@ export interface InternalPlatformPolicyInterface {
    * Telegram alone is accepted and such users go straight in.
    */
   readonly requireTelegramWebCredentials: boolean;
+  /**
+   * «Восстановление пароля по ссылке подписки» (default true). The cabinet
+   * offers recovery by subscription link only when this is `true`; a cabinet
+   * reading a panel that predates the field treats its absence as OFF.
+   */
+  readonly subscriptionLinkRecovery: boolean;
   readonly accessMode: AccessMode;
   readonly inviteModeStartedAt: string | null;
   readonly defaultCurrency: Currency;

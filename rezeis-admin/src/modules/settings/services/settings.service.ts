@@ -247,6 +247,7 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
   channelUsername: null,
   channelRecheck: true,
   requireTelegramWebCredentials: false,
+  subscriptionLinkRecovery: true,
   accessMode: 'PUBLIC',
   inviteModeStartedAt: null,
   defaultCurrency: 'USD',
@@ -1804,6 +1805,7 @@ function mapInternalPlatformPolicy(settings: Settings): InternalPlatformPolicyIn
     channelUsername: branding.channelUsername,
     channelRecheck: branding.channelRecheck,
     requireTelegramWebCredentials: branding.requireTelegramWebCredentials,
+    subscriptionLinkRecovery: branding.subscriptionLinkRecovery,
     accessMode: settings.accessMode,
     inviteModeStartedAt:
       settings.inviteModeStartedAt === null ? null : settings.inviteModeStartedAt.toISOString(),

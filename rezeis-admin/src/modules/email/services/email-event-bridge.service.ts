@@ -1,12 +1,27 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 
 import {
+  EVENT_TYPES,
   SystemEventsService,
   type SystemEventPayload,
 } from '../../../common/services/system-events.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EmailDeliveryService } from './email-delivery.service';
 import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
+
+/**
+ * Events about the ACCOUNT'S OWN CREDENTIALS. Their letters go only to the
+ * address the web account VERIFIED — never to an unconfirmed one, which may be
+ * a typo and so a stranger, and never to `User.email`, which an import or a
+ * social sign-up can set without anybody confirming it. Without a verified
+ * address the letter is not sent: a notice about somebody's password is worse
+ * than no notice when it reaches somebody else.
+ */
+export const VERIFIED_ADDRESS_ONLY_EVENTS: ReadonlySet<string> = new Set<string>([
+  EVENT_TYPES.AUTH_PASSWORD_RECOVERY,
+  EVENT_TYPES.AUTH_PASSWORD_CHANGED,
+  EVENT_TYPES.AUTH_WEB_LOGIN,
+]);
 
 /**
  * Bridges SystemEventsService → Email delivery.
@@ -65,11 +80,15 @@ export class EmailEventBridgeService implements OnModuleInit {
         name: true,
         // Without this the letter is Russian for everybody.
         language: true,
-        webAccount: { select: { email: true } },
+        webAccount: { select: { email: true, emailVerifiedAt: true } },
       },
     });
 
-    const email = user?.email ?? user?.webAccount?.email;
+    const email = VERIFIED_ADDRESS_ONLY_EVENTS.has(event.type)
+      ? user?.webAccount?.emailVerifiedAt
+        ? user.webAccount.email
+        : null
+      : (user?.email ?? user?.webAccount?.email);
     if (!email) return;
 
     // Build variables from event metadata

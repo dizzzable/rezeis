@@ -27,6 +27,7 @@ import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from './payments-transactions.service';
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
+import { assertPartnerBalanceNotHeld } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 
 /**
  * Key under `Transaction.gatewayData` holding a balance restore we still owe a
@@ -169,6 +170,13 @@ export class PartnerBalancePaymentService {
         message: 'You are not an active partner.',
       });
     }
+
+    // 4b. The recovery hold: for three days after the password was reset by
+    //     subscription link nothing leaves the balance — not a withdrawal and
+    //     not this. The same shared check `createWithdrawalRequest` runs, so
+    //     both refuse with `WITHDRAWAL_HOLD_AFTER_RECOVERY` and `holdUntil`.
+    //     Before the draft, so a refusal reserves and releases nothing.
+    await assertPartnerBalanceNotHeld(this.prismaService, user.id);
 
     // 5. Balance currency: per-user override → operator default.
     const balanceCurrency: Currency =

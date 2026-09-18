@@ -78,6 +78,12 @@ export const RELAY_DIRECT_DELIVERY_EXCEPTIONS: Readonly<Record<string, string>> 
     'attempt whose result it can show — the same reasoning as ' +
     '`ReiwaCacheInvalidatorService.invalidateNow`. The broadcast\'s channel post ' +
     'is NOT among them: it goes through the queue.',
+  'src/modules/web-auth/services/password-reset.service.ts':
+    'A password-reset message carries a live single-use credential in its button. ' +
+    'The queue keeps completed and failed jobs (`BULLMQ_RETAINED_*`), so a queued copy ' +
+    'would leave the link readable in Redis long after its fifteen minutes, and a late ' +
+    'retry could deliver a link that no longer works. One direct attempt; the outcome ' +
+    'is read and logged by status, and a miss is the customer asking again.',
 };
 
 /** Payload of a `reiwa.relay` job. Must stay JSON-serialisable. */

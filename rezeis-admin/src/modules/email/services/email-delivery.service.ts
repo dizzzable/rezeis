@@ -174,6 +174,57 @@ export class EmailDeliveryService {
   }
 
   /**
+   * Send a password-reset LINK, synchronously and never through the queue.
+   *
+   * The link is a live, single-use credential for fifteen minutes. `send()`
+   * would put it in a BullMQ job, and the queue keeps completed jobs for a day
+   * and failed ones for a week — the link would sit readable in Redis long after
+   * it stopped being valid, and a retry could deliver it after it expired. One
+   * direct SMTP attempt keeps it in memory only; the caller learns the outcome
+   * and the customer can simply ask again.
+   */
+  public async sendPasswordResetLink(input: {
+    readonly to: string;
+    readonly login: string;
+    readonly link: string;
+    readonly expiresAt: Date;
+    readonly locale: 'ru' | 'en';
+  }): Promise<{ success: boolean; error?: string }> {
+    const minutes = Math.max(1, Math.round((input.expiresAt.getTime() - Date.now()) / 60_000));
+    const login = escapeEmailHtml(input.login);
+    const href = escapeEmailHtml(input.link);
+    const en = input.locale === 'en';
+    const heading = en ? 'Password reset' : 'Сброс пароля';
+    const intro = en
+      ? `Someone asked to reset the cabinet password for the login <b>${login}</b>.`
+      : `Запросили сброс пароля от кабинета для логина <b>${login}</b>.`;
+    const action = en ? 'Set a new password' : 'Задать новый пароль';
+    const validity = en
+      ? `The link works once and expires in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`
+      : `Ссылка сработает один раз и действует ${minutes} ${pluralMinutesRu(minutes)}.`;
+    const ignore = en
+      ? 'If it wasn’t you, ignore this email — your password stays the same.'
+      : 'Если это были не вы — просто проигнорируйте письмо, пароль останется прежним.';
+    const rawHtml = `
+      <h2 style="margin:0 0 12px 0;color:#111827;font-size:20px;">${heading}</h2>
+      <p style="margin:0 0 20px 0;color:#374151;">${intro}</p>
+      <p style="margin:0 0 20px 0;text-align:center;">
+        <a href="${href}" style="display:inline-block;padding:12px 22px;background:#111827;color:#ffffff;border-radius:10px;text-decoration:none;font-weight:600;">${action}</a>
+      </p>
+      <p style="margin:0 0 8px 0;color:#6b7280;font-size:13px;">${validity}</p>
+      <p style="margin:0;color:#9ca3af;font-size:12px;">${ignore}</p>
+    `;
+    return this.sendImmediate({
+      to: input.to,
+      subject: heading,
+      templateType: '__password_reset_link__',
+      variables: {},
+      rawHtml,
+      locale: input.locale,
+    });
+  }
+
+  /**
    * Send a test email to verify SMTP configuration.
    */
   public async sendTest(to: string): Promise<{ success: boolean; error?: string }> {
@@ -378,5 +429,15 @@ function escapeEmailHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Russian plural of «минута» for a count. */
+function pluralMinutesRu(count: number): string {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'минуту';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'минуты';
+  return 'минут';
 }

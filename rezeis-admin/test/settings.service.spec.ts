@@ -124,6 +124,9 @@ describe('SettingsService', () => {
       channelUsername: null,
       channelRecheck: true,
       requireTelegramWebCredentials: false,
+      // «Восстановление пароля по ссылке подписки» is ON until an operator
+      // switches it off — a fresh install included.
+      subscriptionLinkRecovery: true,
       accessMode: AccessMode.PUBLIC,
       inviteModeStartedAt: null,
       defaultCurrency: Currency.USD,

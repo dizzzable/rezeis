@@ -296,7 +296,12 @@ describe('WebAuthService', () => {
     });
   });
 
-  it('claims a migrated web-only account with any password on first login and forces a reset', async () => {
+  // This used to read "claims a migrated web-only account with any password on
+  // first login" — the account takeover it pinned: the login of an imported
+  // account is usually its owner's public Telegram username, and whoever typed
+  // it first chose the password. The owner's way in is now a reset link (see
+  // `test/web-auth-reset.spec.ts`, "an account imported without a password").
+  it('refuses a migrated account without a password whatever is typed, and writes nothing', async () => {
     const passwordHashService = createPasswordHashServiceMock();
     const prisma = createPrismaMock({
       loginAccounts: new Map([
@@ -309,33 +314,21 @@ describe('WebAuthService', () => {
             passwordBootstrapPending: true,
             requiresPasswordChange: true,
             credentialsBootstrappedAt: null,
+            email: null,
             emailVerifiedAt: null,
-            user: { telegramId: null },
+            user: { telegramId: 555000111n },
           },
         ],
       ]),
     });
     const service = createService({ prisma, passwordHashService });
 
-    const result = await service.login({ login: 'Migrated', password: 'whatever-they-typed' });
+    for (const password of ['whatever-they-typed', 'another-guess-2']) {
+      await assertGenericLoginFailure(service, { login: 'Migrated', password });
+    }
 
-    assert.deepStrictEqual(result, {
-      userId: 'user-9',
-      requiresPasswordChange: true,
-      telegramLinked: false,
-      emailVerified: false,
-    });
-    // The submitted password is adopted; the pending flag is cleared; reset forced.
-    assert.equal(prisma.webAccountUpdates.length, 1);
-    const data = prisma.webAccountUpdates[0].data as {
-      passwordHash: string;
-      passwordBootstrapPending: boolean;
-      requiresPasswordChange: boolean;
-    };
-    assert.equal(data.passwordHash, 'hashed:whatever-they-typed');
-    assert.equal(data.passwordBootstrapPending, false);
-    assert.equal(data.requiresPasswordChange, true);
-    assert.deepStrictEqual(passwordHashService.hashPasswordCalls, ['whatever-they-typed']);
+    assert.equal(prisma.webAccountUpdates.length, 0, 'the typed password was written to the account');
+    assert.deepStrictEqual(passwordHashService.hashPasswordCalls, [], 'the typed password was even hashed');
   });
 
   it('does not claim an ordinary null-password account (no pending flag)', async () => {
@@ -384,25 +377,7 @@ describe('WebAuthService', () => {
     await assertGenericLoginFailure(service, { login: 'bad login', password: 'correct-password' });
   });
 
-  it('resolves recovery channels without leaking unknown accounts', async () => {
-    const service = createService({
-      prisma: createPrismaMock({
-        recoveryAccounts: new Map([
-          ['telegram-user', { email: null, emailVerifiedAt: null, user: { telegramId: BigInt(1) } }],
-          [
-            'email-user',
-            { email: 'user@example.com', emailVerifiedAt: new Date('2026-06-02T12:00:00.000Z'), user: { telegramId: null } },
-          ],
-          ['bare-user', { email: 'user@example.com', emailVerifiedAt: null, user: { telegramId: null } }],
-        ]),
-      }),
-    });
-
-    assert.deepStrictEqual(await service.recover({ login: 'telegram-user' }), { method: 'telegram' });
-    assert.deepStrictEqual(await service.recover({ login: 'email-user' }), { method: 'email' });
-    assert.deepStrictEqual(await service.recover({ login: 'bare-user' }), { method: 'none' });
-    assert.deepStrictEqual(await service.recover({ login: 'missing-user' }), { method: 'none' });
-  });
+  // Recovery moved to `PasswordResetService` — see test/web-auth-reset.spec.ts.
 
   it('changes a password after verifying the current password', async () => {
     const prisma = createPrismaMock({
@@ -418,14 +393,19 @@ describe('WebAuthService', () => {
     });
     const service = createService({ prisma });
 
-    assert.deepStrictEqual(
-      await service.changePassword({
-        userId: 'user-1',
-        currentPassword: 'old-password',
-        newPassword: 'new-password',
-      }),
-      { success: true },
-    );
+    const result = await service.changePassword({
+      userId: 'user-1',
+      currentPassword: 'old-password',
+      newPassword: 'new-password',
+    });
+
+    // The same write signs every other cabinet session of the account out
+    // (`web-session-revocation.spec.ts`); its moment goes back to the cabinet.
+    assert.equal(prisma.webAccountUpdates.length, 1);
+    const [update] = prisma.webAccountUpdates;
+    const revokedAt = (update.data as Record<string, unknown>)['sessionsRevokedAt'];
+    assert.ok(revokedAt instanceof Date, 'the password change left older sessions signed in');
+    assert.deepStrictEqual(result, { success: true, sessionsRevokedAt: revokedAt.toISOString() });
     assert.deepStrictEqual(prisma.webAccountUpdates, [
       {
         where: { id: 'web-account-1' },
@@ -433,6 +413,7 @@ describe('WebAuthService', () => {
           passwordHash: 'hashed:new-password',
           requiresPasswordChange: false,
           temporaryPasswordExpiresAt: null,
+          sessionsRevokedAt: revokedAt,
         },
       },
     ]);

@@ -145,10 +145,13 @@ export function panelShortUuidFromConfigUrl(value: string | null): string | null
   }
 }
 
+/** Path segments that are routes of a panel or a subscription page, never an id. */
+const RESERVED_ROUTE_SEGMENT = /^(api|admin|assets?|favicon\.ico|health|metrics|subscription|subscriptions)$/i;
+
 function panelShortUuidFromPath(pathname: string): string | null {
   const match = pathname.match(/(?:^|\/)api\/sub\/([^/?#]+)$|(?:^|\/)sub\/([^/?#]+)$/);
   const explicit = match?.[1] ?? match?.[2];
-  if (explicit !== undefined && explicit.length > 0) return decodeURIComponent(explicit);
+  if (explicit !== undefined && explicit.length > 0) return decodePathSegment(explicit);
 
   // Remnawave 3.2.x renders subscription links as `https://sub-domain/<shortUuid>`.
   // Accept only one plain path segment so dashboard/API routes are never mistaken
@@ -156,10 +159,87 @@ function panelShortUuidFromPath(pathname: string): string | null {
   const segments = pathname.split('/').filter((segment) => segment.length > 0);
   if (segments.length !== 1) return null;
   const raw = segments[0];
-  if (/^(api|admin|assets?|favicon\.ico|health|metrics|subscription|subscriptions)$/i.test(raw)) {
+  if (RESERVED_ROUTE_SEGMENT.test(raw)) {
     return null;
   }
-  return decodeURIComponent(raw);
+  return decodePathSegment(raw);
+}
+
+/**
+ * A path segment, percent-decoded — or `null` when its encoding is malformed.
+ *
+ * `decodeURIComponent` THROWS on `%E0%A4%A`, and this sits under panel
+ * addressing and under recovery by subscription link: a single stored address
+ * with a stray `%` used to throw out of every caller. "Cannot tell" is the
+ * honest answer; the raw text would be an id nobody issued.
+ */
+function decodePathSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+/** Words that end a subscription address without being an id: routes and client formats. */
+const NOT_A_SHORT_ID = new Set([
+  'sub',
+  'subs',
+  'api',
+  'json',
+  'singbox',
+  'sing-box',
+  'clash',
+  'mihomo',
+  'stash',
+  'v2ray',
+  'v2ray-json',
+  'xray',
+  'xray-json',
+  'outline',
+  'info',
+]);
+
+/**
+ * Every short id a STORED subscription address can be recognised by, for
+ * matching the link a customer pastes during password recovery.
+ *
+ * Wider than `panelShortUuidFromConfigUrl` on purpose, and kept apart from it:
+ * that one feeds panel ADDRESSING, and widening it would start addressing
+ * profiles by whatever a custom path happens to end with. Here the answer is
+ * only ever compared with the customer's own paste, and the extra case is the
+ * one the strict reader misses — an operator's subscription page under a
+ * custom path prefix (`https://sub.example.com/vpn/<id>`), whose customers
+ * would otherwise never match and lock themselves out trying.
+ *
+ * The fallback takes the LAST segment, and only when it looks like an issued
+ * id: 8–64 characters of the short-id alphabet, not a route, not a client
+ * format. A generic last word would let anybody who typed it match every
+ * address that ends with it.
+ */
+export function configUrlShortIds(value: string | null): string[] {
+  const ids: string[] = [];
+  const strict = panelShortUuidFromConfigUrl(value);
+  if (strict !== null) ids.push(strict);
+  if (typeof value !== 'string' || value.length === 0) return ids;
+  let pathname: string;
+  try {
+    pathname = new URL(value).pathname;
+  } catch {
+    pathname = value.split(/[?#]/, 1)[0] ?? '';
+  }
+  const segments = pathname.split('/').filter((segment) => segment.length > 0);
+  const last = segments.length === 0 ? null : decodePathSegment(segments[segments.length - 1]);
+  if (
+    last !== null &&
+    !ids.includes(last) &&
+    /^[A-Za-z0-9_-]{8,64}$/.test(last) &&
+    !RESERVED_ROUTE_SEGMENT.test(last) &&
+    !NOT_A_SHORT_ID.has(last.toLowerCase())
+  ) {
+    ids.push(last);
+  }
+  return ids;
 }
 
 /** A decimal integer with no sign, no separators, no leading `+`. */

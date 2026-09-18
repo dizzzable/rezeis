@@ -72,6 +72,9 @@ is_auto_recoverable_migration() {
     20260918120000_transactions_gateway_id_index)
       return 0
       ;;
+    20260918140000_web_account_sessions_revoked_at)
+      return 0
+      ;;
     *)
       return 1
       ;;

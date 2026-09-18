@@ -10,6 +10,8 @@ import { enablePush } from '@/lib/push'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { InfoTip } from '@/components/ui/info-tip'
+import { useHasPermission } from '@/features/rbac'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -19,19 +21,28 @@ import { Separator } from '@/components/ui/separator'
 const ACCESS_MODES = ['PUBLIC', 'INVITED', 'PURCHASE_BLOCKED', 'REG_BLOCKED', 'RESTRICTED'] as const
 const CURRENCIES = ['RUB', 'USD', 'EUR', 'XTR', 'USDT', 'TON'] as const
 
-interface BrandingVerificationSettings {
-  readonly telegramTemplate?: { readonly ru?: string; readonly en?: string }
-  readonly passwordResetTelegramTemplate?: { readonly ru?: string; readonly en?: string }
-}
-
+/**
+ * No Telegram templates. «Верификация (RU/EN)» and «Сброс пароля (RU/EN)» were
+ * offered here and never sent by anything — a reset link goes out with the
+ * bot's own text, an e-mail code with the e-mail's own. The card neither shows
+ * nor sends them; the panel keeps what an install stored, untouched.
+ */
 interface BrandingSettings {
   readonly projectName?: string
   readonly webTitle?: string
   readonly channelUsername?: string
   readonly channelRecheck?: boolean
   readonly requireTelegramWebCredentials?: boolean
-  readonly verification?: BrandingVerificationSettings
+  /** «Восстановление пароля по ссылке подписки»; absent reads as ON, as on the server. */
+  readonly subscriptionLinkRecovery?: boolean
 }
+
+/**
+ * How long partner withdrawals wait after a recovery by subscription link —
+ * `RECOVERY_WITHDRAWAL_HOLD_HOURS` on the server. Stated in the (i) of the
+ * switch that turns that recovery on.
+ */
+export const RECOVERY_WITHDRAWAL_HOLD_HOURS = 72
 
 interface MultiSubscriptionSettings {
   readonly enabled?: boolean
@@ -460,6 +471,10 @@ export function WebPushSection({ settings }: { settings: AdminSettings | undefin
 export function BrandingTab({ settings }: { settings: AdminSettings | undefined }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  // The save is `PATCH /admin/settings/platform`, which needs `settings:edit`.
+  // The admin client has no global 403 handler, so without the right nothing
+  // may go out: the write affordances are disabled instead.
+  const canEdit = useHasPermission('settings', 'edit')
   const branding = settings?.platformBranding ?? {}
 
   const [projectName, setProjectName] = useState(branding.projectName ?? '')
@@ -469,13 +484,9 @@ export function BrandingTab({ settings }: { settings: AdminSettings | undefined 
   const [requireTelegramWebCredentials, setRequireTelegramWebCredentials] = useState(
     branding.requireTelegramWebCredentials ?? false,
   )
-
-  // Verification templates
-  const verification = branding.verification ?? {}
-  const [verifyTelegramRu, setVerifyTelegramRu] = useState(verification.telegramTemplate?.ru ?? '')
-  const [verifyTelegramEn, setVerifyTelegramEn] = useState(verification.telegramTemplate?.en ?? '')
-  const [passwordResetRu, setPasswordResetRu] = useState(verification.passwordResetTelegramTemplate?.ru ?? '')
-  const [passwordResetEn, setPasswordResetEn] = useState(verification.passwordResetTelegramTemplate?.en ?? '')
+  const [subscriptionLinkRecovery, setSubscriptionLinkRecovery] = useState(
+    branding.subscriptionLinkRecovery ?? true,
+  )
 
   const mutation = useMutation({
     mutationFn: (data: BrandingSettings) => api.patch('/admin/settings/platform', { platformBranding: data }),
@@ -490,10 +501,7 @@ export function BrandingTab({ settings }: { settings: AdminSettings | undefined 
       channelUsername,
       channelRecheck,
       requireTelegramWebCredentials,
-      verification: {
-        telegramTemplate: { ru: verifyTelegramRu, en: verifyTelegramEn },
-        passwordResetTelegramTemplate: { ru: passwordResetRu, en: passwordResetEn },
-      },
+      subscriptionLinkRecovery,
     })
   }
 
@@ -560,57 +568,25 @@ export function BrandingTab({ settings }: { settings: AdminSettings | undefined 
           />
         </div>
 
-        <Separator />
-
-        <div className="space-y-4">
-          <h3 className="text-sm font-semibold">{t('settingsPage.branding.verificationTemplates')}</h3>
-          <p className="text-xs text-muted-foreground">{t('settingsPage.branding.verificationTemplatesHint')}</p>
-
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="settings-branding-verification-ru">{t('settingsPage.branding.verificationRu')}</Label>
-              <textarea
-                id="settings-branding-verification-ru"
-                className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
-                value={verifyTelegramRu}
-                onChange={(e) => setVerifyTelegramRu(e.target.value)}
-                placeholder={t('settingsPage.branding.verifyTelegramRuPlaceholder')}
-              />
+        <div className="flex items-center justify-between rounded-lg border p-3">
+          <div className="pr-3">
+            <div className="flex items-center gap-1.5">
+              <Label>{t('settingsPage.branding.subscriptionLinkRecovery')}</Label>
+              <InfoTip label={t('settingsPage.branding.subscriptionLinkRecoveryInfoLabel')}>
+                {t('settingsPage.branding.subscriptionLinkRecoveryInfo', { count: RECOVERY_WITHDRAWAL_HOLD_HOURS })}
+              </InfoTip>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="settings-branding-verification-en">{t('settingsPage.branding.verificationEn')}</Label>
-              <textarea
-                id="settings-branding-verification-en"
-                className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
-                value={verifyTelegramEn}
-                onChange={(e) => setVerifyTelegramEn(e.target.value)}
-                placeholder={t('settingsPage.branding.verifyTelegramEnPlaceholder')}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="settings-branding-password-reset-ru">{t('settingsPage.branding.passwordResetRu')}</Label>
-              <textarea
-                id="settings-branding-password-reset-ru"
-                className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
-                value={passwordResetRu}
-                onChange={(e) => setPasswordResetRu(e.target.value)}
-                placeholder={t('settingsPage.branding.passwordResetRuPlaceholder')}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="settings-branding-password-reset-en">{t('settingsPage.branding.passwordResetEn')}</Label>
-              <textarea
-                id="settings-branding-password-reset-en"
-                className="w-full h-20 font-mono text-xs border rounded-md p-2 bg-muted/30 resize-y"
-                value={passwordResetEn}
-                onChange={(e) => setPasswordResetEn(e.target.value)}
-                placeholder={t('settingsPage.branding.passwordResetEnPlaceholder')}
-              />
-            </div>
+            <p className="text-xs text-muted-foreground">{t('settingsPage.branding.subscriptionLinkRecoveryHint')}</p>
           </div>
+          <Switch
+            checked={subscriptionLinkRecovery}
+            onCheckedChange={setSubscriptionLinkRecovery}
+            disabled={!canEdit}
+            aria-label={t('settingsPage.branding.subscriptionLinkRecovery')}
+          />
         </div>
 
-        <Button onClick={handleSave} disabled={mutation.isPending}>
+        <Button onClick={handleSave} disabled={mutation.isPending || !canEdit}>
           {mutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
           {t('settingsPage.branding.saveButton')}
         </Button>

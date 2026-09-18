@@ -1714,11 +1714,18 @@ model WebAccount {
   emailVerifiedAt            DateTime? @map("email_verified_at") @db.Timestamptz(3)
   passwordHash               String?   @map("password_hash")
   requiresPasswordChange     Boolean   @default(false) @map("requires_password_change")
-  /// Set by an importer for a migrated web-only account that has no usable
-  /// password yet. While true, the first cabinet sign-in adopts whatever
-  /// password the user submits, clears this flag, and forces a reset. Only an
-  /// importer sets it — no pre-existing account is claimable.
+  /// Set by an importer for a migrated account that has no usable password
+  /// yet. Nobody can claim it by typing a password at sign-in: its owner gets
+  /// in through a reset link (sent to the linked Telegram or verified e-mail),
+  /// or sets a first password from a session they already have (the Mini
+  /// App). Either way clears it.
   passwordBootstrapPending   Boolean   @default(false) @map("password_bootstrap_pending")
+  /// Every cabinet session of this account opened before this moment is
+  /// signed out. Written by a password reset (any channel), a password change,
+  /// a first password and «Выйти на всех устройствах»; the cabinet compares it
+  /// with each session's start, at most once a minute per session. Null: no
+  /// session was ever signed out this way.
+  sessionsRevokedAt          DateTime? @map("sessions_revoked_at") @db.Timestamptz(3)
   temporaryPasswordExpiresAt DateTime? @map("temporary_password_expires_at") @db.Timestamptz(3)
   /// Set when the user first enrolls credentials. Acts as an idempotency
   /// guard for `setWebAccountPassword`.

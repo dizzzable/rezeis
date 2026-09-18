@@ -7,6 +7,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 import { AdminPartnersController } from '../src/modules/partners/controllers/admin-partners.controller';
 import { PartnersService } from '../src/modules/partners/services/partners.service';
+import { RECOVERY_WITHDRAWAL_HOLD_PURPOSE } from '../src/modules/web-auth/utils/recovery-withdrawal-hold.util';
 
 /**
  * Partner withdrawals: the debit that opens one, and the transition that
@@ -433,6 +434,24 @@ function makeDb(seedRows: {
       findUnique: async (args: { where: { id?: string } }) => {
         record('user.findUnique');
         return users.find((u) => u.id === args.where.id) ?? null;
+      },
+    },
+    /**
+     * The recovery hold, which `createWithdrawalRequest` checks before its
+     * transaction opens. No fixture here is under one, so a lookup for the
+     * partner's own user finds nothing; a lookup for anybody else fails the
+     * test. The hold itself is pinned in `partner-balance-recovery-hold.spec.ts`.
+     */
+    authChallenge: {
+      findFirst: async (args: { where: { purpose?: string; webAccount?: { userId?: string } } }) => {
+        record('authChallenge.findFirst');
+        assert.equal(args.where.purpose, RECOVERY_WITHDRAWAL_HOLD_PURPOSE);
+        const owner = args.where.webAccount?.userId;
+        assert.ok(
+          partners.some((p) => p.userId === owner),
+          `the hold was looked up for ${String(owner)}, who owns no partner row`,
+        );
+        return null;
       },
     },
     partner: {
