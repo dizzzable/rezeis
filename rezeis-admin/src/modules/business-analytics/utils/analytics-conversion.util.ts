@@ -7,6 +7,11 @@
  * "Paid" is money received (`analytics-money-received.util.ts`): a checkout
  * completed for nothing by a 100 % promo code converts nobody, and a partner's
  * balance spend is not a payment of new money.
+ *
+ * A TRIAL STARTS ONLY AS A FREE ONE (the owner's rule: a paid trial is paid).
+ * Buying anything with money after a free trial — a paid trial included — is
+ * the conversion; a customer who bought a paid trial straight away is a new
+ * paying customer and starts no trial here.
  */
 import { Prisma } from '@prisma/client';
 
@@ -16,7 +21,7 @@ import type {
   DaysToPayCountInterface,
   TrialConversionReport,
 } from '../interfaces/business-analytics.types';
-import { moneyReceivedSql, netAmountSql } from './analytics-money-received.util';
+import { boughtSubscriptionSql, moneyReceivedSql, netAmountSql, paidTrialPurchaseSql } from './analytics-money-received.util';
 import { chooseMoneyView, type FxSnapshot, moneyFigure } from './analytics-money.util';
 import type { AnalyticsWindowInterface } from './analytics-window.util';
 
@@ -51,13 +56,41 @@ export type DaysToPayRow = Readonly<Record<DaysToPayBucket, number>> & {
 };
 
 /**
- * The trial grants of the window, and each customer's first payment of money
- * received made at or after their grant.
+ * THE TRIAL STARTS of the window: each customer's first FREE trial, when it
+ * falls in the window — read off the trial ledger, not `trial_grants`. The
+ * grant is one row per customer that every trial rewrites, a paid one
+ * included: a customer who took a free trial and then bought a paid one keeps
+ * only the paid trial's time there. The ledger keeps a claim per trial
+ * (`trial_claims`, backfilled for the time before it), and a trial start is a
+ * claim that
+ *   - is not a paid trial's own (`source` PAID),
+ *   - nor was written for a subscription that was bought — the backfill wrote
+ *     LEGACY claims for every trial then running, paid ones too,
+ *   - and did not come after the customer had already bought a paid trial:
+ *     that customer is a paying one, their paid trial the first money.
  */
-const TRIAL_FIRST_PAID = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sql`
-  "grant" AS (
-    SELECT g."user_id", g."granted_at" FROM "trial_grants" g WHERE g."granted_at" >= ${window.start}
+const TRIAL_STARTS = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sql`
+  "trial_start" AS (
+    SELECT c."user_id", MIN(COALESCE(c."consumed_at", c."created_at")) AS "granted_at"
+      FROM "trial_claims" c
+     WHERE c."status" = 'CONSUMED' AND c."source" <> 'PAID'
+       AND (c."subscription_id" IS NULL OR NOT ${boughtSubscriptionSql(Prisma.sql`c."subscription_id"`)})
+     GROUP BY c."user_id"
   ),
+  "grant" AS (
+    SELECT s."user_id", s."granted_at"
+      FROM "trial_start" s
+     WHERE s."granted_at" >= ${window.start}
+       AND NOT EXISTS (
+         SELECT 1 FROM "transactions" e
+          WHERE e."user_id" = s."user_id" AND e."status" = 'COMPLETED' AND ${paidTrialPurchaseSql('e')}
+            AND e."created_at" <= s."granted_at"
+       )
+  )`;
+
+/** The trial starts of the window, and each customer's first payment of money received made at or after it. */
+const TRIAL_FIRST_PAID = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sql`
+  ${TRIAL_STARTS(window)},
   "first_paid" AS (
     SELECT DISTINCT ON (t."user_id") t."user_id", t."created_at", g."granted_at", t."purchase_type", t."plan_snapshot"
       FROM "transactions" t
@@ -111,10 +144,11 @@ export interface CurrencySumRow {
 /** Everything converted trial customers paid from their trial on, per currency — net of partial refunds. */
 export function trialRevenueSql(window: AnalyticsWindowInterface): Prisma.Sql {
   return Prisma.sql`
+    WITH ${TRIAL_STARTS(window)}
     SELECT t."currency"::text AS "currency", SUM(${netAmountSql()}) AS "amount"
       FROM "transactions" t
-      JOIN "trial_grants" g ON g."user_id" = t."user_id"
-     WHERE g."granted_at" >= ${window.start} AND ${moneyReceivedSql()} AND t."created_at" >= g."granted_at"
+      JOIN "grant" g ON g."user_id" = t."user_id"
+     WHERE ${moneyReceivedSql()} AND t."created_at" >= g."granted_at"
      GROUP BY 1`;
 }
 

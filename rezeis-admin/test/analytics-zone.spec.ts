@@ -2,32 +2,56 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  chooseAnalyticsZone,
   dateKeyOf,
   instantOfWallClock,
-  resolveAnalyticsZone,
+  readZoneSetting,
   startOfZonedDay,
+  UTC_ZONE,
 } from '../src/modules/business-analytics/utils/analytics-zone.util';
 
 /**
  * The operator's time zone, as the analytics reports read it from
- * `Settings.platformPolicy.timezone`. It reaches SQL as a bind parameter, and
- * only after passing a shape check and `Intl`; anything else falls back to UTC
- * with `fallback` set, which the page turns into a note.
+ * `Settings.platformPolicy.timezone`: taken when BOTH `Intl` (what Telegram
+ * cards and notifications format with) and PostgreSQL (what the statements
+ * count days with) know it — no stricter check of its own. Anything else falls
+ * back to UTC with `fallback` set, which the page turns into a note. The
+ * PostgreSQL half runs in `analytics-reports-postgres.spec.ts`.
  */
 describe('the time zone the reports count days in', () => {
-  it('takes an IANA zone the panel names, spelled as Intl spells it', () => {
-    assert.deepEqual(resolveAnalyticsZone('Europe/Moscow'), { name: 'Europe/Moscow', fallback: false });
-    assert.deepEqual(resolveAnalyticsZone('  europe/moscow '), { name: 'Europe/Moscow', fallback: false });
-    // Three parts, and an alias Intl canonicalises (`America/Buenos_Aires`); PostgreSQL knows both spellings.
-    assert.equal(resolveAnalyticsZone('America/Argentina/Buenos_Aires').fallback, false);
-    assert.deepEqual(resolveAnalyticsZone('UTC'), { name: 'UTC', fallback: false });
-    assert.deepEqual(resolveAnalyticsZone('Etc/UTC'), { name: 'UTC', fallback: false });
+  it('reads whatever Intl reads, as the operator typed it and as Intl names it', () => {
+    assert.deepEqual(readZoneSetting('Europe/Moscow'), { typed: 'Europe/Moscow', canonical: 'Europe/Moscow' });
+    assert.deepEqual(readZoneSetting('  europe/moscow '), { typed: 'europe/moscow', canonical: 'Europe/Moscow' });
+    // No slash, no area — and zones all the same: the old shape check turned both away.
+    assert.equal(readZoneSetting('GMT')?.canonical, 'UTC');
+    assert.equal(readZoneSetting('EST5EDT')?.typed, 'EST5EDT');
+    // Intl takes an offset; whether the reports may is PostgreSQL's half of the question.
+    assert.equal(readZoneSetting('+03:00')?.typed, '+03:00');
   });
 
-  it('falls back to UTC, and says so, for an empty setting or one that is not a zone', () => {
-    for (const setting of [null, undefined, '', '   ', 'Mars/Olympus_Mons', 'MSK', '+03:00', 'UTC+3', "UTC'; DROP TABLE users; --"]) {
-      assert.deepEqual(resolveAnalyticsZone(setting), { name: 'UTC', fallback: true }, JSON.stringify(setting));
+  it('reads nothing from an empty setting or one Intl does not know', () => {
+    for (const setting of [null, undefined, '', '   ', 'Mars/Olympus_Mons', 'MSK', 'UTC+3', "UTC'; DROP TABLE users; --"]) {
+      assert.equal(readZoneSetting(setting), null, JSON.stringify(setting));
     }
+  });
+
+  it('counts in UTC for UTC under any name, without asking PostgreSQL', () => {
+    for (const setting of ['UTC', 'Etc/UTC', 'GMT', 'Zulu']) {
+      assert.deepEqual(chooseAnalyticsZone(readZoneSetting(setting), null), UTC_ZONE, setting);
+    }
+  });
+
+  it('gives PostgreSQL the name it reads as that zone: Intl’s own, else the one typed, else nothing', () => {
+    const cet = { typed: 'CET', canonical: 'Europe/Brussels' };
+    // PostgreSQL reads `CET` as its fixed UTC+1 abbreviation, so only Intl's name will do.
+    assert.deepEqual(chooseAnalyticsZone(cet, { canonical: true, typed: false }), { name: 'Europe/Brussels', fallback: false });
+    // An install whose zone files lack Intl's older spelling still knows the one typed.
+    assert.deepEqual(chooseAnalyticsZone({ typed: 'Asia/Kolkata', canonical: 'Asia/Calcutta' }, { canonical: false, typed: true }), {
+      name: 'Asia/Kolkata',
+      fallback: false,
+    });
+    assert.deepEqual(chooseAnalyticsZone({ typed: '+03:00', canonical: '+03:00' }, { canonical: false, typed: false }), { name: 'UTC', fallback: true });
+    assert.deepEqual(chooseAnalyticsZone(null, null), { name: 'UTC', fallback: true });
   });
 });
 

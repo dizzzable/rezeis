@@ -123,6 +123,7 @@ export interface KpiSummaryInterface {
   /** Average revenue per paying user across the window. */
   readonly arppu: number;
   readonly activeSubscriptions: number;
+  /** Free trials in force now; a paid trial is among `activeSubscriptions`. */
   readonly trialSubscriptions: number;
   readonly totalUsers: number;
   readonly newUsersInWindow: number;
@@ -259,9 +260,9 @@ export interface OverviewMetricsInterface {
   readonly newUsers: ComparedInterface<number>;
   /** Payments that began a paying subscription: NEW, another subscription, a trial's first payment. */
   readonly newSubscriptions: ComparedInterface<number>;
-  /** Subscriptions on a paid plan whose paid term runs, at the end of each window — however they were paid. */
+  /** Subscriptions on a paid plan whose paid term runs, at the end of each window — however they were paid, paid trials included. */
   readonly activeSubscriptions: ComparedInterface<number>;
-  /** Trial subscriptions in force now. */
+  /** FREE trial subscriptions in force now; a paid trial is among `activeSubscriptions`. */
   readonly trialSubscriptions: number;
   readonly churn: ComparedInterface<ChurnFigureInterface>;
 }

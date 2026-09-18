@@ -48,6 +48,7 @@ import {
   hoveredRow,
   LINE_CURSOR,
   type RechartsTooltipProps,
+  sharedInfoWords,
   SWEEP_MS,
   useChartEntrance,
 } from './analytics-chart-support'
@@ -222,7 +223,7 @@ function KpiRow({ report }: { readonly report: AdvancedAnalyticsReport }): JSX.E
         id="activeSubscriptions"
         icon={CreditCard}
         label={t('analyticsPage.kpi.activeSubs')}
-        info={t('analyticsPage.kpi.activeSubsInfo')}
+        info={t('analyticsPage.kpi.activeSubsInfo', sharedInfoWords(t))}
         rule="subscriptions"
         value={formatCount(metrics.activeSubscriptions.current)}
         delta={relativeDelta(metrics.activeSubscriptions.current, metrics.activeSubscriptions.previous)}
@@ -235,7 +236,7 @@ function KpiRow({ report }: { readonly report: AdvancedAnalyticsReport }): JSX.E
         id="churn"
         icon={Activity}
         label={t('analyticsPage.kpi.churn')}
-        info={t('analyticsPage.kpi.churnInfo')}
+        info={t('analyticsPage.kpi.churnInfo', sharedInfoWords(t))}
         rule="subscriptions"
         value={churnRate === null ? null : formatPercent(churnRate, { digits: 1 })}
         delta={pointDelta(churnRate, metrics.churn.previous.rate, { higherIsBetter: false })}
@@ -440,7 +441,7 @@ function NewSubscriptionsCard({
       id="overview-new-subscriptions"
       className={className}
       title={title}
-      info={t('analyticsPage.newSubsChart.info')}
+      info={t('analyticsPage.newSubsChart.info', sharedInfoWords(t))}
       rule="money"
       table={
         empty ? undefined : (

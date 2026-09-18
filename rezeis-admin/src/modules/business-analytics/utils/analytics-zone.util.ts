@@ -7,11 +7,26 @@
  * counted UTC days: a payment at 01:30 MSK fell in the previous day's bar, and
  * every window of a Moscow operator opened at 03:00.
  *
- * A zone reaches SQL only as a bind parameter, and only after it passed both
- * a shape check (an IANA name, or `UTC`) and `Intl` — so a stray setting can
- * neither break a statement nor ride into one. An empty or unknown setting
- * falls back to UTC, and the report says so (`fallback`), for the page to tell
- * the operator which days they are looking at.
+ * ONE VALIDATION: the zone is used when BOTH `Intl` and PostgreSQL know it —
+ * `Intl`, because Telegram cards and customer notifications format with it and
+ * the reports' labels and windows are computed with it; PostgreSQL, because its
+ * statements count the days. No stricter check of our own: `GMT` and `EST5EDT`
+ * are zones both know. A zone reaches SQL only as a bind parameter, so a stray
+ * setting can neither break a statement nor ride into one. Anything else —
+ * empty, a zone `Intl` does not know, or one PostgreSQL does not list, such as
+ * the offset `+03:00` (which PostgreSQL would read as POSIX, UTC−3) — falls
+ * back to UTC, and the report says so (`fallback`), for the page to tell the
+ * operator which days they are looking at.
+ *
+ * WHICH NAME PostgreSQL IS GIVEN matters, because `AT TIME ZONE` tries its
+ * abbreviations FIRST: `CET`, `EET`, `WET` and `MET` are also zone files, but
+ * `AT TIME ZONE 'CET'` is a fixed UTC+1 all summer, while `Intl` reads `CET` as
+ * Central European time with its daylight hour. So PostgreSQL gets `Intl`'s own
+ * name for the zone (`CET` → `Europe/Brussels`) when it lists that one and does
+ * not also read it as an abbreviation, else the name as the operator typed it on
+ * the same terms — an install whose zone files lack `Intl`'s older spelling
+ * (`Asia/Calcutta`) still has `Asia/Kolkata` — else nothing. The service asks
+ * once per setting ({@link chooseAnalyticsZone} decides).
  *
  * Everything here is pure: the calendar arithmetic is done on `YYYY-MM-DD`
  * keys and on "wall clock" values — the local date and time of an instant,
@@ -21,29 +36,58 @@
 export const ANALYTICS_ZONE_DAY_MS = 86_400_000;
 
 export interface AnalyticsZone {
-  /** An IANA zone (`Europe/Moscow`), or `UTC`. */
+  /** The zone's name, as both `Intl` and PostgreSQL read it (`Europe/Moscow`), or `UTC`. */
   readonly name: string;
-  /** The panel's setting was empty or not a zone: days are UTC days. */
+  /** The panel's setting was empty or not a zone both know: days are UTC days. */
   readonly fallback: boolean;
 }
 
 export const UTC_ZONE: AnalyticsZone = { name: 'UTC', fallback: false };
 
-/** `UTC`, or an IANA name: an area and one or more locations. Nothing else reaches `Intl` or SQL. */
-const ZONE_NAME = /^(?:UTC|[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+)$/;
+/** `Intl`'s reading of the panel's setting. */
+export interface ZoneSettingReading {
+  /** The setting as the operator wrote it, trimmed — the spelling Telegram cards format with. */
+  readonly typed: string;
+  /** `Intl`'s own name for the zone (`CET` → `Europe/Brussels`, `Asia/Kolkata` → `Asia/Calcutta`, `GMT` → `UTC`). */
+  readonly canonical: string;
+}
 
-/** The zone the panel's setting names, or UTC — with `fallback` set when the setting could not be used. */
-export function resolveAnalyticsZone(setting: string | null | undefined): AnalyticsZone {
-  const candidate = (setting ?? '').trim();
-  if (candidate === '' || candidate.length > 64 || !ZONE_NAME.test(candidate)) return { name: 'UTC', fallback: true };
-  let resolved: string;
+/**
+ * What PostgreSQL makes of the two names, each `true` when `pg_timezone_names`
+ * lists it (in any letter case, as `AT TIME ZONE` matches) and it is not also
+ * one of the session's abbreviations (`pg_timezone_abbrevs`), which
+ * `AT TIME ZONE` would read instead.
+ */
+export interface DatabaseZoneNames {
+  readonly canonical: boolean;
+  readonly typed: boolean;
+}
+
+const UTC_NAMES: ReadonlySet<string> = new Set(['UTC', 'Etc/UTC', 'Etc/GMT']);
+
+/** `Intl`'s reading of the setting — `null` when it is empty or names no zone `Intl` knows. */
+export function readZoneSetting(setting: string | null | undefined): ZoneSettingReading | null {
+  const typed = (setting ?? '').trim();
+  if (typed === '') return null;
   try {
-    resolved = new Intl.DateTimeFormat('en-US', { timeZone: candidate }).resolvedOptions().timeZone;
+    return { typed, canonical: new Intl.DateTimeFormat('en-US', { timeZone: typed }).resolvedOptions().timeZone };
   } catch {
-    return { name: 'UTC', fallback: true };
+    return null;
   }
-  if (resolved === 'UTC' || resolved === 'Etc/UTC' || resolved === 'Etc/GMT') return UTC_ZONE;
-  return { name: resolved, fallback: false };
+}
+
+/** Whether PostgreSQL has to be asked: for every zone but UTC under one of its names. */
+export function needsDatabaseZoneCheck(reading: ZoneSettingReading | null): reading is ZoneSettingReading {
+  return reading !== null && !UTC_NAMES.has(reading.canonical);
+}
+
+/** The zone the reports count days in — see the file comment; `database` is `null` when it was not asked. */
+export function chooseAnalyticsZone(reading: ZoneSettingReading | null, database: DatabaseZoneNames | null): AnalyticsZone {
+  if (reading === null) return { name: 'UTC', fallback: true };
+  if (!needsDatabaseZoneCheck(reading)) return UTC_ZONE;
+  if (database?.canonical === true) return { name: reading.canonical, fallback: false };
+  if (database?.typed === true) return { name: reading.typed, fallback: false };
+  return { name: 'UTC', fallback: true };
 }
 
 const formatters = new Map<string, Intl.DateTimeFormat>();

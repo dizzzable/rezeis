@@ -53,6 +53,7 @@ import {
   GRID_STROKE,
   hoveredRow,
   type RechartsTooltipProps,
+  sharedInfoWords,
   SWEEP_MS,
   useChartEntrance,
   withRule,
@@ -411,7 +412,7 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
       className={className}
       title={title}
       icon={<Shapes className="size-4 text-muted-foreground" aria-hidden="true" />}
-      info={t('analyticsPage.revenue.kinds.info')}
+      info={t('analyticsPage.revenue.kinds.info', sharedInfoWords(t))}
       rule="money"
       description={t('analyticsPage.revenue.kinds.description')}
       table={

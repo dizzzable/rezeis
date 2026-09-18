@@ -7,7 +7,15 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { AutoRenewService } from '../src/modules/auto-renew/auto-renew.service';
 import { BusinessAnalyticsService } from '../src/modules/business-analytics/services/business-analytics.service';
-import { bucketIndexSql, describePeriod, planAnalyticsWindow } from '../src/modules/business-analytics/utils/analytics-window.util';
+import { paymentOutcomeSql } from '../src/modules/business-analytics/utils/analytics-money-received.util';
+import {
+  bucketIndexSql,
+  databaseZoneNamesSql,
+  describePeriod,
+  planAnalyticsWindow,
+  readAnalyticsZone,
+} from '../src/modules/business-analytics/utils/analytics-window.util';
+import { wallClockOf } from '../src/modules/business-analytics/utils/analytics-zone.util';
 import type { FxRateService } from '../src/modules/fx/fx-rate.service';
 import type { PaymentsRenewalCheckoutService } from '../src/modules/payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../src/modules/payments/services/saved-payment-method.service';
@@ -116,6 +124,106 @@ async function trialClaim(tx: Prisma.TransactionClient, userId: string, subscrip
   await tx.trialClaim.create({
     data: { userId, subscriptionId, source: 'FREE', status: 'CONSUMED', units: 1, consumedAt: at, createdAt: at },
   });
+}
+
+/** A subscription on a plan, as a purchase or an operator writes it: the plan's `id` in the snapshot. */
+const PRO: Prisma.InputJsonObject = { id: 'pro', name: 'Pro' };
+
+/** What `RemnawaveImporterService` writes for a profile it imports: no plan, and the import as the start. */
+const REMNAWAVE_IMPORT: Prisma.InputJsonObject = { importedFrom: 'remnawave', importRecordId: 'import-1', tag: null, trafficLimitStrategy: 'NO_RESET' };
+
+/**
+ * The duplicate `DuplicateSubscriptionMergeService` retires (`writeMerge`, step 1): DELETED, with its panel
+ * identity cleared in the same statement — and nothing else. Raw, because Prisma stamps `updatedAt` itself.
+ */
+async function mergedAway(tx: Prisma.TransactionClient, subscriptionId: string, at: Date) {
+  await tx.$executeRaw`
+    UPDATE "subscriptions"
+       SET "status" = 'DELETED', "remnawave_id" = NULL, "remnawave_panel_id" = NULL,
+           "remnawave_panel_username" = NULL, "config_url" = NULL, "updated_at" = ${at}
+     WHERE "id" = ${subscriptionId}`;
+}
+
+/** What a trial plan's snapshot on its subscription names. */
+const TRIAL_PLAN: Prisma.InputJsonObject = { id: 'trial', name: 'Trial' };
+
+/**
+ * A free trial as `SubscriptionMutationsService.grantTrial` writes it: the trial row, the ledger's FREE claim, and
+ * the grant — one row per customer, which every later trial rewrites.
+ */
+async function freeTrial(tx: Prisma.TransactionClient, userId: string, at: Date, extra: Partial<Prisma.SubscriptionUncheckedCreateInput> = {}): Promise<string> {
+  const row = await tx.subscription.create({
+    data: { userId, isTrial: true, planSnapshot: TRIAL_PLAN, createdAt: at, startedAt: at, expiresAt: new Date(at.getTime() + 3 * DAY_MS), ...extra },
+  });
+  await trialClaim(tx, userId, row.id, at);
+  await tx.trialGrant.upsert({ where: { userId }, create: { userId, planId: 'trial', grantedAt: at }, update: { planId: 'trial', grantedAt: at } });
+  return row.id;
+}
+
+/**
+ * A paid trial as the checkout and `createSubscriptionFromPayment` write it: the checkout's NEW payment for a TRIAL
+ * plan, started a minute before its fulfilment; the trial row the fulfilment created and linked it to; the ledger's
+ * PAID claim naming both; and the grant, rewritten.
+ */
+async function paidTrial(tx: Prisma.TransactionClient, userId: string, at: Date, extra: Partial<Prisma.SubscriptionUncheckedCreateInput> = {}): Promise<string> {
+  const row = await tx.subscription.create({
+    data: {
+      userId,
+      isTrial: true,
+      planSnapshot: { ...TRIAL_PLAN, purchaseType: 'NEW', amount: '10', currency: 'RUB', snapshotSource: 'PAYMENT_COMPLETION' },
+      createdAt: at,
+      startedAt: at,
+      expiresAt: new Date(at.getTime() + 7 * DAY_MS),
+      ...extra,
+    },
+  });
+  const checkout = new Date(at.getTime() - 60_000);
+  const bought = await pay(tx, {
+    userId,
+    subscriptionId: row.id,
+    amount: '10',
+    createdAt: checkout,
+    fulfilledAt: at,
+    planSnapshot: { ...TRIAL_PLAN, availability: 'TRIAL', trialSettings: { maxClaims: 2 }, selectedDurationDays: 7, purchaseType: 'NEW', snapshotSource: 'ADMIN_TRANSACTION_DRAFT' },
+  });
+  await tx.trialClaim.create({
+    data: { userId, planId: 'trial', transactionId: bought.id, subscriptionId: row.id, source: 'PAID', status: 'CONSUMED', units: 1, reservedAt: checkout, consumedAt: at, createdAt: checkout },
+  });
+  await tx.trialGrant.upsert({ where: { userId }, create: { userId, planId: 'trial', grantedAt: at }, update: { planId: 'trial', grantedAt: at } });
+  return row.id;
+}
+
+/** The trial row moved to Pro in place by a paid UPGRADE (`PaymentSubscriptionMutationService`): no longer a trial, restarted. */
+async function upgradeInPlace(tx: Prisma.TransactionClient, userId: string, subscriptionId: string, at: Date): Promise<void> {
+  await pay(tx, {
+    userId,
+    subscriptionId,
+    purchaseType: 'UPGRADE',
+    amount: '300',
+    createdAt: at,
+    fulfilledAt: at,
+    planSnapshot: { ...PRO, availability: 'ALL', selectedDurationDays: 30, purchaseType: 'UPGRADE', snapshotSource: 'ADMIN_TRANSACTION_DRAFT' },
+  });
+  await tx.subscription.update({
+    where: { id: subscriptionId },
+    data: { isTrial: false, planSnapshot: { ...PRO, snapshotSource: 'PAYMENT_COMPLETION' }, startedAt: at, expiresAt: new Date(at.getTime() + 30 * DAY_MS) },
+  });
+}
+
+/** The most recent instant, at least two days back, at which a summer month turns over in Central Europe: 22:30 UTC on its last day. */
+function lastSummerMonthTurnover(now: number): { readonly at: Date; readonly month: string; readonly next: string } {
+  const key = (year: number, month: number): string => `${year}-${String(month + 1).padStart(2, '0')}`;
+  let best: { at: Date; month: string; next: string } | null = null;
+  const year = new Date(now).getUTCFullYear();
+  for (const y of [year, year - 1]) {
+    // April to September: CEST (UTC+2) on both sides of each month's last midnight.
+    for (let month = 3; month <= 8; month++) {
+      const at = new Date(Date.UTC(y, month + 1, 0, 22, 30));
+      if (at.getTime() > now - 2 * DAY_MS) continue;
+      if (best === null || at > best.at) best = { at, month: key(y, month), next: key(y, month + 1) };
+    }
+  }
+  return best!;
 }
 
 run('business analytics on PostgreSQL', () => {
@@ -274,7 +382,7 @@ run('business analytics on PostgreSQL', () => {
     const observed = await onCleanSlate(async (tx, service) => {
       await customer(tx, 'owner');
       const sub = (data: Partial<Prisma.SubscriptionUncheckedCreateInput>) =>
-        tx.subscription.create({ data: { userId: 'owner', planSnapshot: {}, ...data } });
+        tx.subscription.create({ data: { userId: 'owner', planSnapshot: PRO, ...data } });
       await sub({ createdAt: daysAgo(90), expiresAt: daysAgo(20), status: 'EXPIRED' }); // lapsed inside the window: churned
       await sub({ createdAt: daysAgo(90), expiresAt: daysAhead(10) }); // renewed past now: kept
       await sub({ createdAt: daysAgo(90), expiresAt: daysAgo(45), status: 'EXPIRED' }); // lapsed in the previous window
@@ -415,15 +523,15 @@ run('business analytics on PostgreSQL', () => {
   it('converts a trial only by a payment made after it, and counts the days from the grant', async () => {
     const report = await onCleanSlate(async (tx, service) => {
       await customer(tx, 'converted');
-      await tx.trialGrant.create({ data: { userId: 'converted', grantedAt: daysAgo(10) } });
+      await freeTrial(tx, 'converted', daysAgo(10));
       await pay(tx, { userId: 'converted', amount: '999', createdAt: daysAgo(12), planSnapshot: { id: 'old', name: 'Old' } });
       await pay(tx, { userId: 'converted', amount: '300', createdAt: daysAgo(3), planSnapshot: { id: 'p1', name: 'Pro' } });
       await pay(tx, { userId: 'converted', amount: '300', createdAt: daysAgo(1), purchaseType: 'RENEW', planSnapshot: { id: 'p1', name: 'Pro' } });
       await customer(tx, 'paidBefore');
-      await tx.trialGrant.create({ data: { userId: 'paidBefore', grantedAt: daysAgo(6) } });
+      await freeTrial(tx, 'paidBefore', daysAgo(6));
       await pay(tx, { userId: 'paidBefore', amount: '500', createdAt: daysAgo(8) });
       await customer(tx, 'stillTrying');
-      await tx.trialGrant.create({ data: { userId: 'stillTrying', grantedAt: daysAgo(2) } });
+      await freeTrial(tx, 'stillTrying', daysAgo(2));
       return service.getTrialConversion(30);
     });
     assert.equal(report.totalTrialUsers, 3);
@@ -568,7 +676,7 @@ run('business analytics on PostgreSQL', () => {
     const observed = await onCleanSlate(async (tx, service) => {
       await customer(tx, 'owner');
       const sub = (data: Partial<Prisma.SubscriptionUncheckedCreateInput>) =>
-        tx.subscription.create({ data: { userId: 'owner', planSnapshot: {}, createdAt: daysAgo(100), ...data } });
+        tx.subscription.create({ data: { userId: 'owner', planSnapshot: PRO, createdAt: daysAgo(100), ...data } });
       /** Ended `days` ago; the expired-profile cleanup deleted it three days later. */
       const lapsedAndCleaned = async (days: number) => {
         const row = await sub({ expiresAt: daysAgo(days), status: 'EXPIRED' });
@@ -605,14 +713,21 @@ run('business analytics on PostgreSQL', () => {
       });
       await pay(tx, { userId: 'upgrader', subscriptionId: paid.id, amount: '500', createdAt: daysAgo(100) });
       await pay(tx, { userId: 'upgrader', subscriptionId: paid.id, purchaseType: 'UPGRADE', amount: '200', createdAt: daysAgo(5) });
-      // Imported yesterday: `created_at` is the import, `started_at` the donor's start date.
+      // Imported yesterday: `created_at` is the import, `started_at` the donor's start date. On a plan:
+      // «Клонировать тарифы» linked it to the cloned one (`BackupPlanClonerService` keeps the donor's keys).
       await customer(tx, 'imported', { createdAt: daysAgo(1) });
       await tx.subscription.create({
-        data: { userId: 'imported', planSnapshot: { importedFrom: 'bedolaga' }, createdAt: daysAgo(1), startedAt: daysAgo(200), expiresAt: daysAhead(10) },
+        data: {
+          userId: 'imported',
+          planSnapshot: { importedFrom: 'bedolaga', sourceSubscriptionId: 7, id: 'pro', planId: 'pro', name: 'Pro' },
+          createdAt: daysAgo(1),
+          startedAt: daysAgo(200),
+          expiresAt: daysAhead(10),
+        },
       });
       // Deleted by an operator while its term still ran: it ended when it was deleted.
       await customer(tx, 'removed', { createdAt: daysAgo(100) });
-      const removed = await tx.subscription.create({ data: { userId: 'removed', planSnapshot: {}, createdAt: daysAgo(100), expiresAt: daysAhead(20) } });
+      const removed = await tx.subscription.create({ data: { userId: 'removed', planSnapshot: PRO, createdAt: daysAgo(100), expiresAt: daysAhead(20) } });
       await deletedAt(tx, removed.id, daysAgo(2));
       const overview = await service.getAdvancedReport(30);
       const series = overview.series.activeSubscriptions;
@@ -791,7 +906,7 @@ run('business analytics on PostgreSQL', () => {
       // A 100 % promo code: the checkout completes at 0.
       for (const id of ['f1', 'f2']) {
         await customer(tx, id, { createdAt: daysAgo(6) });
-        await tx.trialGrant.create({ data: { userId: id, grantedAt: daysAgo(6) } });
+        await freeTrial(tx, id, daysAgo(6));
         await pay(tx, { userId: id, amount: '0', createdAt: daysAgo(3) });
       }
       const overview = await service.getAdvancedReport(30);
@@ -856,13 +971,17 @@ run('business analytics on PostgreSQL', () => {
     assert.deepEqual([overview.period.timeZone, overview.period.timeZoneFallback], ['Europe/Moscow', false]);
   });
 
-  it('falls back to UTC days when the panel’s time zone is empty or not a zone, and says so', async () => {
+  it('falls back to UTC days when the panel’s time zone is empty, not a zone, or one Intl and PostgreSQL read differently, and says so', async () => {
     const periods: unknown[] = [];
-    for (const timezone of ['Mars/Olympus_Mons', '', null, "UTC'; DROP TABLE users; --"]) {
+    // `+03:00`: Intl reads UTC+3, PostgreSQL a POSIX offset — UTC−3. `MSK`: only PostgreSQL's abbreviation. `posixrules`: only its file.
+    for (const timezone of ['Mars/Olympus_Mons', '', null, "UTC'; DROP TABLE users; --", '+03:00', 'MSK', 'posixrules']) {
       const overview = await onCleanSlate((_tx, service) => service.getAdvancedReport(7), { timezone });
       periods.push([overview.period.timeZone, overview.period.timeZoneFallback]);
     }
     assert.deepEqual(periods, [
+      ['UTC', true],
+      ['UTC', true],
+      ['UTC', true],
       ['UTC', true],
       ['UTC', true],
       ['UTC', true],
@@ -959,5 +1078,364 @@ run('business analytics on PostgreSQL', () => {
       ['archived, renews onto a replacement on sale', 1, 1],
       ['archived, renews itself', 1, 1],
     ]);
+  });
+
+  it('leaves subscriptions without a plan out of paid subscriptions and churn — an import is not on a paid plan until one is assigned', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      // Five profiles the Remnawave importer brought in five days ago: no plan, the import as their start.
+      for (let index = 0; index < 5; index++) {
+        await customer(tx, `rw${index}`, { createdAt: daysAgo(5) });
+        await tx.subscription.create({
+          data: {
+            userId: `rw${index}`,
+            remnawaveId: String(4000 + index),
+            remnawavePanelId: 4000 + index,
+            remnawavePanelUsername: `user_${4000 + index}`,
+            configUrl: `https://sub.example/${4000 + index}`,
+            planSnapshot: REMNAWAVE_IMPORT,
+            createdAt: daysAgo(5),
+            startedAt: daysAgo(5),
+            expiresAt: daysAhead(60),
+          },
+        });
+      }
+      // A 3x-ui client imported 50 days ago whose term ran out inside the window; the cleanup deleted it three days later.
+      await customer(tx, 'xui', { createdAt: daysAgo(50) });
+      const xui = await tx.subscription.create({
+        data: {
+          userId: 'xui',
+          planSnapshot: { importedFrom: '3xui', importRecordId: 'import-2', email: 'xui@example.com', subId: 'x1', uuid: 'c0ffee00', inboundRemark: 'de', inboundProtocol: 'vless', trafficResetDays: 0 },
+          createdAt: daysAgo(50),
+          startedAt: daysAgo(50),
+          expiresAt: daysAgo(10),
+          status: 'EXPIRED',
+        },
+      });
+      await deletedAt(tx, xui.id, daysAgo(7));
+      // Bedolaga imports with the donor's start date: not linked to a plan yet; linked by «Клонировать тарифы»;
+      // and re-imported after that — the importer rebuilds the snapshot from the donor and carries only `planId` over.
+      const bedolaga = async (userId: string, planSnapshot: Prisma.InputJsonObject) => {
+        await customer(tx, userId, { createdAt: daysAgo(3) });
+        await tx.subscription.create({ data: { userId, planSnapshot, createdAt: daysAgo(3), startedAt: daysAgo(90), expiresAt: daysAhead(30) } });
+      };
+      await bedolaga('unlinked', { importedFrom: 'bedolaga', sourceSubscriptionId: 1 });
+      await bedolaga('linked', { importedFrom: 'bedolaga', sourceSubscriptionId: 2, id: 'pro', planId: 'pro', name: 'Pro' });
+      await bedolaga('relinked', { importedFrom: 'bedolaga', sourceSubscriptionId: 3, planId: 'pro' });
+      // And one bought in the panel long ago.
+      await customer(tx, 'payer', { createdAt: daysAgo(100) });
+      await tx.subscription.create({ data: { userId: 'payer', planSnapshot: PRO, createdAt: daysAgo(100), startedAt: daysAgo(100), expiresAt: daysAhead(20) } });
+      const overview = await service.getAdvancedReport(30);
+      const series = overview.series.activeSubscriptions;
+      return {
+        active: overview.metrics.activeSubscriptions,
+        churn: overview.metrics.churn.current,
+        seriesStart: series[0],
+        seriesEnd: series[series.length - 1],
+      };
+    });
+    // The payer and the two Bedolaga imports on a plan, all in force since before the window; nothing without a plan.
+    assert.deepEqual(observed.active, { current: 3, previous: 3 });
+    assert.deepEqual(observed.churn, { base: 3, churned: 0, rate: 0 });
+    assert.equal(observed.seriesStart, 3);
+    assert.equal(observed.seriesEnd, 3);
+  });
+
+  it('does not take the duplicate «Слияние подписок-дубликатов» retires for a customer who left', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      // The pair the 2.x → 3.x identity change left behind: the older row, with the customer's plan and history…
+      await customer(tx, 'pair', { createdAt: daysAgo(300) });
+      const survivor = await tx.subscription.create({
+        data: { userId: 'pair', planSnapshot: PRO, remnawaveId: '6a1f9c1e-2b1d-4d59-9c8e-3f1b7a2c9d10', createdAt: daysAgo(300), startedAt: daysAgo(10), expiresAt: daysAhead(20) },
+      });
+      // …and the row the Remnawave importer minted for the same profile on the 3.x panel, 60 days ago.
+      const duplicate = await tx.subscription.create({
+        data: {
+          userId: 'pair',
+          planSnapshot: REMNAWAVE_IMPORT,
+          remnawaveId: '4242',
+          remnawavePanelId: 4242,
+          remnawavePanelUsername: 'user_4242',
+          configUrl: 'https://sub.example/4242',
+          createdAt: daysAgo(60),
+          startedAt: daysAgo(60),
+          expiresAt: daysAhead(20),
+        },
+      });
+      // The merge five days ago: the duplicate retired, its identity moved onto the survivor.
+      await mergedAway(tx, duplicate.id, daysAgo(5));
+      await tx.subscription.update({
+        where: { id: survivor.id },
+        data: { remnawaveId: '4242', remnawavePanelId: 4242, remnawavePanelUsername: 'user_4242', configUrl: 'https://sub.example/4242' },
+      });
+      const overview = await service.getAdvancedReport(30);
+      return { active: overview.metrics.activeSubscriptions, churn: overview.metrics.churn.current };
+    });
+    assert.deepEqual(observed.active, { current: 1, previous: 1 });
+    assert.deepEqual(observed.churn, { base: 1, churned: 0, rate: 0 });
+  });
+
+  it('still reads a duplicate that had been given a plan before the merge as a second subscription that ended — the gap the (i) admits', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      await customer(tx, 'pair', { createdAt: daysAgo(300) });
+      await tx.subscription.create({ data: { userId: 'pair', planSnapshot: PRO, createdAt: daysAgo(300), startedAt: daysAgo(10), expiresAt: daysAhead(20) } });
+      // «Назначить план всем» replaced the importer's snapshot wholesale (`BulkPlanAssignmentService`): `importedFrom` is gone.
+      const duplicate = await tx.subscription.create({
+        data: {
+          userId: 'pair',
+          planSnapshot: { id: 'pro', planId: 'pro', name: 'Pro', tag: null, type: 'BOTH', icon: null, trafficLimit: 100, deviceLimit: 3, trafficLimitStrategy: 'NO_RESET', duration: 30, internalSquads: [], externalSquad: null },
+          remnawaveId: '4343',
+          remnawavePanelId: 4343,
+          createdAt: daysAgo(60),
+          startedAt: daysAgo(60),
+          expiresAt: daysAhead(20),
+        },
+      });
+      await mergedAway(tx, duplicate.id, daysAgo(5));
+      const overview = await service.getAdvancedReport(30);
+      return { active: overview.metrics.activeSubscriptions, churn: overview.metrics.churn.current };
+    });
+    // Nothing on the retired row says it was a duplicate (DELETED with its identity cleared is also what a row
+    // deleted before it ever got a profile looks like); the audit row that names it is rotated away after 90 days.
+    assert.deepEqual(observed.active, { current: 1, previous: 2 });
+    assert.deepEqual(observed.churn, { base: 2, churned: 1, rate: 0.5 });
+  });
+
+  it('files a paid trial’s purchase as a new subscription and its later move to a regular plan as a plan change — a paid trial is paid', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      // Bought a paid trial nine days ago, moved it to Pro in place four days ago.
+      await customer(tx, 'buyer', { createdAt: daysAgo(9) });
+      const bought = await paidTrial(tx, 'buyer', daysAgo(9));
+      await upgradeInPlace(tx, 'buyer', bought, daysAgo(4));
+      // A free trial turned paid stays a new subscription.
+      await customer(tx, 'trialist', { createdAt: daysAgo(10) });
+      await upgradeInPlace(tx, 'trialist', await freeTrial(tx, 'trialist', daysAgo(10)), daysAgo(5));
+      const overview = await service.getAdvancedReport(30);
+      const revenue = await service.getRevenueReport(30);
+      const last = overview.series.newSubscriptions.length - 1;
+      return {
+        kinds: revenue.byKind.map((kind) => [kind.kind, kind.figure.value, kind.payments]),
+        newSubscriptions: overview.metrics.newSubscriptions,
+        daysAgoCounted: overview.series.newSubscriptions.flatMap((count, index) => (count > 0 ? [[last - index, count]] : [])),
+      };
+    });
+    assert.deepEqual(observed.kinds, [
+      ['new', 310, 2],
+      ['renewal', 0, 0],
+      ['change', 300, 1],
+      ['addon', 0, 0],
+    ]);
+    // Counted once each: the paid trial on the day it was bought, the free one on the day it was first paid for.
+    assert.deepEqual(observed.newSubscriptions, { current: 2, previous: 0 });
+    assert.deepEqual(observed.daysAgoCounted, [
+      [9, 1],
+      [5, 1],
+    ]);
+  });
+
+  it('counts a subscription on a paid trial as paid from its purchase — in force and in churn — and only the free trials beside it', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      // Still on its paid trial.
+      await customer(tx, 'paying', { createdAt: daysAgo(10) });
+      await paidTrial(tx, 'paying', daysAgo(10), { expiresAt: daysAhead(2) });
+      // A paid trial in force when the window opened that ran out inside it; the cleanup deleted it three days later.
+      await customer(tx, 'lapsed', { createdAt: daysAgo(35) });
+      const lapsed = await paidTrial(tx, 'lapsed', daysAgo(35), { expiresAt: daysAgo(28), status: 'EXPIRED' });
+      await deletedAt(tx, lapsed, daysAgo(25));
+      // Bought 33 days ago, moved to Pro 20 days ago: paid since the purchase, not since the move.
+      await customer(tx, 'converted', { createdAt: daysAgo(33) });
+      await upgradeInPlace(tx, 'converted', await paidTrial(tx, 'converted', daysAgo(33)), daysAgo(20));
+      // Free trials: one running, one turned paid 20 days ago.
+      await customer(tx, 'free', { createdAt: daysAgo(5) });
+      await freeTrial(tx, 'free', daysAgo(5), { expiresAt: daysAhead(2) });
+      await customer(tx, 'freeConverted', { createdAt: daysAgo(40) });
+      await upgradeInPlace(tx, 'freeConverted', await freeTrial(tx, 'freeConverted', daysAgo(40)), daysAgo(20));
+      const overview = await service.getAdvancedReport(30);
+      return {
+        active: overview.metrics.activeSubscriptions,
+        churn: overview.metrics.churn.current,
+        freeTrials: overview.metrics.trialSubscriptions,
+      };
+    });
+    // Now: «paying», «converted», «freeConverted». A period ago: «lapsed» and «converted».
+    assert.deepEqual(observed.active, { current: 3, previous: 2 });
+    assert.deepEqual(observed.churn, { base: 2, churned: 1, rate: 0.5 });
+    assert.equal(observed.freeTrials, 1);
+  });
+
+  it('starts trial → paid at a free trial only: a paid trial bought after one converts it, and one bought straight away starts nothing', async () => {
+    const report = await onCleanSlate(async (tx, service) => {
+      // A free trial ten days ago, then a paid trial five days ago — the grant now shows only the paid trial's time.
+      await customer(tx, 'tryThenBuy', { createdAt: daysAgo(10) });
+      await freeTrial(tx, 'tryThenBuy', daysAgo(10));
+      await paidTrial(tx, 'tryThenBuy', daysAgo(5));
+      // Straight to a paid trial: a paying customer, not a trial start.
+      await customer(tx, 'straight', { createdAt: daysAgo(4) });
+      await paidTrial(tx, 'straight', daysAgo(4));
+      // A free trial and nothing since.
+      await customer(tx, 'freeOnly', { createdAt: daysAgo(3) });
+      await freeTrial(tx, 'freeOnly', daysAgo(3));
+      // A paid trial refunded in full: reconciliation cancels the payment and expires the row; the claim stays.
+      await customer(tx, 'refunded', { createdAt: daysAgo(6) });
+      const refunded = await paidTrial(tx, 'refunded', daysAgo(6));
+      await tx.transaction.updateMany({
+        where: { subscriptionId: refunded },
+        data: { status: 'CANCELED', gatewayData: { refundReversedAt: daysAgo(5).toISOString(), subscriptionRevoked: true } },
+      });
+      await tx.subscription.update({ where: { id: refunded }, data: { status: 'EXPIRED', expiresAt: daysAgo(5) } });
+      // The ledger's backfill (2026-07-31) left two more shapes of a paid trial, neither naming its payment:
+      // a trial row still running got a LEGACY claim on it — here one whose draft predates the persisted availability —
+      await customer(tx, 'legacyTrialRow', { createdAt: daysAgo(7) });
+      const running = await tx.subscription.create({
+        data: { userId: 'legacyTrialRow', isTrial: true, planSnapshot: TRIAL_PLAN, createdAt: daysAgo(7), startedAt: daysAgo(7), expiresAt: daysAhead(1) },
+      });
+      await pay(tx, {
+        userId: 'legacyTrialRow',
+        subscriptionId: running.id,
+        amount: '10',
+        createdAt: new Date(daysAgo(7).getTime() - 60_000),
+        fulfilledAt: daysAgo(7),
+        planSnapshot: { ...TRIAL_PLAN, selectedDurationDays: 8, purchaseType: 'NEW', snapshotSource: 'ADMIN_TRANSACTION_DRAFT' },
+      });
+      await tx.trialClaim.create({ data: { userId: 'legacyTrialRow', subscriptionId: running.id, source: 'LEGACY', status: 'CONSUMED', units: 1, consumedAt: daysAgo(7) } });
+      await tx.trialGrant.create({ data: { userId: 'legacyTrialRow', planId: 'trial', grantedAt: daysAgo(7) } });
+      // — and a customer whose paid trial had already been moved to a plan got one synthetic LEGACY claim at their grant.
+      await customer(tx, 'legacyBuyer', { createdAt: daysAgo(8) });
+      const moved = await tx.subscription.create({ data: { userId: 'legacyBuyer', planSnapshot: PRO, createdAt: daysAgo(8), startedAt: daysAgo(6), expiresAt: daysAhead(24) } });
+      await pay(tx, {
+        userId: 'legacyBuyer',
+        subscriptionId: moved.id,
+        amount: '10',
+        createdAt: new Date(daysAgo(8).getTime() - 60_000),
+        fulfilledAt: daysAgo(8),
+        planSnapshot: { ...TRIAL_PLAN, availability: 'TRIAL', selectedDurationDays: 3, purchaseType: 'NEW', snapshotSource: 'ADMIN_TRANSACTION_DRAFT' },
+      });
+      await tx.trialGrant.create({ data: { userId: 'legacyBuyer', planId: 'trial', grantedAt: daysAgo(8) } });
+      await tx.trialClaim.create({ data: { id: 'legacy_grant_legacyBuyer', userId: 'legacyBuyer', planId: 'trial', source: 'LEGACY', status: 'CONSUMED', units: 1, consumedAt: daysAgo(8) } });
+      return service.getTrialConversion(30);
+    });
+    assert.deepEqual([report.totalTrialUsers, report.convertedUsers, report.conversionRate], [2, 1, 0.5]);
+    assert.deepEqual(
+      report.daysToConvert.map((bucket) => [bucket.key, bucket.users]),
+      [['d0', 0], ['d1_3', 0], ['d4_7', 1], ['d8_14', 0], ['d15_30', 0], ['d31_plus', 0]],
+    );
+    assert.equal(report.revenueFromConverted, 10);
+    assert.deepEqual(report.topConvertedPlans.map((plan) => [plan.plan, plan.planId, plan.count]), [['Trial', 'trial', 1]]);
+  });
+
+  it('takes every zone both Intl and PostgreSQL know: GMT is UTC, EST5EDT keeps its daylight time, and a name is read in any case', async () => {
+    const read: unknown[] = [];
+    for (const [timezone, zone] of [
+      ['GMT', 'UTC'],
+      ['EST5EDT', 'America/New_York'],
+      ['US/Eastern', 'America/New_York'],
+      ['europe/moscow', 'Europe/Moscow'],
+    ] as const) {
+      const overview = await onCleanSlate((_tx, service) => service.getAdvancedReport(7), { timezone });
+      const start = new Date(overview.period.start);
+      read.push([timezone, overview.period.timeZoneFallback, wallClockOf(start, zone) % DAY_MS]);
+    }
+    // Not a fallback, and the window opens at midnight in that zone.
+    assert.deepEqual(read, [
+      ['GMT', false, 0],
+      ['EST5EDT', false, 0],
+      ['US/Eastern', false, 0],
+      ['europe/moscow', false, 0],
+    ]);
+  });
+
+  it('reads CET as the Central European zone, not as PostgreSQL’s fixed UTC+1 abbreviation — a summer midnight falls on the same day in SQL and in the labels', async () => {
+    const turnover = lastSummerMonthTurnover(Date.now());
+    const overview = await onCleanSlate(
+      async (tx, service) => {
+        await customer(tx, 'midnight');
+        // 00:30 CEST on the first of the next month; 23:30 on the last of this one at a fixed UTC+1.
+        await pay(tx, { userId: 'midnight', amount: '555', createdAt: turnover.at });
+        return service.getAdvancedReport(365);
+      },
+      { timezone: 'CET' },
+    );
+    const bar = overview.series.revenue.indexOf(555);
+    assert.equal(overview.period.timeZoneFallback, false);
+    assert.equal(overview.period.buckets[bar]?.from, `${turnover.next}-01`, `the payment belongs to ${turnover.next}, not ${turnover.month}`);
+  });
+
+  it('asks PostgreSQL whether it reads a name as a zone: listed in any letter case, and not one of its abbreviations', async () => {
+    const answers: unknown[] = [];
+    for (const [typed, canonical] of [
+      ['europe/moscow', 'Europe/Moscow'],
+      // What an older Intl calls `CET`: the zone file exists, but `AT TIME ZONE 'CET'` is the fixed UTC+1 abbreviation.
+      ['CET', 'CET'],
+      ['EST5EDT', 'America/New_York'],
+      ['+03:00', '+03:00'],
+      ['posixrules', 'posixrules'],
+    ] as const) {
+      const [row] = await prisma.$queryRaw<Array<{ canonical: boolean; typed: boolean }>>(databaseZoneNamesSql({ typed, canonical }));
+      answers.push([typed, row?.canonical, row?.typed]);
+    }
+    assert.deepEqual(answers, [
+      ['europe/moscow', true, true],
+      ['CET', false, false],
+      ['EST5EDT', true, true],
+      ['+03:00', false, false],
+      // Listed, and `Intl` is the half that turns it away.
+      ['posixrules', true, true],
+    ]);
+  });
+
+  it('reads the operator’s zone for any report that counts days, asking PostgreSQL once per setting', async () => {
+    let asked = 0;
+    const client = {
+      $queryRaw: (query: Prisma.Sql) => {
+        asked++;
+        return prisma.$queryRaw(query);
+      },
+    } as unknown as Pick<PrismaService, '$queryRaw'>;
+    const read: unknown[] = [];
+    for (const setting of ['Asia/Tokyo', 'Asia/Tokyo', 'UTC', '', null, 'Mars/Olympus_Mons', '+05:00', 'Asia/Tokyo']) {
+      const zone = await readAnalyticsZone(client, setting);
+      read.push([setting, zone.name, zone.fallback]);
+    }
+    assert.deepEqual(read, [
+      ['Asia/Tokyo', 'Asia/Tokyo', false],
+      ['Asia/Tokyo', 'Asia/Tokyo', false],
+      ['UTC', 'UTC', false],
+      ['', 'UTC', true],
+      [null, 'UTC', true],
+      ['Mars/Olympus_Mons', 'UTC', true],
+      ['+05:00', 'UTC', true],
+      ['Asia/Tokyo', 'Asia/Tokyo', false],
+    ]);
+    // Tokyo once, the offset once; UTC, the empty setting and a name Intl does not know never reach it.
+    assert.equal(asked, 2);
+  });
+
+  it('names how a checkout ended the way every payment report does', async () => {
+    const outcomes = await onCleanSlate(async (tx) => {
+      await customer(tx, 'payer');
+      const shapes: ReadonlyArray<readonly [string, Partial<Prisma.TransactionUncheckedCreateInput>]> = [
+        ['paid', {}],
+        // A partial refund leaves the payment COMPLETED and records what went back.
+        ['refunded-in-part', { gatewayData: { refundedAmountTotal: '40.00', refunds: [{ id: 'r1', amount: '40.00' }] } }],
+        // A full one: reconciliation cancels the payment and stamps it.
+        ['refunded', { status: 'CANCELED', gatewayData: { refundReversedAt: daysAgo(1).toISOString(), subscriptionRevoked: true } }],
+        ['refunded-long-ago', { status: 'REFUNDED' }],
+        ['abandoned', { status: 'CANCELED' }],
+        ['declined', { status: 'FAILED' }],
+        ['waiting', { status: 'PENDING' }],
+      ];
+      for (const [paymentId, shape] of shapes) await pay(tx, { userId: 'payer', paymentId, ...shape });
+      return tx.$queryRaw<Array<{ paymentId: string; outcome: string }>>(
+        Prisma.sql`SELECT t."payment_id" AS "paymentId", ${paymentOutcomeSql()} AS "outcome" FROM "transactions" t ORDER BY t."payment_id"`,
+      );
+    });
+    assert.deepEqual(Object.fromEntries(outcomes.map((row) => [row.paymentId, row.outcome])), {
+      paid: 'completed',
+      'refunded-in-part': 'completed',
+      refunded: 'refunded',
+      'refunded-long-ago': 'refunded',
+      abandoned: 'canceled',
+      declined: 'failed',
+      waiting: 'pending',
+    });
   });
 });

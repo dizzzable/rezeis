@@ -24,6 +24,7 @@
  */
 import { Prisma } from '@prisma/client';
 
+import type { PrismaService } from '../../../common/prisma/prisma.service';
 import type {
   AnalyticsBucketLabelInterface,
   AnalyticsGranularity,
@@ -34,14 +35,19 @@ import {
   addDays,
   ANALYTICS_ZONE_DAY_MS,
   type AnalyticsZone,
+  chooseAnalyticsZone,
+  type DatabaseZoneNames,
   dateKeyOf,
   daysBetween,
   instantOfWallClock,
   monthEndKey,
   monthsBetween,
   monthStartKey,
+  needsDatabaseZoneCheck,
+  readZoneSetting,
   startOfZonedDay,
   wallClockOf,
+  type ZoneSettingReading,
 } from './analytics-zone.util';
 
 export const ANALYTICS_DAY_MS = ANALYTICS_ZONE_DAY_MS;
@@ -205,6 +211,52 @@ export function bothWindowsSql(column: Prisma.Sql, window: AnalyticsWindowInterf
  */
 export function panelInstantSql(column: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`(((${column}) AT TIME ZONE current_setting('TimeZone')) AT TIME ZONE 'UTC')`;
+}
+
+/**
+ * Which of the setting's two names PostgreSQL lists as a zone AND will read as
+ * one in `AT TIME ZONE` — the database half of `DatabaseZoneNames`
+ * (`analytics-zone.util.ts`), one row. Letter case does not matter to
+ * `AT TIME ZONE`, so it does not here; an abbreviation does, because
+ * `AT TIME ZONE` tries the session's abbreviations first (`CET` would be a
+ * fixed UTC+1).
+ */
+export function databaseZoneNamesSql(reading: ZoneSettingReading): Prisma.Sql {
+  const readsAsZone = (name: string): Prisma.Sql => Prisma.sql`(
+    EXISTS (SELECT 1 FROM pg_timezone_names n WHERE LOWER(n."name") = LOWER(${name}::text))
+    AND NOT EXISTS (SELECT 1 FROM pg_timezone_abbrevs a WHERE LOWER(a."abbrev") = LOWER(${name}::text)))`;
+  return Prisma.sql`SELECT ${readsAsZone(reading.canonical)} AS "canonical", ${readsAsZone(reading.typed)} AS "typed"`;
+}
+
+/**
+ * The zone each setting came to once PostgreSQL was asked — once per process
+ * and setting: a zone `Intl` knows and the database's tz data does not would
+ * fail every statement it is bound into, and one the database reads as an
+ * abbreviation would count other days than the labels.
+ */
+const zonesReadByDatabase = new Map<string, AnalyticsZone>();
+
+/**
+ * THE OPERATOR'S ZONE, for any report that counts days: `setting` is the
+ * panel's `Settings.platformPolicy.timezone` as `SettingsService
+ * .getPlatformBranding().timezone` hands it over. The zone when both `Intl` and
+ * PostgreSQL know it (`analytics-zone.util.ts`), else UTC with `fallback` set,
+ * for the page to say so. PostgreSQL is asked once per setting and process;
+ * UTC, an empty setting and a name `Intl` does not know never reach it.
+ */
+export async function readAnalyticsZone(
+  client: Pick<PrismaService, '$queryRaw'>,
+  setting: string | null | undefined,
+): Promise<AnalyticsZone> {
+  const reading = readZoneSetting(setting);
+  if (!needsDatabaseZoneCheck(reading)) return chooseAnalyticsZone(reading, null);
+  let zone = zonesReadByDatabase.get(reading.typed);
+  if (zone === undefined) {
+    const [row] = await client.$queryRaw<DatabaseZoneNames[]>(databaseZoneNamesSql(reading));
+    zone = chooseAnalyticsZone(reading, row ?? null);
+    zonesReadByDatabase.set(reading.typed, zone);
+  }
+  return zone;
 }
 
 /** The wall-clock time of a stored `timestamptz` in the report's zone (a bind parameter). */

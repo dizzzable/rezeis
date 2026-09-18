@@ -93,5 +93,18 @@ export function withRule(t: (key: string) => string, info: string, rule: Analyti
   return rule === undefined ? info : `${info}\n\n${t(`analyticsPage.rules.${rule}`)}`
 }
 
+/**
+ * The words two (i)s share, handed to both as interpolations so they cannot
+ * drift apart: what «Платные подписки» and «Отток» cannot see, and what a new
+ * subscription is under «Новые подписки» and «Откуда деньги».
+ */
+export function sharedInfoWords(t: (key: string) => string): Record<'renewedLapse' | 'mergedDuplicate' | 'newSubscription', string> {
+  return {
+    renewedLapse: t('analyticsPage.caveats.renewedLapse'),
+    mergedDuplicate: t('analyticsPage.caveats.mergedDuplicate'),
+    newSubscription: t('analyticsPage.definitions.newSubscription'),
+  }
+}
+
 export const ANALYTICS_PERIODS = [7, 30, 90, 365] as const
 export type AnalyticsPeriodDays = (typeof ANALYTICS_PERIODS)[number]

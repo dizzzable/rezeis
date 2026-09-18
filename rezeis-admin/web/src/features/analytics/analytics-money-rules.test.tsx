@@ -151,6 +151,65 @@ describe('which rule a figure follows', () => {
   })
 })
 
+describe('what the (i) of a figure admits about what it counts', () => {
+  async function info(title: string): Promise<HTMLElement> {
+    const user = userEvent.setup()
+    await user.hover(await screen.findByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title }) }))
+    return screen.findByRole('tooltip')
+  }
+
+  it('leaves subscriptions without a plan out of «Платные подписки», names where they come from, and admits what the comparison cannot see', async () => {
+    renderWithProviders(<AnalyticsPage />)
+    const tip = await info('Платные подписки')
+    // A paid trial is paid (the owner's rule); the "+ N" beside the count is free trials only.
+    expect(tip).toHaveTextContent('бесплатные пробные не входят. Платный пробный период считается с покупки')
+    expect(tip).toHaveTextContent('платные пробные периоды тоже (бесплатные — нет)')
+    const trials = overviewReport({}, 30).metrics.trialSubscriptions
+    expect(document.querySelector('[data-kpi="activeSubscriptions"]')?.textContent).toContain(
+      i18n.t('analyticsPage.kpi.trials', { count: trials }),
+    )
+    expect(i18n.t('analyticsPage.kpi.trials', { count: trials })).toContain('бесплатн')
+    expect(tip).toHaveTextContent('Подписки без тарифа не входят — это перенесённые импортом из Remnawave, 3x-ui или другого бота')
+    expect(tip).toHaveTextContent('«Клонировать тарифы» и «Назначить план всем» после импорта на странице «Импорты»')
+    expect(tip).toHaveTextContent('из Remnawave или 3x-ui — со дня переноса')
+    // The same two admissions, in the same words, as «Отток»: its previous value is rebuilt the same way.
+    expect(tip).toHaveTextContent(i18n.t('analyticsPage.caveats.renewedLapse'))
+    expect(tip).toHaveTextContent(i18n.t('analyticsPage.caveats.mergedDuplicate'))
+    expect(i18n.t('analyticsPage.caveats.renewedLapse')).toContain('если клиент после перерыва продлил ту же подписку, перерыв не виден')
+    expect(i18n.t('analyticsPage.caveats.mergedDuplicate')).toContain('«Слиянием подписок-дубликатов» на странице «Подписки»')
+  })
+
+  it('says the same of «Отток»', async () => {
+    renderWithProviders(<AnalyticsPage />)
+    const tip = await info('Отток')
+    expect(tip).toHaveTextContent('Подписки без тарифа не входят')
+    expect(tip).toHaveTextContent(i18n.t('analyticsPage.caveats.renewedLapse'))
+    expect(tip).toHaveTextContent(i18n.t('analyticsPage.caveats.mergedDuplicate'))
+  })
+
+  it('defines a new subscription in the same words under «Новые подписки» and «Откуда деньги»: a paid trial is bought, its move to a plan is a change', async () => {
+    const definition = i18n.t('analyticsPage.definitions.newSubscription')
+    expect(definition).toBe('покупка новой подписки или ещё одной (в том числе платного пробного периода) или первая оплата после бесплатного пробного периода')
+    renderWithProviders(<AnalyticsPage />)
+    const counted = await info('Новые подписки по дням')
+    expect(counted).toHaveTextContent(`Первые оплаты подписок: ${definition}. Каждая подписка считается один раз.`)
+    expect(counted).toHaveTextContent('в том числе переход с платного пробного периода на обычный тариф')
+    await openTab('revenue')
+    const money = await info('Откуда деньги')
+    expect(money).toHaveTextContent(`«Новые подписки» — ${definition}.`)
+    expect(money).toHaveTextContent('«Смена тарифа» — переход на другой тариф у подписки, за которую уже платили, в том числе с платного пробного периода.')
+  })
+
+  it('starts trial → paid at a free trial only, and says a paid trial bought straight away is a paying customer', async () => {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('conversion')
+    const tip = await info('Пробный → оплата')
+    expect(tip).toHaveTextContent('начавших бесплатный пробный период')
+    expect(tip).toHaveTextContent('покупка платного пробного периода — тоже оплата')
+    expect(tip).toHaveTextContent('Кто сразу купил платный пробный период, — не пробный, а платящий клиент и сюда не входит.')
+  })
+})
+
 describe('a spend of a partner’s balance', () => {
   const spent = { figure: { value: 300, byCurrency: [{ currency: 'RUB', amount: 300 }] }, payments: 1 }
   const line = 'Оплачено балансом партнёра — не выручка: 300 ₽ · 1 платёж'

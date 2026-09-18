@@ -27,7 +27,15 @@ import type {
   PartnerBalanceSpendInterface,
   ProviderHealthInterface,
 } from '../interfaces/business-analytics.types';
-import { moneyReceivedSql, netAmountSql, purchaseKindSql, refundedSoFarSql } from './analytics-money-received.util';
+import {
+  boughtSubscriptionSql,
+  moneyReceivedSql,
+  netAmountSql,
+  type PaymentOutcome,
+  paymentOutcomeSql,
+  purchaseKindSql,
+  refundedSoFarSql,
+} from './analytics-money-received.util';
 import { chooseMoneyView, type FxSnapshot, hasUnconverted, moneyFigure } from './analytics-money.util';
 import {
   type AnalyticsWindowInterface,
@@ -113,31 +121,58 @@ export function overviewNewUsersSql(window: AnalyticsWindowInterface): Prisma.Sq
  * it became paid, `until` when its paid time ran or runs out — for
  * "in force at T": `from <= T < until`.
  *
+ * A PAID TRIAL IS PAID (the owner's rule): a trial subscription that was
+ * bought ({@link boughtSubscriptionSql}) counts from its purchase, whatever it
+ * cost and however it was paid, like any paid plan. A free trial does not.
+ *
+ * ON A PLAN: its snapshot names one — `id`, which every purchase, renewal and
+ * operator action writes, or `planId`, which «Клонировать тарифы» and
+ * «Назначить план всем» write on an imported row and the only key a re-import
+ * carries over. No importer writes either: a profile brought in from
+ * Remnawave, 3x-ui or another bot is on no plan until one is assigned, and it
+ * is neither a paid subscription nor a lapse. (The Remnawave and 3x-ui
+ * importers also stamp the import as the start, so five profiles imported on
+ * Monday used to appear as five new paid subscriptions, and a year of them in
+ * the 365-day view.)
+ *
  * WHEN IT BECAME PAID. Not `created_at` alone, and not `started_at` alone:
- *   - a trial converts by an UPGRADE of the trial row in place, which keeps the
- *     trial's `created_at` — such a row (it carries a trial claim, the ledger
- *     every trial subscription gets) is paid from its first completed UPGRADE;
+ *   - a free trial converts by an UPGRADE of the trial row in place, which
+ *     keeps the trial's `created_at` — such a row (it carries a trial claim, the
+ *     ledger every trial subscription gets, and it was not bought) is paid from
+ *     its first completed UPGRADE;
  *   - an importer writes `created_at` = the import and `started_at` = the
  *     donor's start date;
  *   - every UPGRADE resets `started_at` to its own moment, so a paid
- *     subscription moved to another plan would look new.
- *   So: a former trial from its conversion; anything else from the earlier of
- *   `created_at` and `started_at`.
+ *     subscription moved to another plan — a paid trial moved to a regular one
+ *     included — would look new.
+ *   So: a former free trial from its conversion; anything else from the
+ *   earlier of `created_at` and `started_at`.
  *
  * WHEN IT ENDS. `expires_at` — and for a deleted row the earlier of that and
  * the deletion, its last write (`updated_at`). Deleted rows count: under the
  * default settings the expired-profile cleanup deletes a lapsed subscription
  * three days after it ends, so leaving them out left only the lapses of the
  * last three days in any churn figure. A row deleted while its term ran — an
- * operator's removal, a merged duplicate — ended when it was deleted.
+ * operator's removal — ended when it was deleted.
  *
- * WHAT CANNOT BE SEEN. A row keeps only its latest `expires_at`: a customer
- * who let a subscription lapse and later renewed the SAME subscription looks
- * as if it never lapsed (by default that is only possible inside the three
- * days before the cleanup deletes it). No table keeps the history: the durable
- * terms (`subscription_terms`) exist only on installs that ran the add-on
- * entitlement cutover script, and payments do not record every extension
- * (grants, promo days, operator edits). The page's (i) says so.
+ * WHAT CANNOT BE SEEN, and the page's (i) says so:
+ *   - A row keeps only its latest `expires_at`: a customer who let a
+ *     subscription lapse and later renewed the SAME subscription looks as if
+ *     it never lapsed (by default that is only possible inside the three days
+ *     before the cleanup deletes it). No table keeps the history: the durable
+ *     terms (`subscription_terms`) exist only on installs that ran the add-on
+ *     entitlement cutover script, and payments do not record every extension
+ *     (grants, promo days, operator edits).
+ *   - The duplicate «Слияние подписок-дубликатов» retires is the row the
+ *     Remnawave importer minted, so it is on no plan and never counted — unless
+ *     «Назначить план всем» reached it first. Then it reads as a second paid
+ *     subscription until the merge and a lapse on the day of it: the merge
+ *     leaves nothing on the row to tell it from a deletion (DELETED with the
+ *     identity cleared is also a row deleted before it ever got a profile), and
+ *     the audit row naming it (`subscriptions.duplicate_pair_merged`) is written
+ *     after the merge commits and rotated away after 90 days.
+ *   - A Remnawave or 3x-ui import that has been given a plan is paid from the
+ *     import: neither importer keeps the profile's own start.
  */
 function paidTermSql(): Prisma.Sql {
   // Joined, not correlated: every non-trial subscription is read, and a hash
@@ -149,6 +184,7 @@ function paidTermSql(): Prisma.Sql {
         LEFT JOIN "transactions" u
           ON u."subscription_id" = c."subscription_id" AND u."status" = 'COMPLETED' AND u."purchase_type" = 'UPGRADE'
        WHERE c."status" = 'CONSUMED' AND c."subscription_id" IS NOT NULL
+         AND NOT ${boughtSubscriptionSql(Prisma.sql`c."subscription_id"`)}
        GROUP BY c."subscription_id"
     ),
     "paid_term" AS MATERIALIZED (
@@ -162,7 +198,8 @@ function paidTermSql(): Prisma.Sql {
              END AS "until"
         FROM "subscriptions" s
         LEFT JOIN "former_trial" f ON f."subscription_id" = s."id"
-       WHERE NOT s."is_trial"
+       WHERE (NOT s."is_trial" OR ${boughtSubscriptionSql(Prisma.sql`s."id"`)})
+         AND (NULLIF(s."plan_snapshot"->>'id', '') IS NOT NULL OR NULLIF(s."plan_snapshot"->>'planId', '') IS NOT NULL)
     )`;
 }
 
@@ -200,7 +237,9 @@ export function subscriptionSnapshotSql(window: AnalyticsWindowInterface): Prism
            (SELECT COUNT(*)
               FROM "subscriptions" s
              WHERE s."is_trial" AND s."status" IN ('ACTIVE', 'LIMITED')
-               AND (s."expires_at" IS NULL OR s."expires_at" > ${now}))::int AS "trialsNow"
+               AND (s."expires_at" IS NULL OR s."expires_at" > ${now})
+               -- Free trials only: a paid one is already among the paid subscriptions.
+               AND NOT ${boughtSubscriptionSql(Prisma.sql`s."id"`)})::int AS "trialsNow"
       FROM "paid_term"`;
 }
 
@@ -280,8 +319,8 @@ export function funnelSql(window: AnalyticsWindowInterface): Prisma.Sql {
       LEFT JOIN "paid" p ON p."user_id" = c."id"`;
 }
 
-/** How a checkout ended, as the panel writes it. */
-export type ProviderOutcome = 'completed' | 'completedRefundedInPart' | 'refunded' | 'canceled' | 'failed' | 'pending';
+/** How a checkout ended ({@link paymentOutcomeSql}), with a partial refund told apart from a plain completion. */
+export type ProviderOutcome = PaymentOutcome | 'completedRefundedInPart';
 
 export interface ProviderRow {
   readonly gateway: string;
@@ -306,12 +345,7 @@ export function providersSql(window: AnalyticsWindowInterface): Prisma.Sql {
     SELECT t."gateway_type"::text AS "gateway",
            (CASE
               WHEN t."status" = 'COMPLETED' AND ${refundedSoFarSql()} > 0 THEN 'completedRefundedInPart'
-              WHEN t."status" = 'COMPLETED' THEN 'completed'
-              WHEN t."status" = 'REFUNDED' THEN 'refunded'
-              WHEN t."status" = 'CANCELED' AND t."gateway_data"->>'refundReversedAt' IS NOT NULL THEN 'refunded'
-              WHEN t."status" = 'CANCELED' THEN 'canceled'
-              WHEN t."status" = 'FAILED' THEN 'failed'
-              ELSE 'pending'
+              ELSE ${paymentOutcomeSql()}
             END) AS "outcome",
            t."currency"::text AS "currency",
            COUNT(*)::int AS "count",

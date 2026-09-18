@@ -23,6 +23,11 @@
  *
  * Subscription-state figures (paid subscriptions in force, churn) are NOT
  * money: they count subscriptions on paid plans, however they were paid.
+ *
+ * A PAID TRIAL IS PAID (the owner's rule, 2026-09-18): the purchase of a trial
+ * plan is a subscription's first money, so it is `new` like any other, and a
+ * later move of that subscription to a regular plan is a `change`. Only a FREE
+ * trial starts a customer's trial → paid journey.
  */
 import { Prisma } from '@prisma/client';
 
@@ -47,6 +52,63 @@ export function refundedSoFarSql(alias: TransactionAlias = 't'): Prisma.Sql {
 /** The part of the payment the panel kept: its amount less a partial refund, never below zero. */
 export function netAmountSql(alias: TransactionAlias = 't'): Prisma.Sql {
   return Prisma.sql`GREATEST(${column(alias, 'amount')} - ${refundedSoFarSql(alias)}, 0)`;
+}
+
+/** How a checkout ended — see {@link paymentOutcomeSql}. */
+export type PaymentOutcome = 'completed' | 'refunded' | 'canceled' | 'failed' | 'pending';
+
+/**
+ * How a checkout ended, as the panel writes it. A refund is an outcome of a
+ * checkout that WENT THROUGH: reconciliation writes a full one as CANCELED
+ * stamped `gateway_data.refundReversedAt`; REFUNDED is what older rows may
+ * carry, though no writer sets it now. A partial refund leaves the payment
+ * COMPLETED — `completed` here; a report that shows it apart tests
+ * {@link refundedSoFarSql} first. Anything not yet settled is `pending`.
+ */
+export function paymentOutcomeSql(alias: TransactionAlias = 't'): Prisma.Sql {
+  const status = column(alias, 'status');
+  return Prisma.sql`(CASE
+      WHEN ${status} = 'COMPLETED' THEN 'completed'
+      WHEN ${status} = 'REFUNDED' THEN 'refunded'
+      WHEN ${status} = 'CANCELED' AND ${column(alias, 'gateway_data')}->>'refundReversedAt' IS NOT NULL THEN 'refunded'
+      WHEN ${status} = 'CANCELED' THEN 'canceled'
+      WHEN ${status} = 'FAILED' THEN 'failed'
+      ELSE 'pending'
+    END)`;
+}
+
+/**
+ * The payment bought a trial plan — a paid trial's own purchase. The checkout
+ * persists the plan's availability in the payment's snapshot
+ * (`buildTransactionDraftSnapshot`), and the fulfilment reads it back to make
+ * the subscription a trial (`createSubscriptionFromPayment`); the trial ledger
+ * names the payment too (`trial_claims.transaction_id`, `consumePaidTrialClaim`).
+ * Either will do — the ledger's own backfill recognised a paid trial by the
+ * snapshot alone. Any status: the caller says which payments it means.
+ */
+export function paidTrialPurchaseSql(alias: TransactionAlias = 't'): Prisma.Sql {
+  return Prisma.sql`(UPPER(COALESCE(${column(alias, 'plan_snapshot')}->>'availability', '')) = 'TRIAL'
+    OR EXISTS (SELECT 1 FROM "trial_claims" tc WHERE tc."transaction_id" = ${column(alias, 'id')}))`;
+}
+
+/**
+ * The subscription (the SQL expression naming its id) was BOUGHT: a completed
+ * payment linked to it bought its plan — NEW, or an ADDITIONAL that is not an
+ * add-on — whatever it cost. `createSubscriptionFromPayment` links that
+ * payment to the row it creates; a free trial never has one (the cabinet's and
+ * the operator's grant, and an import, create the row with no payment), and a
+ * plan change or a renewal is not the purchase that made the row. So a trial
+ * subscription that was bought is a PAID trial — told apart without `is_trial`,
+ * which both kinds carry, and without the ledger's PAID claims, which exist
+ * only since 2026-07-31 (its backfill wrote LEGACY claims for every trial).
+ */
+export function boughtSubscriptionSql(subscriptionId: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`EXISTS (
+    SELECT 1 FROM "transactions" bp
+     WHERE bp."subscription_id" = ${subscriptionId}
+       AND bp."status" = 'COMPLETED'
+       AND (bp."purchase_type" = 'NEW'
+            OR (bp."purchase_type" = 'ADDITIONAL' AND bp."plan_snapshot"->>'snapshotSource' IS DISTINCT FROM 'ADDON_PURCHASE')))`;
 }
 
 /** `e` was made before `t` — by time, then by id, so two payments of one instant still have an order. */

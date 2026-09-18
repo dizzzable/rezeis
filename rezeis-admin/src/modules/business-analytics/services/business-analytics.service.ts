@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { FxRateService } from '../../fx/fx-rate.service';
@@ -86,8 +85,8 @@ import {
   revenueSlicesSql,
   type RevenueSliceRow,
 } from '../utils/analytics-revenue.util';
-import { planAnalyticsWindow } from '../utils/analytics-window.util';
-import { type AnalyticsZone, resolveAnalyticsZone } from '../utils/analytics-zone.util';
+import { planAnalyticsWindow, readAnalyticsZone } from '../utils/analytics-window.util';
+import type { AnalyticsZone } from '../utils/analytics-zone.util';
 import {
   buildUsageSurfaceReport,
   usageSurfaceReportSql,
@@ -105,13 +104,6 @@ const EMPTY_SUBSCRIPTION_SNAPSHOT: SubscriptionSnapshotRow = {
 };
 
 const EMPTY_FUNNEL: FunnelRow = { registered: 0, activated: 0, paid: 0, repeat: 0 };
-
-/**
- * Zones PostgreSQL has been asked about, and its answer — once per process: a
- * zone `Intl` knows and the database's tz data does not would fail every
- * statement it is bound into, so it falls back to UTC instead.
- */
-const zonesKnownToDatabase = new Map<string, boolean>();
 
 /**
  * Business analytics aggregation service.
@@ -171,20 +163,10 @@ export class BusinessAnalyticsService {
     return readFxSnapshot(this.prismaService, this.fxRateService.getBaseCurrency());
   }
 
-  /** The zone the reports count days in: the panel's setting when it is one both `Intl` and PostgreSQL know, else UTC. */
+  /** The zone the reports count days in: the panel's setting when both `Intl` and PostgreSQL know it, else UTC. */
   private async readZone(): Promise<AnalyticsZone> {
     const branding = await this.settingsService.getPlatformBranding();
-    const zone = resolveAnalyticsZone(branding.timezone);
-    if (zone.name === 'UTC') return zone;
-    let known = zonesKnownToDatabase.get(zone.name);
-    if (known === undefined) {
-      const [row] = await this.prismaService.$queryRaw<Array<{ known: boolean }>>(
-        Prisma.sql`SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE "name" = ${zone.name}) AS "known"`,
-      );
-      known = row?.known === true;
-      zonesKnownToDatabase.set(zone.name, known);
-    }
-    return known ? zone : { name: 'UTC', fallback: true };
+    return readAnalyticsZone(this.prismaService, branding.timezone);
   }
 
   // ── «Обзор» ────────────────────────────────────────────────────────────
