@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 
 import { en } from '@/i18n/en'
 import { ru } from '@/i18n/ru'
-import { QR_STYLE_PLAIN, ROUNDED_MODULE_RADIUS, qrSvg, type QrLogo } from '@/lib/qr/kit/qr-style'
+import { QR_STYLE_PLAIN, qrSvg, type QrLogo } from '@/lib/qr/kit/qr-style'
 import { EYE_LOGO, SVG_LOGO_BYTES, TRANSPARENT_LOGO, paintLogo } from '@/test/qr-logo-bitmaps'
 import { renderWithProviders } from '@/test/test-utils'
 
@@ -770,8 +770,9 @@ describe('QR style section — the partner advertising code', () => {
     expect(markup(await sample('referral'))).toContain('<circle')
     const partner = markup(await sample('partner'))
     expect(partner).not.toContain('<circle')
-    // Not merely "no dots": rounded data modules are what dots became.
-    expect(partner).toContain(` rx="${ROUNDED_MODULE_RADIUS}"`)
+    // Not merely "no dots": rounded data modules are what dots became — the
+    // very code the rounded style draws at this size, byte for byte.
+    expect(partner).toBe(await qrSvg(QR_PREVIEW_PARTNER_LINK, { ...NAVY_DOTS, modules: 'rounded' }, QR_PREVIEW_PARTNER_PX))
     // And the step really ran: the same style drawn with no size — as a
     // preview that forgot to pass one would draw it — keeps its dots.
     const unsized = await qrSvg(QR_PREVIEW_PARTNER_LINK, NAVY_DOTS)
@@ -833,6 +834,8 @@ describe('QR style section — the partner advertising code', () => {
     const drawn = markup(await sample('partner'))
     expect(drawn).toBe(await qrSvg(QR_PREVIEW_PARTNER_LINK, QR_STYLE_PLAIN))
     expect(drawn).not.toContain('<circle')
-    expect(drawn).not.toContain(' rx=')
+    // A rounded corner, in either spelling the renderer has had: `rx` on a
+    // <rect>, or an arc in a path.
+    expect(drawn).not.toMatch(/\srx="|\sd="[^"]*[aA]/)
   })
 })

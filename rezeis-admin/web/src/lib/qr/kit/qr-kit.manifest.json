@@ -2,12 +2,12 @@
   "comment": "DO NOT EDIT files in kit/ by hand — they are vendored from reiwa (web/src/lib). Edit there, then: node scripts/sync-landing-kit.mjs",
   "sourceRepo": "dizzzable/reiwa",
   "sourcePath": "web/src/lib",
-  "sourceCommit": "62415efa15263781951b2df128ed1edf6495839a",
-  "syncedAt": "2026-09-13T14:51:12.251Z",
+  "sourceCommit": "6071d543d9c8aee70ae3c2266c814e52b2322ce6",
+  "syncedAt": "2026-09-18T13:05:49.555Z",
   "files": {
     "qr-logo-source.ts": "31879471ca9ab5709a391c346cc335ed270797de0a3ee50a3c0edbb5ea51b65b",
     "qr-logo.ts": "3b33b89ea51c75847242059686005bbd30bf77e95513c207900e7f14ec54c87f",
     "qr-options.ts": "348ff8b3e71d82757b5d6da6940595d08322dc83bdf59a52aa07b523f62bd599",
-    "qr-style.ts": "222dd97b870f422b75c1a67e04d0dfea804da82da94140ddcc1869083c4417c0"
+    "qr-style.ts": "2ab99b831d393f1645fc288a6620aa75dc1a6398d3133799f9bce94248a01ea5"
   }
 }
