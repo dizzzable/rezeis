@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { findHintCollisions } from './hint-collision'
+import { findHintCollisions, findHintCollisionsWithCompanions } from './hint-collision'
 import type { AutomationRule } from './automations-api'
 import type { UserHint } from '@/features/user-hints/user-hints-api'
 
@@ -274,6 +274,39 @@ describe('two rules on the same trigger', () => {
     expect(collisions[0].ruleName).toBe('Второе окно')
   })
 
+  it('warns about a second rule showing the SAME hint on the same event — the owner’s welcome', () => {
+    // The owner already has an enabled «Первое появление» on the Telegram
+    // sign-up. Applying the welcome for everyone opens a draft on that very
+    // event with that very hint: the most direct way to get the same window
+    // twice. Checked with ONE key on both sides, which the pair above never is.
+    const collisions = findHintCollisions({
+      draft: {
+        triggerKind: 'REALTIME',
+        triggerSpec: 'user.registered',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+      },
+      rules: [
+        rule({
+          id: 'rule-welcome',
+          name: 'Первое появление',
+          triggerSpec: 'user.registered',
+          actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+        }),
+      ],
+      hints: [hint({ id: 'h-welcome', key: 'tpl-welcome', titleRu: 'Добро пожаловать' })],
+      coincidentEventGroups: [],
+    })
+
+    expect(collisions).toEqual([
+      {
+        ruleId: 'rule-welcome',
+        ruleName: 'Первое появление',
+        triggerSpec: 'user.registered',
+        hintTitle: 'Добро пожаловать',
+      },
+    ])
+  })
+
   it('still says nothing when the two share a group', () => {
     // Supersession handles that, and warning about a case the system already
     // handles is how a warning stops being read.
@@ -394,5 +427,92 @@ describe('a rule that reaches the same event through a wildcard', () => {
     // half-typed rule in the list.
     expect(collide('payment.failed', '   ')).toEqual([])
     expect(collide('   ', 'payment.failed')).toEqual([])
+  })
+})
+
+describe('a draft that «Создать» saves with companion rules', () => {
+  /**
+   * «Первое появление» for everyone is a draft on the Telegram sign-up and a
+   * companion — the same rule — on the site sign-up. The companion exists only
+   * as a line on the draft until «Создать», so it is in no rule list, and a
+   * check over the draft's own event could not see the second window it adds.
+   */
+  const welcome = (over: Partial<UserHint> = {}): UserHint =>
+    ({ id: 'h-welcome', key: 'tpl-welcome', titleRu: 'Добро пожаловать', groupKey: null, isActive: true, ...over }) as UserHint
+
+  const onSite = (over: Record<string, unknown> = {}) =>
+    ({
+      id: 'rule-site',
+      name: 'Приветствие на сайте',
+      isEnabled: true,
+      triggerKind: 'REALTIME',
+      triggerSpec: 'user.web_registered',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome-web' } }],
+      ...over,
+    }) as never
+
+  const input = (rules: never[]) => ({
+    draft: {
+      triggerKind: 'REALTIME',
+      triggerSpec: 'user.registered',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+    },
+    rules,
+    hints: [welcome(), welcome({ id: 'h-web', key: 'tpl-welcome-web', titleRu: 'Добро пожаловать на сайт' })],
+    coincidentEventGroups: [] as string[][],
+  })
+
+  it('warns about a rule on a companion’s event', () => {
+    expect(findHintCollisions(input([onSite()]))).toEqual([])
+    expect(findHintCollisionsWithCompanions(input([onSite()]), ['user.web_registered'])).toEqual([
+      {
+        ruleId: 'rule-site',
+        ruleName: 'Приветствие на сайте',
+        triggerSpec: 'user.web_registered',
+        hintTitle: 'Добро пожаловать на сайт',
+      },
+    ])
+  })
+
+  it('still warns about the draft’s own event', () => {
+    const onTelegram = onSite({
+      id: 'rule-telegram',
+      name: 'Приветствие в Telegram',
+      triggerSpec: 'user.registered',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+    })
+    expect(
+      findHintCollisionsWithCompanions(input([onTelegram]), ['user.web_registered']).map((c) => c.ruleId),
+    ).toEqual(['rule-telegram'])
+  })
+
+  it('lists a rule once when it collides through more than one of the events', () => {
+    // A `user.*` rule fires beside the draft AND beside its companion.
+    const everySignUp = onSite({ id: 'rule-wild', name: 'Все регистрации', triggerSpec: 'user.*' })
+    expect(
+      findHintCollisionsWithCompanions(input([everySignUp]), ['user.web_registered']).map((c) => c.ruleId),
+    ).toEqual(['rule-wild'])
+  })
+
+  it('is the plain check when there are no companions', () => {
+    // Inputs where the answer is not empty either way: a rule on the draft's
+    // own event collides, and a rule on the site sign-up only would through a
+    // companion that is not there.
+    const onTelegram = onSite({
+      id: 'rule-telegram',
+      name: 'Приветствие в Telegram',
+      triggerSpec: 'user.registered',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+    })
+    const both = input([onTelegram, onSite()])
+
+    const plain = findHintCollisions(both)
+    expect(plain.map((c) => c.ruleId)).toEqual(['rule-telegram'])
+    expect(findHintCollisionsWithCompanions(both, [])).toEqual(plain)
+    // Anti-vacuity: the same inputs with the companion reach the site rule too.
+    expect(findHintCollisionsWithCompanions(both, ['user.web_registered']).map((c) => c.ruleId)).toEqual([
+      'rule-telegram',
+      'rule-site',
+    ])
   })
 })

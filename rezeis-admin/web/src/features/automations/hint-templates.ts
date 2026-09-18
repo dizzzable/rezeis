@@ -603,3 +603,95 @@ export function buildHint(
 export function buildHintAction(template: HintTemplate): AutomationActionDef[] {
   return [{ type: 'show_hint', params: { hintKey: template.hintKey } }]
 }
+
+// ── «Кого приветствовать» ─────────────────────────────────────────────────────
+
+/**
+ * Who a welcome is for, as the operator chooses it on the one «Первое появление»
+ * card.
+ *
+ * ── Why one card with a choice, and not two cards ───────────────────────────
+ *
+ * The two welcomes are the same moment reached through two doors, and each door
+ * is a different event: a Telegram sign-up (the bot's /start or the Mini App)
+ * raises `user.registered`, a sign-up on the site (login and password, Google,
+ * Yandex, or Telegram sign-in on the site) raises `user.web_registered`. As two
+ * cards the door was a code string under the title, and it was missed: an
+ * operator applied the Telegram welcome, set its surfaces to «Браузер», and
+ * waited for people registering in the browser to see it. The rule never
+ * matched a single one of them, and nothing anywhere said so.
+ *
+ * The surfaces a hint allows answer WHERE it may appear. This answers WHOM it
+ * greets, which only the event can decide.
+ */
+export const ARRIVAL_AUDIENCES = ['everyone', 'telegram', 'web'] as const
+
+export type ArrivalAudience = (typeof ARRIVAL_AUDIENCES)[number]
+
+/** The two templates the arrival card folds into one, by the door each watches. */
+export const ARRIVAL_TEMPLATE_IDS = { telegram: 'welcome', web: 'welcome_web' } as const
+
+/** A further rule created together with a template's draft. */
+export interface HintTemplateCompanion {
+  /** The event the companion rule fires on. */
+  readonly triggerSpec: string
+  /**
+   * The template whose NAME the companion rule takes. Every welcome rule is
+   * named for the door it watches, whichever hint it shows, so two rules on
+   * one list never read the same.
+   */
+  readonly nameTemplateId: string
+}
+
+/** What applying a template writes: its hint, its draft rule, and any companions. */
+export interface HintTemplatePlan {
+  /** Whose hint is written and whose rule the draft is. */
+  readonly template: HintTemplate
+  /**
+   * Rules created alongside the draft when «Создать» is pressed, each with the
+   * draft's actions and conditions on an event of its own. Empty for every
+   * template but a welcome for everyone.
+   */
+  readonly companions: readonly HintTemplateCompanion[]
+}
+
+function templateById(id: string): HintTemplate {
+  const template = HINT_TEMPLATES.find((candidate) => candidate.id === id)
+  if (template === undefined) throw new Error(`no hint template "${id}"`)
+  return template
+}
+
+/** Whether the library draws this template on the arrival card rather than on a card of its own. */
+export function isArrivalTemplate(template: HintTemplate): boolean {
+  return template.id === ARRIVAL_TEMPLATE_IDS.telegram || template.id === ARRIVAL_TEMPLATE_IDS.web
+}
+
+/**
+ * What the arrival card applies for a choice.
+ *
+ * EVERYONE IS ONE HINT AND TWO RULES. One hint, because a welcome for everyone
+ * is one text the operator edits once, and because a once-only hint is counted
+ * per account across every rule that fires it: an account that raises both
+ * events is greeted once, not once per door. Two rules, because the trigger
+ * grammar has no "either of these events" — `user.*` would fire the welcome on
+ * every blocked, linked and merged account as well.
+ *
+ * The Telegram welcome's hint is the one kept for everyone: it is open to every
+ * surface, while the site's is limited to the browser and the installed app —
+ * a limit that would hide the Telegram half of the audience.
+ */
+export function planArrival(audience: ArrivalAudience): HintTemplatePlan {
+  const telegram = templateById(ARRIVAL_TEMPLATE_IDS.telegram)
+  const web = templateById(ARRIVAL_TEMPLATE_IDS.web)
+  switch (audience) {
+    case 'telegram':
+      return { template: telegram, companions: [] }
+    case 'web':
+      return { template: web, companions: [] }
+    case 'everyone':
+      return {
+        template: telegram,
+        companions: [{ triggerSpec: web.triggerSpec, nameTemplateId: web.id }],
+      }
+  }
+}

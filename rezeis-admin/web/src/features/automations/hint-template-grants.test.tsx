@@ -306,3 +306,149 @@ describe('applying a ready-made hint that already has its text', () => {
     expect(sent.bodyRu).toBe(stock)
   })
 })
+
+describe('re-applying a template over a hint whose group or button the operator changed', () => {
+  /**
+   * "THE OTHER SETTINGS ARE KEPT" INCLUDES A SETTING THE OPERATOR REMOVED.
+   *
+   * The refresh branch kept a group and a button only when the hint HAD one:
+   * a group the operator had cleared, or a button they had taken off, came
+   * back from the template — while the toast, and the map's tooltip for the
+   * same button, said every other setting was kept.
+   *
+   * The hints PUT replaces the whole row (`user-hint.service.ts`,
+   * `buildWriteData`): an absent or empty `groupKey` is written as no group,
+   * and a button of kind NONE has its words and destination cleared — while a
+   * button of any other kind is refused without its Russian words. So what is
+   * sent has to say "none" in exactly those terms, and carry a kept button's
+   * words with it.
+   */
+  beforeEach(async () => {
+    usePermissionStore.getState().reset()
+    vi.mocked(getCatalog).mockResolvedValue({ actionTypes: ['show_hint'], coincidentEventGroups: [] })
+    vi.mocked(listRules).mockResolvedValue([])
+    vi.mocked(listExecutions).mockResolvedValue({ items: [], nextCursor: null })
+    vi.mocked(createUserHint).mockResolvedValue({} as never)
+    vi.mocked(updateUserHint).mockResolvedValue({} as never)
+    grant([
+      { resource: 'automations', action: 'view' },
+      { resource: 'automations', action: 'create' },
+      { resource: 'user_hints', action: 'edit' },
+    ])
+    await loadFeatureBundle('automations')
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    vi.clearAllMocks()
+  })
+
+  function templateOf(id: string) {
+    const template = HINT_TEMPLATES.find((candidate) => candidate.id === id)
+    expect(template, `no template ${id}`).toBeDefined()
+    return template!
+  }
+
+  /** The hint as the operator left it: the template's key, their own aiming. */
+  function existing(id: string, over: Record<string, unknown>): void {
+    const template = templateOf(id)
+    vi.mocked(listUserHints).mockResolvedValue([
+      {
+        id: 'hint-changed',
+        key: template.hintKey,
+        titleRu: 'Уже есть',
+        bodyRu: 'Текст оператора',
+        titleEn: null,
+        bodyEn: null,
+        surfaces: [],
+        formFactors: [],
+        groupKey: null,
+        isActive: true,
+        mode: template.mode,
+        tone: template.tone,
+        ttlHours: template.ttlHours,
+        isRepeatable: template.repeatable,
+        ctaKind: 'NONE',
+        ctaLabelRu: null,
+        ctaLabelEn: null,
+        ctaTarget: null,
+        ...over,
+      },
+    ] as never)
+  }
+
+  /** Opens the guide and presses «Использовать» on the card named for `id`. */
+  async function pressCard(id: string): Promise<Record<string, unknown>> {
+    renderWithProviders(<AutomationsPage />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: says('automationsPage.help.title') }))
+    const card = (
+      await screen.findByText(String(i18n.t(`automationsPage.hintTemplates.${id}.name`)))
+    ).parentElement!
+    const use = Array.from(card.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === String(i18n.t('automationsPage.help.useTemplate')),
+    )
+    expect(use, `the ${id} card has no «Использовать»`).toBeDefined()
+    await user.click(use!)
+    await waitFor(() => {
+      expect(updateUserHint).toHaveBeenCalledTimes(1)
+    })
+    const [, sent] = vi.mocked(updateUserHint).mock.calls[0] as unknown as [string, Record<string, unknown>]
+    // Anti-vacuity: this is the refresh branch, and the words ARE refreshed.
+    expect(sent.bodyRu).toBe(String(i18n.t(`automationsPage.hintTemplates.${id}.bodyRu`)))
+    return sent
+  }
+
+  it('keeps no group and no button when the operator had removed both', async () => {
+    // The premise: this template ships both, so both could come back.
+    expect(templateOf('payment_failed').groupKey).toBeDefined()
+    expect(templateOf('payment_failed').route).not.toBeNull()
+    existing('payment_failed', { groupKey: null, ctaKind: 'NONE' })
+
+    const sent = await pressCard('payment_failed')
+
+    // `''` or nothing is what the server writes as no group.
+    expect(sent.groupKey ?? '').toBe('')
+    expect(sent.ctaKind).toBe('NONE')
+    expect(sent.ctaTarget).toBeUndefined()
+    expect(sent.ctaLabelRu).toBeUndefined()
+    expect(sent.ctaLabelEn).toBeUndefined()
+  })
+
+  it('keeps the operator’s own group and button — destination and words — over the template’s', async () => {
+    existing('payment_failed', {
+      groupKey: 'my-payments',
+      ctaKind: 'ROUTE',
+      ctaTarget: '/renew',
+      ctaLabelRu: 'Продлить сейчас',
+      ctaLabelEn: 'Renew now',
+    })
+
+    const sent = await pressCard('payment_failed')
+
+    expect(sent).toMatchObject({
+      groupKey: 'my-payments',
+      ctaKind: 'ROUTE',
+      ctaTarget: '/renew',
+      ctaLabelRu: 'Продлить сейчас',
+      ctaLabelEn: 'Renew now',
+    })
+  })
+
+  it('keeps a button the template has none of, with the words the server requires of a button', async () => {
+    expect(templateOf('first_connected').route).toBeNull()
+    existing('first_connected', {
+      ctaKind: 'ROUTE',
+      ctaTarget: '/support',
+      ctaLabelRu: 'Написать нам',
+      ctaLabelEn: null,
+    })
+
+    const sent = await pressCard('first_connected')
+
+    expect(sent).toMatchObject({ ctaKind: 'ROUTE', ctaTarget: '/support', ctaLabelRu: 'Написать нам' })
+    // No English words on the operator's button stays no English words.
+    expect(sent.ctaLabelEn ?? '').toBe('')
+  })
+})

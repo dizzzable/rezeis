@@ -26,8 +26,9 @@
  * `i18n/features/automations-copy-truth.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router'
 
 import { i18n, i18nReady, loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
@@ -127,14 +128,28 @@ function unreachable(): Error {
   })
 }
 
-/** Opens the help card and presses the first ready-made hint in it. */
-async function pressFirstTemplate(): Promise<void> {
+/**
+ * Opens the help card and presses the first ready-made hint in it.
+ *
+ * The first card is «Первое появление», which asks whom it greets. Its default
+ * — everyone — brings a companion rule, and so a sentence of its own; naming a
+ * door (`audience`) gives the plain one-rule template the cases below were
+ * first written against.
+ */
+async function pressFirstTemplate(audience?: 'telegram' | 'web'): Promise<void> {
   const user = userEvent.setup()
   await user.click(await screen.findByRole('button', { name: matching('automationsPage.help.title') }))
 
   const heading = await screen.findByText(matching('automationsPage.hintTemplates.title'))
   const section = heading.parentElement
   expect(section).not.toBeNull()
+  if (audience !== undefined) {
+    await user.click(
+      within(section!).getByRole('radio', {
+        name: says(`automationsPage.hintTemplates.arrival.audiences.${audience}`),
+      }),
+    )
+  }
   const useLabel = String(i18n.t('automationsPage.help.useTemplate'))
   const buttons = Array.from(section!.querySelectorAll('button')).filter(
     (button) => button.textContent?.trim() === useLabel,
@@ -194,7 +209,7 @@ describe('which sentence follows the template button', () => {
     ])
 
     renderWithProviders(<AutomationsPage />)
-    await pressFirstTemplate()
+    await pressFirstTemplate('telegram')
 
     await waitFor(() => {
       expect(createUserHint).toHaveBeenCalledTimes(1)
@@ -225,7 +240,7 @@ describe('which sentence follows the template button', () => {
     ])
 
     renderWithProviders(<AutomationsPage />)
-    await pressFirstTemplate()
+    await pressFirstTemplate('telegram')
 
     await waitFor(() => {
       expect(updateUserHint).toHaveBeenCalledTimes(1)
@@ -240,6 +255,110 @@ describe('which sentence follows the template button', () => {
     expect(toastMock.success).not.toHaveBeenCalledWith(
       says('automationsPage.hintTemplates.created', { title }),
     )
+  })
+
+  describe('for a draft that «Создать» saves with a companion rule', () => {
+    // «Первое появление» for everyone: one hint, and «Создать» saves TWO rules.
+    // "The rule opened as a draft" would under-count what the next press does.
+
+    it('says how many rules «Создать» saves, on the branch that created the text', async () => {
+      grant([
+        { resource: 'automations', action: 'view' },
+        { resource: 'automations', action: 'create' },
+        { resource: 'user_hints', action: 'create' },
+      ])
+
+      renderWithProviders(<AutomationsPage />)
+      await pressFirstTemplate()
+
+      const title = 'Свежий текст'
+      await waitFor(() => {
+        expect(toastMock.success).toHaveBeenCalledWith(
+          says('automationsPage.hintTemplates.createdWithCompanions', { title, count: 2 }),
+        )
+      })
+      expect(toastMock.success).not.toHaveBeenCalledWith(
+        says('automationsPage.hintTemplates.created', { title }),
+      )
+    })
+
+    it('says how many rules the draft would add, on the branch that only refreshed the text', async () => {
+      hintsAlreadyExist()
+      grant([
+        { resource: 'automations', action: 'view' },
+        { resource: 'automations', action: 'create' },
+        { resource: 'user_hints', action: 'edit' },
+      ])
+
+      renderWithProviders(<AutomationsPage />)
+      await pressFirstTemplate()
+
+      const title = 'Уже существовавший текст'
+      await waitFor(() => {
+        expect(toastMock.success).toHaveBeenCalledWith(
+          says('automationsPage.hintTemplates.updatedWithCompanions', { title, count: 2 }),
+        )
+      })
+      expect(toastMock.success).not.toHaveBeenCalledWith(
+        says('automationsPage.hintTemplates.updated', { title }),
+      )
+    })
+  })
+})
+
+describe('an answer that lands after the operator left the page', () => {
+  it('does not bring them back to Automations, nor toast about a draft that is gone', async () => {
+    // The tab switch after a template is a navigation to this page's own
+    // address. Arriving once the operator had gone elsewhere, it dragged them
+    // back to a page that no longer held the draft it was opening.
+    grant([
+      { resource: 'automations', action: 'view' },
+      { resource: 'automations', action: 'create' },
+      { resource: 'user_hints', action: 'create' },
+    ])
+    let writeHint!: (value: unknown) => void
+    vi.mocked(createUserHint).mockReturnValueOnce(
+      new Promise((resolve) => {
+        writeHint = resolve
+      }) as never,
+    )
+    function Elsewhere() {
+      const { pathname } = useLocation()
+      return <p>now at {pathname}</p>
+    }
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/automations']}>
+        <Routes>
+          <Route
+            path="/automations"
+            element={
+              <>
+                <AutomationsPage />
+                <Link to="/elsewhere">leave</Link>
+              </>
+            }
+          />
+          <Route path="/elsewhere" element={<Elsewhere />} />
+        </Routes>
+      </MemoryRouter>,
+      { withRouter: false },
+    )
+    const user = userEvent.setup()
+    await pressFirstTemplate('telegram')
+    await waitFor(() => {
+      expect(createUserHint).toHaveBeenCalledTimes(1)
+    })
+
+    await user.click(screen.getByRole('link', { name: 'leave' }))
+    expect(await screen.findByText('now at /elsewhere')).toBeInTheDocument()
+
+    writeHint({ titleRu: 'Свежий текст' })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    })
+
+    expect(screen.getByText('now at /elsewhere')).toBeInTheDocument()
+    expect(toastMock.success).not.toHaveBeenCalled()
   })
 })
 

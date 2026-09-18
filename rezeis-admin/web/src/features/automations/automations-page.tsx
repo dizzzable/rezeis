@@ -10,7 +10,7 @@
  * realtime hook turns into an `['admin', 'automations']` invalidation
  * (we add the key here so the list refreshes when something fires).
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -29,6 +29,8 @@ import {
   Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
+
+import { InfoTip, LabelWithInfo } from '@/components/ui/info-tip';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -52,7 +54,6 @@ import { Card,
 } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -65,8 +66,22 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { listUserHints } from '@/features/user-hints/user-hints-api';
-import { findHintCollisions } from './hint-collision';
+import { ArrivalTemplateCard } from './arrival-template-card';
+import { findHintCollisionsWithCompanions } from './hint-collision';
 import { getEventCatalog } from './event-catalog-api';
+import { ACTION_LABEL_KEYS } from './rule-action-labels';
+import { ButtonTip } from './rule-button-tip';
+import {
+  companionPayload,
+  companionsInForce,
+  type DraftCompanion,
+  type DraftSeed,
+} from './rule-companions';
+import { RuleCompanionsNotice } from './rule-companions-notice';
+import { RuleHintWarnings } from './rule-hint-warnings';
+import { RuleRunDialog } from './rule-run-dialog';
+import { actionResultText, executionLogNote, runHadNoAnswer, runToastText } from './run-result-copy';
+import { ExecutionStatusBadge } from './run-status-badge';
 import { TriggerCatalogHint } from './trigger-catalog-hint';
 import { TriggerMapCard } from './trigger-map-card';
 import { useRuleDraft } from './use-rule-draft';
@@ -95,14 +110,25 @@ import {
 
 const RULES_KEY = ['admin', 'automations', 'rules'] as const;
 
-const ACTION_LABEL_KEYS: Record<string, string> = {
-  notify_telegram: 'automationsPage.actionTypes.notify_telegram',
-  webhook_post: 'automationsPage.actionTypes.webhook_post',
-  block_ip: 'automationsPage.actionTypes.block_ip',
-  block_user: 'automationsPage.actionTypes.block_user',
-  show_hint: 'automationsPage.actionTypes.show_hint',
-  show_hint_to_audience: 'automationsPage.actionTypes.show_hint_to_audience',
-  system_event: 'automationsPage.actionTypes.system_event',
+/** The id the editor opens an unsaved draft under. No rule and no query carries it. */
+const NEW_RULE_ID = '__new__';
+
+/**
+ * What the editor is on: the rule chosen in the list, and the unsaved draft
+ * behind `NEW_RULE_ID` when that is the choice. One value, because a late
+ * answer has to weigh both halves at once — see where it is held.
+ */
+type EditorTarget = {
+  readonly selectedId: string | null;
+  readonly draftSeed: DraftSeed | null;
+  /**
+   * WHICH draft, behind the one id they all share. Every draft opens under
+   * `NEW_RULE_ID`, so a second one opened while the first was being created
+   * reached the same editor instance — and inherited its state: every field
+   * disabled and «Создать» spinning, on a draft nothing was being created for.
+   * Counted per draft, it goes into the editor's key, and each gets its own.
+   */
+  readonly draftNo: number;
 };
 
 /**
@@ -115,7 +141,8 @@ import {
   HINT_TEMPLATE_STAGES,
   buildHint,
   buildHintAction,
-  type HintTemplate,
+  isArrivalTemplate,
+  type HintTemplatePlan,
 } from './hint-templates';
 import { createUserHint, updateUserHint } from '@/features/user-hints/user-hints-api';
 import { useHasPermission } from '@/features/rbac/permission-gate';
@@ -197,11 +224,49 @@ export default function AutomationsPage() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // (see `editorTarget` below — the selection and the open draft are one state)
+  // THE UNSAVED DRAFT LIVES HERE, not in the query cache.
+  //
+  // It used to be written into the cache under `__new__` and read back by a
+  // query function that returned whatever the cache held. The editor exists
+  // only on «Правила», so on any other tab nothing observed that entry; once
+  // its `gcTime` had passed the cache collected it, and back on the tab the
+  // query handed TanStack `undefined` — "data is undefined", with «Повторить»
+  // asking the same empty cache again for ever. Page state outlives a tab.
+  //
+  // WHICH RULE AND WHICH DRAFT ARE ONE PIECE OF STATE. A save answers later than
+  // the press, and both halves decide whether its answer still concerns the
+  // operator: a created rule opens only while the selection is still the very
+  // draft it came from. Two separate states cannot be asked that question
+  // together — each updater sees only its own half — so they are one here, and
+  // every late answer decides INSIDE the updater, on the state React is about
+  // to write, not on a copy a render or an effect behind.
+  const [editorTarget, setEditorTarget] = useState<EditorTarget>({
+    selectedId: null,
+    draftSeed: null,
+    draftNo: 0,
+  });
+  const { selectedId, draftSeed } = editorTarget;
 
-  // Opens the editor with an unsaved draft seeded under the synthetic
-  // `__new__` id (shared by the blank "New rule" button and the templates).
-  function openDraft(seed: Partial<AutomationRule> & { name: string; actions: AutomationActionDef[] }) {
+  // WHETHER THE PAGE IS STILL HERE, for answers that arrive later than the
+  // press. A mutation's own callbacks outlive the page, and a hint template's
+  // switches tabs — a navigation to this page's address, from a page that is
+  // gone. Where the operator stands WITHIN the page is `editorTarget`, read
+  // inside the updater rather than from a ref.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Opens the editor with an unsaved draft under the synthetic `__new__` id
+  // (shared by the blank "New rule" button and the templates).
+  function openDraft(
+    seed: Partial<AutomationRule> & { name: string; actions: AutomationActionDef[] },
+    companions: readonly DraftCompanion[] = [],
+  ) {
     const blank: AutomationRule = {
       id: '',
       name: seed.name,
@@ -219,8 +284,11 @@ export default function AutomationsPage() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    queryClient.setQueryData(['admin', 'automations', 'rule', '__new__'], blank);
-    setSelectedId('__new__');
+    setEditorTarget((current) => ({
+      selectedId: NEW_RULE_ID,
+      draftSeed: { rule: blank, companions },
+      draftNo: current.draftNo + 1,
+    }));
   }
 
   /**
@@ -236,7 +304,10 @@ export default function AutomationsPage() {
    * operator applying a template twice means "give me the stock text back".
    */
   const applyHintTemplate = useMutation({
-    mutationFn: async (template: HintTemplate) => {
+    // A PLAN, not a bare template: the hint and draft of `template`, and the
+    // companion rules «Создать» adds (only «Первое появление» for everyone has
+    // any). Every branch below is about the hint alone, so it reads `template`.
+    mutationFn: async ({ template }: HintTemplatePlan) => {
       // Checked before the first write, not after it. The server still refuses
       // on its own — this is the difference between being told now and being
       // told once there is a stray row to clean up.
@@ -288,24 +359,51 @@ export default function AutomationsPage() {
       // an operator who repointed the expiry pop-up at /plans and raised its
       // window to 72 hours lost both by pressing the one button the map offers
       // them for resuming a half-built pop-up.
+      //
+      // AND A SETTING THE OPERATOR REMOVED IS KEPT REMOVED. The group and the
+      // button were kept only when the hint HAD one, so a group the operator
+      // had cleared or a button they had taken off came back from the template
+      // — under a toast saying the other settings were kept. The PUT replaces
+      // the whole row (`user-hint.service.ts`, `buildWriteData`): an empty
+      // `groupKey` is written as no group, and a button of kind NONE loses its
+      // words and destination. A kept button travels WITH its words, which
+      // belong to the destination the operator chose — and without which the
+      // server refuses a button outright, as it did whenever the template had
+      // no button of its own.
+      const {
+        ctaLabelRu: _templateLabelRu,
+        ctaLabelEn: _templateLabelEn,
+        ctaTarget: _templateTarget,
+        ...words
+      } = payload;
       const hint = await updateUserHint(existing.id, {
-        ...payload,
+        ...words,
         surfaces: existing.surfaces,
         formFactors: existing.formFactors,
-        ...(existing.groupKey === null ? {} : { groupKey: existing.groupKey }),
+        groupKey: existing.groupKey ?? '',
         isActive: existing.isActive,
         mode: existing.mode,
         tone: existing.tone,
         ttlHours: existing.ttlHours,
         isRepeatable: existing.isRepeatable,
-        ...(existing.ctaTarget === null
+        ctaKind: existing.ctaKind,
+        ...(existing.ctaKind === 'NONE'
           ? {}
-          : { ctaKind: existing.ctaKind, ctaTarget: existing.ctaTarget }),
+          : {
+              ctaTarget: existing.ctaTarget ?? undefined,
+              ctaLabelRu: existing.ctaLabelRu ?? undefined,
+              ctaLabelEn: existing.ctaLabelEn ?? '',
+            }),
       });
       return { hint, existed: true };
     },
-    onSuccess: ({ hint, existed }, template) => {
+    onSuccess: ({ hint, existed }, plan) => {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'user-hints'] });
+      // NOT AFTER THE OPERATOR HAS LEFT. The tab switch below is a navigation
+      // to this page's own address, so an answer landing once they had gone
+      // elsewhere dragged them back — to a draft the unmounted page no longer
+      // holds. The text is written either way; the map offers the rest.
+      if (!mounted.current) return;
       // THE DRAFT OPENS ON THE RULES TAB, because that is the only tab that
       // renders the rule editor.
       //
@@ -316,13 +414,27 @@ export default function AutomationsPage() {
       // redrew the same button, now amber, and pressing it again repeated the
       // whole loop for ever.
       setTab('rules');
-      openDraft({
-        name: t(`automationsPage.hintTemplates.${template.id}.name`),
-        description: t(`automationsPage.hintTemplates.${template.id}.description`),
-        triggerKind: 'REALTIME',
-        triggerSpec: template.triggerSpec,
-        actions: buildHintAction(template),
-      });
+      const { template, companions } = plan;
+      openDraft(
+        {
+          name: t(`automationsPage.hintTemplates.${template.id}.name`),
+          // A companion copies the draft's description along with the rest of
+          // its payload, so a draft that brings one opens with a description
+          // true of every rule it creates — not the Telegram welcome's, which
+          // would be false on the rule for the site.
+          description:
+            companions.length > 0 && isArrivalTemplate(template)
+              ? t('automationsPage.hintTemplates.arrival.ruleDescription')
+              : t(`automationsPage.hintTemplates.${template.id}.description`),
+          triggerKind: 'REALTIME',
+          triggerSpec: template.triggerSpec,
+          actions: buildHintAction(template),
+        },
+        companions.map((companion) => ({
+          triggerSpec: companion.triggerSpec,
+          name: t(`automationsPage.hintTemplates.${companion.nameTemplateId}.name`),
+        })),
+      );
       // ONE BUTTON, TWO OUTCOMES, AND ONLY ONE OF THEM WAITS FOR ANYTHING.
       //
       // Both branches used to end on `created`, which says the text was created
@@ -336,14 +448,28 @@ export default function AutomationsPage() {
       //
       // `updated` says that instead. It is a different sentence in both
       // dictionaries, not a rename of the same one.
-      toast.success(
-        t(
-          existed
-            ? 'automationsPage.hintTemplates.updated'
-            : 'automationsPage.hintTemplates.created',
-          { title: hint.titleRu },
-        ),
-      );
+      //
+      // A draft with companions gets the sibling of each, because «Создать»
+      // then saves more than one rule and the sentence has to say how many.
+      if (companions.length === 0) {
+        toast.success(
+          t(
+            existed
+              ? 'automationsPage.hintTemplates.updated'
+              : 'automationsPage.hintTemplates.created',
+            { title: hint.titleRu },
+          ),
+        );
+      } else {
+        toast.success(
+          t(
+            existed
+              ? 'automationsPage.hintTemplates.updatedWithCompanions'
+              : 'automationsPage.hintTemplates.createdWithCompanions',
+            { title: hint.titleRu, count: 1 + companions.length },
+          ),
+        );
+      }
     },
     // The server's own sentence, IN THE OPERATOR'S LANGUAGE. A rejected payload
     // comes back from `ValidationPipe` as one line per field and those lines are
@@ -377,33 +503,49 @@ export default function AutomationsPage() {
   const [selectInitialized, setSelectInitialized] = useState(false);
   if (!selectInitialized && rulesQuery.data && rulesQuery.data.length > 0) {
     setSelectInitialized(true);
-    if (selectedId === null) setSelectedId(rulesQuery.data[0]?.id ?? null);
+    if (selectedId === null) {
+      const first = rulesQuery.data[0]?.id ?? null;
+      setEditorTarget((current) => (current.selectedId === null ? { ...current, selectedId: first } : current));
+    }
   }
 
   return (
     <div className="space-y-6">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Zap className="h-6 w-6" />
-            {t('automationsPage.title')}
-          </h1>
+          {/* The (i) sits BESIDE the heading, not in it: inside, its name would
+              become part of the heading's own. */}
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+              <Zap className="h-6 w-6" />
+              {t('automationsPage.title')}
+            </h1>
+            <InfoTip
+              label={t('automationsPage.infoAria', { subject: t('automationsPage.title') })}
+              side="bottom"
+              align="start"
+            >
+              {t('automationsPage.pageInfo')}
+            </InfoTip>
+          </div>
           <p className="text-sm text-muted-foreground mt-1">
             {t('automationsPage.subtitle')}
           </p>
         </div>
         {activeTab === 'rules' && (
-          <Button
-            onClick={() => {
-              openDraft({
-                name: t('automationsPage.untitledRule'),
-                actions: [{ type: 'notify_telegram', params: { text: 'Triggered' } }],
-              });
-            }}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            {t('automationsPage.newRule')}
-          </Button>
+          <ButtonTip tip={t('automationsPage.tips.newRule')}>
+            <Button
+              onClick={() => {
+                openDraft({
+                  name: t('automationsPage.untitledRule'),
+                  actions: [{ type: 'notify_telegram', params: { text: 'Triggered' } }],
+                });
+              }}
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              {t('automationsPage.newRule')}
+            </Button>
+          </ButtonTip>
         )}
       </header>
 
@@ -419,7 +561,8 @@ export default function AutomationsPage() {
 
       {activeTab === 'map' && (
         <TriggerMapCard
-          onUseTemplate={(template) => applyHintTemplate.mutate(template)}
+          // The map applies one template for its own event: no companions.
+          onUseTemplate={(template) => applyHintTemplate.mutate({ template, companions: [] })}
           templatePending={applyHintTemplate.isPending}
         />
       )}
@@ -427,7 +570,7 @@ export default function AutomationsPage() {
       {activeTab === 'rules' && (
         <HelpAndTemplates
           onUseTemplate={useTemplate}
-          onUseHintTemplate={(template) => applyHintTemplate.mutate(template)}
+          onUseHintTemplate={(plan) => applyHintTemplate.mutate(plan)}
           hintTemplatePending={applyHintTemplate.isPending}
         />
       )}
@@ -445,10 +588,21 @@ export default function AutomationsPage() {
           rules={rulesQuery.data ?? []}
           loading={rulesQuery.isLoading}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={(id) => setEditorTarget((current) => ({ ...current, selectedId: id }))}
           onToggle={(id, enabled) => {
             void toggleRule(id, enabled)
-              .then(() => {
+              .then((toggled) => {
+                // THE ANSWER IS THE RULE AS IT NOW STANDS, so it becomes that
+                // rule's copy — not only the list's. The editor open on it kept
+                // the old «Включено», and «Сохранить» wrote the old switch back;
+                // a rule opened later was served the old copy while it counted
+                // as fresh. The open draft takes the new switch and keeps the
+                // rest of what was typed (`useRuleDraft`).
+                if (toggled && toggled.id === id) {
+                  const ruleKey = ['admin', 'automations', 'rule', id];
+                  void queryClient.cancelQueries({ queryKey: ruleKey, exact: true });
+                  queryClient.setQueryData(ruleKey, toggled);
+                }
                 queryClient.invalidateQueries({ queryKey: RULES_KEY });
               })
               .catch((err) => {
@@ -463,7 +617,7 @@ export default function AutomationsPage() {
               });
           }}
         />
-        {selectedId === null ? (
+        {selectedId === null || (selectedId === NEW_RULE_ID && draftSeed === null) ? (
           <Card>
             <CardContent className="py-12 text-center text-sm text-muted-foreground">
               {t('automationsPage.selectPrompt')}
@@ -476,10 +630,11 @@ export default function AutomationsPage() {
           // running on one rule kept «Сохранить» spinning and disabled on the
           // next.
           <RuleEditor
-            key={selectedId}
+            key={selectedId === NEW_RULE_ID ? `${NEW_RULE_ID}:${editorTarget.draftNo}` : selectedId}
             ruleId={selectedId}
+            draftSeed={selectedId === NEW_RULE_ID ? draftSeed : null}
             actionCatalog={catalogQuery.data?.actionTypes ?? []}
-            onSaved={(rule) => {
+            onSaved={(rule, { created, fromId, fromSeed }) => {
               // THE ANSWER TO A SAVE IS THE RULE AS SAVED, so it becomes this
               // rule's copy. Refreshing only the list left the copy read BEFORE
               // the save in the cache, fresh for another half-minute: back on
@@ -493,12 +648,39 @@ export default function AutomationsPage() {
               const ruleKey = ['admin', 'automations', 'rule', rule.id];
               void queryClient.cancelQueries({ queryKey: ruleKey, exact: true });
               queryClient.setQueryData(ruleKey, rule);
-              setSelectedId(rule.id);
               queryClient.invalidateQueries({ queryKey: RULES_KEY });
+              // ONLY IF THE OPERATOR IS STILL ON WHAT WAS SAVED. An answer that
+              // lands after they opened another rule used to pull them back to
+              // this one; a create that lands after they opened another draft
+              // closed that draft. A created rule is opened only while the
+              // selection is still the very draft it was created from.
+              //
+              // Asked INSIDE the updater, on the state React is about to write.
+              // A copy kept in a ref is written by an effect, which React runs
+              // after the commit — an answer landing in between read the place
+              // the operator had already left.
+              setEditorTarget((current) => {
+                const stillHere = created
+                  ? current.selectedId === NEW_RULE_ID && current.draftSeed?.rule === fromSeed
+                  : current.selectedId === fromId;
+                if (!stillHere) return current;
+                // The draft is a rule now; nothing will open it again.
+                return { ...current, selectedId: rule.id, draftSeed: created ? null : current.draftSeed };
+              });
             }}
             onDeleted={() => {
-              setSelectedId(null);
+              setEditorTarget((current) => ({ ...current, selectedId: null }));
               queryClient.invalidateQueries({ queryKey: RULES_KEY });
+            }}
+            // «Не создавать эти правила». The rule object is kept as it is,
+            // so the draft taken from it — and whatever was typed into it —
+            // does not start over (`useRuleDraft` keys on its content).
+            onDropCompanions={() => {
+              setEditorTarget((current) =>
+                current.draftSeed === null
+                  ? current
+                  : { ...current, draftSeed: { ...current.draftSeed, companions: [] } },
+              );
             }}
           />
         )}
@@ -521,7 +703,7 @@ function HelpAndTemplates({
   hintTemplatePending,
 }: {
   onUseTemplate: (template: RuleTemplate) => void;
-  onUseHintTemplate: (template: HintTemplate) => void;
+  onUseHintTemplate: (plan: HintTemplatePlan) => void;
   hintTemplatePending: boolean;
 }) {
   const { t } = useTranslation();
@@ -624,10 +806,12 @@ function HelpAndTemplates({
                       {t(`automationsPage.templates.${tpl.id}.description`)}
                     </p>
                     <code className="mb-2 truncate text-[10px] text-muted-foreground">{tpl.triggerSpec}</code>
-                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onUseTemplate(tpl)}>
-                      <Plus className="mr-1.5 h-3.5 w-3.5" />
-                      {t('automationsPage.help.useTemplate')}
-                    </Button>
+                    <ButtonTip tip={t('automationsPage.tips.useRuleTemplate')} className="flex [&>*]:flex-1">
+                      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onUseTemplate(tpl)}>
+                        <Plus className="mr-1.5 h-3.5 w-3.5" />
+                        {t('automationsPage.help.useTemplate')}
+                      </Button>
+                    </ButtonTip>
                   </div>
                 ))}
               </div>
@@ -638,12 +822,18 @@ function HelpAndTemplates({
                 looking for "show the customer something" is not looking for
                 "notify me in Telegram". */}
             <div className="space-y-2">
+              {/* The explanation is behind the (i); the heading stays the
+                  section's first child, which the template tests look up. */}
               <p className="flex items-center gap-1.5 text-xs font-semibold">
                 <MessageSquare className="h-3.5 w-3.5 text-primary" />
                 {t('automationsPage.hintTemplates.title')}
-              </p>
-              <p className="text-[11px] text-muted-foreground">
-                {t('automationsPage.hintTemplates.subtitle')}
+                <InfoTip
+                  label={t('automationsPage.infoAria', {
+                    subject: t('automationsPage.hintTemplates.title'),
+                  })}
+                >
+                  {t('automationsPage.hintTemplates.subtitle')}
+                </InfoTip>
               </p>
               {/* GROUPED BY MOMENT, not listed.
 
@@ -655,13 +845,24 @@ function HelpAndTemplates({
               {HINT_TEMPLATE_STAGES.map((stage) => {
                 const inStage = HINT_TEMPLATES.filter((tpl) => tpl.stage === stage);
                 if (inStage.length === 0) return null;
+                // THE TWO WELCOMES ARE ONE CARD with a choice of whom it greets
+                // (`arrival-template-card.tsx`): as two cards, the only thing
+                // telling them apart was an event code under each title.
+                const hasArrival = inStage.some(isArrivalTemplate);
+                const cards = inStage.filter((tpl) => !isArrivalTemplate(tpl));
                 return (
                   <div key={stage} className="space-y-1.5">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                       {t(`automationsPage.hintTemplates.stages.${stage}`)}
                     </p>
                     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      {inStage.map((tpl) => (
+                      {hasArrival && (
+                        <ArrivalTemplateCard
+                          onUse={onUseHintTemplate}
+                          pending={hintTemplatePending}
+                        />
+                      )}
+                      {cards.map((tpl) => (
                         <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
                           <p className="text-xs font-medium">
                             {t(`automationsPage.hintTemplates.${tpl.id}.name`)}
@@ -672,16 +873,22 @@ function HelpAndTemplates({
                           <code className="mb-2 truncate text-[10px] text-muted-foreground">
                             {tpl.triggerSpec}
                           </code>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs"
+                          <ButtonTip
+                            tip={t('automationsPage.tips.useHintTemplate')}
                             disabled={hintTemplatePending}
-                            onClick={() => onUseHintTemplate(tpl)}
+                            className="flex [&>*]:flex-1"
                           >
-                            <Plus className="mr-1.5 h-3.5 w-3.5" />
-                            {t('automationsPage.help.useTemplate')}
-                          </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs"
+                              disabled={hintTemplatePending}
+                              onClick={() => onUseHintTemplate({ template: tpl, companions: [] })}
+                            >
+                              <Plus className="mr-1.5 h-3.5 w-3.5" />
+                              {t('automationsPage.help.useTemplate')}
+                            </Button>
+                          </ButtonTip>
                         </div>
                       ))}
                     </div>
@@ -766,11 +973,13 @@ function RuleList({
                   </p>
                 </button>
                 <div className="flex items-center pr-3">
-                  <Switch
-                    checked={rule.isEnabled}
-                    onCheckedChange={(v) => onToggle(rule.id, v)}
-                    aria-label={t('automationsPage.list.toggleAria', { name: rule.name })}
-                  />
+                  <ButtonTip tip={t('automationsPage.tips.listToggle')}>
+                    <Switch
+                      checked={rule.isEnabled}
+                      onCheckedChange={(v) => onToggle(rule.id, v)}
+                      aria-label={t('automationsPage.list.toggleAria', { name: rule.name })}
+                    />
+                  </ButtonTip>
                 </div>
               </div>
             );
@@ -781,45 +990,156 @@ function RuleList({
   );
 }
 
-function RuleEditor({
+interface RuleEditorProps {
+  ruleId: string;
+  /** The unsaved draft and its companions, when `ruleId` is `NEW_RULE_ID`. */
+  draftSeed: DraftSeed | null;
+  actionCatalog: readonly AutomationActionType[];
+  onSaved: (
+    rule: AutomationRule,
+    outcome: {
+      readonly created: boolean;
+      /** The editor's id when «Сохранить» or «Создать» was pressed. */
+      readonly fromId: string;
+      /** The draft's seed when «Создать» was pressed; `null` for a saved rule. */
+      readonly fromSeed: AutomationRule | null;
+    },
+  ) => void;
+  onDeleted: () => void;
+  /** Takes the companion rules off the draft: «Создать» then saves only the draft. */
+  onDropCompanions: () => void;
+}
+
+/** One companion rule «Создать» tried to save after the draft, and how that went. */
+interface CompanionOutcome {
+  readonly name: string;
+  /** `null` when it was created. */
+  readonly error: unknown;
+}
+
+/** How the editor's rule was read, for a saved rule; `null` for a draft. */
+interface RuleLoad {
+  readonly isError: boolean;
+  readonly error: unknown;
+  readonly refetch: () => unknown;
+}
+
+/**
+ * A draft is drawn from the page's seed and a saved rule from its query — two
+ * components, so an unsaved draft never goes near the query cache at all.
+ * Neither changes under one editor: the page keys the editor by `ruleId`.
+ */
+function RuleEditor(props: RuleEditorProps) {
+  if (props.ruleId === NEW_RULE_ID) {
+    return <RuleEditorBody {...props} rule={props.draftSeed?.rule} load={null} />;
+  }
+  return <SavedRuleEditor {...props} />;
+}
+
+function SavedRuleEditor(props: RuleEditorProps) {
+  const ruleQuery = useQuery({
+    queryKey: ['admin', 'automations', 'rule', props.ruleId],
+    queryFn: () => getRule(props.ruleId),
+  });
+  return <RuleEditorBody {...props} rule={ruleQuery.data} load={ruleQuery} />;
+}
+
+function RuleEditorBody({
   ruleId,
+  rule: ruleToEdit,
+  load,
+  draftSeed,
   actionCatalog,
   onSaved,
   onDeleted,
-}: {
-  ruleId: string;
-  actionCatalog: readonly AutomationActionType[];
-  onSaved: (rule: AutomationRule) => void;
-  onDeleted: () => void;
-}) {
+  onDropCompanions,
+}: RuleEditorProps & { rule: AutomationRule | undefined; load: RuleLoad | null }) {
   const { t } = useTranslation();
-  const isNew = ruleId === '__new__';
+  const isNew = ruleId === NEW_RULE_ID;
   const queryClient = useQueryClient();
-
-  const ruleQuery = useQuery({
-    queryKey: ['admin', 'automations', 'rule', ruleId],
-    queryFn: () => (isNew ? Promise.resolve(queryClient.getQueryData<AutomationRule>(['admin', 'automations', 'rule', ruleId])!) : getRule(ruleId)),
-    enabled: !!ruleId,
-  });
+  const mayRun = useHasPermission('automations', 'run');
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
+  // Where keyboard focus goes when the run dialog closes: back to the button it
+  // was opened from, which Radix cannot do for a dialog with no trigger.
+  const runButton = useRef<HTMLButtonElement>(null);
+  const switchId = useId();
 
   // The rule under THIS id and the draft taken from it, as one value — never a
   // draft left over from the rule that was open before. `useRuleDraft` holds
   // the account of the render that took the whole page down after Create.
-  const { inHand, setDraft } = useRuleDraft(ruleQuery.data);
+  const { inHand, setDraft } = useRuleDraft(ruleToEdit);
 
   const saveMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: async (): Promise<{
+      rule: AutomationRule;
+      companions: CompanionOutcome[];
+      seedAtPress: AutomationRule | null;
+    }> => {
       const draft = inHand?.draft;
-      if (!draft) return Promise.reject(new Error('No draft'));
+      if (!draft) throw new Error('No draft');
+      // The draft this press saves, taken NOW: the callbacks run with whatever
+      // props the editor has when the answer lands, and by then the page may
+      // have opened another draft in its place.
+      const seedAtPress = isNew ? (draftSeed?.rule ?? null) : null;
       const payload: UpsertRulePayload = {
         ...draft,
         description: draft.description?.trim() ? draft.description.trim() : undefined,
       };
-      return isNew ? apiCreateRule(payload) : apiUpdateRule(ruleId, payload);
+      if (!isNew) return { rule: await apiUpdateRule(ruleId, payload), companions: [], seedAtPress };
+      // THE DRAFT FIRST, then each companion in order, each with the draft's
+      // payload under its own name and event. A companion that fails does not
+      // undo the rule already created, and does not stop the next one: they
+      // are separate rules, and the answer says which of them exist.
+      const rule = await apiCreateRule(payload);
+      const companions: CompanionOutcome[] = [];
+      for (const companion of companionsInForce(draft, draftSeed?.companions ?? [])) {
+        try {
+          await apiCreateRule(companionPayload(payload, companion));
+          companions.push({ name: companion.name, error: null });
+        } catch (error) {
+          companions.push({ name: companion.name, error });
+        }
+      }
+      return { rule, companions, seedAtPress };
     },
-    onSuccess: (rule) => {
-      toast.success(isNew ? t('automationsPage.toast.created') : t('automationsPage.toast.updated'));
-      onSaved(rule);
+    onSuccess: ({ rule, companions, seedAtPress }) => {
+      if (companions.length === 0) {
+        toast.success(isNew ? t('automationsPage.toast.created') : t('automationsPage.toast.updated'));
+      } else {
+        const quoted = (name: string) => t('automationsPage.toast.ruleName', { name });
+        const created = [rule.name, ...companions.filter((c) => c.error === null).map((c) => c.name)]
+          .map(quoted)
+          .join(', ');
+        const failed = companions.filter((c) => c.error !== null);
+        if (failed.length === 0) {
+          // Off or on as the SERVER saved them — the switch in the header may
+          // have been turned on before «Создать».
+          toast.success(
+            t(
+              rule.isEnabled
+                ? 'automationsPage.toast.createdSeveralOn'
+                : 'automationsPage.toast.createdSeveralOff',
+              { names: created },
+            ),
+          );
+        } else {
+          toast.error(
+            t('automationsPage.toast.createdPartly', {
+              created,
+              failed: failed
+                .map((c) =>
+                  t('automationsPage.toast.ruleFailed', {
+                    name: c.name,
+                    message: translateApiError(t, c.error),
+                  }),
+                )
+                .join('; '),
+            }),
+          );
+        }
+      }
+      // The created draft is opened whatever became of its companions.
+      onSaved(rule, { created: isNew, fromId: ruleId, fromSeed: seedAtPress });
     },
     // `translateApiError`, not `.message` and not `getErrorMessage`.
     //
@@ -859,18 +1179,36 @@ function RuleEditor({
       ),
   });
 
+  // The immediate run, for a rule that shows no hint to a customer. A rule that
+  // does opens `RuleRunDialog` instead — see there for why.
   const runMutation = useMutation({
     mutationFn: () => runRuleManually(ruleId, {}),
     onSuccess: (result) => {
-      toast.success(t('automationsPage.toast.runFinished', { status: result.status }));
+      // THE STATUS IN THE OPERATOR'S LANGUAGE, and what went wrong first. It
+      // printed the raw `SUCCEEDED` — and nothing at all about an action that
+      // failed or was skipped inside a run graded as a whole.
+      const text = runToastText(t, result);
+      if (result.status === 'FAILED') toast.error(text);
+      else if (result.status === 'SKIPPED') toast.warning(text);
+      else toast.success(text);
       queryClient.invalidateQueries({ queryKey: ['admin', 'automations'] });
     },
-    onError: (err) =>
+    onError: (err) => {
+      // AN UNANSWERED RUN IS NOT A FAILED ONE. The run executes inside the
+      // request; a timeout or no answer at all may belong to a run that is still
+      // going, and "failed" invites pressing again — a second run. Its row will
+      // say how it ended, so the rule and its log are read again.
+      if (runHadNoAnswer(err)) {
+        toast.warning(t('automationsPage.toast.runNoAnswer'));
+        void queryClient.invalidateQueries({ queryKey: ['admin', 'automations'] });
+        return;
+      }
       toast.error(
         t('automationsPage.toast.runFailed', {
           message: translateApiError(t, err),
         }),
-      ),
+      );
+    },
   });
 
   if (!inHand) {
@@ -878,15 +1216,15 @@ function RuleEditor({
     // are not retried, and clicking the rule again changes nothing, because it
     // is already the selected one. Pressing retry puts the skeleton back until
     // the new answer.
-    if (ruleQuery.isError) {
+    if (load?.isError) {
       return (
         <Card>
           <CardContent className="p-6">
             <Alert variant="destructive">
               <AlertTitle>{t('automationsPage.errors.title')}</AlertTitle>
               <AlertDescription className="space-y-3">
-                <p>{translateApiError(t, ruleQuery.error)}</p>
-                <Button variant="outline" size="sm" onClick={() => void ruleQuery.refetch()}>
+                <p>{translateApiError(t, load.error)}</p>
+                <Button variant="outline" size="sm" onClick={() => void load.refetch()}>
                   {t('common.retry')}
                 </Button>
               </AlertDescription>
@@ -913,6 +1251,23 @@ function RuleEditor({
   // had always dropped it. So the switch and every field take no input until
   // the answer is in; a save that fails gives them back with the draft intact.
   const saving = saveMutation.isPending;
+  // Companions still in force for the draft as it stands (`rule-companions.ts`).
+  const companions = isNew ? companionsInForce(draft, draftSeed?.companions ?? []) : [];
+  // A rule that shows a hint to the customer its event names cannot run for
+  // nobody, so its «Запустить сейчас» asks whom to run it for. Read off the
+  // SAVED rule: the run executes what is on the server, not the draft.
+  const runAsksForCustomer = !isNew && rule.actions.some((action) => action.type === 'show_hint');
+  const runBlocked = !mayRun || runMutation.isPending;
+  // AN AUDIENCE ACTION WITH NO AUDIENCE. The server refuses the whole rule for
+  // it, and the refusal names neither the action nor the field, so the operator
+  // was left to guess which of several actions it meant. The panel knows before
+  // the press: the picker is marked, and «Сохранить» says what is missing
+  // instead of sending a save that cannot succeed.
+  const audienceMissing = draft.actions.some(
+    (action) =>
+      action.type === 'show_hint_to_audience' &&
+      (typeof action.params?.audience !== 'string' || action.params.audience.trim().length === 0),
+  );
 
   return (
     <Card>
@@ -920,44 +1275,94 @@ function RuleEditor({
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-3">
             <CardTitle>{isNew ? t('automationsPage.editor.newTitle') : draft.name}</CardTitle>
-            <Switch
-              checked={draft.isEnabled ?? false}
-              onCheckedChange={(v) => setDraft({ ...draft, isEnabled: v })}
-              disabled={saving}
-            />
+            <div className="flex items-center gap-2">
+              <Switch
+                id={switchId}
+                checked={draft.isEnabled ?? false}
+                onCheckedChange={(v) => setDraft({ ...draft, isEnabled: v })}
+                disabled={saving}
+              />
+              <LabelWithInfo
+                htmlFor={switchId}
+                info={t('automationsPage.editor.enabledInfo')}
+                infoLabel={t('automationsPage.infoAria', {
+                  subject: t('automationsPage.editor.enabledLabel'),
+                })}
+              >
+                {t('automationsPage.editor.enabledLabel')}
+              </LabelWithInfo>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             {!isNew && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => runMutation.mutate()}
-                disabled={runMutation.isPending}
+              <ButtonTip
+                tip={
+                  !mayRun
+                    ? t('automationsPage.tips.runNowForbidden')
+                    : runAsksForCustomer
+                      ? t('automationsPage.tips.runNowDialog')
+                      : t('automationsPage.tips.runNow')
+                }
+                disabled={runBlocked}
               >
-                {runMutation.isPending ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <PlayCircle className="mr-2 h-4 w-4" />
-                )}
-                {t('automationsPage.editor.runNow')}
-              </Button>
+                <Button
+                  ref={runButton}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => (runAsksForCustomer ? setRunDialogOpen(true) : runMutation.mutate())}
+                  disabled={runBlocked}
+                >
+                  {runMutation.isPending ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <PlayCircle className="mr-2 h-4 w-4" />
+                  )}
+                  {t('automationsPage.editor.runNow')}
+                </Button>
+              </ButtonTip>
             )}
-            <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-              {saveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isNew ? t('automationsPage.editor.create') : t('automationsPage.editor.save')}
-            </Button>
+            {runAsksForCustomer && (
+              <RuleRunDialog
+                open={runDialogOpen}
+                onOpenChange={setRunDialogOpen}
+                rule={rule}
+                returnFocusTo={runButton}
+              />
+            )}
+            <ButtonTip
+              tip={
+                audienceMissing
+                  ? t('automationsPage.tips.saveNeedsAudience')
+                  : isNew
+                    ? companions.length > 0
+                      ? t('automationsPage.tips.createWithCompanions')
+                      : t('automationsPage.tips.create')
+                    : t('automationsPage.tips.save')
+              }
+              disabled={saveMutation.isPending || audienceMissing}
+            >
+              <Button
+                onClick={() => saveMutation.mutate()}
+                disabled={saveMutation.isPending || audienceMissing}
+              >
+                {saveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {isNew ? t('automationsPage.editor.create') : t('automationsPage.editor.save')}
+              </Button>
+            </ButtonTip>
             {!isNew && (
               <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    disabled={deleteMutation.isPending}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    {t('automationsPage.editor.delete')}
-                  </Button>
-                </AlertDialogTrigger>
+                <ButtonTip tip={t('automationsPage.tips.delete')} disabled={deleteMutation.isPending}>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      disabled={deleteMutation.isPending}
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      {t('automationsPage.editor.delete')}
+                    </Button>
+                  </AlertDialogTrigger>
+                </ButtonTip>
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>
@@ -993,7 +1398,8 @@ function RuleEditor({
               })}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        <RuleCompanionsNotice companions={companions} onDrop={onDropCompanions} disabled={saving} />
         <Tabs defaultValue="config">
           <TabsList>
             <TabsTrigger value="config">{t('automationsPage.editor.tabs.config')}</TabsTrigger>
@@ -1005,6 +1411,7 @@ function RuleEditor({
               setDraft={setDraft}
               actionCatalog={actionCatalog}
               ruleId={isNew ? undefined : ruleId}
+              companions={companions}
               disabled={saving}
             />
           </TabsContent>
@@ -1024,6 +1431,7 @@ function ConfigEditor({
   setDraft,
   actionCatalog,
   ruleId,
+  companions,
   disabled,
 }: {
   draft: UpsertRulePayload;
@@ -1031,10 +1439,14 @@ function ConfigEditor({
   actionCatalog: readonly AutomationActionType[];
   /** Undefined for an unsaved draft — it cannot collide with itself. */
   ruleId?: string;
+  /** The companion rules «Создать» saves with this draft, each on its own event. */
+  companions: readonly DraftCompanion[];
   /** True while the rule is being saved: every control here takes no input. */
   disabled: boolean;
 }) {
   const { t } = useTranslation();
+  /** The accessible name of the (i) beside a field: «Подробнее: Название». */
+  const infoAria = (subject: string): string => t('automationsPage.infoAria', { subject });
   // Read HERE rather than threaded down from the page: nothing above the field
   // decides anything about it, and a sixth prop for one query would put the
   // catalogue's lifetime in a component that never looks at it.
@@ -1059,7 +1471,13 @@ function ConfigEditor({
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2">
         <div className="space-y-1.5">
-          <Label htmlFor="automation-rule-name">{t('automationsPage.config.name')}</Label>
+          <LabelWithInfo
+            htmlFor="automation-rule-name"
+            info={t('automationsPage.config.nameInfo')}
+            infoLabel={infoAria(t('automationsPage.config.name'))}
+          >
+            {t('automationsPage.config.name')}
+          </LabelWithInfo>
           <Input
             id="automation-rule-name"
             value={draft.name}
@@ -1069,7 +1487,12 @@ function ConfigEditor({
           />
         </div>
         <div className="space-y-1.5">
-          <Label>{t('automationsPage.config.trigger')}</Label>
+          <LabelWithInfo
+            info={t('automationsPage.config.triggerInfo')}
+            infoLabel={infoAria(t('automationsPage.config.trigger'))}
+          >
+            {t('automationsPage.config.trigger')}
+          </LabelWithInfo>
           <Select
             value={draft.triggerKind}
             onValueChange={(v) => setDraft({ ...draft, triggerKind: v as AutomationTriggerKind })}
@@ -1088,7 +1511,13 @@ function ConfigEditor({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="automation-rule-description">{t('automationsPage.config.description')}</Label>
+        <LabelWithInfo
+          htmlFor="automation-rule-description"
+          info={t('automationsPage.config.descriptionInfo')}
+          infoLabel={infoAria(t('automationsPage.config.description'))}
+        >
+          {t('automationsPage.config.description')}
+        </LabelWithInfo>
         <Textarea
           id="automation-rule-description"
           value={draft.description ?? ''}
@@ -1101,9 +1530,21 @@ function ConfigEditor({
 
       {draft.triggerKind !== 'MANUAL' && (
         <div className="space-y-1.5">
-          <Label htmlFor="automation-trigger-spec">
+          <LabelWithInfo
+            htmlFor="automation-trigger-spec"
+            info={
+              draft.triggerKind === 'REALTIME'
+                ? t('automationsPage.config.eventPatternHint')
+                : t('automationsPage.config.cronHint')
+            }
+            infoLabel={infoAria(
+              draft.triggerKind === 'REALTIME'
+                ? t('automationsPage.config.eventPattern')
+                : t('automationsPage.config.cronExpression'),
+            )}
+          >
             {draft.triggerKind === 'REALTIME' ? t('automationsPage.config.eventPattern') : t('automationsPage.config.cronExpression')}
-          </Label>
+          </LabelWithInfo>
           <Input
             id="automation-trigger-spec"
             value={draft.triggerSpec}
@@ -1127,18 +1568,19 @@ function ConfigEditor({
               windowDays={eventCatalog?.windowDays ?? 0}
             />
           )}
-          <p className="text-xs text-muted-foreground">
-            {draft.triggerKind === 'REALTIME'
-              ? t('automationsPage.config.eventPatternHint')
-              : t('automationsPage.config.cronHint')}
-          </p>
         </div>
       )}
 
       <Separator />
 
       <div className="space-y-1.5">
-        <Label htmlFor="automation-conditions">{t('automationsPage.config.conditionsLabel')}</Label>
+        <LabelWithInfo
+          htmlFor="automation-conditions"
+          info={t('automationsPage.help.conditionsHint')}
+          infoLabel={infoAria(t('automationsPage.config.conditionsLabel'))}
+        >
+          {t('automationsPage.config.conditionsLabel')}
+        </LabelWithInfo>
         <Textarea
           id="automation-conditions"
           value={conditionsText}
@@ -1157,7 +1599,9 @@ function ConfigEditor({
             }
           }}
           rows={6}
-          placeholder={`{\n  "and": [\n    { "==": ["$severity", "HIGH"] },\n    { ">": ["$score", 70] }\n  ]\n}`}
+          placeholder={t('automationsPage.config.examplePlaceholder', {
+            example: `{\n  "and": [\n    { "==": ["$severity", "HIGH"] },\n    { ">": ["$score", 70] }\n  ]\n}`,
+          })}
           className="font-mono text-xs"
           disabled={disabled}
         />
@@ -1169,10 +1613,17 @@ function ConfigEditor({
         actions={draft.actions}
         actionCatalog={actionCatalog}
         onChange={(actions) => setDraft({ ...draft, actions })}
+        triggerKind={draft.triggerKind}
+        triggerSpec={draft.triggerSpec}
+        companions={companions}
         disabled={disabled}
       />
 
-      <HintCollisionNotice ruleId={ruleId} draft={draft} />
+      <HintCollisionNotice
+        ruleId={ruleId}
+        draft={draft}
+        companionTriggerSpecs={companions.map((companion) => companion.triggerSpec)}
+      />
     </div>
   );
 }
@@ -1192,9 +1643,12 @@ function ConfigEditor({
 function HintCollisionNotice({
   ruleId,
   draft,
+  companionTriggerSpecs,
 }: {
   ruleId: string | undefined;
   draft: UpsertRulePayload;
+  /** The companion rules' events: «Создать» puts the draft's hint on those too. */
+  companionTriggerSpecs: readonly string[];
 }) {
   const { t } = useTranslation();
   const rulesQuery = useQuery({ queryKey: RULES_KEY, queryFn: listRules });
@@ -1209,17 +1663,20 @@ function HintCollisionNotice({
     staleTime: 5 * 60 * 1000,
   });
 
-  const collisions = findHintCollisions({
-    draft: {
-      id: ruleId,
-      triggerKind: draft.triggerKind,
-      triggerSpec: draft.triggerSpec ?? '',
-      actions: draft.actions,
+  const collisions = findHintCollisionsWithCompanions(
+    {
+      draft: {
+        id: ruleId,
+        triggerKind: draft.triggerKind,
+        triggerSpec: draft.triggerSpec ?? '',
+        actions: draft.actions,
+      },
+      rules: rulesQuery.data ?? [],
+      hints: hintsQuery.data ?? [],
+      coincidentEventGroups: catalogQuery.data?.coincidentEventGroups ?? [],
     },
-    rules: rulesQuery.data ?? [],
-    hints: hintsQuery.data ?? [],
-    coincidentEventGroups: catalogQuery.data?.coincidentEventGroups ?? [],
-  });
+    companionTriggerSpecs,
+  );
 
   if (collisions.length === 0) return null;
 
@@ -1251,14 +1708,24 @@ function ActionsEditor({
   actions,
   actionCatalog,
   onChange,
+  triggerKind,
+  triggerSpec,
+  companions,
   disabled,
 }: {
   actions: AutomationActionDef[];
   actionCatalog: readonly AutomationActionType[];
   onChange: (actions: AutomationActionDef[]) => void;
+  /** The draft's trigger: the warnings under a hint picker compare the hint with it. */
+  triggerKind: AutomationTriggerKind;
+  triggerSpec: string;
+  /** The companion rules: they show the same hint, each on its own event. */
+  companions: readonly DraftCompanion[];
   disabled: boolean;
 }) {
   const { t } = useTranslation();
+  const idPrefix = useId();
+  const infoAria = (subject: string): string => t('automationsPage.infoAria', { subject });
   // The hint library, for the picker below. Loaded here rather than passed in:
   // only this editor needs it, and only when a `show_hint` action is present.
   const hintsQuery = useQuery({
@@ -1284,18 +1751,37 @@ function ActionsEditor({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{t('automationsPage.actions.heading')}</h3>
-        <Button size="sm" variant="outline" onClick={add} disabled={disabled}>
-          <Plus className="mr-2 h-4 w-4" />
-          {t('automationsPage.actions.add')}
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <h3 className="text-sm font-semibold">{t('automationsPage.actions.heading')}</h3>
+          <InfoTip label={infoAria(t('automationsPage.actions.heading'))}>
+            {t('automationsPage.actions.headingInfo')}
+          </InfoTip>
+        </div>
+        <ButtonTip tip={t('automationsPage.tips.addAction')} disabled={disabled}>
+          <Button size="sm" variant="outline" onClick={add} disabled={disabled}>
+            <Plus className="mr-2 h-4 w-4" />
+            {t('automationsPage.actions.add')}
+          </Button>
+        </ButtonTip>
       </div>
       {actions.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           {t('automationsPage.actions.required')}
         </p>
       ) : (
-        actions.map((action, idx) => (
+        actions.map((action, idx) => {
+          const typeLabel = ACTION_LABEL_KEYS[action.type] ? t(ACTION_LABEL_KEYS[action.type]) : action.type;
+          const typeDescription = t(`automationsPage.help.actionDescriptions.${action.type}`, {
+            defaultValue: '',
+          });
+          const hintKey = typeof action.params?.hintKey === 'string' ? action.params.hintKey : '';
+          const hintPickerId = `${idPrefix}-hint-${idx}`;
+          const audiencePickerId = `${idPrefix}-audience-${idx}`;
+          // Nothing picked yet — the state «Сохранить» waits for.
+          const audienceEmpty =
+            action.type === 'show_hint_to_audience' &&
+            (typeof action.params?.audience !== 'string' || action.params.audience.trim().length === 0);
+          return (
           <Card key={idx} className="bg-muted/30">
             <CardContent className="p-3 space-y-2">
               <div className="flex items-center gap-2">
@@ -1318,16 +1804,27 @@ function ActionsEditor({
                     ))}
                   </SelectContent>
                 </Select>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => remove(idx)}
-                  className="ml-auto"
-                  aria-label={t('automationsPage.actions.removeAria', { index: idx + 1 })}
-                  disabled={disabled}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
+                {/* What the SELECTED type does — the guide's sentence for it. */}
+                {typeDescription.length > 0 && (
+                  <InfoTip label={infoAria(typeLabel)}>
+                    {t('automationsPage.actions.typeInfo', {
+                      label: typeLabel,
+                      description: typeDescription,
+                    })}
+                  </InfoTip>
+                )}
+                <ButtonTip tip={t('automationsPage.tips.removeAction')} disabled={disabled} className="ml-auto">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => remove(idx)}
+                    className="ml-auto"
+                    aria-label={t('automationsPage.actions.removeAria', { index: idx + 1 })}
+                    disabled={disabled}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </ButtonTip>
               </div>
               {action.type === 'show_hint' || action.type === 'show_hint_to_audience' ? (
                 /* CHOSEN, NOT TYPED. The parameter is a hint KEY, and an
@@ -1336,8 +1833,21 @@ function ActionsEditor({
                    engine can only report by logging, run after run, while the
                    rule quietly does nothing. */
                 <div className="space-y-1.5">
+                  {action.type === 'show_hint' ? (
+                    <LabelWithInfo
+                      htmlFor={hintPickerId}
+                      info={t('automationsPage.actions.hintNeedsCustomer')}
+                      infoLabel={infoAria(t('automationsPage.actions.hintLabel'))}
+                    >
+                      {t('automationsPage.actions.hintLabel')}
+                    </LabelWithInfo>
+                  ) : (
+                    <LabelWithInfo htmlFor={hintPickerId}>
+                      {t('automationsPage.actions.hintLabel')}
+                    </LabelWithInfo>
+                  )}
                   <Select
-                    value={typeof action.params?.hintKey === 'string' ? action.params.hintKey : ''}
+                    value={hintKey}
                     onValueChange={(v) =>
                       update(idx, {
                         ...action,
@@ -1350,7 +1860,7 @@ function ActionsEditor({
                     }
                     disabled={disabled}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={hintPickerId}>
                       <SelectValue placeholder={t('automationsPage.actions.pickHint')} />
                     </SelectTrigger>
                     <SelectContent>
@@ -1362,8 +1872,22 @@ function ActionsEditor({
                       ))}
                     </SelectContent>
                   </Select>
-                  {action.type === 'show_hint_to_audience' ? (
+                  <RuleHintWarnings
+                    hint={(hintsQuery.data ?? []).find((hint) => hint.key === hintKey.trim())}
+                    actionType={action.type}
+                    triggerKind={triggerKind}
+                    triggerSpec={triggerSpec}
+                    companions={companions}
+                  />
+                  {action.type === 'show_hint_to_audience' && (
                     <>
+                      <LabelWithInfo
+                        htmlFor={audiencePickerId}
+                        info={t('automationsPage.actions.audienceNeedsCron')}
+                        infoLabel={infoAria(t('automationsPage.actions.audienceLabel'))}
+                      >
+                        {t('automationsPage.actions.audienceLabel')}
+                      </LabelWithInfo>
                       <Select
                         value={
                           typeof action.params?.audience === 'string'
@@ -1375,7 +1899,12 @@ function ActionsEditor({
                         }
                         disabled={disabled}
                       >
-                        <SelectTrigger>
+                        <SelectTrigger
+                          id={audiencePickerId}
+                          aria-invalid={audienceEmpty || undefined}
+                          aria-describedby={audienceEmpty ? `${audiencePickerId}-missing` : undefined}
+                          className={audienceEmpty ? 'border-destructive' : undefined}
+                        >
                           <SelectValue placeholder={t('automationsPage.actions.pickAudience')} />
                         </SelectTrigger>
                         <SelectContent>
@@ -1384,14 +1913,12 @@ function ActionsEditor({
                           </SelectItem>
                         </SelectContent>
                       </Select>
-                      <p className="text-xs text-muted-foreground">
-                        {t('automationsPage.actions.audienceNeedsCron')}
-                      </p>
+                      {audienceEmpty && (
+                        <p id={`${audiencePickerId}-missing`} className="text-xs text-destructive">
+                          {t('automationsPage.actions.audienceMissing')}
+                        </p>
+                      )}
                     </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      {t('automationsPage.actions.hintNeedsCustomer')}
-                    </p>
                   )}
                 </div>
               ) : (
@@ -1407,13 +1934,14 @@ function ActionsEditor({
                 }}
                 rows={5}
                 className="font-mono text-xs"
-                placeholder='{ "text": "Hello" }'
+                placeholder={t('automationsPage.config.examplePlaceholder', { example: '{ "text": "Hello" }' })}
                 disabled={disabled}
               />
               )}
             </CardContent>
           </Card>
-        ))
+          );
+        })
       )}
     </div>
   );
@@ -1451,8 +1979,12 @@ function ExecutionsList({ ruleId }: { ruleId: string }) {
               {exec.durationMs !== null && ` · ${exec.durationMs}ms`}
             </span>
           </div>
-          {exec.errorMessage && (
-            <p className="text-xs text-destructive">{exec.errorMessage}</p>
+          {/* The executor's reason in words, and no English line repeating the
+              worded failures below (`executionLogNote`). */}
+          {executionLogNote(t, exec) !== null && (
+            <p className={cn('text-xs', exec.status === 'FAILED' ? 'text-destructive' : 'text-muted-foreground')}>
+              {executionLogNote(t, exec)}
+            </p>
           )}
           {exec.actionResults.length > 0 && (
             <ul className="text-xs text-muted-foreground space-y-0.5">
@@ -1468,7 +2000,11 @@ function ExecutionsList({ ruleId }: { ruleId: string }) {
                   <code className="text-[11px]">
                     {t(`automationsPage.actionTypes.${r.type}`, { defaultValue: r.type })}
                   </code>
-                  {r.message && <span className="truncate">— {r.message}</span>}
+                  {/* Worded from its code when it has one; a row written before
+                      codes existed keeps the server's message. */}
+                  {actionResultText(t, r) !== null && (
+                    <span className="truncate">— {actionResultText(t, r)}</span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -1477,21 +2013,4 @@ function ExecutionsList({ ruleId }: { ruleId: string }) {
       ))}
     </div>
   );
-}
-
-function ExecutionStatusBadge({ status }: { status: AutomationRule['lastRunStatus'] }) {
-  const { t } = useTranslation();
-  if (!status) return <Badge variant="outline">{t('automationsPage.statuses.UNKNOWN')}</Badge>;
-  const label = String(t(`automationsPage.statuses.${status}`, status));
-  switch (status) {
-    case 'SUCCEEDED':
-      return <Badge variant="success">{label}</Badge>;
-    case 'FAILED':
-      return <Badge variant="destructive">{label}</Badge>;
-    case 'RUNNING':
-    case 'PENDING':
-      return <Badge variant="warning">{label}</Badge>;
-    case 'SKIPPED':
-      return <Badge variant="secondary">{label}</Badge>;
-  }
 }

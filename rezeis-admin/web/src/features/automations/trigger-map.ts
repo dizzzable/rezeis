@@ -1,5 +1,13 @@
 import { HINT_TEMPLATES, HINT_TEMPLATE_STAGES, type HintTemplateStage } from './hint-templates'
 import type { AutomationRule } from './automations-api'
+import {
+  canCarryPopup,
+  isKnownAudience,
+  isWildcardPattern,
+  matchEventPattern,
+  surfaceGap,
+  type HintSurface,
+} from './popup-audience'
 import type { UserHint } from '@/features/user-hints/user-hints-api'
 
 /**
@@ -27,10 +35,16 @@ import type { UserHint } from '@/features/user-hints/user-hints-api'
  *
  * ── What it deliberately does not do ─────────────────────────────────────────
  *
- * It draws no edge for anything but a REALTIME rule whose action is `show_hint`.
- * A rule that sends Telegram on the same event is real and useful and is not a
- * path to a pop-up, and a map that drew it would be a map of automations rather
- * than of pop-ups — at which point it stops answering the question it is for.
+ * It draws no edge for a rule whose actions show no pop-up. A rule that sends
+ * Telegram on the same event is real and useful and is not a path to a pop-up,
+ * and a map that drew it would be a map of automations rather than of pop-ups.
+ *
+ * ── Everything it counts, it draws ───────────────────────────────────────────
+ *
+ * A badge is a promise that the thing it counts is on screen to be pressed. So
+ * a rule the counts include always has a place: a path on an event row, a row
+ * of its own when it reaches no event row, or the scheduled list when it has no
+ * event at all.
  */
 
 /** How a path between one trigger and one pop-up is doing. */
@@ -48,6 +62,23 @@ export type TriggerPathState =
   | 'missing-hint'
   /** The hint exists but is switched off, so the rule fires into nothing. */
   | 'hint-inactive'
+  /**
+   * The rule's event is not one the panel has CHECKED a pop-up can be shown on
+   * (`canCarryPopup` is false). UNCERTAIN, not broken.
+   *
+   * The server's list is closed, not exhaustive. Rules on the pre-fix template
+   * triggers (`user.expire_soon` and its two siblings) never fire; a rule on an
+   * unlisted event that does name a customer — `support.ticket_created`,
+   * `partner.activated` — works. The map cannot tell which, so it says neither:
+   * amber, counted apart, and pointing at the rule's run log. Drawing these red
+   * told an operator to delete pop-ups that were being shown.
+   */
+  | 'unverified'
+  /**
+   * `show_hint_to_audience` on an event rule. The action refuses an event
+   * trigger outright, so every run fails — certain, and red.
+   */
+  | 'audience-on-event'
 
 export interface TriggerPath {
   readonly ruleId: string
@@ -69,6 +100,29 @@ export interface TriggerPath {
    * filter in front of it.
    */
   readonly hasConditions: boolean
+  /**
+   * Where the customers this trigger names open the cabinet, and the hint may
+   * not appear — `[]` when there is no such place (see `surfaceGap`).
+   *
+   * The state is not changed by it, on purpose. A welcome on the Telegram
+   * sign-up limited to «Браузер» is `live` in every sense the map can check —
+   * rule on, hint written and on — and it reaches nobody, because the people
+   * that event names are inside Telegram. That is the case the owner hit, and
+   * it was green here. A LIKELY miss rather than a certain one (somebody who
+   * signed up in the bot can open the site later), so it is a marker beside
+   * the state, not a state of its own and not a count.
+   */
+  readonly surfaceGap: readonly HintSurface[]
+  /**
+   * The rule's own switch.
+   *
+   * `paused` says it by being that state, and every other state used to hide
+   * it: an operator who had just switched a legacy rule off saw the same amber
+   * chip as before, «Выключено» stayed at 0, and the explanation still talked
+   * about what happens when the event arrives. The map and «Кто увидит», which
+   * has always carried the badge, disagreed about the one thing just changed.
+   */
+  readonly isEnabled: boolean
 }
 
 /** A template an operator could apply to this trigger but has not. */
@@ -79,9 +133,24 @@ export interface TriggerOffer {
   readonly hintExists: boolean
 }
 
+/**
+ * The lanes of the map: the customer-life stages the template library names,
+ * and «Прочее» for the rows it does not — a rule on an unlisted event, a
+ * wildcard, a legacy trigger. They used to land in the LAST stage, which is
+ * headed «Безопасность» and holds one template about a fraud signal, so a
+ * support-ticket rule was filed under Security.
+ *
+ * `HINT_TEMPLATE_STAGES` is not touched: it is the template library's own
+ * vocabulary, and `other` is a lane of this map, not a stage a template can
+ * have.
+ */
+export type TriggerLaneStage = HintTemplateStage | 'other'
+
+export const TRIGGER_LANE_STAGES: readonly TriggerLaneStage[] = [...HINT_TEMPLATE_STAGES, 'other']
+
 export interface TriggerNode {
   readonly type: string
-  readonly stage: HintTemplateStage
+  readonly stage: TriggerLaneStage
   /** Paths that exist, whatever state they are in. */
   readonly paths: readonly TriggerPath[]
   /** Ready-made pop-ups for this trigger that nothing is using yet. */
@@ -89,17 +158,41 @@ export interface TriggerNode {
   /**
    * Rules that reach this trigger through a wildcard rather than by naming it.
    *
-   * Counted separately because they are the reason a trigger with no paths of
-   * its own can still fire a pop-up: one `*` rule covers everything, and an
-   * operator staring at an empty row needs to know that before they add a
-   * second one and get two.
+   * A CROSS-REFERENCE, not a count: each wildcard rule is drawn and counted on
+   * a row of its own, and this is what tells an operator staring at a bare row
+   * that a wildcard already covers it — before they add a second pop-up and
+   * get two. Counting here as well multiplied one rule by the rows it reaches;
+   * counting only in the pre-loop left a badge with nothing to press.
    */
   readonly wildcardRuleIds: readonly string[]
 }
 
 export interface TriggerLane {
-  readonly stage: HintTemplateStage
+  readonly stage: TriggerLaneStage
   readonly triggers: readonly TriggerNode[]
+}
+
+/** Why a rule with no event of its own can never show the hint it names. */
+export type EventlessFailureReason =
+  /** `show_hint` on a CRON rule: a schedule names no customer. */
+  | 'schedule-names-nobody'
+  /** `show_hint_to_audience` with no audience, or one the panel does not know. */
+  | 'audience-invalid'
+
+/**
+ * A rule that names a hint, has no event to put on a row, and fails on every
+ * automatic run. Listed on its own — counted, and in sight — instead of
+ * letting it mark its hint as used in silence, which is what the hints tab
+ * already reports as a rule that shows nobody anything.
+ */
+export interface EventlessFailure {
+  readonly ruleId: string
+  readonly ruleName: string
+  readonly hintKey: string
+  /** The hint's own title, or null when there is no such hint. */
+  readonly hintTitle: string | null
+  readonly reason: EventlessFailureReason
+  readonly isEnabled: boolean
 }
 
 /**
@@ -113,9 +206,11 @@ export interface TriggerLane {
  * dead.
  *
  * Mirrors `CLIENT_MOMENTS` in the panel's internal hints controller. A moment
- * added there and not here comes back as a false orphan.
+ * added there and not here comes back as a false orphan — and, in the hint
+ * editor's «Кто увидит», as "no rule shows this hint" about one the cabinet
+ * shows by itself.
  */
-const CLIENT_MOMENT_KEYS: ReadonlySet<string> = new Set(['subscription-ready'])
+export const CLIENT_MOMENT_KEYS: ReadonlySet<string> = new Set(['subscription-ready'])
 
 /** A hint nothing points at, from any rule or any template. */
 export interface OrphanHint {
@@ -127,11 +222,16 @@ export interface OrphanHint {
 export interface TriggerMap {
   readonly lanes: readonly TriggerLane[]
   readonly orphanHints: readonly OrphanHint[]
+  /** Rules with no event that fail on every automatic run. */
+  readonly eventlessFailures: readonly EventlessFailure[]
   /** Totals, so the card can say what it is worth opening for. */
   readonly counts: {
     readonly live: number
     readonly paused: number
+    /** Certain failures. */
     readonly broken: number
+    /** Rules on events the panel has not checked — uncertain, not broken. */
+    readonly unverified: number
     readonly unused: number
   }
 }
@@ -146,6 +246,11 @@ export interface TriggerMap {
  * separate packages and importing the server module here would pull NestJS
  * source into the browser bundle to evaluate nine lines of string comparison.
  *
+ * The implementation moved to `popup-audience.ts`, which needs it for the
+ * capability check and is imported by this file — defining it here would have
+ * made the two modules import each other. It is re-exported so every existing
+ * `from './trigger-map'` import keeps working.
+ *
  * A second opinion about what a pattern means is the shape of defect this
  * subsystem has already been bitten by — `canCarryPopup` once disagreed with
  * the bridge about `*`, so the panel refused to save a rule that would have
@@ -153,51 +258,51 @@ export interface TriggerMap {
  * BOTH functions and runs them over the same corpus, so a change to either
  * that the other does not follow fails the build.
  */
-export function matchEventPattern(pattern: string, eventType: string): boolean {
-  const trimmed = pattern.trim()
-  if (trimmed.length === 0) return false
-  if (trimmed === '*') return true
-  if (trimmed.endsWith('.*')) {
-    const prefix = trimmed.slice(0, -2)
-    return eventType === prefix || eventType.startsWith(`${prefix}.`)
-  }
-  return eventType === trimmed
+export { matchEventPattern }
+
+
+/** One pop-up action of a rule: which kind, which hint, which audience. */
+interface PopupAction {
+  readonly kind: 'show_hint' | 'show_hint_to_audience'
+  readonly hintKey: string
+  /** Only the audience action has one; trimmed, or `null`. */
+  readonly audience: string | null
 }
 
-/** Every `show_hint` key a rule's actions name. */
 /**
- * The hint keys a rule names.
+ * The pop-up actions a rule carries, one entry per kind and key.
  *
- * `includeAudience` widens it to `show_hint_to_audience`, the CRON action that
- * sends one pop-up to everyone matching a query. That action can never be drawn
- * as a PATH — there is no event on the map to hang it from — but the hint it
- * names is very much in use, and the orphan list is built from what is left
- * over. Without this the flagship nightly audience pop-up was reported as a
- * hint no customer will ever see.
- *
- * Duplicates are removed. An operator can add "show a hint" twice and pick the
- * same hint both times — the picker does not exclude a key the rule already
- * uses — and counting that as two paths inflated the live count and drew two
- * identical badges under one duplicate React key.
- *
- * A KEY THAT IS NOT A USABLE STRING STILL COUNTS — see `unusableKeyLabel`.
+ * Deduplicated on purpose, and the reason is the action picker: it does not
+ * exclude a key the rule already uses, so one rule can carry the same action
+ * twice — which is one path, not two.
  */
-function hintKeysOf(
-  rule: AutomationRule,
-  options: { readonly includeAudience?: boolean } = {},
-): string[] {
-  const wanted = options.includeAudience === true
-    ? ['show_hint', 'show_hint_to_audience']
-    : ['show_hint']
-  const keys = rule.actions
-    .filter((action) => wanted.includes(action.type))
-    .map((action) => {
-      const params = (action.params ?? {}) as Record<string, unknown>
-      const key = params['hintKey']
-      if (typeof key === 'string' && key.trim().length > 0) return key.trim()
-      return unusableKeyLabel(key)
+function popupActionsOf(rule: AutomationRule): PopupAction[] {
+  const seen = new Set<string>()
+  const actions: PopupAction[] = []
+  for (const action of rule.actions) {
+    if (action.type !== 'show_hint' && action.type !== 'show_hint_to_audience') continue
+    const params = (action.params ?? {}) as Record<string, unknown>
+    const rawKey = params['hintKey']
+    const hintKey =
+      typeof rawKey === 'string' && rawKey.trim().length > 0
+        ? rawKey.trim()
+        : unusableKeyLabel(rawKey)
+    const token = `${action.type}:${hintKey}`
+    if (seen.has(token)) continue
+    seen.add(token)
+    const rawAudience = params['audience']
+    const kind: PopupAction['kind'] =
+      action.type === 'show_hint' ? 'show_hint' : 'show_hint_to_audience'
+    actions.push({
+      kind,
+      hintKey,
+      audience:
+        typeof rawAudience === 'string' && rawAudience.trim().length > 0
+          ? rawAudience.trim()
+          : null,
     })
-  return [...new Set(keys)]
+  }
+  return actions
 }
 
 /**
@@ -211,10 +316,10 @@ function hintKeysOf(
  * can leave `hintKey` as null, a number, an object, or an empty string.
  *
  * Every such key used to be mapped to `''` and filtered out, which took the
- * whole RULE with it — `popupRules` keeps only entries with at least one key —
- * and the consequences were the opposite of harmless. The rule vanished from
- * the map, its trigger row went back to looking bare, and the map then OFFERED
- * a ready-made pop-up on it, because "nothing is working here" is exactly the
+ * whole RULE with it — only rules with at least one key were drawn — and the
+ * consequences were the opposite of harmless. The rule vanished from the map,
+ * its trigger row went back to looking bare, and the map then OFFERED a
+ * ready-made pop-up on it, because "nothing is working here" is exactly the
  * state that opens the offers. The operator applied the offer and now had two
  * rules on one trigger, one of which fires into nothing. Neither the rules tab
  * nor the hints tab shows any of that; this view is the only one that could.
@@ -248,9 +353,18 @@ function unusableKeyLabel(value: unknown): string {
   return `<${clipped}>`
 }
 
+/**
+ * The state of a `show_hint` path.
+ *
+ * Certain failures first: a hint that does not exist or is switched off shows
+ * nothing whatever the event does. Only when the hint side is sound does the
+ * event's uncertainty decide — and it decides for a switched-off rule too,
+ * because switching it on would not settle whether the event names a customer.
+ */
 function pathState(rule: AutomationRule, hint: UserHint | undefined): TriggerPathState {
   if (hint === undefined) return 'missing-hint'
   if (!hint.isActive) return 'hint-inactive'
+  if (!canCarryPopup(rule.triggerSpec)) return 'unverified'
   return rule.isEnabled ? 'live' : 'paused'
 }
 
@@ -293,23 +407,39 @@ const UNTEMPLATED_TRIGGER_LANE: ReadonlyMap<string, HintTemplateStage> = new Map
 /**
  * The residual, for a trigger no template covers and no entry above names.
  *
- * Only an install carrying a rule from before the save-time capability check
- * can reach it — `subscription.renewed`, say, on a rule written years ago. A
- * neighbour in the same namespace is the best available answer and it is a good
- * one when the namespace agrees with itself: every `payment.*` template is in
- * `payment`, so a legacy `payment.refunded` rule lands in «Оплата» instead of
+ * A WILDCARD row first asks the events it reaches: `referral.*` reaches only the
+ * referral pair, so it belongs where they do rather than under «Безопасность».
+ *
+ * Otherwise only an install carrying a rule from before the save-time capability
+ * check can reach it — `subscription.renewed`, say, on a rule written years ago.
+ * A neighbour in the same namespace is the best available answer and it is a
+ * good one when the namespace agrees with itself: every `payment.*` template is
+ * in `payment`, so a legacy `payment.refunded` rule lands in «Оплата» instead of
  * «Безопасность». Where the namespace disagrees — `remnawave.user.*` spans
  * three lanes — there is no honest answer, and the last lane is taken for want
  * of one.
  *
- * TODO(i18n): the honest answer is a lane of its own, headed «Прочее» /
- * "Other", which needs `automationsPage.hintTemplates.stages.other` in both
- * bundles. Until that key exists this reuses a real heading, which is the one
- * thing this function is trying to stop doing.
+ * What is left lands in «Прочее» — a lane of this map rather than a stage a
+ * template can have. It used to land in the LAST stage, and that is a real
+ * heading: «Безопасность», one template, about a fraud signal. A rule on
+ * `support.ticket_created`, a legacy `*` audience rule and every wildcard row
+ * were filed under Security, which is not where anybody looks for them.
  */
-function laneForUntemplated(spec: string): HintTemplateStage {
+function laneForUntemplated(spec: string): TriggerLaneStage {
   const named = UNTEMPLATED_TRIGGER_LANE.get(spec)
   if (named !== undefined) return named
+
+  if (isWildcardPattern(spec)) {
+    const reached = new Set<HintTemplateStage>([
+      ...HINT_TEMPLATES.filter((template) => matchEventPattern(spec, template.triggerSpec)).map(
+        (template) => template.stage,
+      ),
+      ...[...UNTEMPLATED_TRIGGER_LANE]
+        .filter(([type]) => matchEventPattern(spec, type))
+        .map(([, stage]) => stage),
+    ])
+    if (reached.size === 1) return [...reached][0]!
+  }
 
   const dot = spec.indexOf('.')
   const namespace = dot > 0 ? spec.slice(0, dot) : ''
@@ -324,7 +454,14 @@ function laneForUntemplated(spec: string): HintTemplateStage {
     if (neighbours.size === 1) return [...neighbours][0]!
   }
 
-  return HINT_TEMPLATE_STAGES[HINT_TEMPLATE_STAGES.length - 1]!
+  return 'other'
+}
+
+/** One realtime rule's pop-up action, and the spec it is drawn on. */
+interface RealtimeEntry {
+  readonly rule: AutomationRule
+  readonly spec: string
+  readonly action: PopupAction
 }
 
 /**
@@ -332,9 +469,18 @@ function laneForUntemplated(spec: string): HintTemplateStage {
  *
  * Triggers come from the TEMPLATES rather than from a list of their own: those
  * are the events the panel ships a ready-made pop-up for, which is exactly the
- * set an operator can build a path on without writing anything. A rule bound to
- * some other capable event still appears — under the trigger it names — because
- * the trigger set is the union of both.
+ * set an operator can build a path on without writing anything. Every spec a
+ * rule names gets a row too — an event, a wildcard, or a string the bridge will
+ * never match — because a rule an operator wrote has to be somewhere they can
+ * see it.
+ *
+ * ── Everything counted is drawn, exactly once ─────────────────────────────
+ *
+ * Each pop-up action is counted where its chip is: on the row named by its own
+ * spec. A wildcard used to be counted before this loop and drawn nowhere, so
+ * one `payment.*` rule naming a deleted hint read «1 не сработает» with no red
+ * chip anywhere and nothing to press. The rows such a rule reaches keep a
+ * cross-reference — «плюс N правил по маске» — which is not a count.
  */
 export function buildTriggerMap(input: {
   readonly rules: readonly AutomationRule[]
@@ -342,127 +488,117 @@ export function buildTriggerMap(input: {
 }): TriggerMap {
   const hintByKey = new Map(input.hints.map((hint) => [hint.key, hint]))
 
-  // Only REALTIME rules with a `show_hint` action can be drawn as a PATH on a
-  // trigger row: a path says "this event happens and this pop-up follows", and
-  // a rule with no event has no row to sit on.
-  const popupRules = input.rules
-    .filter((rule) => rule.triggerKind === 'REALTIME')
-    .map((rule) => ({ rule, keys: hintKeysOf(rule) }))
-    .filter((entry) => entry.keys.length > 0)
-
-  // EVERY OTHER RULE THAT NAMES A HINT STILL USES IT.
-  //
-  // Two kinds were being ignored, and the server permits both on purpose:
-  // `show_hint` on a MANUAL rule, which is how an operator sends one pop-up to
-  // one customer, and `show_hint_to_audience` on a CRON rule, which is the
-  // nightly "paid a day ago and never connected" job.
-  //
-  // Neither can be drawn as a path — there is no event to draw it from — but
-  // both are rules that fire the hint, and the orphan list is built from what
-  // is left over. So the flagship audience pop-up appeared under "hints nothing
-  // points at", captioned "no customer will ever see them". An operator who
-  // takes that advice deletes the hint, and the nightly job then logs "hint was
-  // raised but no such hint exists" once per matched customer, up to five
-  // hundred times a night, with nothing at all on screen.
-  const otherRulesUsingHints = input.rules
-    .filter((rule) => rule.triggerKind !== 'REALTIME' || hintKeysOf(rule).length === 0)
-    .flatMap((rule) => hintKeysOf(rule, { includeAudience: true }))
-
-  const stageOf = new Map<string, HintTemplateStage>()
-  for (const template of HINT_TEMPLATES) {
-    stageOf.set(template.triggerSpec, template.stage)
-  }
-
-  // A rule may name an event no template covers. It belongs on the map — an
-  // operator who wrote it wants to see it — and it has no stage of its own.
-  for (const { rule } of popupRules) {
-    const spec = rule.triggerSpec.trim()
-    if (spec.length === 0 || spec.includes('*')) continue
-    if (!stageOf.has(spec)) stageOf.set(spec, laneForUntemplated(spec))
-  }
-
-  const counts = { live: 0, paused: 0, broken: 0, unused: 0 }
-  const nodes: TriggerNode[] = []
+  const realtime: RealtimeEntry[] = []
+  const eventlessFailures: EventlessFailure[] = []
   const usedKeys = new Set<string>()
+  const counts = { live: 0, paused: 0, broken: 0, unverified: 0, unused: 0 }
+  const count = (state: TriggerPathState): void => {
+    if (state === 'live') counts.live += 1
+    else if (state === 'paused') counts.paused += 1
+    else if (state === 'unverified') counts.unverified += 1
+    else counts.broken += 1
+  }
 
-  // WILDCARD RULES ARE COUNTED ONCE, HERE, BEFORE THE PER-TRIGGER LOOP.
-  //
-  // They used to be counted inside it, which multiplied them by the number of
-  // triggers they reach: a single `*` rule naming a hint that does not exist
-  // rendered a red badge reading "17 will not fire" for ONE mistake. The other
-  // half of that asymmetry was worse — the same branch never touched `live` or
-  // `paused`, so an operator who fixed the hint watched the red badge drop to
-  // zero and the green one stay at zero, while that rule was delivering a
-  // pop-up on every event in the product.
-  //
-  // Counting here also reaches the wildcards the loop below never sees at all.
-  // The loop runs over trigger types drawn from templates and from EXACT rule
-  // specs, so a rule on `referral.*` — which the server accepts, and which
-  // fires — matched no row, contributed to no count, and its hint dropped
-  // through into "hints nothing points at" with the sentence saying no customer
-  // will ever see it.
-  for (const { rule, keys } of popupRules) {
+  for (const rule of input.rules) {
     const spec = rule.triggerSpec.trim()
-    if (!spec.includes('*')) continue
-    for (const key of keys) {
-      usedKeys.add(key)
-      const state = pathState(rule, hintByKey.get(key))
-      if (state === 'live') counts.live += 1
-      else if (state === 'paused') counts.paused += 1
-      else counts.broken += 1
+    for (const action of popupActionsOf(rule)) {
+      // A HINT NOTHING POINTS AT means no rule of ANY kind names it. MANUAL
+      // rules (one pop-up to one customer) and the nightly audience job have no
+      // event to draw and do fire their hint: reporting those under "hints
+      // nothing points at" once got the flagship nightly pop-up deleted.
+      usedKeys.add(action.hintKey)
+
+      if (rule.triggerKind === 'REALTIME') {
+        // A realtime rule with no pattern is selected by nothing, and the server
+        // refuses to save one, so there is no row to draw it on.
+        if (spec.length > 0) realtime.push({ rule, spec, action })
+        continue
+      }
+
+      // No event of its own. Two shapes fail on every automatic run and are
+      // listed apart; the rest work and simply are not a path on any event.
+      const reason: EventlessFailureReason | null =
+        action.kind === 'show_hint'
+          ? rule.triggerKind === 'CRON'
+            ? 'schedule-names-nobody'
+            : null
+          : isKnownAudience(action.audience)
+            ? null
+            : 'audience-invalid'
+      if (reason === null) continue
+      counts.broken += 1
+      eventlessFailures.push({
+        ruleId: rule.id,
+        ruleName: rule.name,
+        hintKey: action.hintKey,
+        hintTitle: hintByKey.get(action.hintKey)?.titleRu ?? null,
+        reason,
+        isEnabled: rule.isEnabled,
+      })
     }
   }
 
-  // And the keys named by rules that are not paths at all — MANUAL, and the
-  // CRON audience job. Used, therefore not orphans.
-  for (const key of otherRulesUsingHints) usedKeys.add(key)
+  // ── Rows ─────────────────────────────────────────────────────────────────
+  //
+  // Every template event, and every spec a rule names — a wildcard included,
+  // because that is where its own chip goes.
+  const stageOf = new Map<string, TriggerLaneStage>()
+  for (const template of HINT_TEMPLATES) stageOf.set(template.triggerSpec, template.stage)
+  for (const entry of realtime) {
+    if (!stageOf.has(entry.spec)) stageOf.set(entry.spec, laneForUntemplated(entry.spec))
+  }
 
+  const pathOf = (entry: RealtimeEntry, state: TriggerPathState, type: string): TriggerPath => {
+    const hint = hintByKey.get(entry.action.hintKey)
+    return {
+      ruleId: entry.rule.id,
+      ruleName: entry.rule.name,
+      hintKey: entry.action.hintKey,
+      hintTitle: hint?.titleRu ?? null,
+      state,
+      isEnabled: entry.rule.isEnabled,
+      // `null` and `{}` both mean "no filter". An empty object is what the
+      // editor leaves behind when an operator clears the field, and calling
+      // that "conditional" would put the marker on rules that have none.
+      hasConditions:
+        entry.rule.conditions !== null &&
+        typeof entry.rule.conditions === 'object' &&
+        Object.keys(entry.rule.conditions as Record<string, unknown>).length > 0,
+      // Nothing to compare against when the hint does not exist, and nothing to
+      // warn about on an action that shows nothing on any surface.
+      surfaceGap:
+        hint === undefined || state === 'audience-on-event'
+          ? []
+          : surfaceGap(type, hint.surfaces),
+    }
+  }
+
+  const nodes: TriggerNode[] = []
   for (const [type, stage] of stageOf) {
     const paths: TriggerPath[] = []
     const wildcardRuleIds: string[] = []
+    // A row that is itself a pattern belongs to the rule that owns it; other
+    // wildcards are not "reaching" a pattern.
+    const isEventRow = !isWildcardPattern(type)
 
-    for (const { rule, keys } of popupRules) {
-      const spec = rule.triggerSpec.trim()
-      const exact = spec === type
-      if (!exact && !matchEventPattern(spec, type)) continue
-      if (!exact) {
-        wildcardRuleIds.push(rule.id)
-        // ITS KEYS STILL COUNT, and skipping them was two defects in one line.
-        //
-        // A hint reached only through a wildcard rule was reported under "hints
-        // nothing points at" — beside the very row saying a wildcard rule
-        // points at it — with a sentence telling the operator no customer will
-        // ever see it. Deleting it on that advice kills a live pop-up.
-        //
-        // And a wildcard rule naming a key nothing answers to was invisible:
-        // the red "will not fire" badge never appeared for it, which is the one
-        // failure this whole view exists to surface.
-        for (const key of keys) {
-          usedKeys.add(key)
-        }
-        continue
-      }
-      for (const key of keys) {
-        usedKeys.add(key)
-        const hint = hintByKey.get(key)
-        const state = pathState(rule, hint)
-        if (state === 'live') counts.live += 1
-        else if (state === 'paused') counts.paused += 1
-        else counts.broken += 1
-        paths.push({
-          ruleId: rule.id,
-          ruleName: rule.name,
-          hintKey: key,
-          hintTitle: hint?.titleRu ?? null,
-          state,
-          // `null` and `{}` both mean "no filter". An empty object is what the
-          // editor leaves behind when an operator clears the field, and calling
-          // that "conditional" would put the marker on rules that have none.
-          hasConditions:
-            rule.conditions !== null &&
-            typeof rule.conditions === 'object' &&
-            Object.keys(rule.conditions as Record<string, unknown>).length > 0,
-        })
+    for (const entry of realtime) {
+      if (entry.spec === type) {
+        const state =
+          entry.action.kind === 'show_hint_to_audience'
+            ? 'audience-on-event'
+            : pathState(entry.rule, hintByKey.get(entry.action.hintKey))
+        count(state)
+        paths.push(pathOf(entry, state, type))
+      } else if (
+        // A cross-reference only, and never for an action that shows nothing
+        // anywhere: an audience rule listed here would claim to cover the row
+        // and would take its ready-made pop-ups away.
+        entry.action.kind === 'show_hint' &&
+        isEventRow &&
+        isWildcardPattern(entry.spec) &&
+        matchEventPattern(entry.spec, type)
+      ) {
+        wildcardRuleIds.push(entry.rule.id)
       }
     }
 
@@ -481,7 +617,9 @@ export function buildTriggerMap(input: {
     // surface. `unused` quietly dropped by two at the same time.
     //
     // The question is whether anything on this trigger is WORKING. A live or
-    // paused path is working or one toggle from it; a broken one is not.
+    // paused path is working or one toggle from it; a broken or unchecked one is
+    // not. A wildcard reaching the row counts too: it already shows a pop-up
+    // here, and a template applied beside it would make two.
     const served = paths.some((path) => path.state === 'live' || path.state === 'paused')
     const offers = (served || wildcardRuleIds.length > 0
       ? []
@@ -510,10 +648,10 @@ export function buildTriggerMap(input: {
     )
     .map((hint) => ({ key: hint.key, title: hint.titleRu, isActive: hint.isActive }))
 
-  const lanes = HINT_TEMPLATE_STAGES.map((stage) => ({
+  const lanes = TRIGGER_LANE_STAGES.map((stage) => ({
     stage,
     triggers: nodes.filter((node) => node.stage === stage),
   })).filter((lane) => lane.triggers.length > 0)
 
-  return { lanes, orphanHints, counts }
+  return { lanes, orphanHints, eventlessFailures, counts }
 }

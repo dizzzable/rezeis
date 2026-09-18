@@ -36,9 +36,14 @@ function draftOf(rule: AutomationRule): UpsertRulePayload {
  * the page stamps each draft with the moment it was opened, so opening a draft
  * again — the same template twice — still starts it over. A saved rule's
  * `createdAt` never moves.
+ *
+ * NOT `isEnabled` either — that one is MERGED, see `useRuleDraft`. The switch
+ * beside the rule in the list writes it at once, and a draft started over by
+ * that press threw away everything the operator had typed into the open editor.
  */
 function snapshotKeyOf(rule: AutomationRule): string {
-  return JSON.stringify([rule.id, rule.createdAt, draftOf(rule)]);
+  const { isEnabled: _switchIsMerged, ...edited } = draftOf(rule);
+  return JSON.stringify([rule.id, rule.createdAt, edited]);
 }
 
 /**
@@ -69,6 +74,13 @@ function snapshotKeyOf(rule: AutomationRule): string {
  * So the value that render works with is the one it has just derived, and the
  * rule and its draft come out as ONE value: a caller cannot hold a draft
  * without the rule it was taken from, nor one rule's draft next to another.
+ *
+ * THE SWITCH ALONE IS MERGED, NOT RESET. When the only thing that moved on the
+ * server is `isEnabled` — the list's switch, pressed while this rule is open —
+ * the draft takes the new value and keeps everything else the operator typed.
+ * Without that, the editor kept showing the old «Включено», and «Сохранить»
+ * wrote the old switch back over the one just pressed. A switch flipped here
+ * and not saved is kept across a re-read that did not move it.
  */
 export function useRuleDraft(rule: AutomationRule | undefined): {
   readonly inHand: RuleInHand | null;
@@ -78,11 +90,18 @@ export function useRuleDraft(rule: AutomationRule | undefined): {
   // "store previous prop in state and adjust during render":
   // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   const [snapshotKey, setSnapshotKey] = useState<string | null>(null);
+  // The switch as the server last had it, kept apart from the key.
+  const [serverSwitch, setServerSwitch] = useState<boolean | null>(null);
   const key = rule ? snapshotKeyOf(rule) : null;
   let current = draft;
   if (key !== snapshotKey) {
     current = rule ? draftOf(rule) : null;
     setSnapshotKey(key);
+    setServerSwitch(rule ? rule.isEnabled : null);
+    setDraft(current);
+  } else if (rule && current && rule.isEnabled !== serverSwitch) {
+    current = { ...current, isEnabled: rule.isEnabled };
+    setServerSwitch(rule.isEnabled);
     setDraft(current);
   }
   return { inHand: rule && current ? { rule, draft: current } : null, setDraft };

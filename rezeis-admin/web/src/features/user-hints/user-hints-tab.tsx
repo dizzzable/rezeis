@@ -8,8 +8,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { InfoTip, LabelWithInfo } from '@/components/ui/info-tip'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -19,8 +19,11 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { translateApiError } from '@/lib/translate-error'
 import { cn } from '@/lib/utils'
 
+import { ActionTip } from './action-tip'
+import { HintReachPanel } from './hint-reach-panel'
 import {
   createUserHint,
   deleteUserHint,
@@ -95,12 +98,19 @@ function toDraft(hint: UserHint): UpsertUserHintInput {
  * every field on this form exists to narrow when it fires: the surfaces it
  * suits, how long it stays worth showing, and whether it may repeat.
  *
- * ── Why the key matters more than it looks ────────────────────────────────
+ * ── What it does NOT decide, and why that is on screen ────────────────────
  *
- * The key IS the binding. A hint keyed `subscription-ready` fires when the
- * cabinet finishes provisioning a purchase; nothing else connects the two, and
- * renaming the key unbinds it. The form says so rather than leaving an operator
- * to discover it.
+ * WHOM. A hint is queued for whoever the event of the rule calling it names,
+ * and «Где показывать» only limits where the cabinet may draw it. The owner
+ * read the second as the first — «Браузер» on a welcome bound to the Telegram
+ * sign-up — and every delivery lapsed unseen. «Кто увидит» computes the first
+ * answer beside the second, from the rules and the draft.
+ *
+ * ── Why the explanations are behind (i)s ──────────────────────────────────
+ *
+ * The panel's rule: visible text is for labels, live status and warnings;
+ * how a setting works is one hover (or tap) away, and every button says what
+ * pressing it does before it is pressed.
  */
 export function UserHintsTab() {
   const { t } = useTranslation()
@@ -127,10 +137,12 @@ export function UserHintsTab() {
     onError: (error: unknown) => {
       // The server refuses a route that is not on its own list and a key that
       // already exists, and both are things the operator can fix — so its
-      // message is shown rather than a generic failure.
-      const message =
-        (error as { response?: { data?: { message?: unknown } } })?.response?.data?.message
-      toast.error(typeof message === 'string' ? message : t('userHints.saveFailed'))
+      // sentence is shown, in the operator's language where the dictionary has
+      // it. Reading `response.data.message` by hand showed the raw English and
+      // dropped a validation refusal altogether: that one is an ARRAY, one line
+      // per field, and a `typeof === 'string'` check replaced the whole
+      // diagnosis with "could not save".
+      toast.error(t('userHints.saveFailed', { message: translateApiError(t, error) }))
     },
   })
 
@@ -141,11 +153,18 @@ export function UserHintsTab() {
       setEditing(null)
       toast.success(t('userHints.deleted', { count: result.deletedDeliveries }))
     },
-    onError: () => toast.error(t('userHints.deleteFailed')),
+    // The server's reason, the same way as a failed save: a hint deleted in
+    // another tab answers "not found", a role without the grant answers with the
+    // permission it lacks, and a dead host is not a refusal at all.
+    onError: (error: unknown) =>
+      toast.error(t('userHints.deleteFailed', { message: translateApiError(t, error) })),
   })
 
   const vocabulary = vocabQuery.data
   const hints = hintsQuery.data ?? []
+
+  /** «Подробнее: <поле>» — the accessible name of a field's (i). */
+  const infoLabel = (subject: string): string => t('automationsPage.infoAria', { subject })
 
   function toggleIn(list: string[] | undefined, value: string): string[] {
     const current = list ?? []
@@ -154,16 +173,17 @@ export function UserHintsTab() {
       : [...current, value]
   }
 
+  // The key as SAVED, so «Кто увидит» can tell a rename from a new key.
+  const savedKey =
+    editing === null || editing.id === null
+      ? null
+      : (hints.find((hint) => hint.id === editing.id)?.key ?? null)
+  // Every OTHER hint's key: a draft typed onto one of them is not a new hint
+  // with that hint's rules, it is a conflict the save will refuse.
+  const otherKeys = hints.filter((hint) => hint.id !== editing?.id).map((hint) => hint.key)
+
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <p className="text-sm text-muted-foreground max-w-2xl">{t('userHints.intro')}</p>
-        <Button onClick={() => setEditing({ id: null, draft: emptyDraft() })}>
-          <Plus className="mr-2 h-4 w-4" />
-          {t('userHints.new')}
-        </Button>
-      </div>
-
       {hintsQuery.error && (
         <Alert variant="destructive">
           <AlertTitle>{t('userHints.errors.title')}</AlertTitle>
@@ -173,11 +193,20 @@ export function UserHintsTab() {
 
       <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Lightbulb className="h-4 w-4" />
-              {t('userHints.listTitle')}
-            </CardTitle>
+          <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-3">
+            <div className="flex items-center gap-1.5">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Lightbulb className="h-4 w-4" />
+                {t('userHints.listTitle')}
+              </CardTitle>
+              <InfoTip label={infoLabel(t('userHints.listTitle'))}>{t('userHints.intro')}</InfoTip>
+            </div>
+            <ActionTip tip={t('userHints.tips.new')}>
+              <Button size="sm" onClick={() => setEditing({ id: null, draft: emptyDraft() })}>
+                <Plus className="mr-2 h-4 w-4" />
+                {t('userHints.new')}
+              </Button>
+            </ActionTip>
           </CardHeader>
           <CardContent className="space-y-1">
             {hints.length === 0 && (
@@ -226,22 +255,32 @@ export function UserHintsTab() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-1.5">
-                <Label htmlFor="hint-key">{t('userHints.fields.key')}</Label>
+                <LabelWithInfo
+                  htmlFor="hint-key"
+                  info={t('userHints.fields.keyHint')}
+                  infoLabel={infoLabel(t('userHints.fields.key'))}
+                >
+                  {t('userHints.fields.key')}
+                </LabelWithInfo>
                 <Input
                   id="hint-key"
                   value={editing.draft.key}
-                  placeholder="subscription-ready"
+                  placeholder={t('userHints.fields.keyPlaceholder')}
                   onChange={(e) =>
                     setEditing({ ...editing, draft: { ...editing.draft, key: e.target.value } })
                   }
                 />
-                {/* The one field whose meaning is not obvious from its name. */}
-                <p className="text-xs text-muted-foreground">{t('userHints.fields.keyHint')}</p>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label htmlFor="hint-title-ru">{t('userHints.fields.titleRu')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-title-ru"
+                    info={t('userHints.fields.titleHint')}
+                    infoLabel={infoLabel(t('userHints.fields.titleRu'))}
+                  >
+                    {t('userHints.fields.titleRu')}
+                  </LabelWithInfo>
                   <Input
                     id="hint-title-ru"
                     value={editing.draft.titleRu}
@@ -254,7 +293,13 @@ export function UserHintsTab() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="hint-title-en">{t('userHints.fields.titleEn')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-title-en"
+                    info={t('userHints.fields.titleHint')}
+                    infoLabel={infoLabel(t('userHints.fields.titleEn'))}
+                  >
+                    {t('userHints.fields.titleEn')}
+                  </LabelWithInfo>
                   <Input
                     id="hint-title-en"
                     value={editing.draft.titleEn ?? ''}
@@ -271,7 +316,13 @@ export function UserHintsTab() {
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label htmlFor="hint-body-ru">{t('userHints.fields.bodyRu')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-body-ru"
+                    info={t('userHints.fields.bodyHint')}
+                    infoLabel={infoLabel(t('userHints.fields.bodyRu'))}
+                  >
+                    {t('userHints.fields.bodyRu')}
+                  </LabelWithInfo>
                   <Textarea
                     id="hint-body-ru"
                     rows={4}
@@ -285,7 +336,13 @@ export function UserHintsTab() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="hint-body-en">{t('userHints.fields.bodyEn')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-body-en"
+                    info={t('userHints.fields.bodyHint')}
+                    infoLabel={infoLabel(t('userHints.fields.bodyEn'))}
+                  >
+                    {t('userHints.fields.bodyEn')}
+                  </LabelWithInfo>
                   <Textarea
                     id="hint-body-en"
                     rows={4}
@@ -303,7 +360,13 @@ export function UserHintsTab() {
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>{t('userHints.fields.tone')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-tone"
+                    info={t('userHints.fields.toneHint')}
+                    infoLabel={infoLabel(t('userHints.fields.tone'))}
+                  >
+                    {t('userHints.fields.tone')}
+                  </LabelWithInfo>
                   <Select
                     value={editing.draft.tone}
                     onValueChange={(value) =>
@@ -313,7 +376,7 @@ export function UserHintsTab() {
                       })
                     }
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="hint-tone">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -326,7 +389,13 @@ export function UserHintsTab() {
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="hint-ttl">{t('userHints.fields.ttlHours')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-ttl"
+                    info={t('userHints.fields.ttlHint')}
+                    infoLabel={infoLabel(t('userHints.fields.ttlHours'))}
+                  >
+                    {t('userHints.fields.ttlHours')}
+                  </LabelWithInfo>
                   <Input
                     id="hint-ttl"
                     type="number"
@@ -340,14 +409,19 @@ export function UserHintsTab() {
                       })
                     }
                   />
-                  <p className="text-xs text-muted-foreground">{t('userHints.fields.ttlHint')}</p>
                 </div>
               </div>
 
               {/* ── The button ──────────────────────────────────────────── */}
               <div className="space-y-3 rounded-lg border p-3">
                 <div className="space-y-1.5">
-                  <Label>{t('userHints.fields.ctaKind')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-cta-kind"
+                    info={t('userHints.fields.ctaKindHint')}
+                    infoLabel={infoLabel(t('userHints.fields.ctaKind'))}
+                  >
+                    {t('userHints.fields.ctaKind')}
+                  </LabelWithInfo>
                   <Select
                     value={editing.draft.ctaKind}
                     onValueChange={(value) =>
@@ -365,7 +439,7 @@ export function UserHintsTab() {
                       })
                     }
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="hint-cta-kind">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -381,7 +455,13 @@ export function UserHintsTab() {
                 {editing.draft.ctaKind !== 'NONE' && (
                   <>
                     <div className="space-y-1.5">
-                      <Label htmlFor="hint-cta-label">{t('userHints.fields.ctaLabelRu')}</Label>
+                      <LabelWithInfo
+                        htmlFor="hint-cta-label"
+                        info={t('userHints.fields.ctaLabelHint')}
+                        infoLabel={infoLabel(t('userHints.fields.ctaLabelRu'))}
+                      >
+                        {t('userHints.fields.ctaLabelRu')}
+                      </LabelWithInfo>
                       <Input
                         id="hint-cta-label"
                         value={editing.draft.ctaLabelRu ?? ''}
@@ -394,7 +474,13 @@ export function UserHintsTab() {
                       />
                     </div>
                     <div className="space-y-1.5">
-                      <Label>{t('userHints.fields.ctaTarget')}</Label>
+                      <LabelWithInfo
+                        htmlFor="hint-cta-target"
+                        info={t('userHints.fields.ctaTargetHint')}
+                        infoLabel={infoLabel(t('userHints.fields.ctaTarget'))}
+                      >
+                        {t('userHints.fields.ctaTarget')}
+                      </LabelWithInfo>
                       {editing.draft.ctaKind === 'ROUTE' ? (
                         <Select
                           value={editing.draft.ctaTarget ?? ''}
@@ -405,7 +491,7 @@ export function UserHintsTab() {
                             })
                           }
                         >
-                          <SelectTrigger>
+                          <SelectTrigger id="hint-cta-target">
                             <SelectValue placeholder={t('userHints.fields.pickRoute')} />
                           </SelectTrigger>
                           <SelectContent>
@@ -421,8 +507,9 @@ export function UserHintsTab() {
                         </Select>
                       ) : (
                         <Input
+                          id="hint-cta-target"
                           value={editing.draft.ctaTarget ?? ''}
-                          placeholder="https://t.me/your_channel"
+                          placeholder={t('userHints.fields.externalPlaceholder')}
                           onChange={(e) =>
                             setEditing({
                               ...editing,
@@ -436,69 +523,122 @@ export function UserHintsTab() {
                 )}
               </div>
 
-              {/* ── Where it is worth showing ───────────────────────────── */}
+              {/* ── Whom it reaches — decided by the rules, not by this form ── */}
+              <HintReachPanel
+                draftKey={editing.draft.key}
+                savedKey={savedKey}
+                otherKeys={otherKeys}
+                surfaces={editing.draft.surfaces ?? []}
+                isActive={editing.draft.isActive ?? true}
+                ttlHours={editing.draft.ttlHours ?? 168}
+              />
+
+              {/* ── Where it may be drawn ───────────────────────────────── */}
               <div className="space-y-3 rounded-lg border p-3">
-                <div>
-                  <Label>{t('userHints.fields.surfaces')}</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {t('userHints.fields.surfacesHint')}
-                  </p>
+                <div className="space-y-2">
+                  <LabelWithInfo
+                    info={t('userHints.fields.surfacesHint')}
+                    infoLabel={infoLabel(t('userHints.fields.surfaces'))}
+                  >
+                    {t('userHints.fields.surfaces')}
+                  </LabelWithInfo>
+                  <div
+                    role="group"
+                    aria-label={t('userHints.fields.surfaces')}
+                    className="flex flex-wrap gap-2"
+                  >
+                    {(vocabulary?.surfaces ?? []).map((surface) => {
+                      const on = editing.draft.surfaces?.includes(surface) ?? false
+                      const name = t(`userHints.surfaces.${surface}`)
+                      return (
+                        <ActionTip
+                          key={surface}
+                          tip={t(on ? 'userHints.tips.surfaceOn' : 'userHints.tips.surfaceOff', {
+                            name,
+                          })}
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={on ? 'secondary' : 'outline'}
+                            aria-pressed={on}
+                            onClick={() =>
+                              setEditing({
+                                ...editing,
+                                draft: {
+                                  ...editing.draft,
+                                  surfaces: toggleIn(editing.draft.surfaces, surface),
+                                },
+                              })
+                            }
+                          >
+                            {name}
+                          </Button>
+                        </ActionTip>
+                      )
+                    })}
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {(vocabulary?.surfaces ?? []).map((surface) => (
-                    <Button
-                      key={surface}
-                      type="button"
-                      size="sm"
-                      variant={
-                        editing.draft.surfaces?.includes(surface) ? 'secondary' : 'outline'
-                      }
-                      onClick={() =>
-                        setEditing({
-                          ...editing,
-                          draft: {
-                            ...editing.draft,
-                            surfaces: toggleIn(editing.draft.surfaces, surface),
-                          },
-                        })
-                      }
-                    >
-                      {t(`userHints.surfaces.${surface}`)}
-                    </Button>
-                  ))}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {(vocabulary?.formFactors ?? []).map((factor) => (
-                    <Button
-                      key={factor}
-                      type="button"
-                      size="sm"
-                      variant={
-                        editing.draft.formFactors?.includes(factor) ? 'secondary' : 'outline'
-                      }
-                      onClick={() =>
-                        setEditing({
-                          ...editing,
-                          draft: {
-                            ...editing.draft,
-                            formFactors: toggleIn(editing.draft.formFactors, factor),
-                          },
-                        })
-                      }
-                    >
-                      {t(`userHints.formFactors.${factor}`)}
-                    </Button>
-                  ))}
+                <div className="space-y-2">
+                  <LabelWithInfo
+                    info={t('userHints.fields.formFactorsHint')}
+                    infoLabel={infoLabel(t('userHints.fields.formFactors'))}
+                  >
+                    {t('userHints.fields.formFactors')}
+                  </LabelWithInfo>
+                  <div
+                    role="group"
+                    aria-label={t('userHints.fields.formFactors')}
+                    className="flex flex-wrap gap-2"
+                  >
+                    {(vocabulary?.formFactors ?? []).map((factor) => {
+                      const on = editing.draft.formFactors?.includes(factor) ?? false
+                      const name = t(`userHints.formFactors.${factor}`)
+                      return (
+                        <ActionTip
+                          key={factor}
+                          tip={t(
+                            on ? 'userHints.tips.formFactorOn' : 'userHints.tips.formFactorOff',
+                            { name },
+                          )}
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={on ? 'secondary' : 'outline'}
+                            aria-pressed={on}
+                            onClick={() =>
+                              setEditing({
+                                ...editing,
+                                draft: {
+                                  ...editing.draft,
+                                  formFactors: toggleIn(editing.draft.formFactors, factor),
+                                },
+                              })
+                            }
+                          >
+                            {name}
+                          </Button>
+                        </ActionTip>
+                      )
+                    })}
+                  </div>
                 </div>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label htmlFor="hint-group">{t('userHints.fields.groupKey')}</Label>
+                  <LabelWithInfo
+                    htmlFor="hint-group"
+                    info={t('userHints.fields.groupKeyHint')}
+                    infoLabel={infoLabel(t('userHints.fields.groupKey'))}
+                  >
+                    {t('userHints.fields.groupKey')}
+                  </LabelWithInfo>
                   <Input
                     id="hint-group"
                     value={editing.draft.groupKey ?? ''}
-                    placeholder="purchase"
+                    placeholder={t('userHints.fields.groupKeyPlaceholder')}
                     onChange={(e) =>
                       setEditing({
                         ...editing,
@@ -506,13 +646,11 @@ export function UserHintsTab() {
                       })
                     }
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t('userHints.fields.groupKeyHint')}
-                  </p>
                 </div>
                 <div className="space-y-3 pt-6">
-                  <label className="flex items-center gap-2 text-sm">
+                  <div className="flex items-center gap-2">
                     <Switch
+                      id="hint-active"
                       checked={editing.draft.isActive ?? true}
                       onCheckedChange={(checked) =>
                         setEditing({
@@ -521,10 +659,17 @@ export function UserHintsTab() {
                         })
                       }
                     />
-                    {t('userHints.fields.isActive')}
-                  </label>
-                  <label className="flex items-center gap-2 text-sm">
+                    <LabelWithInfo
+                      htmlFor="hint-active"
+                      info={t('userHints.fields.isActiveHint')}
+                      infoLabel={infoLabel(t('userHints.fields.isActive'))}
+                    >
+                      {t('userHints.fields.isActive')}
+                    </LabelWithInfo>
+                  </div>
+                  <div className="flex items-center gap-2">
                     <Switch
+                      id="hint-repeatable"
                       checked={editing.draft.isRepeatable ?? false}
                       onCheckedChange={(checked) =>
                         setEditing({
@@ -533,36 +678,52 @@ export function UserHintsTab() {
                         })
                       }
                     />
-                    {t('userHints.fields.isRepeatable')}
-                  </label>
+                    <LabelWithInfo
+                      htmlFor="hint-repeatable"
+                      info={t('userHints.fields.isRepeatableHint')}
+                      infoLabel={infoLabel(t('userHints.fields.isRepeatable'))}
+                    >
+                      {t('userHints.fields.isRepeatable')}
+                    </LabelWithInfo>
+                  </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 pt-1">
-                <Button
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <ActionTip
+                  tip={t(editing.id === null ? 'userHints.tips.saveNew' : 'userHints.tips.saveExisting')}
                   disabled={saveMutation.isPending}
-                  onClick={() => saveMutation.mutate({ id: editing.id, draft: editing.draft })}
                 >
-                  {t('userHints.save')}
-                </Button>
-                <Button variant="ghost" onClick={() => setEditing(null)}>
-                  {t('userHints.cancel')}
-                </Button>
-                {editing.id !== null && (
                   <Button
-                    variant="destructive"
-                    className="ml-auto"
-                    disabled={deleteMutation.isPending}
-                    onClick={() => {
-                      // Deleting destroys the record of who was shown it, which
-                      // switching it off does not — so the confirmation says so.
-                      if (!window.confirm(t('userHints.deleteConfirm'))) return
-                      deleteMutation.mutate(editing.id as string)
-                    }}
+                    disabled={saveMutation.isPending}
+                    onClick={() => saveMutation.mutate({ id: editing.id, draft: editing.draft })}
                   >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    {t('userHints.delete')}
+                    {t('userHints.save')}
                   </Button>
+                </ActionTip>
+                <ActionTip tip={t('userHints.tips.cancel')}>
+                  <Button variant="ghost" onClick={() => setEditing(null)}>
+                    {t('userHints.cancel')}
+                  </Button>
+                </ActionTip>
+                {editing.id !== null && (
+                  <div className="ml-auto">
+                    <ActionTip tip={t('userHints.tips.delete')} disabled={deleteMutation.isPending}>
+                      <Button
+                        variant="destructive"
+                        disabled={deleteMutation.isPending}
+                        onClick={() => {
+                          // Deleting destroys the record of who was shown it, which
+                          // switching it off does not — so the confirmation says so.
+                          if (!window.confirm(t('userHints.deleteConfirm'))) return
+                          deleteMutation.mutate(editing.id as string)
+                        }}
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        {t('userHints.delete')}
+                      </Button>
+                    </ActionTip>
+                  </div>
                 )}
               </div>
             </CardContent>

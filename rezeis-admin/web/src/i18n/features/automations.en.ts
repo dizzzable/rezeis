@@ -8,8 +8,14 @@
 export const en = {
   automationsPage: {
     title: 'Automations',
-    subtitle: "React to events, run things on a schedule, fire ad-hoc workflows. Each rule is evaluated independently — failures of one action don't abort the rest.",
+    // One line under the title; the explanation sits behind the (i) beside it (`pageInfo`).
+    subtitle: 'Rules, cabinet hints for customers, and the map of how the two connect.',
+    pageInfo:
+      'Three tabs.\nRules — what the panel does on its own: when an event happens, on a schedule, or on the Run now button. Each rule runs on its own, and one failed action does not stop the rest.\nHints — the texts a customer sees in the cabinet.\nMap — which events already bring a hint to the customer and which will not.\n\nA window or a line for a customer is a text on the Hints tab plus a rule that calls it with the "Show a hint in the cabinet" or "Show a hint on a schedule" action. Neither shows anything without the other — except a hint keyed subscription-ready, which the cabinet calls itself.',
     newRule: 'New rule',
+    // The accessible name of an (i) beside a field or a section: "More about Key".
+    // Shared by the Rules, Hints and Map tabs.
+    infoAria: 'More about {{subject}}',
     hintCollision: {
       title: 'The customer will see one hint after another',
       // Pluralised. One fixed form read "2 other enabled rule shows", and two
@@ -23,6 +29,40 @@ export const en = {
     },
     audiences: {
       'paid-not-connected': 'Paid, but has never connected',
+    },
+    // The operator's words for the events a hint can be shown on. Keyed by the
+    // event type with dots turned into underscores (`popupEventNameKey`), since
+    // i18next splits keys on a dot. Checked against the server's
+    // POPUP_CAPABLE_EVENTS in `popup-audience.test.ts`.
+    popupEvents: {
+      user_registered: 'Signed up through Telegram — the bot or the Mini App',
+      user_web_registered: 'Signed up on the site — login and password, Google, Yandex, Mail.ru or Telegram on the site',
+      user_first_traffic: 'First traffic — once ever',
+      subscription_created: 'A subscription was issued',
+      subscription_trial_granted: 'A trial was issued',
+      payment_completed: 'A payment went through',
+      payment_failed: 'A payment failed',
+      promocode_activated: 'A promo code was applied',
+      remnawave_user_expire_soon: 'The subscription ends soon',
+      remnawave_user_expired: 'The subscription has ended',
+      remnawave_user_bandwidth_threshold: 'Traffic is running out',
+      remnawave_user_limited: 'Traffic has run out',
+      remnawave_user_first_connected: 'First connection',
+      remnawave_user_enabled: 'The profile was switched back on',
+      remnawave_user_disabled: 'The profile was switched off',
+      remnawave_user_traffic_reset: 'The traffic counter was reset',
+      // Only the invitation's FIRST confirmation: by the first qualifying purchase,
+      // or manually with no purchase (`referral-qualification.service.ts`). The
+      // event's `userId` is the invitee at both emit sites, so they get the hint.
+      referral_qualified: "An invitation was confirmed — by the invitee's first qualifying purchase or manually; the hint goes to the invitee",
+      // `userId` is whoever the reward was credited to: the inviter for a
+      // first-level reward, the inviter's own inviter for a second-level one
+      // (`admin-rewards.service.ts`, `referral-qualification.service.ts`).
+      referral_reward_issued: 'A reward for an invitation was credited — the hint goes to whoever received it: the inviter, or for a second-level reward, whoever invited the inviter',
+      // Only a HIGH-severity signal (new, or escalated to it), and not within an
+      // hour of an earlier notified one about the same customers
+      // (`anti-fraud.service.ts`).
+      fraud_signal_opened: 'A high-severity anti-fraud signal — a hint reaches somebody only when it is about one customer',
     },
     tabs: {
       rules: 'Rules',
@@ -55,15 +95,32 @@ export const en = {
         config: 'Configuration',
         executions: 'Executions',
       },
+      // The switch in the editor header changes the DRAFT (`setDraft`); the
+      // switch in the list on the left changes the rule itself, at once (`toggleRule`).
+      enabledLabel: 'Enabled',
+      enabledInfo:
+        'This switch changes the draft: the rule is switched on or off when you press Save (Create, for a new rule). The switch next to the rule in the list on the left acts at once.\n\nA switched-off rule does not fire by itself — neither on events nor on a schedule — but Run now still runs it.',
+      // Rules Create saves together with the draft (`rule-companions.ts`).
+      companions: {
+        title: 'Create also saves these rules',
+        body: 'With the same actions, conditions and switch as this rule, each on its own event.',
+        drop: "Don't create these rules",
+      },
     },
     config: {
       name: 'Name',
+      nameInfo: "The rule's name in the list on the left. Customers never see it.",
       trigger: 'Trigger',
+      triggerInfo:
+        'What starts the rule.\nRealtime event — something happened in the panel, a failed payment for instance.\nCron schedule — at the time you set.\nManual only — only the Run now button.',
       description: 'Description',
+      descriptionInfo: 'A note for operators: why the rule exists and what it does. Customers never see it.',
       eventPattern: 'Event pattern',
       cronExpression: 'Cron expression',
-      eventPatternPlaceholder: 'payment.failed or fraud.*',
-      cronPlaceholder: '0 3 * * *',
+      // A placeholder must not look like a value already filled in.
+      eventPatternPlaceholder: 'for example: payment.failed or fraud.*',
+      cronPlaceholder: 'for example: 0 3 * * *',
+      examplePlaceholder: 'for example: {{example}}',
       triggerUnknown: 'The panel does not know this event. It may be your own — one you post to /api/internal/events — but if it is a typo the rule will never fire and nothing anywhere will say so.',
       triggerWindowDays_one: '{{count}} day',
       triggerWindowDays_other: '{{count}} days',
@@ -86,12 +143,26 @@ export const en = {
     actions: {
       pickHint: 'Pick a hint',
       pickAudience: 'Whom to pick',
+      audienceMissing: 'Pick an audience — the rule cannot be saved without one.',
       audienceNeedsCron: 'This action picks its own recipients, so the rule needs a scheduled trigger rather than an event one. Once a day is plenty: a hint is never delivered to the same person twice.',
       hintNeedsCustomer: 'A hint can only go on an event the panel actually emits and that names a customer. The list is closed: if the event you want is not on it, saving is refused and the refusal names the ones that work.',
       heading: 'Actions',
+      headingInfo: 'What the rule does when it fires, in order. One failed action does not stop the rest.',
+      // The (i) beside an action's type: its label and `help.actionDescriptions.<type>`.
+      typeInfo: '"{{label}}" — {{description}}',
+      hintLabel: 'Hint',
+      audienceLabel: 'Audience',
       add: 'Add action',
       required: 'At least one action is required.',
       removeAria: 'Remove action {{index}}',
+      // Warnings under the hint picker, computed from the data.
+      hintOff:
+        'The hint "{{title}}" is switched off — the rule will not show it until its Show it switch is on, on the Hints tab.',
+      surfaceGap:
+        'The hint may only appear here: {{allowed}}. But the rule fires on "{{event}}", and those customers open the cabinet here: {{home}} — they will most likely never see it.',
+      // The same about a companion rule Create saves together with the draft.
+      surfaceGapCompanion:
+        'The hint may only appear here: {{allowed}}. But the rule "{{rule}}", which Create saves along with this one, fires on "{{event}}", and those customers open the cabinet here: {{home}} — they will most likely never see it.',
     },
     actionTypes: {
       notify_telegram: 'Notify (Telegram)',
@@ -120,11 +191,126 @@ export const en = {
       saveFailed: 'Save failed: {{message}}',
       deleteFailed: 'Delete failed: {{message}}',
       runFinished: 'Run finished: {{status}}',
+      // The status translated (`statuses.*`), then the first action that failed
+      // or was skipped, worded from its code.
+      runFinishedAction: 'Run finished: {{status}}. "{{action}}": {{note}}',
+      runFinishedNote: 'Run finished: {{status}}. {{note}}',
       runFailed: 'Run failed: {{message}}',
+      // A timeout, a 408/504, or no answer at all. The request may never have
+      // reached the panel (no run at all) or may be running — the two cannot be
+      // told apart, so the sentence holds either way and sends them to the log.
+      runNoAnswer: "The panel did not answer. The run may not have started at all, or may still be going — open the rule's Executions tab and see whether a new run appeared before running it again.",
+      // Create on a draft with companion rules. Off or on is read from the
+      // server's answer, not assumed from the draft's default: the header switch
+      // may have been turned on.
+      createdSeveralOff: 'Rules created: {{names}}. They are switched off: customers see nothing until you switch them on.',
+      createdSeveralOn: 'Rules created and switched on: {{names}}.',
+      createdPartly: 'Created: {{created}}. Not created: {{failed}}.',
+      ruleName: '"{{name}}"',
+      ruleFailed: '"{{name}}" ({{message}})',
+    },
+    // What a button does, on hover and focus.
+    tips: {
+      newRule: 'Opens an empty draft rule. Nothing is saved until you press Create.',
+      useRuleTemplate: 'Opens a draft rule with these settings. Nothing is saved until you press Create.',
+      useHintTemplate:
+        'Writes the hint text to the Hints tab at once — or, if that hint already exists, puts its stock text back and leaves its other settings alone. Then opens a draft of the rule that shows it. Customers see the hint once the rule is created and switched on — or without Create, if a switched-on rule already shows this hint.',
+      runNow: 'Runs the rule right now, even if it is switched off. This run carries no event data, so a rule with conditions will most likely be skipped. The result shows up on the Executions tab.',
+      runNowDialog: "Opens the run dialog: you pick a customer, and the rule's actions really run for them, as if the event had happened to them.",
+      runNowForbidden: 'Your role is not allowed to run rules (automations:run).',
+      create: 'Saves the draft as a rule. It is switched on only if the Enabled switch in the header is on.',
+      createWithCompanions:
+        'Saves the draft as a rule, and the rules listed below along with it. They are switched on only if the Enabled switch in the header is on.',
+      save: 'Writes the changes, the Enabled switch included. Until then the rule keeps working as before.',
+      saveNeedsAudience: 'Cannot be saved yet: the action "Show a hint on a schedule" has no audience picked. Choose one in the Audience field — it is marked in red.',
+      delete: 'Deletes the rule and its run log. The hint text on the Hints tab stays.',
+      addAction: 'Adds one more action at the end of the list. Saved together with the rule.',
+      removeAction: 'Removes this action from the draft. It leaves the rule when you press Save (Create, for a new rule).',
+      listToggle: 'Switches the rule on or off at once — no Save needed.',
+      dropCompanions: 'Takes the rules off this list: Create saves only this rule.',
+    },
+    // The Run now dialog, for a rule that shows a hint.
+    runDialog: {
+      title: 'Run "{{name}}"',
+      what: "The rule's actions run now for the customer you pick, as if the event had happened to them. If the hint is queued, they see it when they open the cabinet somewhere it is allowed — after any hints already waiting for them.",
+      disabledNote: 'The rule is switched off. This run still goes ahead: the switch only decides whether the rule fires by itself.',
+      conditionsNote: 'The rule has conditions, and this run passes only the customer. If the conditions look at anything else, the run will most likely be skipped.',
+      alsoRuns: 'Also runs: {{actions}}',
+      blocksCustomer: 'The "Block user" action will block the customer you run the rule for.',
+      blocksNamedUser: 'The "Block user" action will block the user {{userId}} named in the action itself.',
+      audienceAll: 'The "Show a hint on a schedule" action queues its hint for its whole audience, not just the customer you pick.',
+      customerLabel: 'Show it to',
+      searchPlaceholder: 'for example: a name, @username, email or Telegram ID',
+      searchPrompt: 'Start typing to find a customer.',
+      searching: 'Searching…',
+      noCustomers: 'Nobody matches.',
+      searchFailed: 'Could not load customers: {{message}}',
+      change: 'Change',
+      forbidden: 'Your role cannot list customers (users:view), so there is nobody to pick — and no run.',
+      showAgain: 'Show it even if it was shown before',
+      showAgainInfo:
+        'A hint that may not be shown more than once reaches a customer once. This box lets it reach this customer again — for this run only. Clear it to see how the rule behaves for real.',
+      hintsLabel: 'What the customer sees',
+      hintLine: '"{{title}}" — {{mode}}; where: {{where}}',
+      hintMissing: 'There is no hint "{{key}}" — the action will fail.',
+      hintOff: 'The hint "{{title}}" is switched off — it will be skipped.',
+      everywhere: 'everywhere',
+      modes: {
+        MODAL: 'a window over the screen',
+        TOAST: 'a line that does not take the screen',
+      },
+      run: 'Run',
+      done: 'Done',
+      resultTitle: 'Result',
+      blocked: 'Blocked',
+      // The request timed out or got no answer: Run is not offered again until
+      // the operator has looked at the log — there may have been no run at all.
+      noAnswer: "The panel did not answer. The run may not have started at all, or may still be going. Close this dialog and check this rule's Executions tab: if a new run is there, there is no need to repeat it.",
+      // What the dialog's buttons do — and why Run cannot be pressed right now.
+      runTip: 'Runs the rule for the customer you picked — its actions really run.',
+      runTipNoCustomer: 'First pick, in Show it to, whom to run the rule for.',
+      runTipForbidden: 'Your role cannot list customers (users:view), so the rule cannot be run for one.',
+      runTipRunning: 'A run is already going — wait for its answer.',
+      changeTip: 'Clears the customer you picked, so you can find another.',
+      cancelTip: 'Closes the dialog without running anything.',
+      doneTip: 'Closes the dialog. The result stays on the Executions tab.',
+    },
+    // An action result in words, from the code the server writes
+    // (`run-result-copy.ts`). No code — the server's message is shown.
+    runResults: {
+      hint_queued: 'Hint "{{hintKey}}" queued — the customer sees it when they open the cabinet somewhere it is allowed.',
+      hint_already_delivered: 'Skipped: this customer has already been given "{{hintKey}}", and it may not be shown again.',
+      hint_inactive: 'Skipped: hint "{{hintKey}}" is switched off.',
+      hint_missing: 'There is no hint "{{hintKey}}".',
+      hint_key_missing: 'The action names no hint.',
+      customer_missing: 'No customer named — nobody to show it to.',
+      customer_not_found: 'Customer {{userId}} not found.',
+      // `count` is how many matched, which the noun agrees with.
+      audience_queued_one: 'Hint "{{hintKey}}" queued for {{queued}} of {{count}} customer in the "{{audience}}" audience.',
+      audience_queued_other: 'Hint "{{hintKey}}" queued for {{queued}} of {{count}} customers in the "{{audience}}" audience.',
+      audienceCapped: 'More customers matched than one run takes — some were left out of this one.',
+      // Part of the audience was queued and part was never reached. `count` is
+      // how many matched; what failed and who was never reached get their own
+      // sentences below — i18next agrees a noun with one number per key, and a
+      // run can also stop on its time budget without a single failure.
+      audience_partial_one: 'Hint "{{hintKey}}", audience "{{audience}}": {{queued}} of {{count}} matched customer queued.',
+      audience_partial_other: 'Hint "{{hintKey}}", audience "{{audience}}": {{queued}} of {{count}} matched customers queued.',
+      audienceFailed_one: 'Another {{count}} customer could not be queued — why is in the panel log.',
+      audienceFailed_other: 'Another {{count}} customers could not be queued — why is in the panel log.',
+      audienceStoppedFailures_one: 'The run stopped after three failures in a row — {{count}} customer was never reached. What was queued stays queued; the rule can be run again for the rest.',
+      audienceStoppedFailures_other: 'The run stopped after three failures in a row — {{count}} customers were never reached. What was queued stays queued; the rule can be run again for the rest.',
+      audienceStoppedTime_one: 'The run stopped on its time budget: one pass gets a minute, and {{count}} customer was never reached. What was queued stays queued; the rule can be run again for the rest.',
+      audienceStoppedTime_other: 'The run stopped on its time budget: one pass gets a minute, and {{count}} customers were never reached. What was queued stays queued; the rule can be run again for the rest.',
+      audienceStopped_one: 'The run stopped before it reached the end — {{count}} customer was never reached. What was queued stays queued; the rule can be run again for the rest.',
+      audienceStopped_other: 'The run stopped before it reached the end — {{count}} customers were never reached. What was queued stays queued; the rule can be run again for the rest.',
+      audience_empty: 'Nobody is in the "{{audience}}" audience right now.',
+      audience_blind: 'The hint was queued for nobody: the panel cannot pick the audience reliably. The server said: {{reason}}',
+      conditionsNotMatched: "Skipped: the rule's conditions did not match.",
+      ruleDisabled: 'Skipped: the rule is switched off.',
     },
     help: {
       title: 'How it works — examples & templates',
-      intro: 'An automation is an "if X happens, do Y" rule. You pick a trigger, optionally add conditions, and one or more actions. Each rule runs independently; its runs appear under the "Runs" tab.',
+      intro: 'An automation is an "if X happens, do Y" rule. You pick a trigger, optionally add conditions, and one or more actions. Each rule runs independently; its runs appear on the Executions tab.',
       steps: {
         trigger: {
           title: '1. Trigger',
@@ -179,24 +365,68 @@ export const en = {
         broken_other: '{{count}} will not fire',
         unused_one: '{{count}} ready-made hint unused',
         unused_other: '{{count}} ready-made hints unused',
+        // Rules on events the panel has not checked: uncertain, not broken.
+        // Drawn only above zero.
+        unverified_one: '{{count}} not checked',
+        unverified_other: '{{count}} not checked',
       },
       viaWildcard_one: 'plus {{count}} rule via a wildcard',
       viaWildcard_other: 'plus {{count}} rules via a wildcard',
       noSuchHint: 'no hint named "{{key}}"',
-      nothingHere: 'nothing set up',
       orphans: 'Hints nothing points at',
       conditional: 'only when the rule conditions match',
       offerHalfBuilt: 'text ready, no rule',
+      // The tooltip on a ready-made hint's button. One button, two branches
+      // (`applyHintTemplate` in `automations-page.tsx`): no text yet — it is
+      // created; text already there — it gets its stock words back and keeps
+      // every other setting. Both open a draft rule on the Rules tab.
       offerHalfBuiltHint:
-        'The hint text "{{key}}" already exists on the Hints tab — a template was applied and the rule was never created, so nothing fires it. Press to restore the stock text and re-open the draft rule.',
+        'The hint text "{{key}}" already exists on the Hints tab, and no working rule is on this event. Press to restore the stock text — every other setting is kept — and open a draft rule on the Rules tab.',
+      offerNew:
+        'Press to create the hint with its stock text and open a draft rule, switched off, on the Rules tab. If an enabled rule with the "Show a hint in the cabinet" action already calls the key "{{key}}" on an event marked "a hint can be shown on it", it starts showing this text the next time it fires.',
+      // The map applies a welcome for its own door only: it does not add the
+      // second rule a welcome for everyone needs.
+      offerOneDoor: 'This door only: "{{event}}". People who arrive through "{{other}}" are not greeted by this rule.',
+      // Behind the (i) beside the headings, not paragraphs under them.
       orphansHint: 'They are written, but no rule calls them, so no customer will ever see them. From the Hints tab they look finished.',
       off: '(off)',
+      countsSubject: 'Counts',
+      countsInfo: 'Live — the rule is on, and its hint exists and is on. Switched off — everything is built and the rule is off. Will not fire — the rule calls a hint that does not exist or is switched off, or its action cannot work that way: "Show a hint on a schedule" on an event, "Show a hint in the cabinet" on a schedule; this count is hidden at zero. Not checked — the rule sits on an event the panel has not checked a hint can be shown on: it shows the hint only if the event arrives and names a customer; this count is hidden at zero too. Unused — ready-made hints on events with neither a live nor a switched-off rule showing a hint, and no wildcard rule. A wildcard rule counts once, however many events it covers.',
+      // What a "rule → hint" path means — on hover.
+      pathRule: 'Rule "{{rule}}" → hint "{{key}}"',
+      pathLive: 'The rule is on, and the hint exists and is on — customers get it.',
+      pathPaused: 'Everything is built, but the rule is switched off. Switch it on on the Rules tab.',
+      pathMissingHint: 'No hint has this key, so the rule fails when it fires. Create a hint with this key on the Hints tab.',
+      pathHintInactive: 'The hint is switched off: when the rule fires, it queues nothing. Switch "Show it" on for the hint on the Hints tab.',
+      // An event not on the list where the panel checked a hint can be shown
+      // (`canCarryPopup`). The list is closed, not complete: an event outside it
+      // may well work if it names a customer. So certain facts only — never
+      // "never shows".
+      pathUnverified: 'The panel has not checked that a hint can be shown on this event: nothing may send it, or it may name no customer. The rule shows the hint only if the event arrives and names a customer — the rule\'s "Executions" tab shows whether it does. The panel will not save changes to such a rule while it keeps this event and the "Show a hint in the cabinet" action. It is safer to pick an event on the "Rules" tab that is marked "a hint can be shown on it".',
+      // An audience action on an event rule: refused on every event run
+      // (`action-registry.ts`); a manual run works.
+      pathAudienceOnEvent: 'The "Show a hint on a schedule" action works only on a schedule or manually: on an event every run fails. Change the rule\'s trigger on the "Rules" tab.',
+      // A hint shown by a scheduled rule: a schedule names no customer
+      // (`customer_missing`), and such a rule has no event row.
+      pathScheduleNamesNobody: 'A scheduled rule with the "Show a hint in the cabinet" action: a schedule names no customer, so every scheduled run fails. To show a hint on a schedule, use the "Show a hint on a schedule" action.',
+      // The rule's switch on a chip: «Switched off» is a state of its own, and
+      // every other state hid the switch, so a rule just switched off looked
+      // exactly as it had a moment before.
+      ruleOff: 'switched off',
+      ruleOffNote: 'The rule is switched off — it does not fire by itself. "Run now" runs it even so.',
+      // Rules with no event whose every automatic run fails.
+      eventlessTitle: 'Rules with no event that will not show their hint',
+      pathAudienceInvalid: 'The "Show a hint on a schedule" action has no audience, or one the panel does not know: every run fails. Pick an audience in the action on the "Rules" tab.',
+      // The path is fine, but this event's customers open the cabinet where the
+      // hint is not allowed — the owner's case. The path's state is unchanged.
+      gapMarker: 'Most likely never shown',
+      gap: 'Those customers open the cabinet where this hint is not allowed: {{home}}. Most likely they never see it, and it lapses when its lifetime runs out. Fix "Where to show it" for the hint on the Hints tab.',
     },
     hintTemplates: {
       title: 'Ready-made hints',
       subtitle:
-        'The moment each one appears is already decided. Some are a window over the screen, some a line that does not take it; the description says which. The text is created straight away and can be edited on the Hints tab. The rule opens as a draft AND switched off: Create saves it switched off, and switching it on is a separate step. And if a rule with this key already exists and is on, the text reaches customers at once.',
-      created: 'The hint text "{{title}}" is created. The rule opened as a draft: Create saves it switched off, and switching it on is a separate step. If a rule with this key already exists and is on, the text is with customers already.',
+        'The moment each one appears is already decided. Some are a window over the screen, some a line that does not take it; the description says which. The text is created straight away and can be edited on the Hints tab. The rule opens as a draft AND switched off: Create saves it switched off, and switching it on is a separate step. If a rule with this key already exists and is on, it needs no Create: the text goes out the next time it fires.',
+      created: 'The hint text "{{title}}" is created. The rule opened as a draft: Create saves it switched off, and switching it on is a separate step. If a rule with this key already exists and is on, it needs no Create: the text goes out the next time it fires.',
       // The SECOND branch of the same button, and it creates nothing: the
       // template's words replace the words of a hint that already exists, by
       // PUT, at once. Everything the operator aimed — where the button goes,
@@ -205,9 +435,34 @@ export const en = {
       // it changes for whoever an enabled rule is already showing it to.
       // Nothing here waits on Create.
       updated: 'The text of "{{title}}" is back to the stock wording; every other setting is kept. If an enabled rule already shows it, the customer sees the new text right now — there is nothing to press Create for, and the draft that opened would add a second rule.',
+      // The same two branches for a template whose draft brings companion rules
+      // ("First arrival" for everyone). `count` is how many rules Create saves.
+      createdWithCompanions_one: 'The hint text "{{title}}" is created. A draft opened: Create saves {{count}} rule, switched off, and switching it on is a separate step. If a rule with this key already exists and is on, it needs no Create: the text goes out the next time it fires.',
+      createdWithCompanions_other: 'The hint text "{{title}}" is created. A draft opened: Create saves {{count}} rules, switched off, and switching them on is a separate step. If a rule with this key already exists and is on, it needs no Create: the text goes out the next time it fires.',
+      updatedWithCompanions_one: 'The text of "{{title}}" is back to the stock wording; every other setting is kept. If an enabled rule already shows it, the customer sees the new text right now — there is nothing to press Create for, and the draft that opened would add {{count}} more rule.',
+      updatedWithCompanions_other: 'The text of "{{title}}" is back to the stock wording; every other setting is kept. If an enabled rule already shows it, the customer sees the new text right now — there is nothing to press Create for, and the draft that opened would add {{count}} more rules.',
       failed: 'Could not create the hint',
       needsBoth:
         'A hint is a text and a rule that shows it. Your role is missing: {{missing}}. Nothing was created — ask for that access first.',
+      // One card instead of two welcomes (`arrival-template-card.tsx`).
+      arrival: {
+        title: 'First arrival',
+        description: 'A greeting for a new customer. Shown once.',
+        audienceLabel: 'Whom to greet',
+        audienceInfo:
+          'Whom to greet is the event the rule fires on: a sign-up in the bot or the Mini App, a sign-up on the site, or both.\n\n"Where to show it", in the hint itself, decides something else: where the window may appear, not whom it reaches.\n\nFor instance, a welcome for "Came through the bot or the Mini App" with "Browser" ticked reaches almost nobody: people signing up on the site raise a different event, and people who came through Telegram open the cabinet inside Telegram, where that window never appears — unless one of them visits the site before it lapses.',
+        audiences: {
+          everyone: 'Every new customer',
+          // Not "through Telegram": the site's own Telegram button is a sign-up on the site.
+          telegram: 'Came through the bot or the Mini App',
+          web: 'Signed up on the site',
+        },
+        firesOnOne: 'Fires on the event:',
+        firesOnBoth: 'Fires on either of two events — two rules with one hint:',
+        // The draft's description for everyone: the companion copies it, and
+        // "Don't create these rules" can leave one rule — true of one and of two.
+        ruleDescription: 'A greeting for a new customer, once.',
+      },
       stages: {
         arrival: 'Arrival',
         start: 'From purchase to first connection',
@@ -216,6 +471,10 @@ export const en = {
         limits: 'Limits and access',
         rewards: 'Rewards',
         security: 'Security',
+        // A lane of the Map for rows no stage fits: a rule on an unlisted
+        // event, a wildcard, a legacy trigger. They used to land in
+        // «Security», which is a heading about anti-fraud signals.
+        other: 'Other',
       },
       payment_failed: {
         name: 'Payment failed',
@@ -229,7 +488,10 @@ export const en = {
       },
       subscription_created: {
         name: 'Subscription purchased',
-        description: 'Right after a purchase, points at connecting — the next step is unambiguous here.',
+        // The event arrives EVERY time a subscription gets its panel profile:
+        // after a purchase, a trial grant, an import — and when the panel builds
+        // the profile again. Naming only the first three is not the truth.
+        description: 'Points at connecting once a subscription gets its panel profile — after a purchase, a trial or an import, and whenever the panel builds that profile again (a resync, accounts merged). The next step is unambiguous here.',
         titleRu: 'Подписка готова',
         bodyRu: 'Осталось подключить устройство: выберите приложение и добавьте подписку в один тап.',
         titleEn: 'Your subscription is ready',
@@ -277,9 +539,11 @@ export const en = {
         ctaRu: '',
         ctaEn: '',
       },
+      // The name and description name the DOOR: the map uses them for its button
+      // and the tip on it, and the welcome for everyone for its two rules.
       welcome: {
-        name: 'First arrival',
-        description: 'A greeting on registration, shown once.',
+        name: 'First arrival — through Telegram',
+        description: 'Greets somebody who signed up in the Telegram bot or Mini App. Shown once.',
         titleRu: 'Добро пожаловать',
         bodyRu: 'Выберите тариф — подключение займёт пару минут.',
         titleEn: 'Welcome',
@@ -288,8 +552,8 @@ export const en = {
         ctaEn: 'See plans',
       },
       welcome_web: {
-        name: 'First visit from the web',
-        description: 'Greets somebody who signed up on the site rather than through Telegram. Browser and installed app only.',
+        name: 'First arrival — on the site',
+        description: "Greets somebody who signed up on the site — with a login and password, Google, Yandex, Mail.ru or the site's Telegram button — rather than in the bot or the Mini App. Shown once, in the browser and the installed app only.",
         titleRu: 'Добро пожаловать',
         bodyRu: 'Аккаунт создан. Выберите тариф — на подключение уйдёт пара минут, приложение подойдёт любое из списка.',
         titleEn: 'Welcome',
@@ -468,7 +732,8 @@ export const en = {
     // How many of each is read from `HINT_TEMPLATES`, not restated here —
     // `automations-hint-copy.test.ts` takes the modes from the data, so a
     // template changing mode breaks this sentence loudly rather than quietly.
-    intro: 'A hint meets somebody on a page they opened for their own reasons: one takes the screen as a window, another passes as a line in the corner. The form below creates a window; the ones that arrive as a line come from the ready-made templates, and they are edited here too. Every setting below is about one thing: when interrupting them is worth it.',
+    // Sits behind the (i) beside "Library", not as a paragraph over the list.
+    intro: 'A hint meets somebody on a page they opened for their own reasons: one takes the screen as a window, another passes as a line in the corner. "New hint" creates a window; the ones that arrive as a line come from the ready-made templates, and they are edited here too. A hint shows itself to nobody: a rule calls it (the cabinet itself calls the one keyed subscription-ready), and whom it reaches is under "Who will see it".',
     new: 'New hint',
     editing: 'Edit hint',
     listTitle: 'Library',
@@ -479,36 +744,129 @@ export const en = {
     cancel: 'Cancel',
     delete: 'Delete',
     saved: 'Hint saved',
-    saveFailed: 'Could not save the hint',
+    // {{message}} is the server's refusal through `translateApiError`, as on the
+    // Rules tab. The toast used to show the raw English line, and replaced a
+    // per-field validation refusal (an array) with a generic failure.
+    saveFailed: 'Could not save the hint: {{message}}',
     deleted: 'Hint deleted along with {{count}} deliveries',
-    deleteFailed: 'Could not delete the hint',
+    // {{message}} is the server's refusal through `translateApiError`, as for `saveFailed`.
+    deleteFailed: 'Could not delete the hint: {{message}}',
     deleteConfirm: 'Delete this hint? The record of who was shown it goes too. To simply stop showing it, switch it off instead.',
     errors: {
       title: 'Error',
       load: 'Could not load the hints.',
     },
+    // Field labels, and the explanation behind the (i) beside each (`*Hint`).
+    // Every claim is checked against `user-hint-delivery.service.ts` (`raise`,
+    // `nextFor`, `resolve`), the DTO and the cabinet's `hint-controller.tsx`.
     fields: {
       key: 'Key',
-      keyHint: 'The key IS the binding. A hint keyed subscription-ready fires when the cabinet finishes provisioning a purchase. Rename the key and it unbinds.',
+      keyHint: 'The binding: a rule calls the hint by its key. Rename it and rules naming the old key no longer find it. The cabinet itself calls the key subscription-ready when a purchased subscription is ready to connect. Lower-case Latin letters, digits and hyphens only.',
+      // A sample, not a value: a grey `subscription-ready` in an empty field was
+      // read as a key already filled in.
+      keyPlaceholder: 'for example: connect-after-purchase',
       titleRu: 'Title (RU)',
       titleEn: 'Title (EN)',
+      titleHint: 'The hint\'s title, up to 120 characters. A customer whose cabinet is in English sees the English one; an empty English title is replaced by the Russian.',
       bodyRu: 'Body (RU)',
       bodyEn: 'Body (EN)',
+      bodyHint: 'The text under the title, up to 600 characters. A customer whose cabinet is in English sees the English one; an empty English text is replaced by the Russian.',
       fallsBackToRu: 'Empty — Russian is used',
       tone: 'Tone',
+      // Checked against the cabinet: a window uses `railForTone` (a stripe above
+      // the title, DANGER in the brand colour); a line uses sonner's toast type
+      // (its icon) and the `[data-type]` left-edge stripe in `index.css` (red for
+      // error).
+      toneHint: 'The colour of its mark in the cabinet: a stripe above the title on a window, a stripe along the left edge plus an icon on a line. "Important" is drawn in the brand colour on a window and in red on a line. The tone changes neither the text nor the buttons.',
       ttlHours: 'Expires after, hours',
-      ttlHint: 'How long the hint waits for the customer. A lapsed one is not shown: a failed-payment notice found ten days later is noise.',
+      ttlHint: 'How many hours the hint waits for the customer from the moment it was queued. A lapsed one is never shown: a failed-payment notice found ten days later is noise. A new value applies to later firings; hints already waiting keep theirs. From 1 to 2160 hours.',
       ctaKind: 'Button',
+      ctaKindHint: '"No button" is text only. "Cabinet section" leads to a section from the list, "External link" to an https:// address. A button needs a label and a destination, or the hint will not save.',
       ctaLabelRu: 'Button label',
+      ctaLabelHint: 'Up to 48 characters. A customer whose cabinet is in English sees the English label if a ready-made hint brought one, and this one otherwise.',
       ctaTarget: 'Destination',
+      ctaTargetHint: 'A cabinet section is picked from the list — the panel accepts no other address. An external link is a full address starting with https://.',
+      externalPlaceholder: 'for example: https://t.me/your_channel',
       pickRoute: 'Pick a section',
       surfaces: 'Where to show it',
-      surfacesHint: 'Nothing ticked means everywhere, which is the common case. Tick only when the hint is actively wrong elsewhere: "install the app" to somebody already in it.',
+      surfacesHint: 'Where the cabinet may draw the hint: "Telegram" is inside Telegram, "App" the installed cabinet, "Browser" the site. Nothing ticked means everywhere, which is the common case. This is not whom to show it to: that is decided by the rule\'s event — see "Who will see it". Tick only when the hint is actively wrong elsewhere: "install the app" to somebody already in it.',
+      // The row of device buttons had no label at all.
+      formFactors: 'Device',
+      formFactorsHint: 'Which device the cabinet may draw the hint on. Nothing ticked means any.',
       groupKey: 'Group',
       groupKeyHint:
         'Hints in one group supersede each other: anything not yet shown lapses when the next one arrives. A single purchase emits several events, so a shared group leaves one hint instead of four. A name extended with a hyphen is a sub-group: “payment-attempt” lapses “payment-attempt-method”, never the other way round.',
+      // A sample, not a value: a grey `purchase` was read as a group filled in.
+      groupKeyPlaceholder: 'for example: payment-attempt',
       isActive: 'Show it',
+      isActiveHint: 'A switched-off hint is not drawn, and a rule that fires does not queue it. Hints already waiting in the queue stay, and appear once it is switched back on, if their lifetime has not run out.',
       isRepeatable: 'May be shown more than once',
+      // "Show it even if it was shown before" is the box in the "Run now" dialog
+      // on the Rules tab (`automationsPage.runDialog.showAgain`); the words are
+      // kept verbatim.
+      isRepeatableHint: 'Off — once per customer, ever. Any earlier delivery counts, even one never shown or lapsed, so a test on your own account works once. To test again: "Run now" on a rule with the "Show a hint in the cabinet" action, with "Show it even if it was shown before" ticked. On — the hint is queued every time the rule fires.',
+    },
+    // What a button does — the tooltip on hover.
+    tips: {
+      new: 'Opens an empty form. The hint appears in the library after "Save", and for customers when a rule calls it.',
+      saveNew: 'Creates the hint in the library. Customers see it when a rule calls it.',
+      saveExisting: 'Saves the changes at once. If an enabled rule calls this hint, customers get the new text from now on — including those it is already waiting for in the queue.',
+      cancel: 'Closes the form; unsaved changes are lost.',
+      delete: 'Deletes the hint together with the record of whom it was shown to — this cannot be undone. Rules that call it start failing. To simply stop showing it, switch "Show it" off.',
+      surfaceOff: 'Press to allow "{{name}}". Once anything is ticked, the hint is drawn only in the ticked places.',
+      surfaceOn: 'Press to untick "{{name}}". With nothing ticked, the hint is drawn everywhere.',
+      formFactorOff: 'Press to allow "{{name}}". Once anything is ticked, the hint is drawn only on the ticked devices.',
+      formFactorOn: 'Press to untick "{{name}}". With nothing ticked, the hint is drawn on any device.',
+    },
+    // ── "Who will see it" ─────────────────────────────────────────────────────
+    //
+    // Whom a hint reaches is decided by the rule's EVENT; "Where to show it"
+    // only decides where the cabinet draws it. The owner ticked "Browser" on the
+    // welcome bound to the Telegram sign-up and every delivery lapsed unseen:
+    // those customers open the cabinet inside Telegram. Computed live from the
+    // rules and the draft (`features/user-hints/hint-reach.ts`).
+    reach: {
+      title: 'Who will see it',
+      info: 'Whom a hint reaches is decided by the rule that calls it: the customer the rule\'s event names, or the audience the rule picks itself. "Where to show it" decides something else — where the cabinet may draw it. If the place those customers open the cabinet in is not ticked there, the hint sits in the queue until its lifetime runs out, and lapses.\n\nIt does not appear at the moment of the event: the cabinet shows it when the customer opens it.',
+      loading: 'Reading the rules…',
+      unreadable: 'The rules could not be read, so which of them call this hint cannot be seen from here.',
+      blankKey: 'Set a key: a rule finds the hint by it.',
+      enabled: 'on',
+      disabled: 'off',
+      whomWildcard: 'every event matching "{{pattern}}"',
+      whomManual: 'manually only — with the "Run now" button',
+      whomAudienceSchedule: '{{audience}} — on a schedule',
+      whomAudienceManual: '{{audience}} — manually only, with the "Run now" button',
+      // An event the panel has not checked: uncertain, not broken. Never "never
+      // shows" — an event outside the list may well work.
+      whomUnverified: 'the event "{{event}}": the panel has not checked a hint can be shown on it — it shows only if the event arrives and names a customer',
+      notChecked: 'not checked',
+      // Shapes whose every run fails. The panel no longer lets anyone save them;
+      // an older install can still hold them. Such a rule is listed, but it does
+      // not count as calling the hint.
+      whomScheduleNamesNobody: 'on a schedule — but a schedule names nobody, so every scheduled run fails',
+      whomAudienceOnEvent: 'on an event — but this action works only on a schedule or manually, so every run on an event fails',
+      whomAudienceInvalid: 'no audience chosen, or one the panel does not know — every run fails',
+      clientMoment: 'The cabinet shows this hint by itself — when a purchased subscription is ready to connect. No rule is needed for that.',
+      noRule: 'No rule calls this hint, so no customer will see it. To show it, create a rule on the "Rules" tab with the "Show a hint in the cabinet" or "Show a hint on a schedule" action and this key.',
+      // Rules do call it, and every one of them is a shape that shows nothing.
+      noWorkingRule: 'The rules above call this hint, but none of them will show it, so no customer will see it. Fix them on the "Rules" tab — or create a rule with the "Show a hint in the cabinet" or "Show a hint on a schedule" action and this key.',
+      // Only a rule on an unchecked event can show it: say what to check and
+      // where, never that customers will not see it.
+      onlyUnverified: 'Only a rule on an event the panel has not checked can show this hint: customers see it only if such an event arrives and names a customer — the rule\'s "Executions" tab shows whether it does. It is safer to pick an event for that rule on the "Rules" tab that is marked "a hint can be shown on it".',
+      // Another hint's key: the save answers with a conflict, and the rules on
+      // that key belong to that hint, not to this one.
+      keyTaken: 'The key "{{key}}" already belongs to another hint — saving with it will fail. Choose another key.',
+      inactive: 'This hint is switched off: while "Show it" is off, a rule that fires queues nothing, and those customers will not get it. Hints already waiting in the queue stay, and appear once it is switched back on, if their lifetime has not run out.',
+      gap: 'Rule "{{rule}}" calls it on "{{event}}". Those customers open the cabinet where it is not allowed: {{home}}. Ticked under "Where to show it": {{ticked}}.',
+      gapLapse: 'Most likely they never see it: it lapses {{hours}} after the rule fires.',
+      gapLapseUnknown: 'Most likely they never see it: it lapses when its lifetime runs out.',
+      hours_one: '{{count}} hour',
+      hours_other: '{{count}} hours',
+      renamed: 'Rules call this hint by its old key "{{key}}": {{rules}}. Once it is saved under the new key they will not find it — the rules keep the old key, and they fail when they fire.',
+      renamedClientMoment: 'The cabinet calls this hint by the key "{{key}}" when a purchased subscription is ready to connect. Under a new key it will not find it.',
+      // The name of a place, a rule or an event inside a sentence.
+      quoted: '"{{value}}"',
     },
     tones: {
       INFO: 'Plain',

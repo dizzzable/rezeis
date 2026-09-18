@@ -2218,12 +2218,16 @@ export const en = {
     // `AutomationsService` throws these as plain `BadRequestException(...)`
     // with no code — `SAFE_PRODUCT_CODES` carries none for automations — so the
     // response body holds free text and nothing else. This exact-sentence table
-    // is the only way to reach it, and only sentences with NO full stop and NO
-    // colon can be reached at all: i18next splits the key on '.' and on ':'
-    // before it looks anything up. The module's other refusals ("Unknown action
-    // type: …", "Invalid cron expression: …", "Missing permission: …", both
-    // pop-up sentences) are split exactly there and arrive as a fragment; that
-    // is fixed in `lib/translate-error.ts` (`nsSeparator: false`), not here.
+    // is the only way to reach it.
+    //
+    // A COLON IN THE SENTENCE IS FINE: `translateServerSentence` looks the key
+    // up with `nsSeparator: false`, so ':' no longer cuts it in half (it used
+    // to, and this comment used to say so). A FULL STOP still does —
+    // `keySeparator` stays on, because these entries live nested inside
+    // `errors: {…}` — so refusals with a stop inside them ("Unknown action
+    // type: payment.failed", "Invalid cron expression: …", and the sentence
+    // about an event that cannot carry a pop-up) cannot be entries here at all,
+    // by construction, and reach the operator in English.
     'At least one action is required': 'A rule needs at least one action.',
     'REALTIME triggers require an event-type pattern':
       'An event trigger needs an event-type pattern — payment.failed, or payment.*',
@@ -2231,6 +2235,14 @@ export const en = {
     'MANUAL triggers must have an empty triggerSpec':
       'A manual trigger must leave the event field empty.',
     'Rule not found': 'No such rule — it may have been deleted in another tab.',
+    // The three hint refusals. The key is the server's sentence character for
+    // character: one comma out of place and the operator sees the raw English.
+    'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger':
+      'The "Show a hint on a schedule" action picks its own recipients, so it cannot run on an event. Choose the "On a schedule (cron)" trigger.',
+    'Action "show_hint_to_audience" needs an audience, one of: paid-not-connected':
+      'The "Show a hint on a schedule" action has no audience picked. Choose one in the Audience field: "Paid, but has never connected" is the one available.',
+    'A pop-up needs somebody to show it to, and a schedule names nobody — bind this rule to an event about a customer, or run it manually with a user id':
+      'A pop-up has nobody to show itself to: a schedule names no customer. Bind the rule to an event that names one, or run it with "Run now" and pick a customer.',
   },
   auth: {
     sessionCheckTitle: 'Checking admin session',

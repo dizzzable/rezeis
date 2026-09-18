@@ -44,8 +44,32 @@ const REPO = resolve(HERE, '..', '..', '..', '..')
 const PAGE_PATH = resolve(HERE, '..', '..', 'features', 'automations', 'automations-page.tsx')
 const SERVICE_PATH = resolve(REPO, 'src', 'modules', 'automations', 'automations.service.ts')
 
+const AUDIENCES_PATH = resolve(REPO, 'src', 'modules', 'user-hints', 'services', 'hint-audience.service.ts')
+
 const PAGE = readFileSync(PAGE_PATH, 'utf8')
 const SERVICE = readFileSync(SERVICE_PATH, 'utf8')
+
+/**
+ * The service's source with the two things that hide a sentence from a plain
+ * search undone: adjacent string literals joined ('a ' + 'b' → 'a b'), and the
+ * interpolations whose values are fixed put in.
+ *
+ * The three hint refusals are written as template literals across two lines,
+ * carrying `${action.type}` and the audience list — so nothing that reads the
+ * source for quoted sentences could see them, and the dictionary entries for
+ * them sat unguarded. `HINT_AUDIENCES` is read from the panel's own source, so
+ * adding an audience there turns the sentence into one the dictionary no longer
+ * has, and this file says so.
+ */
+const HINT_AUDIENCES = (() => {
+  const source = readFileSync(AUDIENCES_PATH, 'utf8')
+  const list = /HINT_AUDIENCES\s*=\s*\[([^\]]*)\]/.exec(source)?.[1] ?? ''
+  return [...list.matchAll(/'([^']+)'/g)].map((match) => match[1])
+})()
+
+const SERVICE_SENTENCES = SERVICE.replace(/['`]\s*\+\s*[\r\n\s]*['`]/g, '')
+  .replace(/\$\{action\.type\}/g, 'show_hint_to_audience')
+  .replace(/\$\{HINT_AUDIENCES\.join\(', '\)\}/g, HINT_AUDIENCES.join(', '))
 
 type Dict = Record<string, unknown>
 
@@ -135,6 +159,24 @@ describe('M13: what an operator gets after pressing Create', () => {
     expect(draftSeedIsEnabled()).toBe(false)
     expect(RU('automationsPage.hintTemplates.created')).toMatch(/выключен/)
     expect(EN('automationsPage.hintTemplates.created')).toMatch(/switched off/)
+  })
+
+  it('says it for every rule «Создать» saves when the draft brings companions', () => {
+    // «Первое появление» for everyone: one press of «Создать», two rules, both
+    // saved from the same seed — so both switched off, and the sibling sentence
+    // has to say so in every plural form it can reach.
+    expect(draftSeedIsEnabled()).toBe(false)
+    for (const form of ['_one', '_few', '_many', '_other']) {
+      expect(RU(`automationsPage.hintTemplates.createdWithCompanions${form}`)).toMatch(/выключен/)
+    }
+    for (const form of ['_one', '_other']) {
+      expect(EN(`automationsPage.hintTemplates.createdWithCompanions${form}`)).toMatch(/switched off/)
+    }
+    // The count the page passes is the draft plus its companions.
+    expect(PAGE).toMatch(/createdWithCompanions'[\s\S]{0,120}count: 1 \+ companions\.length/)
+    expect(
+      FEATURE_RU.t('automationsPage.hintTemplates.createdWithCompanions', { title: 'x', count: 2 }),
+    ).toContain('сохранит 2 правила выключенными')
   })
 })
 
@@ -257,13 +299,84 @@ describe('I7: what happens when a template is applied a second time', () => {
     expect(updatedEn).not.toBe(EN('automationsPage.hintTemplates.created'))
   })
 
+  it('says the same on the refresh branch of a draft with companions, in every form', () => {
+    for (const form of ['_one', '_few', '_many', '_other']) {
+      const sentence = RU(`automationsPage.hintTemplates.updatedWithCompanions${form}`)
+      expect(sentence).toMatch(/уже сейчас/)
+      expect(sentence).not.toBe(RU(`automationsPage.hintTemplates.createdWithCompanions${form}`))
+    }
+    for (const form of ['_one', '_other']) {
+      const sentence = EN(`automationsPage.hintTemplates.updatedWithCompanions${form}`)
+      expect(sentence).toMatch(/right now/)
+      expect(sentence).not.toBe(EN(`automationsPage.hintTemplates.createdWithCompanions${form}`))
+    }
+  })
+
   it('does not let the create toast claim the customer is waiting on Create', () => {
     // The create branch is live-on-arrival too, whenever a rule already names
     // the key and is on: the hint it writes turns a red "will not fire" path
     // green with no further press. `trigger-map.ts` calls that state
     // `missing-hint`, and the map offers the template on exactly those rows.
-    expect(RU('automationsPage.hintTemplates.created')).toMatch(/уже у клиентов/)
-    expect(EN('automationsPage.hintTemplates.created')).toMatch(/with customers already/)
+    //
+    // Live, but not "already with customers": a hint is queued when that rule
+    // next FIRES, so the sentence says no Create is needed and when the text
+    // goes out — not that anybody has it yet.
+    const noCreateRu = /«Создать» для него не нужно: текст пойдёт клиентам при его следующем срабатывании/
+    const noCreateEn = /it needs no Create: the text goes out the next time it fires/
+    for (const path of ['automationsPage.hintTemplates.created', 'automationsPage.hintTemplates.subtitle']) {
+      expect(RU(path), path).toMatch(noCreateRu)
+      expect(RU(path), path).not.toMatch(/уже у клиентов|уйдёт клиентам сразу/)
+      expect(EN(path), path).toMatch(noCreateEn)
+      expect(EN(path), path).not.toMatch(/with customers already|reaches customers at once/)
+    }
+    for (const form of ['_one', '_few', '_many', '_other']) {
+      expect(RU(`automationsPage.hintTemplates.createdWithCompanions${form}`)).toMatch(noCreateRu)
+    }
+    for (const form of ['_one', '_other']) {
+      expect(EN(`automationsPage.hintTemplates.createdWithCompanions${form}`)).toMatch(noCreateEn)
+    }
+  })
+
+  it('does not let the button tooltip promise customers wait on the rule either', () => {
+    // «Использовать» on a ready-made hint takes the same two branches, and the
+    // refresh one needs no Create when an enabled rule already shows the hint.
+    expect(RU('automationsPage.tips.useHintTemplate')).toMatch(/или без «Создать», если включённое правило с этой подсказкой уже есть/)
+    expect(EN('automationsPage.tips.useHintTemplate')).toMatch(/or without Create, if a switched-on rule already shows this hint/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R1 — what the rule editor's buttons and switches say they do
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A method's body out of a source file, from its signature to the next `public`. */
+function methodBody(source: string, signature: string): string {
+  const start = source.indexOf(signature)
+  expect(start, `${signature} is gone — the copy about it has lost its subject`).toBeGreaterThan(-1)
+  const rest = source.slice(start + signature.length)
+  const end = rest.search(/\n\s{2}(?:public|private|protected) /)
+  return end === -1 ? rest : rest.slice(0, end)
+}
+
+describe('R1: the editor tells the operator what its controls do', () => {
+  it('says «Удалить» leaves the hint text, which is what the service deletes', () => {
+    // The rule row goes; its executions go with it (cascade in the schema); the
+    // hint is a row in another table that this method never names.
+    const body = methodBody(SERVICE, 'public async deleteRule(')
+    expect(body).toMatch(/automationRule\.delete\(/)
+    expect(body).not.toMatch(/userHint/i)
+    expect(RU('automationsPage.tips.delete')).toMatch(/Текст подсказки на вкладке «Подсказки» остаётся/)
+    expect(EN('automationsPage.tips.delete')).toMatch(/hint text on the Hints tab stays/)
+  })
+
+  it('says the editor switch changes the draft and the list switch acts at once, which is what each one calls', () => {
+    // The editor's switch writes into the draft only; «Сохранить» sends it.
+    expect(PAGE).toMatch(/onCheckedChange=\{\(v\) => setDraft\(\{ \.\.\.draft, isEnabled: v \}\)\}/)
+    // The list's switch calls the toggle endpoint straight away.
+    expect(PAGE).toMatch(/onCheckedChange=\{\(v\) => onToggle\(rule\.id, v\)\}/)
+    expect(PAGE).toMatch(/onToggle=\{\(id, enabled\) => \{\s*void toggleRule\(id, enabled\)/)
+    expect(RU('automationsPage.editor.enabledInfo')).toMatch(/меняет черновик[\s\S]*«Сохранить»[\s\S]*в списке слева действует сразу/)
+    expect(EN('automationsPage.editor.enabledInfo')).toMatch(/changes the draft[\s\S]*Save[\s\S]*list on the left acts at once/)
   })
 })
 
@@ -374,7 +487,7 @@ describe('I10: the noun the shared copy uses', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// I11 — `nothingHere` is NOT unreachable
+// I11 — every row the map draws says something
 // ─────────────────────────────────────────────────────────────────────────────
 
 function wildcardRule(spec: string): AutomationRule {
@@ -397,34 +510,135 @@ function wildcardRule(spec: string): AutomationRule {
   } as unknown as AutomationRule
 }
 
-describe('I11: the empty-state string on a trigger row', () => {
-  /**
-   * The card renders it on `paths.length === 0 && offers.length === 0`, and
-   * that pair is reachable through the WILDCARD branch: a rule that matches a
-   * trigger without naming it contributes no path, and `wildcardRuleIds` being
-   * non-empty suppresses the offers. One `*` rule puts the string on every row
-   * at once. So the key stays; deleting it would take the operator's only
-   * explanation of a row that looks blank for a reason.
-   */
-  it('is reachable — a single wildcard rule empties every row', () => {
+/**
+ * The card used to carry an empty-state string («ничего не настроено») for a row
+ * with no paths and no offers, and this guard proved that state reachable: one
+ * `*` rule contributed no path to any row and suppressed every offer.
+ *
+ * It is not reachable any more. A wildcard now gets a row of its own, and the
+ * rows it covers keep a cross-reference line («плюс N правил по маске») in the
+ * place the empty state used to occupy — which is why the card's condition
+ * grew `wildcardRuleIds.length === 0` and stopped ever being true. The string,
+ * its branch and the old premise are gone; what stays is the invariant they
+ * existed to keep, so a row that can be blank fails HERE rather than rendering
+ * an empty cell to an operator.
+ */
+describe('I11: no trigger row is left blank', () => {
+  const rowsOf = (map: ReturnType<typeof buildTriggerMap>) =>
+    map.lanes.flatMap((lane) => lane.triggers)
+
+  const blankRows = (map: ReturnType<typeof buildTriggerMap>) =>
+    rowsOf(map)
+      .filter(
+        (row) =>
+          row.paths.length === 0 && row.offers.length === 0 && row.wildcardRuleIds.length === 0,
+      )
+      .map((row) => row.type)
+
+  it('says something on every row when one rule covers them all', () => {
     const map = buildTriggerMap({ rules: [wildcardRule('*')], hints: [] })
-    const nodes = map.lanes.flatMap((lane) => lane.triggers)
-    const empty = nodes.filter((node) => node.paths.length === 0 && node.offers.length === 0)
-    expect(nodes.length, 'the map drew no trigger rows at all').toBeGreaterThan(0)
-    expect(empty.length, 'no row reaches the empty state any more').toBeGreaterThan(0)
+
+    expect(rowsOf(map).length, 'the map drew no trigger rows at all').toBeGreaterThan(0)
+    expect(blankRows(map)).toEqual([])
   })
 
-  it('is reachable through a namespace wildcard too', () => {
+  it('marks the rows a namespace wildcard covers, and leaves none of them blank', () => {
     const map = buildTriggerMap({ rules: [wildcardRule('payment.*')], hints: [] })
-    const empty = map.lanes
-      .flatMap((lane) => lane.triggers)
-      .filter((node) => node.paths.length === 0 && node.offers.length === 0)
-    expect(empty.map((node) => node.type).sort()).toEqual(['payment.completed', 'payment.failed'])
+
+    const covered = rowsOf(map)
+      .filter((row) => row.wildcardRuleIds.length > 0)
+      .map((row) => row.type)
+      .sort()
+    expect(covered).toEqual(['payment.completed', 'payment.failed'])
+    expect(blankRows(map)).toEqual([])
   })
 
-  it('has the string it needs, in both languages', () => {
-    expect(RU('automationsPage.triggerMap.nothingHere').length).toBeGreaterThan(0)
-    expect(EN('automationsPage.triggerMap.nothingHere').length).toBeGreaterThan(0)
+  it('keeps no copy for the state that cannot happen', () => {
+    // Dead copy is worse than none: it reads as a state somebody can reach, and
+    // the next reader writes code to produce it.
+    expect(() => RU('automationsPage.triggerMap.nothingHere')).toThrow()
+    expect(() => EN('automationsPage.triggerMap.nothingHere')).toThrow()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I14 — a run that got no answer is not a run that happened
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('I14: what the panel says when a manual run gets no answer', () => {
+  // `runHadNoAnswer` covers two states axios cannot tell apart: a request that
+  // never reached the panel, and one whose bytes went out and whose answer was
+  // cut off. The copy used to settle it for the operator — «запускать ещё раз
+  // не нужно» — which is false for half of them: nothing may have run at all.
+  //
+  // Both sentences are checked in BOTH languages, because the page tests read
+  // whichever bundle the test instance is on, and a claim broken in Russian
+  // alone slipped through them.
+  const SENTENCES = [
+    ['automationsPage.toast.runNoAnswer', 'the toast after an immediate run'],
+    ['automationsPage.runDialog.noAnswer', 'the note inside the run dialog'],
+  ] as const
+
+  it.each(SENTENCES)('%s admits the run may not have started', (path) => {
+    expect(copy(ru, path), 'the Russian sentence no longer admits the run may not have started').toMatch(
+      /мог не начаться/,
+    )
+    expect(copy(en, path), 'the English sentence no longer admits the run may not have started').toMatch(
+      /may not have started/,
+    )
+  })
+
+  it.each(SENTENCES)('%s sends the operator to the run log to find out', (path) => {
+    expect(copy(ru, path), 'the Russian sentence no longer names «Запуски»').toContain('«Запуски»')
+    expect(copy(en, path), 'the English sentence no longer names the Executions tab').toContain('Executions')
+  })
+
+  it.each(SENTENCES)('%s never settles it outright', (path) => {
+    const ruText = copy(ru, path)
+    // The old wording, and anything that reassures without the condition: what
+    // makes the sentence true is «если новый запуск там появился».
+    expect(ruText, 'the Russian sentence reassures with no condition attached').not.toMatch(
+      /^(?:(?!если|посмотрите|прежде).)*(?:не нужно|не требуется)/s,
+    )
+    expect(copy(en, path), 'the English sentence reassures with no condition attached').not.toMatch(
+      /^(?:(?!if |see whether|check ).)*no need/s,
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I13 — what «Подписка оформлена» actually fires on
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('I13: the template that rides subscription.created', () => {
+  const PROFILE_SYNC = readFileSync(
+    resolve(REPO, 'src', 'modules', 'profile-sync', 'profile-sync.processor.ts'),
+    'utf8',
+  )
+
+  it('is emitted on more paths than a purchase — including a profile built again', () => {
+    // The premise, read off the emitter. `subscription.created` goes out of the
+    // CREATE job, and one of its two sites is the branch that LINKS a panel
+    // profile that already existed — a resync, or two accounts merged. The
+    // card copy used to name a purchase, a trial and an import and stop there,
+    // which reads as a closed list and is not one.
+    const emits = [...PROFILE_SYNC.matchAll(/EVENT_TYPES\.SUBSCRIPTION_CREATED/g)]
+    expect(emits.length, 'profile-sync.processor.ts no longer emits it — the copy needs rereading').toBeGreaterThanOrEqual(2)
+    expect(PROFILE_SYNC).toMatch(/Remnawave profile linked[\s\S]{0,400}?EVENT_TYPES\.SUBSCRIPTION_CREATED|EVENT_TYPES\.SUBSCRIPTION_CREATED[^\n]*Remnawave profile linked/)
+  })
+
+  it('says so in both languages, instead of listing three of the paths', () => {
+    const ruText = copy(ru, 'automationsPage.hintTemplates.subscription_created.description')
+    const enText = copy(en, 'automationsPage.hintTemplates.subscription_created.description')
+    expect(ruText, 'the Russian card still names only the three obvious paths').toMatch(
+      /заново|пересинхронизац|объединен/,
+    )
+    expect(enText, 'the English card still names only the three obvious paths').toMatch(
+      /again|resync|merged/,
+    )
+    // And the claim it makes is about the PROFILE appearing, not about a purchase.
+    expect(ruText).toMatch(/профил/)
+    expect(enText).toMatch(/profile/)
   })
 })
 
@@ -457,13 +671,13 @@ describe('I12: an automations refusal reaching a Russian operator', () => {
   })
 
   it('translates every refusal the dictionary is ABLE to reach', () => {
-    // i18next splits a key on '.' and on ':' before it looks it up, so only a
-    // sentence carrying neither can be a dictionary entry at all. Those are the
-    // ones this asserts on; the rest are reported as a fix to
-    // `lib/translate-error.ts`, not papered over here.
-    const reachable = literalRefusals().filter(
-      (sentence) => !sentence.includes('.') && !sentence.includes(':'),
-    )
+    // A COLON IS REACHABLE. `translateServerSentence` looks the key up with
+    // `nsSeparator: false`, so ':' no longer cuts the sentence in half — this
+    // filter used to drop those, and «…needs an audience, one of: …» was
+    // skipped in silence rather than checked. A FULL STOP still splits the key
+    // (`keySeparator` stays on for the nested `errors: {…}`), so sentences
+    // carrying one cannot be entries at all and are left out here.
+    const reachable = literalRefusals().filter((sentence) => !sentence.includes('.'))
     expect(reachable.length, 'nothing in this module is dictionary-reachable').toBeGreaterThan(0)
 
     for (const sentence of reachable) {
@@ -474,5 +688,33 @@ describe('I12: an automations refusal reaching a Russian operator', () => {
       // English sentence would pass a bare inequality.
       expect(shown, `"${sentence}" resolved to something that is not Russian`).toMatch(/[а-яА-Я]/)
     }
+  })
+
+  /**
+   * The three refusals about hints, which no parser of quoted literals can
+   * find: each is a template literal split across two lines. They are the ones
+   * an operator building a pop-up rule actually walks into, and each is the
+   * dictionary KEY, so a reworded server sentence must break this rather than
+   * quietly reach the operator in English.
+   */
+  const HINT_REFUSALS = [
+    'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger',
+    `Action "show_hint_to_audience" needs an audience, one of: ${HINT_AUDIENCES.join(', ')}`,
+    'A pop-up needs somebody to show it to, and a schedule names nobody — bind this rule to an event about a customer, or run it manually with a user id',
+  ]
+
+  it.each(HINT_REFUSALS)('is still the sentence the server sends: %s', (sentence) => {
+    expect(HINT_AUDIENCES.length, 'no audience parsed out of hint-audience.service.ts').toBeGreaterThan(0)
+    expect(
+      SERVICE_SENTENCES,
+      'automations.service.ts no longer composes this sentence — the dictionary entry is now dead',
+    ).toContain(sentence)
+  })
+
+  it.each(HINT_REFUSALS)('reaches a Russian operator in Russian: %s', (sentence) => {
+    const shown = translateApiError(RU_I18N.t.bind(RU_I18N) as never, refusal(sentence))
+    expect(shown, `"${sentence}" still reaches a Russian operator in English`).not.toBe(sentence)
+    expect(shown, `"${sentence}" resolved to a key path`).not.toMatch(/^errors\./)
+    expect(shown, `"${sentence}" resolved to something that is not Russian`).toMatch(/[а-яА-Я]/)
   })
 })

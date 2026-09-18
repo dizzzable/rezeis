@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
-import { buildTriggerMap } from './trigger-map'
-import { HINT_TEMPLATES } from './hint-templates'
+import { CLIENT_MOMENT_KEYS, TRIGGER_LANE_STAGES, buildTriggerMap } from './trigger-map'
+import { HINT_TEMPLATES, HINT_TEMPLATE_STAGES } from './hint-templates'
 import { matchEventPattern as serverMatch } from '../../../../src/modules/automations/event-pattern'
 import type { AutomationRule } from './automations-api'
 import type { UserHint } from '@/features/user-hints/user-hints-api'
@@ -109,6 +109,8 @@ describe('a path from a trigger to a pop-up', () => {
         hintTitle: 'Оплата не прошла',
         state: 'live',
         hasConditions: false,
+        surfaceGap: [],
+        isEnabled: true,
       },
     ])
     expect(map.counts.live).toBe(1)
@@ -148,6 +150,537 @@ describe('a path from a trigger to a pop-up', () => {
   })
 })
 
+describe('a path whose customers open the cabinet where the hint may not appear', () => {
+  /**
+   * THE OWNER'S CASE. «Первое появление» listens to `user.registered` — the
+   * Telegram sign-up — and he ticked «Браузер». Rule on, hint written and on:
+   * every check this map makes said `live`, drawn green as "customers are
+   * seeing this", while the people that event names were inside Telegram and
+   * the hint, limited to the browser, was never drawn for any of them.
+   */
+  const welcome = (over: Partial<AutomationRule> = {}) =>
+    rule({
+      name: 'Первое появление',
+      triggerSpec: 'user.registered',
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+      ...over,
+    })
+  const welcomeHint = (surfaces: string[], over: Partial<UserHint> = {}) =>
+    hint({ key: 'tpl-welcome', titleRu: 'Добро пожаловать', surfaces, ...over })
+
+  it('marks the Telegram sign-up welcome limited to the browser, and keeps it live', () => {
+    const map = buildTriggerMap({ rules: [welcome()], hints: [welcomeHint(['browser'])] })
+    const path = nodeFor(map, 'user.registered')?.paths[0]
+
+    // A marker beside the state, not a fifth state: it is a LIKELY miss.
+    expect(path?.state).toBe('live')
+    expect(path?.surfaceGap).toEqual(['tma'])
+  })
+
+  it('clears the mark once the place those customers are in is ticked', () => {
+    const map = buildTriggerMap({
+      rules: [welcome()],
+      hints: [welcomeHint(['browser', 'tma'])],
+    })
+
+    expect(nodeFor(map, 'user.registered')?.paths[0]?.surfaceGap).toEqual([])
+  })
+
+  it('does not mark a hint that is not limited at all', () => {
+    const map = buildTriggerMap({ rules: [welcome()], hints: [welcomeHint([])] })
+
+    expect(nodeFor(map, 'user.registered')?.paths[0]?.surfaceGap).toEqual([])
+  })
+
+  it('marks the site sign-up welcome limited to Telegram, on its own row', () => {
+    const map = buildTriggerMap({
+      rules: [welcome({ triggerSpec: 'user.web_registered' })],
+      hints: [welcomeHint(['tma'])],
+    })
+
+    expect(nodeFor(map, 'user.web_registered')?.paths[0]?.surfaceGap).toEqual(['browser', 'pwa'])
+  })
+
+  it('claims nothing about an event that happens to a customer wherever they are', () => {
+    // Anti-vacuity for the positive case: a map marking every limited hint
+    // would satisfy it and put amber on rules that reach their people fine.
+    const map = buildTriggerMap({ rules: [rule()], hints: [hint({ surfaces: ['browser'] })] })
+
+    expect(nodeFor(map, 'payment.failed')?.paths[0]?.surfaceGap).toEqual([])
+  })
+
+  it('marks a switched-off hint too, and says nothing for a hint that does not exist', () => {
+    const inactive = buildTriggerMap({
+      rules: [welcome()],
+      hints: [welcomeHint(['browser'], { isActive: false })],
+    })
+    expect(nodeFor(inactive, 'user.registered')?.paths[0]).toMatchObject({
+      state: 'hint-inactive',
+      surfaceGap: ['tma'],
+    })
+
+    const missing = buildTriggerMap({ rules: [welcome()], hints: [] })
+    expect(nodeFor(missing, 'user.registered')?.paths[0]).toMatchObject({
+      state: 'missing-hint',
+      surfaceGap: [],
+    })
+  })
+
+  it('changes no count', () => {
+    // The badges count states. A gap is not one, and a live path with a gap is
+    // still counted live — the marker is what tells it apart.
+    const limited = buildTriggerMap({ rules: [welcome()], hints: [welcomeHint(['browser'])] })
+    const open = buildTriggerMap({ rules: [welcome()], hints: [welcomeHint([])] })
+
+    expect(limited.counts).toEqual(open.counts)
+    expect(limited.counts).toMatchObject({ live: 1, paused: 0, broken: 0 })
+  })
+})
+
+describe('a rule on an event the panel has not checked', () => {
+  /**
+   * UNCHECKED, NOT BROKEN. The server's list of events a pop-up is known to
+   * work on is closed, not exhaustive: the pre-fix template triggers
+   * (`user.expire_soon` and its siblings, on installs from 0.9.7.48 and
+   * 0.9.7.50) never fire, while an unlisted event that names a customer —
+   * `support.ticket_created`, `partner.activated` — works. Drawing all of them
+   * red and counting them under «Не сработает» told an operator to delete
+   * pop-ups that were being shown; drawing them green claimed the opposite.
+   */
+  const legacy = (triggerSpec: string) =>
+    rule({
+      id: 'legacy',
+      name: 'Скоро истечёт (старый шаблон)',
+      triggerSpec,
+      actions: [{ type: 'show_hint', params: { hintKey: 'tpl-expire-soon' } }],
+    })
+  const expiryHint = () => hint({ key: 'tpl-expire-soon', titleRu: 'Скоро закончится' })
+
+  it.each([
+    'user.expire_soon',
+    'subscription.expired',
+    'user.bandwidth_usage_threshold_reached',
+    // Unlisted and working: emitted with a `userId`.
+    'support.ticket_created',
+    'partner.activated',
+  ])('is unchecked — not live, not broken — on %s', (spec) => {
+    const map = buildTriggerMap({ rules: [legacy(spec)], hints: [expiryHint()] })
+
+    expect(nodeFor(map, spec)?.paths[0]?.state).toBe('unverified')
+    expect(map.counts).toMatchObject({ live: 0, paused: 0, broken: 0, unverified: 1 })
+  })
+
+  it("carries the rule's own switch, so a rule just switched off does not read as running", () => {
+    // «Кто увидит» has always shown the badge; the map showed the same amber
+    // chip as before and left «Выключено» at 0.
+    const map = buildTriggerMap({
+      rules: [{ ...legacy('user.expire_soon'), isEnabled: false }],
+      hints: [expiryHint()],
+    })
+
+    expect(nodeFor(map, 'user.expire_soon')?.paths[0]).toMatchObject({
+      state: 'unverified',
+      isEnabled: false,
+    })
+    expect(buildTriggerMap({ rules: [legacy('user.expire_soon')], hints: [expiryHint()] }).lanes
+      .flatMap((lane) => lane.triggers)
+      .find((node) => node.type === 'user.expire_soon')?.paths[0]?.isEnabled).toBe(true)
+  })
+
+  it('stays unchecked while the rule is switched off: switching it on settles nothing', () => {
+    const map = buildTriggerMap({
+      rules: [{ ...legacy('user.expire_soon'), isEnabled: false }],
+      hints: [expiryHint()],
+    })
+
+    expect(nodeFor(map, 'user.expire_soon')?.paths[0]?.state).toBe('unverified')
+    expect(map.counts).toMatchObject({ paused: 0, unverified: 1 })
+  })
+
+  it('reports a missing or switched-off hint first, because that failure is certain', () => {
+    const missing = buildTriggerMap({ rules: [legacy('user.expire_soon')], hints: [] })
+    expect(nodeFor(missing, 'user.expire_soon')?.paths[0]?.state).toBe('missing-hint')
+    expect(missing.counts).toMatchObject({ broken: 1, unverified: 0 })
+
+    const off = buildTriggerMap({
+      rules: [legacy('user.expire_soon')],
+      hints: [expiryHint()].map((one) => ({ ...one, isActive: false })),
+    })
+    expect(nodeFor(off, 'user.expire_soon')?.paths[0]?.state).toBe('hint-inactive')
+  })
+
+  it('leaves the ready-made pop-up offered on the event it belongs to', () => {
+    // The repair affordance: the text is already there, the rule is not.
+    const map = buildTriggerMap({ rules: [legacy('user.expire_soon')], hints: [expiryHint()] })
+    const offer = nodeFor(map, 'remnawave.user.expire_soon')?.offers.find(
+      (candidate) => candidate.templateId === 'expire_soon',
+    )
+
+    expect(offer?.hintExists).toBe(true)
+  })
+
+  it('draws a star the grammar does not call a wildcard on a row of its own, unchecked', () => {
+    // `payment*` is an exact string to the bridge. It was counted as a
+    // working wildcard and drawn nowhere.
+    const map = buildTriggerMap({ rules: [legacy('payment*')], hints: [expiryHint()] })
+
+    expect(nodeFor(map, 'payment*')?.paths[0]?.state).toBe('unverified')
+    expect(nodeFor(map, 'payment.failed')?.wildcardRuleIds).toEqual([])
+    expect(map.counts).toMatchObject({ live: 0, broken: 0, unverified: 1 })
+  })
+
+  it.each(['node.*', 'support.*'])(
+    'draws a wildcard that reaches no checked event (%s) on a row of its own',
+    (spec) => {
+      // It was counted as «1 не сработает» and drawn nowhere — a badge with
+      // nothing on the map to press.
+      const map = buildTriggerMap({ rules: [legacy(spec)], hints: [expiryHint()] })
+
+      expect(nodeFor(map, spec)?.paths.map((path) => path.state)).toEqual(['unverified'])
+      expect(map.counts).toMatchObject({ live: 0, broken: 0, unverified: 1 })
+    },
+  )
+
+  it('still calls a capable wildcard and a capable event live', () => {
+    // Anti-vacuity: a check that refused every spec would satisfy the cases above.
+    const wildcard = buildTriggerMap({ rules: [legacy('remnawave.user.*')], hints: [expiryHint()] })
+    expect(wildcard.counts).toMatchObject({ live: 1, broken: 0, unverified: 0 })
+    // Drawn on a row of its own — where the one chip the count promises is —
+    // and cross-referenced on the event rows it reaches.
+    expect(nodeFor(wildcard, 'remnawave.user.*')?.paths.map((path) => path.state)).toEqual(['live'])
+    expect(nodeFor(wildcard, 'remnawave.user.expire_soon')?.wildcardRuleIds).toEqual(['legacy'])
+
+    const exact = buildTriggerMap({
+      rules: [legacy('remnawave.user.expire_soon')],
+      hints: [expiryHint()],
+    })
+    expect(nodeFor(exact, 'remnawave.user.expire_soon')?.paths[0]?.state).toBe('live')
+  })
+})
+
+describe('a checked wildcard no event row carries', () => {
+  // `referral.*` reaches only the referral pair, which no template covers, so
+  // no row showed it — while the badges counted it live.
+  it('gets a row of its own, in the lane of the events it reaches', () => {
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'referral-rule',
+          triggerSpec: 'referral.*',
+          actions: [{ type: 'show_hint', params: { hintKey: 'hand-written' } }],
+        }),
+      ],
+      hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
+    })
+
+    expect(nodeFor(map, 'referral.*')?.paths.map((path) => path.state)).toEqual(['live'])
+    expect(map.lanes.find((lane) => lane.triggers.some((node) => node.type === 'referral.*'))?.stage).toBe(
+      'rewards',
+    )
+    expect(map.counts).toMatchObject({ live: 1, broken: 0 })
+  })
+
+  it('keeps its own chip and cross-references the event rows it reaches', () => {
+    // A rule naming `referral.qualified` exactly gives that event a row too.
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'referral-rule',
+          triggerSpec: 'referral.*',
+          actions: [{ type: 'show_hint', params: { hintKey: 'hand-written' } }],
+        }),
+        rule({
+          id: 'exact-rule',
+          triggerSpec: 'referral.qualified',
+          actions: [{ type: 'show_hint', params: { hintKey: 'hand-written' } }],
+        }),
+      ],
+      hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
+    })
+
+    expect(nodeFor(map, 'referral.*')?.paths.map((path) => path.ruleId)).toEqual(['referral-rule'])
+    expect(nodeFor(map, 'referral.qualified')?.wildcardRuleIds).toEqual(['referral-rule'])
+    // Two rules, two chips, two counted — the cross-reference counts nothing.
+    expect(map.counts).toMatchObject({ live: 2 })
+  })
+})
+
+describe('every counted rule is drawn where it can be pressed', () => {
+  /** Chips on rows, plus the chips in the eventless list. */
+  const drawn = (map: ReturnType<typeof buildTriggerMap>): number =>
+    map.lanes.flatMap((lane) => lane.triggers).reduce((total, node) => total + node.paths.length, 0) +
+    map.eventlessFailures.length
+  const counted = (map: ReturnType<typeof buildTriggerMap>): number =>
+    map.counts.live + map.counts.paused + map.counts.broken + map.counts.unverified
+
+  it('draws a capable wildcard whose hint was deleted, instead of only counting it', () => {
+    // «1 не сработает» in the header, «плюс 1 правило по маске» and
+    // «ничего не настроено» on the rows, and no red chip anywhere to press.
+    const map = buildTriggerMap({
+      rules: [rule({ id: 'wild', triggerSpec: 'payment.*' })],
+      hints: [],
+    })
+
+    expect(nodeFor(map, 'payment.*')?.paths.map((path) => path.state)).toEqual(['missing-hint'])
+    expect(nodeFor(map, 'payment.failed')?.wildcardRuleIds).toEqual(['wild'])
+    expect(map.counts).toMatchObject({ broken: 1 })
+    expect(drawn(map)).toBe(counted(map))
+  })
+
+  it('draws as many chips as it counts, over every shape at once', () => {
+    const map = buildTriggerMap({
+      rules: [
+        rule({}),
+        rule({ id: 'off', isEnabled: false }),
+        rule({ id: 'wild', triggerSpec: 'payment.*' }),
+        rule({ id: 'unchecked', triggerSpec: 'support.ticket_created' }),
+        rule({ id: 'star', triggerSpec: '*' }),
+        rule({ id: 'nodes', triggerSpec: 'node.*' }),
+        rule({ id: 'exactish', triggerSpec: 'payment*' }),
+        rule({
+          id: 'audience-event',
+          actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'tpl-payment-failed' } }],
+        }),
+        rule({ id: 'cron-hint', triggerKind: 'CRON', triggerSpec: '0 3 * * *' }),
+        rule({
+          id: 'cron-audience-broken',
+          triggerKind: 'CRON',
+          triggerSpec: '0 9 * * *',
+          actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'tpl-payment-failed' } }],
+        }),
+      ],
+      hints: [hint()],
+    })
+
+    expect(counted(map), 'the fixture counts too little to prove anything').toBeGreaterThan(8)
+    expect(drawn(map)).toBe(counted(map))
+  })
+})
+
+describe('a row that is a wildcard of its own', () => {
+  it('belongs to its rule only: another wildcard does not "reach" a pattern', () => {
+    // `*` matches the string `node.*` as it matches any string, and listing it
+    // there would say "plus 1 rule via a wildcard" about a row that is not an
+    // event at all.
+    const map = buildTriggerMap({
+      rules: [
+        rule({ id: 'everything', triggerSpec: '*' }),
+        rule({ id: 'nodes', triggerSpec: 'node.*' }),
+      ],
+      hints: [hint()],
+    })
+
+    expect(nodeFor(map, 'node.*')?.paths.map((path) => path.ruleId)).toEqual(['nodes'])
+    expect(nodeFor(map, 'node.*')?.wildcardRuleIds).toEqual([])
+    // And `*` is still reaching the real event rows.
+    expect(nodeFor(map, 'payment.failed')?.wildcardRuleIds).toEqual(['everything'])
+  })
+})
+
+describe('rows the template library has no stage for', () => {
+  it.each(['support.ticket_created', 'payment*', 'node.*', '*'])('files %s under «Прочее»', (spec) => {
+    const map = buildTriggerMap({
+      rules: [rule({ id: 'row', triggerSpec: spec })],
+      hints: [hint()],
+    })
+
+    expect(map.lanes.find((lane) => lane.triggers.some((node) => node.type === spec))?.stage).toBe(
+      'other',
+    )
+  })
+
+  it('is the last lane, after every stage of the library', () => {
+    expect(TRIGGER_LANE_STAGES[TRIGGER_LANE_STAGES.length - 1]).toBe('other')
+    expect(TRIGGER_LANE_STAGES.slice(0, -1)).toEqual([...HINT_TEMPLATE_STAGES])
+  })
+
+  it('leaves a templated event in its own stage', () => {
+    // Anti-vacuity: «Прочее» is the residual, not the answer for everything.
+    const map = buildTriggerMap({ rules: [rule()], hints: [hint()] })
+
+    expect(map.lanes.find((lane) => lane.triggers.some((node) => node.type === 'payment.failed'))?.stage).toBe(
+      'payment',
+    )
+  })
+})
+
+describe('rules whose every automatic run fails', () => {
+  it('draws no surface-gap marker on an audience action, which shows nothing anywhere', () => {
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          triggerSpec: 'user.registered',
+          actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'tpl-welcome' } }],
+        }),
+      ],
+      hints: [hint({ key: 'tpl-welcome', titleRu: 'Добро пожаловать', surfaces: ['browser'] })],
+    })
+
+    expect(nodeFor(map, 'user.registered')?.paths[0]).toMatchObject({
+      state: 'audience-on-event',
+      surfaceGap: [],
+    })
+  })
+
+  it('draws an audience action on an event red on its event row, and counts it', () => {
+    // The action refuses an event trigger outright. It used to mark its hint
+    // used and draw nothing, while «Кто увидит» said nobody sees the hint.
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'audience-on-event',
+          actions: [
+            { type: 'show_hint_to_audience', params: { hintKey: 'tpl-payment-failed', audience: 'paid-not-connected' } },
+          ],
+        }),
+      ],
+      hints: [hint()],
+    })
+    const node = nodeFor(map, 'payment.failed')
+
+    expect(node?.paths.map((path) => path.state)).toEqual(['audience-on-event'])
+    expect(map.counts).toMatchObject({ live: 0, broken: 1, unverified: 0 })
+    // It shows nothing, so it does not stand in the way of the ready-made pop-ups.
+    expect(node?.offers.length).toBeGreaterThan(0)
+  })
+
+  it('draws an audience action on a wildcard on a row of its own, hiding no offers', () => {
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'audience-everywhere',
+          triggerSpec: '*',
+          actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'tpl-payment-failed' } }],
+        }),
+      ],
+      hints: [hint()],
+    })
+
+    expect(nodeFor(map, '*')?.paths.map((path) => path.state)).toEqual(['audience-on-event'])
+    expect(nodeFor(map, 'payment.failed')?.wildcardRuleIds).toEqual([])
+    expect(nodeFor(map, 'payment.failed')?.offers.length).toBeGreaterThan(0)
+    expect(map.counts).toMatchObject({ broken: 1 })
+  })
+
+  it('draws both actions of one rule that shows a hint and also sends it to an audience', () => {
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          actions: [
+            { type: 'show_hint', params: { hintKey: 'tpl-payment-failed' } },
+            { type: 'show_hint_to_audience', params: { hintKey: 'tpl-payment-failed' } },
+          ],
+        }),
+      ],
+      hints: [hint()],
+    })
+
+    expect(nodeFor(map, 'payment.failed')?.paths.map((path) => path.state).sort()).toEqual([
+      'audience-on-event',
+      'live',
+    ])
+    expect(map.counts).toMatchObject({ live: 1, broken: 1 })
+  })
+
+  it('lists a scheduled show_hint rule apart, counted, instead of silently using its hint', () => {
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'cron-hint',
+          name: 'Ночная подсказка',
+          triggerKind: 'CRON',
+          triggerSpec: '0 3 * * *',
+          actions: [{ type: 'show_hint', params: { hintKey: 'hand-written' } }],
+        }),
+      ],
+      hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
+    })
+
+    expect(map.eventlessFailures).toEqual([
+      {
+        ruleId: 'cron-hint',
+        ruleName: 'Ночная подсказка',
+        hintKey: 'hand-written',
+        hintTitle: 'Своя подсказка',
+        reason: 'schedule-names-nobody',
+        isEnabled: true,
+      },
+    ])
+    expect(map.counts).toMatchObject({ live: 0, broken: 1 })
+    expect(map.orphanHints).toEqual([])
+  })
+
+  it('carries the switch of a rule with no event, so its chip can say so too', () => {
+    // Anti-vacuity for the field asserted above: a hard-coded `true` produces
+    // exactly what an enabled rule does, and the chip would then draw a rule
+    // just switched off the way it drew it a moment before.
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'cron-hint',
+          triggerKind: 'CRON',
+          triggerSpec: '0 3 * * *',
+          isEnabled: false,
+          actions: [{ type: 'show_hint', params: { hintKey: 'hand-written' } }],
+        }),
+      ],
+      hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
+    })
+
+    expect(map.eventlessFailures.map((failure) => failure.isEnabled)).toEqual([false])
+  })
+
+  it.each([
+    ['a scheduled audience job with no audience', 'CRON' as const, {}],
+    ['a scheduled audience job with an audience the panel does not know', 'CRON' as const, { audience: 'everyone' }],
+    ['a manual audience run with no audience', 'MANUAL' as const, {}],
+  ])('lists %s among the rules with no event', (_label, triggerKind, extra) => {
+    // Every run fails with "requires `audience`". The map used to count and
+    // draw nothing, while «Кто увидит» said nobody sees the hint.
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'audience-broken',
+          triggerKind,
+          triggerSpec: triggerKind === 'CRON' ? '0 9 * * *' : '',
+          actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'hand-written', ...extra } }],
+        }),
+      ],
+      hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
+    })
+
+    expect(map.eventlessFailures.map((failure) => failure.reason)).toEqual([
+      'audience-invalid',
+    ])
+    expect(map.counts).toMatchObject({ broken: 1 })
+    expect(map.orphanHints).toEqual([])
+  })
+
+  it('does not list a working scheduled audience job or a manual rule', () => {
+    // Anti-vacuity: both are shapes the server accepts on purpose.
+    const map = buildTriggerMap({
+      rules: [
+        rule({
+          id: 'cron-audience',
+          triggerKind: 'CRON',
+          triggerSpec: '0 9 * * *',
+          actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'hand-written', audience: 'paid-not-connected' } }],
+        }),
+        rule({
+          id: 'manual',
+          triggerKind: 'MANUAL',
+          triggerSpec: '',
+          actions: [{ type: 'show_hint', params: { hintKey: 'hand-written' } }],
+        }),
+      ],
+      hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
+    })
+
+    expect(map.eventlessFailures).toEqual([])
+    expect(map.counts).toMatchObject({ live: 0, paused: 0, broken: 0, unverified: 0 })
+  })
+})
+
 describe('a rule that reaches a trigger through a wildcard', () => {
   it('is counted apart from the ones that name it', () => {
     // `*` covers every event. An operator looking at an empty row would
@@ -181,7 +714,18 @@ describe('a rule that reaches a trigger through a wildcard', () => {
     //
     // Exercised through the map rather than against the copy directly: the copy
     // is not exported, and what matters is the behaviour an operator sees.
-    const CORPUS = ['*', 'payment.*', 'payment', 'payment.failed', 'remnawave.user.*', '', '  ']
+    const CORPUS = [
+      '*',
+      'payment.*',
+      'payment',
+      'payment.failed',
+      'remnawave.user.*',
+      // Stars the grammar does NOT treat as wildcards: exact strings to the bridge.
+      'payment*',
+      '*.failed',
+      '',
+      '  ',
+    ]
     const TYPES = HINT_TEMPLATES.map((template) => template.triggerSpec)
 
     for (const pattern of CORPUS) {
@@ -296,16 +840,19 @@ describe('what is not a path', () => {
     expect(nodeFor(map, 'payment.failed')?.paths).toEqual([])
   })
 
-  it('ignores a scheduled rule that carries one anyway', () => {
+  it('draws no event edge for a scheduled rule that carries one anyway', () => {
     // Refused at save time now; an older install may still hold one. A cron run
-    // names nobody, so the pop-up cannot fire — drawing the edge would promise
-    // something the run does not deliver.
+    // names nobody, so the pop-up cannot fire — an edge from an event would
+    // promise something the run does not deliver. It is listed apart instead
+    // (see "rules whose every automatic run fails").
     const map = buildTriggerMap({
       rules: [rule({ triggerKind: 'CRON', triggerSpec: '0 3 * * *' })],
       hints: [hint()],
     })
 
     expect(map.counts.live).toBe(0)
+    expect(nodeFor(map, 'payment.failed')?.paths).toEqual([])
+    expect(map.eventlessFailures.map((failure) => failure.ruleId)).toEqual(['rule-1'])
   })
 })
 
@@ -409,6 +956,28 @@ describe("the cabinet's own moment", () => {
     })
 
     expect(map.orphanHints.map((orphan) => orphan.key)).toEqual(['hand-written'])
+  })
+
+  it('names exactly the moments the panel lets a cabinet raise', () => {
+    // Two screens now read this set: the orphan list here, and «Кто увидит» in
+    // the hint editor, which tells the operator "the cabinet shows it by
+    // itself" instead of "no rule shows it". Read from the server's closed list
+    // rather than restated, so a moment added there cannot come back as a false
+    // orphan AND a false "customers will not see it".
+    const source = readFileSync(
+      resolve(
+        dirname(fileURLToPath(import.meta.url)),
+        '..', '..', '..', '..',
+        'src', 'modules', 'user-hints', 'controllers', 'internal-user-hints.controller.ts',
+      ),
+      'utf8',
+    )
+    const declared = /const CLIENT_MOMENTS = \[([^\]]*)\]/.exec(source)?.[1]
+    expect(declared, 'CLIENT_MOMENTS was not found in the internal hints controller').toBeDefined()
+    const moments = Array.from(declared!.matchAll(/'([^']+)'/g), (match) => match[1]!)
+    expect(moments.length, 'CLIENT_MOMENTS was parsed empty').toBeGreaterThan(0)
+
+    expect([...CLIENT_MOMENT_KEYS].sort()).toEqual(moments.sort())
   })
 })
 
@@ -729,7 +1298,7 @@ describe('a trigger the template library does not cover', () => {
     expect(laneOf(map, 'payment.refunded')).toBe('payment')
   })
 
-  it('does not guess when the namespace spans several lanes', () => {
+  it('lands in «Прочее» when the namespace spans several lanes', () => {
     // `remnawave.user.*` templates sit in start, retention AND limits, so
     // picking one would be picking whichever is declared first. Anti-vacuity
     // for the case above: a rule that always answered "the neighbour's lane"
@@ -739,6 +1308,6 @@ describe('a trigger the template library does not cover', () => {
       hints: [hint({ key: 'hand-written', titleRu: 'Своя подсказка' })],
     })
 
-    expect(laneOf(map, 'remnawave.user.online')).toBe('security')
+    expect(laneOf(map, 'remnawave.user.online')).toBe('other')
   })
 })

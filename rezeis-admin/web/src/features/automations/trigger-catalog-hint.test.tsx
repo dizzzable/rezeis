@@ -130,6 +130,36 @@ describe('the trigger hint', () => {
     expect(screen.getByText(says('automationsPage.config.triggerPopupCapable'))).toBeInTheDocument()
   })
 
+  it('says it on the branch where the event has never fired, too', () => {
+    // The capability belongs to the EVENT, not to whether it has happened here:
+    // the operator picking a brand-new event is the one asking whether a pop-up
+    // is possible on it at all, and this branch told them nothing.
+    draw('subscription.trial_granted', [
+      event({
+        type: 'subscription.trial_granted',
+        namespace: 'subscription',
+        seen: 0,
+        lastSeenAt: null,
+        popupCapable: true,
+      }),
+    ])
+
+    expect(
+      screen.getByText(says('automationsPage.config.triggerNeverFired', { count: 90 })),
+    ).toBeInTheDocument()
+    expect(screen.getByText(says('automationsPage.config.triggerPopupCapable'))).toBeInTheDocument()
+  })
+
+  it('does not say so on that branch either, when the event cannot carry one', () => {
+    draw('node.connection_lost', [
+      event({ type: 'node.connection_lost', namespace: 'node', popupCapable: false, seen: 0, lastSeenAt: null }),
+    ])
+
+    expect(
+      screen.queryByText(says('automationsPage.config.triggerPopupCapable')),
+    ).not.toBeInTheDocument()
+  })
+
   it('does not say so when it cannot', () => {
     // Saying it wrongly would send an operator to build a hint the save-time
     // check then refuses.
@@ -140,6 +170,43 @@ describe('the trigger hint', () => {
     expect(
       screen.queryByText(says('automationsPage.config.triggerPopupCapable')),
     ).not.toBeInTheDocument()
+  })
+
+  it('names an exact event a hint can ride, in the operator’s words', () => {
+    // The field holds `user.registered`, which reads like "somebody
+    // registered" and means only the Telegram sign-up. The name says which.
+    draw('user.registered', [
+      event({ type: 'user.registered', namespace: 'user', popupCapable: true, seen: 3 }),
+    ])
+
+    expect(screen.getByText(says('automationsPage.popupEvents.user_registered'))).toBeInTheDocument()
+  })
+
+  it('names it on the branch where the event has never fired, too', () => {
+    draw('user.web_registered', [
+      event({ type: 'user.web_registered', namespace: 'user', popupCapable: true, seen: 0, lastSeenAt: null }),
+    ])
+
+    expect(screen.getByText(says('automationsPage.popupEvents.user_web_registered'))).toBeInTheDocument()
+    expect(
+      screen.getByText(says('automationsPage.config.triggerNeverFired', { count: 90 })),
+    ).toBeInTheDocument()
+  })
+
+  it('names no event for a wildcard, nor for one the catalogue says cannot carry a hint', () => {
+    const name = says('automationsPage.popupEvents.user_registered')
+    const { unmount } = draw('user.*', [
+      event({ type: 'user.registered', namespace: 'user', popupCapable: true, seen: 3 }),
+    ])
+    expect(screen.queryByText(name)).toBeNull()
+    unmount()
+
+    draw('user.registered', [
+      event({ type: 'user.registered', namespace: 'user', popupCapable: false, seen: 3 }),
+    ])
+    expect(screen.queryByText(name)).toBeNull()
+    // Anti-vacuity: the count line itself is drawn.
+    expect(screen.getByText(/Happened 3 times/)).toBeInTheDocument()
   })
 
   it('stays quiet until the catalogue has loaded', () => {

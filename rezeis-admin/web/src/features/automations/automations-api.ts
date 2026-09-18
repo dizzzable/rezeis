@@ -21,7 +21,24 @@ export interface AutomationActionResult {
   index: number;
   type: string;
   status: 'success' | 'failed' | 'skipped';
+  /** English, for logs and older clients. The operator is shown `code` when there is one. */
   message?: string;
+  /**
+   * What happened, as a stable token the panel words in the operator's
+   * language (`run-result-copy.ts`). Absent on rows written before codes
+   * existed and on action types that carry none.
+   */
+  code?: string;
+  /** The values the sentence for `code` names: `hintKey`, `userId`, `audience`, … */
+  details?: Record<string, string | number | boolean | null>;
+}
+
+/** The answer to a manual run. */
+export interface ManualRunResult {
+  executionId: string;
+  status: string;
+  actionResults: AutomationActionResult[];
+  errorMessage: string | null;
 }
 
 export interface AutomationRule {
@@ -114,16 +131,38 @@ export async function deleteRule(id: string): Promise<void> {
   await api.delete(`${BASE}/rules/${id}`);
 }
 
+/**
+ * How long a manual run is waited for.
+ *
+ * A run executes every action of the rule inside the request — a webhook, an
+ * audience of up to five hundred — and the client default is thirty seconds.
+ * The panel gives this route the same two minutes (its long-timeout list), so
+ * the browser giving up first would report as failed a run that is still going.
+ */
+export const MANUAL_RUN_TIMEOUT_MS = 120_000;
+
+/**
+ * Runs a rule now, whatever its switch says.
+ *
+ * `triggerData.userId` names the customer the run is about. `showAgain` lets a
+ * `show_hint` action queue a once-only hint for a customer who already had it —
+ * for THIS run only. It travels beside `triggerData`, never inside it: the
+ * server reads it from the body alone, so no event payload can carry it.
+ *
+ * Sent only when the caller decided it. An absent field and `false` mean the
+ * same to the server today, but a body that always names it would put a
+ * decision in every request nobody made.
+ */
 export async function runRuleManually(
   id: string,
   triggerData: Record<string, unknown> = {},
-): Promise<{
-  executionId: string;
-  status: string;
-  actionResults: AutomationActionResult[];
-  errorMessage: string | null;
-}> {
-  const res = await api.post(`${BASE}/rules/${id}/run`, { triggerData });
+  options: { readonly showAgain?: boolean } = {},
+): Promise<ManualRunResult> {
+  const body: { triggerData: Record<string, unknown>; showAgain?: boolean } = { triggerData };
+  if (options.showAgain !== undefined) body.showAgain = options.showAgain;
+  const res = await api.post<ManualRunResult>(`${BASE}/rules/${id}/run`, body, {
+    timeout: MANUAL_RUN_TIMEOUT_MS,
+  });
   return res.data;
 }
 

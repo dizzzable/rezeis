@@ -49,6 +49,7 @@ import {
   listExecutions,
   listRules,
   runRuleManually,
+  toggleRule,
   updateRule,
   type AutomationRule,
   type UpsertRulePayload,
@@ -185,6 +186,12 @@ function servePanel(initial: readonly AutomationRule[]) {
     })
     return { executionId: `execution-${finishedAt}`, status: 'SUCCEEDED', actionResults: [], errorMessage: null }
   })
+  // The list's switch: `toggleRule` writes `isEnabled` alone and answers with the rule.
+  vi.mocked(toggleRule).mockImplementation(async (id, isEnabled) => {
+    const row = { ...rows.get(id)!, isEnabled, updatedAt: now() }
+    rows.set(id, row)
+    return wire(row)
+  })
 
   return {
     row: (id: string): AutomationRule => wire(rows.get(id)!),
@@ -257,14 +264,22 @@ function editorSwitch(): HTMLElement {
  * Every control in the editor that changes the draft: the switch in its header
  * and everything on «Настройка». Not «Запустить», «Удалить» or the tabs, which
  * change nothing in it.
+ *
+ * Nor the (i) beside a field. It explains the field and changes nothing in the
+ * draft, so it stays pressable while a save runs — an operator waiting on the
+ * answer may still read what a field is for. Each is named «Подробнее: …»
+ * (`automationsPage.infoAria`), which is how it is told apart here.
  */
 function controlsThatEdit(): HTMLElement[] {
   const settings = within(editorCard()).getByRole('tabpanel')
+  const explanation = says('automationsPage.infoAria', { subject: '' })
   return [
     editorSwitch(),
-    ...settings.querySelectorAll<HTMLElement>(
-      'input:not([aria-hidden="true"]), textarea, select:not([aria-hidden="true"]), button',
-    ),
+    ...Array.from(
+      settings.querySelectorAll<HTMLElement>(
+        'input:not([aria-hidden="true"]), textarea, select:not([aria-hidden="true"]), button',
+      ),
+    ).filter((control) => !(control.getAttribute('aria-label') ?? '').startsWith(explanation)),
   ]
 }
 
@@ -313,6 +328,8 @@ beforeEach(async () => {
     { resource: 'automations', action: 'view' },
     { resource: 'automations', action: 'create' },
     { resource: 'automations', action: 'edit' },
+    // «Запустить сейчас» is pressable only with the grant the endpoint checks.
+    { resource: 'automations', action: 'run' },
   ])
   vi.mocked(getCatalog).mockResolvedValue({ actionTypes: ['notify_telegram'], coincidentEventGroups: [] })
   vi.mocked(getEventCatalog).mockResolvedValue({ events: [], windowDays: 30 })
@@ -574,8 +591,9 @@ describe('«Запустить»', () => {
     await user.type(nameField(), 'Typed, not saved yet')
     await user.click(screen.getByRole('button', { name: says('automationsPage.editor.runNow') }))
     await waitFor(() => {
+      // The status as the operator reads it, not the wire value.
       expect(toastMock.success).toHaveBeenCalledWith(
-        says('automationsPage.toast.runFinished', { status: 'SUCCEEDED' }),
+        says('automationsPage.toast.runFinished', { status: says('automationsPage.statuses.SUCCEEDED') }),
       )
     })
 
@@ -653,6 +671,300 @@ describe('moving to another rule', () => {
     await waitFor(() => {
       expect(toastMock.success).toHaveBeenCalledWith(says('automationsPage.toast.updated'))
     })
+  })
+})
+
+describe('a rule that shows a hint to an audience', () => {
+  /** The same rule with nobody picked — the state the server refuses to save. */
+  const NO_AUDIENCE: AutomationRule = {
+    ...EVERY_CONTROL,
+    id: 'rule-no-audience',
+    name: 'Без аудитории',
+    actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'payment-failed' } }],
+  }
+
+  it('holds «Сохранить» and marks the picker until an audience is chosen', async () => {
+    // The server refuses such a rule, and its refusal names neither the action
+    // nor the field: the operator pressed «Сохранить», got one line of Russian
+    // about an audience, and had to work out which of the actions meant it.
+    servePanel([NO_AUDIENCE])
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+
+    const save = screen.getByRole('button', { name: says('automationsPage.editor.save') })
+    expect(save).toBeDisabled()
+    // Marked where the choice is made, and in words beside it.
+    const picker = screen.getByRole('combobox', { name: says('automationsPage.actions.audienceLabel') })
+    expect(picker).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText(says('automationsPage.actions.audienceMissing'))).toBeInTheDocument()
+
+    // And the button says what is missing, rather than nothing at all.
+    await user.hover(save.parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(
+      says('automationsPage.tips.saveNeedsAudience'),
+    )
+    await user.keyboard('{Escape}')
+
+    // Picking one gives the save back.
+    await user.click(picker)
+    await user.click(await screen.findByRole('option', { name: says('automationsPage.audiences.paid-not-connected') }))
+    expect(picker).not.toHaveAttribute('aria-invalid')
+    expect(screen.queryByText(says('automationsPage.actions.audienceMissing'))).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: says('automationsPage.editor.save') })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.save') }))
+    await waitFor(() => {
+      expect(updateRule).toHaveBeenCalledWith(
+        NO_AUDIENCE.id,
+        expect.objectContaining({
+          actions: [
+            { type: 'show_hint_to_audience', params: { hintKey: 'payment-failed', audience: 'paid-not-connected' } },
+          ],
+        }),
+      )
+    })
+  })
+
+  it('leaves «Сохранить» alone for a rule whose audience is picked', async () => {
+    // Anti-vacuity: the hold is about the empty field, not about the action.
+    servePanel([EVERY_CONTROL])
+    renderPage()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+
+    expect(screen.getByRole('button', { name: says('automationsPage.editor.save') })).toBeEnabled()
+    expect(
+      screen.queryByText(says('automationsPage.actions.audienceMissing')),
+    ).not.toBeInTheDocument()
+  })
+})
+
+describe('an answer that lands after the operator moved on', () => {
+  /**
+   * A save answers after its request, and the answer used to move the selection
+   * to the rule it saved — wherever the operator had gone meanwhile.
+   */
+  it('leaves the operator on the rule they opened while «Сохранить» ran', async () => {
+    servePanel([FIRST, SECOND])
+    const answer = deferred<void>()
+    const serveUpdate = vi.mocked(updateRule).getMockImplementation()!
+    vi.mocked(updateRule).mockImplementationOnce(async (id, payload) => {
+      await answer.promise
+      return serveUpdate(id, payload)
+    })
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.save') }))
+    await user.click(ruleInList(SECOND.name))
+    expect(await screen.findByText(headerOf(SECOND))).toBeInTheDocument()
+
+    answer.resolve()
+    await waitFor(() => {
+      expect(toastMock.success).toHaveBeenCalledWith(says('automationsPage.toast.updated'))
+    })
+    await settle()
+
+    expect(screen.getByText(headerOf(SECOND))).toBeInTheDocument()
+    expect(nameField()).toHaveValue(SECOND.name)
+  })
+
+  /**
+   * The same answer, landing in the very tick the operator moved: the pick and
+   * the answer with nothing awaited in between.
+   *
+   * The guard behind it asks which rule is open INSIDE the state updater, on
+   * the state React is about to write, rather than from a copy kept in a ref —
+   * a ref is written by an effect, and an answer that lands before React runs
+   * it reads the place the operator has already left.
+   *
+   * Honesty about what this case can prove: in jsdom (React 19) the effects of
+   * the pick always run before the answer's microtask, whatever the click is
+   * dispatched with, so it cannot tell the two guards apart — it holds the
+   * behaviour in the tightest interleave this environment allows. What the
+   * guard itself is worth is proven by the three cases around it.
+   */
+  it('leaves them on the rule they picked in the very tick the answer landed', async () => {
+    servePanel([FIRST, SECOND])
+    const answer = deferred<void>()
+    const serveUpdate = vi.mocked(updateRule).getMockImplementation()!
+    vi.mocked(updateRule).mockImplementationOnce(async (id, payload) => {
+      await answer.promise
+      return serveUpdate(id, payload)
+    })
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.save') }))
+
+    // NO `act` AND NO `fireEvent` HERE, both of which flush the effects the
+    // gap is made of. A raw click is what a browser delivers: React commits it
+    // synchronously (a click is a discrete event) and leaves its passive
+    // effects to the scheduler — and the answer, a microtask, arrives first.
+    ruleInList(SECOND.name).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    answer.resolve()
+    for (let tick = 0; tick < 40; tick += 1) await Promise.resolve()
+    await waitFor(() => {
+      expect(toastMock.success).toHaveBeenCalledWith(says('automationsPage.toast.updated'))
+    })
+    await settle()
+
+    expect(screen.getByText(headerOf(SECOND))).toBeInTheDocument()
+    expect(nameField()).toHaveValue(SECOND.name)
+  })
+
+  it('leaves the operator on the saved rule they opened while «Создать» ran', async () => {
+    servePanel([FIRST])
+    const answer = deferred<void>()
+    const serveCreate = vi.mocked(createRule).getMockImplementation()!
+    vi.mocked(createRule).mockImplementationOnce(async (payload) => {
+      await answer.promise
+      return serveCreate(payload)
+    })
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.newRule') }))
+    await user.click(await screen.findByRole('button', { name: says('automationsPage.editor.create') }))
+    await user.click(ruleInList(FIRST.name))
+    expect(await screen.findByText(headerOf(FIRST))).toBeInTheDocument()
+
+    answer.resolve()
+    await waitFor(() => {
+      expect(toastMock.success).toHaveBeenCalledWith(says('automationsPage.toast.created'))
+    })
+    await settle()
+
+    expect(screen.getByText(headerOf(FIRST))).toBeInTheDocument()
+    // Anti-vacuity: the rule was created, and the list has it.
+    expect(
+      await screen.findByRole('button', {
+        name: says('automationsPage.list.selectAria', { name: says('automationsPage.untitledRule') }),
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it('gives a draft opened while «Создать» is out an editor of its own', async () => {
+    // Every draft opens under the one synthetic id, so the second one reached
+    // the first one's editor instance and inherited its pending create: every
+    // field disabled and «Создать» spinning, on a draft nothing was being
+    // created for. The only way out was to wait for a save the operator had
+    // already walked away from.
+    servePanel([])
+    const answer = deferred<void>()
+    const serveCreate = vi.mocked(createRule).getMockImplementation()!
+    vi.mocked(createRule).mockImplementationOnce(async (payload) => {
+      await answer.promise
+      return serveCreate(payload)
+    })
+    renderPage()
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: says('automationsPage.newRule') }))
+    await user.click(await screen.findByRole('button', { name: says('automationsPage.editor.create') }))
+    // Anti-vacuity: the first draft really is waiting on its create.
+    expect(nameField()).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.newRule') }))
+
+    const create = screen.getByRole('button', { name: says('automationsPage.editor.create') })
+    expect(nameField()).toBeEnabled()
+    expect(create).toBeEnabled()
+    await user.clear(nameField())
+    await user.type(nameField(), 'Второе')
+    expect(nameField()).toHaveValue('Второе')
+
+    answer.resolve()
+    await waitFor(() => {
+      expect(toastMock.success).toHaveBeenCalledWith(says('automationsPage.toast.created'))
+    })
+    await settle()
+
+    // The first rule was created; the second draft is untouched by its answer.
+    expect(createRule).toHaveBeenCalledTimes(1)
+    expect(nameField()).toHaveValue('Второе')
+  })
+
+  it('keeps a new draft the operator opened while «Создать» ran', async () => {
+    servePanel([])
+    const answer = deferred<void>()
+    const serveCreate = vi.mocked(createRule).getMockImplementation()!
+    vi.mocked(createRule).mockImplementationOnce(async (payload) => {
+      await answer.promise
+      return serveCreate(payload)
+    })
+    renderPage()
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: says('automationsPage.newRule') }))
+    await user.click(await screen.findByRole('button', { name: says('automationsPage.editor.create') }))
+    await user.click(screen.getByRole('button', { name: says('automationsPage.newRule') }))
+
+    answer.resolve()
+    await waitFor(() => {
+      expect(toastMock.success).toHaveBeenCalledWith(says('automationsPage.toast.created'))
+    })
+    await settle()
+
+    // Still the draft — not the rule created from the one before it.
+    expect(screen.getByRole('button', { name: says('automationsPage.editor.create') })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: says('automationsPage.editor.save') })).toBeNull()
+    expect(createRule).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the switch beside a rule in the list', () => {
+  it('reaches the open editor without dropping what was typed, and «Сохранить» keeps the new switch', async () => {
+    servePanel([FIRST])
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+    expect(editorSwitch()).toHaveAttribute('aria-checked', 'true')
+
+    await user.clear(nameField())
+    await user.type(nameField(), 'Typed, not saved')
+    await user.click(
+      screen.getByRole('switch', { name: says('automationsPage.list.toggleAria', { name: FIRST.name }) }),
+    )
+
+    await waitFor(() => {
+      expect(editorSwitch()).toHaveAttribute('aria-checked', 'false')
+    })
+    expect(nameField()).toHaveValue('Typed, not saved')
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.save') }))
+    await waitFor(() => {
+      expect(updateRule).toHaveBeenCalledTimes(1)
+    })
+    expect(vi.mocked(updateRule).mock.calls[0]![1]).toMatchObject({ name: 'Typed, not saved', isEnabled: false })
+  })
+
+  it('makes the answer that rule’s copy, so opening it later shows the new switch without a read', async () => {
+    servePanel([FIRST, SECOND])
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+    await user.click(ruleInList(SECOND.name))
+    expect(await screen.findByText(headerOf(SECOND))).toBeInTheDocument()
+    await user.click(ruleInList(FIRST.name))
+    expect(await screen.findByText(headerOf(FIRST))).toBeInTheDocument()
+
+    await user.click(
+      screen.getByRole('switch', { name: says('automationsPage.list.toggleAria', { name: SECOND.name }) }),
+    )
+    await waitFor(() => {
+      expect(toggleRule).toHaveBeenCalledWith(SECOND.id, false)
+    })
+    await settle()
+    await user.click(ruleInList(SECOND.name))
+
+    expect(await screen.findByText(headerOf(SECOND))).toBeInTheDocument()
+    expect(editorSwitch()).toHaveAttribute('aria-checked', 'false')
+    // Served from the copy the toggle answered with — SECOND was read once.
+    expect(vi.mocked(getRule).mock.calls.filter(([id]) => id === SECOND.id)).toHaveLength(1)
   })
 })
 

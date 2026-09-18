@@ -224,6 +224,11 @@ describe('pressing Create on a ready-made pop-up', () => {
   /**
    * The owner's steps: the help card, the «Первое появление» template, Create.
    * Returns the rule the server answered with.
+   *
+   * The welcome is ONE card now, with a choice of whom it greets. «Пришедших
+   * через Telegram» is the welcome this case was written against: one rule, on
+   * `user.registered`, named for that door. The default («Всех новых клиентов»)
+   * creates a second rule as well, which is covered where companions are.
    */
   async function applyWelcomeAndCreate(): Promise<AutomationRule> {
     grant([
@@ -242,9 +247,14 @@ describe('pressing Create on a ready-made pop-up', () => {
     await user.click(
       await screen.findByRole('button', { name: says('automationsPage.help.title') }),
     )
-    const card = (await screen.findByText(says('automationsPage.hintTemplates.welcome.name')))
+    const card = (await screen.findByText(says('automationsPage.hintTemplates.arrival.title')))
       .parentElement
     expect(card).not.toBeNull()
+    await user.click(
+      within(card!).getByRole('radio', {
+        name: says('automationsPage.hintTemplates.arrival.audiences.telegram'),
+      }),
+    )
     await user.click(
       within(card!).getByRole('button', { name: says('automationsPage.help.useTemplate') }),
     )

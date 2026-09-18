@@ -194,3 +194,30 @@ export function findHintCollisions(input: CollisionInput): HintCollision[] {
   }
   return collisions
 }
+
+/**
+ * The same question for a draft that «Создать» saves together with companion
+ * rules — the draft's actions on each companion's event as well as its own.
+ *
+ * A companion is not in `rules` yet: it exists only as a line on the draft. So
+ * the welcome for everyone, applied beside an enabled welcome on the site
+ * sign-up, would put a second window on that sign-up while the notice looked
+ * only at the Telegram half and said nothing. Each event is asked on its own and
+ * the answers are merged, one entry per rule and hint.
+ */
+export function findHintCollisionsWithCompanions(
+  input: CollisionInput,
+  companionTriggerSpecs: readonly string[],
+): HintCollision[] {
+  const seen = new Set<string>()
+  const merged: HintCollision[] = []
+  for (const triggerSpec of [input.draft.triggerSpec, ...companionTriggerSpecs]) {
+    for (const collision of findHintCollisions({ ...input, draft: { ...input.draft, triggerSpec } })) {
+      const key = JSON.stringify([collision.ruleId, collision.hintTitle])
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(collision)
+    }
+  }
+  return merged
+}

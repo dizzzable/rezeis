@@ -150,6 +150,47 @@ describe('useRuleDraft', () => {
     expect(result.current.inHand?.rule.runCount).toBe(1)
   })
 
+  it('takes the switch pressed in the list without dropping what the operator typed', () => {
+    // The list's switch writes `isEnabled` at once. The open editor used to keep
+    // showing the old «Включено», and «Сохранить» wrote the old switch back.
+    const rule = saved('rule-first', 'Payment failure alert')
+    const { rerender, result } = renderRecorded(rule)
+
+    act(() => {
+      result.current.setDraft({ ...result.current.inHand!.draft, name: 'Typed by the operator' })
+    })
+    rerender({ rule: { ...rule, isEnabled: false, updatedAt: '2026-06-05T10:00:00.000Z' } })
+
+    expect(result.current.inHand?.draft.isEnabled).toBe(false)
+    expect(result.current.inHand?.draft.name).toBe('Typed by the operator')
+    // In the same render that noticed it — not one render later.
+    expect(result.current.inHand?.rule.isEnabled).toBe(false)
+  })
+
+  it('still starts over when the switch moved together with a field the operator edits', () => {
+    const rule = saved('rule-first', 'Payment failure alert')
+    const { rerender, result } = renderRecorded(rule)
+
+    act(() => {
+      result.current.setDraft({ ...result.current.inHand!.draft, name: 'Typed by the operator' })
+    })
+    rerender({ rule: { ...saved(rule.id, 'Saved elsewhere', '2026-06-05T10:00:00.000Z'), isEnabled: false } })
+
+    expect(result.current.inHand?.draft).toMatchObject({ name: 'Saved elsewhere', isEnabled: false })
+  })
+
+  it('keeps a switch flipped in the editor across a re-read that did not move it', () => {
+    const rule = saved('rule-first', 'Payment failure alert')
+    const { rerender, result } = renderRecorded(rule)
+
+    act(() => {
+      result.current.setDraft({ ...result.current.inHand!.draft, isEnabled: false })
+    })
+    rerender({ rule: { ...rule, actions: [...rule.actions] } })
+
+    expect(result.current.inHand?.draft.isEnabled).toBe(false)
+  })
+
   it('starts an unsaved draft over when one is opened again, even with the same words', () => {
     // A draft has no id yet; the page stamps each one with the moment it opened.
     function opened(at: string): AutomationRule {
