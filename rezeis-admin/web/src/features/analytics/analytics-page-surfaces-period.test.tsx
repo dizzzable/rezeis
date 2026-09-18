@@ -22,6 +22,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { i18n, i18nReady, loadFeatureBundle } from '@/i18n/i18n'
+import { usePermissionStore } from '@/features/rbac/use-permission-store'
 import { useAppearanceStore } from '@/lib/theme/appearance-store'
 import { installIntersectionObserver, renderWithProviders, type IntersectionObserverHarness } from '@/test/test-utils'
 
@@ -44,40 +45,23 @@ vi.mock('recharts', async (importOriginal) => {
 
 vi.mock('./analytics-api', () => ({
   getAnalyticsOverview: vi.fn(),
-  getAnalyticsCohorts: vi.fn(),
-  getLtvDistribution: vi.fn(),
-  getRevenueByCurrency: vi.fn(),
-  getSubscriptionsByPlan: vi.fn(),
-  getTopPayers: vi.fn(),
+  getRevenueReport: vi.fn(),
   getTrialConversion: vi.fn(),
+  getAnalyticsCohorts: vi.fn(),
+  getExpiring: vi.fn(),
+  getTopPayers: vi.fn(),
+  getLtvDistribution: vi.fn(),
+  getSubscriptionsByPlan: vi.fn(),
   getSurfaceAnalytics: vi.fn(),
 }))
 
 import * as analyticsApi from './analytics-api'
 import AnalyticsPage from './analytics-page'
+import { emptyOverviewReport, emptyRevenueReport } from './analytics-test-fixtures'
 
 const api = vi.mocked(analyticsApi)
 
-const overviewFor = (windowDays: number) => ({
-  kpis: {
-    windowDays,
-    totalRevenue: 0,
-    paidCount: 0,
-    payingUsers: 0,
-    arpu: 0,
-    arppu: 0,
-    activeSubscriptions: 0,
-    trialSubscriptions: 0,
-    totalUsers: 0,
-    newUsersInWindow: 0,
-  },
-  churn: { windowDays, prevActive: 0, stillActive: 0, churned: 0, churnRate: 0, retentionRate: 0 },
-  funnel: [],
-  providers: [],
-  daily: [],
-  windowDays,
-  generatedAt: '2026-09-17T00:00:00.000Z',
-})
+const overviewFor = (windowDays: number) => emptyOverviewReport(windowDays)
 
 const SURFACES = {
   surfaces: [
@@ -106,6 +90,8 @@ beforeEach(() => {
   recorded.pies.length = 0
   visibility = installIntersectionObserver()
   vi.clearAllMocks()
+  // The page is `analytics:view`; the viewer here holds it.
+  usePermissionStore.setState({ loaded: true, role: 'ADMIN', granted: new Set(['analytics:view']) })
   // The card may move: neither switch is off.
   useAppearanceStore.setState({ animationsEnabled: true })
   window.matchMedia = ((query: string) => ({
@@ -120,7 +106,7 @@ beforeEach(() => {
   })) as typeof window.matchMedia
   api.getAnalyticsOverview.mockImplementation((days: number) => Promise.resolve(overviewFor(days)))
   api.getSurfaceAnalytics.mockResolvedValue(SURFACES)
-  api.getRevenueByCurrency.mockResolvedValue([])
+  api.getRevenueReport.mockResolvedValue(emptyRevenueReport())
   api.getSubscriptionsByPlan.mockResolvedValue([])
 })
 
@@ -128,6 +114,7 @@ afterEach(() => {
   visibility?.restore()
   visibility = null
   window.matchMedia = realMatchMedia
+  usePermissionStore.getState().reset()
 })
 
 const surfacePanel = (): HTMLElement => {
@@ -149,7 +136,7 @@ describe('the surfaces card and the period buttons', () => {
     const drawnFor30d = surfacePanel()
     const sweeps = recorded.pies.length
 
-    await user.click(screen.getByRole('button', { name: '90d' }))
+    await user.click(screen.getByRole('button', { name: '90 дней' }))
 
     // The period's own cards ask again…
     await waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledTimes(2))

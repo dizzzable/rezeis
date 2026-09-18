@@ -205,3 +205,4 @@ jobs:
           test/user-hint-delivery-postgres.spec.ts
           test/automation-empty-conditions-postgres.spec.ts
           test/analytics-surfaces-postgres.spec.ts
+          test/analytics-reports-postgres.spec.ts

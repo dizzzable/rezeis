@@ -100,7 +100,14 @@ export const navGroups: ReadonlyArray<NavGroup> = [
       { key: 'supportTickets', path: '/support-tickets', icon: Bell },
       { key: 'fraudSignals', path: '/fraud', icon: ShieldAlert },
       { key: 'automations', path: '/automations', icon: Zap },
-      { key: 'analytics', path: '/analytics', icon: BarChart3 },
+      {
+        key: 'analytics',
+        path: '/analytics',
+        icon: BarChart3,
+        // Every report on the page is `analytics:view`; without it the item led
+        // to five cards saying «Не удалось загрузить данные».
+        requiredPermission: { resource: 'analytics', action: 'view' },
+      },
     ],
   },
   {

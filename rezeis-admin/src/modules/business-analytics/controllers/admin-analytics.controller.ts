@@ -11,19 +11,17 @@ import {
 import { BusinessAnalyticsService } from '../services/business-analytics.service';
 
 /**
- * Admin Business Analytics — Phase 7.
+ * Admin Business Analytics — the «Бизнес-аналитика» page's reports.
  *
- * Exposes a single bundled endpoint for the dashboard
- * (`/admin/analytics/overview`) plus targeted endpoints for the heavier
- * cohort/LTV/top-payers panels (kept separate so the dashboard load
- * doesn't pay for what it doesn't render on first paint).
+ * Permission: `analytics:view` (auto-registered in `rbac.resources.ts`) on
+ * EVERY route — the page asks for nothing else, so an operator who may open it
+ * never meets a 403 on one of its cards.
  *
- * Permission: `analytics:view` (auto-registered in `rbac.resources.ts`).
- *
- * Backwards compatibility
- *   The legacy frontend hit `/admin/business-analytics?days=30` — we
- *   keep that path as an alias to `overview` so the existing
- *   `analytics-page.tsx` and any saved bookmarks keep working.
+ * Removed in the 2026-09 review, with nothing left calling them (both repos
+ * searched): `/admin/business-analytics` (an alias of the overview),
+ * `/admin/analytics/baseline` (a 7-day report that summed money across
+ * currencies and dated payments by `updated_at`) and
+ * `/admin/analytics/revenue-by-currency` (superseded by `/admin/analytics/revenue`).
  */
 @ApiTags('admin/analytics')
 @ApiBearerAuth('JWT')
@@ -34,16 +32,16 @@ export class AdminAnalyticsController {
 
   @Get('admin/analytics/overview')
   @RequirePermission('analytics', 'view')
-  @ApiOperation({ summary: 'Bundled KPI report (KPIs + churn + funnel + providers + daily series)' })
+  @ApiOperation({ summary: 'KPIs against the previous window, their series, the funnel and the payment systems' })
   public getOverview(@Query() query: AnalyticsWindowQueryDto) {
     return this.analyticsService.getAdvancedReport(query.days ?? 30);
   }
 
-  @Get('admin/business-analytics')
+  @Get('admin/analytics/revenue')
   @RequirePermission('analytics', 'view')
-  @ApiOperation({ summary: 'Legacy alias for the overview endpoint' })
-  public getOverviewLegacy(@Query() query: AnalyticsWindowQueryDto) {
-    return this.analyticsService.getAdvancedReport(query.days ?? 30);
+  @ApiOperation({ summary: 'Revenue of the window by bar, currency, kind of purchase, plan and payment system' })
+  public getRevenue(@Query() query: AnalyticsWindowQueryDto) {
+    return this.analyticsService.getRevenueReport(query.days ?? 30);
   }
 
   @Get('admin/analytics/cohorts')
@@ -54,41 +52,32 @@ export class AdminAnalyticsController {
     return { cohorts };
   }
 
+  @Get('admin/analytics/expiring')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Live subscriptions ending in the coming 30 days, by day and by whether autopay will charge' })
+  public getExpiring() {
+    return this.analyticsService.getExpiring();
+  }
+
   @Get('admin/analytics/top-payers')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Leaderboard of users by lifetime spend' })
-  public async getTopPayers(@Query() query: TopPayersQueryDto) {
-    const payers = await this.analyticsService.getTopPayers(query.limit ?? 20);
-    return { payers };
+  public getTopPayers(@Query() query: TopPayersQueryDto) {
+    return this.analyticsService.getTopPayers(query.limit ?? 20);
   }
 
   @Get('admin/analytics/ltv-distribution')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Histogram of paying-user lifetime value' })
-  public async getLtvDistribution() {
-    const buckets = await this.analyticsService.getLtvDistribution();
-    return { buckets };
-  }
-
-  @Get('admin/analytics/baseline')
-  @RequirePermission('analytics', 'view')
-  @ApiOperation({ summary: 'Original 7-day baseline report (kept for the dashboard widget)' })
-  public getBaseline() {
-    return this.analyticsService.getReport();
+  public getLtvDistribution() {
+    return this.analyticsService.getLtvDistribution();
   }
 
   @Get('admin/analytics/trial-conversion')
   @RequirePermission('analytics', 'view')
-  @ApiOperation({ summary: 'Trial-to-paid conversion metrics' })
+  @ApiOperation({ summary: 'Trial-to-paid conversion and the time customers take to pay first' })
   public getTrialConversion(@Query() query: AnalyticsWindowQueryDto) {
     return this.analyticsService.getTrialConversion(query.days ?? 30);
-  }
-
-  @Get('admin/analytics/revenue-by-currency')
-  @RequirePermission('analytics', 'view')
-  @ApiOperation({ summary: 'Revenue breakdown by currency' })
-  public getRevenueByCurrency(@Query() query: AnalyticsWindowQueryDto) {
-    return this.analyticsService.getRevenueByCurrency(query.days ?? 30);
   }
 
   @Get('admin/analytics/subscriptions-by-plan')

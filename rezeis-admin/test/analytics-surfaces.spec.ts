@@ -5,6 +5,8 @@ import { Logger } from '@nestjs/common';
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { BusinessAnalyticsService } from '../src/modules/business-analytics/services/business-analytics.service';
+import type { FxRateService } from '../src/modules/fx/fx-rate.service';
+import type { SettingsService } from '../src/modules/settings/services/settings.service';
 import {
   buildUsageSurfaceReport,
   PWA_INSTALL_OS_UNKNOWN,
@@ -14,6 +16,14 @@ import {
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 
 Logger.overrideLogger(false);
+
+/** The reporting base currency, and nothing else of the rate service: the surfaces report asks for neither. */
+const REPORTING_IN_RUB = ({ getBaseCurrency: () => 'RUB' } satisfies Pick<FxRateService, 'getBaseCurrency'>) as unknown as FxRateService;
+
+/** The surfaces report counts no days: it must not even ask for the operator's time zone. */
+const NO_ZONE = ({
+  getPlatformBranding: () => Promise.reject(new Error('the surfaces report read the time zone setting')),
+} satisfies Pick<SettingsService, 'getPlatformBranding'>) as unknown as SettingsService;
 
 /**
  * The usage-surface report without a database: how the rows of its one
@@ -156,7 +166,7 @@ describe('the report asks the database once', () => {
     );
     const before = Date.now();
 
-    const report = await new BusinessAnalyticsService(prisma as never).getSurfaceAnalytics();
+    const report = await new BusinessAnalyticsService(prisma as never, REPORTING_IN_RUB, NO_ZONE).getSurfaceAnalytics();
 
     assert.equal(statements.length, 1);
     const [statement] = statements;

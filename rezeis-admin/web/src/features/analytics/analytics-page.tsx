@@ -1,596 +1,135 @@
+/**
+ * «Бизнес-аналитика».
+ *
+ * One period switch for the tabs that have a period (Обзор, Выручка,
+ * Конверсия); the other two say what their cards count instead of offering a
+ * switch that would change nothing. Each tab fetches only its own reports, and
+ * every one of them is `analytics:view`.
+ *
+ * THE PAGE ITSELF IS `analytics:view` TOO, checked before any report is asked
+ * for. The admin client has no global handler for a 403: without the gate an
+ * operator without the right got every card saying «Не удалось загрузить
+ * данные» — five requests refused, and nothing said why.
+ *
+ * The page remembers, for this visit, which charts have played their entrance:
+ * a tab or a period is not an arrival, and a chart that has been seen is drawn
+ * finished when it comes back (see `analytics-chart-kit.tsx`).
+ */
 import { useState } from 'react'
-import type { ComponentType, SVGProps } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
-import {
-  TrendingUp,
-  TrendingDown,
-  Users,
-  DollarSign,
-  CreditCard,
-  Trophy,
-  Layers,
-  BarChart3,
-  ArrowRightLeft,
-  PieChart as PieChartIcon,
-} from 'lucide-react'
-import {
-  Area,
-  AreaChart,
-  Bar,
-  CartesianGrid,
-  Cell,
-  ComposedChart,
-  Line,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
+import { useIsFetching } from '@tanstack/react-query'
+import { BarChart3 } from 'lucide-react'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import { Progress } from '@/components/ui/progress'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { holdsPermission, usePermissionStore } from '@/features/rbac/use-permission-store'
+import { cn } from '@/lib/utils'
 
-import {
-  getAnalyticsCohorts,
-  getAnalyticsOverview,
-  getLtvDistribution,
-  getRevenueByCurrency,
-  getSubscriptionsByPlan,
-  getTopPayers,
-  getTrialConversion,
-  type AdvancedAnalyticsReport,
-} from './analytics-api'
-import { SurfaceUsageCard } from './surface-usage-card'
-import { activeLocale } from '@/lib/utils'
+import { ChartSkeleton, EmptyState, PeriodSwitch } from './analytics-chart-kit'
+import type { AnalyticsPeriodDays } from './analytics-chart-support'
+import { ConversionTab } from './analytics-conversion-tab'
+import { LeadersTab } from './analytics-leaders-tab'
+import { OverviewTab } from './analytics-overview-tab'
+import { RAMP_ANCHOR_CLASS } from './analytics-palette'
+import { RetentionTab } from './analytics-retention-tab'
+import { RevenueTab } from './analytics-revenue-tab'
+import { useSurfaceMotion } from './surface-motion'
 
-const WINDOW_OPTIONS: ReadonlyArray<{ label: string; days: number }> = [
-  { label: '7d', days: 7 },
-  { label: '30d', days: 30 },
-  { label: '90d', days: 90 },
-  { label: '1y', days: 365 },
-]
+const TABS = ['overview', 'revenue', 'conversion', 'retention', 'leaderboard'] as const
+type AnalyticsTab = (typeof TABS)[number]
+const WINDOWED: ReadonlySet<AnalyticsTab> = new Set(['overview', 'revenue', 'conversion'])
 
-const DONUT_COLORS = [
-  'hsl(142, 71%, 45%)', 'hsl(217, 91%, 60%)', 'hsl(48, 96%, 53%)',
-  'hsl(0, 84%, 60%)', 'hsl(262, 83%, 58%)', 'hsl(25, 95%, 53%)',
-  'hsl(180, 70%, 45%)', 'hsl(330, 80%, 55%)',
-]
+/** The tab body's entrance, still for anyone who asked for stillness. */
+const TAB_CONTENT = 'mt-4 motion-reduce:animate-none'
 
 export default function AnalyticsPage() {
+  const role = usePermissionStore((state) => state.role)
+  const granted = usePermissionStore((state) => state.granted)
+  const loaded = usePermissionStore((state) => state.loaded)
+  const failed = usePermissionStore((state) => state.error !== null)
+  if (holdsPermission({ role, granted }, 'analytics', 'view')) return <AnalyticsReports />
+  return <AnalyticsClosed state={loaded ? 'denied' : failed ? 'unknown' : 'checking'} />
+}
+
+function PageHeading() {
   const { t } = useTranslation()
-  const [days, setDays] = useState(30)
-  const [activeTab, setActiveTab] = useState('overview')
+  return (
+    <div>
+      <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+        <BarChart3 className="h-6 w-6" aria-hidden="true" />
+        {t('analyticsPage.title')}
+      </h1>
+      <p className="text-sm text-muted-foreground">{t('analyticsPage.subtitle')}</p>
+    </div>
+  )
+}
 
-  const overview = useQuery({
-    queryKey: ['analytics', 'overview', days],
-    queryFn: () => getAnalyticsOverview(days),
-    staleTime: 30_000,
-  })
+/** The page for a viewer whose rights are not known yet, or do not include it: no report is requested. */
+function AnalyticsClosed({ state }: { readonly state: 'checking' | 'denied' | 'unknown' }) {
+  const { t } = useTranslation()
+  return (
+    <div className="space-y-6" data-analytics-access={state}>
+      <PageHeading />
+      {state === 'checking' ? (
+        <ChartSkeleton className="h-40" />
+      ) : (
+        <EmptyState className="h-40 rounded-lg border">
+          {state === 'denied' ? t('analyticsPage.access.denied') : t('analyticsPage.access.unknown')}
+        </EmptyState>
+      )}
+    </div>
+  )
+}
 
-  // The panels that have already played their sweep, for this visit to the page:
-  // held here so that switching tabs or periods, which rebuilds everything below,
-  // does not replay them.
-  const [surfacesPlayed] = useState(() => new Set<string>())
+function AnalyticsReports() {
+  const { t } = useTranslation()
+  const [days, setDays] = useState<AnalyticsPeriodDays>(30)
+  const [activeTab, setActiveTab] = useState<AnalyticsTab>('overview')
+  const animate = useSurfaceMotion()
+  const fetching = useIsFetching({ queryKey: ['analytics'] }) > 0
+  // The charts that have played their entrance during this visit to the page:
+  // held here so that switching tabs or periods, which rebuilds everything
+  // below, does not replay them.
+  const [played] = useState(() => new Set<string>())
 
   return (
-    <div className="space-y-6">
+    <div className={cn('space-y-6', RAMP_ANCHOR_CLASS)}>
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <BarChart3 className="h-6 w-6" />
-            {t('analyticsPage.title')}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {t('analyticsPage.subtitle')}
+        <PageHeading />
+        {WINDOWED.has(activeTab) ? (
+          <PeriodSwitch value={days} onChange={setDays} busy={fetching} animate={animate} />
+        ) : (
+          <p className="text-xs text-muted-foreground" data-analytics-period-note="">
+            {t(`analyticsPage.periods.independent.${activeTab}`)}
           </p>
-        </div>
-        <div className="flex gap-1">
-          {WINDOW_OPTIONS.map((opt) => (
-            <Button
-              key={opt.days}
-              size="sm"
-              variant={opt.days === days ? 'default' : 'outline'}
-              onClick={() => setDays(opt.days)}
-            >
-              {opt.label}
-            </Button>
-          ))}
-        </div>
+        )}
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
-          <TabsTrigger value="overview">{t('analyticsPage.tabs.overview')}</TabsTrigger>
-          <TabsTrigger value="revenue">{t('analyticsPage.tabs.revenue')}</TabsTrigger>
-          <TabsTrigger value="conversion">{t('analyticsPage.tabs.conversion')}</TabsTrigger>
-          <TabsTrigger value="retention">{t('analyticsPage.tabs.retention')}</TabsTrigger>
-          <TabsTrigger value="leaderboard">{t('analyticsPage.tabs.leaderboard')}</TabsTrigger>
+      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as AnalyticsTab)}>
+        {/* Wraps on a phone rather than scrolling: a tab past the edge is a tab nobody finds. */}
+        <TabsList className="h-auto min-h-10 max-w-full flex-wrap justify-start">
+          {TABS.map((tab) => (
+            <TabsTrigger key={tab} value={tab}>
+              {t(`analyticsPage.tabs.${tab}`)}
+            </TabsTrigger>
+          ))}
         </TabsList>
 
-        <TabsContent value="overview" className="space-y-6 mt-4">
-          <OverviewTab report={overview.data} loading={overview.isLoading} surfacesPlayed={surfacesPlayed} />
+        <TabsContent value="overview" className={TAB_CONTENT}>
+          <OverviewTab days={days} played={played} />
         </TabsContent>
-        <TabsContent value="revenue" className="space-y-6 mt-4">
-          <RevenueTab days={days} />
+        <TabsContent value="revenue" className={TAB_CONTENT}>
+          <RevenueTab days={days} played={played} />
         </TabsContent>
-        <TabsContent value="conversion" className="space-y-6 mt-4">
-          <ConversionTab days={days} />
+        <TabsContent value="conversion" className={TAB_CONTENT}>
+          <ConversionTab days={days} played={played} />
         </TabsContent>
-        <TabsContent value="retention" className="space-y-6 mt-4">
-          <RetentionTab />
+        <TabsContent value="retention" className={TAB_CONTENT}>
+          <RetentionTab played={played} />
         </TabsContent>
-        <TabsContent value="leaderboard" className="space-y-6 mt-4">
-          <LeaderboardTab />
+        <TabsContent value="leaderboard" className={TAB_CONTENT}>
+          <LeadersTab played={played} />
         </TabsContent>
       </Tabs>
     </div>
   )
-}
-
-// ── Overview Tab ─────────────────────────────────────────────────────────────
-
-function OverviewTab({
-  report,
-  loading,
-  surfacesPlayed,
-}: {
-  report: AdvancedAnalyticsReport | undefined
-  loading: boolean
-  surfacesPlayed: Set<string>
-}) {
-  const { t } = useTranslation()
-  const ready = !loading && report !== undefined
-  return (
-    <>
-      {ready ? (
-        <>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <KpiCard icon={DollarSign} title={t('analyticsPage.kpi.revenue')} value={formatCurrency(report.kpis.totalRevenue)} subtitle={t('analyticsPage.kpi.revenueSubtitle', { count: report.kpis.paidCount.toLocaleString(activeLocale()) })} />
-            <KpiCard icon={Users} title={t('analyticsPage.kpi.payingUsers')} value={report.kpis.payingUsers.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.payingUsersSubtitle', { arppu: formatCurrency(report.kpis.arppu), arpu: formatCurrency(report.kpis.arpu) })} />
-            <KpiCard icon={CreditCard} title={t('analyticsPage.kpi.activeSubs')} value={report.kpis.activeSubscriptions.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.activeSubsSubtitle', { trial: report.kpis.trialSubscriptions.toLocaleString(activeLocale()), users: report.kpis.totalUsers.toLocaleString(activeLocale()) })} />
-            <KpiCard icon={report.churn.churnRate > 0.1 ? TrendingDown : TrendingUp} title={t('analyticsPage.kpi.retention')} value={`${(report.churn.retentionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.kpi.retentionSubtitle', { churned: report.churn.churned, total: report.churn.prevActive })} negative={report.churn.churnRate > 0.2} />
-          </div>
-          <DailyChart daily={report.daily} />
-        </>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28" />)}
-        </div>
-      )}
-      {/*
-        Where customers open the cabinet does not depend on the chosen period,
-        and this card fetches its own breakdown. It is deliberately OUTSIDE the
-        swap above: when it was inside, every 7d/30d/90d/1y click replaced the
-        whole tab with skeletons, so the card unmounted, asked the server again
-        and replayed all four sweeps — an answer about the surfaces to a click
-        that was about the period.
-      */}
-      <SurfaceUsageCard played={surfacesPlayed} />
-      {ready ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <FunnelCard funnel={report.funnel} />
-          <ProvidersCard providers={report.providers} />
-        </div>
-      ) : null}
-    </>
-  )
-}
-
-// ── Revenue Tab ──────────────────────────────────────────────────────────────
-
-function RevenueTab({ days }: { days: number }) {
-  const { t } = useTranslation()
-  const { data: currencies, isLoading: currLoading } = useQuery({
-    queryKey: ['analytics', 'revenue-by-currency', days],
-    queryFn: () => getRevenueByCurrency(days),
-    staleTime: 60_000,
-  })
-  const { data: plans, isLoading: plansLoading } = useQuery({
-    queryKey: ['analytics', 'subscriptions-by-plan'],
-    queryFn: getSubscriptionsByPlan,
-    staleTime: 60_000,
-  })
-
-  if (currLoading || plansLoading) {
-    return <div className="grid gap-4 lg:grid-cols-2"><Skeleton className="h-72" /><Skeleton className="h-72" /></div>
-  }
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      {/* Revenue by Currency Donut */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <PieChartIcon className="h-4 w-4" />
-            {t('analyticsPage.revenue.byCurrencyTitle')}
-          </CardTitle>
-          <CardDescription>{t('analyticsPage.revenue.byCurrencyDescription')}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {!currencies || currencies.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-8 text-center">{t('analyticsPage.revenue.empty')}</p>
-          ) : (
-            <div className="flex items-center gap-6">
-              <div className="h-52 w-52 shrink-0">
-                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                  <PieChart>
-                    {/* `nameKey`: these rows have no `name`, and recharts names such a slice by its index. */}
-                    <Pie data={[...currencies]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="revenue" nameKey="currency">
-                      {currencies.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
-                    </Pie>
-                    <Tooltip formatter={(v) => formatCurrency(Number(v ?? 0))} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="flex flex-col gap-2">
-                {currencies.map((item, i) => (
-                  <div key={item.currency} className="flex items-center gap-2 text-sm">
-                    <div className="h-3 w-3 rounded-full" style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }} />
-                    <span className="text-muted-foreground">{item.currency}</span>
-                    <span className="font-medium ml-auto">{formatCurrency(item.revenue)}</span>
-                    <span className="text-xs text-muted-foreground">({(item.percentage * 100).toFixed(0)}%)</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Subscriptions by Plan Donut */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Layers className="h-4 w-4" />
-            {t('analyticsPage.revenue.byPlanTitle')}
-          </CardTitle>
-          <CardDescription>{t('analyticsPage.revenue.byPlanDescription')}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {!plans || plans.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-8 text-center">{t('analyticsPage.revenue.noPlans')}</p>
-          ) : (
-            <div className="flex items-center gap-6">
-              <div className="h-52 w-52 shrink-0">
-                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                  <PieChart>
-                    <Pie data={[...plans]} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={2} dataKey="total" nameKey="plan">
-                      {plans.map((_, i) => <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />)}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="flex flex-col gap-2">
-                {plans.map((item, i) => (
-                  <div key={item.plan} className="flex items-center gap-2 text-sm">
-                    <div className="h-3 w-3 rounded-full" style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }} />
-                    <span className="text-muted-foreground truncate max-w-32">{item.plan}</span>
-                    <span className="font-medium ml-auto">{item.total}</span>
-                    <span className="text-xs text-muted-foreground">({(item.percentage * 100).toFixed(0)}%)</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
-// ── Conversion Tab ───────────────────────────────────────────────────────────
-
-function ConversionTab({ days }: { days: number }) {
-  const { t } = useTranslation()
-  const { data: conversion, isLoading } = useQuery({
-    queryKey: ['analytics', 'trial-conversion', days],
-    queryFn: () => getTrialConversion(days),
-    staleTime: 60_000,
-  })
-
-  if (isLoading) {
-    return <div className="grid gap-4 md:grid-cols-3"><Skeleton className="h-28" /><Skeleton className="h-28" /><Skeleton className="h-28" /></div>
-  }
-
-  if (!conversion) return null
-
-  return (
-    <>
-      {/* KPI Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KpiCard icon={ArrowRightLeft} title={t('analyticsPage.conversion.rate')} value={`${(conversion.conversionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.conversion.rateSubtitle', { converted: conversion.convertedUsers, total: conversion.totalTrialUsers })} />
-        <KpiCard icon={Users} title={t('analyticsPage.conversion.trialUsers')} value={conversion.totalTrialUsers.toLocaleString(activeLocale())} subtitle={t('analyticsPage.conversion.trialUsersSubtitle', { days })} />
-        <KpiCard icon={DollarSign} title={t('analyticsPage.conversion.revenueFromConverted')} value={formatCurrency(conversion.revenueFromConverted)} subtitle={t('analyticsPage.conversion.revenueSubtitle')} />
-        <KpiCard icon={TrendingUp} title={t('analyticsPage.conversion.avgDays')} value={`${conversion.avgDaysToConvert}d`} subtitle={t('analyticsPage.conversion.avgDaysSubtitle')} />
-      </div>
-
-      {/* Top Converted Plans */}
-      {conversion.topConvertedPlans.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t('analyticsPage.conversion.topPlansTitle')}</CardTitle>
-            <CardDescription>{t('analyticsPage.conversion.topPlansDescription')}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {conversion.topConvertedPlans.map((plan) => (
-              <div key={plan.plan} className="space-y-1">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium">{plan.plan}</span>
-                  <span className="tabular-nums text-muted-foreground">
-                    {plan.count} ({(plan.percentage * 100).toFixed(0)}%)
-                  </span>
-                </div>
-                <Progress value={plan.percentage * 100} className="h-2" />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-    </>
-  )
-}
-
-// ── Retention Tab ────────────────────────────────────────────────────────────
-
-function RetentionTab() {
-  const { t } = useTranslation()
-  const [cohortOpen, setCohortOpen] = useState(false)
-  const cohorts = useQuery({
-    queryKey: ['analytics', 'cohorts'],
-    queryFn: getAnalyticsCohorts,
-    enabled: cohortOpen,
-    staleTime: 5 * 60_000,
-  })
-  const ltv = useQuery({
-    queryKey: ['analytics', 'ltv'],
-    queryFn: getLtvDistribution,
-    staleTime: 5 * 60_000,
-  })
-
-  const ltvData = (ltv.data ?? []).map((b) => ({ bound: `≥ ${b.bound}`, users: b.users }))
-  const totalLtvUsers = ltvData.reduce((acc, b) => acc + b.users, 0)
-
-  return (
-    <>
-      {/* Cohort Matrix */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <CardTitle className="text-base">{t('analyticsPage.cohorts.title')}</CardTitle>
-              <CardDescription>{t('analyticsPage.cohorts.description')}</CardDescription>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => setCohortOpen((v) => !v)}>
-              {cohortOpen ? t('analyticsPage.cohorts.hide') : t('analyticsPage.cohorts.show')}
-            </Button>
-          </div>
-        </CardHeader>
-        {cohortOpen && (
-          <CardContent>
-            {cohorts.isLoading ? <Skeleton className="h-48 w-full" /> : !cohorts.data || cohorts.data.length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t('analyticsPage.cohorts.empty')}</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead className="border-b text-muted-foreground">
-                    <tr>
-                      <th className="px-2 py-2 text-left">{t('analyticsPage.cohorts.cohortColumn')}</th>
-                      <th className="px-2 py-2 text-right">{t('analyticsPage.cohorts.sizeColumn')}</th>
-                      {Array.from({ length: 12 }).map((_, idx) => <th key={idx} className="px-2 py-2 text-center">M{idx}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cohorts.data.map((row) => (
-                      <tr key={row.cohort} className="border-b last:border-0">
-                        <td className="px-2 py-2 font-mono">{row.cohort}</td>
-                        <td className="px-2 py-2 text-right tabular-nums">{row.cohortSize}</td>
-                        {Array.from({ length: 12 }).map((_, idx) => {
-                          const value = row.retentionByMonth[idx]
-                          if (value === undefined) return <td key={idx} className="px-2 py-2 text-center text-muted-foreground">—</td>
-                          const pct = value * 100
-                          const intensity = Math.min(0.85, value)
-                          return <td key={idx} className="px-2 py-2 text-center tabular-nums" style={{ background: `rgba(59, 130, 246, ${intensity})`, color: intensity > 0.4 ? 'white' : undefined }}>{pct < 1 ? pct.toFixed(1) : pct.toFixed(0)}%</td>
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </CardContent>
-        )}
-      </Card>
-
-      {/* LTV Distribution */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Layers className="h-4 w-4" />
-            <CardTitle className="text-base">{t('analyticsPage.ltv.title')}</CardTitle>
-          </div>
-          <CardDescription>{t('analyticsPage.ltv.description', { count: totalLtvUsers.toLocaleString(activeLocale()) })}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {ltv.isLoading ? <Skeleton className="h-48 w-full" /> : totalLtvUsers === 0 ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">{t('analyticsPage.ltv.empty')}</p>
-          ) : (
-            <ResponsiveContainer width="100%" height={220} minWidth={0}>
-              <AreaChart data={ltvData}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                <XAxis dataKey="bound" className="text-xs" />
-                <YAxis className="text-xs" allowDecimals={false} />
-                <Tooltip contentStyle={{ background: 'var(--card)', border: '1px solid var(--border)' }} />
-                <Area type="monotone" dataKey="users" stroke="#10b981" fill="#10b981" fillOpacity={0.3} />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
-        </CardContent>
-      </Card>
-    </>
-  )
-}
-
-// ── Leaderboard Tab ──────────────────────────────────────────────────────────
-
-function LeaderboardTab() {
-  const { t } = useTranslation()
-  const top = useQuery({ queryKey: ['analytics', 'top-payers'], queryFn: () => getTopPayers(20), staleTime: 60_000 })
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <Trophy className="h-4 w-4" />
-          <CardTitle className="text-base">{t('analyticsPage.topPayers.title')}</CardTitle>
-        </div>
-        <CardDescription>{t('analyticsPage.topPayers.description')}</CardDescription>
-      </CardHeader>
-      <CardContent className="p-0 overflow-x-auto">
-        {top.isLoading ? <Skeleton className="h-32 w-full" /> : !top.data || top.data.length === 0 ? (
-          <p className="px-6 py-4 text-sm text-muted-foreground">{t('analyticsPage.topPayers.empty')}</p>
-        ) : (
-          <table className="w-full min-w-[520px] text-sm">
-            <thead className="border-b bg-muted/30 text-left text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2 w-10">#</th>
-                <th className="px-3 py-2">{t('analyticsPage.topPayers.userColumn')}</th>
-                <th className="px-3 py-2">{t('analyticsPage.topPayers.telegramColumn')}</th>
-                <th className="px-3 py-2 text-right">{t('analyticsPage.topPayers.spentColumn')}</th>
-                <th className="px-3 py-2 text-right">{t('analyticsPage.topPayers.txCountColumn')}</th>
-                <th className="px-3 py-2 text-right">{t('analyticsPage.topPayers.lastPaymentColumn')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {top.data.map((row, idx) => (
-                <tr key={row.userId} className="border-b last:border-0">
-                  <td className="px-3 py-2 font-mono text-xs">{idx + 1}</td>
-                  <td className="px-3 py-2">{row.name || row.username || <span className="text-muted-foreground">{t('analyticsPage.topPayers.unknownUser')}</span>}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{row.telegramId ?? '—'}</td>
-                  <td className="px-3 py-2 text-right font-mono">{formatCurrency(row.totalSpent)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{row.transactionCount}</td>
-                  <td className="px-3 py-2 text-right text-xs text-muted-foreground">{row.lastPaymentAt ? new Date(row.lastPaymentAt).toLocaleDateString(activeLocale()) : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── Shared Components ────────────────────────────────────────────────────────
-
-function KpiCard({ icon: Icon, title, value, subtitle, negative }: { icon: ComponentType<SVGProps<SVGSVGElement>>; title: string; value: string | number; subtitle: string; negative?: boolean }) {
-  return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-        <Icon className={`h-4 w-4 ${negative ? 'text-destructive' : 'text-muted-foreground'}`} />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold">{value}</div>
-        <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
-      </CardContent>
-    </Card>
-  )
-}
-
-function DailyChart({ daily }: { daily: readonly { date: string; revenue: number; newUsers: number; newSubscriptions: number }[] }) {
-  const { t } = useTranslation()
-  if (!daily || daily.length === 0) return null
-  const formatted = daily.map((point) => ({ ...point, label: point.date.slice(5) }))
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">{t('analyticsPage.daily.title')}</CardTitle>
-        <CardDescription>{t('analyticsPage.daily.description', { count: daily.length })}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <ResponsiveContainer width="100%" height={280} minWidth={0}>
-          <ComposedChart data={formatted}>
-            <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-            <XAxis dataKey="label" className="text-xs" />
-            <YAxis yAxisId="left" className="text-xs" />
-            <YAxis yAxisId="right" orientation="right" className="text-xs" />
-            <Tooltip contentStyle={{ background: 'var(--card)', border: '1px solid var(--border)' }} />
-            <Bar yAxisId="left" dataKey="revenue" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-            <Line yAxisId="right" type="monotone" dataKey="newUsers" stroke="#10b981" strokeWidth={2} dot={false} />
-            <Line yAxisId="right" type="monotone" dataKey="newSubscriptions" stroke="#f59e0b" strokeWidth={2} dot={false} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </CardContent>
-    </Card>
-  )
-}
-
-function FunnelCard({ funnel }: { funnel: readonly { key: string; label: string; count: number; pctOfStart: number; pctOfPrev: number }[] }) {
-  const { t } = useTranslation()
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">{t('analyticsPage.funnel.title')}</CardTitle>
-        <CardDescription>{t('analyticsPage.funnel.description')}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {funnel.length === 0 ? <p className="text-sm text-muted-foreground">{t('analyticsPage.funnel.empty')}</p> : funnel.map((step) => (
-          <div key={step.key} className="space-y-1">
-            <div className="flex items-center justify-between text-sm">
-              <span className="font-medium">{step.label}</span>
-              <span className="tabular-nums text-muted-foreground">{step.count.toLocaleString(activeLocale())} <span className="text-xs">({(step.pctOfStart * 100).toFixed(1)}%)</span></span>
-            </div>
-            <Progress value={step.pctOfStart * 100} className="h-2" />
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  )
-}
-
-function ProvidersCard({ providers }: { providers: readonly { gatewayType: string; total: number; completed: number; failed: number; successRate: number; revenue: number }[] }) {
-  const { t } = useTranslation()
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">{t('analyticsPage.providers.title')}</CardTitle>
-        <CardDescription>{t('analyticsPage.providers.description')}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {providers.length === 0 ? <p className="py-6 text-center text-sm text-muted-foreground">{t('analyticsPage.providers.empty')}</p> : providers.map((p) => (
-          <div key={p.gatewayType} className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium">{p.gatewayType}</p>
-              <p className="text-xs text-muted-foreground">{t('analyticsPage.providers.successCount', { completed: p.completed, total: p.total, failed: p.failed })}</p>
-            </div>
-            <div className="text-right">
-              <p className="font-mono text-sm">{formatCurrency(p.revenue)}</p>
-              <Badge variant={p.successRate > 0.8 ? 'success' : p.successRate > 0.5 ? 'warning' : 'destructive'} className="text-xs">{(p.successRate * 100).toFixed(0)}%</Badge>
-            </div>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatCurrency(amount: number): string {
-  if (Math.abs(amount) >= 1_000_000) return `${(amount / 1_000_000).toFixed(2)}M`
-  if (Math.abs(amount) >= 1_000) return `${(amount / 1_000).toFixed(1)}K`
-  return amount.toFixed(0)
 }

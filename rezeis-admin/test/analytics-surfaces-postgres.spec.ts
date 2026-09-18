@@ -9,6 +9,8 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import type { UsageSurfaceReportInterface } from '../src/modules/business-analytics/interfaces/business-analytics.types';
 import { BusinessAnalyticsService } from '../src/modules/business-analytics/services/business-analytics.service';
+import type { FxRateService } from '../src/modules/fx/fx-rate.service';
+import type { SettingsService } from '../src/modules/settings/services/settings.service';
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 
 Logger.overrideLogger(false);
@@ -91,8 +93,17 @@ async function seed(tx: Prisma.TransactionClient, customers: readonly Customer[]
   }
 }
 
+/** The surfaces report counts no days: it must not even ask for the operator's time zone. */
+const NO_ZONE = ({
+  getPlatformBranding: () => Promise.reject(new Error('the surfaces report read the time zone setting')),
+} satisfies Pick<SettingsService, 'getPlatformBranding'>) as unknown as SettingsService;
+
 const report = (tx: Prisma.TransactionClient): Promise<UsageSurfaceReportInterface> =>
-  new BusinessAnalyticsService(tx as never).getSurfaceAnalytics();
+  new BusinessAnalyticsService(
+    tx as never,
+    ({ getBaseCurrency: () => 'RUB' } satisfies Pick<FxRateService, 'getBaseCurrency'>) as unknown as FxRateService,
+    NO_ZONE,
+  ).getSurfaceAnalytics();
 
 type Ring = 'surfaces' | 'formFactors' | 'operatingSystems' | 'pwaInstallsByOs';
 const RINGS: readonly Ring[] = ['surfaces', 'formFactors', 'operatingSystems', 'pwaInstallsByOs'];
