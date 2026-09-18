@@ -13,14 +13,20 @@
  * never advances it, so the sectors would have no shape to point at) and the
  * size its fixed wrapper would give. A slice is hovered the way a mouse does,
  * and the tooltip is read off the page.
+ *
+ * The usage rings sweep in only once their panel is on screen
+ * (`surface-motion.ts`), and the suite's `IntersectionObserver` stub never
+ * reports anything. So this file installs the driveable one from `test-utils`,
+ * which answers the way a browser does for a card already in view: at once,
+ * intersecting.
  */
 import { cloneElement, isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { i18n, i18nReady, loadFeatureBundle } from '@/i18n/i18n'
-import { renderWithProviders } from '@/test/test-utils'
+import { installIntersectionObserver, renderWithProviders, type IntersectionObserverHarness } from '@/test/test-utils'
 
 vi.mock('recharts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('recharts')>()
@@ -56,7 +62,16 @@ beforeAll(async () => {
   await loadFeatureBundle('analytics')
 })
 
+// A card already in view: every observed element is reported intersecting at once.
+let visibility: IntersectionObserverHarness | null = null
+
+afterEach(() => {
+  visibility?.restore()
+  visibility = null
+})
+
 beforeEach(() => {
+  visibility = installIntersectionObserver()
   vi.clearAllMocks()
   api.getAnalyticsOverview.mockResolvedValue({
     kpis: {
@@ -86,6 +101,7 @@ beforeEach(() => {
     formFactors: [],
     operatingSystems: [],
     pwaInstalls: 0,
+    pwaInstallsByOs: [],
     activeLast30d: 0,
     totalTracked: 17,
     generatedAt: '2026-09-14T00:00:00.000Z',
@@ -132,7 +148,7 @@ async function hoverSlice(card: HTMLElement, index: number): Promise<{ readonly 
 describe('analytics page donuts — the tooltip says which slice it is', () => {
   it('usage surfaces: the slice’s surface, in the legend’s words, beside its count', async () => {
     renderWithProviders(<AnalyticsPage />)
-    const title = i18n.t('analyticsPage.surfaces.bySurface')
+    const title = i18n.t('analyticsPage.surfaces.panels.surface')
     await waitFor(() => expect(document.querySelectorAll('.recharts-pie-sector')).toHaveLength(2))
     const card = donutCard(title)
     const miniApp = i18n.t('analyticsPage.surfaces.surface.tma')

@@ -865,11 +865,15 @@ export class InternalUserEdgeService {
       });
       // Stamp the first-install instant only when the surface is an installed
       // PWA and it isn't set yet — keeps the milestone stable without a
-      // read-modify-write race.
+      // read-modify-write race. The OS of this open goes into the SAME write:
+      // `lastOs` is overwritten by every later visit, from Telegram and the
+      // browser too, and the audit row the milestone leaves is deleted by the
+      // retention sweep — this column is the only lasting record of where the
+      // app was first opened (the analytics installs-by-OS ring reads it).
       if (surface === 'pwa') {
         const stamped = await this.prismaService.user.updateMany({
           where: { id: touched.id, pwaInstalledAt: null },
-          data: { pwaInstalledAt: now },
+          data: { pwaInstalledAt: now, pwaInstalledOs: os },
         });
         // The conditional write is ALSO the "first time" test: a count of one
         // means this very report is the one that set the milestone, so the

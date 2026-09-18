@@ -152,11 +152,22 @@ export interface SurfaceCount {
   count: number
 }
 
+/**
+ * `GET /admin/analytics/surfaces`, field for field the backend's
+ * `UsageSurfaceReportInterface` — `surface-report-wire-contract.test.ts` holds
+ * the two together.
+ */
 export interface UsageSurfaceReport {
   surfaces: readonly SurfaceCount[]
   formFactors: readonly SurfaceCount[]
   operatingSystems: readonly SurfaceCount[]
   pwaInstalls: number
+  /**
+   * The same installs by the OS the app was opened on: the first open while its
+   * audit row survives, else the latest visit when it was from the app, else
+   * `unknown`. Adds up to `pwaInstalls`.
+   */
+  pwaInstallsByOs: readonly SurfaceCount[]
   activeLast30d: number
   totalTracked: number
   generatedAt: string
@@ -164,5 +175,27 @@ export interface UsageSurfaceReport {
 
 export async function getSurfaceAnalytics(): Promise<UsageSurfaceReport> {
   const response = await api.get<UsageSurfaceReport>('/admin/analytics/surfaces')
-  return response.data
+  return readSurfaceReport(response.data)
+}
+
+/**
+ * The report as the card may read it, or a throw.
+ *
+ * Four rings `.map` these lists, and a panel a release behind this page answers
+ * without `pwaInstallsByOs`. Rather than crash the whole overview tab, or draw
+ * "no installs yet" for installs that exist, the query fails and the card says
+ * it could not load.
+ */
+export function readSurfaceReport(body: unknown): UsageSurfaceReport {
+  const report = unwrapPayload(body)
+  return {
+    surfaces: expectArray<SurfaceCount>(report.surfaces),
+    formFactors: expectArray<SurfaceCount>(report.formFactors),
+    operatingSystems: expectArray<SurfaceCount>(report.operatingSystems),
+    pwaInstalls: Number(report.pwaInstalls ?? 0),
+    pwaInstallsByOs: expectArray<SurfaceCount>(report.pwaInstallsByOs),
+    activeLast30d: Number(report.activeLast30d ?? 0),
+    totalTracked: Number(report.totalTracked ?? 0),
+    generatedAt: String(report.generatedAt ?? ''),
+  }
 }

@@ -1484,7 +1484,7 @@ model AutomationExecution {
   trigger        String                    @map("trigger")
   /// Trigger payload (event metadata, cron tick info, …) for debugging.
   triggerPayload Json                      @default("{}") @map("trigger_payload")
-  /// Per-action results recorded as `{ index, type, status, message? }`.
+  /// Per-action results recorded as `{ index, type, status, message?, code?, details? }`.
   actionResults  Json                      @default("[]") @map("action_results")
   errorMessage   String?                   @map("error_message")
   startedAt      DateTime?                 @map("started_at") @db.Timestamptz(3)
@@ -1545,6 +1545,13 @@ model User {
   /// the most recent session's surface; `lastSeenAt` is the latest reported
   /// activity. Drives the 30-day installed-PWA session + admin usage analytics.
   pwaInstalledAt                 DateTime? @map("pwa_installed_at") @db.Timestamptz(3)
+  /// The OS of that first open from the installed app (`ios`/`android`/
+  /// `windows`/`macos`/`linux`/`other`), written by the SAME conditional update
+  /// that stamps `pwaInstalledAt`, so the two can never describe different
+  /// opens. NULL for an install older than the column whose milestone audit row
+  /// was already gone when 20260915210000 carried the surviving ones over; the
+  /// analytics report then falls back to the last visit from the app.
+  pwaInstalledOs                 String?   @map("pwa_installed_os")
   lastSurface                    String?   @map("last_surface")
   lastFormFactor                 String?   @map("last_form_factor")
   lastOs                         String?   @map("last_os")

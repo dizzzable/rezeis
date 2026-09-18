@@ -181,6 +181,13 @@ export interface UsageSurfaceReportInterface {
   readonly operatingSystems: readonly SurfaceCountInterface[];
   /** Users who have ever opened the cabinet as an installed PWA. */
   readonly pwaInstalls: number;
+  /**
+   * The same users by the OS the installed app was opened on: the first open
+   * (`users.pwa_installed_os`), else the latest visit when it was from the app,
+   * else `unknown`. Adds up to `pwaInstalls`. See
+   * `utils/usage-surface-report.util.ts` for what is recorded and since when.
+   */
+  readonly pwaInstallsByOs: readonly SurfaceCountInterface[];
   /** Users seen on any surface within the last 30 days. */
   readonly activeLast30d: number;
   /** Users with any surface telemetry recorded. */

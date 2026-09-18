@@ -13,7 +13,6 @@ import {
   BarChart3,
   ArrowRightLeft,
   PieChart as PieChartIcon,
-  Smartphone,
 } from 'lucide-react'
 import {
   Area,
@@ -52,10 +51,9 @@ import {
   getSubscriptionsByPlan,
   getTopPayers,
   getTrialConversion,
-  getSurfaceAnalytics,
   type AdvancedAnalyticsReport,
-  type SurfaceCount,
 } from './analytics-api'
+import { SurfaceUsageCard } from './surface-usage-card'
 import { activeLocale } from '@/lib/utils'
 
 const WINDOW_OPTIONS: ReadonlyArray<{ label: string; days: number }> = [
@@ -81,6 +79,11 @@ export default function AnalyticsPage() {
     queryFn: () => getAnalyticsOverview(days),
     staleTime: 30_000,
   })
+
+  // The panels that have already played their sweep, for this visit to the page:
+  // held here so that switching tabs or periods, which rebuilds everything below,
+  // does not replay them.
+  const [surfacesPlayed] = useState(() => new Set<string>())
 
   return (
     <div className="space-y-6">
@@ -118,7 +121,7 @@ export default function AnalyticsPage() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6 mt-4">
-          <OverviewTab report={overview.data} loading={overview.isLoading} />
+          <OverviewTab report={overview.data} loading={overview.isLoading} surfacesPlayed={surfacesPlayed} />
         </TabsContent>
         <TabsContent value="revenue" className="space-y-6 mt-4">
           <RevenueTab days={days} />
@@ -139,183 +142,50 @@ export default function AnalyticsPage() {
 
 // ── Overview Tab ─────────────────────────────────────────────────────────────
 
-function OverviewTab({ report, loading }: { report: AdvancedAnalyticsReport | undefined; loading: boolean }) {
+function OverviewTab({
+  report,
+  loading,
+  surfacesPlayed,
+}: {
+  report: AdvancedAnalyticsReport | undefined
+  loading: boolean
+  surfacesPlayed: Set<string>
+}) {
   const { t } = useTranslation()
-  if (loading || !report) {
-    return (
-      <div className="grid gap-4 md:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28" />)}
-      </div>
-    )
-  }
-  const { kpis, churn } = report
+  const ready = !loading && report !== undefined
   return (
     <>
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KpiCard icon={DollarSign} title={t('analyticsPage.kpi.revenue')} value={formatCurrency(kpis.totalRevenue)} subtitle={t('analyticsPage.kpi.revenueSubtitle', { count: kpis.paidCount.toLocaleString(activeLocale()) })} />
-        <KpiCard icon={Users} title={t('analyticsPage.kpi.payingUsers')} value={kpis.payingUsers.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.payingUsersSubtitle', { arppu: formatCurrency(kpis.arppu), arpu: formatCurrency(kpis.arpu) })} />
-        <KpiCard icon={CreditCard} title={t('analyticsPage.kpi.activeSubs')} value={kpis.activeSubscriptions.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.activeSubsSubtitle', { trial: kpis.trialSubscriptions.toLocaleString(activeLocale()), users: kpis.totalUsers.toLocaleString(activeLocale()) })} />
-        <KpiCard icon={churn.churnRate > 0.1 ? TrendingDown : TrendingUp} title={t('analyticsPage.kpi.retention')} value={`${(churn.retentionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.kpi.retentionSubtitle', { churned: churn.churned, total: churn.prevActive })} negative={churn.churnRate > 0.2} />
-      </div>
-      <DailyChart daily={report.daily} />
-      <SurfaceUsageCard />
-      <div className="grid gap-4 lg:grid-cols-2">
-        <FunnelCard funnel={report.funnel} />
-        <ProvidersCard providers={report.providers} />
-      </div>
-    </>
-  )
-}
-
-// ── Usage surfaces card ──────────────────────────────────────────────────────
-
-function SurfaceUsageCard() {
-  const { t } = useTranslation()
-  const { data, isLoading } = useQuery({
-    queryKey: ['analytics', 'surfaces'],
-    queryFn: getSurfaceAnalytics,
-    staleTime: 60_000,
-  })
-
-  const labelFor = (group: 'surface' | 'form' | 'os', key: string): string => {
-    const fallback = key.charAt(0).toUpperCase() + key.slice(1)
-    return String(t(`analyticsPage.surfaces.${group}.${key}`, fallback))
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Smartphone className="h-4 w-4" />
-          {t('analyticsPage.surfaces.title')}
-        </CardTitle>
-        <CardDescription>{t('analyticsPage.surfaces.subtitle')}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {isLoading || !data ? (
-          <Skeleton className="h-32 w-full" />
-        ) : (
-          <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr] lg:items-center">
-            <div className="space-y-4">
-              <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-2xl font-bold tabular-nums">{data.totalTracked.toLocaleString(activeLocale())}</p>
-                  <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.tracked')}</p>
-                </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-2xl font-bold tabular-nums text-emerald-600">{data.activeLast30d.toLocaleString(activeLocale())}</p>
-                  <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.active30d')}</p>
-                </div>
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <p className="text-2xl font-bold tabular-nums text-sky-600">{data.pwaInstalls.toLocaleString(activeLocale())}</p>
-                  <p className="text-xs text-muted-foreground">{t('analyticsPage.surfaces.pwaInstalls')}</p>
-                </div>
-              </div>
-              <div className="grid gap-4 sm:grid-cols-3">
-                <SurfaceBreakdownRow label={t('analyticsPage.surfaces.bySurface')} items={data.surfaces} labelFor={(k) => labelFor('surface', k)} />
-                <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byForm')} items={data.formFactors} labelFor={(k) => labelFor('form', k)} />
-                <SurfaceBreakdownRow label={t('analyticsPage.surfaces.byOs')} items={data.operatingSystems} labelFor={(k) => labelFor('os', k)} />
-              </div>
-            </div>
-            <SurfaceDonut
-              label={t('analyticsPage.surfaces.bySurface')}
-              items={data.surfaces}
-              labelFor={(k) => labelFor('surface', k)}
-            />
+      {ready ? (
+        <>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <KpiCard icon={DollarSign} title={t('analyticsPage.kpi.revenue')} value={formatCurrency(report.kpis.totalRevenue)} subtitle={t('analyticsPage.kpi.revenueSubtitle', { count: report.kpis.paidCount.toLocaleString(activeLocale()) })} />
+            <KpiCard icon={Users} title={t('analyticsPage.kpi.payingUsers')} value={report.kpis.payingUsers.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.payingUsersSubtitle', { arppu: formatCurrency(report.kpis.arppu), arpu: formatCurrency(report.kpis.arpu) })} />
+            <KpiCard icon={CreditCard} title={t('analyticsPage.kpi.activeSubs')} value={report.kpis.activeSubscriptions.toLocaleString(activeLocale())} subtitle={t('analyticsPage.kpi.activeSubsSubtitle', { trial: report.kpis.trialSubscriptions.toLocaleString(activeLocale()), users: report.kpis.totalUsers.toLocaleString(activeLocale()) })} />
+            <KpiCard icon={report.churn.churnRate > 0.1 ? TrendingDown : TrendingUp} title={t('analyticsPage.kpi.retention')} value={`${(report.churn.retentionRate * 100).toFixed(1)}%`} subtitle={t('analyticsPage.kpi.retentionSubtitle', { churned: report.churn.churned, total: report.churn.prevActive })} negative={report.churn.churnRate > 0.2} />
           </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-/**
- * Donut breakdown of cabinet surfaces (Mini App / Browser / PWA) shown to the
- * right of the surface stats. Mirrors the revenue-donut style used elsewhere on
- * this page. Renders nothing when there is no surface telemetry yet.
- */
-function SurfaceDonut({
-  label,
-  items,
-  labelFor,
-}: {
-  label: string
-  items: readonly SurfaceCount[]
-  labelFor: (key: string) => string
-}) {
-  if (items.length === 0) {
-    return null
-  }
-  const total = items.reduce((sum, i) => sum + i.count, 0)
-  const chartData = items.map((item) => ({
-    key: item.key,
-    name: labelFor(item.key),
-    value: item.count,
-  }))
-  return (
-    <div className="mx-auto w-full max-w-72 lg:mx-auto">
-      <p className="mb-2 text-xs font-medium text-muted-foreground">{label}</p>
-      <div className="h-40 w-full">
-        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-          <PieChart>
-            <Pie data={chartData} cx="50%" cy="50%" innerRadius={42} outerRadius={68} paddingAngle={2} dataKey="value" nameKey="name">
-              {chartData.map((_, i) => (
-                <Cell key={i} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />
-              ))}
-            </Pie>
-            {/* The value alone, so the slice keeps its name: `[value, '']` made recharts print " : 12". */}
-            <Tooltip formatter={(v) => Number(v ?? 0).toLocaleString(activeLocale())} />
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
-      <div className="mt-2 flex flex-col gap-1.5">
-        {chartData.map((item, i) => {
-          const pct = total > 0 ? Math.round((item.value / total) * 100) : 0
-          return (
-            <div key={item.key} className="flex items-center gap-2 text-sm">
-              <div className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }} />
-              <span className="truncate text-muted-foreground">{item.name}</span>
-              <span className="ml-auto font-medium tabular-nums">{item.value.toLocaleString(activeLocale())}</span>
-              <span className="text-xs text-muted-foreground">· {pct}%</span>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-function SurfaceBreakdownRow({
-  label,
-  items,
-  labelFor,
-}: {
-  label: string
-  items: readonly SurfaceCount[]
-  labelFor: (key: string) => string
-}) {
-  const { t } = useTranslation()
-  const total = items.reduce((sum, i) => sum + i.count, 0)
-  return (
-    <div className="space-y-1">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      {items.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{t('analyticsPage.surfaces.empty')}</p>
+          <DailyChart daily={report.daily} />
+        </>
       ) : (
-        <div className="flex flex-wrap gap-2">
-          {items.map((item) => {
-            const pct = total > 0 ? Math.round((item.count / total) * 100) : 0
-            return (
-              <Badge key={item.key} variant="outline" className="gap-1.5">
-                {labelFor(item.key)}
-                <span className="font-semibold tabular-nums">{item.count.toLocaleString(activeLocale())}</span>
-                <span className="text-muted-foreground">· {pct}%</span>
-              </Badge>
-            )
-          })}
+        <div className="grid gap-4 md:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28" />)}
         </div>
       )}
-    </div>
+      {/*
+        Where customers open the cabinet does not depend on the chosen period,
+        and this card fetches its own breakdown. It is deliberately OUTSIDE the
+        swap above: when it was inside, every 7d/30d/90d/1y click replaced the
+        whole tab with skeletons, so the card unmounted, asked the server again
+        and replayed all four sweeps — an answer about the surfaces to a click
+        that was about the period.
+      */}
+      <SurfaceUsageCard played={surfacesPlayed} />
+      {ready ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <FunnelCard funnel={report.funnel} />
+          <ProvidersCard providers={report.providers} />
+        </div>
+      ) : null}
+    </>
   )
 }
 
