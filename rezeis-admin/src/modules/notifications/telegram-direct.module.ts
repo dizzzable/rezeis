@@ -7,7 +7,7 @@ import { TELEGRAM_DIRECT_QUEUE } from './telegram-direct.constants';
 import { emitTelegramDirectUndelivered, TelegramDirectProcessor } from './telegram-direct.processor';
 import { TelegramDirectClient } from './services/telegram-direct.client';
 import { TelegramDirectQueueService } from './services/telegram-direct-queue.service';
-import { createUndeliveredRecorder, UndeliveredAlertGate } from './undelivered-alert-gate';
+import { createUndeliveredRecorder, gateRedisOf, UndeliveredAlertGate } from './undelivered-alert-gate';
 import {
   describeTelegramDirectRepeats,
   TELEGRAM_DIRECT_UNDELIVERED_RECORDER,
@@ -24,7 +24,7 @@ export function buildTelegramDirectUndeliveredRecorder(
   queue: Pick<Queue, 'client'>,
 ): UndeliveredRecorder {
   return createUndeliveredRecorder({
-    gate: new UndeliveredAlertGate(() => queue.client),
+    gate: new UndeliveredAlertGate(() => gateRedisOf(queue)),
     emit: (record) => emitTelegramDirectUndelivered(events, record),
     describeRepeats: describeTelegramDirectRepeats,
   });

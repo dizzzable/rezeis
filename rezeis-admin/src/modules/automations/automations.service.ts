@@ -12,6 +12,7 @@ import {
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { HINT_AUDIENCES } from '../user-hints/services/hint-audience.service';
+import { InvalidCronSpecError, loadCronParser, nextCronFire } from './automation-event-bridge.service';
 import { AutomationExecutorService } from './automation-executor.service';
 import { POPUP_CAPABLE_EVENTS, canCarryPopup } from './popup-capable-events';
 import {
@@ -315,16 +316,24 @@ export class AutomationsService {
         if (trimmed.length === 0) {
           throw new BadRequestException('CRON triggers require an expression');
         }
-        // Best-effort validation. We don't fail when cron-parser is
-        // unavailable — runtime evaluation guards against bad rows.
+        // The dispatcher's own question, on the same parser (`nextCronFire`),
+        // so a spec saved here is one the scheduler can read. This used to
+        // refuse only what cron-parser words as "Invalid cron expression",
+        // which is a spec with too many fields: `61 * * * *`, `0 25 * * *` and
+        // `abc` were saved, and then never ran.
         try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const cronParser = require('cron-parser') as typeof import('cron-parser');
-          cronParser.parseExpression(trimmed);
-        } catch (err) {
-          if ((err as Error).message?.includes('Invalid cron')) {
-            throw new BadRequestException(`Invalid cron expression: ${trimmed}`);
+          nextCronFire(loadCronParser(), trimmed, new Date());
+        } catch (err: unknown) {
+          if (err instanceof InvalidCronSpecError) {
+            throw new BadRequestException(`Invalid cron expression: ${trimmed} (${err.message})`);
           }
+          // Not the expression's fault: cron-parser is missing or changed, and
+          // then no CRON rule runs at all. The save still goes through, as it
+          // always did — but no longer silently, and the dispatcher repeats it
+          // every minute with the rules it stopped.
+          this.logger.error(
+            `Could not check the cron expression "${trimmed}": ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
         return;
       }

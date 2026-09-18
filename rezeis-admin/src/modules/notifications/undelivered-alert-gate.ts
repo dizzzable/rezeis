@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 import { Logger } from '@nestjs/common';
+import type { Queue } from 'bullmq';
+import { Cluster, Redis } from 'ioredis';
 
 import type {
   UndeliveredRecord,
@@ -89,7 +91,11 @@ export interface UndeliveredAlertVerdict {
   readonly repeats: number;
 }
 
-/** The commands the gate sends. ioredis — and so BullMQ's connection — has them. */
+/**
+ * The commands the gate sends, in ioredis's own form. ioredis has them; BullMQ's
+ * connection has them only because an ioredis client sits under it — see
+ * `gateRedisOf`.
+ */
 export interface UndeliveredGateRedis {
   set(key: string, value: string, px: 'PX', milliseconds: number, nx: 'NX'): Promise<unknown>;
   multi(): UndeliveredGatePipeline;
@@ -101,6 +107,35 @@ export interface UndeliveredGatePipeline {
   incr(key: string): UndeliveredGatePipeline;
   pexpire(key: string, milliseconds: number): UndeliveredGatePipeline;
   exec(): Promise<Array<[Error | null, unknown]> | null>;
+}
+
+/**
+ * The gate's connection: the ioredis client under a BullMQ queue.
+ *
+ * Since bullmq 5.77.0 `Queue#client` is typed as BullMQ's own `IRedisClient`,
+ * which declares only what BullMQ itself sends, in BullMQ's structured form:
+ * its `set` takes `{ PX }` and knows no NX, and its MULTI has no GET, INCR or
+ * PEXPIRE. What the promise resolves to is still a Proxy over the ioredis client
+ * BullMQ built from our `{ url }`, and it hands both of the gate's calls to that
+ * client unchanged — probed on 5.81.5 against Valkey 9: `instanceof Redis`,
+ * `SET … PX … NX` answering `OK` and then `null`, and an ioredis `Pipeline` from
+ * `multi()` that runs GET/DEL and INCR/PEXPIRE. So the gate asks for ioredis by
+ * name, here, instead of casting past the type.
+ *
+ * Anything else is refused, and the gate then keeps its windows in this process
+ * (see `admit`). Trusting it would be worse than that: BullMQ's other adapters
+ * read `set(key, value, 'PX', ms, 'NX')` as a plain SET, which answers `OK`
+ * every time — every record an alert, the storm this file exists to stop. The
+ * check is by class, so a second copy of ioredis in node_modules is refused too;
+ * `undelivered-alert-gate.spec.ts` goes red on one.
+ */
+export async function gateRedisOf(queue: Pick<Queue, 'client'>): Promise<UndeliveredGateRedis> {
+  const client: unknown = await queue.client;
+  if (client instanceof Redis || client instanceof Cluster) return client;
+  throw new Error(
+    "the queue's Redis client is not this process's ioredis (another driver, or a second copy of " +
+      "ioredis), and the gate's SET … NX and MULTI are ioredis calls",
+  );
 }
 
 export interface UndeliveredAlertGateOptions {

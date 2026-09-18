@@ -5,7 +5,7 @@ import { Queue, Job, JobsOptions, BulkJobOptions } from 'bullmq';
  * Abstract base class for BullMQ queue services.
  * Inspired by remnawave backend-main AbstractQueueService.
  *
- * Provides: connection check, event listeners, job add/bulk, drain, pause/resume.
+ * Provides: event listeners, job add/bulk, drain, pause/resume.
  */
 export abstract class AbstractQueueService {
   protected readonly logger: Logger;
@@ -14,16 +14,6 @@ export abstract class AbstractQueueService {
 
   constructor(loggerContext: string) {
     this.logger = new Logger(loggerContext);
-  }
-
-  protected async checkConnection(): Promise<void> {
-    const client = await this.queue.client;
-    if (client.status !== 'ready') {
-      const msg = `Queue "${this.queue.name}" is not connected. Status: [${client.status.toUpperCase()}]`;
-      this.logger.error(msg);
-      throw new Error(msg);
-    }
-    this.logger.log(`Queue "${this.queue.name}" connected.`);
   }
 
   protected initEventListeners(): void {

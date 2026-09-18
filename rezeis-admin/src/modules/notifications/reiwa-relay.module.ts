@@ -7,7 +7,7 @@ import { REIWA_RELAY_QUEUE } from './reiwa-relay.constants';
 import { emitRelayUndelivered, ReiwaRelayProcessor } from './reiwa-relay.processor';
 import { BotNotifierClient } from './services/bot-notifier.client';
 import { ReiwaRelayQueueService } from './services/reiwa-relay-queue.service';
-import { createUndeliveredRecorder, UndeliveredAlertGate } from './undelivered-alert-gate';
+import { createUndeliveredRecorder, gateRedisOf, UndeliveredAlertGate } from './undelivered-alert-gate';
 import {
   describeRelayRepeats,
   RELAY_UNDELIVERED_RECORDER,
@@ -22,13 +22,15 @@ import {
  * The gate keeps its windows on the relay queue's own Redis connection, which
  * the API container and the worker share; see `undelivered-alert-gate.ts` for
  * why a window in memory would not do, and what happens when Redis is away.
+ * `gateRedisOf` hands it the ioredis client under that connection, which is
+ * what its commands need, rather than the BullMQ-typed one.
  */
 export function buildRelayUndeliveredRecorder(
   events: Pick<SystemEventsService, 'warn'>,
   queue: Pick<Queue, 'client'>,
 ): UndeliveredRecorder {
   return createUndeliveredRecorder({
-    gate: new UndeliveredAlertGate(() => queue.client),
+    gate: new UndeliveredAlertGate(() => gateRedisOf(queue)),
     emit: (record) => emitRelayUndelivered(events, record),
     describeRepeats: describeRelayRepeats,
   });

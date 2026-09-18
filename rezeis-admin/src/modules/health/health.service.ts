@@ -95,12 +95,18 @@ export class HealthService {
   private async checkRedis(): Promise<ComponentHealth> {
     const start = Date.now();
     try {
-      // Use the BullMQ queue's internal connection to ping Redis
-      const client = (await this.sampleQueue.client) as unknown as {
-        ping: () => Promise<string>;
-      };
+      // PING on the BullMQ queue's own connection. Since bullmq 5.77.0 that
+      // connection is typed as BullMQ's `IRedisClient`, which declares only the
+      // commands BullMQ itself sends, and PING is not one of them. The object is
+      // a Proxy over the ioredis client BullMQ built, and it forwards PING to it
+      // (probed on 5.81.5), so the method is looked for rather than cast to. Any
+      // client that has it will do: PING means the same on every client, and the
+      // reply is checked. The undelivered-alert gate insists on ioredis itself
+      // (`gateRedisOf`) because its SET … NX is not portable; this is.
+      const client: unknown = await this.sampleQueue.client;
+      if (!answersPing(client)) throw new Error('The queue connection has no PING');
       const pong = await client.ping();
-      if (pong !== 'PONG') throw new Error(`Unexpected PING response: ${pong}`);
+      if (pong !== 'PONG') throw new Error(`Unexpected PING response: ${String(pong)}`);
       return { status: 'up', latencyMs: Date.now() - start };
     } catch (err) {
       this.logger.warn(`Redis health check failed: ${safeHealthLogMessage(err)}`);
@@ -160,4 +166,13 @@ function redactHealthDiagnostic(value: string): string {
     .replace(/\b(?:api[_-]?key|auth(?:orization)?|bearer\w*|cookie|credential|password|secret|token)\s*[:=]\s*\S+/giu, '[redacted]')
     .replace(/\b(?:api[_-]?key|auth(?:orization)?|bearer\w*|cookie|credential|password|secret|token)\b/giu, '[redacted]')
     .slice(0, 256);
+}
+
+/** Whether a connection answers PING: looked for, because its declared type does not promise it. */
+function answersPing(client: unknown): client is { ping(): Promise<unknown> } {
+  return (
+    typeof client === 'object' &&
+    client !== null &&
+    typeof (client as { ping?: unknown }).ping === 'function'
+  );
 }

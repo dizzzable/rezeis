@@ -3,20 +3,34 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 
+import { createIORedisClient, type Queue } from 'bullmq';
+import { Redis, type Command } from 'ioredis';
+
 import { HealthService } from '../src/modules/health/health.service';
 
 interface PrismaProbe {
   $queryRawUnsafe: (query: string) => Promise<unknown>;
 }
 
-interface RedisClientProbe {
-  ping: () => Promise<string>;
-}
+/**
+ * The queue, as far as HealthService reaches, typed from bullmq's own `Queue`:
+ * a change of shape there — bullmq 6 has no `Queue#client` — stops this
+ * compiling instead of leaving the fake to answer for a library that no longer
+ * does. `client` resolves to what 5.81.5 resolves it to (see `queueProbe`).
+ */
+type QueueProbe = Pick<Queue, 'client' | 'getJobCounts'>;
 
-interface QueueProbe {
-  readonly client: Promise<RedisClientProbe>;
-  getJobCounts: () => Promise<{ waiting?: number; active?: number; failed?: number }>;
-}
+/** `getJobCounts()` on 5.81.5, asked for no type in particular: every type. */
+const EVERY_JOB_COUNT = {
+  active: 0,
+  completed: 0,
+  delayed: 0,
+  failed: 0,
+  paused: 0,
+  prioritized: 0,
+  waiting: 0,
+  'waiting-children': 0,
+};
 
 const originalBackupLocation = process.env.BACKUP_LOCATION;
 const originalAppVersion = process.env.APP_VERSION;
@@ -94,10 +108,8 @@ describe('HealthService', () => {
     const rawRedisFailure = 'redis://default:secret-password@redis.internal/0 token=raw-token';
     const service = createService({
       queue: createQueueProbe({
-        client: {
-          ping: async (): Promise<string> => {
-            throw new Error(rawRedisFailure);
-          },
+        ping: async (): Promise<string> => {
+          throw new Error(rawRedisFailure);
         },
       }),
     });
@@ -184,27 +196,37 @@ function createService(overrides: { prisma?: PrismaProbe; queue?: QueueProbe } =
   );
 }
 
+/**
+ * `client` resolves to what bullmq 5.81.5 resolves it to: BullMQ's Proxy
+ * (`createIORedisClient`) over an ioredis client. PING is answered where the
+ * socket would be — ioredis's `sendCommand` — so the path HealthService takes in
+ * production, the Proxy forwarding PING to ioredis, is the path it takes here.
+ */
 function createQueueProbe(
   overrides: {
-    client?: RedisClientProbe;
-    counts?: { waiting?: number; active?: number; failed?: number };
-    getJobCounts?: () => Promise<{ waiting?: number; active?: number; failed?: number }>;
+    ping?: () => Promise<string>;
+    counts?: Partial<typeof EVERY_JOB_COUNT>;
+    getJobCounts?: QueueProbe['getJobCounts'];
   } = {},
 ): QueueProbe {
+  const answer = overrides.ping ?? (async (): Promise<string> => 'PONG');
+  const redis = new Redis({ lazyConnect: true, enableOfflineQueue: false, retryStrategy: () => null });
+  redis.sendCommand = (command: Command): Promise<unknown> => {
+    if (command.name.toLowerCase() === 'ping') {
+      answer().then(command.resolve, command.reject);
+    } else {
+      command.reject(new Error(`HealthService sent ${command.name}, which nothing here answers`));
+    }
+    return command.promise;
+  };
   return {
-    client: Promise.resolve(
-      overrides.client ?? {
-        ping: async (): Promise<string> => 'PONG',
-      },
-    ),
+    client: Promise.resolve(createIORedisClient(redis)),
     getJobCounts:
       overrides.getJobCounts ??
-      (async () =>
-        overrides.counts ?? {
-          waiting: 0,
-          active: 0,
-          failed: 0,
-        }),
+      (async (...types: unknown[]) => {
+        assert.deepStrictEqual(types, [], 'HealthService reads the counts of every type');
+        return { ...EVERY_JOB_COUNT, ...overrides.counts };
+      }),
   };
 }
 

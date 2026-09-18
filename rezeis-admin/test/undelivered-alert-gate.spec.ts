@@ -1,9 +1,13 @@
 import 'reflect-metadata';
 
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
 import { describe, it } from 'node:test';
 
 import { getQueueToken } from '@nestjs/bullmq';
+import { createIORedisClient, createNodeRedisClient, type Queue } from 'bullmq';
+import { Redis, ReplyError, type Command } from 'ioredis';
 
 import { SystemEventsService } from '../src/common/services/system-events.service';
 import {
@@ -32,8 +36,10 @@ import type { TelegramDirectResult } from '../src/modules/notifications/telegram
 import { TelegramDirectProcessor } from '../src/modules/notifications/telegram-direct.processor';
 import {
   createUndeliveredRecorder,
+  gateRedisOf,
   UNDELIVERED_ALERT_COOLDOWN_MS,
   UndeliveredAlertGate,
+  type UndeliveredGateRedis,
 } from '../src/modules/notifications/undelivered-alert-gate';
 import {
   buildRelayUndeliveredRecord,
@@ -54,67 +60,119 @@ import { OfflineBullMqQueue } from './helpers/bullmq-offline-queue';
  * actually bind, over a Redis double both "containers" share, and count what
  * reaches `SystemEventsService`.
  *
- * The double implements the four commands the gate sends (`SET … PX … NX`,
- * `GET`, `DEL`, `INCR`, `PEXPIRE` in a `MULTI`) with Redis's semantics — TTLs
- * included — rather than answering the gate's questions for it, so the
- * windowing logic under test is the gate's own.
+ * The double is a Redis server, as far as the commands the gate sends go
+ * (`SET … PX … NX`, and `GET`/`DEL` or `INCR`/`PEXPIRE` in a `MULTI`), with
+ * Redis's semantics — TTLs included — rather than answering the gate's
+ * questions for it, so the windowing logic under test is the gate's own. It
+ * answers where the socket would (see `RedisDouble.connect`), so the client in
+ * front of it is the real one: ioredis, under the Proxy bullmq 5.81.5 hands out
+ * as `Queue#client`.
  */
 
 interface Clock {
   now: number;
 }
 
-/** Redis, for the commands the gate uses, on a clock the spec moves. */
+/**
+ * Redis, for the commands the gate sends, on a clock the spec moves.
+ *
+ * Every ioredis command, pipelined or not, leaves for the socket through
+ * `sendCommand`, and that is the one method the double takes over. Everything
+ * above it is the library: ioredis's commands, its MULTI pipeline and the way it
+ * unwraps EXEC, and — through `queueOn` — BullMQ's Proxy over the client. A
+ * change in any of them reaches these specs, which a double answering `set` and
+ * `multi()` itself could never show.
+ */
 class RedisDouble {
   private readonly store = new Map<string, { value: string; expiresAt: number | null }>();
+  private refusal: string | null = null;
 
   public constructor(private readonly clock: Clock) {}
 
-  public async set(key: string, value: string, px: string, milliseconds: number, nx: string): Promise<'OK' | null> {
-    assert.equal(px, 'PX');
-    assert.equal(nx, 'NX');
-    if (this.live(key) !== undefined) return null;
-    this.store.set(key, { value, expiresAt: this.clock.now + milliseconds });
-    return 'OK';
+  /** A connection to this Redis: an ioredis client that never opens a socket. */
+  public connect(): Redis {
+    const client = new Redis({ lazyConnect: true, enableOfflineQueue: false, retryStrategy: () => null });
+    // MULTI state belongs to the connection, as it does in Redis.
+    let transaction: string[][] | null = null;
+    client.sendCommand = (command: Command): Promise<unknown> => {
+      const argv = [command.name.toUpperCase(), ...command.args.map((arg) => String(arg))];
+      if (argv[0] === 'MULTI') {
+        transaction = [];
+        command.resolve('OK');
+      } else if (argv[0] === 'EXEC') {
+        // Redis answers EXEC with every reply, a refused command's error included.
+        const replies = (transaction ?? []).map((queued) => this.answer(queued));
+        transaction = null;
+        command.resolve(replies);
+      } else if (transaction !== null) {
+        transaction.push(argv);
+        command.resolve('QUEUED');
+      } else {
+        const reply = this.answer(argv);
+        if (reply instanceof Error) command.reject(reply);
+        else command.resolve(reply);
+      }
+      return command.promise;
+    };
+    return client;
   }
 
-  public multi() {
-    const ops: Array<() => unknown> = [];
-    const chain = {
-      get: (key: string) => {
-        ops.push(() => this.live(key)?.value ?? null);
-        return chain;
-      },
-      del: (key: string) => {
-        ops.push(() => (this.live(key) === undefined ? 0 : (this.store.delete(key), 1)));
-        return chain;
-      },
-      incr: (key: string) => {
-        ops.push(() => {
-          const entry = this.live(key);
-          const next = (entry === undefined ? 0 : Number(entry.value)) + 1;
-          // INCR keeps an existing TTL.
-          this.store.set(key, { value: String(next), expiresAt: entry?.expiresAt ?? null });
-          return next;
-        });
-        return chain;
-      },
-      pexpire: (key: string, milliseconds: number) => {
-        ops.push(() => {
-          const entry = this.live(key);
-          if (entry === undefined) return 0;
-          entry.expiresAt = this.clock.now + milliseconds;
-          return 1;
-        });
-        return chain;
-      },
-      exec: async (): Promise<Array<[Error | null, unknown]>> => ops.map((op) => [null, op()]),
-    };
-    return chain;
+  /** From now on a replica: every write is refused, in Redis's words. */
+  public refuseWrites(reason: string): void {
+    this.refusal = reason;
   }
 
   public keys(): string[] {
     return [...this.store.keys()].filter((key) => this.live(key) !== undefined);
+  }
+
+  /** The reply to one command, or the error Redis would send instead. */
+  private answer([name, ...args]: string[]): unknown {
+    if (this.refusal !== null && name !== 'GET') return new ReplyError(this.refusal);
+    switch (name) {
+      case 'SET':
+        return this.set(args);
+      case 'GET':
+        return this.live(args[0])?.value ?? null;
+      case 'DEL':
+        return args.filter((key) => this.live(key) !== undefined && this.store.delete(key)).length;
+      case 'INCR': {
+        const entry = this.live(args[0]);
+        const next = (entry === undefined ? 0 : Number(entry.value)) + 1;
+        if (!Number.isSafeInteger(next)) return new ReplyError('ERR value is not an integer or out of range');
+        // INCR keeps an existing TTL.
+        this.store.set(args[0], { value: String(next), expiresAt: entry?.expiresAt ?? null });
+        return next;
+      }
+      case 'PEXPIRE': {
+        const entry = this.live(args[0]);
+        if (entry === undefined) return 0;
+        entry.expiresAt = this.clock.now + Number(args[1]);
+        return 1;
+      }
+      default:
+        // Not a command anyone taught this double: refused, never shrugged off.
+        return new ReplyError(`ERR unknown command '${name}'`);
+    }
+  }
+
+  private set([key, value, ...options]: string[]): 'OK' | null | Error {
+    let expiresAt: number | null = null;
+    let onlyIfAbsent = false;
+    for (let index = 0; index < options.length; index += 1) {
+      const option = options[index]?.toUpperCase();
+      if (option === 'NX') {
+        onlyIfAbsent = true;
+      } else if (option === 'PX') {
+        index += 1;
+        expiresAt = this.clock.now + Number(options[index]);
+      } else {
+        return new ReplyError('ERR syntax error');
+      }
+    }
+    if (onlyIfAbsent && this.live(key) !== undefined) return null;
+    this.store.set(key, { value, expiresAt });
+    return 'OK';
   }
 
   private live(key: string): { value: string; expiresAt: number | null } | undefined {
@@ -143,9 +201,14 @@ function eventsSink(emitted: Emitted[]): Pick<SystemEventsService, 'warn'> {
   } as Pick<SystemEventsService, 'warn'>;
 }
 
-/** A BullMQ queue, as far as the recorder reaches: its Redis connection. */
-function queueOn(redis: RedisDouble): { client: Promise<never> } {
-  return { client: Promise.resolve(redis) as Promise<never> };
+/**
+ * A BullMQ queue, as far as the recorder reaches: `Queue#client`, resolving to
+ * what bullmq 5.81.5 resolves it to — BullMQ's Proxy over an ioredis client,
+ * made by `createIORedisClient`, the call `RedisConnection` makes on the client
+ * it builds from our `{ url }`.
+ */
+function queueOn(redis: RedisDouble): Pick<Queue, 'client'> {
+  return { client: Promise.resolve(createIORedisClient(redis.connect())) };
 }
 
 function refusal(detail: string): NotifyDeliveryResult {
@@ -183,8 +246,10 @@ describe('the alert gate', () => {
   it('keeps one window for both containers when they share Redis', async () => {
     const clock: Clock = { now: 5_000_000 };
     const redis = new RedisDouble(clock);
-    const api = new UndeliveredAlertGate(async () => redis);
-    const worker = new UndeliveredAlertGate(async () => redis);
+    const apiConnection = redis.connect();
+    const workerConnection = redis.connect();
+    const api = new UndeliveredAlertGate(async () => apiConnection);
+    const worker = new UndeliveredAlertGate(async () => workerConnection);
 
     assert.deepStrictEqual(await api.admit('cause'), { alert: true, repeats: 0 });
     assert.deepStrictEqual(await worker.admit('cause'), { alert: false, repeats: 1 });
@@ -211,16 +276,13 @@ describe('the alert gate', () => {
     assert.deepStrictEqual(first, { alert: true, repeats: 0 }, 'silence is the wrong way for an alert to fail');
     assert.deepStrictEqual(second, { alert: false, repeats: 1 }, 'and a storm is the thing being fixed');
 
-    const refusing = new UndeliveredAlertGate(async () => ({
-      set: async () => {
-        throw new Error('READONLY You can\'t write against a read only replica.');
-      },
-      multi: () => {
-        throw new Error('unreachable');
-      },
-    }));
+    const replica = new RedisDouble(clock);
+    replica.refuseWrites("READONLY You can't write against a read only replica.");
+    const replicaConnection = replica.connect();
+    const refusing = new UndeliveredAlertGate(async () => replicaConnection);
     assert.deepStrictEqual(await refusing.admit('cause'), { alert: true, repeats: 0 });
     assert.deepStrictEqual(await refusing.admit('cause'), { alert: false, repeats: 1 });
+    assert.deepStrictEqual(replica.keys(), [], 'the replica took no write');
   });
 
   it('puts the count on the alert that carries it, in its sentence and its metadata', async () => {
@@ -262,6 +324,65 @@ describe('the alert gate', () => {
       describeRepeats: () => '',
     });
     assert.equal(await recorder({ message: 'x', metadata: {}, signature: 's' }), 'failed');
+  });
+});
+
+describe('the connection the gate is given', () => {
+  it('is the ioredis client BullMQ builds, from its own copy of ioredis', async () => {
+    // What `RedisConnection` does with our `{ url }`: an ioredis client, made
+    // with the ioredis BullMQ itself resolves, wrapped in BullMQ's Proxy. The
+    // gate recognises ioredis by class, so a second copy of ioredis in the tree
+    // — bullmq pins its own exact version — would leave every container
+    // coalescing only for itself, with one warning each. That is this case red.
+    const { Redis: BullMqRedis } = createRequire(require.resolve('bullmq'))('ioredis') as typeof import('ioredis');
+    const raw = new BullMqRedis('redis://127.0.0.1:6379', { lazyConnect: true });
+    const built = createIORedisClient(raw);
+
+    await assert.doesNotReject(
+      gateRedisOf({ client: Promise.resolve(built) }),
+      'BullMQ built its client from an ioredis the gate does not recognise: two copies of ioredis in node_modules',
+    );
+    assert.equal(await gateRedisOf({ client: Promise.resolve(built) }), built);
+  });
+
+  it('is refused when BullMQ hands over any other client, whose SET would drop the NX', async () => {
+    // BullMQ 5.81.5 ships drivers besides ioredis, and one assignment to
+    // `RedisConnection.clientFactory` swaps them in. Its node-redis adapter,
+    // over node-redis's own SET (options as an object, NX honoured when asked):
+    const asked: unknown[] = [];
+    const held = new Set<string>();
+    const nodeRedis = Object.assign(new EventEmitter(), {
+      isOpen: true,
+      isReady: true,
+      set: async (key: string, _value: string, options: { NX?: boolean; PX?: number } = {}) => {
+        asked.push(options);
+        if (options.NX === true && held.has(key)) return null;
+        held.add(key);
+        return 'OK';
+      },
+    });
+    const adapter = createNodeRedisClient(nodeRedis);
+
+    // Through the recorders the two modules bind, on a queue whose client this is.
+    const record: UndeliveredRecord = { message: 'undelivered', metadata: {}, signature: 'same cause' };
+    for (const build of [buildRelayUndeliveredRecorder, buildTelegramDirectUndeliveredRecorder]) {
+      const emitted: Emitted[] = [];
+      const recorder = build(eventsSink(emitted), { client: Promise.resolve(adapter) });
+      assert.deepStrictEqual(
+        [await recorder(record), await recorder(record)],
+        ['alerted', 'counted'],
+        `${build.name}: refused, the gate coalesces in this process instead`,
+      );
+      assert.equal(emitted.length, 1);
+    }
+    assert.deepStrictEqual(asked, [], 'the gate sent nothing through it');
+
+    // Why: the adapter reads the gate's SET as a plain SET. Every record would
+    // open a window, and every record would be an alert.
+    const trusted = adapter as unknown as UndeliveredGateRedis;
+    assert.equal(await trusted.set('k', '1', 'PX', 60_000, 'NX'), 'OK');
+    assert.equal(await trusted.set('k', '1', 'PX', 60_000, 'NX'), 'OK');
+    assert.deepStrictEqual(asked, [{}, {}], 'neither NX nor PX reached node-redis');
   });
 });
 

@@ -29,8 +29,8 @@ import { matchEventPattern } from './event-pattern';
  *     decoupled from individual feature modules.
  *   - `CRON` rules are dispatched by the scheduler tick below — every
  *     minute we look up enabled cron rules and check whether their
- *     `triggerSpec` matches the current minute (using `cron-parser`,
- *     already installed transitively via BullMQ).
+ *     `triggerSpec` matches the current minute (using `cron-parser` 4,
+ *     a declared dependency; see `loadCronParser`).
  *
  * The bridge intentionally stays small: it only **queues** jobs. The
  * actual evaluation lives in `AutomationExecutorService`.
@@ -39,6 +39,8 @@ import { matchEventPattern } from './event-pattern';
 export class AutomationEventBridgeService implements OnModuleInit {
   private readonly logger = new Logger(AutomationEventBridgeService.name);
   private installedRealtimeHook = false;
+  /** CRON rules whose spec cron-parser refused, by id and spec: each is named once. */
+  private readonly refusedSpecs = new Set<string>();
 
   public constructor(
     private readonly moduleRef: ModuleRef,
@@ -191,8 +193,21 @@ export class AutomationEventBridgeService implements OnModuleInit {
 
   /**
    * Tick once per minute and enqueue any cron-driven rule whose
-   * `triggerSpec` matches the current minute. We use `cron-parser`
-   * (already a transitive dep of BullMQ) to evaluate the expression.
+   * `triggerSpec` matches the current minute, as `nextCronFire` reads it.
+   *
+   * ── What may stop a rule quietly, and what may not ─────────────────────
+   *
+   * One thing: a spec cron-parser refuses. It is skipped, as it always was,
+   * and named once per process (`noteRefusedSpec`). Everything else that
+   * stops a rule is an error, logged with the rule, every minute it stops
+   * it — cron-parser missing or changed, the job refused or not answered.
+   *
+   * This loop used to hold the parse AND the enqueue in one `catch {}`
+   * labelled "invalid cron spec". So cron-parser 5, which has no
+   * `parseExpression` and is what BullMQ 6 depends on, would have switched
+   * off every scheduled automation without a line in the log, and so did
+   * every minute Redis refused the job: the rule was due, did not run, and
+   * nothing said so.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   public async tickCronRules(): Promise<void> {
@@ -212,14 +227,13 @@ export class AutomationEventBridgeService implements OnModuleInit {
     }
     if (rules.length === 0) return;
 
-    // Resolve cron-parser lazily so the module loads even when the lib
-    // is unavailable — failure here only disables cron triggers, it
-    // doesn't break realtime/manual.
-    let cronParser: typeof import('cron-parser') | null = null;
+    let parser: CronParser;
     try {
-      cronParser = await import('cron-parser');
-    } catch {
-      this.logger.warn('cron-parser not installed — cron triggers disabled');
+      parser = loadCronParser();
+    } catch (err: unknown) {
+      this.logger.error(
+        `No CRON rule ran this minute (${rules.map((rule) => rule.id).join(', ')}): ${describeError(err)}`,
+      );
       return;
     }
 
@@ -229,28 +243,125 @@ export class AutomationEventBridgeService implements OnModuleInit {
     const endOfMinute = new Date(startOfMinute.getTime() + 60_000);
 
     for (const rule of rules) {
+      let next: Date;
       try {
-        const interval = (cronParser as typeof import('cron-parser')).parseExpression(rule.triggerSpec, {
-          currentDate: new Date(startOfMinute.getTime() - 1000),
-          tz: 'UTC',
-        });
-        const next = interval.next().toDate();
-        if (next >= startOfMinute && next < endOfMinute) {
-          await this.automationQueueService.enqueueExecution({
-            ruleId: rule.id,
-            trigger: `cron:${rule.triggerSpec}`,
-            triggerData: {
-              firedAt: next.toISOString(),
-              spec: rule.triggerSpec,
-            },
-          });
+        next = nextCronFire(parser, rule.triggerSpec, startOfMinute);
+      } catch (err: unknown) {
+        if (err instanceof InvalidCronSpecError) {
+          this.noteRefusedSpec(rule, err);
+        } else {
+          this.logger.error(
+            `CRON rule ${rule.id} ("${rule.triggerSpec}") could not be evaluated and did not run: ` +
+              describeError(err),
+          );
         }
-      } catch {
-        // Invalid cron spec — quietly skip. The rule editor validates
-        // expressions on save, so this only happens when an operator
-        // hand-edits the DB.
+        continue;
+      }
+      if (next < startOfMinute || next >= endOfMinute) continue;
+      try {
+        await this.automationQueueService.enqueueExecution({
+          ruleId: rule.id,
+          trigger: `cron:${rule.triggerSpec}`,
+          triggerData: {
+            firedAt: next.toISOString(),
+            spec: rule.triggerSpec,
+          },
+        });
+      } catch (err: unknown) {
+        this.logger.error(
+          `CRON rule ${rule.id} was due at ${next.toISOString()} and was not queued, so it did not run: ` +
+            describeError(err),
+        );
       }
     }
   }
+
+  /**
+   * A spec cron-parser refuses is skipped, and said once per process rather
+   * than every minute. Once, not never: the editor used to accept almost
+   * every such spec — it refused only one with too many fields — so rules
+   * like this exist, and until now they never fired and never said why.
+   */
+  private noteRefusedSpec(rule: { id: string; triggerSpec: string }, err: InvalidCronSpecError): void {
+    const key = `${rule.id} ${rule.triggerSpec}`;
+    if (this.refusedSpecs.has(key)) return;
+    this.refusedSpecs.add(key);
+    this.logger.warn(
+      `CRON rule ${rule.id} does not run: cron-parser refuses "${rule.triggerSpec}" (${err.message}). ` +
+        'Correct the expression in the rule editor.',
+    );
+  }
+}
+
+// ── Reading a CRON spec ─────────────────────────────────────────────────────
+
+/** The part of cron-parser 4 a CRON rule needs. */
+export type CronParser = Pick<typeof import('cron-parser'), 'parseExpression'>;
+
+/**
+ * cron-parser refused the spec itself: the one failure a CRON rule may be
+ * skipped for, and the one the editor answers with a 400. Anything else that
+ * stops a rule is a fault of the library or of this code, and is reported.
+ */
+export class InvalidCronSpecError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'InvalidCronSpecError';
+  }
+}
+
+/**
+ * cron-parser, as the dispatcher and the rule editor both use it.
+ *
+ * Required here rather than imported at the top, so a missing package costs
+ * the CRON rules and not the module. And checked rather than trusted:
+ * cron-parser 5 has no `parseExpression` (it is `CronExpressionParser.parse`
+ * there), BullMQ 6 depends on 5, and a module without it used to reach the
+ * dispatcher as a TypeError it read as "an invalid spec". The package is
+ * declared in package.json, pinned to 4, for the same reason.
+ */
+export function loadCronParser(): CronParser {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const loaded: unknown = require('cron-parser');
+  if (hasParseExpression(loaded)) return loaded;
+  throw new Error(
+    'the installed cron-parser has no parseExpression (cron-parser 5 moved it to ' +
+      'CronExpressionParser.parse); no CRON rule can run until it is 4.x again or this code is ported',
+  );
+}
+
+/**
+ * When `spec` next fires at or after `notBefore`, in UTC.
+ *
+ * Throws `InvalidCronSpecError` when cron-parser refuses the spec. cron-parser
+ * 4 reports every fault in an expression — a value out of range, an unknown
+ * alias, too many fields, a day that never comes — as a plain `Error` (each
+ * of those checked against 4.9.0), so a plain `Error` is the spec's fault.
+ * Anything else — the `TypeError` of a library that changed under this call,
+ * a bug — is rethrown as it is, for the caller to report.
+ */
+export function nextCronFire(parser: CronParser, spec: string, notBefore: Date): Date {
+  // A second early, because `next()` answers strictly after its start: a rule
+  // due at exactly `notBefore` is due then.
+  const currentDate = new Date(notBefore.getTime() - 1_000);
+  try {
+    return parser.parseExpression(spec, { currentDate, tz: 'UTC' }).next().toDate();
+  } catch (err: unknown) {
+    if (err instanceof Error && Object.getPrototypeOf(err) === Error.prototype) {
+      throw new InvalidCronSpecError(err.message);
+    }
+    throw err;
+  }
+}
+
+function hasParseExpression(loaded: unknown): loaded is CronParser {
+  return (
+    (typeof loaded === 'function' || (typeof loaded === 'object' && loaded !== null)) &&
+    typeof (loaded as { parseExpression?: unknown }).parseExpression === 'function'
+  );
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
