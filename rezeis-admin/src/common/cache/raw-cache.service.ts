@@ -65,6 +65,41 @@ export class RawCacheService implements OnModuleInit, OnModuleDestroy {
     await this.redis.del(key);
   }
 
+  /**
+   * Reads a key and removes it in ONE step, so exactly one caller ever receives
+   * its value — the primitive for single-use secrets such as bot sign-in tokens.
+   *
+   * `get` followed by `del` is two commands, and two callers can both read the
+   * value before either of them deletes it: that is how one sign-in token could
+   * mint two sessions. GET and DEL queued in one MULTI/EXEC run back to back on
+   * the server with no other client's command between them, so a second caller's
+   * GET already finds the key gone.
+   *
+   * MULTI rather than GETDEL: GETDEL needs Redis 6.2 — the bundled Valkey 9 has
+   * it, but `REDIS_URL` may point at an operator's own, older server — while
+   * MULTI/EXEC works on every version the queues run on.
+   *
+   * `null` when the key is absent or expired, when the cache is unavailable, and
+   * when the transaction did not run. A command error inside it is thrown, as
+   * `get` would throw it.
+   */
+  async take<T>(key: string): Promise<T | null> {
+    if (!this.isReady()) return null;
+    const results = await this.redis.multi().get(key).del(key).exec();
+    if (results === null || results.length !== 2) return null;
+    const [[readError, raw], [removeError, removed]] = results as [
+      [Error | null, unknown],
+      [Error | null, unknown],
+    ];
+    if (readError !== null) throw readError;
+    if (removeError !== null) throw removeError;
+    // Both halves ran in the same transaction, so a value and a removal of
+    // exactly one key always come together. Asking for both costs nothing and
+    // keeps this honest should the two ever disagree.
+    if (typeof raw !== 'string' || removed !== 1) return null;
+    return JSON.parse(raw) as T;
+  }
+
   async delMany(keys: string[]): Promise<void> {
     if (!this.isReady() || keys.length === 0) return;
     await this.redis.del(...keys);

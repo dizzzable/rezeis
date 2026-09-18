@@ -334,20 +334,36 @@ function createPrisma(admin: AdminRow) {
   return { prisma: prisma as unknown as PrismaService, admins, passkeys, audit };
 }
 
-function createCache() {
+function createCache(slow = false) {
   // JSON round-tripped exactly as Redis does it, so a field that survives here
   // is a field that survives in production.
+  //
+  // `slow` gives every command the round trip a real Redis client has: it acts
+  // only after the event loop has turned, so two requests' `get`s can both land
+  // before either request's `del`. `take` stays ONE command — reading and
+  // removing happen together, as MULTI/EXEC makes them in `RawCacheService` —
+  // which is the whole difference the single-use tests are about.
   const store = new Map<string, string>();
+  const roundTrip = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
   const cache = {
     get: async <T>(key: string): Promise<T | null> => {
+      if (slow) await roundTrip();
       const raw = store.get(key);
       return raw === undefined ? null : (JSON.parse(raw) as T);
     },
     set: async (key: string, value: unknown): Promise<void> => {
+      if (slow) await roundTrip();
       store.set(key, JSON.stringify(value));
     },
     del: async (key: string): Promise<void> => {
+      if (slow) await roundTrip();
       store.delete(key);
+    },
+    take: async <T>(key: string): Promise<T | null> => {
+      if (slow) await roundTrip();
+      const raw = store.get(key);
+      store.delete(key);
+      return raw === undefined ? null : (JSON.parse(raw) as T);
     },
   };
   return { cache: cache as unknown as RawCacheService, store };
@@ -458,6 +474,8 @@ async function createHarness(options?: {
   rateLimited?: boolean;
   /** Omit a provider to reproduce a wiring failure. */
   omitProviders?: readonly string[];
+  /** Give every cache command a round trip, as a real Redis client has. */
+  slowCache?: boolean;
 }): Promise<Harness> {
   const admin: AdminRow = {
     id: 'admin-1',
@@ -478,7 +496,7 @@ async function createHarness(options?: {
   };
 
   const prisma = createPrisma(admin);
-  const cache = createCache();
+  const cache = createCache(options?.slowCache ?? false);
   const twoFactor = createTwoFactor(options?.acceptedCodes ?? ['123456']);
   const loginGuard = createLoginGuard(options?.rateLimited ?? false);
 
@@ -953,6 +971,82 @@ describe('passkey enrolment: challenge lifecycle and stored credential', () => {
     // signing every other session out here would be friction with no gain. The
     // attacker-with-a-stolen-token case is closed by the fresh-factor gate.
     assert.equal(harness.admin.tokenVersion, 3);
+  });
+});
+
+describe('a passkey challenge is spent once, even by two requests at the same instant', () => {
+  it('uses a cache in which reading and then deleting really can hand one value to two callers', async () => {
+    // ANTI-VACUITY. Without it the two tests below could pass because this fake
+    // happens to serialise every command, not because the service consumes in
+    // one step.
+    const { cache } = createCache(true);
+    const theOldWay = async (): Promise<unknown> => {
+      const value = await cache.get<unknown>('k');
+      await cache.del('k');
+      return value;
+    };
+    await cache.set('k', { challenge: 'c' });
+    const twoSeparateCommands = await Promise.all([theOldWay(), theOldWay()]);
+    assert.equal(twoSeparateCommands.filter((value) => value !== null).length, 2);
+
+    await cache.set('k', { challenge: 'c' });
+    const oneCommand = await Promise.all([cache.take<unknown>('k'), cache.take<unknown>('k')]);
+    assert.equal(oneCommand.filter((value) => value !== null).length, 1);
+  });
+
+  it('signs in once when the same assertion arrives twice at the same time', async () => {
+    const harness = await createHarness({
+      totpEnabled: true,
+      acceptedCodes: ['123456'],
+      slowCache: true,
+    });
+    const authenticator = createAuthenticator('00000000-0000-0000-0000-00000000000a');
+    await enrol(harness, authenticator, { code: '123456' });
+    const options = (await harness.service.generateAuthenticationOptions(RP_ID)) as {
+      challenge: string;
+    };
+    const assertion = authenticator.assertion(options.challenge) as never;
+
+    const outcomes = await Promise.allSettled([
+      harness.service.verifyAuthentication(RP_ID, ORIGIN, assertion, REQUEST),
+      harness.service.verifyAuthentication(RP_ID, ORIGIN, assertion, REQUEST),
+    ]);
+
+    assert.equal(
+      outcomes.filter((outcome) => outcome.status === 'fulfilled').length,
+      1,
+      'one assertion signed in twice',
+    );
+    const refused = outcomes.find((outcome) => outcome.status === 'rejected');
+    assert.ok(refused?.status === 'rejected' && refused.reason instanceof UnauthorizedException);
+  });
+
+  it('stores one credential when the same attestation is submitted twice at the same time', async () => {
+    const harness = await createHarness({
+      totpEnabled: true,
+      acceptedCodes: ['123456'],
+      slowCache: true,
+    });
+    const authenticator = createAuthenticator('00000000-0000-0000-0000-00000000000b');
+    const options = (await harness.service.generateRegistrationOptions(
+      harness.admin.id,
+      RP_ID,
+      { code: '123456' },
+      REQUEST,
+    )) as { challenge: string };
+    const attestation = authenticator.attestation(options.challenge) as never;
+
+    const outcomes = await Promise.allSettled([
+      harness.service.verifyRegistration(harness.admin.id, RP_ID, ORIGIN, attestation, 'Key A', REQUEST),
+      harness.service.verifyRegistration(harness.admin.id, RP_ID, ORIGIN, attestation, 'Key B', REQUEST),
+    ]);
+
+    assert.equal(
+      outcomes.filter((outcome) => outcome.status === 'fulfilled').length,
+      1,
+      'one registration challenge enrolled twice',
+    );
+    assert.equal(harness.prisma.passkeys.length, 1);
   });
 });
 

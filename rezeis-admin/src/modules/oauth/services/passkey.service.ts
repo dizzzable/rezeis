@@ -290,10 +290,13 @@ export class PasskeyService {
     // verification stayed live for the rest of its 300 s TTL and could be
     // retried at leisure. The authentication path has always consumed on
     // lookup (`findChallengeForResponse`); this is the same rule.
-    const stored = await this.cacheService.get<StoredRegistrationChallenge | string>(
+    //
+    // Read and removed in ONE step (`take`). As a `get` and then a `del`, two
+    // submissions of the same attestation at the same instant could both read
+    // the challenge before either removed it, and both go on to verify.
+    const stored = await this.cacheService.take<StoredRegistrationChallenge | string>(
       `passkey:reg:${adminId}`,
     );
-    await this.cacheService.del(`passkey:reg:${adminId}`);
 
     const expectedChallenge = typeof stored === 'string' ? stored : stored?.challenge;
     if (!expectedChallenge) {
@@ -990,7 +993,8 @@ export class PasskeyService {
   /**
    * Decodes the challenge from the response's clientDataJSON, looks it up in
    * Redis (where the matching auth-options call placed it), and returns the
-   * stored record for verification. Single-use — the entry is deleted on lookup.
+   * stored record for verification. Single-use — the entry is read and deleted
+   * in one step.
    */
   private async findChallengeForResponse(
     response: AuthenticationResponseJSON,
@@ -999,11 +1003,13 @@ export class PasskeyService {
       const clientDataBuffer = Buffer.from(response.response.clientDataJSON, 'base64url');
       const clientData = JSON.parse(clientDataBuffer.toString('utf8')) as { challenge?: string };
       if (clientData.challenge) {
-        const stored = await this.cacheService.get<StoredAuthenticationChallenge>(
+        // `take`, not `get` then `del`: as two commands, two requests carrying
+        // the same assertion at the same instant both found the challenge
+        // before either removed it, and one assertion signed in twice.
+        const stored = await this.cacheService.take<StoredAuthenticationChallenge>(
           `passkey:auth:${clientData.challenge}`,
         );
         if (stored) {
-          await this.cacheService.del(`passkey:auth:${clientData.challenge}`);
           return { challenge: stored.challenge, adminId: stored.adminId ?? null };
         }
       }

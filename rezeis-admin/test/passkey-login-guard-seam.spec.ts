@@ -146,6 +146,7 @@ function buildSeam(seed: readonly AttemptRow[]): Seam {
     get: async () => null,
     set: async () => undefined,
     del: async () => undefined,
+    take: async () => null,
   } as unknown as RawCacheService;
 
   const jwtService = {

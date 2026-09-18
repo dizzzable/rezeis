@@ -105,9 +105,18 @@ export class BotSigninTokenService {
 
   /**
    * Consume a token. Returns the bound `userId` on success, null when
-   * the token is unknown / expired / already consumed. Single-use is
-   * enforced by atomically deleting the Redis key as part of consume —
-   * a parallel race ends with one winner and one null.
+   * the token is unknown / expired / already consumed.
+   *
+   * SINGLE-USE IS ONE REDIS STEP. The key is read and removed together
+   * (`RawCacheService.take`, GET and DEL inside one MULTI/EXEC), so of
+   * any number of concurrent consumes of one token exactly one receives
+   * the payload and every other one finds nothing.
+   *
+   * It used to be a `get` and then a `del`, two commands, with a comment
+   * claiming the race still ended with one winner. It did not: two
+   * consumes could both read the payload before either deleted it, and
+   * `del` reported nothing about how many keys it removed — so one token
+   * could mint a session in two browsers.
    */
   public async consume(token: string): Promise<{ userId: string } | null> {
     if (typeof token !== 'string' || token.length !== 64 || !/^[a-f0-9]+$/i.test(token)) {
@@ -115,13 +124,10 @@ export class BotSigninTokenService {
     }
     const tokenHash = this.hash(token);
     const key = `${BotSigninTokenService.KEY_PREFIX}${tokenHash}`;
-    const stored = await this.cache.get<{ userId: string; telegramId: string }>(key);
+    // Spent here, whatever follows: a token whose user turns out to be
+    // blocked or gone is used up too, as it always was.
+    const stored = await this.cache.take<{ userId: string; telegramId: string }>(key);
     if (stored === null) return null;
-    // Single-use: delete before returning. If this delete races with
-    // a parallel consume, the loser sees `null` because their `get`
-    // returned the same payload but only one delete actually removed
-    // the key — too late, atomic at the Redis level.
-    await this.cache.del(key);
     // Re-validate the user is still around and not blocked between
     // issue and consume (rare but worth defending against).
     const user = await this.prismaService.user.findUnique({
