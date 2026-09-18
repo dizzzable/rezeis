@@ -1,6 +1,7 @@
 import { Suspense, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { TFunction } from 'i18next'
 import { AlertCircle, Network, Pencil, Plus, Shield, ShieldBan, ShieldCheck, Trash2, Webhook } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -119,6 +120,25 @@ const ROLES_QUERY_KEY = ['admin', 'rbac', 'roles'] as const
 /** Shared roles fetch for the RBAC-role selector in the create/edit dialogs. */
 function useRolesList() {
   return useQuery({ queryKey: ROLES_QUERY_KEY, queryFn: listRoles })
+}
+
+/**
+ * The access role in the list, named the way the role picker names it: a system
+ * role in the page's language (`roleDisplayName`), anything else as stored.
+ *
+ * The list row carries only the stored `displayName` — English for the four
+ * system roles, so a Russian owner read "Operator" here and «Оператор» in the
+ * picker and on the Roles tab. The role itself comes from the roles list the
+ * picker already loads; until it arrives, or for an operator who may not read
+ * roles, the stored name is all there is and is shown as before.
+ */
+function accessRoleName(
+  t: TFunction,
+  admin: Pick<Admin, 'rbacRoleId' | 'rbacRoleName'>,
+  roles: readonly RbacRoleListItem[] | undefined,
+): string {
+  const role = admin.rbacRoleId === null ? undefined : roles?.find((candidate) => candidate.id === admin.rbacRoleId)
+  return role === undefined ? (admin.rbacRoleName ?? '') : roleDisplayName(t, role)
 }
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -754,6 +774,8 @@ function AdminsListTab() {
   const queryClient = useQueryClient()
 
   const { data, isLoading, error } = useQuery({ queryKey: ['admins'], queryFn: fetchAdmins })
+  // The same query the create dialog below already runs — one request, shared.
+  const rolesQuery = useRolesList()
 
   const deleteMutation = useMutation({
     mutationFn: deleteAdmin,
@@ -849,7 +871,7 @@ function AdminsListTab() {
                         {admin.rbacRoleName ? (
                           <Badge variant="outline" className="gap-1">
                             <ShieldCheck className="h-3 w-3" />
-                            {admin.rbacRoleName}
+                            {accessRoleName(t, admin, rolesQuery.data)}
                           </Badge>
                         ) : (
                           <span className="text-xs text-muted-foreground">

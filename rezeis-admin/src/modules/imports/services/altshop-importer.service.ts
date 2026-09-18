@@ -767,11 +767,25 @@ export class AltshopImporterService {
     const currency = this.mapCurrency(source.currency);
     const amount = this.extractAmount(source.pricing);
     if (!gatewayType || !currency || amount === null) return { outcome: 'skipped' };
+    const status = this.mapTransactionStatus(source.status);
+    const createdAt = this.parseOptionalDate(source.created_at) ?? new Date();
     const created = await this.prismaService.transaction.create({
       data: {
         user: { connect: { id: userId } },
         paymentId,
-        status: this.mapTransactionStatus(source.status),
+        status,
+        // A completed donor payment is stamped delivered, on the Bedolaga
+        // importer's rule — the donor's completion time, else its creation
+        // time, else now; AltShop records only the creation time. It WAS
+        // delivered, by the other bot, and `fulfilledAt: null` is not inert:
+        // it is the "paid, not delivered yet" marker. Left null, an ADDITIONAL
+        // payment sat in the add-on recovery sweep's window for ever (a hundred
+        // of them and a genuinely stranded add-on was never reached), and a
+        // provider notification resolving to the row drove it back into
+        // fulfilment. For a NEW row the stamp does not settle that last one:
+        // the webhook reconciler reads an old stamp on a row with no
+        // subscription as an abandoned checkout claim (`reconcileWebhookEvent`).
+        ...(status === TransactionStatus.COMPLETED ? { fulfilledAt: createdAt } : {}),
         purchaseType: this.mapPurchaseType(source.purchase_type),
         gatewayType,
         amount,
@@ -788,7 +802,7 @@ export class AltshopImporterService {
           originalPlanSnapshot: source.plan_snapshot,
           originalRenewItems: source.renew_items ?? [],
         }),
-        createdAt: this.parseOptionalDate(source.created_at) ?? new Date(),
+        createdAt,
       },
     });
     return { outcome: 'created', id: created.id };

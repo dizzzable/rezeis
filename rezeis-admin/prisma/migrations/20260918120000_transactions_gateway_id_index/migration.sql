@@ -17,9 +17,13 @@
 -- `transactions` for the length of the build, the choice
 -- `20260910000000_audit_log_action_created_at_index` makes for the same reason;
 -- it has to stay the only statement in this file to run outside a transaction.
--- `IF NOT EXISTS` keeps a re-run cheap; an interrupted build leaves the index
--- INVALID and it has to be dropped by hand before this will replace it. The
--- name is Prisma's own for `@@index([gatewayId])`, so `migrate diff` sees no
--- drift.
+-- `IF NOT EXISTS` keeps a re-run cheap. An interrupted build (an OOM, a deploy
+-- timeout, a cancel) leaves the index INVALID and this migration failed; the
+-- next start recovers both on its own: `docker-entrypoint.sh` drops the index
+-- (`cleanup_retry_artifacts`, `DROP INDEX CONCURRENTLY IF EXISTS`) and replays
+-- this file once (`is_auto_recoverable_migration`). The drop is what makes the
+-- replay a repair — on its own, `IF NOT EXISTS` would skip the INVALID index and
+-- finish over it. The name is Prisma's own for `@@index([gatewayId])`, so
+-- `migrate diff` sees no drift.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS "transactions_gateway_id_idx"
   ON "transactions" ("gateway_id");

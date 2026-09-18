@@ -120,7 +120,7 @@ export default function ReferralsPage() {
       )}
 
       <Tabs defaultValue="referrals">
-        <TabsList>
+        <TabsList className="flex-wrap">
           <TabsTrigger value="referrals">{t('referralsPage.tabs.referrals')}</TabsTrigger>
           <TabsTrigger value="invites">{t('referralsPage.tabs.invites')}</TabsTrigger>
           <TabsTrigger value="rewards">{t('referralsPage.tabs.rewards')}</TabsTrigger>

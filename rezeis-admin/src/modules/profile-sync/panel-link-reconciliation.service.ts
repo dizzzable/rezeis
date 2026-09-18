@@ -868,14 +868,14 @@ export class PanelLinkReconciliationService {
       // happen to have been recorded, and neither is more authoritative.
       if (member.remnawaveId !== null && identitySet.has(member.remnawaveId)) {
         collect(
-          `identity ${member.userId} ${member.remnawaveId}`,
+          `identity\x00${member.userId}\x00${member.remnawaveId}`,
           { remnawaveId: member.remnawaveId, panelId: null, members: [] },
           member,
         );
       }
       if (member.remnawavePanelId !== null && panelIdSet.has(member.remnawavePanelId)) {
         collect(
-          `panelId ${member.userId} ${member.remnawavePanelId}`,
+          `panelId\x00${member.userId}\x00${member.remnawavePanelId}`,
           {
             // The identity spelling for a group keyed by the numeric id. Sound
             // because this arm only runs on a panel PROVEN to be 3.x, where the

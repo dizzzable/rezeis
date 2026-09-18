@@ -48,6 +48,16 @@ PRISMA="./node_modules/.bin/prisma"
 # membership the next start hits P3009, refuses, and the panel stays down until a
 # human runs `prisma migrate resolve` — for a file that would have replayed
 # cleanly on its own.
+#
+# THE SEPTEMBER INDEX NEEDS A CLEANUP AS WELL AS MEMBERSHIP. The gateway id index
+# is built CONCURRENTLY on `transactions`, which every existing install has
+# already filled, so the build takes real time at upgrade. Interrupted (an OOM, a
+# deploy timeout, a cancel), it leaves the index behind marked INVALID and the
+# migration failed. Replaying the file alone repairs nothing: its `IF NOT EXISTS`
+# skips the INVALID index and the migration finishes over a dead index that
+# reports as present. So `cleanup_retry_artifacts` drops the index first, and the
+# retry then builds it whole. `migration-concurrent-index-recovery.spec.ts` holds
+# every concurrent build since to the same pair.
 is_auto_recoverable_migration() {
   case "$1" in
     20260708120000_perf_composite_indexes|20260724120000_reconcile_subscription_expiry_index|20260724120500_drop_conflicting_subscription_expiry_index|20260724121000_swap_subscription_expiry_index|20260810120000_remnawave_panel_identity|20260810160000_index_subscription_panel_identity)
@@ -57,6 +67,9 @@ is_auto_recoverable_migration() {
       return 0
       ;;
     20260829120000_user_hints|20260829150000_guest_support_device|20260829170000_user_ip_observations|20260831120000_traffic_reset_addon|20260901090000_broadcast_schedule_record|20260901120000_broadcast_channel_post|20260901160000_promocode_actions|20260902120000_points_ledger_and_cashback|20260902160000_wheel_spin_wallet|20260902180000_wheel_sectors_and_spins|20260902200000_wheel_manual_prizes|20260903090000_contests|20260903120000_wheel_updated_at_defaults)
+      return 0
+      ;;
+    20260918120000_transactions_gateway_id_index)
       return 0
       ;;
     *)
@@ -73,6 +86,15 @@ cleanup_retry_artifacts() {
         'DROP INDEX CONCURRENTLY IF EXISTS "public"."subscriptions_status_expires_at_rebuild_idx";' \
         | "${PRISMA}" db execute --stdin 2>&1; then
         echo "[entrypoint] FATAL: failed to remove the subscription expiry staging index"
+        return 1
+      fi
+      ;;
+    20260918120000_transactions_gateway_id_index)
+      echo "[entrypoint] removing a possibly invalid transactions gateway id index"
+      if ! printf '%s\n' \
+        'DROP INDEX CONCURRENTLY IF EXISTS "public"."transactions_gateway_id_idx";' \
+        | "${PRISMA}" db execute --stdin 2>&1; then
+        echo "[entrypoint] FATAL: failed to remove the transactions gateway id index"
         return 1
       fi
       ;;

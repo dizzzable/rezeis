@@ -1,7 +1,8 @@
 import 'reflect-metadata';
 
 import assert from 'node:assert/strict';
-import { after, describe, it } from 'node:test';
+import { promises as fsp } from 'node:fs';
+import { after, describe, it, type TestContext } from 'node:test';
 
 import { createIORedisClient, type Queue } from 'bullmq';
 import { Redis, type Command } from 'ioredis';
@@ -178,6 +179,147 @@ describe('HealthService', () => {
     assert.equal(serialized.includes('REZEIS_ADMIN_RUID_USER'), false);
   });
 });
+
+/**
+ * A dependency that stops answering is reported down, and the answer comes
+ * inside the compose healthcheck's budget: docker kills the probe's `wget`
+ * after 5 s (e2e, demo) or 10 s (production).
+ *
+ * A paused Valkey keeps its TCP connection open and never replies, and ioredis
+ * has no command timeout of its own, so a PING sent to it — and `getJobCounts`
+ * on the same connection — stays pending. Without a bound of its own the
+ * endpoint therefore hung instead of saying Redis was down.
+ *
+ * `setTimeout` is mocked, so the 3 s pass exactly and in no time. Each case
+ * checks both edges: nothing has answered at 2 999 ms, and the answer is there
+ * at 3 000 ms — a budget that is shorter, longer or missing fails one of them.
+ */
+describe('a stalled dependency is reported down within the probe budget', () => {
+  it('reports Redis down at 3 s when PING never answers', async (t) => {
+    process.env.BACKUP_LOCATION = process.cwd();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    answerDiskAtOnce(t);
+    const service = createService({ queue: createQueueProbe({ ping: never }) });
+
+    const response = await healthAtTheBudget(t, service);
+
+    assert.equal(response.status, 'error');
+    assert.equal(response.components.redis.status, 'down');
+    assert.equal(response.components.redis.details, 'redis_unavailable');
+    // Control: only the stalled probe is down.
+    assert.equal(response.components.database.status, 'up');
+    assert.equal(response.components.queues.status, 'up');
+    assert.equal(response.components.disk.status, 'up');
+  });
+
+  it('reports Redis and the queues down at 3 s when the whole connection stalls, as a paused Valkey does', async (t) => {
+    process.env.BACKUP_LOCATION = process.cwd();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    answerDiskAtOnce(t);
+    const service = createService({ queue: createQueueProbe({ ping: never, getJobCounts: never }) });
+
+    const response = await healthAtTheBudget(t, service);
+
+    assert.equal(response.status, 'error');
+    assert.equal(response.components.redis.status, 'down');
+    assert.deepStrictEqual(response.components.queues, { status: 'down', details: 'queue_unavailable' });
+    assert.equal(response.components.database.status, 'up');
+    assert.equal(response.components.disk.status, 'up');
+  });
+
+  it('reports the database down at 3 s when SELECT 1 never answers', async (t) => {
+    process.env.BACKUP_LOCATION = process.cwd();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    answerDiskAtOnce(t);
+    const service = createService({ prisma: { $queryRawUnsafe: never } });
+
+    const response = await healthAtTheBudget(t, service);
+
+    assert.equal(response.status, 'error');
+    assert.equal(response.components.database.status, 'down');
+    assert.equal(response.components.database.details, 'database_unavailable');
+    assert.equal(response.components.redis.status, 'up');
+  });
+
+  it('reports the backup volume down at 3 s when the write never returns', async (t) => {
+    process.env.BACKUP_LOCATION = process.cwd();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(fsp, 'writeFile', never);
+    const service = createService();
+
+    const response = await healthAtTheBudget(t, service);
+
+    assert.equal(response.status, 'degraded');
+    assert.deepStrictEqual(response.components.disk, { status: 'down', details: 'disk_unavailable' });
+    assert.equal(response.components.redis.status, 'up');
+  });
+
+  it('leaves no timer armed once every probe has answered', async () => {
+    process.env.BACKUP_LOCATION = process.cwd();
+    const service = createService();
+    const armedBefore = armedTimeouts();
+
+    const response = await service.getHealth();
+
+    assert.equal(response.status, 'ok');
+    assert.equal(
+      armedTimeouts(),
+      armedBefore,
+      'a probe that answered left its 3 s timer running — one per request, for every healthcheck',
+    );
+  });
+});
+
+/** A promise that never settles: a dependency that has stopped answering. */
+function never(): Promise<never> {
+  return new Promise<never>(() => undefined);
+}
+
+/**
+ * The backup-volume probe answering at once. Under a mocked clock the real
+ * write would race the tick that expires every probe, so the cases about other
+ * components hold the disk still instead.
+ */
+function answerDiskAtOnce(t: TestContext): void {
+  t.mock.method(fsp, 'writeFile', async () => undefined);
+  t.mock.method(fsp, 'unlink', async () => undefined);
+}
+
+/** Lets pending I/O callbacks and microtasks run; `setImmediate` is not mocked. */
+async function flushIo(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * `getHealth()` under the mocked clock: asserts nothing has answered at
+ * 2 999 ms and the answer is there at 3 000 ms, then returns it. Settlement is
+ * observed, never awaited blind, so a probe with no bound fails the second
+ * assertion instead of hanging the run.
+ */
+async function healthAtTheBudget(
+  t: TestContext,
+  service: HealthService,
+): Promise<Awaited<ReturnType<HealthService['getHealth']>>> {
+  let settled = false;
+  const pending = service.getHealth().then((response) => {
+    settled = true;
+    return response;
+  });
+  await flushIo();
+  t.mock.timers.tick(2_999);
+  await flushIo();
+  assert.equal(settled, false, 'answered before 3 s: the stalled probe did not stall, or its budget is shorter');
+  t.mock.timers.tick(1);
+  await flushIo();
+  assert.equal(settled, true, 'still waiting on a stalled dependency after 3 s: the probe has no budget');
+  return pending;
+}
+
+function armedTimeouts(): number {
+  return process.getActiveResourcesInfo().filter((resource) => resource === 'Timeout').length;
+}
 
 function createService(overrides: { prisma?: PrismaProbe; queue?: QueueProbe } = {}): HealthService {
   const prisma = overrides.prisma ?? {

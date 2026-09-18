@@ -178,7 +178,7 @@ export default function AuditPage() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setTab}>
-        <TabsList>
+        <TabsList className="flex-wrap">
           <TabsTrigger value="audit" className="gap-1.5">
             <ClipboardList className="h-3.5 w-3.5" />
             {t('auditPage.tabs.audit')}

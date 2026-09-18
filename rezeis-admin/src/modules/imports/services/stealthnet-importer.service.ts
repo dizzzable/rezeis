@@ -750,13 +750,34 @@ export class StealthnetImporterService {
     if (!gatewayType || !currency) return false;
 
     const tariff = payment.tariff_id ? tariffById.get(payment.tariff_id) : undefined;
+    const status = this.mapTransactionStatus(payment.status);
 
     try {
       await this.prismaService.transaction.create({
         data: {
           user: { connect: { id: userId } },
           paymentId: payment.order_id,
-          status: this.mapTransactionStatus(payment.status),
+          status,
+          // A completed donor payment is stamped delivered, on the Bedolaga
+          // importer's rule: the donor's completion time (`paid_at`), else its
+          // creation time, else now. It WAS delivered, by the other bot, and
+          // `fulfilledAt: null` is not inert: it is the "paid, not delivered
+          // yet" marker. This row carries the provider's own references
+          // (`order_id`, `external_id`), so a provider notification for the
+          // payment resolves to it; unstamped it was driven back into
+          // fulfilment, and a refund notification was ignored.
+          //
+          // What the stamp does NOT settle: the webhook reconciler reads a stamp
+          // older than two minutes on a NEW row with no subscription as a
+          // checkout claim that was abandoned, clears it and fulfils again
+          // (`reconcileWebhookEvent`). Every imported payment is such a row —
+          // Bedolaga's too — so that path has to learn to tell them apart.
+          ...(status === TransactionStatus.COMPLETED
+            ? {
+                fulfilledAt:
+                  parseOptionalDate(payment.paid_at) ?? parseOptionalDate(payment.created_at) ?? new Date(),
+              }
+            : {}),
           purchaseType: PurchaseType.NEW,
           gatewayType,
           gatewayId: payment.external_id ?? undefined,

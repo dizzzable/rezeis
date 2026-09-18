@@ -15,6 +15,23 @@ interface ComponentHealth {
   readonly details?: string;
 }
 
+/**
+ * How long one probe may take before its component is reported down.
+ *
+ * `/api/health` answers the compose healthcheck, whose `wget` docker kills
+ * after 10 s in production (`docker-compose.yml`) and after 5 s in the e2e and
+ * demo stacks. The four probes run side by side, so bounding each one at 3 s
+ * bounds the whole answer at about 3 s — inside the tighter budget, with room
+ * left for the response itself.
+ *
+ * Without it a stalled dependency made the endpoint hang instead of answering.
+ * A paused Valkey keeps its TCP connection open and simply never replies, and
+ * ioredis has no command timeout unless one is configured, so PING — and
+ * `getJobCounts` on the same connection — stayed pending until docker gave up
+ * on the probe, and nothing said which component was down.
+ */
+const HEALTH_PROBE_TIMEOUT_MS = 3_000;
+
 interface HealthResponse {
   readonly status: 'ok' | 'degraded' | 'error';
   readonly service: string;
@@ -84,7 +101,7 @@ export class HealthService {
   private async checkDatabase(): Promise<ComponentHealth> {
     const start = Date.now();
     try {
-      await this.prismaService.$queryRawUnsafe('SELECT 1');
+      await withinProbeBudget(this.prismaService.$queryRawUnsafe('SELECT 1'), 'Database SELECT 1');
       return { status: 'up', latencyMs: Date.now() - start };
     } catch (err) {
       this.logger.warn(`Database health check failed: ${safeHealthLogMessage(err)}`);
@@ -95,17 +112,7 @@ export class HealthService {
   private async checkRedis(): Promise<ComponentHealth> {
     const start = Date.now();
     try {
-      // PING on the BullMQ queue's own connection. Since bullmq 5.77.0 that
-      // connection is typed as BullMQ's `IRedisClient`, which declares only the
-      // commands BullMQ itself sends, and PING is not one of them. The object is
-      // a Proxy over the ioredis client BullMQ built, and it forwards PING to it
-      // (probed on 5.81.5), so the method is looked for rather than cast to. Any
-      // client that has it will do: PING means the same on every client, and the
-      // reply is checked. The undelivered-alert gate insists on ioredis itself
-      // (`gateRedisOf`) because its SET … NX is not portable; this is.
-      const client: unknown = await this.sampleQueue.client;
-      if (!answersPing(client)) throw new Error('The queue connection has no PING');
-      const pong = await client.ping();
+      const pong = await withinProbeBudget(this.pingQueueConnection(), 'Redis PING');
       if (pong !== 'PONG') throw new Error(`Unexpected PING response: ${String(pong)}`);
       return { status: 'up', latencyMs: Date.now() - start };
     } catch (err) {
@@ -114,9 +121,28 @@ export class HealthService {
     }
   }
 
+  /**
+   * PING on the BullMQ queue's own connection. Since bullmq 5.77.0 that
+   * connection is typed as BullMQ's `IRedisClient`, which declares only the
+   * commands BullMQ itself sends, and PING is not one of them. The object is a
+   * Proxy over the ioredis client BullMQ built, and it forwards PING to it
+   * (probed on 5.81.5), so the method is looked for rather than cast to. Any
+   * client that has it will do: PING means the same on every client, and the
+   * reply is checked. The undelivered-alert gate insists on ioredis itself
+   * (`gateRedisOf`) because its SET … NX is not portable; this is.
+   *
+   * Reaching the connection is inside the probe budget too: `client` waits for
+   * BullMQ to finish connecting, and that wait is as unbounded as the PING.
+   */
+  private async pingQueueConnection(): Promise<unknown> {
+    const client: unknown = await this.sampleQueue.client;
+    if (!answersPing(client)) throw new Error('The queue connection has no PING');
+    return client.ping();
+  }
+
   private async checkQueues(): Promise<ComponentHealth> {
     try {
-      const counts = await this.sampleQueue.getJobCounts();
+      const counts = await withinProbeBudget(this.sampleQueue.getJobCounts(), 'Queue job counts');
       // If there are active jobs but no workers, queues are stalled
       const healthy = counts.active === 0 || counts.active < 50;
       return {
@@ -134,14 +160,42 @@ export class HealthService {
     try {
       // Check if backup directory is writable
       const testFile = `${backupDir}/.health-check-${Date.now()}`;
-      await fsp.writeFile(testFile, 'ok');
-      await fsp.unlink(testFile);
+      await withinProbeBudget(writeAndRemove(testFile), 'Backup directory write');
       return { status: 'up' };
     } catch (err) {
       this.logger.warn(`Disk health check failed: ${safeHealthLogMessage(err)}`);
       return { status: 'down', details: 'disk_unavailable' };
     }
   }
+}
+
+/**
+ * `probe`, or a rejection once {@link HEALTH_PROBE_TIMEOUT_MS} has passed —
+ * whichever comes first.
+ *
+ * The timer is cleared on either outcome, so a probe that answers leaves
+ * nothing armed behind it. A probe that never answers is abandoned rather than
+ * awaited: `Promise.race` has already attached its handlers, so a late
+ * rejection from it is handled and cannot surface as an unhandled one.
+ */
+async function withinProbeBudget<T>(probe: Promise<T>, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${what} did not answer within ${HEALTH_PROBE_TIMEOUT_MS} ms`)),
+      HEALTH_PROBE_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([probe, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function writeAndRemove(file: string): Promise<void> {
+  await fsp.writeFile(file, 'ok');
+  await fsp.unlink(file);
 }
 
 function normalizeGitSha(value: string | undefined): string | null {

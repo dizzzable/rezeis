@@ -118,7 +118,7 @@ export default function PartnerDetailSheet({ partner, open, onOpenChange }: Part
 
         {partner && partnerId ? (
           <Tabs defaultValue="overview" className="flex-1 flex flex-col">
-            <TabsList className="rounded-none border-b px-6 h-11 bg-transparent justify-start">
+            <TabsList className="rounded-none border-b px-6 min-h-11 flex-wrap bg-transparent justify-start">
               <TabsTrigger value="overview">
                 <Activity className="h-3.5 w-3.5 mr-1.5" />
                 {t('partnersDetail.tabs.overview')}

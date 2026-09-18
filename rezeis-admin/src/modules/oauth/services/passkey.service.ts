@@ -1,4 +1,11 @@
-import { Inject, Injectable, Logger, Optional, UnauthorizedException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  Optional,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
@@ -265,11 +272,7 @@ export class PasskeyService {
       challenge: options.challenge,
       reauthAt: Date.now(),
     };
-    await this.cacheService.set(
-      `passkey:reg:${adminId}`,
-      record,
-      PasskeyService.CHALLENGE_TTL_SECONDS,
-    );
+    await this.parkChallenge(`passkey:reg:${adminId}`, record, 'registration');
 
     return options as unknown as Record<string, unknown>;
   }
@@ -435,9 +438,40 @@ export class PasskeyService {
       challenge: options.challenge,
       adminId: adminId ?? null,
     };
-    await this.cacheService.set(challengeKey, record, PasskeyService.CHALLENGE_TTL_SECONDS);
+    await this.parkChallenge(challengeKey, record, 'authentication');
 
     return options as unknown as Record<string, unknown>;
+  }
+
+  /**
+   * Stores a challenge for its verify half, and refuses to hand out one that is
+   * not stored.
+   *
+   * `RawCacheService.set` returns as if it had written even when Redis is not
+   * ready — it is a silent no-op then, by design for a cache. A challenge is not
+   * a cache entry: it is the only thing the verify half checks the ceremony
+   * against, and `take` answers null for it while Redis is down. Handed out
+   * anyway, it sent the operator through the whole authenticator prompt for a
+   * guaranteed "challenge expired" — and a sign-in charged that refusal to the
+   * fail2ban counter as a failed login, so an outage walked the operator's own
+   * address towards an auto-block.
+   *
+   * So the record is read back before the options leave: nothing is issued that
+   * the verify half could not find. A 503 says what is actually wrong.
+   */
+  private async parkChallenge(
+    key: string,
+    record: StoredRegistrationChallenge | StoredAuthenticationChallenge,
+    ceremony: 'registration' | 'authentication',
+  ): Promise<void> {
+    await this.cacheService.set(key, record, PasskeyService.CHALLENGE_TTL_SECONDS);
+    const stored = await this.cacheService.get<{ readonly challenge?: unknown }>(key);
+    if (stored?.challenge !== record.challenge) {
+      this.logger.error(
+        `Passkey ${ceremony} challenge could not be stored — refusing to issue it (is Redis reachable?)`,
+      );
+      throw new ServiceUnavailableException('Passkeys are temporarily unavailable');
+    }
   }
 
   /**

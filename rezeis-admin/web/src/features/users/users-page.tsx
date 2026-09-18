@@ -205,7 +205,7 @@ export default function UsersPage() {
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>
-        <TabsList>
+        <TabsList className="flex-wrap">
           <TabsTrigger value="list" className="gap-1.5">
             <UsersIcon className="h-3.5 w-3.5" />
             {t('usersPage.tabs.list')}

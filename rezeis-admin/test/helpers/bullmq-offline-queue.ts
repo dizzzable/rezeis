@@ -182,11 +182,12 @@ export class OfflineBullMqQueue<TData = unknown> {
   }
 
   /**
-   * `Queue.remove`, answered the way bullmq 5.76's `removeJob-2.lua` answers it:
+   * `Queue.remove`, answered the way bullmq 5.81.5's `removeJob-2.lua` answers it:
    * 0 for a job a worker holds the lock on, 1 for everything else — a job it
    * removed, and an id it does not have at all. (It used to answer 0 for a
    * missing id, which the library never does; `bullmq-late-enqueue.spec.ts`
-   * pins both answers to the shipped script.)
+   * pins both answers to the shipped script. The script's third answer, -8, is
+   * for a job scheduler's own job, which nothing on these doubles enqueues.)
    */
   public async remove(jobId: string): Promise<number> {
     const job = this.jobs.get(jobId);

@@ -84,10 +84,22 @@ async function createHarness(options?: {
     },
   };
 
+  // Keeps what it is given. `generateRegistrationOptions` reads its challenge
+  // back before issuing it and refuses one the store did not keep (see
+  // `passkey-challenge-storage.spec.ts`), so a double that drops every write
+  // would stand for Redis being down, not for a working panel.
+  const parked = new Map<string, string>();
   const cache = {
-    get: async () => null,
-    set: async () => undefined,
-    del: async () => undefined,
+    get: async (key: string) => {
+      const raw = parked.get(key);
+      return raw === undefined ? null : (JSON.parse(raw) as unknown);
+    },
+    set: async (key: string, value: unknown) => {
+      parked.set(key, JSON.stringify(value));
+    },
+    del: async (key: string) => {
+      parked.delete(key);
+    },
   };
 
   const loginGuard = {

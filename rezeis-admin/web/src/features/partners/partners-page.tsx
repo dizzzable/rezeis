@@ -200,7 +200,7 @@ export default function PartnersPage() {
       )}
 
       <Tabs value={activeTab} onValueChange={setTab}>
-        <TabsList>
+        <TabsList className="flex-wrap">
           <TabsTrigger value="partners">
             <Handshake className="h-3.5 w-3.5 mr-1.5" />
             {t('partnersPage.tabs.partners')}
