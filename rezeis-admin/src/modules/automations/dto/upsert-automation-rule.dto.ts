@@ -60,9 +60,10 @@ export class UpsertAutomationRuleDto {
 
   /**
    * Optional condition tree (JSON-logic-ish). The evaluator in
-   * `automation/utils/expression-evaluator.ts` is total — typos collapse
-   * to `false` rather than throwing, but we still reject obviously
-   * malformed input here as a UX courtesy.
+   * `automations/utils/expression-evaluator.ts` is total — typos collapse to
+   * `false` rather than throwing — so the service checks the tree against what
+   * the evaluator understands (`utils/condition-validator.ts`) and refuses
+   * anything else with a 400 that names the problem and where it is.
    */
   @IsOptional()
   conditions?: unknown;

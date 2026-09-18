@@ -27,6 +27,16 @@ interface ExecuteRuleResult {
 }
 
 /**
+ * Asked with the rule exactly as it is about to run, before anything runs. A
+ * throw refuses the run: nothing is executed and nothing is recorded.
+ */
+export type AuthorizeRule = (rule: {
+  readonly id: string;
+  readonly name: string;
+  readonly actions: unknown;
+}) => Promise<void>;
+
+/**
  * Runs a single rule against its trigger payload. Wrapped by a BullMQ
  * processor and also reused by `POST /admin/automations/rules/:id/run`
  * for manual invocations — which are real runs, not dry ones: every
@@ -57,6 +67,7 @@ export class AutomationExecutorService {
   private async run(
     job: AutomationJobData,
     manual: AutomationManualRun | null,
+    authorize?: AuthorizeRule,
   ): Promise<ExecuteRuleResult> {
     const startedAt = new Date();
     const rule = await this.prismaService.automationRule.findUnique({
@@ -68,6 +79,17 @@ export class AutomationExecutorService {
       // is written: an execution row must name its rule, and the rule is
       // gone. `recordOrphan` logs it and answers SKIPPED.
       return this.recordOrphan(job, startedAt);
+    }
+
+    // ── A MANUAL RUN IS AUTHORISED ON THE RULE IT RUNS ─────────────────────
+    //
+    // Asked here, on the row just read, rather than by the caller on a read of
+    // its own: that way the actions the operator was checked against are the
+    // actions that run, with no second read in between for an edit to land in.
+    // Before the switch and the conditions, because a run the operator may not
+    // start has no business being graded or recorded at all.
+    if (authorize !== undefined) {
+      await authorize({ id: rule.id, name: rule.name, actions: rule.actions });
     }
 
     // ── THE SWITCH GOVERNS AUTOMATIC FIRING ONLY ───────────────────────────
@@ -116,7 +138,27 @@ export class AutomationExecutorService {
       // reaches this method with `manual === null`, whatever its payload holds.
       ...(manual === null ? {} : { manual }),
     };
-    const actionDefs = (rule.actions ?? []) as unknown as readonly AutomationActionDefinition[];
+    // ── ONLY A LIST RUNS ─────────────────────────────────────────────────────
+    //
+    // `actions` is a JSON column, and a config import writes a plain object
+    // there as readily as a list. The loop below walks `.length` and indexes,
+    // so an object shaped like `{ "0": {…}, "length": 1 }` used to RUN — past
+    // every check that reads the column as a list, the import's permission
+    // check among them. A column that is not a list is a broken rule, graded
+    // FAILED so that it is seen, and nothing in it is executed.
+    if (!Array.isArray(rule.actions)) {
+      return this.persistExecution({
+        ruleId: rule.id,
+        status: AutomationExecutionStatus.FAILED,
+        trigger: job.trigger,
+        triggerPayload: job.triggerData,
+        actionResults: [],
+        errorMessage: 'the rule\'s actions are not a list, so none of them ran',
+        startedAt,
+        finishedAt: new Date(),
+      });
+    }
+    const actionDefs = rule.actions as unknown as readonly AutomationActionDefinition[];
     const results: AutomationActionResult[] = [];
     for (let index = 0; index < actionDefs.length; index++) {
       const action = actionDefs[index];
@@ -153,6 +195,10 @@ export class AutomationExecutorService {
     readonly adminId: string | null;
     readonly triggerData: Readonly<Record<string, unknown>>;
     readonly showAgain?: boolean;
+    /** Where the run was requested from; `block_ip` will not block it. */
+    readonly requestIp?: string | null;
+    /** Whether the operator may run THIS rule — see `run`. */
+    readonly authorize?: AuthorizeRule;
   }): Promise<ExecuteRuleResult> {
     const exists = await this.prismaService.automationRule.findUnique({
       where: { id: input.ruleId },
@@ -165,7 +211,16 @@ export class AutomationExecutorService {
         trigger: `manual:${input.adminId ?? 'system'}`,
         triggerData: input.triggerData,
       },
-      { adminId: input.adminId, showAgain: input.showAgain === true },
+      {
+        adminId: input.adminId,
+        showAgain: input.showAgain === true,
+        // Only when there is one: an address that could not be derived is no
+        // address at all, and the marker keeps the shape it always had.
+        ...(typeof input.requestIp === 'string' && input.requestIp.length > 0
+          ? { requestIp: input.requestIp }
+          : {}),
+      },
+      input.authorize,
     );
   }
 

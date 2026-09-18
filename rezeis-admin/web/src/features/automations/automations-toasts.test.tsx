@@ -402,9 +402,13 @@ describe('a refusal, in the words the panel owns', () => {
     await waitFor(() => {
       expect(toggleRule).toHaveBeenCalledWith('rule-1', false)
     })
+    // The switch names its rule: the list holds many, and the toast outlives
+    // the moment the operator knew which one they pressed.
     await waitFor(() => {
-      expect(toastMock.error).toHaveBeenCalledWith(says('errors.serverUnreachable'))
+      expect(toastMock.error).toHaveBeenCalledWith(
+        says('automationsPage.toast.toggleFailed', { name: RULE.name, message: says('errors.serverUnreachable') }),
+      )
     })
-    expect(toastMock.error).not.toHaveBeenCalledWith('Network Error')
+    expect(toastMock.error).not.toHaveBeenCalledWith(expect.stringContaining('Network Error'))
   })
 })

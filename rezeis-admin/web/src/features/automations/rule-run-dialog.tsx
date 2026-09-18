@@ -25,6 +25,7 @@ import { useHasPermission } from '@/features/rbac/permission-gate'
 import { listUserHints, type UserHint } from '@/features/user-hints/user-hints-api'
 import { translateApiError } from '@/lib/translate-error'
 
+import { translateAutomationError } from './automation-errors'
 import { runRuleManually, type AutomationRule } from './automations-api'
 import { actionLabel } from './rule-action-labels'
 import { ButtonTip } from './rule-button-tip'
@@ -341,7 +342,7 @@ export function RuleRunDialog({
             {run.isError && (
               <Alert variant="destructive">
                 <AlertDescription>
-                  {t('automationsPage.toast.runFailed', { message: translateApiError(t, run.error) })}
+                  {t('automationsPage.toast.runFailed', { message: translateAutomationError(t, run.error) })}
                 </AlertDescription>
               </Alert>
             )}

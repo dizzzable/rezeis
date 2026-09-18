@@ -41,6 +41,14 @@ export const RESULT_CODES = [
   'audience_partial',
   'audience_empty',
   'audience_blind',
+  'block_address_missing',
+  'block_address_invalid',
+  'block_address_protected',
+  'block_address_unverified',
+  'webhook_url_refused',
+  'webhook_address_refused',
+  'webhook_header_invalid',
+  'system_event_type_refused',
 ] as const
 
 export type ResultCode = (typeof RESULT_CODES)[number]
@@ -64,6 +72,57 @@ function count(details: Details, name: string): number {
 /** The audience's operator name, or its key when the panel has none. */
 function audienceName(t: TFunction, audience: string): string {
   return String(t(`automationsPage.audiences.${audience}`, { defaultValue: audience }))
+}
+
+/**
+ * A word from a closed table, or the table's own `unknown` entry.
+ *
+ * The values come off a row the server wrote, possibly by a newer panel, so a
+ * value this bundle has no word for must still land on a sentence — never on a
+ * key path.
+ */
+function tableWord(t: TFunction, table: string, value: string, options: Record<string, unknown> = {}): string {
+  const key = `automationsPage.${table}.${value}`
+  const worded = value.length > 0 ? String(t(key, { ...options, defaultValue: '' })) : ''
+  return worded.length > 0 ? worded : String(t(`automationsPage.${table}.unknown`, options))
+}
+
+/** An address range's kind in words — "a loopback address". */
+export function rangeKindText(t: TFunction, kind: string): string {
+  return tableWord(t, 'rangeKinds', kind)
+}
+
+/** What a refused block would have locked out, in words. */
+export function blockProtectionText(t: TFunction, protection: string, range: string): string {
+  return tableWord(t, 'blockProtections', protection, { range })
+}
+
+/**
+ * The longest URL a webhook action takes — `OUTBOUND_URL_MAX_LENGTH` on the
+ * panel, the same ceiling its webhook subscriptions have.
+ */
+export const WEBHOOK_URL_MAX_LENGTH = 2048
+
+/** Why a webhook URL was refused, in words, from the reason the panel names. */
+export function urlRefusalText(t: TFunction, reason: string, kind: string, range: string): string {
+  switch (reason) {
+    case 'missing':
+      return String(t('automationsPage.actionProblems.urlMissing'))
+    case 'too_long':
+      return String(t('automationsPage.actionProblems.urlTooLong', { limit: WEBHOOK_URL_MAX_LENGTH }))
+    case 'scheme':
+      return String(t('automationsPage.actionProblems.urlScheme'))
+    case 'malformed':
+      return String(t('automationsPage.actionProblems.urlMalformed'))
+    case 'local_name':
+      return String(t('automationsPage.actionProblems.urlLocalName'))
+    case 'metadata_name':
+      return String(t('automationsPage.actionProblems.urlMetadataName'))
+    case 'internal_address':
+      return String(t('automationsPage.actionProblems.urlInternal', { kind: rangeKindText(t, kind), range }))
+    default:
+      return String(t('automationsPage.actionProblems.urlRefused'))
+  }
 }
 
 /** The sentence for a result's code, or `null` when it has none the panel knows. */
@@ -142,6 +201,39 @@ export function resultCodeText(t: TFunction, result: AutomationActionResult): st
       return String(t(key, { audience: audienceName(t, text(details, 'audience')) }))
     case 'audience_blind':
       return String(t(key, { reason: text(details, 'reason') }))
+    case 'block_address_missing':
+      return String(t(key))
+    case 'block_address_invalid':
+      // The rule's own address and one a run brought in are different fixes:
+      // the first is edited in the action, the second in whatever sent it.
+      return String(t(text(details, 'source') === 'rule' ? `${key}_rule` : key))
+    case 'block_address_protected':
+      return String(
+        t(key, {
+          address: text(details, 'address'),
+          protection: blockProtectionText(t, text(details, 'protection'), text(details, 'range')),
+        }),
+      )
+    case 'block_address_unverified':
+      return String(t(key, { address: text(details, 'address') }))
+    case 'webhook_url_refused':
+      return String(
+        t(key, {
+          problem: urlRefusalText(t, text(details, 'reason'), text(details, 'kind'), text(details, 'range')),
+        }),
+      )
+    case 'webhook_address_refused':
+      return String(
+        t(key, {
+          host: text(details, 'host'),
+          address: text(details, 'address'),
+          kind: rangeKindText(t, text(details, 'kind')),
+        }),
+      )
+    case 'webhook_header_invalid':
+      return String(t(key))
+    case 'system_event_type_refused':
+      return String(t(key, { type: text(details, 'type') }))
   }
 }
 
@@ -165,6 +257,8 @@ export function executionNoteText(t: TFunction, errorMessage: string | null): st
       return String(t('automationsPage.runResults.conditionsNotMatched'))
     case 'rule disabled':
       return String(t('automationsPage.runResults.ruleDisabled'))
+    case "the rule's actions are not a list, so none of them ran":
+      return String(t('automationsPage.runResults.actionsNotList'))
     default:
       return errorMessage
   }

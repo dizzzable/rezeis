@@ -103,11 +103,15 @@ export const OTHER_GROUP_ID = 'other'
  * the action is named: `backups:create` because the route that takes a dump
  * also rewrites the Telegram chat dumps are delivered to
  * (`admin-backup.controller.ts`); `partners:view` because the withdrawal list
- * and its CSV carry every payout's requisites (`partner-csv-export.service.ts`);
- * `automations:create`/`edit`/`run` because a rule's `block_ip` and
- * `webhook_post` actions (`automations/actions/action-registry.ts`) write the
- * IP blocklist and call any URL without asking for `blocked_ips` or `webhooks`,
- * and a manual run chooses the address a rule without one blocks.
+ * and its CSV carry every payout's requisites (`partner-csv-export.service.ts`).
+ *
+ * And NOT `automations:create`/`edit`/`run`, which were here while a rule's
+ * `block_ip` and `webhook_post` actions wrote the IP blocklist and called any
+ * URL without asking for `blocked_ips` or `webhooks`. Saving a rule, switching
+ * one on and running one by hand now ask the admin for the permission each of
+ * its actions needs on its own screen (`automation-action-permissions.ts` on
+ * the server): `blocked_ips:create`, `webhooks:create`, `users:edit`. The power
+ * lives in those boxes, and the first two are flagged where they are.
  *
  * `permission-catalog.test.ts` pins the whole list, so adding or dropping a
  * warning is a decision somebody makes on purpose.
@@ -123,7 +127,6 @@ export const DANGEROUS_PERMISSIONS: Readonly<Record<string, readonly RbacAction[
   wheel: ['view_secrets'],
   remnawave: ['edit'],
   imports: ['run'],
-  automations: ['create', 'edit', 'run'],
   webhooks: ['create', 'edit'],
   email: ['edit'],
   api_tokens: ['create', 'delete'],

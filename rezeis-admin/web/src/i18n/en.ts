@@ -2232,6 +2232,28 @@ export const en = {
     'MANUAL triggers must have an empty triggerSpec':
       'A manual trigger must leave the event field empty.',
     'Rule not found': 'No such rule — it may have been deleted in another tab.',
+    // Switching on a rule whose stored actions are not a list (an import can
+    // leave one like that): the switch runs the same checks as a save.
+    'Actions must be a list': 'The rule is damaged: its actions are not a list. Open it, add its actions again and save — or delete it.',
+    // Where the panel does not send a webhook, and why: the reason the server
+    // gives for a refused subscription URL and writes into a refused
+    // delivery's log. Read by shape in `features/webhooks/webhook-refusals.ts`
+    // — the sentences carry an address, so they cannot be keys here. Flat,
+    // because every value of this table is a string. The range words mirror
+    // the server's own table in `common/net/outbound-url.ts`.
+    webhookRefusedSave: 'The panel does not send webhooks there: {{problem}}.',
+    webhookRefusedDelivery: 'Not sent: {{problem}}.',
+    webhookRefusedResolved: 'Not sent: {{host}} resolves to {{kind}} ({{address}}), and the panel never sends webhooks there.',
+    webhookUrlPointsAt: 'the URL points at {{kind}} ({{range}})',
+    webhookUrlLocalhost: 'the URL names this machine itself (localhost)',
+    webhookUrlMetadataName: 'the URL names a cloud metadata service',
+    webhookRange_unspecified: 'an unspecified address',
+    webhookRange_loopback: 'a loopback address',
+    webhookRange_link_local: 'a link-local address, where cloud metadata services answer',
+    webhookRange_multicast: 'a multicast address',
+    webhookRange_reserved: 'a reserved address',
+    webhookRange_cloud_metadata: 'a cloud metadata address',
+    webhookRange_unknown: 'an address the panel never sends webhooks to',
     // The three hint refusals. The key is the server's sentence character for
     // character: one comma out of place and the operator sees the raw English.
     'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger':

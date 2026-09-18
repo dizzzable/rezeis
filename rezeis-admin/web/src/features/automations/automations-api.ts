@@ -95,6 +95,13 @@ export interface AutomationCatalog {
    * copy would be a second thing to update when a flow changes.
    */
   coincidentEventGroups: string[][]
+  /**
+   * What each action type needs on top of the automations permissions — the
+   * very map the panel enforces on a save, on switching a rule on and on «Run
+   * now» (`automation-action-permissions.ts`). Absent from a panel older than
+   * that map, and then nothing is greyed out: the server still refuses.
+   */
+  actionPermissions?: Record<string, ReadonlyArray<{ resource: string; action: string }>>
 }
 
 export async function getCatalog(): Promise<AutomationCatalog> {

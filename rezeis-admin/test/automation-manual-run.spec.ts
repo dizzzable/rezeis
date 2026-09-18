@@ -9,6 +9,7 @@ import { AutomationActionRegistry } from '../src/modules/automations/actions/act
 import { AutomationExecutorService } from '../src/modules/automations/automation-executor.service';
 import { AutomationsController } from '../src/modules/automations/automations.controller';
 import { AutomationsService } from '../src/modules/automations/automations.service';
+import { AutomationRuleAccessService } from '../src/modules/automations/services/automation-rule-access.service';
 
 /**
  * «Запустить сейчас», and what a run is graded
@@ -49,6 +50,9 @@ interface EngineOptions {
 
 const RULE_ID = 'rule-first-appearance';
 
+/** An Express-shaped request, as the route receives it: the caller's address and no headers. */
+const REQUEST = { ip: '198.51.100.20', headers: {}, socket: {} } as never;
+
 function buildEngine(options: EngineOptions = {}) {
   const rule: RuleRow | null =
     options.rule === null
@@ -80,6 +84,8 @@ function buildEngine(options: EngineOptions = {}) {
         return users.includes(args.where.id) ? { id: args.where.id } : null;
       },
     },
+    // The row «Запустить сейчас» leaves in the admin audit log.
+    adminAuditLog: { create: async () => ({}) },
     $transaction: async (work: (tx: unknown) => Promise<unknown>) =>
       work({
         automationExecution: {
@@ -117,7 +123,10 @@ function buildEngine(options: EngineOptions = {}) {
     );
   const executor = new AutomationExecutorService(prisma as never, registry as never);
   const service = new AutomationsService(prisma as never, executor);
-  const controller = new AutomationsController(service, {} as never);
+  // The real permission check, over an RBAC that grants nothing: a pop-up needs
+  // no permission beyond the route's own, so the run below goes through it.
+  const access = new AutomationRuleAccessService({ hasPermission: async () => false } as never);
+  const controller = new AutomationsController(service, {} as never, access);
   return { executor, controller, executions, ruleUpdates, userLookups, queued };
 }
 
@@ -508,7 +517,7 @@ describe('POST /admin/automations/rules/:id/run', () => {
     const engine = buildEngine({ rule: { isEnabled: false } });
     const dto = await throughPipe({ triggerData: { userId: 'user-9' }, showAgain: true });
 
-    const response = await engine.controller.runRule(RULE_ID, dto as never, { id: 'admin-1' } as never);
+    const response = await engine.controller.runRule(RULE_ID, dto as never, { id: 'admin-1' } as never, REQUEST);
 
     assert.equal(response.status, 'SUCCEEDED');
     assert.equal(response.actionResults[0]?.code, 'hint_queued');
@@ -526,7 +535,7 @@ describe('POST /admin/automations/rules/:id/run', () => {
     const engine = buildEngine();
     const dto = await throughPipe({ triggerData: { userId: 'user-9', showAgain: true } });
 
-    await engine.controller.runRule(RULE_ID, dto as never, { id: 'admin-1' } as never);
+    await engine.controller.runRule(RULE_ID, dto as never, { id: 'admin-1' } as never, REQUEST);
 
     assert.equal(engine.queued[0]?.showAgain, false);
   });

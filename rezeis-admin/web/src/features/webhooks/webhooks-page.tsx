@@ -51,6 +51,7 @@ import {
   type WebhookDelivery,
   type WebhookSubscription,
 } from './webhooks-api'
+import { deliveryErrorText, subscriptionErrorText } from './webhook-refusals'
 import { activeLocale } from '@/lib/utils'
 
 /**
@@ -204,8 +205,10 @@ function CreateSubscriptionCard({
       setError(null)
       onCreated()
     },
+    // A URL the panel refuses to send to comes back with the reason in words;
+    // every other refusal reads as before.
     onError: (err) =>
-      setError(getErrorMessage(err, t('webhooksPage.subscriptions.createFailed'))),
+      setError(subscriptionErrorText(t, err, t('webhooksPage.subscriptions.createFailed'))),
   })
 
   const eventTypes = useMemo(
@@ -618,8 +621,11 @@ function DeliveryRow({
       <td className="px-3 py-2 font-mono text-xs">
         {delivery.httpStatus ?? <span className="text-muted-foreground">—</span>}
         {delivery.errorMessage && (
-          <div className="mt-1 max-w-[200px] truncate text-xs text-destructive" title={delivery.errorMessage}>
-            {delivery.errorMessage}
+          <div
+            className="mt-1 max-w-[200px] truncate text-xs text-destructive"
+            title={deliveryErrorText(t, delivery.errorMessage)}
+          >
+            {deliveryErrorText(t, delivery.errorMessage)}
           </div>
         )}
       </td>

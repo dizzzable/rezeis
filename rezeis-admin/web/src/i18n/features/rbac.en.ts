@@ -560,16 +560,11 @@ export const en = {
           '“Event → action” rules that run on their own: a Telegram message, a hint, a request to another system, blocking a customer or an address.',
         actions: {
           view: 'The rules, the event catalogue and the run log.',
-          create: 'Create a rule.',
-          edit: 'Change a rule, switch it on or off.',
-          delete: 'Delete a rule together with its run log.',
-          run: 'Run a rule by hand.',
-        },
-        danger: {
           create:
-            'A rule can block any IP address, admins’ included, and send event data to any address, without the “Blocked IPs” or “Outgoing webhooks” permissions.',
-          edit: 'A changed rule can block any IP address or send event data anywhere.',
-          run: 'A rule that blocks an address blocks whichever IP the run is given, an admin’s included.',
+            'Create a rule. A rule that blocks an address, blocks a customer or sends event data out also needs “Blocked IPs: Create”, “Users: Edit” or “Outgoing webhooks: Create”.',
+          edit: 'Change a rule, switch it on or off. Changing or switching on a rule with such an action needs that permission too; switching one off never does.',
+          delete: 'Delete a rule together with its run log.',
+          run: 'Run a rule by hand. Its blocking and sending actions need their own permissions here as well.',
         },
       },
       webhooks: {

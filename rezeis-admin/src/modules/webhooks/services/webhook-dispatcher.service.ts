@@ -1,8 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { Prisma, WebhookDeliveryStatus } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
 
+import {
+  checkOutboundUrl,
+  describeOutboundUrlRefusal,
+  describeRange,
+  guardedAgents,
+  OUTBOUND_LOOKUP,
+  systemLookupAll,
+  type LookupAll,
+} from '../../../common/net/outbound-url';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   AUTO_DISABLE_THRESHOLD,
@@ -45,6 +54,16 @@ export interface WebhookDispatchEventInput {
  * Non-2xx responses count as failures. Network errors (timeout, DNS,
  * TLS) also count as failures and are retried just like 5xx responses.
  *
+ * Where a delivery may go
+ *   The outbound policy the `webhook_post` automation action follows
+ *   (`common/net/outbound-url.ts`): never the machine itself, never a cloud
+ *   metadata service; private networks and compose service names are fine.
+ *   Checked twice — the URL before anything is sent, then every address its
+ *   host resolves to at the moment the socket connects — and a refusal is a
+ *   FINAL failure with the reason in the delivery log: retrying cannot change
+ *   where a URL points, and a silent drop would leave the operator looking at
+ *   a subscription that just never delivers.
+ *
  * Auto-disable
  *   When `consecutive_failures` >= AUTO_DISABLE_THRESHOLD the subscription
  *   is flipped to `isActive=false` and `auto_disabled_at=now()`. The
@@ -55,11 +74,18 @@ export interface WebhookDispatchEventInput {
 export class WebhookDispatcherService {
   private readonly logger = new Logger(WebhookDispatcherService.name);
 
+  private readonly lookupAll: LookupAll;
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly httpService: HttpService,
     private readonly queueService: WebhookQueueService,
-  ) {}
+    @Optional()
+    @Inject(OUTBOUND_LOOKUP)
+    lookupAll?: LookupAll,
+  ) {
+    this.lookupAll = lookupAll ?? systemLookupAll;
+  }
 
   /**
    * Fan out a SystemEvent to every active matching subscription. Called
@@ -229,14 +255,33 @@ export class WebhookDispatcherService {
       'X-Rezeis-Timestamp': timestamp.toString(),
     };
 
+    // A subscription saved before the outbound policy existed can point
+    // anywhere; judged again here, before a byte leaves.
+    const target = checkOutboundUrl(delivery.subscription.url);
+    if (!target.ok) {
+      await this.markFailed(delivery.id, delivery.subscription.id, {
+        attempt: attemptNumber,
+        httpStatus: null,
+        responseBody: null,
+        errorMessage: `Refused before sending: ${describeOutboundUrlRefusal(target.refusal)}`,
+        durationMs: 0,
+        startedAt,
+        previousConsecutiveFailures: delivery.subscription.consecutiveFailures,
+      });
+      return;
+    }
+
     let httpStatus: number | null = null;
     let responseBody: string | null = null;
     let errorMessage: string | null = null;
     let success = false;
+    // Fresh agents for this one request, whose lookup refuses every address
+    // the policy refuses — the address judged is the address dialled.
+    const agents = guardedAgents(this.lookupAll);
 
     try {
       const response = await firstValueFrom(
-        this.httpService.post(delivery.subscription.url, body, {
+        this.httpService.post(target.url.toString(), body, {
           headers,
           timeout: DELIVERY_TIMEOUT_MS,
           // Pass the body as a string so axios doesn't try to re-serialize
@@ -246,6 +291,11 @@ export class WebhookDispatcherService {
           // decide whether to retry.
           validateStatus: () => true,
           maxRedirects: 0,
+          // An environment proxy would resolve the host itself, past the
+          // guarded lookup below.
+          proxy: false,
+          httpAgent: agents.httpAgent,
+          httpsAgent: agents.httpsAgent,
           maxContentLength: 1_000_000,
           maxBodyLength: 1_000_000,
         }),
@@ -254,6 +304,21 @@ export class WebhookDispatcherService {
       responseBody = truncate(stringifyResponseBody(response.data), MAX_RESPONSE_BODY_PREVIEW);
       success = response.status >= 200 && response.status < 300;
     } catch (err) {
+      const refused = agents.refusal();
+      if (refused !== null) {
+        await this.markFailed(delivery.id, delivery.subscription.id, {
+          attempt: attemptNumber,
+          httpStatus: null,
+          responseBody: null,
+          errorMessage:
+            `Refused before sending: ${refused.host} resolves to ${describeRange(refused.range)}: ` +
+            refused.address,
+          durationMs: Date.now() - startedAt.getTime(),
+          startedAt,
+          previousConsecutiveFailures: delivery.subscription.consecutiveFailures,
+        });
+        return;
+      }
       errorMessage = truncate((err as Error).message ?? 'Unknown error', 1024);
     }
 

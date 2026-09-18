@@ -155,6 +155,27 @@ export const en = {
       add: 'Add action',
       required: 'At least one action is required.',
       removeAria: 'Remove action {{index}}',
+      // A «POST webhook» action's Authorization header. The panel never sends a
+      // saved one back, so the editor can only keep it, replace it or remove it.
+      header: {
+        label: 'Authorization header',
+        saved:
+          'Saved. Its value is never shown. Saving keeps it only while the URL stays exactly as it is — change the URL and the header must be entered again.',
+        none: 'No Authorization header.',
+        set: 'Add',
+        replace: 'Replace',
+        remove: 'Remove',
+        apply: 'Apply',
+        cancel: 'Cancel',
+        placeholder: 'Bearer …',
+        newValueAria: 'New Authorization header',
+        moved:
+          'The URL changed, and a saved header is never sent to any other URL: replace the header or remove it, or saving is refused.',
+        shifted:
+          'This action moved up the list, and a saved header stays with the place it was saved at: replace the header or remove it, or saving is refused.',
+      },
+      urlHidden:
+        'The path and the query of this URL are hidden: they are shown only to those who may edit the rule and create outgoing webhooks.',
       // Warnings under the hint picker, computed from the data.
       hintOff:
         'The hint "{{title}}" is switched off — the rule will not show it until its Show it switch is on, on the Hints tab.',
@@ -190,6 +211,8 @@ export const en = {
       deleted: 'Rule deleted',
       saveFailed: 'Save failed: {{message}}',
       deleteFailed: 'Delete failed: {{message}}',
+      // The list switch, naming the rule it was pressed for.
+      toggleFailed: '"{{name}}": {{message}}',
       runFinished: 'Run finished: {{status}}',
       // The status translated (`statuses.*`), then the first action that failed
       // or was skipped, worded from its code.
@@ -229,6 +252,14 @@ export const en = {
       removeAction: 'Removes this action from the draft. It leaves the rule when you press Save (Create, for a new rule).',
       listToggle: 'Switches the rule on or off at once — no Save needed.',
       dropCompanions: 'Takes the rules off this list: Create saves only this rule.',
+      // A control greyed out because an action in the rule needs a permission
+      // this role lacks — the one the action's own screen asks for.
+      actionNeedsPermission: 'Your role cannot use this action: it also needs {{permissions}}.',
+      saveNeedsPermission:
+        'Cannot be saved: {{actions}} also needs {{permissions}}, and your role does not have it. Remove the action or ask for the permission.',
+      runNowNeedsPermission: 'Your role cannot run this rule: {{actions}} also needs {{permissions}}.',
+      listToggleNeedsPermission: 'Your role can switch this rule off, but not on: {{actions}} also needs {{permissions}}.',
+      templateNeedsPermission: 'Your role cannot use this template: {{actions}} also needs {{permissions}}.',
     },
     // The Run now dialog, for a rule that shows a hint.
     // ── «Run now» on a switched-off rule that opens no dialog ─────────────
@@ -322,6 +353,22 @@ export const en = {
       audience_blind: 'The hint was queued for nobody: the panel cannot pick the audience reliably. The server said: {{reason}}',
       conditionsNotMatched: "Skipped: the rule's conditions did not match.",
       ruleDisabled: 'Skipped: the rule is switched off.',
+      actionsNotList: "Nothing ran: the rule's actions are not a list. Open the rule, add its actions again and save — or delete it.",
+      // block_ip, every way it declines to write an entry.
+      block_address_missing:
+        'Nothing was blocked: the action names no address and the run brought none. No event carries one, so write the address into the action.',
+      block_address_invalid: 'Nothing was blocked: the address in the run data is not a single IP address.',
+      block_address_invalid_rule: 'Nothing was blocked: the address written in the action is not an IP address or a CIDR range.',
+      block_address_protected: '{{address}} was not blocked: it covers {{protection}}.',
+      block_address_unverified:
+        "{{address}} was not blocked: it could not be checked against the administrators' addresses, and nothing is blocked unchecked.",
+      // webhook_post: refused before a socket was opened, and at the moment of connecting.
+      webhook_url_refused: 'Nothing was sent: {{problem}}.',
+      webhook_address_refused: 'Nothing was sent: {{host}} resolves to {{kind}} ({{address}}), and the panel never sends requests there.',
+      webhook_header_invalid:
+        'Nothing was sent: the Authorization header holds characters an HTTP header cannot carry (Cyrillic, a line break). Enter it again in Latin characters.',
+      system_event_type_refused:
+        'Nothing was emitted: "{{type}}" is one of the panel’s own events, and a rule may emit only its own — "automation.custom" or a type that starts with "automation.custom.".',
     },
     help: {
       title: 'How it works — examples & templates',
@@ -354,7 +401,8 @@ export const en = {
         webhook_post: 'POST JSON to an arbitrary URL (with optional auth header).',
         block_ip: 'block the IP from the trigger data or an explicit one.',
         block_user: 'block the user by the ID carried in the trigger.',
-        system_event: 'emit your own event back into the bus (type/category/severity).',
+        system_event:
+          'emit your own event back into the bus (type/category/severity). The type is "automation.custom" or starts with "automation.custom." — the panel’s own events cannot be emitted.',
       },
       useCasesTitle: 'Example use-cases',
       useCases: {
@@ -713,11 +761,6 @@ export const en = {
         description: 'Sends a Telegram alert when a payment fails.',
         message: '❌ Payment failed — check the payment gateway.',
       },
-      fraud_block_ip: {
-        name: 'Anti-fraud → block IP + Telegram',
-        description: 'On an anti-fraud signal, blocks the IP and notifies.',
-        message: '🚨 Anti-fraud: IP blocked by signal.',
-      },
       node_down_notify: {
         name: 'Node offline → Telegram',
         description: 'Sends an urgent alert when a node goes offline.',
@@ -731,6 +774,94 @@ export const en = {
         name: 'Daily health-check (cron)',
         description: 'Hits an external service webhook every day at 09:00 UTC.',
       },
+    },
+    // ── Permissions an action needs, and the server's refusals in words ─────
+    //
+    // Named exactly as the roles page names them ("Resource: Action"), so the
+    // name read here is the box to look for there; `action-permissions.test.ts`
+    // holds them to `rolesPage` in both languages.
+    permissionNames: {
+      automations: {
+        view: 'Automations: View',
+        create: 'Automations: Create',
+        edit: 'Automations: Edit',
+        delete: 'Automations: Delete',
+        run: 'Automations: Run',
+      },
+      blocked_ips: { create: 'Blocked IPs: Create' },
+      webhooks: { create: 'Outgoing webhooks: Create' },
+      users: { edit: 'Users: Edit' },
+    },
+    // A permission or an action named inside a sentence.
+    quotedName: '"{{name}}"',
+    serverErrors: {
+      actionPermission: 'Your role does not have {{permission}}, and {{actions}} needs it.',
+      routePermission: 'Your role does not have {{permission}}.',
+      conditions: 'The conditions were not accepted — {{where}}: {{problem}}',
+      conditionsTop: 'at the top level',
+      conditionsAt: 'at {{pointer}}',
+      action: 'Action {{index}} ({{action}}): {{problem}}',
+      ruleChanged: 'The rule changed — reload the page.',
+    },
+    conditionProblems: {
+      unknownOperator: 'unknown operator "{{operator}}"; the ones that work are ==, !=, >, >=, <, <=, in, and, or, not',
+      unknownOperatorUnnamed: 'an unknown operator; the ones that work are ==, !=, >, >=, <, <=, in, and, or, not',
+      oneOperator: 'expected an object with exactly one operator',
+      twoOperands: '"{{operator}}" takes exactly two operands, in a list',
+      notOne: '"not" takes exactly one condition',
+      emptyList: '"{{operator}}" needs a list of at least one condition',
+      plainValue: 'a plain value cannot be a condition: it is always true or always false; compare it, for example with "=="',
+      listPlace: 'a list is allowed only as the second operand of "in"',
+      listItems: 'a list for "in" may hold only plain values',
+      operand: 'expected a plain value, a "$" variable or an operation',
+      variable: 'the variable is not a usable path: "$" and names separated by dots',
+      tooDeep: 'nested more than {{limit}} levels deep',
+      tooLarge: 'more than {{limit}} parts',
+    },
+    actionProblems: {
+      urlMissing: 'the URL is missing',
+      urlTooLong: 'the URL is longer than {{limit}} characters',
+      urlScheme: 'the URL must use http or https',
+      urlMalformed: 'the URL is not a valid address',
+      urlLocalName: 'the URL names this machine itself (localhost)',
+      urlMetadataName: 'the URL names a cloud metadata service',
+      urlInternal: 'the URL points at {{kind}} ({{range}})',
+      urlRefused: 'the URL was refused',
+      headerCharset:
+        'the Authorization header may hold only what an HTTP header can carry: printable ASCII and Latin-1 characters on one line — no line breaks, no Cyrillic',
+      eventTypeNotCustom:
+        'a rule may emit only its own events: "automation.custom", or a type that starts with "automation.custom."',
+      headerNewRule: 'a new rule has no saved Authorization header to keep: enter the header itself',
+      headerGone: 'the saved Authorization header it refers to is no longer on the rule: enter it again or remove it',
+      headerMoved: 'the URL changed, so the saved Authorization header was not carried over: enter it again or remove it',
+      headerShifted: 'the saved Authorization header it refers to belongs to another action: enter it again or remove it',
+      blockAddressNeeded:
+        'no event or schedule carries an IP address, so a rule that runs on its own needs the address written into the action',
+      addressInvalid: '"address" is not an IP address or a CIDR range',
+      expiresInvalid: '"expiresAt" is not a date',
+      addressProtected: 'the address {{address}} covers {{protection}}',
+      addressUnverified: "the address could not be checked against the administrators' addresses, so the rule was not saved; try again",
+    },
+    // What an address range is, inside "points at …" / "resolves to …".
+    rangeKinds: {
+      unspecified: 'an unspecified address',
+      loopback: 'a loopback address',
+      link_local: 'a link-local address, where cloud metadata services answer',
+      multicast: 'a multicast address',
+      reserved: 'a reserved address',
+      cloud_metadata: 'a cloud metadata address',
+      unparseable: 'something that is not an IP address',
+      unknown: 'an address the panel never sends requests to',
+    },
+    // What a refused block would have locked out, inside "it covers …".
+    blockProtections: {
+      your_address: 'your own address',
+      internal_network: "the panel's internal network ({{range}}): the panel itself, its reverse proxy and the services beside it connect from there",
+      this_panel: 'an address of the machine the panel runs on',
+      admin_session: 'an address an administrator signed in or worked from in the last 24 hours',
+      admin_allowlist: 'an entry of the admin IP allowlist',
+      panel_service: "the address of the panel's own domain or of a service it works with (the cabinet, the subscription page)",
+      unknown: 'an address the panel must not block',
     },
   },
   userHints: {

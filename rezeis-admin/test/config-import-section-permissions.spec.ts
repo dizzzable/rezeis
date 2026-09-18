@@ -70,7 +70,9 @@ const ATTACK_ROWS: Readonly<Partial<Record<ConfigExportSection, Record<string, u
 const REQUIRED: Readonly<Partial<Record<ConfigExportSection, readonly string[]>>> = {
   settings: ['settings:edit'],
   webhooks: ['webhooks:create', 'webhooks:edit'],
-  automations: ['automations:create', 'automations:edit'],
+  // The attack row's `webhook_post` adds the permission the panel's own save
+  // demands for that action (`automation-action-permissions.ts`).
+  automations: ['automations:create', 'automations:edit', 'webhooks:create'],
   adminIpAllowlist: ['admins:edit'],
   blockedIps: ['blocked_ips:create', 'blocked_ips:delete'],
 };

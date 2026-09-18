@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
+import { checkOutboundUrl, describeOutboundUrlRefusal } from '../../../common/net/outbound-url';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { WEBHOOK_EVENT_CATALOG } from '../webhooks.constants';
 
@@ -168,6 +169,12 @@ function generateSecret(): string {
   return randomBytes(32).toString('hex');
 }
 
+/**
+ * A subscription URL: http or https, a URL at all, and a destination the
+ * outbound policy allows (`common/net/outbound-url.ts`) — never the machine
+ * itself, never a cloud metadata service. The same policy the `webhook_post`
+ * automation action follows, and the dispatcher applies it again at send.
+ */
 function validateUrl(url: string): void {
   if (!URL_HTTP_PROTOCOL_REGEX.test(url.trim())) {
     throw new BadRequestException('URL must use http:// or https://');
@@ -177,6 +184,12 @@ function validateUrl(url: string): void {
     new URL(url);
   } catch {
     throw new BadRequestException('URL is malformed');
+  }
+  const target = checkOutboundUrl(url);
+  if (!target.ok) {
+    throw new BadRequestException(
+      `The panel does not send webhooks there: ${describeOutboundUrlRefusal(target.refusal)}`,
+    );
   }
 }
 

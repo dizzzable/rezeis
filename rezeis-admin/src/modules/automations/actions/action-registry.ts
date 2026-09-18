@@ -1,9 +1,20 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
+import {
+  HEADER_FIELD_VALUE_RULE,
+  INVALID_HEADER_ERROR_CODES,
+  isHeaderFieldValue,
+} from '../../../common/net/header-value';
+import {
+  checkOutboundUrl,
+  describeOutboundUrlRefusal,
+  describeRange,
+  guardedAgents,
+} from '../../../common/net/outbound-url';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   EVENT_TYPES,
@@ -27,6 +38,19 @@ import {
 import { UserHintDeliveryService } from '../../user-hints/services/user-hint-delivery.service';
 import { AUTOMATION_ACTION_TYPES, AutomationActionType } from '../automations.constants';
 import { chainMetadata } from '../chain-depth';
+import { CUSTOM_EVENT_TYPE_RULE, isCustomEventType, systemEventTypeOf } from '../custom-event-type';
+import {
+  AUTOMATION_NETWORK_PROBES,
+  SYSTEM_NETWORK_PROBES,
+  type AutomationNetworkProbes,
+} from '../services/automation-network-probes';
+import {
+  BlockAddressUnverifiableError,
+  BlockIpSafetyService,
+  describeBlockProtection,
+  type BlockAddressRefusal,
+} from '../services/block-ip-safety.service';
+import { parseBlockEntry } from '../utils/network-address.util';
 import {
   ActionFailure,
   actionSkipped,
@@ -57,6 +81,7 @@ import {
 @Injectable()
 export class AutomationActionRegistry {
   private readonly logger = new Logger(AutomationActionRegistry.name);
+  private readonly networkProbes: AutomationNetworkProbes;
 
   public constructor(
     private readonly httpService: HttpService,
@@ -67,7 +92,20 @@ export class AutomationActionRegistry {
     private readonly hintAudienceService: HintAudienceService,
     @Inject(paymentsConfig.KEY)
     private readonly paymentsConfiguration: ConfigType<typeof paymentsConfig>,
-  ) {}
+    /**
+     * The lockout check `block_ip` needs before it writes. Optional only so a
+     * registry built by hand in a spec still constructs — and absent, the
+     * action blocks NOTHING (`block_address_unverified`): a missing safety
+     * check is not a reason to skip it.
+     */
+    @Optional()
+    private readonly blockIpSafety?: BlockIpSafetyService,
+    @Optional()
+    @Inject(AUTOMATION_NETWORK_PROBES)
+    networkProbes?: AutomationNetworkProbes,
+  ) {
+    this.networkProbes = networkProbes ?? SYSTEM_NETWORK_PROBES;
+  }
 
   public listSupportedTypes(): readonly AutomationActionType[] {
     return AUTOMATION_ACTION_TYPES;
@@ -180,33 +218,137 @@ export class AutomationActionRegistry {
     return `notification raised: ${text.slice(0, 64)}`;
   }
 
-  /** POST a JSON payload to an arbitrary URL with optional auth header. */
+  /**
+   * POSTs the event to the rule's URL, with the rule's optional
+   * `Authorization` header — and never to the machine itself or to a cloud
+   * metadata service (the policy, and why it allows private networks, is in
+   * `common/net/outbound-url.ts`; the panel's own webhooks follow the same one).
+   *
+   * ── Checked twice, the second time where it cannot be dodged ─────────────
+   *
+   * The URL is judged statically first (`checkOutboundUrl`): the same check the
+   * save runs, repeated because a rule saved before it existed, or written by
+   * an import, never met it. Then the request goes out through agents whose
+   * socket lookup refuses every address the policy refuses (`guardedAgents`),
+   * so the address that is judged is the address that is dialled — a name
+   * that resolves somewhere allowed for a check and to the loopback for the
+   * request has nothing to exploit. `maxRedirects: 0`, as the panel's own
+   * webhook dispatcher sends, so a receiver cannot bounce the request to a
+   * refused address; `proxy: false`, so an environment proxy cannot carry it
+   * past the lookup that makes the decision.
+   *
+   * The success message names the host and nothing more: a webhook URL often
+   * carries its secret in the path, and the message is stored on the
+   * execution row that everybody with `automations:view` can read.
+   */
   private async webhookPost(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
   ): Promise<string> {
-    const url = readString(action.params, 'url');
-    if (!url) throw new Error('webhook_post requires `url`');
+    const target = checkOutboundUrl(action.params['url']);
+    if (!target.ok) {
+      throw new ActionFailure(
+        `webhook_post: ${describeOutboundUrlRefusal(target.refusal)}`,
+        'webhook_url_refused',
+        {
+          reason: target.refusal.reason,
+          ...(target.refusal.range === undefined
+            ? {}
+            : { range: target.refusal.range.cidr, kind: target.refusal.range.kind }),
+        },
+      );
+    }
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const authHeader = readString(action.params, 'authorizationHeader');
+    // A header saved before its characters were checked (a Cyrillic token,
+    // say) would make Node throw ERR_INVALID_CHAR from inside the request —
+    // an unnamed error, on every run. Named here instead, and nothing is sent.
+    if (authHeader !== null && !isHeaderFieldValue(authHeader)) {
+      throw new ActionFailure(
+        `webhook_post: the Authorization header ${HEADER_FIELD_VALUE_RULE}, so nothing was sent`,
+        'webhook_header_invalid',
+      );
+    }
     if (authHeader) headers.Authorization = authHeader;
 
-    await firstValueFrom(
-      this.httpService.post(
-        url,
-        {
-          ruleId: context.ruleId,
-          ruleName: context.ruleName,
-          trigger: context.trigger,
-          triggerData: context.triggerData,
-        },
-        { headers, timeout: 10_000 },
-      ),
-    );
-    return `POST ${url}`;
+    const agents = guardedAgents(this.networkProbes.lookupAll);
+    try {
+      await firstValueFrom(
+        this.httpService.post(
+          target.url.toString(),
+          {
+            ruleId: context.ruleId,
+            ruleName: context.ruleName,
+            trigger: context.trigger,
+            triggerData: context.triggerData,
+          },
+          {
+            headers,
+            timeout: 10_000,
+            maxRedirects: 0,
+            proxy: false,
+            httpAgent: agents.httpAgent,
+            httpsAgent: agents.httpsAgent,
+          },
+        ),
+      );
+    } catch (err) {
+      const refused = agents.refusal();
+      if (refused !== null) {
+        throw new ActionFailure(
+          `webhook_post: refused to connect, because ${refused.host} resolves to ` +
+            `${describeRange(refused.range)}: ${refused.address}`,
+          'webhook_address_refused',
+          {
+            host: refused.host,
+            address: refused.address,
+            range: refused.range.cidr,
+            kind: refused.range.kind,
+          },
+        );
+      }
+      // Whatever else Node refuses in a header is named as well, never passed
+      // on raw: the check above is the one Node applies, so this is the belt
+      // to its braces.
+      if (isInvalidHeaderError(err)) {
+        throw new ActionFailure(
+          `webhook_post: a request header ${HEADER_FIELD_VALUE_RULE}, so nothing was sent`,
+          'webhook_header_invalid',
+        );
+      }
+      throw err;
+    }
+    return `POST to ${target.host}`;
   }
 
-  /** Inserts a row into `blocked_ips` for the IP carried by the trigger. */
+  /**
+   * Adds the address the rule names, or the one its trigger carries, to the IP
+   * blocklist — after the lockout check the manual screen never needed, because
+   * a person was always there.
+   *
+   * ── What changed, and why each part is here ─────────────────────────────
+   *
+   * It used to write whatever string it was handed, straight into
+   * `blocked_ips`. So a rule could list the reverse proxy's address, the
+   * cabinet's, or the address every admin signs in from — and because
+   * `BlockedIpGuard` runs before the allowlist and before sign-in, the only way
+   * back from that is an UPDATE against the database.
+   *
+   *   PARSED, AND STORED CANONICAL, like `BlockedIpService.create`. A value
+   *   that is not an address is refused by name instead of being written as a
+   *   row the guard can never match; a mapped `::ffff:1.2.3.4` is stored as the
+   *   `1.2.3.4` the guard compares.
+   *
+   *   A RANGE ONLY FROM THE RULE. A CIDR written into the rule's own `address`
+   *   was checked at save and is on the screen for anybody to read. A trigger's
+   *   payload — an event, or a manual run's body — names ONE address; a range
+   *   arriving there did not come from where it claims to, and a rule must not
+   *   widen a ban on its own (the block cascade refuses the same).
+   *
+   *   THE LOCKOUT CHECK (`BlockIpSafetyService`), with the requester's address
+   *   on a manual run — see there for everything it protects. If it cannot be
+   *   run, nothing is blocked.
+   */
   private async blockIp(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
@@ -214,12 +356,74 @@ export class AutomationActionRegistry {
     const explicit = readString(action.params, 'address');
     const fromTrigger = readString(context.triggerData, 'ip')
       ?? readString(context.triggerData, 'ipAddress');
-    const address = explicit ?? fromTrigger;
-    if (!address) throw new Error('block_ip requires `address` or trigger data with `ip`');
+    const raw = explicit ?? fromTrigger;
+    if (raw === null) {
+      throw new ActionFailure(
+        'block_ip requires `address` or trigger data with `ip`',
+        'block_address_missing',
+      );
+    }
+    const source = explicit !== null ? 'rule' : 'trigger';
+    const entry = parseBlockEntry(raw);
+    if (entry === null) {
+      throw new ActionFailure(
+        source === 'rule'
+          ? 'block_ip: the rule\'s "address" is not an IP address or CIDR range'
+          : 'block_ip: the address in the trigger data is not an IP address',
+        'block_address_invalid',
+        { source },
+      );
+    }
+    if (source === 'trigger' && entry.prefix !== (entry.family === 4 ? 32 : 128)) {
+      throw new ActionFailure(
+        'block_ip: the trigger data names a range, and a range can only be written into the rule itself',
+        'block_address_invalid',
+        { source },
+      );
+    }
     const reason = readString(action.params, 'reason')
       ?? `Automated by rule "${context.ruleName}"`;
     const expiresAtRaw = readString(action.params, 'expiresAt');
-    const expiresAt = expiresAtRaw ? new Date(expiresAtRaw) : null;
+    const expiresAt = expiresAtRaw === null ? null : new Date(expiresAtRaw);
+    if (expiresAt !== null && Number.isNaN(expiresAt.getTime())) {
+      throw new Error('block_ip: "expiresAt" is not a valid date');
+    }
+
+    const address = entry.canonical;
+    if (this.blockIpSafety === undefined) {
+      throw new ActionFailure(
+        `block_ip: the lockout check is not available here, so ${address} was not blocked`,
+        'block_address_unverified',
+        { address },
+      );
+    }
+    let refusal: BlockAddressRefusal | null;
+    try {
+      refusal = await this.blockIpSafety.refusalFor(entry, {
+        requestIp: context.manual?.requestIp ?? null,
+      });
+    } catch (err) {
+      if (!(err instanceof BlockAddressUnverifiableError)) throw err;
+      // The reason — a database sentence — goes to the log, not to the row
+      // everybody with `automations:view` reads.
+      this.logger.warn(`block_ip for rule ${context.ruleId} stood down: ${err.message}`);
+      throw new ActionFailure(
+        `block_ip: could not read the administrators' addresses, so ${address} was not blocked`,
+        'block_address_unverified',
+        { address },
+      );
+    }
+    if (refusal !== null) {
+      throw new ActionFailure(
+        `block_ip: refused to block ${address}, because it covers ${describeBlockProtection(refusal)}`,
+        'block_address_protected',
+        {
+          address,
+          protection: refusal.protection,
+          ...(refusal.range === undefined ? {} : { range: refusal.range }),
+        },
+      );
+    }
 
     await this.prismaService.blockedIp.upsert({
       where: { address },
@@ -687,9 +891,11 @@ export class AutomationActionRegistry {
   /**
    * Emit a custom event into the SystemEventsService stream.
    *
-   * `type` stays free-form on purpose: rules emit domain-specific types that
-   * downstream webhooks and other rules match on, so narrowing this to a picker
-   * over `EVENT_TYPES` would break them. Such a type cannot be registered,
+   * `type` is the rule's own name for its event — but only inside the rule's
+   * own namespace, `automation.custom` and `automation.custom.<name>`
+   * (`custom-event-type.ts`): a type of the panel's own would drive every rule,
+   * quest, e-mail, push and webhook that trusts the bus. Other rules and
+   * webhooks match on the custom name. Such a type cannot be registered,
    * presented or ticked — the operator's catch-all tick-box
    * (`UNREGISTERED_EVENTS_SENTINEL`) is what makes it deliverable in `selected`
    * mode. The DEFAULT, by contrast, is a fixed string, so it is a real
@@ -699,7 +905,17 @@ export class AutomationActionRegistry {
     action: AutomationActionDefinition,
     context: AutomationActionContext,
   ): Promise<string> {
-    const type = readString(action.params, 'type') ?? EVENT_TYPES.AUTOMATION_CUSTOM;
+    // Only the rule's OWN events (`custom-event-type.ts`): a rule saved before
+    // that was checked could still name `payment.completed`, and everything
+    // downstream would take it for a real payment. Refused, and nothing emitted.
+    const type = systemEventTypeOf(action.params);
+    if (!isCustomEventType(type)) {
+      throw new ActionFailure(
+        `system_event: ${CUSTOM_EVENT_TYPE_RULE}, so nothing was emitted`,
+        'system_event_type_refused',
+        { type },
+      );
+    }
     const message = readString(action.params, 'message') ?? `Automation "${context.ruleName}" fired`;
     const severity = readSeverity(action.params, 'severity');
     const category = readCategory(action.params, 'category');
@@ -855,6 +1071,16 @@ export function resolveTriggerUserId(
     return single.length > 0 ? single : null;
   }
   return null;
+}
+
+/** An error Node's HTTP layer raises for a header value, bare or wrapped by axios. */
+function isInvalidHeaderError(err: unknown): boolean {
+  for (let current: unknown = err, depth = 0; current !== null && current !== undefined && depth < 3; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && INVALID_HEADER_ERROR_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 function readString(params: Readonly<Record<string, unknown>>, key: string): string | null {

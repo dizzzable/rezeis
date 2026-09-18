@@ -13,8 +13,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import * as SelectPrimitive from '@radix-ui/react-select';
 import {
   BookOpen,
+  Check,
   CheckCircle2,
   ChevronDown,
   Clock,
@@ -66,7 +68,15 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { listUserHints } from '@/features/user-hints/user-hints-api';
+import {
+  actionsNeedingPermission,
+  permissionList,
+  useMissingActionPermissions,
+  type ActionPermissionMap,
+  type PermissionRef,
+} from './action-permissions';
 import { ArrivalTemplateCard } from './arrival-template-card';
+import { translateAutomationError } from './automation-errors';
 import { findHintCollisionsWithCompanions } from './hint-collision';
 import { getEventCatalog } from './event-catalog-api';
 import { ACTION_LABEL_KEYS, actionLabel } from './rule-action-labels';
@@ -80,11 +90,13 @@ import {
 import { RuleCompanionsNotice } from './rule-companions-notice';
 import { RuleHintWarnings } from './rule-hint-warnings';
 import { RuleRunDialog } from './rule-run-dialog';
+import { isUrlHidden, paramsWithHeaderKept, paramsWithoutHeader, savedUrlFor } from './saved-header';
 import { actionResultText, executionLogNote, runHadNoAnswer, runToastText } from './run-result-copy';
 import { ExecutionStatusBadge } from './run-status-badge';
 import { TriggerCatalogHint } from './trigger-catalog-hint';
 import { TriggerMapCard } from './trigger-map-card';
 import { useRuleDraft } from './use-rule-draft';
+import { WebhookHeaderField } from './webhook-header-field';
 import { useTabSync } from '@/lib/use-tab-sync';
 import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
@@ -162,15 +174,11 @@ const RULE_TEMPLATES: readonly RuleTemplate[] = [
     triggerSpec: 'payment.failed',
     buildActions: (text) => [{ type: 'notify_telegram', params: { text: text('automationsPage.templates.payment_failed_notify.message') } }],
   },
-  {
-    id: 'fraud_block_ip',
-    triggerKind: 'REALTIME',
-    triggerSpec: 'fraud.signal_opened',
-    buildActions: (text) => [
-      { type: 'block_ip', params: {} },
-      { type: 'notify_telegram', params: { text: text('automationsPage.templates.fraud_block_ip.message') } },
-    ],
-  },
+  // «Антифрод → блок IP + Telegram» was here, and it could never work: it
+  // blocked «the address the event carries», and `fraud.signal_opened` carries
+  // none — no event does (see `assertBlockAddressAvailable` on the panel). Every
+  // rule made from it failed «no address» on every signal, so it is retired
+  // rather than offered.
   {
     id: 'node_down_notify',
     triggerKind: 'REALTIME',
@@ -223,6 +231,10 @@ export default function AutomationsPage() {
     queryFn: getCatalog,
     staleTime: 5 * 60 * 1000,
   });
+  // What each action needs beyond the automations permissions — the server's
+  // own map, so the page greys out exactly what a save, the switch and a run
+  // would be refused for (`action-permissions.ts`).
+  const actionPermissions = catalogQuery.data?.actionPermissions;
 
   // (see `editorTarget` below — the selection and the open draft are one state)
   // THE UNSAVED DRAFT LIVES HERE, not in the query cache.
@@ -572,13 +584,18 @@ export default function AutomationsPage() {
           onUseTemplate={useTemplate}
           onUseHintTemplate={(plan) => applyHintTemplate.mutate(plan)}
           hintTemplatePending={applyHintTemplate.isPending}
+          actionPermissions={actionPermissions}
         />
       )}
 
       {activeTab === 'rules' && rulesQuery.error && (
         <Alert variant="destructive">
           <AlertTitle>{t('automationsPage.errors.title')}</AlertTitle>
-          <AlertDescription>{t('automationsPage.errors.loadRules')}</AlertDescription>
+          {/* The reason as well as the fact: a 403 and a dead backend are
+              different things to go and fix. */}
+          <AlertDescription>
+            {t('automationsPage.errors.loadRules')} {translateAutomationError(t, rulesQuery.error)}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -587,6 +604,7 @@ export default function AutomationsPage() {
         <RuleList
           rules={rulesQuery.data ?? []}
           loading={rulesQuery.isLoading}
+          actionPermissions={actionPermissions}
           selectedId={selectedId}
           onSelect={(id) => setEditorTarget((current) => ({ ...current, selectedId: id }))}
           onToggle={(id, enabled) => {
@@ -610,10 +628,23 @@ export default function AutomationsPage() {
                 // the one control an operator reaches for while something is
                 // already going wrong, and `getErrorMessage` handed them the
                 // server's English — 'Rule not found', 'Forbidden resource' —
-                // under a Russian interface.
-                toast.error(translateApiError(t, err));
+                // under a Russian interface. Switching ON is checked like a
+                // save now, so its refusals name a permission, a condition or
+                // an address; `translateAutomationError` says which.
+                // Named: the list holds many switches, and the toast outlives
+                // the moment the operator knew which one they pressed.
+                const name = rulesQuery.data?.find((rule) => rule.id === id)?.name ?? id;
+                toast.error(
+                  t('automationsPage.toast.toggleFailed', { name, message: translateAutomationError(t, err) }),
+                );
                 // Refetch to revert any optimistic Switch UI back to source of truth.
                 queryClient.invalidateQueries({ queryKey: RULES_KEY });
+                // 409: the rule changed between the check and the switch. The
+                // editor open on it reloads it too, so what the operator decides
+                // on next is what the rule now holds.
+                if ((err as { response?: { status?: number } } | null)?.response?.status === 409) {
+                  void queryClient.invalidateQueries({ queryKey: ['admin', 'automations', 'rule', id], exact: true });
+                }
               });
           }}
         />
@@ -634,6 +665,7 @@ export default function AutomationsPage() {
             ruleId={selectedId}
             draftSeed={selectedId === NEW_RULE_ID ? draftSeed : null}
             actionCatalog={catalogQuery.data?.actionTypes ?? []}
+            actionPermissions={actionPermissions}
             onSaved={(rule, { created, fromId, fromSeed }) => {
               // THE ANSWER TO A SAVE IS THE RULE AS SAVED, so it becomes this
               // rule's copy. Refreshing only the list left the copy read BEFORE
@@ -701,13 +733,19 @@ function HelpAndTemplates({
   onUseTemplate,
   onUseHintTemplate,
   hintTemplatePending,
+  actionPermissions,
 }: {
   onUseTemplate: (template: RuleTemplate) => void;
   onUseHintTemplate: (plan: HintTemplatePlan) => void;
   hintTemplatePending: boolean;
+  actionPermissions: ActionPermissionMap | undefined;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  // A template whose actions this role could never save opens nothing: the
+  // draft it would open cannot be created, and the operator would find out
+  // only on «Создать».
+  const missingFor = useMissingActionPermissions(actionPermissions);
 
   const steps = ['trigger', 'condition', 'action'] as const;
   const triggerKinds = ['realtime', 'cron', 'manual'] as const;
@@ -799,21 +837,44 @@ function HelpAndTemplates({
                 {t('automationsPage.help.templatesTitle')}
               </p>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {RULE_TEMPLATES.map((tpl) => (
-                  <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
-                    <p className="text-xs font-medium">{t(`automationsPage.templates.${tpl.id}.name`)}</p>
-                    <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
-                      {t(`automationsPage.templates.${tpl.id}.description`)}
-                    </p>
-                    <code className="mb-2 truncate text-[10px] text-muted-foreground">{tpl.triggerSpec}</code>
-                    <ButtonTip tip={t('automationsPage.tips.useRuleTemplate')} className="flex [&>*]:flex-1">
-                      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => onUseTemplate(tpl)}>
-                        <Plus className="mr-1.5 h-3.5 w-3.5" />
-                        {t('automationsPage.help.useTemplate')}
-                      </Button>
-                    </ButtonTip>
-                  </div>
-                ))}
+                {RULE_TEMPLATES.map((tpl) => {
+                  // Only the TYPES matter here, so the texts are left as keys.
+                  const templateActions = tpl.buildActions((key) => key);
+                  const missing = missingFor(templateActions);
+                  const blocked = missing.length > 0;
+                  return (
+                    <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
+                      <p className="text-xs font-medium">{t(`automationsPage.templates.${tpl.id}.name`)}</p>
+                      <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
+                        {t(`automationsPage.templates.${tpl.id}.description`)}
+                      </p>
+                      <code className="mb-2 truncate text-[10px] text-muted-foreground">{tpl.triggerSpec}</code>
+                      <ButtonTip
+                        tip={
+                          blocked
+                            ? t('automationsPage.tips.templateNeedsPermission', {
+                                actions: actionsNeedingPermission(t, templateActions, missingFor),
+                                permissions: permissionList(t, missing),
+                              })
+                            : t('automationsPage.tips.useRuleTemplate')
+                        }
+                        disabled={blocked}
+                        className="flex [&>*]:flex-1"
+                      >
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={blocked}
+                          onClick={() => onUseTemplate(tpl)}
+                        >
+                          <Plus className="mr-1.5 h-3.5 w-3.5" />
+                          {t('automationsPage.help.useTemplate')}
+                        </Button>
+                      </ButtonTip>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -906,17 +967,23 @@ function HelpAndTemplates({
 function RuleList({
   rules,
   loading,
+  actionPermissions,
   selectedId,
   onSelect,
   onToggle,
 }: {
   rules: AutomationRule[];
   loading: boolean;
+  actionPermissions: ActionPermissionMap | undefined;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggle: (id: string, isEnabled: boolean) => void;
 }) {
   const { t } = useTranslation();
+  // Switching a rule ON asks the admin for every permission its actions need;
+  // switching it OFF asks for nothing. So the switch of a rule that is off, and
+  // that this role could not switch on, is held — and says why.
+  const missingFor = useMissingActionPermissions(actionPermissions);
   if (loading) {
     return (
       <Card>
@@ -938,6 +1005,8 @@ function RuleList({
         ) : (
           rules.map((rule) => {
             const active = rule.id === selectedId;
+            const missing = rule.isEnabled ? [] : missingFor(rule.actions);
+            const switchOnBlocked = missing.length > 0;
             return (
               <div
                 key={rule.id}
@@ -973,10 +1042,21 @@ function RuleList({
                   </p>
                 </button>
                 <div className="flex items-center pr-3">
-                  <ButtonTip tip={t('automationsPage.tips.listToggle')}>
+                  <ButtonTip
+                    tip={
+                      switchOnBlocked
+                        ? t('automationsPage.tips.listToggleNeedsPermission', {
+                            actions: actionsNeedingPermission(t, rule.actions, missingFor),
+                            permissions: permissionList(t, missing),
+                          })
+                        : t('automationsPage.tips.listToggle')
+                    }
+                    disabled={switchOnBlocked}
+                  >
                     <Switch
                       checked={rule.isEnabled}
                       onCheckedChange={(v) => onToggle(rule.id, v)}
+                      disabled={switchOnBlocked}
                       aria-label={t('automationsPage.list.toggleAria', { name: rule.name })}
                     />
                   </ButtonTip>
@@ -995,6 +1075,8 @@ interface RuleEditorProps {
   /** The unsaved draft and its companions, when `ruleId` is `NEW_RULE_ID`. */
   draftSeed: DraftSeed | null;
   actionCatalog: readonly AutomationActionType[];
+  /** What each action needs beyond the automations permissions; see `action-permissions.ts`. */
+  actionPermissions: ActionPermissionMap | undefined;
   onSaved: (
     rule: AutomationRule,
     outcome: {
@@ -1050,6 +1132,7 @@ function RuleEditorBody({
   load,
   draftSeed,
   actionCatalog,
+  actionPermissions,
   onSaved,
   onDeleted,
   onDropCompanions,
@@ -1058,6 +1141,10 @@ function RuleEditorBody({
   const isNew = ruleId === NEW_RULE_ID;
   const queryClient = useQueryClient();
   const mayRun = useHasPermission('automations', 'run');
+  // What the rule's actions need beyond the automations permissions, of this
+  // admin: the server asks it on «Сохранить», on the switch and on «Запустить
+  // сейчас», and the buttons say so before the press rather than after it.
+  const missingFor = useMissingActionPermissions(actionPermissions);
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [runConfirmOpen, setRunConfirmOpen] = useState(false);
   // Where keyboard focus goes when the run dialog closes: back to the button it
@@ -1131,7 +1218,7 @@ function RuleEditorBody({
                 .map((c) =>
                   t('automationsPage.toast.ruleFailed', {
                     name: c.name,
-                    message: translateApiError(t, c.error),
+                    message: translateAutomationError(t, c.error),
                   }),
                 )
                 .join('; '),
@@ -1142,7 +1229,7 @@ function RuleEditorBody({
       // The created draft is opened whatever became of its companions.
       onSaved(rule, { created: isNew, fromId: ruleId, fromSeed: seedAtPress });
     },
-    // `translateApiError`, not `.message` and not `getErrorMessage`.
+    // `translateAutomationError`, not `.message` and not `getErrorMessage`.
     //
     // An axios rejection's own message for a non-2xx is the literal string
     // "Request failed with status code 400", and the interceptor re-rejects the
@@ -1158,10 +1245,15 @@ function RuleEditorBody({
     // right order — the server's sentence first, then transport copy naming the
     // connection and the reverse proxy, then the generic — and looks the
     // server's own sentence up in the dictionary on the way past.
+    //
+    // `translateAutomationError` goes first for the refusals a save now meets
+    // that carry values — the permission an action needs, where the conditions
+    // went wrong, what a URL or an address points at — and hands everything
+    // else to `translateApiError` as before.
     onError: (err) =>
       toast.error(
         t('automationsPage.toast.saveFailed', {
-          message: translateApiError(t, err),
+          message: translateAutomationError(t, err),
         }),
       ),
   });
@@ -1175,7 +1267,7 @@ function RuleEditorBody({
     onError: (err) =>
       toast.error(
         t('automationsPage.toast.deleteFailed', {
-          message: translateApiError(t, err),
+          message: translateAutomationError(t, err),
         }),
       ),
   });
@@ -1206,7 +1298,7 @@ function RuleEditorBody({
       }
       toast.error(
         t('automationsPage.toast.runFailed', {
-          message: translateApiError(t, err),
+          message: translateAutomationError(t, err),
         }),
       );
     },
@@ -1224,7 +1316,7 @@ function RuleEditorBody({
             <Alert variant="destructive">
               <AlertTitle>{t('automationsPage.errors.title')}</AlertTitle>
               <AlertDescription className="space-y-3">
-                <p>{translateApiError(t, load.error)}</p>
+                <p>{translateAutomationError(t, load.error)}</p>
                 <Button variant="outline" size="sm" onClick={() => void load.refetch()}>
                   {t('common.retry')}
                 </Button>
@@ -1258,7 +1350,13 @@ function RuleEditorBody({
   // nobody, so its «Запустить сейчас» asks whom to run it for. Read off the
   // SAVED rule: the run executes what is on the server, not the draft.
   const runAsksForCustomer = !isNew && rule.actions.some((action) => action.type === 'show_hint');
-  const runBlocked = !mayRun || runMutation.isPending;
+  // Read off the SAVED rule, like the two above: the run executes what is on
+  // the server, and the server asks this admin for every action's permission.
+  const runMissing = isNew ? [] : missingFor(rule.actions);
+  const runBlocked = !mayRun || runMissing.length > 0 || runMutation.isPending;
+  // The DRAFT's actions: «Сохранить» sends them, and the server asks for the
+  // permission of every one — a kept action as much as an added one.
+  const saveMissing = missingFor(draft.actions);
   // ── «Запустить сейчас» ON A RULE THAT IS SWITCHED OFF ────────────────────
   //
   // A manual run IGNORES the switch (the executor stopped grading such a run
@@ -1317,11 +1415,16 @@ function RuleEditorBody({
                 tip={
                   !mayRun
                     ? t('automationsPage.tips.runNowForbidden')
-                    : runAsksForCustomer
-                      ? t('automationsPage.tips.runNowDialog')
-                      : runNeedsConfirming
-                        ? t('automationsPage.tips.runNowOffConfirm')
-                        : t('automationsPage.tips.runNow')
+                    : runMissing.length > 0
+                      ? t('automationsPage.tips.runNowNeedsPermission', {
+                          actions: actionsNeedingPermission(t, rule.actions, missingFor),
+                          permissions: permissionList(t, runMissing),
+                        })
+                      : runAsksForCustomer
+                        ? t('automationsPage.tips.runNowDialog')
+                        : runNeedsConfirming
+                          ? t('automationsPage.tips.runNowOffConfirm')
+                          : t('automationsPage.tips.runNow')
                 }
                 disabled={runBlocked}
               >
@@ -1416,17 +1519,22 @@ function RuleEditorBody({
               tip={
                 audienceMissing
                   ? t('automationsPage.tips.saveNeedsAudience')
-                  : isNew
-                    ? companions.length > 0
-                      ? t('automationsPage.tips.createWithCompanions')
-                      : t('automationsPage.tips.create')
-                    : t('automationsPage.tips.save')
+                  : saveMissing.length > 0
+                    ? t('automationsPage.tips.saveNeedsPermission', {
+                        actions: actionsNeedingPermission(t, draft.actions, missingFor),
+                        permissions: permissionList(t, saveMissing),
+                      })
+                    : isNew
+                      ? companions.length > 0
+                        ? t('automationsPage.tips.createWithCompanions')
+                        : t('automationsPage.tips.create')
+                      : t('automationsPage.tips.save')
               }
-              disabled={saveMutation.isPending || audienceMissing}
+              disabled={saveMutation.isPending || audienceMissing || saveMissing.length > 0}
             >
               <Button
                 onClick={() => saveMutation.mutate()}
-                disabled={saveMutation.isPending || audienceMissing}
+                disabled={saveMutation.isPending || audienceMissing || saveMissing.length > 0}
               >
                 {saveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {isNew ? t('automationsPage.editor.create') : t('automationsPage.editor.save')}
@@ -1493,7 +1601,9 @@ function RuleEditorBody({
               draft={draft}
               setDraft={setDraft}
               actionCatalog={actionCatalog}
+              missingFor={missingFor}
               ruleId={isNew ? undefined : ruleId}
+              savedActions={isNew ? [] : rule.actions}
               companions={companions}
               disabled={saving}
             />
@@ -1513,15 +1623,21 @@ function ConfigEditor({
   draft,
   setDraft,
   actionCatalog,
+  missingFor,
   ruleId,
+  savedActions,
   companions,
   disabled,
 }: {
   draft: UpsertRulePayload;
   setDraft: (next: UpsertRulePayload) => void;
   actionCatalog: readonly AutomationActionType[];
+  /** The permissions actions need that this admin lacks; see `action-permissions.ts`. */
+  missingFor: (actions: ReadonlyArray<{ readonly type: string }>) => PermissionRef[];
   /** Undefined for an unsaved draft — it cannot collide with itself. */
   ruleId?: string;
+  /** The actions as SAVED — what a kept header's reference names. Empty for a draft. */
+  savedActions: readonly AutomationActionDef[];
   /** The companion rules «Создать» saves with this draft, each on its own event. */
   companions: readonly DraftCompanion[];
   /** True while the rule is being saved: every control here takes no input. */
@@ -1694,7 +1810,9 @@ function ConfigEditor({
 
       <ActionsEditor
         actions={draft.actions}
+        savedActions={savedActions}
         actionCatalog={actionCatalog}
+        missingFor={missingFor}
         onChange={(actions) => setDraft({ ...draft, actions })}
         triggerKind={draft.triggerKind}
         triggerSpec={draft.triggerSpec}
@@ -1789,7 +1907,9 @@ function HintCollisionNotice({
 
 function ActionsEditor({
   actions,
+  savedActions,
   actionCatalog,
+  missingFor,
   onChange,
   triggerKind,
   triggerSpec,
@@ -1797,7 +1917,11 @@ function ActionsEditor({
   disabled,
 }: {
   actions: AutomationActionDef[];
+  /** The actions as saved: a kept `Authorization` header may not leave its saved URL's origin. */
+  savedActions: readonly AutomationActionDef[];
   actionCatalog: readonly AutomationActionType[];
+  /** The permissions actions need that this admin lacks: such a type is offered greyed out, with why. */
+  missingFor: (actions: ReadonlyArray<{ readonly type: string }>) => PermissionRef[];
   onChange: (actions: AutomationActionDef[]) => void;
   /** The draft's trigger: the warnings under a hint picker compare the hint with it. */
   triggerKind: AutomationTriggerKind;
@@ -1825,9 +1949,12 @@ function ActionsEditor({
     onChange(actions.filter((_, i) => i !== idx));
   }
   function add() {
+    // The first type this admin may actually save — a new action that would
+    // only ever grey out «Сохранить» is not a starting point.
+    const allowed = actionCatalog.find((type) => missingFor([{ type }]).length === 0);
     onChange([
       ...actions,
-      { type: actionCatalog[0] ?? 'notify_telegram', params: {} },
+      { type: allowed ?? actionCatalog[0] ?? 'notify_telegram', params: {} },
     ]);
   }
 
@@ -1880,11 +2007,27 @@ function ActionsEditor({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {actionCatalog.map((type) => (
-                      <SelectItem key={type} value={type}>
-                        {ACTION_LABEL_KEYS[type] ? t(ACTION_LABEL_KEYS[type]) : type}
-                      </SelectItem>
-                    ))}
+                    {actionCatalog.map((type) => {
+                      const label = ACTION_LABEL_KEYS[type] ? t(ACTION_LABEL_KEYS[type]) : type;
+                      const missing = missingFor([{ type }]);
+                      if (missing.length === 0) {
+                        return (
+                          <SelectItem key={type} value={type}>
+                            {label}
+                          </SelectItem>
+                        );
+                      }
+                      return (
+                        <ForbiddenActionItem
+                          key={type}
+                          value={type}
+                          label={label}
+                          reason={t('automationsPage.tips.actionNeedsPermission', {
+                            permissions: permissionList(t, missing),
+                          })}
+                        />
+                      );
+                    })}
                   </SelectContent>
                 </Select>
                 {/* What the SELECTED type does — the guide's sentence for it. */}
@@ -2005,11 +2148,17 @@ function ActionsEditor({
                   )}
                 </div>
               ) : (
+              <>
+              {/* WITHOUT THE HEADER. `authorizationHeader` is write-only: the
+                  panel sends a reference in its place, which this box must
+                  neither show nor let anyone retype (`saved-header.ts`). The
+                  field below holds it; an edit here puts it back unchanged. */}
               <Textarea
-                value={JSON.stringify(action.params ?? {}, null, 2)}
+                value={JSON.stringify(paramsWithoutHeader(action.params), null, 2)}
                 onChange={(e) => {
                   try {
-                    update(idx, { ...action, params: JSON.parse(e.target.value) as Record<string, unknown> });
+                    const typed = JSON.parse(e.target.value) as Record<string, unknown>;
+                    update(idx, { ...action, params: paramsWithHeaderKept(typed, action.params) });
                   } catch {
                     // Keep last valid params; a parse error mid-typing
                     // would otherwise discard the user's input.
@@ -2020,6 +2169,23 @@ function ActionsEditor({
                 placeholder={t('automationsPage.config.examplePlaceholder', { example: '{ "text": "Hello" }' })}
                 disabled={disabled}
               />
+              {action.type === 'webhook_post' && isUrlHidden(action.params) && (
+                <p className="text-xs text-muted-foreground">{t('automationsPage.actions.urlHidden')}</p>
+              )}
+              {action.type === 'webhook_post' && (
+                <WebhookHeaderField
+                  id={`${idPrefix}-header-${idx}`}
+                  value={action.params?.authorizationHeader}
+                  position={idx}
+                  url={action.params?.url}
+                  savedUrl={savedUrlFor(action.params?.authorizationHeader, savedActions)}
+                  disabled={disabled}
+                  onChange={(next) =>
+                    update(idx, { ...action, params: { ...action.params, authorizationHeader: next } })
+                  }
+                />
+              )}
+              </>
               )}
             </CardContent>
           </Card>
@@ -2027,6 +2193,35 @@ function ActionsEditor({
         })
       )}
     </div>
+  );
+}
+
+/**
+ * An action type this admin may not save, offered all the same — greyed out and
+ * unpickable, with the reason on hover (the item's `title`) and in words under
+ * its name, so a keyboard, a screen reader and a phone get it too.
+ *
+ * Only the name is the `ItemText`, which is what the picker shows for a chosen
+ * value: a rule that already holds such an action shows the action's name, not
+ * the sentence. Radix skips a disabled item for pointer and keyboard selection
+ * alike, so the only way into this type is a rule that already had it.
+ */
+function ForbiddenActionItem({ value, label, reason }: { value: string; label: string; reason: string }) {
+  return (
+    <SelectPrimitive.Item
+      value={value}
+      disabled
+      title={reason}
+      className="relative flex w-full cursor-not-allowed select-none flex-col items-start rounded-sm py-1.5 pl-8 pr-2 text-sm opacity-60 outline-none"
+    >
+      <span className="absolute left-2 top-2 flex h-3.5 w-3.5 items-center justify-center">
+        <SelectPrimitive.ItemIndicator>
+          <Check className="h-4 w-4" />
+        </SelectPrimitive.ItemIndicator>
+      </span>
+      <SelectPrimitive.ItemText>{label}</SelectPrimitive.ItemText>
+      <span className="mt-0.5 text-xs text-muted-foreground">{reason}</span>
+    </SelectPrimitive.Item>
   );
 }
 

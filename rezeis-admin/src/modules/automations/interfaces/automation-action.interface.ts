@@ -58,6 +58,13 @@ export interface AutomationManualRun {
    * hint that does not repeat. For this run only.
    */
   readonly showAgain: boolean;
+  /**
+   * The address the run was requested from, resolved the way `BlockedIpGuard`
+   * resolves it. `block_ip` refuses to block it — the manual blocklist screen's
+   * own self-lockout check, carried to the one other place an operator chooses
+   * an address by hand. Absent or `null` when it could not be derived.
+   */
+  readonly requestIp?: string | null;
 }
 
 /**

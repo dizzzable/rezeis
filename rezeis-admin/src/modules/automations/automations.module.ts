@@ -12,6 +12,12 @@ import { AutomationProcessor } from './automation.processor';
 import { AutomationQueueService } from './automation-queue.service';
 import { AutomationsController } from './automations.controller';
 import { AutomationsService } from './automations.service';
+import {
+  AUTOMATION_NETWORK_PROBES,
+  SYSTEM_NETWORK_PROBES,
+} from './services/automation-network-probes';
+import { AutomationRuleAccessService } from './services/automation-rule-access.service';
+import { BlockIpSafetyService } from './services/block-ip-safety.service';
 import { EventCatalogService } from './services/event-catalog.service';
 import { AUTOMATION_QUEUE } from './automations.constants';
 
@@ -52,6 +58,11 @@ import { AUTOMATION_QUEUE } from './automations.constants';
     AutomationProcessor,
     AutomationEventBridgeService,
     EventCatalogService,
+    // The permission every action in a rule needs (`RbacService` is global),
+    // and the two safety checks the actions that name an address run.
+    AutomationRuleAccessService,
+    BlockIpSafetyService,
+    { provide: AUTOMATION_NETWORK_PROBES, useValue: SYSTEM_NETWORK_PROBES },
   ],
   exports: [AutomationsService, AutomationQueueService],
 })

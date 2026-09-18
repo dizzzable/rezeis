@@ -3,11 +3,13 @@ import {
   Injectable,
   Logger,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 
 import { LegalDocumentKey, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { requiredActionPermissions } from '../../automations/automation-action-permissions';
 import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import {
   LEGAL_DOCUMENT_KEYS,
@@ -331,7 +333,9 @@ export class ConfigImportService {
     // followed by `.length > 0` also passed for a non-array `sections.roles`
     // (a string has a length), and a section the manifest check refuses
     // must not arm the gate either.
-    const missing = collectMissingSectionPermissions(plan, input.importerPermissions);
+    const missing = collectMissingSectionPermissions(plan, input.importerPermissions, {
+      automationActionsInPlace: await this.readAutomationActionsInPlace(plan, input.strategy),
+    });
     if (missing.length > 0) {
       throw new BadRequestException(
         `Importing these sections requires permissions this admin does not hold: ${missing
@@ -703,6 +707,61 @@ export class ConfigImportService {
    * See `sanitiseImportedRole`. Kept as a method-adjacent note because this is
    * the one section whose rows describe AUTHORITY rather than configuration.
    */
+  /**
+   * The `actions` of the destination's rules that an overwrite of the
+   * `automations` section would change WITHOUT replacing their actions.
+   *
+   * ── Why the destination's rules are asked about at all ──────────────────
+   *
+   * `stripRelationFields` drops a top-level JSON list of objects, so an
+   * imported rule's `actions` never reach the database: a created rule gets
+   * the column default, and an UPDATED one keeps the actions it has. Every
+   * other column of that row IS written — `isEnabled`, the trigger, the
+   * conditions. So a file whose rule carries no actions at all can still
+   * switch on, or re-aim, a rule of the destination that blocks addresses or
+   * posts event data out, and the rule then does that as the system.
+   *
+   * Switching a rule on or re-aiming it through the panel demands every one of
+   * its actions' permissions (`AutomationRuleAccessService`); this makes the
+   * import demand them too. `skip` touches no existing row, so it reads none.
+   *
+   * Read through a transaction, which every Prisma double in the import specs
+   * already models. A read that fails refuses the whole import: nothing has
+   * been written yet, and an unchecked import is the thing being refused.
+   */
+  private async readAutomationActionsInPlace(
+    plan: readonly SectionPlanEntryInterface[],
+    strategy: ImportStrategy,
+  ): Promise<readonly unknown[]> {
+    if (strategy !== 'overwrite') return [];
+    const entry = plan.find((item) => item.section === 'automations' && item.status === 'imported');
+    // A row that is not an object carries no id to look up: the section's own
+    // run turns it into a `failed` or `skipped` row, as it always has. Reading
+    // `null['id']` HERE threw outside that run's catch and failed the whole
+    // import — its dry run too.
+    const ids = (entry?.rows ?? [])
+      .map((row: unknown) => (isObjectRow(row) ? row['id'] : undefined))
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (ids.length === 0) return [];
+    try {
+      return await this.prismaService.$transaction(async (tx) => {
+        const found: unknown[] = [];
+        for (const id of ids) {
+          const row = await tx.automationRule.findUnique({ where: { id }, select: { actions: true } });
+          if (row !== null) found.push(row.actions);
+        }
+        return found;
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Could not read the automation rules an import would change: ${(err as Error).message}`,
+      );
+      throw new ServiceUnavailableException(
+        'Could not read the automation rules this import would change, so nothing was imported; try again',
+      );
+    }
+  }
+
   private async upsertById(
     delegate: GenericPrismaDelegate,
     rows: Array<Record<string, unknown>>,
@@ -968,6 +1027,13 @@ export interface MissingSectionPermissionInterface {
 export function collectMissingSectionPermissions(
   plan: readonly SectionPlanEntryInterface[],
   importerPermissions: ReadonlySet<string>,
+  context: {
+    /**
+     * The `actions` of destination rules the import would change in place —
+     * see `ConfigImportService.readAutomationActionsInPlace`.
+     */
+    readonly automationActionsInPlace?: readonly unknown[];
+  } = {},
 ): readonly MissingSectionPermissionInterface[] {
   const missing: MissingSectionPermissionInterface[] = [];
   for (const entry of plan) {
@@ -978,13 +1044,46 @@ export function collectMissingSectionPermissions(
     // only way to say "no extra gate", and it has to be typed out. Widen the
     // map back to `Partial<>` and this line stops compiling under
     // `strictNullChecks` instead of quietly skipping the gate again.
-    const required = SECTION_REQUIRED_PERMISSIONS[entry.section];
+    //
+    // `automations` needs more than its own two tokens: the permission of
+    // every ACTION a rule it writes will hold, exactly as the panel's own save
+    // asks for it (`automation-action-permissions.ts`). Both the actions in
+    // the file — should that column ever start being imported — and the ones
+    // an overwrite leaves in place on the rules it re-aims or switches on.
+    const required =
+      entry.section === 'automations'
+        ? [
+            ...SECTION_REQUIRED_PERMISSIONS.automations,
+            ...automationActionTokens([
+              // Only an object row has actions to ask about; anything else is
+              // left to the section's own run (see `readAutomationActionsInPlace`).
+              ...entry.rows.map((row: unknown) => (isObjectRow(row) ? row['actions'] : undefined)),
+              ...(context.automationActionsInPlace ?? []),
+            ]),
+          ].filter((token, index, all) => all.indexOf(token) === index)
+        : SECTION_REQUIRED_PERMISSIONS[entry.section];
     const absent = required.filter((token) => !importerPermissions.has(token));
     if (absent.length > 0) {
       missing.push({ section: entry.section, tokens: absent });
     }
   }
   return missing;
+}
+
+/** A payload row the gate may read fields from: a plain object, never null or a list. */
+function isObjectRow(row: unknown): row is Record<string, unknown> {
+  return typeof row === 'object' && row !== null && !Array.isArray(row);
+}
+
+/** Every action permission these `actions` lists need, once each, in first-seen order. */
+function automationActionTokens(actionLists: readonly unknown[]): string[] {
+  const tokens: string[] = [];
+  for (const actions of actionLists) {
+    for (const entry of requiredActionPermissions(actions)) {
+      if (!tokens.includes(entry.token)) tokens.push(entry.token);
+    }
+  }
+  return tokens;
 }
 
 /**

@@ -2317,6 +2317,28 @@ export const ru = {
     'MANUAL triggers must have an empty triggerSpec':
       'У ручного триггера поле события должно быть пустым.',
     'Rule not found': 'Правило не найдено — возможно, его удалили в другой вкладке.',
+    // Включение правила, чьи сохранённые действия — не список (такое может
+    // оставить импорт): переключатель проверяет правило так же, как сохранение.
+    'Actions must be a list': 'Правило повреждено: его действия — не список. Откройте его, заново добавьте действия и сохраните — или удалите.',
+    // Куда панель вебхук не отправляет и почему: причина, которую сервер
+    // называет при отказе в URL подписки и пишет в журнал отказанной
+    // доставки. Её читает по форме `features/webhooks/webhook-refusals.ts` —
+    // в предложениях есть адрес, ключами здесь они быть не могут. Плоско,
+    // потому что каждое значение этой таблицы — строка. Названия диапазонов
+    // повторяют серверную таблицу в `common/net/outbound-url.ts`.
+    webhookRefusedSave: 'Панель не отправляет вебхуки на этот адрес: {{problem}}.',
+    webhookRefusedDelivery: 'Не отправлено: {{problem}}.',
+    webhookRefusedResolved: 'Не отправлено: {{host}} указывает на {{kind}} ({{address}}), а туда панель вебхуки не отправляет.',
+    webhookUrlPointsAt: 'URL указывает на {{kind}} ({{range}})',
+    webhookUrlLocalhost: 'URL указывает на саму эту машину (localhost)',
+    webhookUrlMetadataName: 'URL указывает на сервис метаданных облака',
+    webhookRange_unspecified: 'неопределённый адрес',
+    webhookRange_loopback: 'адрес loopback',
+    webhookRange_link_local: 'link-local адрес, где отвечают сервисы метаданных облака',
+    webhookRange_multicast: 'multicast-адрес',
+    webhookRange_reserved: 'зарезервированный адрес',
+    webhookRange_cloud_metadata: 'адрес сервиса метаданных облака',
+    webhookRange_unknown: 'адрес, на который панель вебхуки не отправляет',
     // Три отказа про подсказки. Ключ — предложение сервера целиком, символ в
     // символ: одна лишняя запятая, и оператор увидит английский текст.
     'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger':

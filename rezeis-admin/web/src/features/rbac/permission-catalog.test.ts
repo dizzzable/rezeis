@@ -241,7 +241,6 @@ describe('the role editor catalog against the backend', () => {
         'admins:edit',
         'api_tokens:delete',
         'auth_providers:edit',
-        'automations:run',
         'blocked_ips:create',
         'config_portability:import',
         'external_auth:edit',
@@ -251,8 +250,6 @@ describe('the role editor catalog against the backend', () => {
         'settings:edit',
         // SECRETS
         'api_tokens:create',
-        'automations:create',
-        'automations:edit',
         'backups:create',
         'backups:export',
         'config_portability:export',

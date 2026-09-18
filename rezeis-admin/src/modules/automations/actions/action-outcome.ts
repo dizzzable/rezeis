@@ -22,7 +22,20 @@ export type AutomationActionResultCode =
   | 'audience_queued'
   | 'audience_partial'
   | 'audience_empty'
-  | 'audience_blind';
+  | 'audience_blind'
+  // block_ip — every way it declines to write an entry
+  | 'block_address_missing'
+  | 'block_address_invalid'
+  | 'block_address_protected'
+  | 'block_address_unverified'
+  // webhook_post — the URL refused before a socket was opened, and the address
+  // refused at the moment of connecting
+  | 'webhook_url_refused'
+  | 'webhook_address_refused'
+  // webhook_post — a header value Node's HTTP layer would refuse
+  | 'webhook_header_invalid'
+  // system_event — a type that is not the rule's own (`custom-event-type.ts`)
+  | 'system_event_type_refused';
 
 /**
  * What a handler answers when it did not fail.

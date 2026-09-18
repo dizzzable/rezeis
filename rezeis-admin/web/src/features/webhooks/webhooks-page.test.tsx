@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
+import { i18n } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 import WebhooksPage from './webhooks-page'
 import {
@@ -90,5 +91,77 @@ describe('WebhooksPage accessibility', () => {
       expect(deleteWebhookSubscription).toHaveBeenCalledWith('webhook-1')
     })
     expect(confirmSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('where the panel does not send a webhook, on this page', () => {
+  // Russian, because the reason arrives in English and the point is that the
+  // operator reads it in their own language.
+  beforeEach(async () => {
+    vi.mocked(getWebhookEventCatalog).mockResolvedValue([])
+    vi.mocked(listWebhookSubscriptions).mockResolvedValue({ items: [], total: 0 })
+    await i18n.changeLanguage('ru')
+  })
+
+  afterEach(async () => {
+    // Unmount first: switching the language back under a mounted page
+    // re-renders it outside `act`.
+    cleanup()
+    await i18n.changeLanguage('en')
+    vi.clearAllMocks()
+  })
+
+  it('shows a refused delivery’s reason in the delivery log, in words', async () => {
+    vi.mocked(listWebhookDeliveries).mockResolvedValue({
+      items: [
+        {
+          id: 'delivery-9',
+          subscriptionId: 'webhook-1',
+          subscriptionName: 'Docker',
+          eventType: 'payment.completed',
+          status: 'FAILED',
+          attempt: 1,
+          httpStatus: null,
+          responseBody: null,
+          errorMessage: 'Refused before sending: the URL points at a loopback address (127.0.0.0/8)',
+          durationMs: 0,
+          nextRetryAt: null,
+          startedAt: '2026-09-18T10:00:00.000Z',
+          finishedAt: '2026-09-18T10:00:00.000Z',
+          createdAt: '2026-09-18T10:00:00.000Z',
+        },
+      ],
+      nextCursor: null,
+    })
+
+    renderWithProviders(<WebhooksPage />)
+
+    expect(await screen.findByText('Не отправлено: URL указывает на адрес loopback (127.0.0.0/8).')).toBeInTheDocument()
+    expect(screen.queryByText(/Refused before sending/)).not.toBeInTheDocument()
+  })
+
+  it('says why a subscription URL was refused, in words', async () => {
+    vi.mocked(listWebhookDeliveries).mockResolvedValue({ items: [], nextCursor: null })
+    vi.mocked(createWebhookSubscription).mockRejectedValue({
+      isAxiosError: true,
+      message: 'Request failed with status code 400',
+      response: {
+        status: 400,
+        data: {
+          statusCode: 400,
+          message: 'The panel does not send webhooks there: the URL points at a loopback address (127.0.0.0/8)',
+        },
+      },
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<WebhooksPage />)
+
+    await user.type(await screen.findByLabelText('Название'), 'Docker')
+    await user.type(screen.getByLabelText('URL'), 'http://127.0.0.1:2375/containers/create')
+    await user.click(screen.getByRole('button', { name: 'Создать' }))
+
+    expect(
+      await screen.findByText('Панель не отправляет вебхуки на этот адрес: URL указывает на адрес loopback (127.0.0.0/8).'),
+    ).toBeInTheDocument()
   })
 })
