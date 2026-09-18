@@ -1,9 +1,31 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ChangeEvent,
+  type ReactNode,
+} from 'react'
 import { useTranslation } from 'react-i18next'
-import { ImageUp, Info, Loader2, QrCode, RefreshCw, RotateCcw, ShieldCheck, X } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  ImageUp,
+  Info,
+  Loader2,
+  QrCode,
+  RefreshCw,
+  RotateCcw,
+  ShieldCheck,
+  X,
+} from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { InfoTip } from '@/components/ui/info-tip'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
@@ -56,6 +78,13 @@ import { qrLogoWithSrc, type QrLogoUploadRefusal, type QrLogoUploadStore } from 
  * synthetic links of every shape the cabinet encodes, at every size it shows a
  * logo at, read back by a real QR reader with and without the logo. The page
  * will not save a logo whose check has not passed (`qrLogoSaveRefusal`).
+ *
+ * THE PREVIEW IS A COMPONENT OF ITS OWN. `QrStyleSection` is the controls;
+ * `QrStylePreview` draws the samples from the same value, and the page mounts
+ * it in the sticky column beside them, where the phone preview sits on every
+ * other tab — so the codes stay in view whichever control the operator is
+ * using. Under the controls, as it used to be, it had scrolled out of sight by
+ * the time the operator reached the colour or the logo.
  */
 
 /**
@@ -78,8 +107,16 @@ export const QR_PREVIEW_CONNECT_LINK = 'https://sub.example.com/api/sub/4f9c2a7e
  * number and to the number the cabinet actually passes.
  */
 export const QR_PREVIEW_REFERRAL_PX = 208
-/** The connect sample is a reminder, not a study, so it is drawn smaller. */
-export const QR_PREVIEW_CONNECT_PX = 120
+/**
+ * The size a subscriber is shown the connect code at: the cabinet's connect
+ * sheet (`connect-link-dialog.tsx`, `<LocalQr size={208}>`). It used to be
+ * drawn smaller here, as a reminder rather than a study; now that every sample
+ * sits on one stage size with its size written under it, a smaller one would
+ * be labelled with a size no subscriber sees. A plain code is drawn the same
+ * at any size, so only the display changed. `qr-preview-cabinet.test.ts` holds
+ * it to the cabinet's number.
+ */
+export const QR_PREVIEW_CONNECT_PX = 208
 
 /**
  * What the partner sample encodes: a web advertising link in the shape the API
@@ -322,52 +359,170 @@ export function QrStyleSection({
           >
             <RotateCcw className="mr-2 h-4 w-4" /> {t('brandingPage.qr.reset')}
           </Button>
-
-          <div className="space-y-2">
-            <Label>{t('brandingPage.qr.previewLabel')}</Label>
-            <div className="flex flex-wrap items-end gap-6">
-              <QrSample
-                kind="referral"
-                text={QR_PREVIEW_REFERRAL_LINK}
-                style={drawn}
-                displayPixels={QR_PREVIEW_REFERRAL_PX}
-                label={t('brandingPage.qr.previewReferral')}
-                withLogo
-              />
-              <QrSample
-                kind="connect"
-                text={QR_PREVIEW_CONNECT_LINK}
-                style={QR_STYLE_PLAIN}
-                displayPixels={QR_PREVIEW_CONNECT_PX}
-                label={t('brandingPage.qr.previewConnect')}
-              />
-            </div>
-            <PartnerQrSample
-              style={drawn}
-              label={t('brandingPage.qr.previewPartner')}
-              magnifiedLabel={t('brandingPage.qr.previewPartnerMagnified')}
-              stepDownNote={t('brandingPage.qr.previewPartnerStepDown')}
-            />
-            <div className="flex flex-wrap items-end gap-6">
-              <QrSample
-                kind="partner-enlarged"
-                text={QR_PREVIEW_PARTNER_LINK}
-                style={drawn}
-                displayPixels={QR_PREVIEW_PARTNER_ENLARGED_PX}
-                label={t('brandingPage.qr.previewPartnerEnlarged')}
-                withLogo
-              />
-            </div>
-            {!usable && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                {t('brandingPage.qr.previewRefused')}
-              </p>
-            )}
-            <p className="text-xs text-muted-foreground">{t('brandingPage.qr.previewHint')}</p>
-          </div>
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+export interface QrStylePreviewProps {
+  /** The style as the operator has it now — the value `QrStyleSection` edits. */
+  readonly value: BrandingQrStyleDraft
+}
+
+/**
+ * The samples: every code the style reaches, and the connect code it never
+ * does, each drawn by the cabinet's renderer at the size the cabinet shows it.
+ *
+ * ONE STRIP OF IDENTICAL TILES. Every tile has the same stage — square, and
+ * large enough for the largest code on its plate — with its code centred on
+ * it at its TRUE size, and the same two-line caption block with the size
+ * written beside it. So the plates of a row share a centre line whatever the
+ * codes measure, a caption that wraps moves nothing, and the sizes themselves
+ * are the thing on show. The strip never wraps: where it does not fit (and
+ * five tiles fit almost nowhere) it scrolls sideways, snapping tile by tile,
+ * and says so under itself, with buttons for a mouse that has no sideways
+ * wheel. The partner card's step-down note is the card's last line, so its
+ * coming and going moves nothing above it.
+ *
+ * The order reads from what the style reaches to what it never does: the
+ * invite, the partner's card code and that same image enlarged beside it, the
+ * code a partner opens, and last the connect code, always plain.
+ */
+export function QrStylePreview({ value }: QrStylePreviewProps) {
+  const { t } = useTranslation()
+  // What the cabinet draws for this value — see `QrStyleSection`.
+  const drawn = useMemo(() => resolveQrStyle(value), [value])
+  const usable = isUsableDark(value.dark.trim())
+  // The partner card's code, drawn once for its two tiles and for the note
+  // under them. No logo: `LocalQr`, which draws the card's code, has no way to
+  // pass one.
+  const partner = useQrImage(QR_PREVIEW_PARTNER_LINK, drawn, QR_PREVIEW_PARTNER_PX)
+  // Taken apart here: render reads the edges, and only the handlers touch the strip itself.
+  const { ref: stripRef, measure, step, overflows, atStart, atEnd } = usePreviewStrip()
+  const stripId = useId()
+  const size = (px: number): string => t('brandingPage.qr.previewSize', { px })
+
+  const fade = stripFade({ overflows, atStart, atEnd })
+
+  return (
+    <Card data-qr-preview-card="">
+      {/* Kept short enough for the sticky column of a 1280×800 screen to show
+          the strip, the way through it and the step-down note at once, so
+          the long explanation of the samples waits behind the (i). */}
+      <CardHeader className="flex-row items-center gap-2 space-y-0">
+        <CardTitle>{t('brandingPage.qr.previewLabel')}</CardTitle>
+        <InfoTip label={t('brandingPage.qr.previewHintLabel')} align="end">
+          {t('brandingPage.qr.previewHint')}
+        </InfoTip>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* The strip runs to the card's edges, so the next tile shows at the
+            right one — the first sign that there is more — and fades out
+            there instead of cutting its caption mid-word.
+
+            `contain: inline-size` makes it take its width from the card and
+            never the other way round. Without it the five tiles are the
+            strip's minimum width, and in the one-column layout under `lg`
+            the page grid widened to 1626 px to fit them instead of letting
+            the strip scroll. */}
+        <div className="-mx-6 [contain:inline-size]">
+          <div
+            ref={stripRef}
+            id={stripId}
+            role="region"
+            aria-label={t('brandingPage.qr.previewStrip')}
+            tabIndex={0}
+            onScroll={measure}
+            data-qr-preview-strip=""
+            className="group/strip flex snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain scroll-px-6 px-6 pb-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-safe:scroll-smooth"
+            style={fade === undefined ? undefined : { maskImage: fade, WebkitMaskImage: fade }}
+          >
+            <QrSample
+              kind="referral"
+              text={QR_PREVIEW_REFERRAL_LINK}
+              style={drawn}
+              displayPixels={QR_PREVIEW_REFERRAL_PX}
+              label={t('brandingPage.qr.previewReferral')}
+              size={size(QR_PREVIEW_REFERRAL_PX)}
+              withLogo
+            />
+            <PartnerCardTile
+              image={partner}
+              label={t('brandingPage.qr.previewPartner')}
+              size={size(QR_PREVIEW_PARTNER_PX)}
+            />
+            <PartnerMagnifiedTile
+              image={partner}
+              label={t('brandingPage.qr.previewPartnerMagnified')}
+              size={t('brandingPage.qr.previewSizeMagnified', {
+                from: QR_PREVIEW_PARTNER_PX,
+                to: QR_PREVIEW_PARTNER_MAGNIFIED_PX,
+              })}
+            />
+            <QrSample
+              kind="partner-enlarged"
+              text={QR_PREVIEW_PARTNER_LINK}
+              style={drawn}
+              displayPixels={QR_PREVIEW_PARTNER_ENLARGED_PX}
+              label={t('brandingPage.qr.previewPartnerEnlarged')}
+              size={size(QR_PREVIEW_PARTNER_ENLARGED_PX)}
+              withLogo
+            />
+            <QrSample
+              kind="connect"
+              text={QR_PREVIEW_CONNECT_LINK}
+              style={QR_STYLE_PLAIN}
+              displayPixels={QR_PREVIEW_CONNECT_PX}
+              label={t('brandingPage.qr.previewConnect')}
+              size={size(QR_PREVIEW_CONNECT_PX)}
+            />
+          </div>
+        </div>
+        {overflows && (
+          <div className="flex items-center justify-between gap-3" data-qr-preview-scroll="">
+            <p className="text-xs text-muted-foreground">{t('brandingPage.qr.previewScrollHint')}</p>
+            <div className="flex shrink-0 gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-8 w-8"
+                aria-label={t('brandingPage.qr.previewPrevious')}
+                aria-controls={stripId}
+                disabled={atStart}
+                onClick={() => step(-1)}
+              >
+                <ChevronLeft aria-hidden="true" />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-8 w-8"
+                aria-label={t('brandingPage.qr.previewNext')}
+                aria-controls={stripId}
+                disabled={atEnd}
+                onClick={() => step(1)}
+              >
+                <ChevronRight aria-hidden="true" />
+              </Button>
+            </div>
+          </div>
+        )}
+        {!usable && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">{t('brandingPage.qr.previewRefused')}</p>
+        )}
+        {/* Last, and it must stay last: it comes and goes with the style, and
+            nothing may move when it does. */}
+        {partner?.dotsReplaced === true && (
+          <p data-qr-step-down="" className="flex gap-2 text-xs text-muted-foreground">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            {t('brandingPage.qr.previewPartnerStepDown')}
+          </p>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -690,6 +845,150 @@ function useQrImage(text: string, style: QrStyle, displayPixels: number, logoHre
 }
 
 /**
+ * What sits around a code on its white plate: `p-4` and a 1-px border, the
+ * plate of the invite dialog (`invite-link-hero.tsx`) — every sample's but the
+ * partner card's, whose plate is the card's own (`CARD_PLATE_INSET_PX`).
+ */
+const PLATE_INSET_PX = 16 + 1
+/** The partner card's plate: `LocalQr`'s `p-1`, and the same 1-px border. */
+const CARD_PLATE_INSET_PX = 4 + 1
+/** How much stage shows around the largest plate. */
+const STAGE_MARGIN_PX = 8
+
+/**
+ * The side of every tile's stage: the largest code on its plate, with a
+ * margin. One number for all five, so every plate is centred on the same line
+ * whatever its code measures — the tiles differ in nothing but what they show.
+ */
+const STAGE_PX =
+  2 * STAGE_MARGIN_PX +
+  Math.max(
+    QR_PREVIEW_REFERRAL_PX + 2 * PLATE_INSET_PX,
+    QR_PREVIEW_CONNECT_PX + 2 * PLATE_INSET_PX,
+    QR_PREVIEW_PARTNER_PX + 2 * CARD_PLATE_INSET_PX,
+    QR_PREVIEW_PARTNER_MAGNIFIED_PX + 2 * PLATE_INSET_PX,
+    QR_PREVIEW_PARTNER_ENLARGED_PX + 2 * PLATE_INSET_PX,
+  )
+
+/** The strip's `gap-3`: what a step of the arrows adds to a tile's width. */
+const TILE_GAP_PX = 12
+
+type QrPreviewKind = 'referral' | 'connect' | 'partner' | 'partner-magnified' | 'partner-enlarged'
+
+/**
+ * Whether the strip is wider than its box, and which end of it is showing —
+ * what the sideways hint and its arrows need. Measured on every resize and
+ * scroll; until the first measurement (and where there is no
+ * `ResizeObserver` to take one) the strip is assumed not to fit, so the way
+ * through it is shown rather than withheld.
+ */
+function usePreviewStrip() {
+  const ref = useRef<HTMLDivElement>(null)
+  const [edges, setEdges] = useState({ overflows: true, atStart: true, atEnd: false })
+
+  const measure = useCallback((): void => {
+    const strip = ref.current
+    if (strip === null) return
+    const room = strip.scrollWidth - strip.clientWidth
+    const next = {
+      overflows: room > 1,
+      atStart: strip.scrollLeft <= 1,
+      atEnd: strip.scrollLeft >= room - 1,
+    }
+    setEdges((current) =>
+      current.overflows === next.overflows && current.atStart === next.atStart && current.atEnd === next.atEnd
+        ? current
+        : next,
+    )
+  }, [])
+
+  useEffect(() => {
+    const strip = ref.current
+    if (strip === null || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(measure)
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [measure])
+
+  /** One tile along. The strip snaps, and scrolls smoothly unless motion is reduced (`motion-safe:scroll-smooth`). */
+  const step = (direction: -1 | 1): void => {
+    ref.current?.scrollBy({ left: direction * (STAGE_PX + TILE_GAP_PX) })
+  }
+
+  return { ref, measure, step, ...edges }
+}
+
+/**
+ * A mask that fades the strip out at an end with more beyond it: across the
+ * 24-px inset at the left, and across the gap and the peeking tile at the
+ * right (the strip's `px-6` and `gap-3` leave the showing tile clear of both).
+ * A mask rather than a gradient painted over the strip, because the card
+ * under it is translucent in the panel's glass themes and a painted fade
+ * would show as a band.
+ */
+function stripFade(edges: { readonly overflows: boolean; readonly atStart: boolean; readonly atEnd: boolean }): string | undefined {
+  if (!edges.overflows) return undefined
+  const left = edges.atStart ? 'black 0' : 'transparent 0, black 24px'
+  const right = edges.atEnd ? 'black 100%' : 'black calc(100% - 28px), transparent 100%'
+  return `linear-gradient(to right, ${left}, ${right})`
+}
+
+/**
+ * One tile of the strip: the stage with a plate centred on it, then the
+ * caption and the size the code is shown at. The caption block is always two
+ * lines tall, so a caption that wraps moves nothing; a longer one is clamped
+ * to two, and shows whole while the tile is hovered or the strip has keyboard
+ * focus — the text itself is never cut from the page.
+ */
+function PreviewTile({
+  kind,
+  label,
+  size,
+  hidden = false,
+  children,
+}: {
+  readonly kind: QrPreviewKind
+  readonly label: string
+  readonly size: string
+  /** A tile that repeats another's image for the eye only — see `PartnerMagnifiedTile`. */
+  readonly hidden?: boolean
+  readonly children: ReactNode
+}) {
+  return (
+    <figure
+      data-qr-preview-tile={kind}
+      aria-hidden={hidden ? true : undefined}
+      className="group/tile flex shrink-0 snap-start flex-col gap-2"
+      style={{ width: STAGE_PX }}
+    >
+      <div
+        data-qr-preview-stage=""
+        className="grid place-items-center rounded-xl border border-border/60 bg-muted/50"
+        style={{ width: STAGE_PX, height: STAGE_PX }}
+      >
+        {children}
+      </div>
+      <figcaption className="flex items-start justify-between gap-3 text-xs leading-4 text-muted-foreground">
+        <span
+          data-qr-preview-caption=""
+          className="line-clamp-2 min-h-8 group-hover/tile:line-clamp-none group-focus-visible/strip:line-clamp-none"
+        >
+          {label}
+        </span>
+        <span data-qr-preview-size="" className="shrink-0 whitespace-nowrap font-medium tabular-nums">
+          {size}
+        </span>
+      </figcaption>
+    </figure>
+  )
+}
+
+/** Where a code will be, the size it will be, until its drawing lands — so nothing moves when it does. */
+function PendingCode({ pixels }: { readonly pixels: number }) {
+  return <div style={{ width: pixels, height: pixels }} aria-hidden="true" />
+}
+
+/**
  * One code, drawn by the cabinet's renderer and mounted the way the cabinet
  * mounts it: an SVG data URL in an `<img>` on a white plate
  * (`invite-link-hero.tsx`). The light field of a code is part of the picture a
@@ -705,6 +1004,7 @@ function QrSample({
   style,
   displayPixels,
   label,
+  size,
   withLogo = false,
 }: {
   readonly kind: 'referral' | 'connect' | 'partner-enlarged'
@@ -712,122 +1012,109 @@ function QrSample({
   readonly style: QrStyle
   readonly displayPixels: number
   readonly label: string
+  readonly size: string
   readonly withLogo?: boolean
 }) {
   const logoHref = useQrLogoHref(text, withLogo ? style : QR_STYLE_PLAIN, displayPixels)
   const image = useQrImage(text, style, displayPixels, withLogo ? logoHref : undefined)
 
   return (
-    <figure className="flex flex-col items-center gap-2">
+    <PreviewTile kind={kind} label={label} size={size}>
       <div className="rounded-2xl border bg-white p-4">
         {image === null ? (
-          <div style={{ width: displayPixels, height: displayPixels }} aria-hidden="true" />
+          <PendingCode pixels={displayPixels} />
         ) : (
           <img
             src={image.src}
             alt={label}
             width={displayPixels}
             height={displayPixels}
+            className="block"
             data-qr-preview={kind}
           />
         )}
       </div>
-      <figcaption className="max-w-[260px] text-center text-xs text-muted-foreground">
-        {label}
-      </figcaption>
-    </figure>
+    </PreviewTile>
   )
 }
 
 /**
- * The partner's advertising code as it sits on a placement card, twice: once
- * at the size a partner sees it there, and once enlarged so the operator can
- * see its shapes.
+ * The partner's advertising code as it sits on a placement card, at the size a
+ * partner sees it there.
  *
- * Both images are ONE drawing. The enlarged one reuses the `src` of the
- * real-size one and only shows it bigger — an SVG scales without inventing
- * anything — so what it magnifies is exactly the code partners get on the
- * card: rounded squares where the style asked for dots, whenever the renderer
- * stepped them down at the partner's size, and never a logo, for which a card
- * code has no room. Drawn again at the larger size, it would show dots that no
- * partner sees on the card. (The code a partner taps open is the separate
- * `partner-enlarged` sample.)
- *
- * The real-size plate is the cabinet's `LocalQr` plate (`rounded-md`, `p-1`),
- * with a border added only so white on the panel's light background still
- * reads as a plate. The enlarged copy repeats nothing a screen reader needs, so
- * it is hidden from one.
+ * Its plate is the cabinet's `LocalQr` plate (`rounded-md`, `p-1`) — the one
+ * plate here that is not the invite's, because it mirrors what a partner
+ * actually sees on the card — with a border added only so white on the panel's
+ * light background still reads as a plate.
  */
-function PartnerQrSample({
-  style,
+function PartnerCardTile({
+  image,
   label,
-  magnifiedLabel,
-  stepDownNote,
+  size,
 }: {
-  readonly style: QrStyle
+  readonly image: QrImage | null
   readonly label: string
-  readonly magnifiedLabel: string
-  readonly stepDownNote: string
+  readonly size: string
 }) {
-  // No logo: `LocalQr`, which draws the card's code, has no way to pass one.
-  const image = useQrImage(QR_PREVIEW_PARTNER_LINK, style, QR_PREVIEW_PARTNER_PX)
-
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-end gap-6">
-        <figure className="flex flex-col items-center gap-2">
-          <div className="overflow-hidden rounded-md border bg-white p-1">
-            {image === null ? (
-              <div
-                style={{ width: QR_PREVIEW_PARTNER_PX, height: QR_PREVIEW_PARTNER_PX }}
-                aria-hidden="true"
-              />
-            ) : (
-              <img
-                src={image.src}
-                alt={label}
-                width={QR_PREVIEW_PARTNER_PX}
-                height={QR_PREVIEW_PARTNER_PX}
-                data-qr-preview="partner"
-              />
-            )}
-          </div>
-          <figcaption className="max-w-[220px] text-center text-xs text-muted-foreground">
-            {label}
-          </figcaption>
-        </figure>
-        <figure aria-hidden="true" className="flex flex-col items-center gap-2">
-          <div className="rounded-2xl border bg-white p-4">
-            {image === null ? (
-              <div
-                style={{
-                  width: QR_PREVIEW_PARTNER_MAGNIFIED_PX,
-                  height: QR_PREVIEW_PARTNER_MAGNIFIED_PX,
-                }}
-              />
-            ) : (
-              <img
-                src={image.src}
-                alt=""
-                aria-hidden="true"
-                width={QR_PREVIEW_PARTNER_MAGNIFIED_PX}
-                height={QR_PREVIEW_PARTNER_MAGNIFIED_PX}
-                data-qr-preview="partner-magnified"
-              />
-            )}
-          </div>
-          <figcaption className="max-w-[220px] text-center text-xs text-muted-foreground">
-            {magnifiedLabel}
-          </figcaption>
-        </figure>
+    <PreviewTile kind="partner" label={label} size={size}>
+      <div className="overflow-hidden rounded-md border bg-white p-1">
+        {image === null ? (
+          <PendingCode pixels={QR_PREVIEW_PARTNER_PX} />
+        ) : (
+          <img
+            src={image.src}
+            alt={label}
+            width={QR_PREVIEW_PARTNER_PX}
+            height={QR_PREVIEW_PARTNER_PX}
+            className="block"
+            data-qr-preview="partner"
+          />
+        )}
       </div>
-      {image?.dotsReplaced === true && (
-        <p data-qr-step-down="" className="flex gap-2 text-xs text-muted-foreground">
-          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          {stepDownNote}
-        </p>
-      )}
-    </div>
+    </PreviewTile>
+  )
+}
+
+/**
+ * The partner card's code again, enlarged so the operator can see its shapes.
+ *
+ * It is the SAME drawing. It reuses the `src` of the real-size one and only
+ * shows it bigger — an SVG scales without inventing anything — so what it
+ * magnifies is exactly the code partners get on the card: rounded squares
+ * where the style asked for dots, whenever the renderer stepped them down at
+ * the partner's size, and never a logo, for which a card code has no room.
+ * Drawn again at the larger size, it would show dots that no partner sees on
+ * the card. (The code a partner taps open is the separate `partner-enlarged`
+ * sample.) It repeats nothing a screen reader needs, so it is hidden from one.
+ */
+function PartnerMagnifiedTile({
+  image,
+  label,
+  size,
+}: {
+  readonly image: QrImage | null
+  readonly label: string
+  readonly size: string
+}) {
+  return (
+    <PreviewTile kind="partner-magnified" label={label} size={size} hidden>
+      <div className="rounded-2xl border bg-white p-4">
+        {image === null ? (
+          <PendingCode pixels={QR_PREVIEW_PARTNER_MAGNIFIED_PX} />
+        ) : (
+          <img
+            src={image.src}
+            alt=""
+            aria-hidden="true"
+            width={QR_PREVIEW_PARTNER_MAGNIFIED_PX}
+            height={QR_PREVIEW_PARTNER_MAGNIFIED_PX}
+            className="block"
+            data-qr-preview="partner-magnified"
+          />
+        )}
+      </div>
+    </PreviewTile>
   )
 }
 

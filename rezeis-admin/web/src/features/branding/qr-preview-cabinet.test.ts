@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { LOGO_DISPLAY_PIXELS } from '@/lib/qr/kit/qr-logo'
 
 import {
+  QR_PREVIEW_CONNECT_PX,
   QR_PREVIEW_PARTNER_ENLARGED_PX,
   QR_PREVIEW_PARTNER_LINK,
   QR_PREVIEW_PARTNER_PX,
@@ -61,6 +62,7 @@ const REIWA_WEB_SRC = join(HERE, '..', '..', '..', '..', '..', '..', 'reiwa', 'w
 const PARTNER_ADS = join(REIWA_WEB_SRC, 'features', 'partner', 'components', 'partner-advertising-section.tsx')
 const PARTNER_QR_DIALOG = join(REIWA_WEB_SRC, 'features', 'partner', 'components', 'partner-qr-dialog.tsx')
 const INVITE_HERO = join(REIWA_WEB_SRC, 'features', 'referrals', 'components', 'invite-link-hero.tsx')
+const CONNECT_SHEET = join(REIWA_WEB_SRC, 'features', 'connect', 'connect-link-dialog.tsx')
 
 /* ─────────────────────────────── reading sources ────────────────────────────── */
 
@@ -552,6 +554,15 @@ const hasSibling = existsSync(REIWA_WEB_SRC)
  */
 const CABINET_PARTNER_CARD_PX = 96
 
+/**
+ * The size a subscriber is shown the connect code at, as the cabinet's connect
+ * sheet spells it out today (`connect-link-dialog.tsx`, `<LocalQr size={208}>`).
+ * The QR tab writes each sample's size under it, so its connect sample has to
+ * be drawn at this one — and a plain code draws the same bytes at every size,
+ * so no test of the image could notice it being another.
+ */
+const CABINET_CONNECT_SHEET_PX = 208
+
 describe('the sample sizes are the cabinet’s own', () => {
   it('draws the samples that carry a logo at the sizes the kit names — the sizes the logo check verifies at', () => {
     // Always runs: the kit is vendored, so this half needs no sibling checkout.
@@ -624,6 +635,32 @@ describe('the sample sizes are the cabinet’s own', () => {
         `invite-link-hero.tsx:${call.line} draws the invite at ${call.size} px, but the QR tab previews it at ` +
           `QR_PREVIEW_REFERRAL_PX = ${QR_PREVIEW_REFERRAL_PX}`,
       ).toBe(QR_PREVIEW_REFERRAL_PX)
+    }
+  })
+
+  it('draws the connect sample at the connect sheet size on record — in every run, with or without the cabinet checkout', () => {
+    expect(
+      QR_PREVIEW_CONNECT_PX,
+      `the QR tab shows the connect code at QR_PREVIEW_CONNECT_PX = ${QR_PREVIEW_CONNECT_PX} px and writes that size ` +
+        `under it, but subscribers see it at ${CABINET_CONNECT_SHEET_PX} px. If the cabinet's sheet really changed, ` +
+        'change the record with it — the case below that reads connect-link-dialog.tsx says what it is now',
+    ).toBe(CABINET_CONNECT_SHEET_PX)
+  })
+
+  it.skipIf(!hasSibling)('draws the connect sample at the size the connect sheet shows the code', () => {
+    expect(existsSync(CONNECT_SHEET), `${CONNECT_SHEET} is gone — where does the connect code render now?`).toBe(true)
+    const uses = localQrUses(reiwaSource(CONNECT_SHEET))
+    expect(uses.length, 'connect-link-dialog.tsx renders no <LocalQr> — the connect code moved, and this test must follow it').toBeGreaterThan(0)
+    for (const use of uses) {
+      expect(
+        use.size,
+        `connect-link-dialog.tsx:${use.line} draws the connect code with size=${use.sizeText ?? '(absent)'}, a size this test cannot read`,
+      ).not.toBeNull()
+      expect(
+        use.size,
+        `connect-link-dialog.tsx:${use.line} shows subscribers the connect code at ${use.size} px, but the record ` +
+          `CABINET_CONNECT_SHEET_PX says ${CABINET_CONNECT_SHEET_PX}: change the record and QR_PREVIEW_CONNECT_PX together`,
+      ).toBe(CABINET_CONNECT_SHEET_PX)
     }
   })
 })

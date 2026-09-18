@@ -22,6 +22,7 @@ import {
   QR_PREVIEW_PARTNER_PX,
   QR_PREVIEW_REFERRAL_LINK,
   QR_PREVIEW_REFERRAL_PX,
+  QrStylePreview,
   QrStyleSection,
 } from './qr-style-section'
 
@@ -102,16 +103,21 @@ function renderSection(
   // The page's store, reading the style the page holds — here, the one last rendered.
   let held = value
   const logoUpload = createQrLogoUploadStore({ upload: uploadLogo, read: () => held, write: onChange })
+  // The tab as the page composes it: the controls, and beside them the
+  // preview, both handed the one value the page holds.
   const section = (current: BrandingQrStyleDraft) => (
-    <QrStyleSection
-      value={current}
-      onChange={onChange}
-      darkError={options.darkError}
-      logoError={options.logoError}
-      brandLogoUrl={options.brandLogoUrl}
-      logoUpload={logoUpload}
-      logoCheck={logoCheck}
-    />
+    <>
+      <QrStyleSection
+        value={current}
+        onChange={onChange}
+        darkError={options.darkError}
+        logoError={options.logoError}
+        brandLogoUrl={options.brandLogoUrl}
+        logoUpload={logoUpload}
+        logoCheck={logoCheck}
+      />
+      <QrStylePreview value={current} />
+    </>
   )
   const view = renderWithProviders(section(value), { withRouter: false })
   /** The page handing the section the style it holds now — what a change the section asked for comes back as. */

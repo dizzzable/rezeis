@@ -71,7 +71,7 @@ import {
 } from "./branding-form-schema";
 import { CardEffectSection } from "./card-effect-section";
 import { ServersGlobeSection } from "./servers-globe-section";
-import { QrStyleSection } from "./qr-style-section";
+import { QrStylePreview, QrStyleSection } from "./qr-style-section";
 import { createQrLogoCheckStore, qrLogoSaveRefusal } from "./qr-logo-check";
 import { createBrowserQrLogoChecker } from "./qr-logo-check-browser";
 import { createQrLogoUploadStore } from "./qr-logo-upload";
@@ -2324,7 +2324,15 @@ export default function WebReiwaPage() {
         </div>
 
         <div className="lg:sticky lg:top-6 lg:self-start">
-          <Card>
+          {/* The QR tab's own preview takes this column: the codes are shown
+              beside the controls that change them, and stay in view while any
+              of those controls is used. The phone has no QR code on it, so on
+              this tab it is hidden — hidden, not unmounted: its app-background
+              layer is meant to live as long as the page does
+              (`card-effect-preview-budget.ts`). Mounted only on the QR tab,
+              like the section, because it draws its samples on mount. */}
+          {tab === 'qr' && <QrStylePreview value={watchedValues.qrStyle} />}
+          <Card className={cn(tab === 'qr' && 'hidden')}>
             <CardHeader>
               <CardTitle>{t('brandingPage.sections.preview.title')}</CardTitle>
               <CardDescription>{t('brandingPage.sections.preview.description')}</CardDescription>

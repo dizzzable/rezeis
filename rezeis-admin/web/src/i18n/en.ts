@@ -4884,7 +4884,7 @@ export const en = {
         dots: 'Dots',
       },
       dotsNote:
-        'Dots need a large code: where it is shown small they are drawn as rounded squares, which a camera reads more reliably. Partner advertising codes are always small on the placement card — the partner sample below shows what that does to them.',
+        'Dots need a large code: where it is shown small they are drawn as rounded squares, which a camera reads more reliably. Partner advertising codes are always small on the placement card — the partner samples in the preview show what that does to them.',
       eyesLabel: 'Corner squares',
       eyesHint:
         'The three large squares in the corners are how a camera finds the code. Only their corners are rounded.',
@@ -4957,6 +4957,13 @@ export const en = {
       previewRefused: 'This colour will not save, so the sample is drawn in black.',
       previewHint:
         'Every sample is exactly the image the cabinet builds, at its own size there: the invite as a subscriber opens it, the partner code as a partner sees it on a placement card and as it opens when tapped. The enlarged copy is the placement-card image, only magnified.',
+      previewHintLabel: 'More about the samples',
+      previewSize: '{{px}} px',
+      previewSizeMagnified: '{{from}} → {{to}} px',
+      previewStrip: 'QR code samples',
+      previewScrollHint: 'Scroll sideways to see them all',
+      previewPrevious: 'Previous sample',
+      previewNext: 'Next sample',
     },
     sections: {
       nav: {
