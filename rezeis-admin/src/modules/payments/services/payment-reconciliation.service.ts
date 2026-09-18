@@ -2019,8 +2019,10 @@ function decimalToMinorUnits(amount: Prisma.Decimal): number {
  * the add-on purchase) build their snapshots field by field, and no path
  * rewrites a transaction's snapshot afterwards. Any non-empty string counts, so
  * a fifth importer is covered the day it writes the key.
+ *
+ * Exported so the expiry sweep decides on the same rule rather than a copy.
  */
-function importedPaymentSource(transaction: Pick<Transaction, 'planSnapshot'>): string | null {
+export function importedPaymentSource(transaction: Pick<Transaction, 'planSnapshot'>): string | null {
   const source = asRecord(transaction.planSnapshot)?.['importedFrom'];
   return typeof source === 'string' && source.length > 0 ? source : null;
 }

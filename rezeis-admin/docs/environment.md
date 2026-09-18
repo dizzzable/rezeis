@@ -78,9 +78,7 @@
 | `DATABASE_NAME` | Имя БД. | — | `rezeis` |
 | `DATABASE_USER` | Пользователь БД. | — | `rezeis` |
 | `DATABASE_PASSWORD` | Пароль БД (общий с контейнером `rezeis-db`). | **да** | свой, **секрет**, задать до 1-го старта |
-| `DATABASE_ECHO` / `DATABASE_ECHO_POOL` | Лог SQL/пула (отладка). | — | `false` |
 | `DATABASE_POOL_SIZE` | Размер пула. Пусто → автоподбор по памяти. | — | пусто |
-| `DATABASE_MAX_OVERFLOW` / `_POOL_TIMEOUT` / `_POOL_RECYCLE` | Параметры пула. | — | дефолты |
 
 ### Redis (брокер BullMQ)
 

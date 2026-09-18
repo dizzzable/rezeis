@@ -1,6 +1,6 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
-import { PaymentGatewayType, Prisma, Transaction } from '@prisma/client';
+import { PaymentGatewayType, Prisma, Transaction, TransactionStatus } from '@prisma/client';
 import { Job } from 'bullmq';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -15,8 +15,9 @@ import {
 /**
  * Registers a COMPLETED YooKassa transaction as self-employed income in
  * «Мой Налог». Best-effort and idempotent: a transaction that already carries
- * a `moyNalogReceiptUuid` is skipped, and any failure is retried by BullMQ
- * without ever touching subscription fulfillment.
+ * a `moyNalogReceiptUuid` is skipped, a refunded one is never registered, and
+ * any failure is retried by BullMQ without ever touching subscription
+ * fulfillment.
  */
 @Processor(MOY_NALOG_QUEUE, { concurrency: 2 })
 export class MoyNalogProcessor extends WorkerHost {
@@ -66,6 +67,23 @@ export class MoyNalogProcessor extends WorkerHost {
       // Already registered — idempotent guard against retries / replays.
       return;
     }
+    // Money that went back is not income. This job retries for minutes when the
+    // tax service is down, and a refund can land in between: its cancellation
+    // then finds no receipt and does nothing, so registering here would declare
+    // the refunded payment for good. A refunded payment also comes back through
+    // here with no receipt when a success notification is replayed after the
+    // refund, which revives the row to COMPLETED but keeps `refundReversedAt` —
+    // registering again would be a second receipt for money already returned.
+    if (
+      transaction.status !== TransactionStatus.COMPLETED ||
+      typeof gatewayData.refundReversedAt === 'string'
+    ) {
+      this.logger.warn(
+        `МойНалог income not registered for transaction ${transactionId}: the payment was refunded ` +
+          `(status ${transaction.status})`,
+      );
+      return;
+    }
 
     const auth = buildAuth(settings, async (rotatedRefreshToken: string) => {
       await this.persistRotatedRefreshToken(gateway.id, gateway.settings, rotatedRefreshToken);
@@ -89,14 +107,9 @@ export class MoyNalogProcessor extends WorkerHost {
       throw new Error(`МойНалог income registration returned no receipt for transaction ${transactionId}`);
     }
 
-    await this.prismaService.transaction.update({
-      where: { id: transaction.id },
-      data: {
-        gatewayData: mergeGatewayData(transaction.gatewayData, {
-          moyNalogReceiptUuid: receiptUuid,
-          moyNalogRegisteredAt: new Date().toISOString(),
-        }) as Prisma.InputJsonValue,
-      },
+    await this.recordOnTransaction(transaction.id, {
+      moyNalogReceiptUuid: receiptUuid,
+      moyNalogRegisteredAt: new Date().toISOString(),
     });
     this.logger.log(`Registered МойНалог income for transaction ${transactionId}`);
   }
@@ -143,15 +156,39 @@ export class MoyNalogProcessor extends WorkerHost {
       throw new Error(`МойНалог income cancellation failed for transaction ${transactionId}`);
     }
 
-    await this.prismaService.transaction.update({
-      where: { id: transaction.id },
-      data: {
-        gatewayData: mergeGatewayData(transaction.gatewayData, {
-          moyNalogCancelledAt: new Date().toISOString(),
-        }) as Prisma.InputJsonValue,
-      },
+    await this.recordOnTransaction(transaction.id, {
+      moyNalogCancelledAt: new Date().toISOString(),
     });
     this.logger.log(`Cancelled МойНалог income for refunded transaction ${transactionId}`);
+  }
+
+  /**
+   * Adds `patch` to the transaction's `gatewayData` in ONE statement, merged by
+   * PostgreSQL onto whatever the row holds at that moment.
+   *
+   * Not `update({ gatewayData: { ...read, ...patch } })`: the row is read before
+   * the tax service is called, and whatever other paths wrote while it answered
+   * would be overwritten by that old read. Two did, checked on PostgreSQL 17
+   * with the real refund path: the cancellation this job runs for a refund
+   * erased the reversal's own `refundReversedAt`, `refundNeedsManualReview` and
+   * `subscriptionRevoked` in 19 of 20 runs; and a registration still waiting on
+   * the tax service erased a partial refund's ledger entry, so the refund that
+   * completed the amount was booked as partial again and the reversal never ran.
+   *
+   * Zero rows means the transaction is gone; there is nothing left to record
+   * the receipt on, and throwing would only make BullMQ call the tax service
+   * again.
+   */
+  private async recordOnTransaction(transactionId: string, patch: Record<string, unknown>): Promise<void> {
+    const updated = await this.prismaService.$executeRaw(Prisma.sql`
+      UPDATE "transactions"
+         SET "gateway_data" = COALESCE("gateway_data", '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
+             "updated_at" = now()
+       WHERE "id" = ${transactionId}
+    `);
+    if (updated === 0) {
+      this.logger.warn(`МойНалог receipt for transaction ${transactionId} not recorded: the transaction is gone`);
+    }
   }
 
   /**
@@ -241,18 +278,4 @@ function readGatewayData(value: Prisma.JsonValue | null): Record<string, unknown
     return value as Record<string, unknown>;
   }
   return {};
-}
-
-function mergeGatewayData(
-  currentValue: Transaction['gatewayData'],
-  nextValue: Record<string, unknown>,
-): Record<string, unknown> {
-  const currentRecord =
-    typeof currentValue === 'object' && currentValue !== null && !Array.isArray(currentValue)
-      ? (currentValue as Record<string, unknown>)
-      : {};
-  return {
-    ...currentRecord,
-    ...nextValue,
-  };
 }

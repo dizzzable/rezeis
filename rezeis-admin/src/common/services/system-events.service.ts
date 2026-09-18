@@ -3383,6 +3383,15 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
         title: 'Платёж не подтверждён провайдером',
         when: (metadata) => isPresent(metadata['verificationReason']),
       },
+      {
+        // `PaymentPendingExpiryService.handImportedPaymentToOperator`: a
+        // checkout imported from another bot, still pending there, that
+        // YooKassa reports paid. Nobody delivered it and the panel will not.
+        // Only that producer sets `importedFrom`.
+        emoji: '📦',
+        title: 'Перенесённый платёж оплачен, выдачи не было',
+        when: (metadata) => isPresent(metadata['importedFrom']),
+      },
     ],
   },
   // Reads as a note, not as a task: ℹ️ against the ⚠️ above, and the outcome

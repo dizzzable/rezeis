@@ -18,7 +18,7 @@ import { requireSetting, requireYookassaSecretKey } from './payment-provider-exe
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import { isProviderCreationClaim } from './payments-checkout.service';
-import { PaymentReconciliationService } from './payment-reconciliation.service';
+import { importedPaymentSource, PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
 /**
@@ -83,6 +83,7 @@ export class PaymentPendingExpiryService {
         gatewayType: true,
         gatewayId: true,
         gatewayData: true,
+        planSnapshot: true,
         amount: true,
         currency: true,
       },
@@ -186,10 +187,7 @@ export class PaymentPendingExpiryService {
    * row still fulfils — reconciliation revives the transaction and
    * `consumePaidTrialClaim` revives the released claim with it.
    */
-  private async isProviderTerminal(tx: {
-    readonly id: string; readonly paymentId: string; readonly gatewayType: PaymentGatewayType;
-    readonly gatewayId: string | null; readonly gatewayData: Prisma.JsonValue | null;
-  }): Promise<'keep' | 'provider-terminal' | 'local-ttl'> {
+  private async isProviderTerminal(tx: StalePendingRow): Promise<'keep' | 'provider-terminal' | 'local-ttl'> {
     if (tx.gatewayType !== PaymentGatewayType.YOOKASSA || tx.gatewayId === null) {
       return 'local-ttl';
     }
@@ -233,6 +231,11 @@ export class PaymentPendingExpiryService {
       // Paid at the provider but webhook was lost: stamp poll metadata, claim
       // fulfillment, and provision so the user is not left paid-but-undelivered.
       if (providerStatus === 'succeeded') {
+        const importedFrom = importedPaymentSource(tx);
+        if (importedFrom !== null) {
+          await this.handImportedPaymentToOperator(tx, importedFrom);
+          return 'keep';
+        }
         await this.prismaService.transaction.updateMany({
           where: { id: tx.id, status: TransactionStatus.PENDING },
           data: {
@@ -297,6 +300,96 @@ export class PaymentPendingExpiryService {
       return 'keep';
     }
   }
+
+  /**
+   * A checkout imported from another bot, still PENDING there, that YooKassa
+   * now reports PAID.
+   *
+   * Only the STEALTHNET importer writes such a row — a donor payment still
+   * pending, carrying the donor's YooKassa payment id, which is what this sweep
+   * polls. The customer paid and nobody delivered: the donor recorded nothing,
+   * and the panel cannot, because the donor's snapshot names no plan here.
+   * Provisioning it used to fail, release its claim and log an error, leaving
+   * the row COMPLETED with nothing on it for anyone to find.
+   *
+   * So the row is recorded as what it is and handed to a person:
+   *   - COMPLETED, because the money arrived;
+   *   - `fulfilledAt` left null, because nothing was delivered. Every automatic
+   *     path already leaves such a row alone — the reconciler acknowledges any
+   *     notification for an imported payment as settled, the add-on recovery
+   *     reads only add-on purchases, and this sweep reads only PENDING rows —
+   *     and the payment page shows "no record of delivery" for it rather than
+   *     a delivery time nobody earned;
+   *   - one operator notice naming the customer and the payment, raised by
+   *     the sweep whose conditional update moved the row. Two sweeps racing,
+   *     or the next tick, find nothing left to move and say nothing.
+   *
+   * Under `payment.amount_mismatch` — the type every "money a human must
+   * settle" notice uses, bound to no automation, popup or outbound webhook —
+   * and titled by its own `importedFrom` variant, not as an underpayment.
+   */
+  private async handImportedPaymentToOperator(tx: StalePendingRow, importedFrom: string): Promise<void> {
+    const at = new Date().toISOString();
+    const moved = await this.prismaService.transaction.updateMany({
+      where: { id: tx.id, status: TransactionStatus.PENDING },
+      data: {
+        status: TransactionStatus.COMPLETED,
+        gatewayData: mergeGatewayData(tx.gatewayData, {
+          providerStatus: 'succeeded',
+          polledAt: at,
+          polledSucceededWithoutWebhook: true,
+          paidAfterImportAt: at,
+        }) as Prisma.InputJsonValue,
+      },
+    });
+    if (moved.count !== 1) return;
+
+    // Naming the customer is worth one read; the notice is not worth losing
+    // to it, so a failed read only drops the Telegram id from the card.
+    const customer = await this.prismaService.user
+      .findUnique({ where: { id: tx.userId }, select: { telegramId: true } })
+      .catch(() => null);
+    this.logger.warn(
+      `YooKassa reports imported payment ${tx.paymentId} (from ${importedFrom}) paid after the import — ` +
+        'recorded COMPLETED, not delivered; handed to an operator',
+    );
+    this.systemEvents.warn(
+      EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
+      'PAYMENT',
+      // Operator-facing detail lives in the metadata, not the message: an
+      // event type can be bound to a customer email template, whose subject
+      // is the message itself.
+      `Перенесённый платёж оплачен, выдачи не было: ${tx.purchaseType}`,
+      {
+        userId: tx.userId,
+        ...(customer?.telegramId === null || customer?.telegramId === undefined
+          ? {}
+          : { telegramId: customer.telegramId.toString() }),
+        paymentId: tx.paymentId,
+        gatewayType: tx.gatewayType,
+        amount: tx.amount.toString(),
+        currency: tx.currency,
+        purchaseType: tx.purchaseType,
+        providerStatus: 'succeeded',
+        importedFrom,
+        needsManualReview: true,
+      },
+    );
+  }
+}
+
+/** A stale PENDING row as the sweep reads it. */
+interface StalePendingRow {
+  readonly id: string;
+  readonly paymentId: string;
+  readonly userId: string;
+  readonly purchaseType: string;
+  readonly gatewayType: PaymentGatewayType;
+  readonly gatewayId: string | null;
+  readonly gatewayData: Prisma.JsonValue | null;
+  readonly planSnapshot: Prisma.JsonValue;
+  readonly amount: { toString(): string };
+  readonly currency: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
