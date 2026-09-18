@@ -34,7 +34,7 @@ export type LogicExpression =
 
 /**
  * Evaluate `expression` against `data` and return the boolean outcome.
- * Returns `true` when the expression is `null` or `undefined` so an
+ * Returns `true` when the expression is `null`, `undefined` or `{}`, so an
  * empty conditions field means "always match".
  */
 export function evaluateCondition(
@@ -42,7 +42,37 @@ export function evaluateCondition(
   data: Readonly<Record<string, unknown>>,
 ): boolean {
   if (expression === null || expression === undefined) return true;
+  // ── `{}` AT THE TOP IS "NO CONDITIONS" ─────────────────────────────────
+  //
+  // A rule is saved with `{}` when its conditions box holds just the braces —
+  // typed, or an expression cleared down to them — or when an API caller sends
+  // it, and the SPA reads `{}` as no conditions everywhere it looks
+  // (`trigger-map.ts`, the run dialog). Here it fell into the
+  // malformed-expression branch below — an object that is not exactly one
+  // operator — and answered false, so such a rule was SKIPPED "conditions did
+  // not match" on every run, automatic or manual.
+  //
+  // That made every such rule a rule that had never run. The migration
+  // `20260915160000_automation_rules_empty_conditions_switched_off` switches
+  // the enabled event and schedule ones off, with an audit row each, so this
+  // line cannot start them on the upgrade: an operator switches one back on
+  // after checking what it does.
+  //
+  // At the TOP only. Nested inside `and`/`or`/`not`, `{}` keeps its old
+  // meaning (a malformed operand, false): nothing the editor produces puts one
+  // there, and reading a malformed operand as true would widen a hand-written
+  // expression rather than narrow it.
+  if (isEmptyObject(expression)) return true;
   return Boolean(evaluate(expression, data));
+}
+
+function isEmptyObject(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
 }
 
 function evaluate(

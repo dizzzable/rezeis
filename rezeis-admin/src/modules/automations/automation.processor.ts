@@ -9,10 +9,10 @@ import { AUTOMATION_QUEUE } from './automations.constants';
 /**
  * BullMQ processor wrapper around `AutomationExecutorService.executeJob`.
  *
- * The executor is also called synchronously from
- * `AutomationsService.runManually()` so live operator clicks bypass the
- * queue entirely (acceptable: manual runs are user-initiated and the
- * round-trip should feel instantaneous).
+ * The executor is also called synchronously, through
+ * `AutomationsService.runRuleManually()` → `AutomationExecutorService.runManually()`,
+ * so live operator clicks bypass the queue entirely (acceptable: manual runs
+ * are user-initiated and the round-trip should feel instantaneous).
  */
 @Processor(AUTOMATION_QUEUE)
 export class AutomationProcessor extends WorkerHost {

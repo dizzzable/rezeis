@@ -12,6 +12,7 @@ import {
   AutomationActionContext,
   AutomationActionDefinition,
   AutomationActionResult,
+  AutomationManualRun,
 } from './interfaces/automation-action.interface';
 import {
   evaluateCondition,
@@ -28,13 +29,16 @@ interface ExecuteRuleResult {
 /**
  * Runs a single rule against its trigger payload. Wrapped by a BullMQ
  * processor and also reused by `POST /admin/automations/rules/:id/run`
- * for manual / dry-run invocations.
+ * for manual invocations — which are real runs, not dry ones: every
+ * action does what it does.
  *
  * Lifecycle
- *   1. Resolve the rule. Missing / disabled → record `SKIPPED`.
+ *   1. Resolve the rule. Missing → nothing to record (see `recordOrphan`).
+ *      Switched off → record `SKIPPED`, for an AUTOMATIC run only.
  *   2. Evaluate `conditions` against the payload. False → record `SKIPPED`.
  *   3. Execute every action sequentially. Failures don't abort the chain.
- *   4. Persist the resulting execution row + update rule's `lastRun*` cache.
+ *   4. Grade the run (`gradeExecution`), persist the execution row and
+ *      update the rule's `lastRun*` cache.
  */
 @Injectable()
 export class AutomationExecutorService {
@@ -45,20 +49,36 @@ export class AutomationExecutorService {
     private readonly actionRegistry: AutomationActionRegistry,
   ) {}
 
+  /** A queued job: an event or a schedule fired the rule on its own. */
   public async executeJob(job: AutomationJobData): Promise<ExecuteRuleResult> {
+    return this.run(job, null);
+  }
+
+  private async run(
+    job: AutomationJobData,
+    manual: AutomationManualRun | null,
+  ): Promise<ExecuteRuleResult> {
     const startedAt = new Date();
     const rule = await this.prismaService.automationRule.findUnique({
       where: { id: job.ruleId },
     });
 
     if (!rule) {
-      // The rule was deleted between enqueue and processor pickup.
-      // Materialise a SKIPPED execution row so operators can see the
-      // mismatch in the history view.
+      // The rule was deleted between enqueue and processor pickup. Nothing
+      // is written: an execution row must name its rule, and the rule is
+      // gone. `recordOrphan` logs it and answers SKIPPED.
       return this.recordOrphan(job, startedAt);
     }
 
-    if (!rule.isEnabled) {
+    // ── THE SWITCH GOVERNS AUTOMATIC FIRING ONLY ───────────────────────────
+    //
+    // A rule is switched off so that events and schedules stop firing it. An
+    // operator pressing «Запустить сейчас» is not an event. A rule made from a
+    // template starts switched off, and trying it on one customer before
+    // switching it on is exactly what an operator should do first — answering
+    // that press with "rule disabled" made it impossible. Conditions still gate
+    // a manual run below: they are part of what the rule means.
+    if (manual === null && !rule.isEnabled) {
       return this.persistExecution({
         ruleId: rule.id,
         status: AutomationExecutionStatus.SKIPPED,
@@ -92,6 +112,9 @@ export class AutomationExecutorService {
       ruleName: rule.name,
       trigger: job.trigger,
       triggerData: job.triggerData,
+      // The marker is the executor's to set and nobody else's: a queued job
+      // reaches this method with `manual === null`, whatever its payload holds.
+      ...(manual === null ? {} : { manual }),
     };
     const actionDefs = (rule.actions ?? []) as unknown as readonly AutomationActionDefinition[];
     const results: AutomationActionResult[] = [];
@@ -101,9 +124,7 @@ export class AutomationExecutorService {
       results.push(result);
     }
 
-    const status = results.every((r) => r.status !== 'failed')
-      ? AutomationExecutionStatus.SUCCEEDED
-      : AutomationExecutionStatus.FAILED;
+    const status = gradeExecution(results);
     const errorMessage = results
       .filter((r) => r.status === 'failed')
       .map((r) => `[${r.type}] ${r.message ?? 'unknown error'}`)
@@ -121,22 +142,31 @@ export class AutomationExecutorService {
     });
   }
 
-  /** Used by the manual "Run now" controller endpoint. */
+  /**
+   * Used by the manual "Run now" controller endpoint.
+   *
+   * The only place a context gets the manual marker, and so the only way
+   * `showAgain` reaches an action.
+   */
   public async runManually(input: {
     readonly ruleId: string;
     readonly adminId: string | null;
     readonly triggerData: Readonly<Record<string, unknown>>;
+    readonly showAgain?: boolean;
   }): Promise<ExecuteRuleResult> {
     const exists = await this.prismaService.automationRule.findUnique({
       where: { id: input.ruleId },
       select: { id: true },
     });
     if (!exists) throw new NotFoundException('Rule not found');
-    return this.executeJob({
-      ruleId: input.ruleId,
-      trigger: `manual:${input.adminId ?? 'system'}`,
-      triggerData: input.triggerData,
-    });
+    return this.run(
+      {
+        ruleId: input.ruleId,
+        trigger: `manual:${input.adminId ?? 'system'}`,
+        triggerData: input.triggerData,
+      },
+      { adminId: input.adminId, showAgain: input.showAgain === true },
+    );
   }
 
   // ── Persistence ────────────────────────────────────────────────────────
@@ -203,6 +233,30 @@ export class AutomationExecutorService {
       errorMessage: 'rule no longer exists',
     };
   }
+}
+
+/**
+ * What a run comes to, from what its actions came to.
+ *
+ *   - FAILED if any action failed;
+ *   - SKIPPED if there was at least one action and every one stood aside;
+ *   - SUCCEEDED otherwise.
+ *
+ * The middle line is the one that matters. It used to be "not failed means
+ * succeeded", so a pop-up that was switched off, or had already been queued for
+ * this customer once, graded the run green — and an operator who pressed
+ * «Запустить сейчас» was told it worked while nothing reached anybody.
+ * `runCount` follows the grade: a run that did nothing is not counted as having
+ * fired.
+ */
+function gradeExecution(results: readonly AutomationActionResult[]): AutomationExecutionStatus {
+  if (results.some((result) => result.status === 'failed')) {
+    return AutomationExecutionStatus.FAILED;
+  }
+  if (results.length > 0 && results.every((result) => result.status === 'skipped')) {
+    return AutomationExecutionStatus.SKIPPED;
+  }
+  return AutomationExecutionStatus.SUCCEEDED;
 }
 
 /**

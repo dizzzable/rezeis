@@ -175,15 +175,27 @@ export const POPUP_CAPABLE_EVENTS: readonly PopupCapableEvent[] = [
 
   // ── Invitations ────────────────────────────────────────────────────────────
   //
-  // Both name the REFERRER — the person whose invitation paid off — under
-  // `userId`, which is who a pop-up about it is for. They were already grouped
-  // as coincident with a purchase while being unable to carry a pop-up at all,
-  // so the collision warning covered a pair one half of which was unreachable.
+  // The two do NOT name the same person, and a pop-up goes to whoever `userId`
+  // names:
+  //
+  //   `referral.qualified` names the INVITED customer — the one whose purchase
+  //   qualified the invitation, or whom an operator qualified by hand (both emit
+  //   sites in `referral-qualification.service.ts`). The inviter travels as
+  //   `referrerId`, which `resolveTriggerUserId` does not read, so a pop-up on
+  //   this event never reaches the inviter.
+  //
+  //   `referral.reward_issued` names the EARNER — `ReferralReward.userId`: the
+  //   inviter for a first-level reward, the inviter's own inviter for a
+  //   second-level one.
+  //
+  // They were already grouped as coincident with a purchase while being unable
+  // to carry a pop-up at all, so the collision warning covered a pair one half
+  // of which was unreachable.
   {
     type: 'referral.qualified',
     namedBy: 'userId',
     emittedIn: 'src/modules/referrals/services/referral-qualification.service.ts',
-    moment: 'Somebody they invited made a qualifying purchase',
+    moment: 'The invitation that brought them was confirmed — by their qualifying purchase, or by hand',
   },
   // Emitted in two places since 2026-09-14: the operator's «Выдать» here, and
   // the automatic issue right after a qualifying payment
@@ -192,7 +204,7 @@ export const POPUP_CAPABLE_EVENTS: readonly PopupCapableEvent[] = [
     type: 'referral.reward_issued',
     namedBy: 'userId',
     emittedIn: 'src/modules/referrals/services/admin-rewards.service.ts',
-    moment: 'A referral reward was credited to them',
+    moment: 'A referral reward they earned was credited to them',
   },
 
   // ── Under review ───────────────────────────────────────────────────────────

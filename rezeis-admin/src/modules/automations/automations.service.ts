@@ -11,6 +11,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { HINT_AUDIENCES } from '../user-hints/services/hint-audience.service';
 import { AutomationExecutorService } from './automation-executor.service';
 import { POPUP_CAPABLE_EVENTS, canCarryPopup } from './popup-capable-events';
 import {
@@ -125,12 +126,17 @@ export class AutomationsService {
     }
   }
 
-  // ── Manual / dry-run execution ─────────────────────────────────────────
+  // ── Manual execution ───────────────────────────────────────────────────
+  //
+  // A real run, not a dry one: every action does what it does. It runs even
+  // while the rule is switched off (the switch governs automatic firing), and
+  // `showAgain` reaches the actions from here only — see `runManually`.
 
   public async runRuleManually(input: {
     readonly ruleId: string;
     readonly adminId: string | null;
     readonly triggerData: Readonly<Record<string, unknown>>;
+    readonly showAgain?: boolean;
   }): Promise<{
     readonly executionId: string;
     readonly status: string;
@@ -199,7 +205,7 @@ export class AutomationsService {
   private static readonly SCHEDULE_ONLY_ACTIONS: readonly string[] = ['show_hint_to_audience'];
 
   private assertActionsValid(
-    actions: readonly { type: string }[],
+    actions: readonly { type: string; params?: unknown }[],
     triggerKind: AutomationTriggerKind,
     triggerSpec: string,
   ): void {
@@ -215,8 +221,21 @@ export class AutomationsService {
         AutomationsService.SCHEDULE_ONLY_ACTIONS.includes(action.type)
       ) {
         throw new BadRequestException(
-          `Action "${action.type}" picks its own recipients, so it cannot run on an event. ` +
-            `Use a scheduled trigger.`,
+          `Action "${action.type}" picks its own recipients, so it cannot run on an event ` +
+            `— use a scheduled trigger`,
+        );
+      }
+      // ── An audience rule has to name its audience ───────────────────────
+      //
+      // The action refuses a missing or unknown `audience` when it runs — on
+      // EVERY run, so a nightly rule saved without one failed every night from
+      // the night it was saved, and the editor's picker starts empty. Refused
+      // here, it is said while the operator is still looking at the form. The
+      // same trimmed read the action makes (`readString`), against the same
+      // list (`HINT_AUDIENCES`), so a rule this accepts is one it can run.
+      if (action.type === 'show_hint_to_audience' && !namesKnownAudience(action.params)) {
+        throw new BadRequestException(
+          `Action "${action.type}" needs an audience, one of: ${HINT_AUDIENCES.join(', ')}`,
         );
       }
       // ── A pop-up on an event that cannot carry one ──────────────────────
@@ -241,8 +260,8 @@ export class AutomationsService {
       ) {
         throw new BadRequestException(
           `"${triggerSpec.trim()}" cannot show a pop-up: it is either never emitted or it does ` +
-            'not name a customer, and a rule bound to it would fail silently. ' +
-            `Events that can: ${POPUP_CAPABLE_EVENTS.map((event) => event.type).join(', ')}`,
+            'not name a customer, and a rule bound to it would fail silently — events that ' +
+            `can: ${POPUP_CAPABLE_EVENTS.map((event) => event.type).join(', ')}`,
         );
       }
       // ── A pop-up on a schedule has nobody to show it to ─────────────────
@@ -258,16 +277,19 @@ export class AutomationsService {
       // Louder than the silent case, and still worth refusing up front: the
       // operator is on the page that could tell them.
       //
-      // MANUAL is deliberately not refused. A manual run carries the
-      // admin-supplied `triggerData`, and `params.userId` names the person on
-      // purpose — that is how an operator sends one pop-up to one customer.
+      // MANUAL is deliberately not refused. A manual run names its customer in
+      // the run body's `triggerData.userId` (for a pop-up that wins over a
+      // `params.userId` pinned on the action), and it runs on a rule of any
+      // trigger kind, even while the rule is switched off. A MANUAL rule is
+      // simply one that only ever goes out that way — one pop-up to one
+      // customer, by hand.
       if (
         action.type === 'show_hint' &&
         triggerKind === AutomationTriggerKind.CRON
       ) {
         throw new BadRequestException(
-          'A pop-up needs somebody to show it to, and a schedule names nobody. ' +
-            'Bind this rule to an event about a customer, or run it manually with a user id.',
+          'A pop-up needs somebody to show it to, and a schedule names nobody — ' +
+            'bind this rule to an event about a customer, or run it manually with a user id',
         );
       }
     }
@@ -356,6 +378,16 @@ function mapExecution(row: {
     durationMs: row.durationMs,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+/** Whether an audience action's params name an audience it can resolve — trimmed, like the action reads it. */
+function namesKnownAudience(params: unknown): boolean {
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) return false;
+  const audience = (params as Record<string, unknown>)['audience'];
+  return (
+    typeof audience === 'string' &&
+    (HINT_AUDIENCES as readonly string[]).includes(audience.trim())
+  );
 }
 
 function normaliseRecord(value: Prisma.JsonValue): Record<string, unknown> {

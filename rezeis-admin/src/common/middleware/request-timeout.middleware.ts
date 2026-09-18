@@ -11,6 +11,7 @@ import { Request, Response, NextFunction } from 'express';
  *     /admin/faq/uploads) - 120s
  *   - Backup download (/admin/backup/download/...) - 120s
  *   - Plan migration start, preview and retry (/admin/plans/:id/migrations...) - 120s
+ *   - Running an automation rule by hand (/admin/automations/rules/:id/run) - 120s
  *
  * This prevents slow/hung requests from consuming worker threads
  * indefinitely and protects against slowloris-style attacks.
@@ -48,6 +49,15 @@ const LONG_TIMEOUT_PATTERNS = [
   // never be previewed at all. The run's status, `current` and the subscription
   // list stay at the default — they are short reads the dialog polls.
   /\/admin\/plans\/[^/?]+\/migrations(?:\/preview|\/[^/?]+\/retry)?(?:[?]|$)/,
+  // RUNNING A RULE BY HAND. The run is synchronous — «Запустить сейчас» waits
+  // for every action's result — and one rule can outlast thirty seconds on its
+  // own: an audience action resolves a cohort and raises a hint for up to five
+  // hundred customers one by one, and each `webhook_post` may take its full
+  // 10 s. At the default the app answered 408 while the run went on and wrote
+  // its execution row, so the operator read a failure for a run that happened.
+  // Only the run itself: the rule's reads, save, toggle and execution log stay
+  // at the default.
+  /\/admin\/automations\/rules\/[^/?]+\/run(?:[?]|$)/,
 ];
 
 // `:userRef` on the SSE stream is EITHER a numeric telegramId OR a CUID

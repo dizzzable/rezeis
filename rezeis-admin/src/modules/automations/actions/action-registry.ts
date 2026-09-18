@@ -15,6 +15,7 @@ import {
   AutomationActionContext,
   AutomationActionDefinition,
   AutomationActionResult,
+  AutomationActionResultDetails,
 } from '../interfaces/automation-action.interface';
 import { UserBlockService } from '../../users/services/user-block.service';
 import {
@@ -25,12 +26,25 @@ import {
 import { UserHintDeliveryService } from '../../user-hints/services/user-hint-delivery.service';
 import { AUTOMATION_ACTION_TYPES, AutomationActionType } from '../automations.constants';
 import { chainMetadata } from '../chain-depth';
+import {
+  ActionFailure,
+  actionSkipped,
+  actionSucceeded,
+  type ActionHandlerOutcome,
+} from './action-outcome';
 
 /**
  * Pure execution surface: takes `(context, action)` and produces a
- * `result`. Action handlers never throw — they always return a result
- * object so the orchestrator can record per-action outcomes without
- * losing the rest of the action chain.
+ * `result`. `execute()` never throws — whatever a handler does, it answers
+ * a result object, so the orchestrator can record per-action outcomes
+ * without losing the rest of the action chain.
+ *
+ * A handler answers in one of three ways:
+ *   - a string — a success with no code, which is what most handlers return;
+ *   - an `ActionHandlerOutcome` (`actionSucceeded` / `actionSkipped`) — a
+ *     success or a skip with a code the SPA can word;
+ *   - by THROWING — a failure. `ActionFailure` carries a code and details onto
+ *     the result; any other error fails the action with its message alone.
  *
  * Adding a new action type
  * ────────────────────────
@@ -72,12 +86,15 @@ export class AutomationActionRegistry {
       };
     }
     try {
-      const message = await this.dispatch(action, context);
+      const answer = await this.dispatch(action, context);
+      const outcome: ActionHandlerOutcome =
+        typeof answer === 'string' ? { status: 'success', message: answer } : answer;
       return {
         index,
         type: action.type,
-        status: 'success',
-        message,
+        status: outcome.status,
+        message: outcome.message,
+        ...codeFields(outcome.code, outcome.details),
       };
     } catch (err) {
       const errorMessage = (err as Error).message;
@@ -89,6 +106,10 @@ export class AutomationActionRegistry {
         type: action.type,
         status: 'failed',
         message: errorMessage,
+        // Only a failure that was NAMED carries a code. A downstream call that
+        // blew up is still a failure, and inventing a name for it would have
+        // the SPA word a guess.
+        ...(err instanceof ActionFailure ? codeFields(err.code, err.details) : {}),
       };
     }
   }
@@ -98,7 +119,7 @@ export class AutomationActionRegistry {
   private async dispatch(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
-  ): Promise<string> {
+  ): Promise<string | ActionHandlerOutcome> {
     switch (action.type) {
       case 'notify_telegram':
         return this.notifyTelegram(action, context);
@@ -304,38 +325,106 @@ export class AutomationActionRegistry {
    * visit, and every other property (once-only, expiry, supersession by group)
    * belongs to the queue rather than to this handler.
    *
-   * ── Why it is not an error when nothing is queued ─────────────────────
+   * ── When nothing is queued, the run says which reason it was ──────────
    *
-   * `raise()` answers `null` for four ordinary reasons: the hint is switched
-   * off, the customer has already had it and it does not repeat, a newer hint
-   * in the same group superseded it, or nobody authored it. Only the last is a
-   * mistake, and the service logs that one loudly. Failing the action on the
-   * other three would fill the execution log with red for a rule behaving
-   * exactly as configured.
+   * The queue declines for three reasons, and they are graded apart:
+   *
+   *   - the hint is switched off, or this customer already has a delivery of
+   *     a hint that does not repeat → SKIPPED. The rule is behaving exactly as
+   *     configured, so this is not red — but it is not green either. A run
+   *     graded SUCCEEDED while nothing was queued for anybody is what an
+   *     operator pressing «Запустить сейчас» used to be shown;
+   *   - nobody authored a hint with this key → FAILED. Always a mistake, and
+   *     one the operator can fix.
+   *
+   * Supersession is not a reason: the queue never declines the hint being
+   * raised because of its group — it queues it and lapses the older ones.
+   *
+   * ── A manual run names its customer from outside ───────────────────────
+   *
+   * The id arrives in the run body, so a manual run is the one place the
+   * customer is looked up first: an id that matches nobody must read "no such
+   * customer", not a foreign-key error from the insert. An event names a
+   * customer the panel itself just acted on, and it gains no query here.
+   * `showAgain` comes from the manual marker only — never from `triggerData`,
+   * which a payload shapes.
    */
   private async showHint(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
-  ): Promise<string> {
+  ): Promise<ActionHandlerOutcome> {
     const hintKey = readString(action.params, 'hintKey');
-    if (!hintKey) throw new Error('show_hint requires `hintKey`');
-    const userId = resolveTriggerUserId(action.params, context.triggerData);
+    if (!hintKey) throw new ActionFailure('show_hint requires `hintKey`', 'hint_key_missing');
+    const manual = context.manual;
+    // ── ON A MANUAL RUN, THE CUSTOMER THE REQUEST NAMES ───────────────────
+    //
+    // `resolveTriggerUserId` lets a `params.userId` pinned on the action win
+    // over the payload, and on an event that is right: the pin is the rule's
+    // own decision. A manual run's request names the customer the operator
+    // just chose, and a pin quietly sending the pop-up to somebody else is the
+    // one answer they could not see coming. A request that names nobody falls
+    // back to the rule's own resolution, pin included.
+    const requested = manual === undefined ? null : readString(context.triggerData, 'userId');
+    const userId = requested ?? resolveTriggerUserId(action.params, context.triggerData);
     if (!userId) {
-      // Named explicitly rather than swallowed: this is the one failure an
-      // operator can act on, and it means they bound the hint to an event that
-      // does not name a customer.
-      throw new Error(
-        'show_hint requires a trigger that names a customer — this event carries no userId',
+      // Named explicitly rather than swallowed: an operator can act on it. They
+      // bound the hint to an event that does not name a customer, or ran the
+      // rule by hand without naming one.
+      throw new ActionFailure(
+        manual === undefined
+          ? 'show_hint requires a trigger that names a customer — this event carries no userId'
+          : 'show_hint requires a trigger that names a customer — this manual run named no userId',
+        'customer_missing',
       );
     }
-    const delivery = await this.userHintDeliveryService.raise({
+    if (manual !== undefined) {
+      const customer = await this.prismaService.user.findUnique({
+        where: { id: userId },
+        select: { id: true },
+      });
+      if (customer === null) {
+        throw new ActionFailure(
+          `show_hint: there is no customer with id ${userId}`,
+          'customer_not_found',
+          { userId },
+        );
+      }
+    }
+    const outcome = await this.userHintDeliveryService.raiseWithOutcome({
       userId,
       hintKey,
-      source: `rule:${context.ruleId}`,
+      // The delivery row is the only place an operator can later ask "why did
+      // this customer see that", and a hint an operator sent by hand is a
+      // different answer from one the rule sent on its own.
+      source: manual === undefined ? `rule:${context.ruleId}` : `rule:${context.ruleId}:manual`,
+      showAgain: manual !== undefined && manual.showAgain,
     });
-    return delivery === null
-      ? `hint "${hintKey}" was not queued for ${userId} (inactive, already delivered, or superseded)`
-      : `queued hint "${hintKey}" for ${userId}`;
+    switch (outcome.kind) {
+      case 'queued':
+        return actionSucceeded(`queued hint "${hintKey}" for ${userId}`, 'hint_queued', {
+          hintKey,
+          userId,
+        });
+      case 'already_delivered':
+        return actionSkipped(
+          `hint "${hintKey}" was not queued for ${userId}: it does not repeat and this ` +
+            'customer already has a delivery of it',
+          'hint_already_delivered',
+          { hintKey, userId },
+        );
+      case 'hint_inactive':
+        return actionSkipped(
+          `hint "${hintKey}" was not queued for ${userId}: the hint is switched off`,
+          'hint_inactive',
+          { hintKey },
+        );
+      case 'hint_missing':
+        throw new ActionFailure(
+          `hint "${hintKey}" does not exist, so nothing was queued for ${userId}`,
+          'hint_missing',
+          { hintKey },
+        );
+    }
   }
 
   /**
@@ -360,11 +449,19 @@ export class AutomationActionRegistry {
    * deliberately. A failed execution invites an operator to retry, and a retry
    * cannot fix a missing webhook; the message is what tells them what to fix.
    * The audience service logs it at warn level as well.
+   *
+   * ── The hint is asked about BEFORE the audience ───────────────────────
+   *
+   * A hint that does not exist or is switched off makes every raise below a
+   * no-op, and finding that out one customer at a time costs the full cohort
+   * query plus up to five hundred reads — to report "queued 0 of 500", which
+   * reads like a quiet night rather than a broken rule. Missing is FAILED (a
+   * mistake to fix); switched off is SKIPPED (a choice somebody made).
    */
   private async showHintToAudience(
     action: AutomationActionDefinition,
     context: AutomationActionContext,
-  ): Promise<string> {
+  ): Promise<ActionHandlerOutcome> {
     // ── NOT ON AN EVENT ──────────────────────────────────────────────────
     //
     // This action picks its own recipients, so the trigger contributes
@@ -382,11 +479,29 @@ export class AutomationActionRegistry {
       );
     }
     const hintKey = readString(action.params, 'hintKey');
-    if (!hintKey) throw new Error('show_hint_to_audience requires `hintKey`');
+    if (!hintKey) {
+      throw new ActionFailure('show_hint_to_audience requires `hintKey`', 'hint_key_missing');
+    }
     const audience = readString(action.params, 'audience');
     if (audience === null || !(HINT_AUDIENCES as readonly string[]).includes(audience)) {
       throw new Error(
         `show_hint_to_audience requires \`audience\` to be one of: ${HINT_AUDIENCES.join(', ')}`,
+      );
+    }
+
+    const hintStatus = await this.userHintDeliveryService.hintStatus(hintKey);
+    if (hintStatus === 'missing') {
+      throw new ActionFailure(
+        `show_hint_to_audience: hint "${hintKey}" does not exist, so the audience was not resolved`,
+        'hint_missing',
+        { hintKey },
+      );
+    }
+    if (hintStatus === 'inactive') {
+      return actionSkipped(
+        `hint "${hintKey}" is switched off, so the audience was not resolved`,
+        'hint_inactive',
+        { hintKey },
       );
     }
 
@@ -404,32 +519,131 @@ export class AutomationActionRegistry {
       if (outcome.reason.includes('window is empty')) {
         throw new Error(`show_hint_to_audience: ${outcome.reason}`);
       }
-      return `stood down without hinting anybody: ${outcome.reason}`;
+      return actionSucceeded(
+        `stood down without hinting anybody: ${outcome.reason}`,
+        'audience_blind',
+        { reason: outcome.reason },
+      );
     }
     if (outcome.userIds.length === 0) {
-      return `nobody matched the "${audience}" audience`;
+      return actionSucceeded(`nobody matched the "${audience}" audience`, 'audience_empty', {
+        audience,
+      });
     }
 
     // Sequential, not parallel. This is a scheduled job with nowhere to be, and
-    // the supersession check inside `raise()` reads and deletes rows for the
+    // the supersession check inside `raise()` reads and lapses rows for the
     // same customer — running the batch concurrently would race those against
     // each other for a customer matched twice.
+    //
+    // ── ONE FAILED RAISE IS ONE CUSTOMER, THREE IN A ROW ARE THE DATABASE ───
+    //
+    // A raise that throws used to end the loop and throw away the counts: one
+    // customer deleted after the audience was resolved, or one moment of a
+    // busy pool, and everybody after them went without the hint while the log
+    // could not say how far the run had got. So a failure is counted and the
+    // loop moves on — and it stops after
+    // `AUDIENCE_RAISE_FAILURE_STREAK_LIMIT` failures in a row, when the
+    // database is plainly not answering and every remaining customer would
+    // wait out the raise's 30 s budget to fail the same way.
+    //
+    // ── AND THREE FAILURES BOUND NOTHING IF NOTHING FAILS ─────────────────
+    //
+    // Raises that SUCCEED can take just as long — each may wait up to 30 s for
+    // a connection and its statements — and a run that is merely slow trips no
+    // streak: five hundred raises at a second each is eight minutes, and
+    // «Запустить сейчас» would be answered 408 at two of them while the loop
+    // kept queueing behind the operator. So the loop carries a WALL-CLOCK
+    // budget as well, and stops on it with the same partial answer.
+    const matched = outcome.userIds.length;
+    const startedAt = Date.now();
     let queued = 0;
+    let failed = 0;
+    let attempted = 0;
+    let failureStreak = 0;
+    let stoppedBy: 'failures' | 'time' | null = null;
+    let lastFailure = '';
     for (const userId of outcome.userIds) {
-      const delivery = await this.userHintDeliveryService.raise({
-        userId,
-        hintKey,
-        source: `audience:${audience}`,
-      });
-      if (delivery !== null) queued += 1;
+      if (failureStreak >= AUDIENCE_RAISE_FAILURE_STREAK_LIMIT) {
+        stoppedBy = 'failures';
+        break;
+      }
+      if (Date.now() - startedAt >= AUDIENCE_RUN_BUDGET_MS) {
+        stoppedBy = 'time';
+        break;
+      }
+      attempted += 1;
+      try {
+        const delivery = await this.userHintDeliveryService.raise({
+          userId,
+          hintKey,
+          source: `audience:${audience}`,
+        });
+        failureStreak = 0;
+        if (delivery !== null) queued += 1;
+      } catch (err) {
+        failed += 1;
+        failureStreak += 1;
+        lastFailure = describeFailure(err);
+        this.logger.warn(
+          `show_hint_to_audience: could not queue "${hintKey}" for ${userId} (rule ${context.ruleId}): ${lastFailure}`,
+        );
+      }
     }
+
+    const notAttempted = matched - attempted;
+    if (failed > 0 || notAttempted > 0) {
+      // FAILED, with everything it did get done: the deliveries it queued stay
+      // queued, and the counts say how far it got.
+      //
+      // THE DATABASE'S OWN SENTENCE IS NOT IN HERE. `message` reaches a 200
+      // body, the operator’s screen and `automation_executions.error_message`
+      // — the one path `AdminSafeExceptionFilter` never sees — and driver text
+      // carries hosts, ports and internal names that the filter strips
+      // everywhere else. It is in the log line above instead, per customer,
+      // where whoever can read the panel log can read it.
+      throw new ActionFailure(
+        `queued "${hintKey}" for ${queued} of ${matched} matched ` +
+          `${outcome.truncated ? '(capped) ' : ''}account(s); ${failed} could not be queued` +
+          (stoppedBy === 'failures'
+            ? `, and the run stopped after ${AUDIENCE_RAISE_FAILURE_STREAK_LIMIT} failures in a row, ` +
+              `leaving ${notAttempted} not attempted`
+            : '') +
+          (stoppedBy === 'time'
+            ? `, and the run stopped after ${Math.round(AUDIENCE_RUN_BUDGET_MS / 1000)} seconds, ` +
+              `leaving ${notAttempted} not attempted`
+            : '') +
+          '; why each one failed is in the panel log',
+        'audience_partial',
+        {
+          hintKey,
+          audience,
+          matched,
+          queued,
+          failed,
+          notAttempted,
+          stoppedEarly: notAttempted > 0,
+          stoppedBy,
+          capped: outcome.truncated,
+        },
+      );
+    }
+
     // Both numbers, because they differ for an ordinary reason: the hint is
     // once-only, so a daily rule matches the same people again and queues
     // nothing for them. An operator seeing "matched 40, queued 3" is looking at
     // a rule working exactly as intended.
-    return (
-      `queued "${hintKey}" for ${queued} of ${outcome.userIds.length} matched ` +
-      `${outcome.truncated ? '(capped) ' : ''}account(s)`
+    return actionSucceeded(
+      `queued "${hintKey}" for ${queued} of ${matched} matched ` +
+        `${outcome.truncated ? '(capped) ' : ''}account(s)`,
+      'audience_queued',
+      {
+        hintKey,
+        audience,
+        queued,
+        matched,
+        capped: outcome.truncated,
+      },
     );
   }
 
@@ -466,6 +680,58 @@ export class AutomationActionRegistry {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /**
+ * Failed raises IN A ROW after which an audience run stops.
+ *
+ * One failure is one customer — deleted after the audience was resolved, say —
+ * and the rest of the audience is still owed its hint. Several in a row are the
+ * database: out of connections, or gone. Each failed raise can take up to 30 s
+ * (`RAISE_TRANSACTION_OPTIONS` in the delivery service: 10 s to get a
+ * connection, 20 s to finish), so three cost at most 90 s — inside the 120 s a
+ * manual run's request has — where grinding through the rest of a 500-customer
+ * audience would cost hours to fail the same way.
+ */
+const AUDIENCE_RAISE_FAILURE_STREAK_LIMIT = 3;
+
+/**
+ * How long an audience run may spend raising before it stops and reports what
+ * it managed.
+ *
+ * The streak limit above bounds only a run whose raises FAIL. One that merely
+ * crawls — a busy pool handing each raise its connection after nine seconds,
+ * say — trips nothing, and five hundred of those outlast every budget around
+ * them: «Запустить сейчас» is answered 408 at 120 s (`LONG_TIMEOUT_PATTERNS`)
+ * while the loop goes on queueing, which is the outcome the streak limit and
+ * this budget both exist to prevent.
+ *
+ * Sixty seconds, checked between raises, so a raise already under way can carry
+ * it to 90 s at worst (its own 30 s) — still inside a manual run’s 120 s with
+ * the audience query and the rule’s other actions. A nightly run on a healthy
+ * install spends a second or two here; one that reaches this budget says so,
+ * and the customers it did not reach are counted rather than lost.
+ */
+const AUDIENCE_RUN_BUDGET_MS = 60_000;
+
+/** An error as one line of text for a log and a result message, never unbounded. */
+function describeFailure(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+  return text.length > 300 ? `${text.slice(0, 297)}...` : text;
+}
+
+/**
+ * `code` and `details` as result fields — or no fields at all.
+ *
+ * Omitted rather than set to `undefined`, so a result that names nothing has
+ * exactly the shape it had before codes existed.
+ */
+function codeFields(
+  code: string | undefined,
+  details: AutomationActionResultDetails | undefined,
+): Pick<AutomationActionResult, 'code' | 'details'> {
+  if (code === undefined) return {};
+  return details === undefined ? { code } : { code, details };
+}
+
+/**
  * The customer a triggered rule is about.
  *
  * ── WHERE THE USER ID ACTUALLY IS, and why this function exists ───────────
@@ -485,6 +751,8 @@ export class AutomationActionRegistry {
  * Both places are read, in the order that lets an operator override: an
  * explicit `params.userId` wins, then the payload's top level (which a manual
  * trigger may set), then `metadata.userId`, which is where events put it.
+ * (`show_hint` on a MANUAL run reads the request's own `userId` before calling
+ * this — see `showHint`. Every other caller gets this order as written.)
  */
 export function resolveTriggerUserId(
   params: Readonly<Record<string, unknown>>,

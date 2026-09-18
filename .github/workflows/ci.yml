@@ -202,3 +202,6 @@ jobs:
           test/referral-rewards-postgres.spec.ts
           test/plan-migration-postgres.spec.ts
           test/payment-plan-migration-guard-postgres.spec.ts
+          test/user-hint-delivery-postgres.spec.ts
+          test/automation-empty-conditions-postgres.spec.ts
+          test/analytics-surfaces-postgres.spec.ts

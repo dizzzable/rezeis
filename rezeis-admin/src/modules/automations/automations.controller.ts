@@ -52,9 +52,23 @@ class ToggleRuleDto {
 }
 
 class RunRuleDto {
+  /** What the run is about — for a pop-up, `userId` names the customer. */
   @IsOptional()
   @IsObject()
   triggerData?: Record<string, unknown>;
+
+  /**
+   * Queue a `show_hint` again for a customer who already has a delivery of a
+   * hint that does not repeat — for this run only.
+   *
+   * A field of its own and never a key read out of `triggerData`: that object
+   * is a payload, and the executor carries this on the run's context where no
+   * payload can reach it. A boolean or nothing — a string `"false"` is refused
+   * rather than read as a yes.
+   */
+  @IsOptional()
+  @IsBoolean()
+  showAgain?: boolean;
 }
 
 interface ResourceCatalog {
@@ -187,6 +201,7 @@ export class AutomationsController {
       ruleId: id,
       adminId: admin.id,
       triggerData: dto.triggerData ?? {},
+      showAgain: dto.showAgain === true,
     });
   }
 

@@ -77,6 +77,17 @@ function hint(over: Partial<FakeHint> = {}): FakeHint {
 
 function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: string) {
   let seq = 0;
+  /**
+   * What happened on the way to the queue, in order: `begin`/`commit` for each
+   * transaction, `tx.lock` for the advisory lock, `tx.<method>` for every
+   * statement made THROUGH the transaction client, and `root.hint` for a hint
+   * read that went past it. A statement that went to the root client leaves no
+   * `tx.` entry, which is how a case sees it.
+   */
+  const ops: string[] = [];
+  const locks: Array<{ readonly text: string; readonly values: readonly unknown[] }> = [];
+  /** Greater than zero while the transaction client is delegating to the root one. */
+  let delegating = 0;
   const feedRows: Array<{
     userId: string;
     type: string;
@@ -107,8 +118,12 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
       },
     },
     userHint: {
-      findUnique: async ({ where }: { where: { key: string } }) =>
-        hints.find((h) => h.key === where.key) ?? null,
+      findUnique: async ({ where }: { where: { key: string } }) => {
+        // Only when the service asked the ROOT client: the transaction client
+        // below delegates here, and says so itself.
+        if (delegating === 0) ops.push('root.hint');
+        return hints.find((h) => h.key === where.key) ?? null;
+      },
     },
     userHintDelivery: {
       count: async ({ where }: { where: { userId: string; hintId: string } }) =>
@@ -153,6 +168,7 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
         const w = where as {
           id?: string;
           userId?: string;
+          hintId?: string;
           shownAt?: null;
           dismissedAt?: null;
           actedAt?: null;
@@ -162,11 +178,15 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
         const hit = deliveries.filter((d) => {
           if (w.id !== undefined && d.id !== w.id) return false;
           if (w.userId !== undefined && d.userId !== w.userId) return false;
+          if (w.hintId !== undefined && d.hintId !== w.hintId) return false;
           // OBEYED, not re-implemented: a stub that applies a constraint the
           // caller did not ask for makes "the service dropped it" look exactly
-          // like "the service kept it".
+          // like "the service kept it". Each term on its own for that reason —
+          // `dismissedAt` used to imply `actedAt` here, so a statement that
+          // forgot `actedAt: null` looked exactly like one that had it.
           if ('shownAt' in w && d.shownAt !== null) return false;
-          if ('dismissedAt' in w && (d.dismissedAt !== null || d.actedAt !== null)) return false;
+          if ('dismissedAt' in w && d.dismissedAt !== null) return false;
+          if ('actedAt' in w && d.actedAt !== null) return false;
           if (w.expiresAt !== undefined && !(d.expiresAt > w.expiresAt.gt)) return false;
           if (w.hint !== undefined) {
             const h = hints.find((x) => x.id === d.hintId);
@@ -243,8 +263,52 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
       },
     },
   };
-  const service = new UserHintDeliveryService(prisma as never);
-  return { service, deliveries, prisma, feedRows };
+
+  const transactionClient = {
+    ...prisma,
+    userHint: {
+      findUnique: async (args: { where: { key: string } }) => {
+        ops.push('tx.hint');
+        delegating += 1;
+        try {
+          return await prisma.userHint.findUnique(args);
+        } finally {
+          delegating -= 1;
+        }
+      },
+    },
+    // A proxy rather than a copy, so a case that swaps one of the root
+    // methods for a recorder still sees the calls made through the
+    // transaction.
+    userHintDelivery: new Proxy(prisma.userHintDelivery, {
+      get(target, property) {
+        const value = Reflect.get(target, property);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          ops.push(`tx.${String(property)}`);
+          return value.apply(target, args);
+        };
+      },
+    }),
+    $executeRaw: async (query: { readonly strings: readonly string[]; readonly values: readonly unknown[] }) => {
+      ops.push('tx.lock');
+      locks.push({ text: query.strings.join('?'), values: query.values });
+      return 0;
+    },
+  };
+  /** The options each transaction was opened with, in order. */
+  const transactionOptions: unknown[] = [];
+  const client = Object.assign(prisma, {
+    $transaction: async <T>(work: (tx: typeof transactionClient) => Promise<T>, options?: unknown): Promise<T> => {
+      transactionOptions.push(options);
+      ops.push('begin');
+      const result = await work(transactionClient);
+      ops.push('commit');
+      return result;
+    },
+  });
+  const service = new UserHintDeliveryService(client as never);
+  return { service, deliveries, prisma, feedRows, ops, locks, transactionOptions };
 }
 
 /**
@@ -968,5 +1032,519 @@ describe('a mode the asking cabinet cannot draw', () => {
     });
 
     assert.equal(next?.key, 'declined');
+  });
+});
+
+describe('raising with an outcome, for a caller that has to say which', () => {
+  /**
+   * `raise()` folds three different refusals into one `null`, and a rule's run
+   * log graded all of them — and a queued hint — the same green. The pop-up
+   * action now reports which it was, so each outcome is pinned here against
+   * the same fake queue the rest of this file uses.
+   */
+
+  /** Records the `where` of every once-only count the service asks for. */
+  function recordCounts(h: ReturnType<typeof build>): Array<Record<string, unknown>> {
+    const asked: Array<Record<string, unknown>> = [];
+    const count = h.prisma.userHintDelivery.count;
+    h.prisma.userHintDelivery.count = async (args) => {
+      asked.push(args.where);
+      return count(args);
+    };
+    return asked;
+  }
+
+  /** A delivery row put in place directly, in whatever state a case needs. */
+  function delivery(over: Partial<FakeDelivery> & Pick<FakeDelivery, 'id' | 'hintId'>): FakeDelivery {
+    return {
+      userId: 'u1',
+      source: 's',
+      expiresAt: new Date(NOW.getTime() + 60 * 60 * 1000),
+      shownAt: null,
+      dismissedAt: null,
+      actedAt: null,
+      createdAt: new Date(NOW.getTime() - 60 * 60 * 1000),
+      ...over,
+    };
+  }
+
+  it('answers queued, with the row it wrote', async () => {
+    const h = build([hint({ key: 'connect' })]);
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'connect',
+      source: 'rule:rule-1',
+      now: NOW,
+    });
+
+    assert.ok(outcome.kind === 'queued', `answered ${outcome.kind}`);
+    assert.equal(h.deliveries.length, 1);
+    assert.equal(outcome.delivery, h.deliveries[0], 'answered a row it did not write');
+    assert.equal(h.deliveries[0].source, 'rule:rule-1');
+  });
+
+  it('answers hint_missing for a key nobody authored, and writes nothing', async () => {
+    const h = build([hint({ key: 'connect' })]);
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'ghost',
+      source: 's',
+      now: NOW,
+    });
+
+    assert.deepStrictEqual(outcome, { kind: 'hint_missing' });
+    assert.deepStrictEqual(h.deliveries, []);
+  });
+
+  it('answers hint_inactive for a hint that is switched off, and writes nothing', async () => {
+    const h = build([hint({ key: 'paused', isActive: false })]);
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'paused',
+      source: 's',
+      now: NOW,
+    });
+
+    assert.deepStrictEqual(outcome, { kind: 'hint_inactive' });
+    assert.deepStrictEqual(h.deliveries, []);
+  });
+
+  it('answers already_delivered when this customer has ANY delivery of a once-only hint', async () => {
+    // Dismissed AND lapsed — the prior delivery least likely to be counted,
+    // and it still counts. "Once" is about what was queued, not about what is
+    // still waiting.
+    const old = delivery({
+      id: 'd-old',
+      hintId: 'h-welcome',
+      shownAt: new Date(NOW.getTime() - 3 * 60 * 60 * 1000),
+      dismissedAt: new Date(NOW.getTime() - 2 * 60 * 60 * 1000),
+      expiresAt: new Date(NOW.getTime() - 60 * 60 * 1000),
+    });
+    const h = build([hint({ key: 'welcome', id: 'h-welcome' })], [old]);
+    const asked = recordCounts(h);
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 's',
+      now: NOW,
+    });
+
+    assert.deepStrictEqual(outcome, { kind: 'already_delivered' });
+    assert.deepStrictEqual(h.deliveries, [old]);
+    // EXACTLY this question. The fake count ignores any term it is not told
+    // about, so the only way to see a shown, dismissed or expiry term slipped
+    // into it — which would stop a closed delivery counting — is to read the
+    // question itself.
+    assert.deepStrictEqual(asked, [{ userId: 'u1', hintId: 'h-welcome' }]);
+  });
+
+  it('treats showAgain: false as no showAgain', async () => {
+    // The pop-up action passes `false` on every automatic run, so a check that
+    // asked "was it given" instead of "is it true" would skip "once" on all of
+    // them.
+    const h = build([hint({ key: 'welcome', id: 'h-welcome' })]);
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 's',
+      now: NOW,
+      showAgain: false,
+    });
+
+    assert.deepStrictEqual(outcome, { kind: 'already_delivered' });
+    assert.equal(h.deliveries.length, 1);
+  });
+
+  it('with showAgain, queues a once-only hint this customer already has', async () => {
+    const h = build([hint({ key: 'welcome', id: 'h-welcome' })]);
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 'rule:rule-1', now: NOW });
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 'rule:rule-1:manual',
+      now: NOW,
+      showAgain: true,
+    });
+
+    assert.ok(outcome.kind === 'queued', `answered ${outcome.kind}`);
+    assert.equal(h.deliveries.length, 2);
+    assert.equal(outcome.delivery, h.deliveries[1]);
+    assert.equal(h.deliveries[1].source, 'rule:rule-1:manual');
+  });
+
+  it('with showAgain, still lapses the older unshown deliveries of its group', async () => {
+    // showAgain skips "once" and nothing else. Its own earlier copy is in the
+    // group too, so it is lapsed with the rest — the customer gets the hint
+    // again, not the hint twice.
+    const hints = [
+      hint({ key: 'welcome', id: 'h-welcome', groupKey: 'purchase' }),
+      hint({ key: 'paid', id: 'h-paid', groupKey: 'purchase' }),
+    ];
+    const earlierWelcome = delivery({ id: 'd-welcome', hintId: 'h-welcome' });
+    const pendingPaid = delivery({ id: 'd-paid', hintId: 'h-paid' });
+    const h = build(hints, [earlierWelcome, pendingPaid]);
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 'rule:rule-1:manual',
+      now: NOW,
+      showAgain: true,
+    });
+
+    assert.ok(outcome.kind === 'queued', `answered ${outcome.kind}`);
+    assert.equal(h.deliveries.length, 3, 'lapsed, not deleted');
+    assert.deepStrictEqual(
+      h.deliveries.filter((d) => d.expiresAt > NOW).map((d) => d.id),
+      [outcome.delivery.id],
+      'only the new delivery may still be offerable',
+    );
+  });
+
+  it('with showAgain, still queues nothing for a hint that is switched off', async () => {
+    const h = build([hint({ key: 'paused', isActive: false })]);
+
+    const outcome = await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'paused',
+      source: 's',
+      now: NOW,
+      showAgain: true,
+    });
+
+    assert.deepStrictEqual(outcome, { kind: 'hint_inactive' });
+    assert.deepStrictEqual(h.deliveries, []);
+  });
+
+  it('keeps raise() answering the row, or null', async () => {
+    const h = build([hint({ key: 'welcome' })]);
+
+    const first = await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+    const second = await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    assert.equal(first, h.deliveries[0]);
+    assert.equal(second, null, 'a refusal is still null, not an outcome object');
+  });
+
+  it('does not let an untyped caller talk raise() into showAgain', async () => {
+    // `raise()` is what the cabinet's moment endpoint and the audience loop
+    // call, and neither may skip "once". Forwarding its input wholesale would
+    // carry a stray `showAgain` straight through.
+    const h = build([hint({ key: 'welcome' })]);
+    await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    const again = await h.service.raise({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 's',
+      now: NOW,
+      showAgain: true,
+    } as never);
+
+    assert.equal(again, null);
+    assert.equal(h.deliveries.length, 1);
+  });
+
+  describe('showAgain replaces a waiting copy instead of stacking another', () => {
+    const HOUR = 60 * 60 * 1000;
+
+    /** Records the `where` of every `updateMany` the service asks for. */
+    function recordUpdates(h: ReturnType<typeof build>): Array<Record<string, unknown>> {
+      const asked: Array<Record<string, unknown>> = [];
+      const updateMany = h.prisma.userHintDelivery.updateMany;
+      h.prisma.userHintDelivery.updateMany = async (args) => {
+        asked.push(args.where);
+        return updateMany(args);
+      };
+      return asked;
+    }
+
+    it('leaves one waiting copy, with a fresh expiry, after a second test run', async () => {
+      // THE DEFECT: each press queued one more copy behind the last, and the
+      // customer met the same pop-up once per press.
+      const h = build([hint({ key: 'welcome', id: 'h-welcome', ttlHours: 48 })]);
+      const later = new Date(NOW.getTime() + 3 * HOUR);
+
+      const first = await h.service.raiseWithOutcome({
+        userId: 'u1',
+        hintKey: 'welcome',
+        source: 'rule:rule-1:manual',
+        now: NOW,
+        showAgain: true,
+      });
+      const second = await h.service.raiseWithOutcome({
+        userId: 'u1',
+        hintKey: 'welcome',
+        source: 'rule:rule-1:manual',
+        now: later,
+        showAgain: true,
+      });
+
+      assert.ok(first.kind === 'queued' && second.kind === 'queued', 'a run was not queued');
+      const waiting = h.deliveries.filter(
+        (d) => d.shownAt === null && d.dismissedAt === null && d.actedAt === null && d.expiresAt > later,
+      );
+      assert.deepStrictEqual(waiting.map((d) => d.id), [second.delivery.id]);
+      assert.equal(
+        second.delivery.expiresAt.getTime(),
+        later.getTime() + 48 * HOUR,
+        'the copy left waiting does not carry the fresh expiry',
+      );
+      assert.equal(first.delivery.expiresAt.getTime(), later.getTime(), 'the earlier copy was not lapsed');
+      // And what the customer is actually offered is the fresh one.
+      const next = await h.service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: later });
+      assert.equal(next?.deliveryId, second.delivery.id);
+    });
+
+    it('lapses only a WAITING copy — shown, dismissed, acted and lapsed ones are history', async () => {
+      const future = new Date(NOW.getTime() + 24 * HOUR);
+      const past = new Date(NOW.getTime() - HOUR);
+      const waiting = delivery({ id: 'd-waiting', hintId: 'h-welcome', expiresAt: future });
+      const history = [
+        delivery({ id: 'd-shown', hintId: 'h-welcome', expiresAt: future, shownAt: past }),
+        delivery({ id: 'd-dismissed', hintId: 'h-welcome', expiresAt: future, dismissedAt: past }),
+        delivery({ id: 'd-acted', hintId: 'h-welcome', expiresAt: future, actedAt: past }),
+        delivery({ id: 'd-lapsed', hintId: 'h-welcome', expiresAt: past }),
+      ];
+      const h = build([hint({ key: 'welcome', id: 'h-welcome' })], [waiting, ...history]);
+      const expiryBefore = new Map(history.map((row) => [row.id, row.expiresAt.getTime()]));
+
+      const outcome = await h.service.raiseWithOutcome({
+        userId: 'u1',
+        hintKey: 'welcome',
+        source: 's',
+        now: NOW,
+        showAgain: true,
+      });
+
+      assert.equal(outcome.kind, 'queued');
+      assert.equal(waiting.expiresAt.getTime(), NOW.getTime(), 'the waiting copy was not lapsed');
+      for (const row of history) {
+        assert.equal(row.expiresAt.getTime(), expiryBefore.get(row.id), `${row.id} was rewritten`);
+      }
+    });
+
+    it('leaves other customers and other hints alone', async () => {
+      const future = new Date(NOW.getTime() + 24 * HOUR);
+      const theirs = delivery({ id: 'd-theirs', hintId: 'h-welcome', userId: 'u2', expiresAt: future });
+      const otherHint = delivery({ id: 'd-other-hint', hintId: 'h-other', expiresAt: future });
+      const h = build(
+        [hint({ key: 'welcome', id: 'h-welcome' }), hint({ key: 'other', id: 'h-other' })],
+        [theirs, otherHint],
+      );
+
+      await h.service.raiseWithOutcome({
+        userId: 'u1',
+        hintKey: 'welcome',
+        source: 's',
+        now: NOW,
+        showAgain: true,
+      });
+
+      assert.equal(theirs.expiresAt.getTime(), future.getTime(), 'another customer’s copy was lapsed');
+      assert.equal(otherHint.expiresAt.getTime(), future.getTime(), 'another hint’s copy was lapsed');
+    });
+
+    it('does nothing extra without showAgain', async () => {
+      // Every automatic run passes `showAgain: false`. A repeatable hint stacks
+      // there exactly as it always has, and an ungrouped one rewrites no row.
+      const future = new Date(NOW.getTime() + 24 * HOUR);
+      const earlier = delivery({ id: 'd-earlier', hintId: 'h-renew', expiresAt: future });
+      const h = build([hint({ key: 'renew', id: 'h-renew', isRepeatable: true })], [earlier]);
+      const updates = recordUpdates(h);
+
+      const outcome = await h.service.raiseWithOutcome({
+        userId: 'u1',
+        hintKey: 'renew',
+        source: 'rule:rule-1',
+        now: NOW,
+        showAgain: false,
+      });
+
+      assert.equal(outcome.kind, 'queued');
+      assert.equal(earlier.expiresAt.getTime(), future.getTime(), 'lapsed a copy without showAgain');
+      assert.deepStrictEqual(updates, [], 'rewrote rows for an ungrouped hint without showAgain');
+    });
+  });
+});
+
+describe('asking whether a hint could be queued, without queuing it', () => {
+  it('answers missing, inactive or active for the key it was asked about', async () => {
+    const h = build([
+      hint({ key: 'on', id: 'h-on' }),
+      hint({ key: 'off', id: 'h-off', isActive: false }),
+    ]);
+    const asked: Array<{ where: { key: string } }> = [];
+    const findUnique = h.prisma.userHint.findUnique;
+    h.prisma.userHint.findUnique = async (args) => {
+      asked.push(args);
+      return findUnique(args);
+    };
+
+    assert.equal(await h.service.hintStatus('on'), 'active');
+    assert.equal(await h.service.hintStatus('off'), 'inactive');
+    assert.equal(await h.service.hintStatus('ghost'), 'missing');
+
+    assert.deepStrictEqual(
+      asked.map((args) => args.where),
+      [{ key: 'on' }, { key: 'off' }, { key: 'ghost' }],
+    );
+    assert.deepStrictEqual(h.deliveries, [], 'asking wrote a delivery');
+  });
+});
+
+describe('one writer per customer’s queue', () => {
+  /**
+   * Two raises for one customer that overlap both read the queue before either
+   * writes it: "once" counted zero twice, `showAgain` lapsed the same old copy
+   * twice and left two new ones. The cure is a transaction that takes a lock
+   * on the customer before it reads anything. Whether the lock actually makes
+   * two connections wait is a question for PostgreSQL, and
+   * `user-hint-delivery-postgres.spec.ts` asks it with truly concurrent calls;
+   * these cases pin what can be seen without one — that the lock is taken,
+   * first, on the right key, and that every statement goes through it.
+   */
+  it('takes the customer’s lock before anything else, and writes only through the transaction', async () => {
+    const h = build([hint({ key: 'welcome', id: 'h-welcome', groupKey: 'purchase' })]);
+
+    await h.service.raiseWithOutcome({
+      userId: 'u1',
+      hintKey: 'welcome',
+      source: 'rule:rule-1:manual',
+      now: NOW,
+      showAgain: true,
+    });
+
+    // The showAgain lapse, both supersession statements, the insert.
+    assert.deepStrictEqual(h.ops, [
+      'begin',
+      'tx.hint',
+      'tx.lock',
+      'tx.updateMany',
+      'tx.updateMany',
+      'tx.updateMany',
+      'tx.create',
+      'commit',
+    ]);
+    assert.equal(h.locks.length, 1);
+    assert.match(h.locks[0].text, /pg_advisory_xact_lock\(hashtext\(\?\)::bigint\)/);
+    assert.deepStrictEqual(h.locks[0].values, ['user-hint:u1']);
+  });
+
+  it('counts "once" under the same lock, and answers the second raise from inside it', async () => {
+    const h = build([hint({ key: 'welcome', id: 'h-welcome' })]);
+
+    const first = await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+    const second = await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    assert.equal(first.kind, 'queued');
+    assert.equal(second.kind, 'already_delivered');
+    assert.deepStrictEqual(h.ops, [
+      'begin', 'tx.hint', 'tx.lock', 'tx.count', 'tx.create', 'commit',
+      'begin', 'tx.hint', 'tx.lock', 'tx.count', 'commit',
+    ]);
+  });
+
+  it('locks the CUSTOMER, not the hint — supersession reaches across the hints of a group', async () => {
+    const h = build([
+      hint({ key: 'paid', id: 'h-paid', groupKey: 'purchase' }),
+      hint({ key: 'created', id: 'h-created', groupKey: 'purchase' }),
+    ]);
+
+    await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'paid', source: 's', now: NOW });
+    await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'created', source: 's', now: NOW });
+    await h.service.raiseWithOutcome({ userId: 'u2', hintKey: 'paid', source: 's', now: NOW });
+
+    assert.deepStrictEqual(
+      h.locks.map((lock) => lock.values),
+      [['user-hint:u1'], ['user-hint:u1'], ['user-hint:u2']],
+    );
+  });
+
+  it('keeps raise() answering exactly as before', async () => {
+    const h = build([hint({ key: 'welcome' }), hint({ key: 'paused', isActive: false })]);
+
+    const queued = await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+    assert.equal(queued, h.deliveries[0]);
+    assert.equal(await h.service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW }), null);
+    assert.equal(await h.service.raise({ userId: 'u1', hintKey: 'paused', source: 's', now: NOW }), null);
+    assert.equal(await h.service.raise({ userId: 'u1', hintKey: 'ghost', source: 's', now: NOW }), null);
+  });
+
+  it('sends raise() through the same customer lock', async () => {
+    // `raise()` is what the audience loop and the cabinet's moment endpoint
+    // call. Its answers alone cannot show whether it took the lock — a raise
+    // that skipped it answers the same, and races the same way it used to.
+    const h = build([hint({ key: 'welcome', id: 'h-welcome' })]);
+
+    await h.service.raise({ userId: 'u7', hintKey: 'welcome', source: 'moment:subscription-ready', now: NOW });
+
+    assert.deepStrictEqual(h.ops, ['begin', 'tx.hint', 'tx.lock', 'tx.count', 'tx.create', 'commit']);
+    assert.deepStrictEqual(h.locks.map((lock) => lock.values), [['user-hint:u7']]);
+  });
+
+  it('reads the hint inside the transaction, so waiting for a connection is bounded too', async () => {
+    // Outside it, that read waits for a pooled connection with NO timer at all,
+    // so a raise could hang instead of failing — and a raise that hangs never
+    // reaches the audience loop's failure count, which is what stops a run
+    // against a database that is not answering.
+    const h = build([hint({ key: 'welcome', id: 'h-welcome' })]);
+
+    await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    assert.deepStrictEqual(h.ops, ['begin', 'tx.hint', 'tx.lock', 'tx.count', 'tx.create', 'commit']);
+    assert.equal(h.ops.includes('root.hint'), false, 'the hint was read outside the transaction');
+  });
+
+  it('reads the hint inside the transaction even when it does not exist or is switched off', async () => {
+    // The refusals answer before the lock is taken, but the READ that produced
+    // them is still inside, because it is the read that can hang.
+    const h = build([hint({ key: 'paused', isActive: false })]);
+
+    const missing = await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'ghost', source: 's', now: NOW });
+    const inactive = await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'paused', source: 's', now: NOW });
+
+    assert.deepStrictEqual(missing, { kind: 'hint_missing' });
+    assert.deepStrictEqual(inactive, { kind: 'hint_inactive' });
+    assert.deepStrictEqual(h.ops, ['begin', 'tx.hint', 'commit', 'begin', 'tx.hint', 'commit']);
+    assert.deepStrictEqual(h.transactionOptions, [
+      { maxWait: 10_000, timeout: 20_000 },
+      { maxWait: 10_000, timeout: 20_000 },
+    ]);
+  });
+
+  it('asks whether a hint could be queued under the same bounded wait', async () => {
+    // `hintStatus` runs inside the audience action, before its loop: an
+    // unbounded wait there hangs the whole run where nothing can stop it.
+    const h = build([hint({ key: 'on', id: 'h-on' })]);
+
+    assert.equal(await h.service.hintStatus('on'), 'active');
+
+    assert.deepStrictEqual(h.ops, ['begin', 'tx.hint', 'commit']);
+    assert.equal(h.ops.includes('root.hint'), false, 'the status read went past the transaction');
+    assert.deepStrictEqual(h.transactionOptions, [{ maxWait: 10_000, timeout: 20_000 }]);
+  });
+
+  it('opens the raise transaction with room to wait for a busy pool', async () => {
+    // Prisma's defaults — 2 s to get a connection, 5 s to finish — turn a pool
+    // busy for two seconds into a P2028 on a raise that used to simply wait.
+    // The numbers are the service's reasoned budget, repeated here as literals
+    // so that a change to them is a change to this line.
+    const h = build([hint({ key: 'welcome' })]);
+
+    await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+    await h.service.raise({ userId: 'u2', hintKey: 'welcome', source: 's', now: NOW });
+
+    assert.deepStrictEqual(h.transactionOptions, [
+      { maxWait: 10_000, timeout: 20_000 },
+      { maxWait: 10_000, timeout: 20_000 },
+    ]);
   });
 });

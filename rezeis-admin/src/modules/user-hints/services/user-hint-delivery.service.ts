@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { UserHint, UserHintDelivery } from '@prisma/client';
+import { Prisma, UserHint, UserHintDelivery } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
@@ -37,7 +37,8 @@ const MODES_ANY_CABINET_DRAWS: readonly string[] = ['MODAL'];
  *
  * What that cost: one cabinet claiming a mode this panel has never heard of
  * made `nextFor` throw, Nest answered 500, and the cabinet's route swallows a
- * failed ask into `{ hint: null }` at debug level. Every customer stops getting
+ * failed ask into `{ hint: null }` (logged at debug level, which is not printed
+ * by default, in cabinets up to 0.9.7.44). Every customer stops getting
  * every hint, for as long as that cabinet keeps asking, with nothing on any
  * screen saying why — the exact outage the header was introduced to prevent,
  * one layer further down.
@@ -61,7 +62,8 @@ export const MODES_THIS_PANEL_KNOWS: readonly string[] = [
  * modes this panel does not have gets NO hint rather than a modal it cannot
  * draw. Holding a delivery is recoverable; handing it to a cabinet that closes
  * it as a dismissal is not — `raise()` counts a dismissed row as a prior
- * delivery, and a once-only hint can never be queued again.
+ * delivery, and no rule or cabinet moment queues a once-only hint again. Only an
+ * operator running a rule by hand with `showAgain` can.
  */
 export function drawableModesForQuery(declared: readonly string[] | null): string[] {
   if (declared === null) return [...MODES_ANY_CABINET_DRAWS];
@@ -120,6 +122,37 @@ export function subGroupPrefix(groupKey: string): string | null {
   return `${groupKey.replace(/[\\%_]/g, (char) => `\\${char}`)}-`;
 }
 
+/**
+ * How long a raise may wait for a connection, and how long it may then take.
+ *
+ * NOT Prisma's defaults (2 s and 5 s). Before the raise had a transaction its
+ * statements queued for a pooled connection for as long as it took; with the
+ * defaults, a pool of five busy for two seconds — an export, a plan migration, a
+ * burst of events — would make a raise throw P2028 where it used to wait.
+ *
+ * WHAT THEY BOUND, exactly: ONE raise. Every statement it makes, the hint read
+ * included, is inside the transaction, and `maxWait` covers the connection
+ * checkout itself — Prisma races `startTransaction`, which is what acquires the
+ * connection, against that timer. So a raise answers or throws within
+ * 10 s + 20 s = 30 s, and never simply hangs. They bound NOTHING about a run as
+ * a whole: an audience run makes up to five hundred of them, and what bounds
+ * that is the loop's own wall-clock budget in `show_hint_to_audience`.
+ *
+ * WHY THESE NUMBERS. 30 s for one raise is the panel's default request timeout,
+ * so the cabinet's moment call — one raise — cannot outlive its own request; and
+ * three failures in a row, which is what stops an audience loop, cost at most
+ * 90 s of the 120 s a manual run has (`LONG_TIMEOUT_PATTERNS`). Wheel's 15 s +
+ * 30 s would be 135 s for those three, and the operator would read a timeout for
+ * a run that was already over. Ten seconds is five times Prisma's default — a
+ * pool that stays exhausted longer than that is an outage, not a burst — and
+ * twenty seconds is far above the few milliseconds a raise's handful of
+ * statements take under its customer's lock.
+ *
+ * A queued run is not the constraint: a BullMQ worker renews its 30 s job lock
+ * every 15 s from a timer, and awaiting the database does not stop the timer.
+ */
+const RAISE_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 20_000 } as const;
+
 /** What the cabinet reports about itself when it asks for pending hints. */
 export interface HintAudience {
   /**
@@ -144,6 +177,20 @@ export interface HintAudience {
    */
   readonly modes: readonly string[] | null;
 }
+
+/**
+ * What raising a hint came to.
+ *
+ * The three refusals are kept apart because they call for different things
+ * from whoever reads them: a missing hint is a mistake somebody has to fix, a
+ * switched-off hint is a choice somebody made, and an already-delivered one is
+ * "once" doing its job.
+ */
+export type HintRaiseOutcome =
+  | { readonly kind: 'queued'; readonly delivery: UserHintDelivery }
+  | { readonly kind: 'hint_missing' }
+  | { readonly kind: 'hint_inactive' }
+  | { readonly kind: 'already_delivered' };
 
 /** One hint, resolved for one viewer. */
 export interface ResolvedHint {
@@ -180,10 +227,17 @@ export class UserHintDeliveryService {
    * Owes `hintKey` to `userId`.
    *
    * Returns the row, or `null` when nothing was queued — which is a normal
-   * outcome, not a failure, and happens for four separate reasons the caller
-   * does not need to tell apart: the hint does not exist, it is switched off,
-   * the user has already had it and it is not repeatable, or a newer hint in
-   * the same group superseded it.
+   * outcome, not a failure, and happens for three reasons this caller does not
+   * need to tell apart: the hint does not exist, it is switched off, or the user
+   * has already had it and it is not repeatable. `raiseWithOutcome` tells them
+   * apart for a caller that does.
+   *
+   * Supersession is NOT one of them. It never declines the hint being raised:
+   * the newest hint of a group is queued and lapses the OLDER unshown ones.
+   *
+   * `showAgain` is deliberately not accepted here, and not forwarded even when
+   * an untyped caller passes it: the cabinet's moment endpoint and the audience
+   * loop call this, and neither may skip "once".
    */
   public async raise(input: {
     readonly userId: string;
@@ -191,29 +245,153 @@ export class UserHintDeliveryService {
     readonly source: string;
     readonly now?: Date;
   }): Promise<UserHintDelivery | null> {
-    const now = input.now ?? new Date();
-    const hint = await this.prismaService.userHint.findUnique({
-      where: { key: input.hintKey },
+    const outcome = await this.raiseWithOutcome({
+      userId: input.userId,
+      hintKey: input.hintKey,
+      source: input.source,
+      now: input.now,
     });
-    if (hint === null) {
-      // Loud, because it is always a mistake: a rule or a client moment naming
-      // a hint nobody authored will silently do nothing on every single fire.
-      this.logger.warn(
-        `Hint "${input.hintKey}" was raised for a user but no such hint exists — ` +
-          `nothing was queued (source: ${input.source})`,
-      );
-      return null;
-    }
-    if (!hint.isActive) return null;
+    return outcome.kind === 'queued' ? outcome.delivery : null;
+  }
 
-    if (!hint.isRepeatable) {
+  /**
+   * Whether `hintKey` could be queued at all, without queuing anything.
+   *
+   * For a caller about to spend something on the answer: the audience action
+   * resolves a cohort of up to five hundred and raises for each, and a hint that
+   * does not exist or is switched off makes every one of those raises a no-op.
+   * Reads the same row `raiseWithOutcome` reads, so the two agree on what
+   * "missing" and "switched off" mean.
+   */
+  public async hintStatus(hintKey: string): Promise<'missing' | 'inactive' | 'active'> {
+    // IN A TRANSACTION for one read, and only because of what bounds it: an
+    // ordinary query waits for a pooled connection with no timer at all
+    // (`pg-pool` queues the checkout when no `connectionTimeoutMillis` is
+    // configured, and `PrismaPg` is built without one), so with the pool held
+    // by an export or a plan migration this would HANG rather than fail —
+    // inside the audience action, before its loop, where nothing else could
+    // stop it. `maxWait` covers the checkout itself: Prisma races
+    // `startTransaction`, which is what acquires the connection, against it.
+    const hint = await this.prismaService.$transaction(
+      (tx) => tx.userHint.findUnique({ where: { key: hintKey }, select: { isActive: true } }),
+      RAISE_TRANSACTION_OPTIONS,
+    );
+    if (hint === null) return 'missing';
+    return hint.isActive ? 'active' : 'inactive';
+  }
+
+  /**
+   * `raise`, saying which of its outcomes it was.
+   *
+   * `showAgain` is for an operator who runs a rule by hand for one customer and
+   * means it. It changes two things, both about this customer and this hint:
+   * the once-only count is skipped, so the hint goes out even though they
+   * already have a delivery of it; and a copy of it still waiting is lapsed, so
+   * the new one replaces it rather than queuing behind it. Everything else
+   * still applies: a hint that is missing or switched off is still not queued,
+   * and supersession by group still lapses the older unshown deliveries.
+   */
+  public async raiseWithOutcome(input: {
+    readonly userId: string;
+    readonly hintKey: string;
+    readonly source: string;
+    readonly now?: Date;
+    readonly showAgain?: boolean;
+  }): Promise<HintRaiseOutcome> {
+    const now = input.now ?? new Date();
+
+
+    // ── ONE WRITER PER CUSTOMER'S QUEUE ──────────────────────────────────
+    //
+    // Everything below reads the queue and then writes it — "once" counts and
+    // then creates, `showAgain` lapses and then creates, supersession lapses
+    // and then creates — and two raises for the same customer overlapping in
+    // that window both read the queue as it was before either wrote. Two
+    // overlapping «Запустить сейчас» runs could leave two waiting copies
+    // although the comment below promises one; two events raising a once-only
+    // hint at the same instant could queue it twice.
+    //
+    // So it all runs in ONE transaction that first takes a lock on the
+    // CUSTOMER. Per customer, not per hint: supersession crosses hints within a
+    // group, and two different hints of one group raised together are the same
+    // race. Transaction-scoped, so COMMIT or ROLLBACK releases it and nothing
+    // can leak it; `$executeRaw` because `pg_advisory_xact_lock` returns
+    // `void`, which Prisma's query path cannot deserialize (see
+    // `persistProfileLink` in `profile-sync.processor.ts`, the same shape).
+    // `hashtext` is 32-bit, so two customers can rarely share a key — they then
+    // wait for each other, which costs a moment and decides nothing.
+    return this.prismaService.$transaction(async (tx) => {
+      // THE HINT IS READ IN HERE TOO, and the reason is the waiting rather
+      // than the reading: outside a transaction this query waits for a pooled
+      // connection with no timer, so a raise could hang instead of failing —
+      // and a raise that hangs never reaches the audience loop's failure
+      // count, which is what was supposed to stop a run against a database
+      // that is not answering. Inside, `maxWait` bounds the checkout.
+      const hint = await tx.userHint.findUnique({ where: { key: input.hintKey } });
+      if (hint === null) {
+        // Loud, because it is always a mistake: a rule or a client moment
+        // naming a hint nobody authored will silently do nothing on every fire.
+        this.logger.warn(
+          `Hint "${input.hintKey}" was raised for a user but no such hint exists — ` +
+            `nothing was queued (source: ${input.source})`,
+        );
+        return { kind: 'hint_missing' };
+      }
+      if (!hint.isActive) return { kind: 'hint_inactive' };
+
+      await tx.$executeRaw(Prisma.sql`
+        SELECT pg_advisory_xact_lock(hashtext(${`user-hint:${input.userId}`})::bigint)
+      `);
+      return this.queueUnderCustomerLock(tx, hint, input, now);
+    }, RAISE_TRANSACTION_OPTIONS);
+  }
+
+  /**
+   * What `raiseWithOutcome` decides and writes, on the transaction that holds
+   * this customer's lock. Every statement goes through `tx`: one that went past
+   * it would read or write outside the lock and reopen the race.
+   */
+  private async queueUnderCustomerLock(
+    tx: Prisma.TransactionClient,
+    hint: UserHint,
+    input: { readonly userId: string; readonly source: string; readonly showAgain?: boolean },
+    now: Date,
+  ): Promise<HintRaiseOutcome> {
+    if (!hint.isRepeatable && input.showAgain !== true) {
       // ANY prior delivery counts, shown or not. "Once" has to mean once even
       // when the first one is still sitting unseen, or a customer who buys
       // twice in a week gets the same onboarding modal twice.
-      const seen = await this.prismaService.userHintDelivery.count({
+      const seen = await tx.userHintDelivery.count({
         where: { userId: input.userId, hintId: hint.id },
       });
-      if (seen > 0) return null;
+      if (seen > 0) return { kind: 'already_delivered' };
+    }
+
+    // ── Again, not twice ─────────────────────────────────────────────────
+    //
+    // Skipping the count alone let every press of a test run leave one more
+    // pending copy behind the last, and the customer met the same pop-up as
+    // many times in a row. So a copy of THIS hint still waiting for THIS
+    // customer is lapsed first, and the fresh one — with a fresh expiry — is
+    // the one that stays.
+    //
+    // "Waiting" means exactly what it means for supersession below, and for
+    // the same reasons: a copy already shown, closed or lapsed is history and
+    // is left as it is. Without `showAgain` nothing here runs, so a repeatable
+    // hint raised by a rule stacks exactly as it always has. It holds when two
+    // runs overlap only because of the customer's lock taken above.
+    if (input.showAgain === true) {
+      await tx.userHintDelivery.updateMany({
+        where: {
+          userId: input.userId,
+          hintId: hint.id,
+          shownAt: null,
+          dismissedAt: null,
+          actedAt: null,
+          expiresAt: { gt: now },
+        },
+        data: { expiresAt: now },
+      });
     }
 
     // ── Supersession ─────────────────────────────────────────────────────
@@ -241,7 +419,7 @@ export class UserHintDeliveryService {
       // Expiring the row keeps it countable, stops it being offered (`nextFor`
       // requires `expiresAt > now`), and — unlike stamping it dismissed — puts
       // no words in the customer's mouth about a hint they never saw.
-      const superseded = await this.prismaService.userHintDelivery.updateMany({
+      const superseded = await tx.userHintDelivery.updateMany({
         where: {
           userId: input.userId,
           shownAt: null,
@@ -283,7 +461,7 @@ export class UserHintDeliveryService {
       //
       // The pending terms are the same three as above and mean the same thing;
       // the reasoning for each is written out there.
-      const supersededBelow = await this.prismaService.userHintDelivery.updateMany({
+      const supersededBelow = await tx.userHintDelivery.updateMany({
         where: {
           userId: input.userId,
           shownAt: null,
@@ -302,7 +480,7 @@ export class UserHintDeliveryService {
       }
     }
 
-    const delivery = await this.prismaService.userHintDelivery.create({
+    const delivery = await tx.userHintDelivery.create({
       data: {
         userId: input.userId,
         hintId: hint.id,
@@ -315,7 +493,7 @@ export class UserHintDeliveryService {
       },
     });
 
-    return delivery;
+    return { kind: 'queued', delivery };
   }
 
   /**

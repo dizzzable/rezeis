@@ -50,7 +50,9 @@ function dto(over: Partial<UpsertAutomationRuleDto>): UpsertAutomationRuleDto {
     name: 'A rule',
     triggerKind: AutomationTriggerKind.CRON,
     triggerSpec: '0 3 * * *',
-    actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'connect' } }],
+    actions: [
+      { type: 'show_hint_to_audience', params: { hintKey: 'connect', audience: 'paid-not-connected' } },
+    ],
     ...over,
   } as UpsertAutomationRuleDto;
 }
@@ -257,7 +259,9 @@ describe('a pop-up bound to an event that cannot carry one', () => {
       dto({
         triggerKind: AutomationTriggerKind.CRON,
         triggerSpec: '0 3 * * *',
-        actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'connect' } }],
+        actions: [
+          { type: 'show_hint_to_audience', params: { hintKey: 'connect', audience: 'paid-not-connected' } },
+        ],
       }),
       'admin-1',
     );
@@ -265,3 +269,187 @@ describe('a pop-up bound to an event that cannot carry one', () => {
     assert.equal(created.length, 1);
   });
 })
+
+describe('the refusals an operator can be shown in their own language', () => {
+  /**
+   * The SPA looks a refusal up as `errors.<the whole sentence>`
+   * (`web/src/lib/translate-error.ts`). i18next splits a key on its
+   * `keySeparator`, which is '.', so a sentence carrying a period — at the end
+   * or anywhere else — can never resolve, and the operator gets the English
+   * sentence back. The ':' that used to break the same way no longer does: that
+   * lookup passes `nsSeparator: false`.
+   *
+   * So these three are pinned WORD FOR WORD. They are the keys the Russian and
+   * English bundles carry, and a reword here without a reword there silently
+   * takes the translation away again.
+   */
+  async function refusalFor(dtoInput: UpsertAutomationRuleDto): Promise<string> {
+    const { service } = buildService();
+    try {
+      await service.createRule(dtoInput, 'admin-1');
+    } catch (error) {
+      return String((error as Error).message);
+    }
+    throw new Error('the save was accepted, so there is no refusal to read');
+  }
+
+  it('refuses a schedule-only action on an event with the exact bundled sentence', async () => {
+    const sentence = await refusalFor(
+      dto({ triggerKind: AutomationTriggerKind.REALTIME, triggerSpec: 'payment.completed' }),
+    );
+
+    assert.equal(
+      sentence,
+      'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger',
+    );
+  });
+
+  it('refuses an audience action with no audience with the exact bundled sentence', async () => {
+    // The list is interpolated from `HINT_AUDIENCES`, so adding an audience
+    // changes this sentence — and with it the bundle key. That is the point of
+    // pinning it here.
+    const sentence = await refusalFor(
+      dto({ actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'connect' } }] }),
+    );
+
+    assert.equal(
+      sentence,
+      'Action "show_hint_to_audience" needs an audience, one of: paid-not-connected',
+    );
+  });
+
+  it('refuses a pop-up on a schedule with the exact bundled sentence', async () => {
+    const sentence = await refusalFor(
+      dto({
+        triggerKind: AutomationTriggerKind.CRON,
+        triggerSpec: '0 3 * * *',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+      }),
+    );
+
+    assert.equal(
+      sentence,
+      'A pop-up needs somebody to show it to, and a schedule names nobody — bind this rule to an event about a customer, or run it manually with a user id',
+    );
+  });
+
+  it('carries no period in any of them, which is what makes them keys at all', async () => {
+    const sentences = [
+      await refusalFor(dto({ triggerKind: AutomationTriggerKind.REALTIME, triggerSpec: 'payment.completed' })),
+      await refusalFor(dto({ actions: [{ type: 'show_hint_to_audience', params: { hintKey: 'connect' } }] })),
+      await refusalFor(
+        dto({
+          triggerKind: AutomationTriggerKind.CRON,
+          triggerSpec: '0 3 * * *',
+          actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+        }),
+      ),
+    ];
+
+    for (const sentence of sentences) {
+      assert.equal(sentence.includes('.'), false, `a period keeps this one untranslatable: ${sentence}`);
+    }
+  });
+
+  it('leaves the one refusal that cannot be a key, and says why', async () => {
+    // This one names event types, and an event type is a dotted name. No
+    // rewording rescues it, so the SPA shows it in English — the reason it is
+    // not in the list above.
+    const sentence = await refusalFor(
+      dto({
+        triggerKind: AutomationTriggerKind.REALTIME,
+        triggerSpec: 'subscription.expired',
+        actions: [{ type: 'show_hint', params: { hintKey: 'tpl-welcome' } }],
+      }),
+    );
+
+    assert.match(sentence, /cannot show a pop-up: /);
+    assert.match(sentence, /events that can: /);
+    assert.match(sentence, /remnawave\.user\.expire_soon/, 'the dotted names are the reason it has periods');
+  });
+});
+describe('an audience rule has to name its audience', () => {
+  /**
+   * The action refuses a missing or unknown `audience` when it runs — on every
+   * run, so a nightly rule saved without one failed every night from the night
+   * it was saved. The editor's audience picker starts empty, so this is what
+   * pressing save too early produced. Refused at save, the operator hears it on
+   * the form.
+   */
+  const audienceRule = (params: Record<string, unknown>) =>
+    dto({ actions: [{ type: 'show_hint_to_audience', params }] });
+
+  it('refuses one with no audience at all', async () => {
+    const { service, created } = buildService();
+
+    await assert.rejects(
+      () => service.createRule(audienceRule({ hintKey: 'connect' }), 'admin-1'),
+      (error: unknown) => {
+        assert.equal((error as { getStatus?: () => number }).getStatus?.(), 400);
+        assert.match(String((error as Error).message), /needs an audience, one of: paid-not-connected/);
+        return true;
+      },
+    );
+    assert.deepStrictEqual(created, [], 'refused, but the row was written anyway');
+  });
+
+  it('refuses an audience nobody defined, and one that is not a string', async () => {
+    for (const audience of ['everybody', '', '   ', 42, null, ['paid-not-connected']]) {
+      const { service, created } = buildService();
+
+      await assert.rejects(
+        () => service.createRule(audienceRule({ hintKey: 'connect', audience }), 'admin-1'),
+        /needs an audience/,
+        `audience ${JSON.stringify(audience)} was accepted`,
+      );
+      assert.deepStrictEqual(created, []);
+    }
+  });
+
+  it('refuses it on update as well as on create', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new AutomationsService(
+      {
+        automationRule: {
+          findUnique: async () => ({ id: 'rule-1' }),
+          update: async (args: Record<string, unknown>) => {
+            updates.push(args);
+            return {};
+          },
+        },
+      } as never,
+      {} as never,
+    );
+
+    await assert.rejects(
+      () => service.updateRule('rule-1', audienceRule({ hintKey: 'connect', audience: 'everybody' })),
+      /needs an audience/,
+    );
+    assert.deepStrictEqual(updates, [], 'refused, but the rule was rewritten anyway');
+  });
+
+  it('accepts a known audience, trimmed the way the action reads it', async () => {
+    const { service, created } = buildService();
+
+    await service.createRule(audienceRule({ hintKey: 'connect', audience: '  paid-not-connected  ' }), 'admin-1');
+
+    assert.equal(created.length, 1);
+  });
+
+  it('leaves the audience of every other action alone', async () => {
+    // `show_hint` has no audience parameter; its stored params are not checked
+    // for one.
+    const { service, created } = buildService();
+
+    await service.createRule(
+      dto({
+        triggerKind: AutomationTriggerKind.MANUAL,
+        triggerSpec: '',
+        actions: [{ type: 'show_hint', params: { hintKey: 'connect' } }],
+      }),
+      'admin-1',
+    );
+
+    assert.equal(created.length, 1);
+  });
+});

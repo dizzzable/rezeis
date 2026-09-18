@@ -182,7 +182,14 @@ function build(hints: FakeHint[]) {
       },
     },
   };
-  const service = new UserHintDeliveryService(prisma as never);
+  // `raise` does its reading and writing in one transaction behind a lock on
+  // the customer. This fake runs one raise at a time, so the transaction is
+  // the fake itself and the lock is a no-op.
+  const client = Object.assign(prisma, {
+    $executeRaw: async () => 0,
+    $transaction: async <T>(work: (tx: typeof prisma) => Promise<T>): Promise<T> => work(prisma),
+  });
+  const service = new UserHintDeliveryService(client as never);
   return { service, deliveries };
 }
 

@@ -64,6 +64,26 @@ describe('request timeout route policy', () => {
     assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan'), 30_000);
   });
 
+  it('gives a manual rule run the long timeout, because the operator waits for every action', () => {
+    // POST /admin/automations/rules/:id/run. An audience action raising a hint
+    // for up to five hundred customers, or a few 10 s webhooks, outlast thirty
+    // seconds — and the 408 arrived while the run went on and was recorded.
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule/run'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule/run?trace=1'), 120_000);
+  });
+
+  it('keeps the rule routes beside the run at the default', () => {
+    // GET and PUT rules/:id, PATCH rules/:id/toggle, GET rules/:id/executions —
+    // and a path that only starts like the run.
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule/toggle'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule/executions'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule/executions?limit=50'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules/cmf1rule/run-extra'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/rules'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/automations/executions'), 30_000);
+  });
+
   it('does not widen similarly named backup routes', () => {
     // The widened pattern must not swallow a neighbour: `restored-*` shares the
     // prefix, and the settings/list routes are ordinary JSON.

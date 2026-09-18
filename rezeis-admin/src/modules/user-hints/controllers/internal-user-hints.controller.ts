@@ -1,5 +1,6 @@
 import { Body, Controller, Headers, Post, UseGuards } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import {
   IsIn,
   IsOptional,
@@ -60,9 +61,10 @@ class HintAudienceDto {
  * deployed in either order. Bodies are validated by the global pipe with
  * `forbidNonWhitelisted`, so a panel whose DTO has not learned a field does not
  * ignore it — it answers 400. A cabinet upgraded before its panel would have
- * had every single hint request rejected, and the cabinet's route swallows that
- * into `{ hint: null }` at debug level: no hints for anybody, and nothing
- * anywhere saying why. An unknown header is simply not read.
+ * had every single hint request rejected, and the cabinet's route turns any
+ * failure into `{ hint: null }`: no hints for anybody. Cabinets up to 0.9.7.44
+ * logged that failure at debug level, which the default log level does not
+ * print, so nothing anywhere said why. An unknown header is simply not read.
  */
 export const HINT_MODES_HEADER = 'x-reiwa-hint-modes';
 
@@ -144,9 +146,24 @@ class HintOutcomeDto extends HintAudienceDto {
   public readonly outcome?: 'acted' | 'dismissed';
 }
 
+/**
+ * NOT THROTTLED PER ADDRESS, and the global limit is the reason.
+ *
+ * `ThrottleModule` allows each handler 600 requests a minute per caller IP.
+ * Every call here comes from the cabinet's BACKEND, one address, on behalf of
+ * every customer at once — so that limit was 600 hint asks a minute for the
+ * whole customer base together, and every cabinet visit asks at least once,
+ * more when something happens on the page. Past it, each ask answers 429 and
+ * the cabinet shows nobody a hint.
+ *
+ * A per-address limit protects nothing on this route: it is behind
+ * `InternalAdminAuthGuard`, so the only caller that gets through is the one
+ * holding the shared secret, and throttling that caller throttles customers.
+ */
 @ApiExcludeController()
 @Controller('internal/user-hints')
 @UseGuards(InternalAdminAuthGuard)
+@SkipThrottle()
 export class InternalUserHintsController {
   public constructor(
     private readonly deliveries: UserHintDeliveryService,
