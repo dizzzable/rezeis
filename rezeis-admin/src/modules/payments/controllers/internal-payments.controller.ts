@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PurchaseChannel } from '@prisma/client';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
@@ -25,6 +26,14 @@ import {
 
 @Controller('internal/payments')
 @UseGuards(InternalAdminAuthGuard)
+// NOT THROTTLED PER ADDRESS. Every call here comes from the cabinet’s
+// backend — one address, on behalf of every customer at once — so the global
+// 600/minute per-IP limit was 600 requests a minute for the whole customer
+// base together, and past it the cabinet stopped working for everybody. The
+// argument in full, including why a per-address limit protects nothing on a
+// route behind `InternalAdminAuthGuard`, is on
+// `src/modules/user-hints/controllers/internal-user-hints.controller.ts`.
+@SkipThrottle()
 export class InternalPaymentsController {
   public constructor(
     private readonly paymentsCheckoutService: PaymentsCheckoutService,
