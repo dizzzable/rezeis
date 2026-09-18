@@ -65,6 +65,8 @@ import { en as paymentsEn } from './features/payments.en'
 import { ru as paymentsRu } from './features/payments.ru'
 import { en as platformSettingsEn } from './features/platformSettings.en'
 import { ru as platformSettingsRu } from './features/platformSettings.ru'
+import { en as rbacEn } from './features/rbac.en'
+import { ru as rbacRu } from './features/rbac.ru'
 import { en as remnawaveEn } from './features/remnawave.en'
 import { ru as remnawaveRu } from './features/remnawave.ru'
 import { en as subpageConfigEn } from './features/subpageConfig.en'
@@ -117,6 +119,7 @@ const PAIRS = [
   { name: 'features/panelLinkReconciliation.{en,ru}.ts', en: panelLinkReconciliationEn as unknown, ru: panelLinkReconciliationRu as unknown },
   { name: 'features/payments.{en,ru}.ts', en: paymentsEn as unknown, ru: paymentsRu as unknown },
   { name: 'features/platformSettings.{en,ru}.ts', en: platformSettingsEn as unknown, ru: platformSettingsRu as unknown },
+  { name: 'features/rbac.{en,ru}.ts', en: rbacEn as unknown, ru: rbacRu as unknown },
   { name: 'features/remnawave.{en,ru}.ts', en: remnawaveEn as unknown, ru: remnawaveRu as unknown },
   { name: 'features/subpageConfig.{en,ru}.ts', en: subpageConfigEn as unknown, ru: subpageConfigRu as unknown },
   { name: 'features/twoFactor.{en,ru}.ts', en: twoFactorEn as unknown, ru: twoFactorRu as unknown },

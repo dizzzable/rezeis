@@ -4336,63 +4336,31 @@ export const en = {
       saveFailed: 'Failed to save settings',
     },
   },
+  // Only the system roles live here: the Administrators page names them in its
+  // role picker without loading the roles page's own words. The rest of
+  // `rolesPage` is the lazy `i18n/features/rbac.*` bundle.
   rolesPage: {
-    title: 'Roles & Permissions',
-    subtitle:
-      'Manage RBAC roles and the admin panel permission matrix. System roles sync automatically with the resource catalog.',
-    syncButton: 'Sync system roles',
-    syncSuccess: 'System roles synced',
-    syncFailed: 'Failed to sync: {{message}}',
-    newRole: 'New role',
-    noRoles: 'No roles yet. System roles will appear after the next backend boot.',
-    selectRole: 'Select a role on the left to edit its permission matrix.',
-    perms: 'perms',
-    admins: 'admin',
-    adminsPlural: 'admins',
-    editor: {
-      save: 'Save',
-      delete: 'Delete',
-      deleteConfirm: 'Delete role "{{name}}"?',
-      deleteAssigned: 'Role is assigned to one or more admins',
-      displayName: 'Display name',
-      description: 'Description',
-      descriptionPlaceholder: 'What this role can do',
-      systemRole: 'System role',
-      systemReadOnly: 'Permission matrix is read-only',
-      systemReadOnlyDescription:
-        'System roles receive their grants from the application\'s resource catalog. Use the "Sync system roles" button at the top to refresh.',
-      permissions: 'Permissions',
-      cannotGrant: 'You cannot grant a permission you do not hold yourself',
-      beyondActorTitle: 'This role holds permissions you do not',
-      beyondActorBody:
-        'Saving is refused while they remain ticked. You may remove them; you may not grant them.',
-      resourceColumn: 'Resource',
-      meta_one: 'name: {{name}} · {{adminsCount}} admin · {{permsCount}} permissions',
-      meta_other: 'name: {{name}} · {{adminsCount}} admins · {{permsCount}} permissions',
-      clear: 'clear',
-      all: 'all',
-    },
-    toasts: {
-      roleUpdated: 'Role updated',
-      updateFailed: 'Update failed: {{message}}',
-      roleDeleted: 'Role deleted',
-      deleteFailed: 'Delete failed: {{message}}',
-      roleCreated: 'Role created',
-      createFailed: 'Create failed: {{message}}',
-    },
-    createDialog: {
-      title: 'Create custom role',
-      dialogDescription:
-        'Pick a stable name (lowercase, used internally), a friendly display name, and tick the permission grants this role should have.',
-      stableName: 'Stable name',
-      stableNamePlaceholder: 'ops_lead',
-      stableNameHint: 'Lowercase, alphanumerics and underscores. Cannot be changed later.',
-      displayName: 'Display name',
-      displayNamePlaceholder: 'Ops Lead',
-      description: 'Description',
-      descriptionPlaceholder: 'What this role can do',
-      cancel: 'Cancel',
-      create: 'Create role',
+    // The four roles the backend seeds. Shown instead of the seed text while a
+    // role still carries it; see `features/rbac/system-roles.ts`.
+    systemRoles: {
+      superadmin: {
+        name: 'Superadmin',
+        description: 'Full access to every section, including permissions future versions add.',
+      },
+      operator: {
+        name: 'Operator',
+        description:
+          'Day-to-day work: customers, subscriptions, payments, support, promo codes, broadcasts, quests and the wheel of fortune.',
+      },
+      support: {
+        name: 'Support',
+        description:
+          'Support tickets, read-only customers, subscriptions and payments, handing over wheel prizes.',
+      },
+      finance: {
+        name: 'Finance',
+        description: 'Payments and gateways, partner withdrawals, plans and financial analytics.',
+      },
     },
   },
   backupPage: {

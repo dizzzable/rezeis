@@ -52,6 +52,26 @@ function permissionToToken(p: RbacPermission): string {
   return `${p.resource}:${p.action}`;
 }
 
+/**
+ * The permission check itself, as a pure function of the two fields it reads.
+ *
+ * `hasPermission` below is a stable function that reads the store through
+ * `get()`, so a component selecting IT (`usePermissionStore((s) =>
+ * s.hasPermission)`) never re-renders when the grants change — it keeps the
+ * same reference forever. A component that has to follow the grants selects
+ * `granted` and `role` and asks this instead.
+ */
+export function holdsPermission(
+  state: { readonly role: string | null; readonly granted: ReadonlySet<string> },
+  resource: string,
+  action: string,
+): boolean {
+  // DEV admins always pass; this mirrors the backend RBAC service so
+  // the UI never hides things a DEV could open through the API anyway.
+  if (state.role === 'DEV') return true;
+  return state.granted.has(`${resource}:${action}`);
+}
+
 function applyResponse(
   set: (p: Partial<PermissionState>) => void,
   response: RbacEffectivePermissionsResponse,
@@ -112,11 +132,5 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
   reset: () => {
     set({ ...INITIAL });
   },
-  hasPermission: (resource: string, action: RbacAction) => {
-    const state = get();
-    // DEV admins always pass; this mirrors the backend RBAC service so
-    // the UI never hides things a DEV could open through the API anyway.
-    if (state.role === 'DEV') return true;
-    return state.granted.has(`${resource}:${action}`);
-  },
+  hasPermission: (resource: string, action: RbacAction) => holdsPermission(get(), resource, action),
 }));

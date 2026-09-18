@@ -6,12 +6,14 @@
  * editor on the right. System roles are listed but their permission
  * matrix is read-only — only display name + description can be edited.
  *
- * The matrix editor groups resources by domain (mirroring `RBAC_RESOURCES`
- * on the backend) and renders a checkbox per (resource × action). All
- * mutations route through React Query with optimistic invalidation so
- * the list refreshes after a save without a manual refetch.
+ * It is written for an owner who has just installed the panel and has never
+ * seen `rbac_roles:edit`: every section, action and dangerous permission in
+ * the matrix is named and explained (`permission-matrix.tsx`), every button
+ * says on hover what pressing it does — or why it cannot be pressed — and a
+ * refusal from the server is told in the operator's language (`role-errors.ts`)
+ * instead of as "Request failed with status code 403".
  */
-import { useMemo, useState } from 'react';
+import { use, useId, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
@@ -39,6 +41,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ButtonTip } from '@/components/ui/button-tip';
 import {
   Card,
   CardContent,
@@ -46,7 +49,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -56,11 +58,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { LabelWithInfo } from '@/components/ui/info-tip';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
+import type { i18n as I18nInstance } from 'i18next';
+import { coreDictionaryReady, loadFeatureBundle } from '@/i18n/i18n';
 import { cn } from '@/lib/utils';
 import {
   createRole,
@@ -77,33 +82,125 @@ import {
   type RbacRole,
   type RbacRoleListItem,
 } from '@/features/rbac';
+import { PermissionMatrix } from './permission-matrix';
+import { permissionLabel } from './permission-labels';
+import { translateRoleError } from './role-errors';
+import {
+  descriptionToStore,
+  isReservedRoleName,
+  nameToStore,
+  roleDescription,
+  roleDisplayName,
+} from './system-roles';
 
 const ROLES_KEY = ['admin', 'rbac', 'roles'] as const;
 const RESOURCES_KEY = ['admin', 'rbac', 'resources'] as const;
+
+/** The server's rule for a role's identifier (`CreateAdminRoleDto.name`). */
+const ROLE_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+const ROLE_NAME_MIN = 2;
+const ROLE_NAME_MAX = 32;
+const DISPLAY_NAME_MIN = 2;
+
+function toPermissions(tokens: Iterable<string>): RbacPermission[] {
+  return Array.from(tokens).map((token) => {
+    const [resource, action] = token.split(':') as [string, RbacAction];
+    return { resource, action };
+  });
+}
+
+/** Whether the ACTING admin may call one of this page's routes. */
+function useCanManageRoles(action: RbacAction): boolean {
+  return usePermissionStore((s) => s.hasPermission('rbac_roles', action));
+}
+
+/**
+ * One promise per language: this page's feature bundle AND the core dictionary.
+ *
+ * Cached so `use()` is handed the same promise on every render of the same
+ * language, and evicted on failure so the next render retries. A failure is
+ * survivable — the words fall back to the other language, and the role names
+ * to what is stored — so it is logged rather than thrown into the page.
+ */
+const wordsByLanguage = new Map<string, Promise<void>>();
+
+function wordsReady(language: string): Promise<void> {
+  const cached = wordsByLanguage.get(language);
+  if (cached !== undefined) return cached;
+  const ready = Promise.all([coreDictionaryReady(language), loadFeatureBundle('rbac')])
+    .then(() => undefined)
+    .catch((error: unknown) => {
+      wordsByLanguage.delete(language);
+      console.warn(`[i18n] the roles page words for "${language}" did not load:`, error);
+    });
+  wordsByLanguage.set(language, ready);
+  return ready;
+}
+
+/**
+ * Whether both dictionaries of `language` are already in the store — read
+ * without falling back, which is exactly what `t()` would do and must not.
+ */
+function wordsPresent(store: I18nInstance, language: string): boolean {
+  return (
+    store.getResource(language, 'translation', 'rolesPage.title') !== undefined &&
+    store.getResource(language, 'translation', 'rolesPage.systemRoles.superadmin.name') !== undefined
+  );
+}
+
+/**
+ * Suspends until the page's words exist in the CURRENT language.
+ *
+ * On a language switch `languageChanged` fires before either dictionary has
+ * arrived, so the first render after it would print key paths — and prefill
+ * nothing sensible. Suspending hands that render to the enclosing `<Suspense>`
+ * instead, which keeps what is on screen, and every edit in it, until the words
+ * are in; React preserves the state of a subtree that re-suspends.
+ *
+ * Only while they are missing: `use()` suspends once even on a promise that
+ * has already resolved, and a page whose words are in the store has no reason
+ * to flash its fallback on every mount.
+ */
+function useRolesWords(): void {
+  const { i18n: store } = useTranslation();
+  if (wordsPresent(store, store.language)) return;
+  use(wordsReady(store.language));
+}
 
 interface RolesPageProps {
   /**
    * When `true`, hides the page-level header (title + subtitle + sync
    * button position) so the page can be embedded inside a tab without
    * duplicating headings. The sync + create-role buttons move into the
-   * grid header instead.
+   * grid header instead, next to a short explanation of what a role is.
    */
   readonly embedded?: boolean;
 }
 
 export default function RolesPage({ embedded = false }: RolesPageProps = {}) {
+  useRolesWords();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const refreshPermissions = usePermissionStore((s) => s.refreshPermissions);
+  const permissionsLoaded = usePermissionStore((s) => s.loaded);
+  const canView = useCanManageRoles('view');
+  const canSync = useCanManageRoles('edit');
+  // An admin whose role cannot read roles is told so instead of being sent
+  // requests that are refused — the refusal used to land in the empty-list
+  // branch and read «Ролей пока нет», which is not what happened. Until the
+  // permissions have loaded the page asks anyway, and a refusal is reported.
+  const refused = permissionsLoaded && !canView;
 
   const rolesQuery = useQuery({
     queryKey: ROLES_KEY,
     queryFn: listRoles,
+    enabled: !refused,
   });
   const resourcesQuery = useQuery({
     queryKey: RESOURCES_KEY,
     queryFn: getResourceCatalog,
     staleTime: 5 * 60 * 1000,
+    enabled: !refused,
   });
 
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
@@ -120,7 +217,7 @@ export default function RolesPage({ embedded = false }: RolesPageProps = {}) {
   const selectedRoleQuery = useQuery({
     queryKey: ['admin', 'rbac', 'role', selectedRoleId],
     queryFn: () => (selectedRoleId ? getRole(selectedRoleId) : Promise.reject(new Error('No role selected'))),
-    enabled: selectedRoleId !== null,
+    enabled: selectedRoleId !== null && !refused,
   });
 
   const syncMutation = useMutation({
@@ -130,14 +227,28 @@ export default function RolesPage({ embedded = false }: RolesPageProps = {}) {
       queryClient.invalidateQueries({ queryKey: ROLES_KEY });
       refreshPermissions().catch(() => undefined);
     },
-    onError: (err) => toast.error(t('rolesPage.syncFailed', { message: (err as Error).message })),
+    onError: (err) => toast.error(t('rolesPage.syncFailed', { message: translateRoleError(t, err) })),
   });
+
+  if (refused) {
+    return (
+      <Alert data-roles-refused>
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>{t('rolesPage.accessDeniedTitle')}</AlertTitle>
+        <AlertDescription>
+          {t('rolesPage.accessDenied', { permission: permissionLabel(t, 'rbac_roles', 'view') })}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  const syncDisabled = syncMutation.isPending || !canSync;
 
   return (
     <div className="space-y-6">
       <header className="flex items-start justify-between gap-4 flex-wrap">
         {embedded ? (
-          <div />
+          <p className="max-w-3xl text-sm text-muted-foreground">{t('rolesPage.intro')}</p>
         ) : (
           <div>
             <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
@@ -150,15 +261,24 @@ export default function RolesPage({ embedded = false }: RolesPageProps = {}) {
           </div>
         )}
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => syncMutation.mutate()}
-            disabled={syncMutation.isPending}
+          <ButtonTip
+            disabled={syncDisabled}
+            tip={
+              canSync
+                ? t('rolesPage.syncTip')
+                : t('rolesPage.noPermission', { permission: permissionLabel(t, 'rbac_roles', 'edit') })
+            }
           >
-            <RefreshCw className={cn('mr-2 h-4 w-4', syncMutation.isPending && 'animate-spin')} />
-            {t('rolesPage.syncButton')}
-          </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => syncMutation.mutate()}
+              disabled={syncDisabled}
+            >
+              <RefreshCw className={cn('mr-2 h-4 w-4', syncMutation.isPending && 'animate-spin')} />
+              {t('rolesPage.syncButton')}
+            </Button>
+          </ButtonTip>
           <CreateRoleDialog
             catalog={resourcesQuery.data ?? null}
             onCreated={(role) => {
@@ -169,33 +289,42 @@ export default function RolesPage({ embedded = false }: RolesPageProps = {}) {
         </div>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <RoleList
-          roles={rolesQuery.data ?? []}
-          loading={rolesQuery.isLoading}
-          selectedId={selectedRoleId}
-          onSelect={setSelectedRoleId}
-        />
-        {selectedRoleId === null ? (
-          <EmptyEditorPlaceholder />
-        ) : (
-          <RoleEditor
-            roleId={selectedRoleId}
-            role={selectedRoleQuery.data ?? null}
-            loading={selectedRoleQuery.isLoading}
-            catalog={resourcesQuery.data ?? null}
-            onDeleted={() => {
-              setSelectedRoleId(null);
-              queryClient.invalidateQueries({ queryKey: ROLES_KEY });
-            }}
-            onUpdated={() => {
-              queryClient.invalidateQueries({ queryKey: ROLES_KEY });
-              queryClient.invalidateQueries({ queryKey: ['admin', 'rbac', 'role', selectedRoleId] });
-              refreshPermissions().catch(() => undefined);
-            }}
+      {rolesQuery.isError ? (
+        <Alert variant="destructive" data-roles-load-failed>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>{t('rolesPage.loadFailedTitle')}</AlertTitle>
+          <AlertDescription>{translateRoleError(t, rolesQuery.error)}</AlertDescription>
+        </Alert>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
+          <RoleList
+            roles={rolesQuery.data ?? []}
+            loading={rolesQuery.isLoading}
+            selectedId={selectedRoleId}
+            onSelect={setSelectedRoleId}
           />
-        )}
-      </div>
+          {selectedRoleId === null ? (
+            <EmptyEditorPlaceholder />
+          ) : (
+            <RoleEditor
+              roleId={selectedRoleId}
+              role={selectedRoleQuery.data ?? null}
+              loading={selectedRoleQuery.isLoading || resourcesQuery.isLoading}
+              loadError={selectedRoleQuery.error ?? resourcesQuery.error ?? null}
+              catalog={resourcesQuery.data ?? null}
+              onDeleted={() => {
+                setSelectedRoleId(null);
+                queryClient.invalidateQueries({ queryKey: ROLES_KEY });
+              }}
+              onUpdated={() => {
+                queryClient.invalidateQueries({ queryKey: ROLES_KEY });
+                queryClient.invalidateQueries({ queryKey: ['admin', 'rbac', 'role', selectedRoleId] });
+                refreshPermissions().catch(() => undefined);
+              }}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -242,6 +371,7 @@ function RoleList({
           return (
             <button
               key={role.id}
+              type="button"
               onClick={() => onSelect(role.id)}
               className={cn(
                 'w-full text-left rounded-md px-3 py-2 transition-colors flex items-start justify-between gap-2',
@@ -250,7 +380,7 @@ function RoleList({
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-sm truncate">{role.displayName}</span>
+                  <span className="font-medium text-sm truncate">{roleDisplayName(t, role)}</span>
                   {role.isSystem && (
                     <Badge
                       variant={active ? 'secondary' : 'outline'}
@@ -261,12 +391,12 @@ function RoleList({
                   )}
                 </div>
                 <p className={cn('text-xs truncate mt-0.5', active ? 'text-primary-foreground/80' : 'text-muted-foreground')}>
-                  {role.description ?? '—'}
+                  {roleDescription(t, role) ?? '—'}
                 </p>
               </div>
-              <div className={cn('text-[11px] tabular-nums shrink-0', active ? 'text-primary-foreground/80' : 'text-muted-foreground')}>
-                <div>{role.permissionsCount} {t('rolesPage.perms')}</div>
-                <div>{role.assignedAdminCount} {role.assignedAdminCount === 1 ? t('rolesPage.admins') : t('rolesPage.adminsPlural')}</div>
+              <div className={cn('text-[11px] tabular-nums shrink-0 text-right', active ? 'text-primary-foreground/80' : 'text-muted-foreground')}>
+                <div>{t('rolesPage.counts.permissions', { count: role.permissionsCount })}</div>
+                <div>{t('rolesPage.counts.admins', { count: role.assignedAdminCount })}</div>
               </div>
             </button>
           );
@@ -289,10 +419,32 @@ function EmptyEditorPlaceholder() {
 
 // ── Role editor ───────────────────────────────────────────────────────────
 
+/**
+ * What the operator has changed in the open role, and nothing else. `null` is
+ * "untouched": the field shows the role as it is — translated, in whatever
+ * language is current — and saves the role's own stored value.
+ *
+ * Keyed on the role's identity and revision, never on the language: a switch
+ * of language is not a reason to throw an operator's edits away, and the
+ * fields that follow the language are exactly the untouched ones, which are
+ * computed on every render rather than copied into state.
+ */
+interface RoleDraft {
+  readonly key: string;
+  readonly name: string | null;
+  readonly description: string | null;
+  readonly permissions: ReadonlySet<string> | null;
+}
+
+function emptyDraft(key: string): RoleDraft {
+  return { key, name: null, description: null, permissions: null };
+}
+
 function RoleEditor({
   roleId,
   role,
   loading,
+  loadError,
   catalog,
   onDeleted,
   onUpdated,
@@ -300,47 +452,47 @@ function RoleEditor({
   roleId: string;
   role: RbacRole | null;
   loading: boolean;
+  loadError: unknown;
   catalog: RbacResourceCatalog | null;
   onDeleted: () => void;
   onUpdated: () => void;
 }) {
   const { t } = useTranslation();
-  const [displayName, setDisplayName] = useState('');
-  const [description, setDescription] = useState('');
-  const [permissions, setPermissions] = useState<Set<string>>(new Set());
+  const fieldId = useId();
+  const canEdit = useCanManageRoles('edit');
+  const canDelete = useCanManageRoles('delete');
 
-  // Reset local edit state whenever the loaded role changes — using the
-  // "store previous prop in state and adjust during render" pattern.
-  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
-  const [roleSnapshotKey, setRoleSnapshotKey] = useState<string | null>(null);
-  if (role) {
-    const nextKey = `${role.id}|${role.updatedAt}`;
-    if (nextKey !== roleSnapshotKey) {
-      setRoleSnapshotKey(nextKey);
-      setDisplayName(role.displayName);
-      setDescription(role.description ?? '');
-      setPermissions(new Set(role.permissions.map((p) => `${p.resource}:${p.action}`)));
-    }
-  }
+  const roleKey = role ? `${role.id}|${role.updatedAt}` : '';
+  const [storedDraft, setDraft] = useState<RoleDraft>(() => emptyDraft(roleKey));
+  // A draft left over from another role — or from before this one was saved —
+  // reads as untouched. Derived, not reset in render: the rest of this render
+  // must see the same draft the next one will.
+  const draft = storedDraft.key === roleKey ? storedDraft : emptyDraft(roleKey);
+
+  const storedPermissions = useMemo(
+    () => new Set(role ? role.permissions.map((p) => `${p.resource}:${p.action}`) : []),
+    [role],
+  );
 
   const saveMutation = useMutation({
-    mutationFn: () => {
-      if (!role) return Promise.reject(new Error('Role not loaded'));
-      const matrix: RbacPermission[] = Array.from(permissions).map((token) => {
-        const [resource, action] = token.split(':') as [string, RbacAction];
-        return { resource, action };
-      });
-      return updateRole(role.id, {
-        displayName,
-        description: description.trim() === '' ? null : description.trim(),
-        permissions: role.isSystem ? role.permissions : matrix,
-      });
-    },
+    mutationFn: ({ current, edits }: { current: RbacRole; edits: RoleDraft }) =>
+      updateRole(current.id, {
+        displayName: nameToStore(t, current, edits.name),
+        description: descriptionToStore(t, current, edits.description),
+        // A system role's permissions are not the editor's to send: the server
+        // ignores them for a system role (`RbacService.updateRole`), but it
+        // CHECKS them against the acting admin first — so re-sending the role's
+        // own permissions stopped anyone who lacked one of them from even
+        // renaming it.
+        permissions: current.isSystem
+          ? []
+          : toPermissions(edits.permissions ?? new Set(current.permissions.map((p) => `${p.resource}:${p.action}`))),
+      }),
     onSuccess: () => {
       toast.success(t('rolesPage.toasts.roleUpdated'));
       onUpdated();
     },
-    onError: (err) => toast.error(t('rolesPage.toasts.updateFailed', { message: (err as Error).message })),
+    onError: (err) => toast.error(t('rolesPage.toasts.updateFailed', { message: translateRoleError(t, err) })),
   });
 
   const deleteMutation = useMutation({
@@ -349,8 +501,18 @@ function RoleEditor({
       toast.success(t('rolesPage.toasts.roleDeleted'));
       onDeleted();
     },
-    onError: (err) => toast.error(t('rolesPage.toasts.deleteFailed', { message: (err as Error).message })),
+    onError: (err) => toast.error(t('rolesPage.toasts.deleteFailed', { message: translateRoleError(t, err) })),
   });
+
+  if (loadError !== null && loadError !== undefined) {
+    return (
+      <Alert variant="destructive" data-role-load-failed>
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>{t('rolesPage.roleLoadFailedTitle')}</AlertTitle>
+        <AlertDescription>{translateRoleError(t, loadError)}</AlertDescription>
+      </Alert>
+    );
+  }
 
   if (loading || !role || !catalog) {
     return (
@@ -364,44 +526,67 @@ function RoleEditor({
     );
   }
 
+  const shownName = roleDisplayName(t, role);
+  const nameValue = draft.name ?? shownName;
+  const descriptionValue = draft.description ?? roleDescription(t, role) ?? '';
+  const permissions = draft.permissions ?? storedPermissions;
+  const nameTooShort = nameValue.trim().length < DISPLAY_NAME_MIN;
+  const saveDisabled = saveMutation.isPending || !canEdit || nameTooShort;
+  const saveTip = !canEdit
+    ? t('rolesPage.noPermission', { permission: permissionLabel(t, 'rbac_roles', 'edit') })
+    : nameTooShort
+      ? t('rolesPage.nameTooShort')
+      : role.isSystem
+        ? t('rolesPage.editor.saveTipSystem')
+        : t('rolesPage.editor.saveTip');
+  const deleteDisabled = deleteMutation.isPending || !canDelete || role.assignedAdminCount > 0;
+  const deleteTip = !canDelete
+    ? t('rolesPage.noPermission', { permission: permissionLabel(t, 'rbac_roles', 'delete') })
+    : role.assignedAdminCount > 0
+      ? t('rolesPage.editor.deleteAssigned', { count: role.assignedAdminCount })
+      : t('rolesPage.editor.deleteTip');
+
   return (
     <Card>
       <CardHeader className="space-y-1.5">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <Shield className="h-5 w-5" />
-            <CardTitle>{role.displayName}</CardTitle>
+            <CardTitle>{shownName}</CardTitle>
             {role.isSystem && <Badge variant="outline">{t('rolesPage.editor.systemRole')}</Badge>}
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={() => saveMutation.mutate()}
-              disabled={saveMutation.isPending}
-            >
-              {saveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {t('rolesPage.editor.save')}
-            </Button>
+            <ButtonTip disabled={saveDisabled} tip={saveTip}>
+              <Button
+                size="sm"
+                onClick={() => saveMutation.mutate({ current: role, edits: draft })}
+                disabled={saveDisabled}
+              >
+                {saveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {t('rolesPage.editor.save')}
+              </Button>
+            </ButtonTip>
             {!role.isSystem && (
               <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    disabled={deleteMutation.isPending || role.assignedAdminCount > 0}
-                    title={role.assignedAdminCount > 0 ? t('rolesPage.editor.deleteAssigned') : ''}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    {t('rolesPage.editor.delete')}
-                  </Button>
-                </AlertDialogTrigger>
+                <ButtonTip disabled={deleteDisabled} tip={deleteTip}>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      disabled={deleteDisabled}
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      {t('rolesPage.editor.delete')}
+                    </Button>
+                  </AlertDialogTrigger>
+                </ButtonTip>
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <AlertDialogTitle>
                       {t('rolesPage.editor.delete')}
                     </AlertDialogTitle>
                     <AlertDialogDescription>
-                      {t('rolesPage.editor.deleteConfirm', { name: role.displayName })}
+                      {t('rolesPage.editor.deleteConfirm', { name: shownName })}
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <AlertDialogFooter>
@@ -422,29 +607,42 @@ function RoleEditor({
           </div>
         </div>
         <CardDescription>
-          {t('rolesPage.editor.meta', {
-            count: role.assignedAdminCount,
-            name: role.name,
-            adminsCount: role.assignedAdminCount,
-            permsCount: role.permissions.length,
-          })}
+          {[
+            t('rolesPage.editor.identifier', { name: role.name }),
+            t('rolesPage.counts.admins', { count: role.assignedAdminCount }),
+            t('rolesPage.counts.permissions', { count: role.permissions.length }),
+          ].join(' · ')}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <Label>{t('rolesPage.editor.displayName')}</Label>
+            <LabelWithInfo
+              htmlFor={`${fieldId}-name`}
+              info={t('rolesPage.editor.displayNameInfo')}
+              infoLabel={t('rolesPage.moreAbout', { name: t('rolesPage.editor.displayName') })}
+            >
+              {t('rolesPage.editor.displayName')}
+            </LabelWithInfo>
             <Input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
+              id={`${fieldId}-name`}
+              value={nameValue}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
               maxLength={64}
             />
           </div>
           <div className="space-y-2">
-            <Label>{t('rolesPage.editor.description')}</Label>
+            <LabelWithInfo
+              htmlFor={`${fieldId}-description`}
+              info={t('rolesPage.editor.descriptionInfo')}
+              infoLabel={t('rolesPage.moreAbout', { name: t('rolesPage.editor.description') })}
+            >
+              {t('rolesPage.editor.description')}
+            </LabelWithInfo>
             <Input
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              id={`${fieldId}-description`}
+              value={descriptionValue}
+              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
               maxLength={256}
               placeholder={t('rolesPage.editor.descriptionPlaceholder')}
             />
@@ -466,167 +664,27 @@ function RoleEditor({
         <PermissionMatrix
           catalog={catalog}
           permissions={permissions}
-          onChange={setPermissions}
+          onChange={(next) => setDraft({ ...draft, permissions: next })}
           readOnly={role.isSystem}
-          systemPermissions={role.isSystem ? new Set(role.permissions.map((p) => `${p.resource}:${p.action}`)) : null}
+          systemPermissions={role.isSystem ? storedPermissions : null}
         />
       </CardContent>
     </Card>
   );
 }
 
-// ── Permission matrix ─────────────────────────────────────────────────────
-
-function PermissionMatrix({
-  catalog,
-  permissions,
-  onChange,
-  readOnly,
-  systemPermissions,
-}: {
-  catalog: RbacResourceCatalog;
-  permissions: Set<string>;
-  onChange: (next: Set<string>) => void;
-  readOnly: boolean;
-  systemPermissions: Set<string> | null;
-}) {
-  const { t } = useTranslation();
-  const ordered = useMemo(() => Object.entries(catalog.resources), [catalog]);
-
-  /**
-   * What the ACTOR holds — not what the role being edited holds.
-   *
-   * The server refuses any save whose resulting permission set contains a
-   * token the actor does not hold (`assertGrantsWithinActor`). Without this the
-   * editor rendered the whole catalogue and let an admin tick a box the save
-   * would then refuse, naming a permission they had never heard of.
-   */
-  const actorHolds = usePermissionStore((s) => s.hasPermission);
-
-  /**
-   * Permissions the role already carries that the actor cannot grant. Any save
-   * is refused while these remain, so they are named rather than left for the
-   * server to discover — and they stay un-disabled above, because REMOVING one
-   * is exactly what makes the save legal again.
-   */
-  const beyondActor = useMemo(() => {
-    const out: string[] = [];
-    for (const [resource, actions] of ordered) {
-      for (const action of actions as readonly RbacAction[]) {
-        const token = `${resource}:${action}`;
-        if (permissions.has(token) && !actorHolds(resource, action)) out.push(token);
-      }
-    }
-    return out.sort();
-  }, [ordered, permissions, actorHolds]);
-
-  function toggle(resource: string, action: RbacAction) {
-    if (readOnly) return;
-    const token = `${resource}:${action}`;
-    const next = new Set(permissions);
-    if (next.has(token)) next.delete(token);
-    else next.add(token);
-    onChange(next);
-  }
-  function setRow(resource: string, actions: RbacAction[], allOn: boolean) {
-    if (readOnly) return;
-    const next = new Set(permissions);
-    for (const action of actions) {
-      const token = `${resource}:${action}`;
-      if (allOn) next.add(token);
-      else next.delete(token);
-    }
-    onChange(next);
-  }
-
-  const effective = readOnly && systemPermissions ? systemPermissions : permissions;
-
-  return (
-    <div className="space-y-3">
-      <h3 className="text-sm font-semibold">{t('rolesPage.editor.permissions')}</h3>
-      {!readOnly && beyondActor.length > 0 && (
-        <Alert variant="destructive" data-role-editor-beyond-actor>
-          <AlertTitle>{t('rolesPage.editor.beyondActorTitle')}</AlertTitle>
-          <AlertDescription>
-            {t('rolesPage.editor.beyondActorBody')}
-            <span className="mt-1 block font-mono text-xs">{beyondActor.join(', ')}</span>
-          </AlertDescription>
-        </Alert>
-      )}
-      <div className="rounded-md border overflow-x-auto">
-        <table className="w-full min-w-[600px] text-sm">
-          <thead className="bg-muted/50">
-            <tr>
-              <th className="px-3 py-2 text-left font-medium">{t('rolesPage.editor.resourceColumn')}</th>
-              {catalog.actions.map((action) => (
-                <th key={action} className="px-2 py-2 text-center font-medium capitalize text-xs">
-                  {action.replace(/_/g, ' ')}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {ordered.map(([resource, actions]) => {
-              const rowGranted = actions.filter((a) => effective.has(`${resource}:${a}`));
-              const allOn = rowGranted.length === actions.length;
-              return (
-                <tr key={resource} className="border-t">
-                  <td className="px-3 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <code className="text-xs">{resource}</code>
-                      {!readOnly && (
-                        <button
-                          type="button"
-                          onClick={() => setRow(resource, actions, !allOn)}
-                          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                          {allOn ? t('rolesPage.editor.clear') : t('rolesPage.editor.all')}
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                  {catalog.actions.map((action) => {
-                    const supports = (actions as readonly string[]).includes(action);
-                    if (!supports) {
-                      return (
-                        <td key={action} className="px-2 py-2 text-center text-muted-foreground">
-                          –
-                        </td>
-                      );
-                    }
-                    const token = `${resource}:${action}`;
-                    const checked = effective.has(token);
-                    // The server refuses a save whose RESULTING set contains a
-                    // permission the actor does not hold — not merely one they
-                    // just added. So ticking a box outside your own grants can
-                    // never succeed, while UNticking one always can: removing it
-                    // is what makes the save legal. Disable the first, allow the
-                    // second, and say why in the title.
-                    const grantable = actorHolds(resource, action as RbacAction);
-                    const blocked = !grantable && !checked;
-                    return (
-                      <td key={action} className="px-2 py-2 text-center">
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={() => toggle(resource, action as RbacAction)}
-                          disabled={readOnly || blocked}
-                          aria-label={token}
-                          title={blocked ? t('rolesPage.editor.cannotGrant') : undefined}
-                        />
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
 // ── Create dialog ─────────────────────────────────────────────────────────
+
+type NameProblem = 'empty' | 'short' | 'pattern' | 'reserved' | null;
+
+/** What is wrong with a typed identifier, checked by the server's own rules. */
+function roleNameProblem(name: string): NameProblem {
+  if (name === '') return 'empty';
+  if (!ROLE_NAME_PATTERN.test(name)) return 'pattern';
+  if (name.length < ROLE_NAME_MIN) return 'short';
+  if (isReservedRoleName(name)) return 'reserved';
+  return null;
+}
 
 function CreateRoleDialog({
   catalog,
@@ -636,6 +694,8 @@ function CreateRoleDialog({
   onCreated: (role: RbacRole) => void;
 }) {
   const { t } = useTranslation();
+  const fieldId = useId();
+  const canCreate = useCanManageRoles('create');
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -646,12 +706,9 @@ function CreateRoleDialog({
     mutationFn: () =>
       createRole({
         name,
-        displayName,
+        displayName: displayName.trim(),
         description: description.trim() === '' ? null : description.trim(),
-        permissions: Array.from(permissions).map((token) => {
-          const [resource, action] = token.split(':') as [string, RbacAction];
-          return { resource, action };
-        }),
+        permissions: toPermissions(permissions),
       }),
     onSuccess: (role) => {
       toast.success(t('rolesPage.toasts.roleCreated'));
@@ -662,17 +719,42 @@ function CreateRoleDialog({
       setPermissions(new Set());
       onCreated(role);
     },
-    onError: (err) => toast.error(t('rolesPage.toasts.createFailed', { message: (err as Error).message })),
+    onError: (err) => toast.error(t('rolesPage.toasts.createFailed', { message: translateRoleError(t, err) })),
   });
+
+  const nameProblem = roleNameProblem(name);
+  const nameError =
+    nameProblem === 'pattern'
+      ? t('rolesPage.createDialog.stableNameInvalid')
+      : nameProblem === 'reserved'
+        ? t('rolesPage.createDialog.stableNameReserved')
+        : null;
+  const displayNameTooShort = displayName.trim().length < DISPLAY_NAME_MIN;
+  const createDisabled = mutation.isPending || nameProblem !== null || displayNameTooShort;
+  const createTip =
+    nameProblem !== null
+      ? t('rolesPage.createDialog.createNeedsIdentifier')
+      : displayNameTooShort
+        ? t('rolesPage.nameTooShort')
+        : t('rolesPage.createDialog.createTip');
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button size="sm">
-          <Plus className="mr-2 h-4 w-4" />
-          {t('rolesPage.newRole')}
-        </Button>
-      </DialogTrigger>
+      <ButtonTip
+        disabled={!canCreate}
+        tip={
+          canCreate
+            ? t('rolesPage.newRoleTip')
+            : t('rolesPage.noPermission', { permission: permissionLabel(t, 'rbac_roles', 'create') })
+        }
+      >
+        <DialogTrigger asChild>
+          <Button size="sm" disabled={!canCreate}>
+            <Plus className="mr-2 h-4 w-4" />
+            {t('rolesPage.newRole')}
+          </Button>
+        </DialogTrigger>
+      </ButtonTip>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t('rolesPage.createDialog.title')}</DialogTitle>
@@ -683,24 +765,33 @@ function CreateRoleDialog({
         <div className="space-y-4">
           <div className="grid gap-3 md:grid-cols-2">
             <div className="space-y-1.5">
-              <Label>
+              <Label htmlFor={`${fieldId}-identifier`}>
                 {t('rolesPage.createDialog.stableName')} <span className="text-destructive">*</span>
               </Label>
               <Input
+                id={`${fieldId}-identifier`}
                 value={name}
                 onChange={(e) => setName(e.target.value.toLowerCase())}
                 placeholder={t('rolesPage.createDialog.stableNamePlaceholder')}
-                maxLength={32}
+                maxLength={ROLE_NAME_MAX}
+                aria-invalid={nameError !== null}
+                aria-describedby={`${fieldId}-identifier-hint`}
               />
-              <p className="text-xs text-muted-foreground">
+              <p id={`${fieldId}-identifier-hint`} className="text-xs text-muted-foreground">
                 {t('rolesPage.createDialog.stableNameHint')}
               </p>
+              {nameError !== null && (
+                <p role="alert" className="text-xs text-destructive">
+                  {nameError}
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
-              <Label>
+              <Label htmlFor={`${fieldId}-display-name`}>
                 {t('rolesPage.createDialog.displayName')} <span className="text-destructive">*</span>
               </Label>
               <Input
+                id={`${fieldId}-display-name`}
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 placeholder={t('rolesPage.createDialog.displayNamePlaceholder')}
@@ -709,8 +800,9 @@ function CreateRoleDialog({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label>{t('rolesPage.createDialog.description')}</Label>
+            <Label htmlFor={`${fieldId}-description`}>{t('rolesPage.createDialog.description')}</Label>
             <Textarea
+              id={`${fieldId}-description`}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               maxLength={256}
@@ -732,14 +824,16 @@ function CreateRoleDialog({
           <Button variant="ghost" onClick={() => setOpen(false)}>
             {t('rolesPage.createDialog.cancel')}
           </Button>
-          <Button
-            onClick={() => mutation.mutate()}
-            disabled={mutation.isPending || name.trim().length < 2 || displayName.trim().length < 2}
-          >
-            {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            <CheckCircle2 className="mr-2 h-4 w-4" />
-            {t('rolesPage.createDialog.create')}
-          </Button>
+          <ButtonTip disabled={createDisabled} tip={createTip}>
+            <Button
+              onClick={() => mutation.mutate()}
+              disabled={createDisabled}
+            >
+              {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+              {t('rolesPage.createDialog.create')}
+            </Button>
+          </ButtonTip>
         </DialogFooter>
       </DialogContent>
     </Dialog>

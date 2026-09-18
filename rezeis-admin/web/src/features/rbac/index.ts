@@ -29,3 +29,7 @@ export {
   getEffectivePermissions,
   changePassword,
 } from './rbac-api';
+// For any surface that names a role or a permission to a person: a system
+// role in the operator's language, a permission as «Пользователи: Удаление».
+export { roleDisplayName, roleDescription } from './system-roles';
+export { permissionLabel, tokenLabel } from './permission-labels';

@@ -12,7 +12,7 @@ import { expectArray } from '@/lib/api-utils'
 import { formatDateTime } from '@/lib/utils'
 import { useTabSync } from '@/lib/use-tab-sync'
 import { HUB_TABS } from '@/components/layout/admin-nav-config'
-import { listRoles, type RbacRoleListItem } from '@/features/rbac'
+import { listRoles, roleDisplayName, type RbacRoleListItem } from '@/features/rbac'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -329,7 +329,7 @@ function CreateAdminDialog({
                       <SelectItem value={NO_RBAC_ROLE}>{t('adminsPage.fields.rbacRoleNone')}</SelectItem>
                       {(rolesQuery.data ?? []).map((r: RbacRoleListItem) => (
                         <SelectItem key={r.id} value={r.id}>
-                          {r.displayName}
+                          {roleDisplayName(t, r)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -563,7 +563,7 @@ function EditAdminDialog({
                       <SelectItem value={NO_RBAC_ROLE}>{t('adminsPage.fields.rbacRoleNone')}</SelectItem>
                       {(rolesQuery.data ?? []).map((r: RbacRoleListItem) => (
                         <SelectItem key={r.id} value={r.id}>
-                          {r.displayName}
+                          {roleDisplayName(t, r)}
                         </SelectItem>
                       ))}
                     </SelectContent>

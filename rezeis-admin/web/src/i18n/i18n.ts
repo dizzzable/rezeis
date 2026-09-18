@@ -65,6 +65,21 @@ void i18n.use(initReactI18next).init({
 // languageChanged handler below.
 export const i18nReady: Promise<void> = loadLocale(initialLocale);
 
+/**
+ * Resolves once the core dictionary of `locale` is in the store, loading it
+ * if it is not.
+ *
+ * For a screen that must not paint before its words have arrived after a
+ * language switch: `languageChanged` fires BEFORE the new core chunk lands (see
+ * `bindI18nStore` above), so a `t()` in that first render answers from the
+ * fallback language, or with the bare key. The roles page waits on this and on
+ * its own feature bundle, because the fields an operator has not touched show
+ * translations, and a field must never show a key path.
+ */
+export function coreDictionaryReady(locale: string): Promise<void> {
+  return locale === 'ru' || locale === 'en' ? loadLocale(locale) : Promise.resolve();
+}
+
 i18n.on('languageChanged', (lng: string): void => {
   if (lng === 'ru' || lng === 'en') {
     void loadLocale(lng);
@@ -117,7 +132,8 @@ export type I18nFeature =
   | 'subpageConfig'
   | 'landingBuilder'
   | 'legalDocuments'
-  | 'panelLinkReconciliation';
+  | 'panelLinkReconciliation'
+  | 'rbac';
 
 const loadedFeatureBundles = new Set<I18nFeature>();
 const featureLoadPromises = new Map<string, Promise<void>>();
@@ -203,6 +219,10 @@ async function fetchFeatureBundle(
       return locale === 'ru'
         ? (await import('@/i18n/features/panelLinkReconciliation.ru')).ru
         : (await import('@/i18n/features/panelLinkReconciliation.en')).en;
+    case 'rbac':
+      return locale === 'ru'
+        ? (await import('@/i18n/features/rbac.ru')).ru
+        : (await import('@/i18n/features/rbac.en')).en;
   }
 }
 

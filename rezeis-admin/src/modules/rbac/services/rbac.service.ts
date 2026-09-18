@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -326,34 +327,47 @@ export class RbacService implements OnModuleInit {
     this.assertPermissionsValid(input.permissions);
     this.assertNameNotReserved(input.name);
     this.assertGrantsWithinActor(input.permissions, input.actorPermissions);
-    const created = await this.prismaService.$transaction(async (tx) => {
-      const existing = await tx.adminRole.findUnique({ where: { name: input.name } });
-      if (existing) {
-        throw new BadRequestException(`Role with name "${input.name}" already exists`);
-      }
-      const role = await tx.adminRole.create({
-        data: {
-          name: input.name,
-          displayName: input.displayName,
-          description: input.description,
-          isSystem: false,
-        },
-      });
-      if (input.permissions.length > 0) {
-        await tx.adminPermission.createMany({
-          data: input.permissions.map((p) => ({
-            roleId: role.id,
-            resource: p.resource,
-            action: p.action,
-          })),
-          skipDuplicates: true,
+    let created: RoleWithCounts;
+    try {
+      created = await this.prismaService.$transaction(async (tx) => {
+        const existing = await tx.adminRole.findUnique({ where: { name: input.name } });
+        if (existing) {
+          throw new BadRequestException(`Role with name "${input.name}" already exists`);
+        }
+        const role = await tx.adminRole.create({
+          data: {
+            name: input.name,
+            displayName: input.displayName,
+            description: input.description,
+            isSystem: false,
+          },
         });
-      }
-      return tx.adminRole.findUniqueOrThrow({
-        where: { id: role.id },
-        include: ROLE_INCLUDE,
+        if (input.permissions.length > 0) {
+          await tx.adminPermission.createMany({
+            data: input.permissions.map((p) => ({
+              roleId: role.id,
+              resource: p.resource,
+              action: p.action,
+            })),
+            skipDuplicates: true,
+          });
+        }
+        return tx.adminRole.findUniqueOrThrow({
+          where: { id: role.id },
+          include: ROLE_INCLUDE,
+        });
       });
-    });
+    } catch (error) {
+      // Two admins creating the same name at the same moment: both pass the
+      // lookup above under READ COMMITTED, and the second INSERT hits the
+      // unique index on `name`. Unhandled, that P2002 reached the safe
+      // exception filter as an unknown error and the operator read "Internal
+      // server error". It is a conflict, and it gets the lookup's own sentence.
+      if (isUniqueViolation(error)) {
+        throw new ConflictException(`Role with name "${input.name}" already exists`);
+      }
+      throw error;
+    }
     this.invalidateAllCache();
     return mapRole(created);
   }
@@ -773,6 +787,16 @@ export class RbacService implements OnModuleInit {
       }
     }
   }
+}
+
+/**
+ * A unique-index violation, as Prisma reports it. Duck-typed on the code
+ * rather than `instanceof PrismaClientKnownRequestError`, the same way
+ * `blocked-ip.service.ts` does, so a client built against another copy of the
+ * runtime still matches.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002';
 }
 
 function mapRole(role: RoleWithCounts): AdminRoleInterface {
