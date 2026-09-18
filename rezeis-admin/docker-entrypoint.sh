@@ -75,6 +75,9 @@ is_auto_recoverable_migration() {
     20260918140000_web_account_sessions_revoked_at)
       return 0
       ;;
+    20260918160000_backfill_imported_payments_fulfilled_at)
+      return 0
+      ;;
     *)
       return 1
       ;;

@@ -343,7 +343,7 @@ describe('MIME sniffing on every image upload slot', () => {
     await assert.rejects(
       () =>
         bannerService.persist({
-          buffer: Buffer.from('MZ ', 'binary'),
+          buffer: Buffer.from('MZ\x90\x00\x03', 'binary'),
           originalName: 'banner.png',
           mimeType: 'image/png',
         }),

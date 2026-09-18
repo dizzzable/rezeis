@@ -53,12 +53,14 @@ const MAX_USERS_PER_RUN = 500;
  * WHAT BOUNDS ONE RESOLVE.
  *
  * The two reads below run inside one interactive transaction, and the reason is
- * the TIMER, not the atomicity. An ordinary Prisma query waits for a pooled
- * connection with no timer at all — pg-pool arms one only when
- * `connectionTimeoutMillis` is set, and it is not — so on a pool held by an
- * export or a plan migration this call does not fail, it HANGS. Inside a
- * transaction `maxWait` covers the checkout itself, because Prisma races
- * `startTransaction` — which is what acquires the connection — against it.
+ * the TIMER, not the atomicity. The pool itself now gives up on a checkout:
+ * `PrismaService` builds it with `connectionTimeoutMillis` of 15 s
+ * (`DB_CONNECTION_TIMEOUT_MS`), so on a pool held by an export or a plan
+ * migration an ordinary query fails after 15 s instead of hanging, as it did
+ * before that was set. Inside the transaction `maxWait` — 10 s — covers the
+ * same checkout and binds first: Prisma races `startTransaction`, which is what
+ * takes the connection from that pool, against it and throws P2028 while the
+ * pool's 15 s is still running. The pool's timer is the backstop behind it.
  *
  * WHY IT MATTERS MORE HERE THAN ANYWHERE ELSE IN A RUN. This resolves the
  * cohort BEFORE the audience loop exists, so nothing downstream can stop it:

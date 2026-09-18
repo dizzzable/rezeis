@@ -335,28 +335,33 @@ export function isRecipientRefusal(detail: string | null): boolean {
  * The BullMQ backoff type relay jobs carry, resolved by the worker's custom
  * strategy (`relayBackoffStrategy`). A built-in type would never reach it:
  * BullMQ looks `fixed` and `exponential` up in its own table first, and those
- * strategies are handed the attempt number and nothing else — no error, so no
+ * strategies read the attempt number and nothing else — not the error, so no
  * `Retry-After`.
  *
  * The producer and the worker have to agree on it, and they ship in one image —
  * but a rolling deploy runs both images at once, and a worker from before this
  * type existed has no strategy for it. That worker does not fail the job. It
  * STALLS it: BullMQ computes the retry delay inside the worker's failure
- * handling (bullmq 5.76: `Job.moveToFailed` -> `shouldRetryJob` ->
+ * handling (bullmq 5.81.5: `Job.moveToFailed` -> `shouldRetryJob` ->
  * `Backoffs.calculate`), the lookup throws "Unknown backoff strategy
  * reiwa-relay.", and the worker only emits that as an `error` event — which,
  * with no listener (the processor registers none), BullMQ prints through
- * `console.error` — and the job stays in `active` with a lock nobody renews.
- * The stalled-job check moves it back to `wait` once the lock lapses — 30-90s
- * later with the defaults (`lockDuration` and `stalledInterval`, 30s each) —
- * and whichever worker takes it next retries it: late, and outside the event's
- * backoff. If an OLD worker takes it again and stalls it a second time,
- * `maxStalledCount` (1) marks it, and it fails as "job stalled more than
- * allowable limit" without the processor running again, so without an alert
- * (checked on Valkey 9 with bullmq 5.76.10: two runs of the processor, the
- * printed error, then that failure). An attempt that computes no delay — the last one,
- * or an `UnrecoverableError` — is unaffected, and jobs queued before the type
- * existed carry `fixed`/`exponential` and work on both.
+ * `console.error` — and the job stays in `active` with a lock nobody renews:
+ * the worker stops renewing it before the failure handling runs.
+ * The stalled-job check moves it back to `wait` once the lock lapses — within
+ * a minute of the failure with the defaults: the lock lapses at most
+ * `lockDuration` (30s) after its last renewal, and the next check, every
+ * `stalledInterval` (30s), moves it — and whichever worker takes it next
+ * retries it: late, outside the event's backoff, and without counting an
+ * attempt. If an OLD worker takes it again and stalls it a second time,
+ * `maxStalledCount` (1) marks it, and the next worker to take it fails it as
+ * "job stalled more than allowable limit" without running the processor, so
+ * without an alert; only the processor's `failed` handler logs it (checked on
+ * Valkey 9.1 with bullmq 5.81.5 and the defaults: the processor ran at 0s and
+ * at 60s, the error was printed after each, and the job failed at 120s).
+ * An attempt that computes no delay — the last one, or an `UnrecoverableError`
+ * — is unaffected, and jobs queued before the type existed carry
+ * `fixed`/`exponential` and work on both.
  */
 export const RELAY_BACKOFF_TYPE = 'reiwa-relay';
 

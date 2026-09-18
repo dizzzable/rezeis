@@ -100,6 +100,34 @@ export class PaymentReconciliationService {
         return;
       }
 
+      // A payment imported from another bot was settled THERE: the donor took
+      // the money, delivered what it bought and paid out what it earned — the
+      // inviter's reward, the partner's commission, the cashback. The row is on
+      // record so an operator can see who they are dealing with, never to be
+      // acted on: the plan it names is not a plan here, and paying its side
+      // effects again would pay them twice. So whatever the provider says about
+      // it now, the answer is "already settled" — nothing is written, claimed,
+      // provisioned or paid, and the event is closed as processed rather than
+      // failed, so nothing alerts and the auto-retry has nothing to retry.
+      //
+      // Decided on the import marker and NOT on `fulfilledAt`. Rows imported
+      // before the importers stamped it are still null until the backfill runs,
+      // and the backfill can be interrupted; and the stale-claim branch below
+      // used to CLEAR an old stamp on a NEW row with no subscription — every
+      // imported payment — and then fulfil it again.
+      //
+      // Below the refund branch on purpose: what a refund of a donor's payment
+      // should do is an open decision, and this leaves it exactly as it was.
+      const importedFrom = importedPaymentSource(transaction);
+      if (importedFrom !== null) {
+        this.logger.log(
+          `Payment notification ${event.id} (${event.eventStatus ?? 'no status'}) resolves to transaction ` +
+            `${transaction.id}, imported from ${importedFrom} and settled there — acknowledged, nothing applied`,
+        );
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
+
       // The buyer paid, but not what we asked (Cryptomus/Heleket
       // `wrong_amount`, Pally `UNDERPAID`), or the provider is holding the
       // funds (`locked`). The money is ours; the entitlement is not automatic.
@@ -460,6 +488,18 @@ export class PaymentReconciliationService {
     transaction: Transaction,
     rawPayload?: unknown,
   ): Promise<void> {
+    // Never for a payment imported from another bot: the donor already paid
+    // everything these pay. Checked here as well as at the top of the webhook
+    // path because this is the one door every fulfilling path goes through for
+    // them — a worker that lost the fulfilment claim, the pending-expiry poll,
+    // the add-on recovery sweep.
+    const importedFrom = importedPaymentSource(transaction);
+    if (importedFrom !== null) {
+      this.logger.warn(
+        `Post-fulfilment hooks not run for transaction ${transaction.id}: imported from ${importedFrom}, settled by the donor`,
+      );
+      return;
+    }
     if (rawPayload !== undefined) {
       await this.persistSavedPaymentMethodBestEffort(transaction, rawPayload);
     }
@@ -1968,6 +2008,21 @@ function mergeGatewayData(
 function decimalToMinorUnits(amount: Prisma.Decimal): number {
   const minor = amount.mul(100).toFixed(0, Prisma.Decimal.ROUND_FLOOR);
   return Number(minor);
+}
+
+/**
+ * The bot a payment was imported from, or null for a payment taken here.
+ *
+ * `planSnapshot.importedFrom` is written on every transaction the four file
+ * importers create — 'bedolaga', 'remnashop', 'altshop', 'stealthnet' — and by
+ * nothing else: the native writers (the checkout draft, the combined renewal,
+ * the add-on purchase) build their snapshots field by field, and no path
+ * rewrites a transaction's snapshot afterwards. Any non-empty string counts, so
+ * a fifth importer is covered the day it writes the key.
+ */
+function importedPaymentSource(transaction: Pick<Transaction, 'planSnapshot'>): string | null {
+  const source = asRecord(transaction.planSnapshot)?.['importedFrom'];
+  return typeof source === 'string' && source.length > 0 ? source : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

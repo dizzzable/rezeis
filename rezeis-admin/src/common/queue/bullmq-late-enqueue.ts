@@ -77,7 +77,8 @@ export async function probeLateJob(queue: LateJobQueue, id: string): Promise<Lat
  * ── How a lost race shows itself ────────────────────────────────────────────
  *
  * NOT as an error. `Queue.remove` refuses a job a worker holds by resolving 0
- * (bullmq 5.76 `removeJob-2.lua`: `return 0` when the job is locked), and it
+ * (bullmq 5.81.5 `removeJob-2.lua`: `return 0` while the job's `:lock` key
+ * exists; only the negative codes throw), and it
  * removes a job a worker already FINISHED without complaint — the message was
  * sent all the same. So each withdrawal reads the job in the same breath as it
  * removes it: a job a worker has started carries `processedOn` (set by

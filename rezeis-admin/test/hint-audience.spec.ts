@@ -203,10 +203,11 @@ describe('the query it builds', () => {
 
 describe('the wait nothing downstream can stop', () => {
   /**
-   * An ordinary Prisma query waits for a pooled connection with NO timer:
-   * pg-pool arms one only when `connectionTimeoutMillis` is set, and it is
-   * not. So on a pool held by an export or a plan migration, this resolve did
-   * not fail — it hung.
+   * An ordinary Prisma query's wait for a pooled connection is bounded by the
+   * pool alone: `connectionTimeoutMillis` of 15 s, set in `PrismaService`
+   * (`DB_CONNECTION_TIMEOUT_MS`). Before that was set it had no timer at all,
+   * and on a pool held by an export or a plan migration this resolve did not
+   * fail — it hung.
    *
    * That is worse here than anywhere else in a run. The cohort is resolved
    * BEFORE the audience loop exists, so the loop's wall-clock budget and its
@@ -217,7 +218,8 @@ describe('the wait nothing downstream can stop', () => {
    *
    * Inside a transaction, `maxWait` covers the checkout itself: Prisma races
    * `startTransaction`, which is what acquires the connection, against that
-   * timer. The numbers are the raise path's, argued over
+   * timer — 10 s, so it binds before the pool's 15 s, which stays the backstop
+   * behind it. The numbers are the raise path's, argued over
    * `RAISE_TRANSACTION_OPTIONS` in `user-hint-delivery.service.ts`.
    */
   const BOUND = { maxWait: 10_000, timeout: 20_000 };

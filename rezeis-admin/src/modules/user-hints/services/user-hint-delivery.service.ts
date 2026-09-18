@@ -264,14 +264,14 @@ export class UserHintDeliveryService {
    * "missing" and "switched off" mean.
    */
   public async hintStatus(hintKey: string): Promise<'missing' | 'inactive' | 'active'> {
-    // IN A TRANSACTION for one read, and only because of what bounds it: an
-    // ordinary query waits for a pooled connection with no timer at all
-    // (`pg-pool` queues the checkout when no `connectionTimeoutMillis` is
-    // configured, and `PrismaPg` is built without one), so with the pool held
-    // by an export or a plan migration this would HANG rather than fail —
-    // inside the audience action, before its loop, where nothing else could
-    // stop it. `maxWait` covers the checkout itself: Prisma races
-    // `startTransaction`, which is what acquires the connection, against it.
+    // IN A TRANSACTION for one read, and only because of what bounds it. An
+    // ordinary query's checkout is bounded by the pool alone: `PrismaService`
+    // builds `PrismaPg` with `connectionTimeoutMillis` of 15 s
+    // (`DB_CONNECTION_TIMEOUT_MS`), so with the pool held by an export or a
+    // plan migration it would wait 15 s and fail — inside the audience action,
+    // before its loop, where nothing else could stop it. `maxWait` covers the
+    // same checkout and binds first, at 10 s: Prisma races `startTransaction`,
+    // which is what takes the connection from that pool, against it.
     const hint = await this.prismaService.$transaction(
       (tx) => tx.userHint.findUnique({ where: { key: hintKey }, select: { isActive: true } }),
       RAISE_TRANSACTION_OPTIONS,
@@ -322,11 +322,13 @@ export class UserHintDeliveryService {
     // wait for each other, which costs a moment and decides nothing.
     return this.prismaService.$transaction(async (tx) => {
       // THE HINT IS READ IN HERE TOO, and the reason is the waiting rather
-      // than the reading: outside a transaction this query waits for a pooled
-      // connection with no timer, so a raise could hang instead of failing —
-      // and a raise that hangs never reaches the audience loop's failure
-      // count, which is what was supposed to stop a run against a database
-      // that is not answering. Inside, `maxWait` bounds the checkout.
+      // than the reading: outside a transaction this query's wait for a
+      // pooled connection is bounded only by the pool's 15 s
+      // (`DB_CONNECTION_TIMEOUT_MS`), and before that was set it had no timer
+      // at all — a raise could hang instead of failing, and a raise that hangs
+      // never reaches the audience loop's failure count, which is what was
+      // supposed to stop a run against a database that is not answering.
+      // Inside, `maxWait` bounds the checkout at 10 s and binds first.
       const hint = await tx.userHint.findUnique({ where: { key: input.hintKey } });
       if (hint === null) {
         // Loud, because it is always a mistake: a rule or a client moment

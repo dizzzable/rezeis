@@ -1491,10 +1491,12 @@ describe('one writer per customer’s queue', () => {
   });
 
   it('reads the hint inside the transaction, so waiting for a connection is bounded too', async () => {
-    // Outside it, that read waits for a pooled connection with NO timer at all,
-    // so a raise could hang instead of failing — and a raise that hangs never
-    // reaches the audience loop's failure count, which is what stops a run
-    // against a database that is not answering.
+    // Outside it, that read's wait for a pooled connection is bounded only by
+    // the pool's 15 s (`DB_CONNECTION_TIMEOUT_MS`), and before that was set it
+    // had NO timer at all, so a raise could hang instead of failing — and a
+    // raise that hangs never reaches the audience loop's failure count, which
+    // is what stops a run against a database that is not answering. Inside,
+    // `maxWait` (10 s) binds first.
     const h = build([hint({ key: 'welcome', id: 'h-welcome' })]);
 
     await h.service.raiseWithOutcome({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });

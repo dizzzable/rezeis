@@ -15,10 +15,15 @@ import { describe, it } from 'node:test';
  * two-character escape (`\x00` in a string or template) yields the same string
  * and can be seen.
  *
+ * The tests are held to it too. A fixture is where raw bytes are most tempting,
+ * and one was there: the "arbitrary bytes" of a banner-upload spec were typed
+ * as the characters themselves, NUL included, so git stored that spec as
+ * binary as well.
+ *
  * Refused: every C0 control (0x00-0x1F) except TAB, LF and CR, in
- * `src/**\/*.ts` and `web/src/**\/*.{ts,tsx}`. The set is built from its codes,
- * never typed as characters, so this file carries none of the bytes it looks
- * for — and says so below.
+ * `src/**\/*.ts`, `web/src/**\/*.{ts,tsx}` and `test/**\/*.ts`. The set is
+ * built from its codes, never typed as characters, so this file carries none of
+ * the bytes it looks for — and says so below.
  */
 
 const TAB = 0x09;
@@ -97,6 +102,13 @@ describe('no raw control bytes in source', () => {
     const { files, hits } = scan(join('web', 'src'), /\.tsx?$/);
     assert.ok(files > 500, `only ${files} files under web/src/ — the walk is looking in the wrong place`);
     assert.deepEqual(hits, [], `raw control bytes in the SPA source — ${HOW_TO_FIX}:\n  ${hits.join('\n  ')}`);
+  });
+
+  it('keeps them out of the tests (test/**/*.ts)', () => {
+    // Fixture bytes included: build them with escapes or `Buffer.from([...])`.
+    const { files, hits } = scan('test', /\.ts$/);
+    assert.ok(files > 500, `only ${files} files under test/ — the walk is looking in the wrong place`);
+    assert.deepEqual(hits, [], `raw control bytes in the tests — ${HOW_TO_FIX}:\n  ${hits.join('\n  ')}`);
   });
 
   it('carries none of the bytes it looks for', () => {
