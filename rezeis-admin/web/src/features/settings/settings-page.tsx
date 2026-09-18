@@ -18,6 +18,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
 
+import { readPlatformTimezoneRefusal } from './platform-timezone'
+import { PlatformTimezoneField } from './platform-timezone-field'
+
 const ACCESS_MODES = ['PUBLIC', 'INVITED', 'PURCHASE_BLOCKED', 'REG_BLOCKED', 'RESTRICTED'] as const
 const CURRENCIES = ['RUB', 'USD', 'EUR', 'XTR', 'USDT', 'TON'] as const
 
@@ -29,6 +32,8 @@ const CURRENCIES = ['RUB', 'USD', 'EUR', 'XTR', 'USDT', 'TON'] as const
  */
 interface BrandingSettings {
   readonly projectName?: string
+  /** «Часовой пояс», edited on the «Настройки платформы» card; `null` — none, UTC. */
+  readonly timezone?: string | null
   readonly webTitle?: string
   readonly channelUsername?: string
   readonly channelRecheck?: boolean
@@ -146,6 +151,11 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
   const [rulesLink, setRulesLink] = useState(settings?.rulesLink ?? '')
   const [channelLink, setChannelLink] = useState(settings?.channelLink ?? '')
   const [channelId, setChannelId] = useState(settings?.channelId?.toString() ?? '')
+  // «Часовой пояс» lives in `platformBranding` on the server, and is sent only
+  // when the operator changed it: an older value an import stored that the
+  // save would now refuse must not block saving the rest of this card.
+  const savedTimezone = settings?.platformBranding?.timezone ?? ''
+  const [timezone, setTimezone] = useState(savedTimezone)
 
   const mutation = useMutation({
     mutationFn: (data: {
@@ -156,9 +166,18 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       readonly rulesLink: string | null
       readonly channelLink: string | null
       readonly channelId: string | null
+      readonly platformBranding?: { readonly timezone: string | null }
     }) => api.patch('/admin/settings/platform', data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.platform.saved')) },
-    onError: () => toast.error(t('settingsPage.platform.saveFailed')),
+    onError: (error: unknown) => {
+      // The server names why it refused a zone; say it in the operator's words.
+      const refusal = readPlatformTimezoneRefusal(error)
+      toast.error(
+        refusal === null
+          ? t('settingsPage.platform.saveFailed')
+          : t(`settingsPage.platform.timezone.errors.${refusal}`, { zone: timezone }),
+      )
+    },
   })
 
   const handleSave = () => {
@@ -180,6 +199,7 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       rulesLink: normalize(rulesLink),
       channelLink: normalize(channelLink),
       channelId: normalize(channelId),
+      ...(timezone === savedTimezone ? {} : { platformBranding: { timezone: normalize(timezone) } }),
     })
   }
 
@@ -215,6 +235,9 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
                 {CURRENCIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
               </SelectContent>
             </Select>
+          </div>
+          <div className="md:col-span-2">
+            <PlatformTimezoneField value={timezone} onChange={setTimezone} />
           </div>
         </div>
 

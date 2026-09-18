@@ -48,6 +48,7 @@ import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollo
 import { mergeBrandingSettings, readBrandingSettings } from '../utils/branding-settings.util';
 import { PlatformBrandingInterface } from '../interfaces/platform-branding.interface';
 import { mergePlatformBranding, readPlatformBranding } from '../utils/platform-branding.util';
+import { describePlatformTimezoneRefusal, resolvePlatformTimezone } from '../utils/platform-timezone.util';
 import { readCustomIcons } from '../utils/custom-icons.util';
 import {
   ensureSettingsRow,
@@ -539,6 +540,16 @@ export class SettingsService {
       const settings: Settings = await this.getOrCreateSettingsRecord();
       return mapPlatformSettings(settings);
     }
+    // «Часовой пояс»: stored only as a zone both `Intl` (Telegram cards,
+    // customer notices, the cabinet) and PostgreSQL (the reports' days) know,
+    // in its proper IANA spelling — `platform-timezone.util.ts`. Asked before
+    // the row lock: the answer depends on the value alone, never on the row.
+    let platformBrandingPatch = input.updatePlatformSettingsDto.platformBranding;
+    if (platformBrandingPatch?.timezone !== undefined) {
+      const timezone = await resolvePlatformTimezone(this.prismaService, platformBrandingPatch.timezone);
+      if (!timezone.ok) throw new BadRequestException(describePlatformTimezoneRefusal(timezone));
+      platformBrandingPatch = { ...platformBrandingPatch, timezone: timezone.timezone };
+    }
     const settings: Settings = await mutateSettingsRow(
       this.prismaService,
       async ({ tx: transactionClient, row: existingSettings, write }): Promise<Settings> => {
@@ -546,10 +557,10 @@ export class SettingsService {
         // Platform-branding texts live in the platformPolicy JSON column, next
         // to the External auth email policy (`externalAuth`). The merge starts
         // from the row read under the lock and keeps every key it does not own.
-        if (input.updatePlatformSettingsDto.platformBranding !== undefined) {
+        if (platformBrandingPatch !== undefined) {
           data.platformPolicy = mergePlatformBranding({
             existing: existingSettings.platformPolicy,
-            patch: input.updatePlatformSettingsDto.platformBranding,
+            patch: platformBrandingPatch,
           }) as Prisma.InputJsonValue;
         }
         // Admin bot token is stored AES-256-GCM-encrypted inside the existing

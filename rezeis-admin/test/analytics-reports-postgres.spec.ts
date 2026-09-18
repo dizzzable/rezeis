@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { Logger } from '@nestjs/common';
+import { BadRequestException, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -17,9 +17,10 @@ import {
 } from '../src/modules/business-analytics/utils/analytics-window.util';
 import { wallClockOf } from '../src/modules/business-analytics/utils/analytics-zone.util';
 import type { FxRateService } from '../src/modules/fx/fx-rate.service';
+import { buildSubscriptionFacts } from '../src/modules/notifications/utils/subscription-facts.util';
 import type { PaymentsRenewalCheckoutService } from '../src/modules/payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../src/modules/payments/services/saved-payment-method.service';
-import type { SettingsService } from '../src/modules/settings/services/settings.service';
+import { SettingsService } from '../src/modules/settings/services/settings.service';
 import { readPlatformBranding } from '../src/modules/settings/utils/platform-branding.util';
 import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
 
@@ -165,29 +166,38 @@ async function freeTrial(tx: Prisma.TransactionClient, userId: string, at: Date,
  * plan, started a minute before its fulfilment; the trial row the fulfilment created and linked it to; the ledger's
  * PAID claim naming both; and the grant, rewritten.
  */
-async function paidTrial(tx: Prisma.TransactionClient, userId: string, at: Date, extra: Partial<Prisma.SubscriptionUncheckedCreateInput> = {}): Promise<string> {
+async function paidTrial(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  at: Date,
+  extra: Partial<Prisma.SubscriptionUncheckedCreateInput> = {},
+  /** What the checkout charged, and through what: 0 is a 100 % promo code, which the checkout completes itself. */
+  checkout: { readonly amount?: string; readonly gatewayType?: Prisma.TransactionUncheckedCreateInput['gatewayType'] } = {},
+): Promise<string> {
+  const amount = checkout.amount ?? '10';
   const row = await tx.subscription.create({
     data: {
       userId,
       isTrial: true,
-      planSnapshot: { ...TRIAL_PLAN, purchaseType: 'NEW', amount: '10', currency: 'RUB', snapshotSource: 'PAYMENT_COMPLETION' },
+      planSnapshot: { ...TRIAL_PLAN, purchaseType: 'NEW', amount, currency: 'RUB', snapshotSource: 'PAYMENT_COMPLETION' },
       createdAt: at,
       startedAt: at,
       expiresAt: new Date(at.getTime() + 7 * DAY_MS),
       ...extra,
     },
   });
-  const checkout = new Date(at.getTime() - 60_000);
+  const startedAt = new Date(at.getTime() - 60_000);
   const bought = await pay(tx, {
     userId,
     subscriptionId: row.id,
-    amount: '10',
-    createdAt: checkout,
+    amount,
+    gatewayType: checkout.gatewayType ?? 'YOOKASSA',
+    createdAt: startedAt,
     fulfilledAt: at,
     planSnapshot: { ...TRIAL_PLAN, availability: 'TRIAL', trialSettings: { maxClaims: 2 }, selectedDurationDays: 7, purchaseType: 'NEW', snapshotSource: 'ADMIN_TRANSACTION_DRAFT' },
   });
   await tx.trialClaim.create({
-    data: { userId, planId: 'trial', transactionId: bought.id, subscriptionId: row.id, source: 'PAID', status: 'CONSUMED', units: 1, reservedAt: checkout, consumedAt: at, createdAt: checkout },
+    data: { userId, planId: 'trial', transactionId: bought.id, subscriptionId: row.id, source: 'PAID', status: 'CONSUMED', units: 1, reservedAt: startedAt, consumedAt: at, createdAt: startedAt },
   });
   await tx.trialGrant.upsert({ where: { userId }, create: { userId, planId: 'trial', grantedAt: at }, update: { planId: 'trial', grantedAt: at } });
   return row.id;
@@ -208,6 +218,30 @@ async function upgradeInPlace(tx: Prisma.TransactionClient, userId: string, subs
     where: { id: subscriptionId },
     data: { isTrial: false, planSnapshot: { ...PRO, snapshotSource: 'PAYMENT_COMPLETION' }, startedAt: at, expiresAt: new Date(at.getTime() + 30 * DAY_MS) },
   });
+}
+
+/**
+ * The panel's own settings service, writing inside the test's transaction: the settings-row lock it takes
+ * (`mutateSettingsRow` opens a `$transaction`) runs in the one the test rolls back, so the singleton row other
+ * specs read is left as it was.
+ */
+function settingsServiceIn(tx: Prisma.TransactionClient): SettingsService {
+  const client = new Proxy(tx, {
+    get: (target, property, receiver) =>
+      property === '$transaction'
+        ? (work: (inner: Prisma.TransactionClient) => Promise<unknown>) => work(tx)
+        : Reflect.get(target, property, receiver),
+  });
+  return new SettingsService(client as never, {} as never, {} as never);
+}
+
+/** An operator saving Settings → «Платформа» as the controller hands the save over. */
+async function operatorIn(tx: Prisma.TransactionClient) {
+  const admin = await tx.adminUser.create({ data: { login: 'operator', loginNormalized: 'operator', passwordHash: 'not-a-hash' } });
+  return {
+    currentAdmin: { id: admin.id } as never,
+    requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+  };
 }
 
 /** The most recent instant, at least two days back, at which a summer month turns over in Central Europe: 22:30 UTC on its last day. */
@@ -1298,7 +1332,11 @@ run('business analytics on PostgreSQL', () => {
       });
       await tx.trialClaim.create({ data: { userId: 'legacyTrialRow', subscriptionId: running.id, source: 'LEGACY', status: 'CONSUMED', units: 1, consumedAt: daysAgo(7) } });
       await tx.trialGrant.create({ data: { userId: 'legacyTrialRow', planId: 'trial', grantedAt: daysAgo(7) } });
-      // — and a customer whose paid trial had already been moved to a plan got one synthetic LEGACY claim at their grant.
+      // — and a customer whose paid trial had already been moved to a plan got one synthetic LEGACY claim at their
+      // grant. Bought before 0.9.6.80 (ce638af8), the payment carries no `availability` and the ledger names it
+      // nowhere: only its plan says it bought a trial. Moved to Pro two days later — it used to read as a free
+      // trial that converted.
+      await tx.plan.create({ data: { id: 'trial', name: 'Trial', availability: 'TRIAL' } });
       await customer(tx, 'legacyBuyer', { createdAt: daysAgo(8) });
       const moved = await tx.subscription.create({ data: { userId: 'legacyBuyer', planSnapshot: PRO, createdAt: daysAgo(8), startedAt: daysAgo(6), expiresAt: daysAhead(24) } });
       await pay(tx, {
@@ -1307,7 +1345,16 @@ run('business analytics on PostgreSQL', () => {
         amount: '10',
         createdAt: new Date(daysAgo(8).getTime() - 60_000),
         fulfilledAt: daysAgo(8),
-        planSnapshot: { ...TRIAL_PLAN, availability: 'TRIAL', selectedDurationDays: 3, purchaseType: 'NEW', snapshotSource: 'ADMIN_TRANSACTION_DRAFT' },
+        planSnapshot: { ...TRIAL_PLAN, selectedDurationDays: 3, purchaseType: 'NEW', gatewayType: 'YOOKASSA', amount: '10', currency: 'RUB', snapshotSource: 'PAYMENT_COMPLETION' },
+      });
+      await pay(tx, {
+        userId: 'legacyBuyer',
+        subscriptionId: moved.id,
+        purchaseType: 'UPGRADE',
+        amount: '300',
+        createdAt: daysAgo(6),
+        fulfilledAt: daysAgo(6),
+        planSnapshot: { ...PRO, selectedDurationDays: 30, purchaseType: 'UPGRADE', gatewayType: 'YOOKASSA', amount: '300', currency: 'RUB', snapshotSource: 'PAYMENT_COMPLETION' },
       });
       await tx.trialGrant.create({ data: { userId: 'legacyBuyer', planId: 'trial', grantedAt: daysAgo(8) } });
       await tx.trialClaim.create({ data: { id: 'legacy_grant_legacyBuyer', userId: 'legacyBuyer', planId: 'trial', source: 'LEGACY', status: 'CONSUMED', units: 1, consumedAt: daysAgo(8) } });
@@ -1320,6 +1367,36 @@ run('business analytics on PostgreSQL', () => {
     );
     assert.equal(report.revenueFromConverted, 10);
     assert.deepEqual(report.topConvertedPlans.map((plan) => [plan.plan, plan.planId, plan.count]), [['Trial', 'trial', 1]]);
+  });
+
+  it('takes a trial plan checked out for 0 ₽ with a 100 % promo code for a free trial, and one paid from a partner’s balance for a paid one', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      // Checked out for nothing five days ago and still running: a free trial.
+      await customer(tx, 'promoTrial', { createdAt: daysAgo(5) });
+      await paidTrial(tx, 'promoTrial', daysAgo(5), {}, { amount: '0' });
+      // Checked out for nothing twenty days ago, moved to Pro for money ten days ago: paid since the move.
+      await customer(tx, 'promoConverted', { createdAt: daysAgo(20) });
+      await upgradeInPlace(tx, 'promoConverted', await paidTrial(tx, 'promoConverted', daysAgo(20), {}, { amount: '0' }), daysAgo(10));
+      // Paid for from a partner's balance four days ago: paid, though not revenue.
+      await customer(tx, 'partnerTrial', { createdAt: daysAgo(4) });
+      await paidTrial(tx, 'partnerTrial', daysAgo(4), {}, { gatewayType: 'PARTNER_BALANCE' });
+      const overview = await service.getAdvancedReport(30);
+      const conversion = await service.getTrialConversion(30);
+      return {
+        active: overview.metrics.activeSubscriptions,
+        freeTrials: overview.metrics.trialSubscriptions,
+        revenue: overview.metrics.revenue.current.value,
+        partnerBalance: [overview.partnerBalance.figure.value, overview.partnerBalance.payments],
+        trial: [conversion.totalTrialUsers, conversion.convertedUsers],
+      };
+    });
+    // In force now: the promo trial once moved to Pro, and the one paid from the balance; neither a period ago.
+    assert.deepEqual(observed.active, { current: 2, previous: 0 });
+    assert.equal(observed.freeTrials, 1);
+    assert.equal(observed.revenue, 300);
+    assert.deepEqual(observed.partnerBalance, [10, 1]);
+    // Both promo trials started a trial; the one moved to Pro converted.
+    assert.deepEqual(observed.trial, [2, 1]);
   });
 
   it('takes every zone both Intl and PostgreSQL know: GMT is UTC, EST5EDT keeps its daylight time, and a name is read in any case', async () => {
@@ -1437,5 +1514,109 @@ run('business analytics on PostgreSQL', () => {
       declined: 'failed',
       waiting: 'pending',
     });
+  });
+
+  it('states «Выручка» in the currency «Обзор» states the same days in: the view is chosen over both windows', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      await customer(tx, 'payer', { createdAt: daysAgo(30) });
+      await rate(tx, 'USDT', '80');
+      // Last week, roubles only; this week, only 10 USDT.
+      await pay(tx, { userId: 'payer', amount: '1000', createdAt: daysAgo(9) });
+      await pay(tx, { userId: 'payer', amount: '10', currency: 'USDT', gatewayType: 'CRYPTOPAY', createdAt: daysAgo(2) });
+      const overview = await service.getAdvancedReport(7);
+      const revenue = await service.getRevenueReport(7);
+      return {
+        overview: [overview.money.currency, overview.metrics.revenue.current.value],
+        revenue: [revenue.money.currency, revenue.total.value],
+        sameView: JSON.stringify(revenue.money) === JSON.stringify(overview.money),
+      };
+    });
+    assert.deepEqual(observed, { overview: ['RUB', 800], revenue: ['RUB', 800], sameView: true });
+  });
+
+  it('saves «Часовой пояс» as a zone Intl and PostgreSQL both know, in its IANA spelling — and the reports and a customer notice read it', async () => {
+    const observed = await onCleanSlate(async (tx) => {
+      const settings = settingsServiceIn(tx);
+      const operator = await operatorIn(tx);
+      await settings.updatePlatformSettings({ ...operator, updatePlatformSettingsDto: { platformBranding: { projectName: 'Rezeis' } } });
+      await settings.updatePlatformSettings({ ...operator, updatePlatformSettingsDto: { platformBranding: { timezone: 'asia/tokyo' } } });
+      const branding = await settings.getPlatformBranding();
+      const overview = await settings.getOverview();
+      // Two readers of the saved value: the reports' days, and the date in a notice to a customer.
+      const report = await new BusinessAnalyticsService(tx as never, REPORTING_IN_RUB, settings).getAdvancedReport(7);
+      const notice = buildSubscriptionFacts({ expiresAt: '2026-09-19T15:30:00.000Z', timezone: branding.timezone }, 'ru');
+      return {
+        stored: branding.timezone,
+        overview: overview.platformBranding.timezone,
+        untouched: branding.projectName,
+        report: [report.period.timeZone, report.period.timeZoneFallback, wallClockOf(new Date(report.period.start), 'Asia/Tokyo') % DAY_MS],
+        notice: notice['expiresDateTime'],
+      };
+    });
+    assert.deepEqual(observed, {
+      stored: 'Asia/Tokyo',
+      overview: 'Asia/Tokyo',
+      untouched: 'Rezeis',
+      report: ['Asia/Tokyo', false, 0],
+      notice: '20 сентября, 00:30',
+    });
+  });
+
+  it('refuses a «Часовой пояс» that is not such a zone with a 400 naming the problem, stores nothing, and takes UTC under any name as none', async () => {
+    const observed = await onCleanSlate(async (tx) => {
+      const settings = settingsServiceIn(tx);
+      const operator = await operatorIn(tx);
+      const save = (timezone: string | null) =>
+        settings.updatePlatformSettings({ ...operator, updatePlatformSettingsDto: { platformBranding: { timezone } } });
+      await save('Europe/Moscow');
+      const refused: unknown[] = [];
+      for (const value of ['+03:00', 'UTC+3', 'CET', 'EST5EDT', 'MSK', 'Mars/Olympus_Mons']) {
+        try {
+          await save(value);
+          refused.push([value, 'stored']);
+        } catch (error) {
+          refused.push([value, error instanceof BadRequestException ? error.getStatus() : String(error), (error as Error).message.split(':')[0]]);
+        }
+      }
+      const afterRefusals = (await settings.getPlatformBranding()).timezone;
+      await save('GMT');
+      const afterUtc = (await settings.getPlatformBranding()).timezone;
+      return { refused, afterRefusals, afterUtc };
+    });
+    assert.deepEqual(observed.refused, [
+      ['+03:00', 400, 'PLATFORM_TIMEZONE_OFFSET'],
+      ['UTC+3', 400, 'PLATFORM_TIMEZONE_OFFSET'],
+      ['CET', 400, 'PLATFORM_TIMEZONE_NOT_A_ZONE_NAME'],
+      ['EST5EDT', 400, 'PLATFORM_TIMEZONE_NOT_A_ZONE_NAME'],
+      ['MSK', 400, 'PLATFORM_TIMEZONE_UNKNOWN'],
+      ['Mars/Olympus_Mons', 400, 'PLATFORM_TIMEZONE_UNKNOWN'],
+    ]);
+    assert.equal(observed.afterRefusals, 'Europe/Moscow');
+    assert.equal(observed.afterUtc, null);
+  });
+
+  it('still reads a «Часовой пояс» an older screen or an import stored safely: the reports fall back to UTC and say so, a notice shows UTC', async () => {
+    const observed = await onCleanSlate(async (tx) => {
+      const read: unknown[] = [];
+      for (const stored of ['MSK', 'Mars/Olympus_Mons', '+03:00', 'CET']) {
+        // As a config import writes it: the column as it is, past the save's check.
+        await tx.$executeRaw`DELETE FROM "settings"`;
+        await tx.settings.create({ data: { platformPolicy: { timezone: stored } } });
+        const settings = settingsServiceIn(tx);
+        const branding = await settings.getPlatformBranding();
+        const report = await new BusinessAnalyticsService(tx as never, REPORTING_IN_RUB, settings).getAdvancedReport(7);
+        const notice = buildSubscriptionFacts({ expiresAt: '2026-09-19T15:30:00.000Z', timezone: branding.timezone }, 'en');
+        read.push([stored, report.period.timeZone, report.period.timeZoneFallback, notice['expiresTime']]);
+      }
+      return read;
+    });
+    assert.deepEqual(observed, [
+      ['MSK', 'UTC', true, '15:30'],
+      ['Mars/Olympus_Mons', 'UTC', true, '15:30'],
+      // Intl reads an offset as the offset it says; the reports refuse it rather than count PostgreSQL's opposite.
+      ['+03:00', 'UTC', true, '18:30'],
+      // Read as the zone it names, Central European summer time.
+      ['CET', 'Europe/Brussels', false, '17:30'],
+    ]);
   });
 });

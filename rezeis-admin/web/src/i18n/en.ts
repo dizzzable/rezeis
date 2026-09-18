@@ -934,7 +934,7 @@ export const en = {
     },
     platform: {
       title: 'Platform Settings',
-      description: 'Control access mode, currency, and channel requirements',
+      description: 'Control access mode, currency, time zone, and channel requirements',
       accessMode: 'Access Mode',
       accessModeLabels: {
         PUBLIC: 'Public',
@@ -964,6 +964,24 @@ export const en = {
       saved: 'Platform settings saved',
       saveFailed: 'Failed to save',
       saveButton: 'Save Platform Settings',
+      timezone: {
+        label: 'Time zone',
+        infoLabel: 'What the time zone affects',
+        info: 'The panel writes times in this zone: in the event cards sent to the chat set in “Notifications → Telegram delivery”; in the dates of messages to customers — when a subscription ends (“Notifications → User notifications”); in the partner’s cabinet — until what hour the balance is frozen. “Analytics” and “Payments → Analytics” count a day in it too. Not set — UTC everywhere.',
+        empty: 'UTC (not set)',
+        searchPlaceholder: 'Find a zone: Moscow, Europe/…',
+        notFound: 'No such zone in the list',
+        useTyped: 'Use “{{zone}}”',
+        now: 'It is {{time}} there now ({{offset}})',
+        nowUtc: 'It is {{time}} UTC now',
+        unknownStored: 'The saved zone “{{zone}}” is not in the list — times are counted in UTC everywhere. Choose a zone from the list.',
+        errors: {
+          OFFSET: '“{{zone}}” is an offset from UTC, not a time zone. Choose a zone from the list, such as Europe/Moscow.',
+          UNKNOWN: 'There is no time zone “{{zone}}”. Choose a zone from the list.',
+          NOT_A_ZONE_NAME: '“{{zone}}” is an abbreviation or an old alias, not a zone. Choose the zone itself from the list — Europe/Brussels rather than CET, say.',
+          NOT_IN_DATABASE: 'The database’s time zone data has no zone “{{zone}}”. Choose a neighbouring zone, or update that data in PostgreSQL.',
+        },
+      },
     },
     branding: {
       title: 'Branding',

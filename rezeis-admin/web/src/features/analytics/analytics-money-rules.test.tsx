@@ -163,7 +163,11 @@ describe('what the (i) of a figure admits about what it counts', () => {
     const tip = await info('Платные подписки')
     // A paid trial is paid (the owner's rule); the "+ N" beside the count is free trials only.
     expect(tip).toHaveTextContent('бесплатные пробные не входят. Платный пробный период считается с покупки')
-    expect(tip).toHaveTextContent('платные пробные периоды тоже (бесплатные — нет)')
+    // Exactly what makes a trial paid: bought for more than nothing — a 100 % promo code makes it a free one.
+    expect(tip).toHaveTextContent(
+      'Пробный период входит, только если его купили больше чем за 0 ₽ — в том числе балансом партнёра; выданный бесплатно или взятый по промокоду на 100 % — бесплатный и сюда не входит.',
+    )
+    expect(tip).toHaveTextContent('как бы они ни были оплачены: картой, промокодом — даже на 100 %, — баллами или балансом партнёра.')
     const trials = overviewReport({}, 30).metrics.trialSubscriptions
     expect(document.querySelector('[data-kpi="activeSubscriptions"]')?.textContent).toContain(
       i18n.t('analyticsPage.kpi.trials', { count: trials }),
@@ -204,7 +208,7 @@ describe('what the (i) of a figure admits about what it counts', () => {
     renderWithProviders(<AnalyticsPage />)
     await openTab('conversion')
     const tip = await info('Пробный → оплата')
-    expect(tip).toHaveTextContent('начавших бесплатный пробный период')
+    expect(tip).toHaveTextContent('начавших бесплатный пробный период (в том числе взятый по промокоду на 100 %)')
     expect(tip).toHaveTextContent('покупка платного пробного периода — тоже оплата')
     expect(tip).toHaveTextContent('Кто сразу купил платный пробный период, — не пробный, а платящий клиент и сюда не входит.')
   })

@@ -21,7 +21,7 @@ import type {
 import { moneyReceivedSql, netAmountSql, purchaseKindSql } from './analytics-money-received.util';
 import { chooseMoneyView, currencySlices, type FxSnapshot, moneyFigure } from './analytics-money.util';
 import { assemblePartnerBalance, type PartnerBalanceRow } from './analytics-overview.util';
-import { type AnalyticsWindowInterface, bucketIndexSql, describePeriod } from './analytics-window.util';
+import { type AnalyticsWindowInterface, bothWindowsSql, bucketIndexSql, describePeriod } from './analytics-window.util';
 
 type SqlNumeric = Prisma.Decimal | string | number | bigint | null;
 const num = (value: SqlNumeric | undefined): number => (value === null || value === undefined ? 0 : Number(value));
@@ -34,6 +34,26 @@ export interface RevenueSliceRow {
   readonly kind: PurchaseKind;
   readonly amount: SqlNumeric;
   readonly payments: number;
+}
+
+export interface ViewCurrencyRow {
+  readonly currency: string;
+}
+
+/**
+ * THE CURRENCIES THE MONEY VIEW IS CHOSEN OVER: every currency with money
+ * received in the window OR in the one it is compared with — the set «Обзор»
+ * chooses over (its payment rows cover both windows). «Выручка» shows no
+ * previous window, but it states the same days as «Обзор» and as the payments'
+ * «Аналитика», and all three must state them in one currency: a week of only
+ * 10 USDT after a week of 1 000 ₽ is «≈ 800 ₽» on each, never «10 USDT» here.
+ */
+export function moneyViewCurrenciesSql(window: AnalyticsWindowInterface): Prisma.Sql {
+  const at = Prisma.sql`t."created_at"`;
+  return Prisma.sql`
+    SELECT DISTINCT t."currency"::text AS "currency"
+      FROM "transactions" t
+     WHERE ${moneyReceivedSql()} AND ${bothWindowsSql(at, window)} AND ${netAmountSql()} > 0`;
 }
 
 /** Money received in the window per bar, currency and kind of purchase — one statement feeds three charts. */
@@ -131,11 +151,13 @@ export function assembleRevenue(
     readonly plans: readonly RevenuePlanRow[];
     readonly gateways: readonly RevenueGatewayRow[];
     readonly partnerBalance: readonly PartnerBalanceRow[];
+    /** {@link moneyViewCurrenciesSql}: both windows, as «Обзор» chooses. */
+    readonly viewCurrencies: readonly ViewCurrencyRow[];
   },
   fx: FxSnapshot,
 ): RevenueReportInterface {
   const view = chooseMoneyView(
-    rows.slices.filter((row) => num(row.amount) !== 0).map((row) => row.currency),
+    rows.viewCurrencies.map((row) => row.currency),
     fx,
   );
 

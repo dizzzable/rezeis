@@ -89,12 +89,16 @@ export class PlatformBrandingDto {
   public projectName?: string | null;
 
   /**
-   * IANA time zone, e.g. `Europe/Moscow`.
+   * IANA time zone, e.g. `Europe/Moscow` — «Часовой пояс» of Settings →
+   * «Платформа». `null` or empty: none, UTC everywhere.
    *
-   * Not validated against the zone database here: the list ships with the
-   * runtime and differs between Node builds, so a check here could refuse a
-   * zone the formatter would have accepted. The renderer validates it where it
-   * is used and falls back to UTC — a wrong hour, never a thrown notification.
+   * Only its shape is bounded here. Whether it is a zone is asked on save by
+   * `SettingsService.updatePlatformSettings` (`platform-timezone.util.ts`):
+   * the zone must be one both `Intl` and PostgreSQL know, and it is stored in
+   * its proper IANA spelling — an offset, an abbreviation such as `CET` or a
+   * name neither knows is a 400 naming the problem. A value stored before that
+   * check, or by a config import, is still read by every reader with its own
+   * fallback to UTC: a wrong hour, never a thrown notification.
    */
   @IsOptional()
   @ValidateIf((_o: object, value: unknown): boolean => value !== null)

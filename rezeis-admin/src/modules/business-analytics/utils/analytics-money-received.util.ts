@@ -27,7 +27,9 @@
  * A PAID TRIAL IS PAID (the owner's rule, 2026-09-18): the purchase of a trial
  * plan is a subscription's first money, so it is `new` like any other, and a
  * later move of that subscription to a regular plan is a `change`. Only a FREE
- * trial starts a customer's trial → paid journey.
+ * trial starts a customer's trial → paid journey — and a trial plan checked out
+ * for 0 with a 100 % promo code is a free one: "paid" means bought for money,
+ * a partner's balance included ({@link boughtSubscriptionSql}).
  */
 import { Prisma } from '@prisma/client';
 
@@ -78,35 +80,53 @@ export function paymentOutcomeSql(alias: TransactionAlias = 't'): Prisma.Sql {
 }
 
 /**
- * The payment bought a trial plan — a paid trial's own purchase. The checkout
- * persists the plan's availability in the payment's snapshot
- * (`buildTransactionDraftSnapshot`), and the fulfilment reads it back to make
- * the subscription a trial (`createSubscriptionFromPayment`); the trial ledger
- * names the payment too (`trial_claims.transaction_id`, `consumePaidTrialClaim`).
- * Either will do — the ledger's own backfill recognised a paid trial by the
- * snapshot alone. Any status: the caller says which payments it means.
+ * The payment bought a trial plan — a paid trial's own purchase, whatever it
+ * cost; the caller says which statuses and amounts it means. Three marks, one
+ * for each era of the data:
+ *
+ *   - the payment's snapshot carries `availability: 'TRIAL'` — the checkout
+ *     persists it (`buildTransactionDraftSnapshot`) and the fulfilment reads it
+ *     back to make the row a trial (`createSubscriptionFromPayment`);
+ *   - the trial ledger names the payment (`trial_claims.transaction_id`,
+ *     `consumePaidTrialClaim`);
+ *   - its plan is a trial plan (`plans.availability`). Both marks above exist
+ *     only since 0.9.6.80 (ce638af8, 31 Jul 2026): a paid trial bought before
+ *     it has neither, and the ledger's backfill left such a customer a LEGACY
+ *     claim naming no payment and, once the trial was moved to a plan, no
+ *     subscription either. The plan is what remains — a deleted plan keeps its
+ *     row (`deletedAt`), so it still answers. It answers with the plan as it is
+ *     NOW: a plan that stopped or started being a trial plan since reads the
+ *     old payments its new way.
  */
 export function paidTrialPurchaseSql(alias: TransactionAlias = 't'): Prisma.Sql {
-  return Prisma.sql`(UPPER(COALESCE(${column(alias, 'plan_snapshot')}->>'availability', '')) = 'TRIAL'
-    OR EXISTS (SELECT 1 FROM "trial_claims" tc WHERE tc."transaction_id" = ${column(alias, 'id')}))`;
+  const snapshot = column(alias, 'plan_snapshot');
+  return Prisma.sql`(UPPER(COALESCE(${snapshot}->>'availability', '')) = 'TRIAL'
+    OR EXISTS (SELECT 1 FROM "trial_claims" tc WHERE tc."transaction_id" = ${column(alias, 'id')})
+    OR EXISTS (SELECT 1 FROM "plans" tp WHERE tp."id" = ${snapshot}->>'id' AND tp."availability" = 'TRIAL'))`;
 }
 
 /**
- * The subscription (the SQL expression naming its id) was BOUGHT: a completed
- * payment linked to it bought its plan — NEW, or an ADDITIONAL that is not an
- * add-on — whatever it cost. `createSubscriptionFromPayment` links that
+ * The subscription (the SQL expression naming its id) was BOUGHT FOR MONEY: a
+ * completed payment of more than 0 linked to it bought its plan — NEW, or an
+ * ADDITIONAL that is not an add-on. `createSubscriptionFromPayment` links that
  * payment to the row it creates; a free trial never has one (the cabinet's and
  * the operator's grant, and an import, create the row with no payment), and a
  * plan change or a renewal is not the purchase that made the row. So a trial
  * subscription that was bought is a PAID trial — told apart without `is_trial`,
  * which both kinds carry, and without the ledger's PAID claims, which exist
  * only since 2026-07-31 (its backfill wrote LEGACY claims for every trial).
+ *
+ * MORE THAN 0: a trial plan checked out with a 100 % promo code completes at
+ * 0 without reaching a payment system (`PaymentsCheckoutService`), and it is a
+ * FREE trial. A partner's balance is money here — the purchase was paid, even
+ * if the reports keep that money out of revenue.
  */
 export function boughtSubscriptionSql(subscriptionId: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`EXISTS (
     SELECT 1 FROM "transactions" bp
      WHERE bp."subscription_id" = ${subscriptionId}
        AND bp."status" = 'COMPLETED'
+       AND bp."amount" > 0
        AND (bp."purchase_type" = 'NEW'
             OR (bp."purchase_type" = 'ADDITIONAL' AND bp."plan_snapshot"->>'snapshotSource' IS DISTINCT FROM 'ADDON_PURCHASE')))`;
 }

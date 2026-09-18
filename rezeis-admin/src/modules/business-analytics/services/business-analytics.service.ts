@@ -78,12 +78,14 @@ import {
 } from '../utils/analytics-retention.util';
 import {
   assembleRevenue,
+  moneyViewCurrenciesSql,
   revenueByGatewaySql,
   revenueByPlanSql,
   type RevenueGatewayRow,
   type RevenuePlanRow,
   revenueSlicesSql,
   type RevenueSliceRow,
+  type ViewCurrencyRow,
 } from '../utils/analytics-revenue.util';
 import { planAnalyticsWindow, readAnalyticsZone } from '../utils/analytics-window.util';
 import type { AnalyticsZone } from '../utils/analytics-zone.util';
@@ -209,14 +211,16 @@ export class BusinessAnalyticsService {
   public async getRevenueReport(daysRaw: number): Promise<RevenueReportInterface> {
     const window = planAnalyticsWindow(daysRaw, new Date(), await this.readZone());
     const prisma = this.prismaService;
-    const [slices, plans, gateways, partnerBalance, fx] = await Promise.all([
+    const [slices, plans, gateways, partnerBalance, viewCurrencies, fx] = await Promise.all([
       prisma.$queryRaw<RevenueSliceRow[]>(revenueSlicesSql(window)),
       prisma.$queryRaw<RevenuePlanRow[]>(revenueByPlanSql(window)),
       prisma.$queryRaw<RevenueGatewayRow[]>(revenueByGatewaySql(window)),
       prisma.$queryRaw<PartnerBalanceRow[]>(partnerBalanceSql(window)),
+      // The currencies of BOTH windows, as «Обзор» chooses its view: the same days, the same currency.
+      prisma.$queryRaw<ViewCurrencyRow[]>(moneyViewCurrenciesSql(window)),
       this.readFx(),
     ]);
-    return assembleRevenue(window, { slices, plans, gateways, partnerBalance }, fx);
+    return assembleRevenue(window, { slices, plans, gateways, partnerBalance, viewCurrencies }, fx);
   }
 
   /** Live subscriptions (ACTIVE and LIMITED) per plan. */

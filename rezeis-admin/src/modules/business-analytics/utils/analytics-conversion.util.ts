@@ -63,17 +63,22 @@ export type DaysToPayRow = Readonly<Record<DaysToPayBucket, number>> & {
  * only the paid trial's time there. The ledger keeps a claim per trial
  * (`trial_claims`, backfilled for the time before it), and a trial start is a
  * claim that
- *   - is not a paid trial's own (`source` PAID),
- *   - nor was written for a subscription that was bought — the backfill wrote
- *     LEGACY claims for every trial then running, paid ones too,
- *   - and did not come after the customer had already bought a paid trial:
- *     that customer is a paying one, their paid trial the first money.
+ *   - was not bought for money: its payment (a paid trial's claim names it)
+ *     cost nothing — a 100 % promo code — whatever became of it since; a paid
+ *     trial refunded later was still bought;
+ *   - nor was written for a subscription that was bought for money — the
+ *     backfill wrote LEGACY claims for every trial then running, paid ones too;
+ *   - and did not come after the customer had already bought a paid trial for
+ *     money: that customer is a paying one, their paid trial the first money.
+ *     Before 0.9.6.80 the backfill's claim names neither the payment nor the
+ *     subscription, and only the payment's plan tells ({@link paidTrialPurchaseSql}).
  */
 const TRIAL_STARTS = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sql`
   "trial_start" AS (
     SELECT c."user_id", MIN(COALESCE(c."consumed_at", c."created_at")) AS "granted_at"
       FROM "trial_claims" c
-     WHERE c."status" = 'CONSUMED' AND c."source" <> 'PAID'
+     WHERE c."status" = 'CONSUMED'
+       AND NOT EXISTS (SELECT 1 FROM "transactions" ct WHERE ct."id" = c."transaction_id" AND ct."amount" > 0)
        AND (c."subscription_id" IS NULL OR NOT ${boughtSubscriptionSql(Prisma.sql`c."subscription_id"`)})
      GROUP BY c."user_id"
   ),
@@ -83,7 +88,8 @@ const TRIAL_STARTS = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sq
      WHERE s."granted_at" >= ${window.start}
        AND NOT EXISTS (
          SELECT 1 FROM "transactions" e
-          WHERE e."user_id" = s."user_id" AND e."status" = 'COMPLETED' AND ${paidTrialPurchaseSql('e')}
+          WHERE e."user_id" = s."user_id" AND e."status" = 'COMPLETED' AND e."amount" > 0
+            AND ${paidTrialPurchaseSql('e')}
             AND e."created_at" <= s."granted_at"
        )
   )`;

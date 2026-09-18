@@ -58,7 +58,7 @@ export const en = {
     },
     rules: {
       money: 'Money here is money received: completed payments above zero, net of refunds (a partial refund is subtracted), without purchases paid from a partner’s balance — that is not new money.',
-      subscriptions: 'Subscriptions here are on paid plans, paid trials included (free trials are not), however they were paid: by card, promo code, points or a partner’s balance. Subscriptions without a plan are left out — those an import brought in from Remnawave, 3x-ui or another bot that have not been given a plan yet: “Clone source plans” and “Assign plan to all” after an import on the “Imports” page, or “Assign plan” in the user’s card.',
+      subscriptions: 'Subscriptions here are on paid plans, however they were paid: by card, promo code — a 100 % one included — points or a partner’s balance. A trial counts only when it was bought for more than 0, a partner’s balance included; one given for free or taken with a 100 % promo code is a free trial and is not counted. Subscriptions without a plan are left out — those an import brought in from Remnawave, 3x-ui or another bot that have not been given a plan yet: “Clone source plans” and “Assign plan to all” after an import on the “Imports” page, or “Assign plan” in the user’s card.',
     },
     caveats: {
       renewedLapse: 'An approximation: the panel keeps only a subscription’s current end date, so when a customer renewed the same subscription after a gap, the gap does not show.',
@@ -227,7 +227,7 @@ export const en = {
     },
     conversion: {
       rate: 'Trial → paid',
-      rateInfo: 'The share of customers who started a free trial in the selected period and paid later; buying a paid trial is a payment too. Only a payment made after the free trial started counts. A customer who bought a paid trial straight away is a paying customer, not a trial one, and is not counted here.',
+      rateInfo: 'The share of customers who started a free trial (one taken with a 100 % promo code included) in the selected period and paid later; buying a paid trial is a payment too. Only a payment made after the free trial started counts. A customer who bought a paid trial straight away is a paying customer, not a trial one, and is not counted here.',
       rateSubtitle: '{{converted}} of {{total}} paid',
       trialUsers: 'Got a free trial',
       trialUsersSubtitle_one: 'in {{count, number}} day',
