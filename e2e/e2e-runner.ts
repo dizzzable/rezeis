@@ -380,13 +380,28 @@ async function scenarioAnalytics(ctx: ScenarioContext): Promise<string> {
     { headers: auth },
   );
   expectStatus(top, 200, 'GET /admin/analytics/top-payers');
-  const ltv = await ctx.admin.get<{ buckets: Array<{ bound: number; users: number }> }>(
-    '/admin/analytics/ltv-distribution',
-    { headers: auth },
-  );
+  // Since 0.9.7.61 the bins follow the data: about eight round-width bins up
+  // to the 95th percentile plus an open tail — and none at all without a
+  // single payer, which is what a fresh stack has. Eight fixed buckets were the
+  // old contract.
+  const ltv = await ctx.admin.get<{
+    buckets: Array<{ from: number; to: number | null; users: number }>;
+    stats: { payers: number };
+  }>('/admin/analytics/ltv-distribution', { headers: auth });
   expectStatus(ltv, 200, 'GET /admin/analytics/ltv-distribution');
-  assert(ltv.data.buckets.length >= 8, 'expected at least 8 LTV buckets');
-  return `overview ${overview.data.kpis.windowDays}d · cohorts=${cohorts.data.cohorts.length} · top=${top.data.payers.length} · ltv=${ltv.data.buckets.length}`;
+  const { buckets, stats } = ltv.data;
+  assert(Array.isArray(buckets), 'LTV buckets must be an array');
+  assert(typeof stats?.payers === 'number', 'LTV stats.payers must be a number');
+  assert(
+    (stats.payers === 0) === (buckets.length === 0),
+    `LTV: ${buckets.length} bucket(s) for ${stats.payers} payer(s) — none exactly when nobody paid`,
+  );
+  assert(buckets.length <= 13, `LTV: ${buckets.length} buckets, at most 12 bins and a tail`);
+  buckets.forEach((bucket, index) => {
+    const next = buckets[index + 1];
+    if (next !== undefined) assert(bucket.to === next.from, `LTV bucket ${index} does not meet the next one`);
+  });
+  return `overview ${overview.data.kpis.windowDays}d · cohorts=${cohorts.data.cohorts.length} · top=${top.data.payers.length} · ltv=${buckets.length} (payers ${stats.payers})`;
 }
 
 async function scenarioConfigPortability(ctx: ScenarioContext): Promise<string> {
