@@ -530,6 +530,7 @@ describe('ProviderSubscriptionService.syncRow', () => {
             live('plan-1', '249', '299'),
             // Signed up at 249 before the price went to 299.
             live('plan-1', '249', '249'),
+            // Past due: counted as such, not as paying an old price (the line says «из них»).
             live('plan-1', '249', '249', ProviderSubscriptionStatus.PAST_DUE),
             // The term is no longer sold at all.
             live('plan-gone', '99', '99'),
@@ -549,7 +550,7 @@ describe('ProviderSubscriptionService.syncRow', () => {
     );
 
     assert.deepEqual(await service.summary(), [
-      { gatewayType: PaymentGatewayType.PLATEGA, active: 5, pastDue: 1, onOldPrice: 3 },
+      { gatewayType: PaymentGatewayType.PLATEGA, active: 5, pastDue: 1, onOldPrice: 2 },
     ]);
   });
 

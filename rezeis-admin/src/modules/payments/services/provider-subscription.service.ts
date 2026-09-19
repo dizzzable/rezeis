@@ -550,7 +550,9 @@ export class ProviderSubscriptionService {
       const counts = byGateway.get(row.gatewayType) ?? { active: 0, pastDue: 0, onOldPrice: 0 };
       if (row.status === ProviderSubscriptionStatus.PAST_DUE) counts.pastDue += 1;
       else counts.active += 1;
-      if (row.listAmount !== null) {
+      // «из них по прежней цене»: of the active ones, which the line counts first.
+      // A past-due one is not charging, whatever price it was signed up at.
+      if (row.status !== ProviderSubscriptionStatus.PAST_DUE && row.listAmount !== null) {
         const current = listPrices.get(listPriceKey(row.planId, row.durationDays, row.currency));
         // A term no longer sold counts too: nobody can sign up at that price now.
         if (current === undefined || !current.equals(row.listAmount)) counts.onOldPrice += 1;
