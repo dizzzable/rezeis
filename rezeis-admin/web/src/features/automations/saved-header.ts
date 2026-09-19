@@ -35,8 +35,17 @@ export function isSavedHeaderReference(value: unknown): value is SavedHeaderRefe
 
 /**
  * Set on a webhook action by the panel when this reader may not see its URL
- * whole: the URL is then its origin and a marker. Never sent back as such — a
- * reader who gets it cannot save the action anyway.
+ * whole: the URL is then its origin and "…", and `urlHidden` is a reference to
+ * the action's place in the saved rule — the same shape a saved header gets.
+ *
+ * «Сохранить» sends the reference back WITHOUT the URL (`actionsForSave`), and
+ * the panel keeps the saved URL for that action or refuses: the mask is a valid
+ * URL, and sent as one it used to replace the real URL. The reference holds only
+ * while the URL in the params box is the one the panel sent — a URL typed in
+ * its place is a new URL, sent as typed and without the reference.
+ *
+ * An editor meets one when their role gained the rights after the page loaded
+ * the rule; a reader without them cannot save the action at all.
  */
 export const URL_HIDDEN_PARAM = 'urlHidden'
 
@@ -48,27 +57,44 @@ export function paramsWithoutHeader(params: Readonly<Record<string, unknown>> | 
   return out
 }
 
-/** Whether the panel sent this action's URL as its origin only. */
+/** Whether the panel sent this action's URL as its origin only, with the reference that keeps it. */
 export function isUrlHidden(params: Readonly<Record<string, unknown>> | undefined): boolean {
-  return params?.[URL_HIDDEN_PARAM] === true
+  return isSavedHeaderReference(params?.[URL_HIDDEN_PARAM])
 }
 
 /**
  * Params typed into the JSON box, with the header the field below holds put
  * back. A string typed into the box itself is an explicit new value and wins;
  * anything else there is dropped, so the box can neither show nor forge the
- * reference.
+ * reference. The hidden-URL reference comes back the same way, and only while
+ * the URL in the box is still the one the panel sent.
  */
 export function paramsWithHeaderKept(
   typed: Readonly<Record<string, unknown>>,
   current: Readonly<Record<string, unknown>> | undefined,
 ): Record<string, unknown> {
   const out = paramsWithoutHeader(typed)
-  if (isUrlHidden(current)) out[URL_HIDDEN_PARAM] = true
+  if (isUrlHidden(current) && typed['url'] === current?.['url']) out[URL_HIDDEN_PARAM] = current?.[URL_HIDDEN_PARAM]
   const typedHeader = typed[HEADER_PARAM]
   if (typeof typedHeader === 'string') return { ...out, [HEADER_PARAM]: typedHeader }
   const held = current?.[HEADER_PARAM]
   return held === undefined ? out : { ...out, [HEADER_PARAM]: held }
+}
+
+/**
+ * The actions as «Сохранить» sends them: one that keeps a hidden URL sends its
+ * reference and no URL — never the mask shown in its place, which the panel
+ * would have to take for an address. The draft itself is left as it is.
+ */
+export function actionsForSave<T extends { readonly params: Readonly<Record<string, unknown>> }>(
+  actions: readonly T[],
+): T[] {
+  return actions.map((action) => {
+    if (!isUrlHidden(action.params)) return action
+    const params: Record<string, unknown> = { ...action.params }
+    delete params['url']
+    return { ...action, params }
+  })
 }
 
 /** The URL saved on the action a reference names, or undefined when it names none. */

@@ -83,7 +83,7 @@ describe('no read returns it', () => {
     // (`automation-webhook-url-visibility.http.spec.ts` has the rest of that).
     assert.deepStrictEqual(one.body.actions[1].params, {
       url: 'https://hooks.example.com/…',
-      urlHidden: true,
+      urlHidden: { stored: true, index: 1 },
       authorizationHeader: { stored: true, index: 1 },
     });
     assert.deepStrictEqual(one.body.actions[0].params, { text: 'fired' }, 'an action without a header gains nothing');

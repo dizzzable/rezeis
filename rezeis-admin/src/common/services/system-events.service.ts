@@ -86,7 +86,13 @@ export type SystemEventCategory =
   | 'FRAUD'
   | 'NODE'
   | 'REMNAWAVE'
-  | 'SYSTEM';
+  | 'SYSTEM'
+  /**
+   * Whatever a rule's `system_event` action emits, whatever the rule asks for.
+   * Its words are the rule author's, so no surface may take it for one of the
+   * panel's own alerts (the admin push titles it after the rule).
+   */
+  | 'AUTOMATION';
 
 export type SystemEventSeverity = 'INFO' | 'WARNING' | 'ERROR';
 

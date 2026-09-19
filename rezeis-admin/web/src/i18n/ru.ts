@@ -1261,6 +1261,7 @@ export const ru = {
       NODE: 'Нода',
       REMNAWAVE: 'Remnawave',
       SYSTEM: 'Система',
+      AUTOMATION: 'Автоматизация',
     },
     events: {
       remnawave_user_expired: 'Профиль истёк (Remnawave)',

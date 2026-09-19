@@ -100,6 +100,24 @@ export function isEventTelegramAllowed(
   return filter.events.includes(UNREGISTERED_EVENTS_SENTINEL);
 }
 
+/**
+ * The forum topic an event's category is mapped to.
+ *
+ * AUTOMATION — whatever a rule's `system_event` emits — falls back to SYSTEM's
+ * topic while it has none of its own: those events were filed under SYSTEM
+ * until they got a category of their own, and the screen that maps topics
+ * offers no AUTOMATION row, so an operator's forum keeps receiving them where
+ * it always did.
+ */
+function topicFor(
+  topicMap: Readonly<Record<string, number | null>>,
+  category: string,
+): number | null | undefined {
+  const own = topicMap[category];
+  if (own !== undefined && own !== null) return own;
+  return category === 'AUTOMATION' ? topicMap['SYSTEM'] : own;
+}
+
 export interface TelegramDeliveryTarget {
   readonly chatId: string;
   readonly topicId: number | null;
@@ -124,7 +142,7 @@ export function resolveTelegramDeliveryTarget(
       isErrorReportEvent(event) && config.errorTopicId !== null ? config.errorTopicId : null;
     return {
       chatId: config.chatId,
-      topicId: errorRoute ?? config.topicMap[event.category] ?? config.defaultTopicId ?? null,
+      topicId: errorRoute ?? topicFor(config.topicMap, event.category) ?? config.defaultTopicId ?? null,
       isDevFallback: false,
     };
   }

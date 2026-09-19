@@ -18,7 +18,6 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   EVENT_TYPES,
-  SystemEventCategory,
   SystemEventSeverity,
   SystemEventsService,
 } from '../../../common/services/system-events.service';
@@ -900,6 +899,9 @@ export class AutomationActionRegistry {
    * (`UNREGISTERED_EVENTS_SENTINEL`) is what makes it deliverable in `selected`
    * mode. The DEFAULT, by contrast, is a fixed string, so it is a real
    * registered constant with a card and a tick-box of its own.
+   *
+   * The severity is the rule's; the category is not. It is AUTOMATION whatever
+   * `params.category` says — see the emit below.
    */
   private async systemEvent(
     action: AutomationActionDefinition,
@@ -918,10 +920,15 @@ export class AutomationActionRegistry {
     }
     const message = readString(action.params, 'message') ?? `Automation "${context.ruleName}" fired`;
     const severity = readSeverity(action.params, 'severity');
-    const category = readCategory(action.params, 'category');
+    // AUTOMATION, whatever the rule asks for. The category used to be the
+    // rule's to pick, and SYSTEM + ERROR is how the panel's own critical errors
+    // arrive: every subscribed admin's device showed the rule author's sentence
+    // under «Система». The severity stays the rule's; where the event came from
+    // is not the rule's to say. `params.category` is no longer read, so a rule
+    // that still carries one saves and runs as before.
     this.systemEventsService.emit({
       type,
-      category,
+      category: 'AUTOMATION',
       severity,
       message,
       metadata: chainMetadata(context),
@@ -1114,25 +1121,4 @@ function readSeverity(
   const raw = readString(params, key);
   if (raw === 'WARNING' || raw === 'ERROR' || raw === 'INFO') return raw;
   return 'INFO';
-}
-
-function readCategory(
-  params: Readonly<Record<string, unknown>>,
-  key: string,
-): SystemEventCategory {
-  const raw = readString(params, key);
-  const allowed: readonly SystemEventCategory[] = [
-    'USER',
-    'AUTH',
-    'SUBSCRIPTION',
-    'PAYMENT',
-    'REFERRAL',
-    'PARTNER',
-    'PROMOCODE',
-    'SYSTEM',
-  ];
-  if (raw !== null && (allowed as readonly string[]).includes(raw)) {
-    return raw as SystemEventCategory;
-  }
-  return 'SYSTEM';
 }

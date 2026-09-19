@@ -135,8 +135,8 @@ export class AutomationsService {
     createdById: string | null,
     options: AutomationWriteOptions = {},
   ): Promise<AutomationRuleInterface> {
-    // A new rule has no saved header for a reference to keep.
-    const actions = keepSavedHeaders(dto.actions, null);
+    // A new rule has no saved header or hidden URL for a reference to keep.
+    const actions = keepSavedHeaders(keepHiddenUrls(dto.actions, null), null);
     await this.assertRuleValid({ ...dto, actions }, options.requestIp ?? null);
 
     const data: Prisma.AutomationRuleCreateInput = {
@@ -169,9 +169,11 @@ export class AutomationsService {
   ): Promise<AutomationRuleInterface> {
     const existing = await this.prismaService.automationRule.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Rule not found');
-    // The headers the editor never saw come back as references to the row
-    // just read; the check and the write below both see the real values.
-    const actions = keepSavedHeaders(dto.actions, existing.actions);
+    // The headers and the hidden URLs the editor never saw come back as
+    // references to the row just read; the check and the write below both see
+    // the real values. The URLs first: a kept header is bound to the URL it was
+    // saved with, and that is the URL a kept hidden one resolves to.
+    const actions = keepSavedHeaders(keepHiddenUrls(dto.actions, existing.actions), existing.actions);
     await this.assertRuleValid({ ...dto, actions }, options.requestIp ?? null);
 
     const data: Prisma.AutomationRuleUpdateInput = {
@@ -663,7 +665,9 @@ function assertConditionsValid(conditions: unknown): void {
  *                 rules (http or https, parses, at most 2048 characters), and
  *                 neither the machine itself nor a cloud metadata service
  *                 (`common/net/outbound-url.ts`). The action checks it again
- *                 when it sends, where DNS can be asked too.
+ *                 when it sends, where DNS can be asked too. Nor is it the
+ *                 shortened form a read shows in place of a hidden URL
+ *                 (`isHiddenUrlForm`): that parses, and reaches no receiver.
  *                 `authorizationHeader`, when present, is one line of text:
  *                 Node refuses a header with a control character in it, so
  *                 such a rule could only ever fail.
@@ -679,6 +683,9 @@ function assertActionParamsValid(actions: readonly ActionShape[]): void {
       const target = checkOutboundUrl(params['url']);
       if (!target.ok) {
         throw new BadRequestException(`${label}: ${describeOutboundUrlRefusal(target.refusal)}`);
+      }
+      if (isHiddenUrlForm(params['url'])) {
+        throw new BadRequestException(`${label}: ${HIDDEN_URL_FORM_RULE}`);
       }
       const header = params['authorizationHeader'];
       if (header !== undefined && header !== null && (typeof header !== 'string' || !isHeaderFieldValue(header))) {
@@ -875,7 +882,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // same place in the list and the same type — so it cannot be fanned out onto
 // new actions either: at most one action sits at that place.
 
-/** What a read puts in place of a saved `authorizationHeader`. */
+/**
+ * What a read puts in place of a saved `authorizationHeader` — and in
+ * `urlHidden`, beside a URL the reader may not see whole (`keepHiddenUrls`).
+ */
 export interface SavedHeaderReference {
   readonly stored: true;
   readonly index: number;
@@ -944,25 +954,121 @@ function sameUrl(a: unknown, b: unknown): boolean {
   return typeof a === 'string' && typeof b === 'string' && a.trim() === b.trim();
 }
 
+// ── A hidden URL is kept by reference, never saved as its mask ──────────────
+//
+// A reader who may not edit a `webhook_post` action reads its URL as its origin
+// and "…" (`maskWebhookUrl`). That mask is a valid URL, so a save that sent a
+// read straight back — an editor replaying what a viewer was shown, or a screen
+// loaded before its admin's role gained the rights — stored it in place of the
+// real URL, and every run after that posted to `<origin>/…`.
+//
+// So a read marks a hidden URL with `urlHidden`, the same reference a saved
+// header gets — the action's place in the saved list — and a save reads it the
+// same way:
+//
+//   the reference, unchanged   keep the URL saved on that action; `url` is left
+//                              out, or is exactly what the read showed;
+//   false, null or nothing     the `url` sent is the URL.
+//
+// It keeps a URL only for the action it came from — the same place and the same
+// type — so an editor who removes an action above it cannot hand one action's
+// URL to another, even when both are on one host and their masks are the same.
+// And the mask is refused as a URL whatever arrives with it (`isHiddenUrlForm`).
+
+/** Where a read marks a URL it hid, and where a save finds the URL to keep. */
+const URL_HIDDEN_PARAM = 'urlHidden';
+
+/**
+ * The submitted actions with every hidden-URL reference replaced by the URL it
+ * names, or refused. `saved` is the rule's stored `actions` — `null` on a
+ * create, where there is nothing to keep. Anything that is not a list is handed
+ * on as it is, for `asActionList` to refuse.
+ */
+function keepHiddenUrls(actions: unknown, saved: unknown): unknown {
+  if (!Array.isArray(actions)) return actions;
+  const savedList: readonly unknown[] = Array.isArray(saved) ? saved : [];
+  return actions.map((action: unknown, index) => {
+    if (!isRecord(action) || !isRecord(action['params'])) return action;
+    const params = action['params'];
+    if (!Object.prototype.hasOwnProperty.call(params, URL_HIDDEN_PARAM)) return action;
+    const { [URL_HIDDEN_PARAM]: reference, ...rest } = params;
+    if (reference === false || reference === null || reference === undefined) {
+      return { ...action, params: rest };
+    }
+
+    const label = `Action ${index + 1} (${String(action['type'])})`;
+    if (!isSavedHeaderReference(reference)) {
+      throw new BadRequestException(
+        `${label}: "urlHidden" does not name a saved URL — read the rule again, or send the URL itself without "urlHidden"`,
+      );
+    }
+    if (saved === null) {
+      throw new BadRequestException(
+        `${label}: "urlHidden" keeps the URL saved on a rule, and a new rule has none — enter the URL itself`,
+      );
+    }
+    const source = savedList[reference.index];
+    if (
+      reference.index !== index ||
+      action['type'] !== 'webhook_post' ||
+      !isRecord(source) ||
+      source['type'] !== action['type']
+    ) {
+      throw new BadRequestException(
+        `${label}: the saved URL "urlHidden" refers to belongs to another action — enter the URL again`,
+      );
+    }
+    const sourceParams = isRecord(source['params']) ? source['params'] : {};
+    const savedUrl = sourceParams['url'];
+    if (typeof savedUrl !== 'string' || savedUrl.trim().length === 0) {
+      throw new BadRequestException(
+        `${label}: the saved URL "urlHidden" refers to is no longer on the rule — enter the URL again`,
+      );
+    }
+    const sent = rest['url'];
+    if (sent !== undefined && sent !== null && !(typeof sent === 'string' && showsSavedUrl(sent, savedUrl))) {
+      throw new BadRequestException(
+        `${label}: "url" and "urlHidden" disagree — send a new URL without "urlHidden", or "urlHidden" without a URL`,
+      );
+    }
+    return { ...action, params: { ...rest, url: savedUrl } };
+  });
+}
+
+/** What a read showed of `saved`: its mask, or the URL itself to a reader who may see it. */
+function showsSavedUrl(sent: string, saved: string): boolean {
+  const shown = sent.trim();
+  return shown === maskWebhookUrl(saved) || shown === saved.trim();
+}
+
 /**
  * The stored `actions` as a read may show them: a list or nothing — the editor
  * walks this, and an import can leave any JSON in the column; the executor
  * refuses to run a non-list either way — with every saved header replaced by
  * its reference and, for a reader who may not edit it, every webhook URL by
- * its origin (`RuleReadView`).
+ * its origin (`RuleReadView`) with a reference beside it that a save keeps the
+ * URL by (`keepHiddenUrls`).
  */
 function withSavedHeadersHidden(actions: unknown, view: RuleReadView): readonly AutomationActionDefinition[] {
   if (!Array.isArray(actions)) return [];
   return actions.map((action: unknown, index) => {
     if (!isRecord(action) || !isRecord(action['params'])) return action;
     let params: Record<string, unknown> = action['params'];
+    // Only a read writes `urlHidden`. One in the stored row is what the old
+    // overwrite left beside the mask, and it means nothing: shown to a reader
+    // who may see the URL, it would come back on the next save and be refused.
+    if (Object.prototype.hasOwnProperty.call(params, URL_HIDDEN_PARAM)) {
+      params = { ...params };
+      delete params['urlHidden'];
+    }
     if (Object.prototype.hasOwnProperty.call(params, 'authorizationHeader')) {
       const { authorizationHeader: header, ...rest } = params;
       const reference: SavedHeaderReference = { stored: true, index };
       params = typeof header === 'string' && header.length > 0 ? { ...rest, authorizationHeader: reference } : rest;
     }
     if (!view.webhookUrls && action['type'] === 'webhook_post' && Object.prototype.hasOwnProperty.call(params, 'url')) {
-      params = { ...params, url: maskWebhookUrl(params['url']), urlHidden: true };
+      const reference: SavedHeaderReference = { stored: true, index };
+      params = { ...params, url: maskWebhookUrl(params['url']), [URL_HIDDEN_PARAM]: reference };
     }
     return { ...action, params };
   }) as unknown as readonly AutomationActionDefinition[];
@@ -981,6 +1087,30 @@ export function maskWebhookUrl(value: unknown): string {
     return '…';
   }
 }
+
+/** The path `maskWebhookUrl` writes, as a URL parser reads it back: the ellipsis percent-encoded. */
+const HIDDEN_URL_PATH = '/%E2%80%A6';
+
+/**
+ * Whether a URL is the shortened form a read shows in place of a hidden one —
+ * an origin, "…" and nothing after it — however it is written: with spaces
+ * around it, the ellipsis encoded, the default port spelt out. It parses, so
+ * the outbound check lets it through; saved as an action's URL it reaches no
+ * receiver, and it is where the real URL used to be.
+ */
+export function isHiddenUrlForm(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value.trim());
+    return url.pathname === HIDDEN_URL_PATH && url.search === '' && url.hash === '';
+  } catch {
+    return false;
+  }
+}
+
+/** The refusal of a URL that is the shortened form (`isHiddenUrlForm`). */
+const HIDDEN_URL_FORM_RULE =
+  'the URL is the shortened form the panel shows in place of a hidden one — enter the full URL';
 
 function mapRule(row: AutomationRule, view: RuleReadView): AutomationRuleInterface {
   return {

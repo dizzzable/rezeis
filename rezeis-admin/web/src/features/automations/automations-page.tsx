@@ -90,7 +90,7 @@ import {
 import { RuleCompanionsNotice } from './rule-companions-notice';
 import { RuleHintWarnings } from './rule-hint-warnings';
 import { RuleRunDialog } from './rule-run-dialog';
-import { isUrlHidden, paramsWithHeaderKept, paramsWithoutHeader, savedUrlFor } from './saved-header';
+import { actionsForSave, isUrlHidden, paramsWithHeaderKept, paramsWithoutHeader, savedUrlFor } from './saved-header';
 import { actionResultText, executionLogNote, runHadNoAnswer, runToastText } from './run-result-copy';
 import { ExecutionStatusBadge } from './run-status-badge';
 import { TriggerCatalogHint } from './trigger-catalog-hint';
@@ -1172,6 +1172,9 @@ function RuleEditorBody({
       const payload: UpsertRulePayload = {
         ...draft,
         description: draft.description?.trim() ? draft.description.trim() : undefined,
+        // A hidden URL goes back as its reference alone, never as the mask the
+        // panel showed in its place (`saved-header.ts`).
+        actions: actionsForSave(draft.actions),
       };
       if (!isNew) return { rule: await apiUpdateRule(ruleId, payload), companions: [], seedAtPress };
       // THE DRAFT FIRST, then each companion in order, each with the draft's

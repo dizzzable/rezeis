@@ -21,7 +21,9 @@ export type RealtimeCategory =
   | 'FRAUD'
   | 'NODE'
   | 'REMNAWAVE'
-  | 'SYSTEM';
+  | 'SYSTEM'
+  /** Whatever a rule's `system_event` emits: the rule author's words, never the panel's own alert. */
+  | 'AUTOMATION';
 
 export interface RealtimeEvent {
   type: string;
@@ -47,6 +49,7 @@ export const REALTIME_TOPICS: readonly RealtimeCategory[] = [
   'NODE',
   'REMNAWAVE',
   'SYSTEM',
+  'AUTOMATION',
 ] as const;
 
 /** Application-level close codes emitted by the server before disconnect. */

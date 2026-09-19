@@ -47,6 +47,7 @@ export const REALTIME_TOPICS = [
   'NODE',
   'REMNAWAVE',
   'SYSTEM',
+  'AUTOMATION',
 ] as const satisfies readonly SystemEventCategory[];
 
 export type RealtimeTopic = (typeof REALTIME_TOPICS)[number];
@@ -75,4 +76,7 @@ export const REALTIME_TOPIC_PERMISSION: Readonly<
   NODE: { resource: 'remnawave', action: 'view' },
   REMNAWAVE: { resource: 'remnawave', action: 'view' },
   SYSTEM: { resource: 'dashboard', action: 'view' },
+  // Whatever a rule's `system_event` emits. Those events were filed under
+  // SYSTEM until they got a lane of their own, so they keep SYSTEM's audience.
+  AUTOMATION: { resource: 'dashboard', action: 'view' },
 };

@@ -140,6 +140,24 @@ function actionProblem(t: TFunction, problem: string): string {
   if (problem === 'the URL changed, so the saved "authorizationHeader" was not carried over — enter it again or remove it') {
     return key('headerMoved')
   }
+  if (problem === '"urlHidden" does not name a saved URL — read the rule again, or send the URL itself without "urlHidden"') {
+    return key('urlHiddenNotReference')
+  }
+  if (problem === '"urlHidden" keeps the URL saved on a rule, and a new rule has none — enter the URL itself') {
+    return key('urlHiddenNewRule')
+  }
+  if (problem === 'the saved URL "urlHidden" refers to belongs to another action — enter the URL again') {
+    return key('urlHiddenShifted')
+  }
+  if (problem === 'the saved URL "urlHidden" refers to is no longer on the rule — enter the URL again') {
+    return key('urlHiddenGone')
+  }
+  if (problem === '"url" and "urlHidden" disagree — send a new URL without "urlHidden", or "urlHidden" without a URL') {
+    return key('urlHiddenDisagree')
+  }
+  if (problem === 'the URL is the shortened form the panel shows in place of a hidden one — enter the full URL') {
+    return key('urlIsHiddenForm')
+  }
   if (
     problem ===
     'no event or schedule carries an IP address, so a rule that runs on its own needs the address written into the action'

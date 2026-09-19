@@ -175,7 +175,7 @@ export const en = {
           'This action moved up the list, and a saved header stays with the place it was saved at: replace the header or remove it, or saving is refused.',
       },
       urlHidden:
-        'The path and the query of this URL are hidden: they are shown only to those who may edit the rule and create outgoing webhooks.',
+        'The path and the query of this URL are hidden: they are shown only to those who may edit the rule and create outgoing webhooks. Saving keeps the saved URL unless a new one is entered in full.',
       // Warnings under the hint picker, computed from the data.
       hintOff:
         'The hint "{{title}}" is switched off — the rule will not show it until its Show it switch is on, on the Hints tab.',
@@ -402,7 +402,7 @@ export const en = {
         block_ip: 'block the IP from the trigger data or an explicit one.',
         block_user: 'block the user by the ID carried in the trigger.',
         system_event:
-          'emit your own event back into the bus (type/category/severity). The type is "automation.custom" or starts with "automation.custom." — the panel’s own events cannot be emitted.',
+          'emit your own event back into the bus (type and severity). The type is "automation.custom" or starts with "automation.custom." — the panel’s own events cannot be emitted. Its category is always "Automation", whatever the params say, so it never passes for one of the panel’s own alerts.',
       },
       useCasesTitle: 'Example use-cases',
       useCases: {
@@ -835,6 +835,16 @@ export const en = {
       headerGone: 'the saved Authorization header it refers to is no longer on the rule: enter it again or remove it',
       headerMoved: 'the URL changed, so the saved Authorization header was not carried over: enter it again or remove it',
       headerShifted: 'the saved Authorization header it refers to belongs to another action: enter it again or remove it',
+      urlHiddenNotReference:
+        'it is marked as a hidden URL, but without the reference the panel sends: open the rule again, or enter the URL in full',
+      urlHiddenNewRule: 'a new rule has no saved URL to keep: enter the URL in full',
+      urlHiddenShifted:
+        'the hidden URL it would keep belongs to another action — an action above it was removed, or its type changed: enter the URL again',
+      urlHiddenGone: 'the hidden URL it would keep is no longer on the rule: enter the URL again',
+      urlHiddenDisagree:
+        'a URL was entered while the hidden one was being kept: send the new URL on its own, or keep the hidden one',
+      urlIsHiddenForm:
+        'the URL is the shortened form shown in place of a hidden one, not the address itself: enter the full URL',
       blockAddressNeeded:
         'no event or schedule carries an IP address, so a rule that runs on its own needs the address written into the action',
       addressInvalid: '"address" is not an IP address or a CIDR range',

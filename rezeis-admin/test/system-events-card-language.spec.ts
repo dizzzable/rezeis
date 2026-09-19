@@ -91,6 +91,8 @@ const ALLOWED_LATIN_WORDS: ReadonlySet<string> = new Set([
   'NODE',
   'REMNAWAVE',
   'SYSTEM',
+  // Whatever a rule's `system_event` emits is filed under this one.
+  'AUTOMATION',
 ]);
 
 /** The Latin words a card says in its own voice. */

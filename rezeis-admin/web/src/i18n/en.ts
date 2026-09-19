@@ -1185,6 +1185,7 @@ export const en = {
       NODE: 'Node',
       REMNAWAVE: 'Remnawave',
       SYSTEM: 'System',
+      AUTOMATION: 'Automation',
     },
     events: {
       remnawave_user_expired: 'Profile expired (Remnawave)',

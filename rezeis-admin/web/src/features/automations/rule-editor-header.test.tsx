@@ -291,7 +291,7 @@ describe('a URL the panel shows only in part', () => {
       ...RELAY,
       id: 'rule-hidden',
       name: 'Hidden',
-      actions: [{ type: 'webhook_post', params: { url: 'https://hooks.example.com/…', urlHidden: true } }],
+      actions: [{ type: 'webhook_post', params: { url: 'https://hooks.example.com/…', urlHidden: { stored: true, index: 0 } } }],
     }
     usePermissionStore.setState({
       loaded: true,

@@ -23,7 +23,12 @@ import {
  */
 
 const HOOK_URL = 'https://hooks.example.com/services/T0/B0/PATH-SECRET?token=QUERY-SECRET';
-const MASKED = { url: 'https://hooks.example.com/…', urlHidden: true };
+/**
+ * The webhook action at `index`, as a reader who may not see its URL reads it:
+ * the origin, and a reference to the saved action a save keeps the URL of
+ * (`automation-hidden-webhook-url.http.spec.ts`).
+ */
+const masked = (index: number) => ({ url: 'https://hooks.example.com/…', urlHidden: { stored: true, index } });
 
 let harness: AutomationHarness;
 
@@ -84,8 +89,8 @@ describe('who reads a webhook URL whole', () => {
     const rule = seed();
     for (const adminId of ['viewer', 'editor-without-webhooks', 'webhooks-without-edit']) {
       const view = await seen(adminId, rule.id);
-      assert.deepStrictEqual(view.list, MASKED, adminId);
-      assert.deepStrictEqual(view.one, MASKED, adminId);
+      assert.deepStrictEqual(view.list, masked(1), adminId);
+      assert.deepStrictEqual(view.one, masked(1), adminId);
       assert.ok(!view.raw.includes('PATH-SECRET') && !view.raw.includes('QUERY-SECRET'), `${adminId} read the secret`);
     }
   });
@@ -96,12 +101,12 @@ describe('who reads a webhook URL whole', () => {
       ruleBody({ actions: [{ type: 'webhook_post', params: { url: HOOK_URL } }] }),
     );
     assert.equal(created.status, 201, JSON.stringify(created.body));
-    assert.deepStrictEqual(created.body.actions[0].params, MASKED);
+    assert.deepStrictEqual(created.body.actions[0].params, masked(0));
 
     const rule = seed();
     const off = await harness.as('editor-without-webhooks').patch(`/rules/${rule.id}/toggle`, { isEnabled: false });
     assert.equal(off.status, 200, JSON.stringify(off.body));
-    assert.deepStrictEqual(off.body.actions[1].params, MASKED);
+    assert.deepStrictEqual(off.body.actions[1].params, masked(1));
 
     const on = await harness.as('editor').patch(`/rules/${rule.id}/toggle`, { isEnabled: true });
     assert.equal(on.status, 200, JSON.stringify(on.body));
@@ -113,7 +118,7 @@ describe('who reads a webhook URL whole', () => {
     const view = await seen('viewer', rule.id);
     assert.deepStrictEqual((await harness.as('viewer').get(`/rules/${rule.id}`)).body.actions[0].params, {
       url: '…',
-      urlHidden: true,
+      urlHidden: { stored: true, index: 0 },
     });
     assert.ok(!view.raw.includes('PATH-SECRET'));
   });
