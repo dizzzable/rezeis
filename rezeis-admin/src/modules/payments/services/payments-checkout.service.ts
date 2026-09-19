@@ -38,6 +38,7 @@ import { normalizePaymentProviderError } from '../utils/payment-provider-error.u
 import {
   autopayNotAvailable,
   PROVIDER_SUBSCRIPTION_GATEWAY_TYPES,
+  readProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { ProviderSubscriptionService } from './provider-subscription.service';
@@ -156,10 +157,6 @@ export class PaymentsCheckoutService {
     if (providerSubscription && !isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings))) {
       throw autopayNotAvailable('NOT_APPROVED');
     }
-    if (providerSubscription && input.purchaseType === PurchaseType.RENEW) {
-      await this.providerSubscriptionService.assertNoLiveSubscriptionFor(input.subscriptionId ?? null);
-    }
-
     const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft(
       {
         userId,
@@ -178,6 +175,16 @@ export class PaymentsCheckoutService {
     });
     if (transaction === null) {
       throw new NotFoundException('Payment transaction not found');
+    }
+    // Checked against the subscription the draft resolved, not the request's
+    // `subscriptionId`: a renewal that leaves it out renews the customer's
+    // latest subscription, and a second live provider subscription on it would
+    // charge twice a period. Before the stored link is handed back, too: a
+    // link made earlier can still be confirmed.
+    if (providerSubscription) {
+      await this.providerSubscriptionService.assertNoLiveSubscriptionFor(
+        readProviderSubscriptionTerms(transaction.planSnapshot)?.subscriptionId ?? null,
+      );
     }
 
     const existingCheckoutUrl = readCheckoutUrl(transaction);

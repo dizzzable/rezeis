@@ -156,6 +156,52 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.providerCreateCalls, 0)
   })
 
+  it('guards the subscription a renewal resolved, not the request field: no second provider subscription', async () => {
+    // The review's case: a RENEW with no `subscriptionId` renews the customer's
+    // latest subscription, which the draft resolves; the guard used to see null.
+    const checked: Array<string | null> = []
+    const { service, state } = createService({
+      gatewayType: PaymentGatewayType.PLATEGA,
+      gatewayCurrency: Currency.RUB,
+      gatewaySettings: { merchantId: 'merchant-1', secret: 'secret-1', savePaymentMethod: true },
+      purchaseType: PurchaseType.RENEW,
+      transactionPlanSnapshot: {
+        providerSubscription: {
+          unit: 'month',
+          count: 1,
+          amount: 299,
+          durationDays: 30,
+          planId: 'plan-1',
+          subscriptionId: 'sub-latest',
+        },
+      },
+      providerSubscriptionService: {
+        recordCheckout: async () => undefined,
+        assertNoLiveSubscriptionFor: async (id: string | null) => {
+          checked.push(id)
+          if (id === 'sub-latest') {
+            throw new BadRequestException({ code: 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', reason: 'ALREADY_ACTIVE' })
+          }
+        },
+      },
+    })
+
+    await assert.rejects(
+      service.checkout({
+        userId: 'user-1',
+        purchaseType: PurchaseType.RENEW,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.PLATEGA,
+        channel: PurchaseChannel.WEB,
+        savePaymentMethodConsent: true,
+      }),
+      BadRequestException,
+    )
+    assert.deepEqual(checked, ['sub-latest'])
+    assert.equal(state.providerCreateCalls, 0)
+  })
+
   it('completes a zero-total checkout without calling the payment provider', async () => {
     const { service, state } = createService({ amount: '0' })
 
@@ -676,6 +722,8 @@ describe('PaymentsCheckoutService', () => {
 
 function createService(input: {
   enqueueError?: Error
+  /** ProviderSubscriptionService stand-in; the default records nothing and refuses nothing. */
+  readonly providerSubscriptionService?: Record<string, unknown>
   readonly gatewayType?: PaymentGatewayType
   readonly gatewayCurrency?: Currency
   readonly gatewaySettings?: Record<string, unknown>
@@ -906,7 +954,11 @@ function createService(input: {
         runPostFulfillmentHooksBestEffort: async (transaction: { id: string }) => {
           state.postFulfillmentHookCalls.push(transaction.id)
         },
-      } as never, { recordCheckout: async () => undefined } as never,
+      } as never,
+      (input.providerSubscriptionService ?? {
+        recordCheckout: async () => undefined,
+        assertNoLiveSubscriptionFor: async () => undefined,
+      }) as never,
     ),
     state,
   }
