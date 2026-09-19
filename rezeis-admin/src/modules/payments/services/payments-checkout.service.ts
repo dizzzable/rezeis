@@ -156,6 +156,9 @@ export class PaymentsCheckoutService {
     if (providerSubscription && !isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings))) {
       throw autopayNotAvailable('NOT_APPROVED');
     }
+    if (providerSubscription && input.purchaseType === PurchaseType.RENEW) {
+      await this.providerSubscriptionService.assertNoLiveSubscriptionFor(input.subscriptionId ?? null);
+    }
 
     const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft(
       {

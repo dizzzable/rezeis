@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS "provider_subscriptions" (
     "plan_id" TEXT NOT NULL,
     "duration_days" INTEGER NOT NULL,
     "amount" DECIMAL(20,8) NOT NULL,
+    "list_amount" DECIMAL(20,8),
     "currency" "Currency" NOT NULL,
     "interval_unit" TEXT NOT NULL,
     "interval_count" INTEGER NOT NULL,

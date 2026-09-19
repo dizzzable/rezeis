@@ -30,6 +30,7 @@ import {
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import {
+  autopayNotAvailable,
   PROVIDER_SUBSCRIPTION_CONSENT_VERSION,
   ProviderSubscriptionTerms,
   readProviderSubscriptionTerms,
@@ -281,6 +282,22 @@ export class ProviderSubscriptionService {
     }));
   }
 
+  /**
+   * Refuses a second live provider subscription for one VPN subscription: both
+   * would charge every period for the same access. A failed one (PAST_DUE) does
+   * not block signing up again.
+   */
+  public async assertNoLiveSubscriptionFor(subscriptionId: string | null): Promise<void> {
+    if (subscriptionId === null) return;
+    const live = await this.prismaService.providerSubscription.findFirst({
+      where: { subscriptionId, status: ProviderSubscriptionStatus.ACTIVE },
+      select: { id: true },
+    });
+    if (live !== null) {
+      throw autopayNotAvailable('ALREADY_ACTIVE');
+    }
+  }
+
   /** «Отключить автосписание» in the cabinet. */
   public async cancelForCustomer(userId: string, id: string): Promise<void> {
     const row = await this.prismaService.providerSubscription.findFirst({ where: { id, userId } });
@@ -453,11 +470,66 @@ export class ProviderSubscriptionService {
     });
   }
 
+  /**
+   * Live subscriptions per gateway, and how many of them still pay a list
+   * price the operator has changed since: a price change applies to new
+   * sign-ups only, and this is where the operator sees who kept the old one.
+   */
+  public async summary(): Promise<readonly ProviderSubscriptionSummaryInterface[]> {
+    const rows = await this.prismaService.providerSubscription.findMany({
+      where: { status: { in: [...LIVE_STATUSES] } },
+      select: {
+        gatewayType: true,
+        status: true,
+        planId: true,
+        durationDays: true,
+        currency: true,
+        listAmount: true,
+      },
+    });
+    const listPrices = await this.currentListPrices(rows);
+    const byGateway = new Map<PaymentGatewayType, { active: number; pastDue: number; onOldPrice: number }>();
+    for (const row of rows) {
+      const counts = byGateway.get(row.gatewayType) ?? { active: 0, pastDue: 0, onOldPrice: 0 };
+      if (row.status === ProviderSubscriptionStatus.PAST_DUE) counts.pastDue += 1;
+      else counts.active += 1;
+      if (row.listAmount !== null) {
+        const current = listPrices.get(listPriceKey(row.planId, row.durationDays, row.currency));
+        // A term no longer sold counts too: nobody can sign up at that price now.
+        if (current === undefined || !current.equals(row.listAmount)) counts.onOldPrice += 1;
+      }
+      byGateway.set(row.gatewayType, counts);
+    }
+    return [...byGateway.entries()].map(([gatewayType, counts]) => ({ gatewayType, ...counts }));
+  }
+
+  private async currentListPrices(
+    rows: readonly { readonly planId: string; readonly durationDays: number; readonly currency: string }[],
+  ): Promise<Map<string, Prisma.Decimal>> {
+    const planIds = [...new Set(rows.map((row) => row.planId))];
+    const prices = new Map<string, Prisma.Decimal>();
+    if (planIds.length === 0) return prices;
+    const durations = await this.prismaService.planDuration.findMany({
+      where: { planId: { in: planIds }, isActive: true },
+      select: { planId: true, days: true, prices: { select: { currency: true, price: true } } },
+    });
+    for (const duration of durations) {
+      for (const price of duration.prices) {
+        prices.set(listPriceKey(duration.planId, duration.days, price.currency), price.price);
+      }
+    }
+    return prices;
+  }
+
   private async createRow(
     transaction: Transaction,
     providerSubscriptionId: string,
     terms: ProviderSubscriptionTerms,
   ): Promise<ProviderSubscription> {
+    const listAmount =
+      (await this.currentListPrices([
+        { planId: terms.planId, durationDays: terms.durationDays, currency: transaction.currency },
+      ])).get(listPriceKey(terms.planId, terms.durationDays, transaction.currency)) ?? null;
     return this.prismaService.providerSubscription.create({
       data: {
         userId: transaction.userId,
@@ -468,6 +540,7 @@ export class ProviderSubscriptionService {
         planId: terms.planId,
         durationDays: terms.durationDays,
         amount: new Prisma.Decimal(terms.amount),
+        listAmount,
         currency: transaction.currency,
         intervalUnit: terms.unit,
         intervalCount: terms.count,
@@ -719,6 +792,18 @@ function readSnapshotPlanId(snapshot: Prisma.JsonValue): string | null {
       ? (snapshot as Record<string, unknown>)['id']
       : null;
   return typeof id === 'string' && id.length > 0 ? id : null;
+}
+
+export interface ProviderSubscriptionSummaryInterface {
+  readonly gatewayType: PaymentGatewayType;
+  readonly active: number;
+  readonly pastDue: number;
+  /** Live subscriptions whose list price at sign-up is not today's. */
+  readonly onOldPrice: number;
+}
+
+function listPriceKey(planId: string, days: number, currency: string): string {
+  return `${planId}|${days}|${currency}`;
 }
 
 function plategaHeaders(settings: Record<string, unknown>): Record<string, string> {

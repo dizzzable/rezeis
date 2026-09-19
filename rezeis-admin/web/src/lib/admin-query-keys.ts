@@ -47,6 +47,7 @@ export const adminQueryKeys = {
     gateways: {
       all: ['admin', 'payments', 'gateways'] as const,
       supportedCurrencies: ['admin', 'payments', 'gateways', 'supported-currencies'] as const,
+      providerSubscriptionSummary: ['admin', 'payments', 'gateways', 'provider-subscriptions-summary'] as const,
     },
     analytics: {
       all: ['admin', 'payments', 'analytics'] as const,

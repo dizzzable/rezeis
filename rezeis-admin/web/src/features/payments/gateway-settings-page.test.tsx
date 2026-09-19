@@ -410,6 +410,8 @@ describe('GatewaySettingsPage Platega payment method', () => {
       merchantId: 'merchant-1',
       secret: 'secret-1',
       paymentMethod: 'PROVIDER_CHOICE',
+      // «Автоплатежи одобрены провайдером», never touched: saved as the OFF it shows.
+      savePaymentMethod: 'false',
     })
   })
 
@@ -451,6 +453,7 @@ describe('GatewaySettingsPage Platega payment method', () => {
       // `'11'` is a member of the backend's accepted enum and normalizes to
       // the number 11 on storage; the label the operator read is not sent.
       paymentMethod: '11',
+      savePaymentMethod: 'false',
     })
   })
 

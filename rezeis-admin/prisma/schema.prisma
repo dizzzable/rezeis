@@ -2658,6 +2658,10 @@ model ProviderSubscription {
   planId                 String                     @map("plan_id")
   durationDays           Int                        @map("duration_days")
   amount                 Decimal                    @map("amount") @db.Decimal(20, 8)
+  /// The plan's list price for this term when the payer signed up, before any
+  /// personal discount. Compared with today's to count who still pays an old
+  /// price; null when the term had no price in this currency.
+  listAmount             Decimal?                   @map("list_amount") @db.Decimal(20, 8)
   currency               Currency                   @map("currency")
   /// The provider's period: `intervalCount` × `intervalUnit` (day, week, month, year).
   intervalUnit           String                     @map("interval_unit")

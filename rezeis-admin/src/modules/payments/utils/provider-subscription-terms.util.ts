@@ -48,7 +48,9 @@ export type ProviderSubscriptionRefusal =
   | 'DURATION'
   | 'AMOUNT'
   | 'ITEMS'
-  | 'ADD_ONS';
+  | 'ADD_ONS'
+  /** This VPN subscription already renews itself: a second one would charge twice a period. */
+  | 'ALREADY_ACTIVE';
 
 export type ProviderSubscriptionTermsResult =
   | { readonly terms: ProviderSubscriptionTerms }

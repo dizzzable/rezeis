@@ -192,6 +192,11 @@ export class PaymentsRenewalCheckoutService {
       addOns: input.addOns,
     });
     const providerSubscriptionTerms = resolveRenewalProviderSubscription(input, gateway, priced);
+    if (providerSubscriptionTerms !== null) {
+      await this.providerSubscriptionService.assertNoLiveSubscriptionFor(
+        providerSubscriptionTerms.subscriptionId,
+      );
+    }
 
     // ── Request-level idempotency (T-007) ─────────────────────────────────
     // The canonical fingerprint covers the full renewal composition (each

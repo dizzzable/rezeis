@@ -59,6 +59,7 @@ import {
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { expectArray } from '@/lib/api-utils'
 import { adminQueryKeys } from '@/lib/admin-query-keys'
 import {
   Card,
@@ -1139,6 +1140,37 @@ interface GatewaySettingsFormProps {
   readonly onClose: () => void
 }
 
+/**
+ * Automatic charging the provider runs on this gateway: how many subscriptions
+ * are live, whose last charge failed, and how many still pay a list price
+ * changed since they signed up (a price change applies to new sign-ups only).
+ * Says nothing while there is nothing to count.
+ */
+function ProviderAutopaySummary({ gatewayType }: { readonly gatewayType: string }) {
+  const { t } = useTranslation()
+  const { data } = useQuery({
+    queryKey: adminQueryKeys.payments.gateways.providerSubscriptionSummary,
+    queryFn: async (): Promise<
+      ReadonlyArray<{ gatewayType: string; active: number; pastDue: number; onOldPrice: number }>
+    > => {
+      const res = await api.get('/admin/payments/gateways/provider-subscriptions/summary')
+      return expectArray<{ gatewayType: string; active: number; pastDue: number; onOldPrice: number }>(res.data)
+    },
+    staleTime: 60_000,
+  })
+  const counts = data?.find((entry) => entry.gatewayType === gatewayType)
+  if (counts === undefined || counts.active + counts.pastDue === 0) return null
+  return (
+    <p className="pt-1 text-xs text-muted-foreground">
+      {t('paymentGateways.autopaySummary', {
+        active: counts.active,
+        pastDue: counts.pastDue,
+        onOldPrice: counts.onOldPrice,
+      })}
+    </p>
+  )
+}
+
 function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -1346,6 +1378,9 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                   <Label>{t(field.labelKey)}</Label>
                   {field.hintKey && (
                     <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
+                  )}
+                  {field.key === 'savePaymentMethod' && gateway.type === 'PLATEGA' && (
+                    <ProviderAutopaySummary gatewayType={gateway.type} />
                   )}
                 </div>
                 <Switch

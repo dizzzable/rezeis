@@ -8,6 +8,8 @@
 
 export const en = {
   paymentGateways: {
+    autopaySummary:
+      'Subscriptions with automatic charging: {{active}}, of them on an earlier plan price: {{onOldPrice}}. Last charge failed: {{pastDue}}.',
     title: 'Payment gateways',
     subtitle:
       'Credentials and display order of gateways shown to users. The first row is offered by default.',

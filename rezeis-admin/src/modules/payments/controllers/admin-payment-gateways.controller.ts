@@ -11,6 +11,10 @@ import { MovePaymentGatewayDto } from '../dto/move-payment-gateway.dto';
 import { UpdatePaymentGatewayDto } from '../dto/update-payment-gateway.dto';
 import { AdminPaymentGatewayInterface } from '../interfaces/admin-payment-gateway.interface';
 import { PaymentGatewayRegistryService } from '../services/payment-gateway-registry.service';
+import {
+  ProviderSubscriptionService,
+  ProviderSubscriptionSummaryInterface,
+} from '../services/provider-subscription.service';
 import { GATEWAY_SUPPORTED_CURRENCIES } from '../utils/gateway-supported-currencies.util';
 
 @Controller('admin/payments/gateways')
@@ -19,6 +23,7 @@ export class AdminPaymentGatewaysController {
   public constructor(
     private readonly paymentGatewayRegistryService: PaymentGatewayRegistryService,
     private readonly rbacService: RbacService,
+    private readonly providerSubscriptionService: ProviderSubscriptionService,
   ) {}
 
   /**
@@ -52,6 +57,17 @@ export class AdminPaymentGatewaysController {
    * keeps the frontend list of supported currencies in sync with the
    * backend's validator without duplicating the table.
    */
+  /**
+   * Automatic charging the provider runs (Platega), per gateway: live, whose
+   * last charge failed, and how many still pay a list price the operator has
+   * changed since. A price change applies to new sign-ups only.
+   */
+  @Get('provider-subscriptions/summary')
+  @RequirePermission('payment_gateways', 'view')
+  public providerSubscriptionSummary(): Promise<readonly ProviderSubscriptionSummaryInterface[]> {
+    return this.providerSubscriptionService.summary();
+  }
+
   @Get('supported-currencies')
   @RequirePermission('payment_gateways', 'view')
   public getSupportedCurrencies(): Record<PaymentGatewayType, readonly Currency[]> {

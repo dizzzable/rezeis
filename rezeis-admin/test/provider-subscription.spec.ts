@@ -278,6 +278,7 @@ function harness(initial: Partial<ProviderSubscription> = {}): Harness {
     planId: 'plan-1',
     durationDays: 30,
     amount: new Prisma.Decimal('299'),
+    listAmount: new Prisma.Decimal('299'),
     currency: Currency.RUB,
     intervalUnit: 'month',
     intervalCount: 1,
@@ -489,6 +490,48 @@ describe('ProviderSubscriptionService.syncRow', () => {
       reason({ subscription: { status: SubscriptionStatus.ACTIVE, planId: 'plan-2' } }),
       'subscription moved to another plan',
     );
+  });
+
+  it('counts who still pays a list price the operator has changed, not a personal discount', async () => {
+    const live = (planId: string, amount: string, listAmount: string | null, status: ProviderSubscriptionStatus = ProviderSubscriptionStatus.ACTIVE) => ({
+      gatewayType: PaymentGatewayType.PLATEGA,
+      status,
+      planId,
+      durationDays: 30,
+      currency: Currency.RUB,
+      amount: new Prisma.Decimal(amount),
+      listAmount: listAmount === null ? null : new Prisma.Decimal(listAmount),
+    });
+    const service = new ProviderSubscriptionService(
+      {
+        providerSubscription: {
+          findMany: async () => [
+            live('plan-1', '299', '299'),
+            // A personal discount lowers the charge, not the list price: current.
+            live('plan-1', '249', '299'),
+            // Signed up at 249 before the price went to 299.
+            live('plan-1', '249', '249'),
+            live('plan-1', '249', '249', ProviderSubscriptionStatus.PAST_DUE),
+            // The term is no longer sold at all.
+            live('plan-gone', '99', '99'),
+            // Unknown at sign-up: not counted either way.
+            live('plan-1', '199', null),
+          ],
+        },
+        planDuration: {
+          findMany: async () => [
+            { planId: 'plan-1', days: 30, prices: [{ currency: Currency.RUB, price: new Prisma.Decimal('299.00000000') }] },
+          ],
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    assert.deepEqual(await service.summary(), [
+      { gatewayType: PaymentGatewayType.PLATEGA, active: 5, pastDue: 1, onOldPrice: 3 },
+    ]);
   });
 
   it('records a cancellation the payer made from the provider email', async () => {

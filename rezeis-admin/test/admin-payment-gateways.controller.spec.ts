@@ -46,11 +46,25 @@ describe('AdminPaymentGatewaysController', () => {
     assertRouteHandlers(AdminPaymentGatewaysController, [
       'listGateways',
       'getSupportedCurrencies',
+      'providerSubscriptionSummary',
       'getGateway',
       'updateGateway',
       'moveGateway',
       'createDefaults',
     ]);
+
+    // Counts only, no credentials: the same view permission as the list.
+    const summaryRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, 'provider-subscriptions/summary')} (autopay counts)`;
+    assertRoute(
+      AdminPaymentGatewaysController.prototype.providerSubscriptionSummary,
+      { method: RequestMethod.GET, path: 'provider-subscriptions/summary' },
+      summaryRoute,
+    );
+    assertRoutePermission(
+      AdminPaymentGatewaysController.prototype.providerSubscriptionSummary,
+      { resource: 'payment_gateways', action: 'view' },
+      summaryRoute,
+    );
 
     const listRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, '/')} (list gateways)`;
     assertRoute(
@@ -417,6 +431,7 @@ function createController(canRevealSecrets: boolean): {
     // The assertion is checked in one direction — `RbacService` is assignable
     // to the `Pick`, so a renamed or re-signatured `hasPermission` stops it.
     rbacService as RbacService,
+    { summary: async () => [] } as never,
   );
   return { controller, calls, permissionChecks };
 }
