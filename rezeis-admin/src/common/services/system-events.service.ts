@@ -3392,6 +3392,15 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
         title: 'Перенесённый платёж оплачен, выдачи не было',
         when: (metadata) => isPresent(metadata['importedFrom']),
       },
+      {
+        // `PaymentReconciliationService.reconcileWebhookEvent`: the provider
+        // reports a payment we refunded in full as paid, after the refund. The
+        // payment stays refunded; an operator decides. Only that producer sets
+        // `paidAfterRefund`.
+        emoji: '↩️',
+        title: 'Провайдер сообщает об оплате возвращённого платежа',
+        when: (metadata) => metadata['paidAfterRefund'] === true,
+      },
     ],
   },
   // Reads as a note, not as a task: ℹ️ against the ⚠️ above, and the outcome

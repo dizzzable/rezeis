@@ -10,6 +10,7 @@ import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-ad
 import { RequestMetadataInterface } from '../src/modules/auth/interfaces/request-metadata.interface';
 import { PaymentRefundService } from '../src/modules/payments/services/payment-refund.service';
 import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * Operator-issued refunds — the one surface in the panel that moves real money
@@ -105,6 +106,13 @@ function createService(input: {
       },
     },
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(transactionClient, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => state.refreshedGatewayData ?? transaction?.gatewayData,
+      update: (args) => transactionClient.transaction.update(args),
+    }),
+  });
   const prisma = {
     ...transactionClient,
     $transaction: async <T>(callback: (tx: typeof transactionClient) => Promise<T>): Promise<T> =>
@@ -237,6 +245,13 @@ function createRefundRace(input: {
       },
     },
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(transactionClient, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => row.gatewayData,
+      update: (args) => transactionClient.transaction.update(args),
+    }),
+  });
   const prisma = {
     ...transactionClient,
     $transaction: async <T>(callback: (tx: typeof transactionClient) => Promise<T>): Promise<T> =>

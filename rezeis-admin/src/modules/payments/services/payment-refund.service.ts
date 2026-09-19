@@ -21,6 +21,7 @@ import {
   readRefundLedger,
   readRefundedTotal,
 } from '../utils/payment-refund-ledger.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import {
   readOptionalString,
   readRecord,
@@ -219,18 +220,18 @@ export class PaymentRefundService {
         previousTotal + (isNewRefund ? requestedAmount : 0),
         ledger.reduce((sum, entry) => sum + Number(entry.amount), 0),
       );
-      await tx.transaction.update({
-        where: { id: transaction.id },
-        data: {
-          gatewayData: mergeRefundAudit(liveGatewayData, {
-            refundRequestedAt: new Date().toISOString(),
-            refundRequestedBy: input.currentAdmin.id,
-            refundId,
-            refundProviderStatus: providerStatus,
-            refunds: ledger,
-            refundedAmountTotal: refundedTotal.toFixed(2),
-            refundProviderResponse: this.redactionService.redact(data) as Prisma.JsonValue,
-          }) as Prisma.InputJsonValue,
+      // The ledger and the total are computed from the read above, under the
+      // row lock; the write goes through the one writer anyway, so no path
+      // writes `gatewayData` any other way (`writeTransactionGatewayData`).
+      await writeTransactionGatewayData(tx, transaction.id, {
+        merge: {
+          refundRequestedAt: new Date().toISOString(),
+          refundRequestedBy: input.currentAdmin.id,
+          refundId,
+          refundProviderStatus: providerStatus,
+          refunds: ledger,
+          refundedAmountTotal: refundedTotal.toFixed(2),
+          refundProviderResponse: this.redactionService.redact(data) as Prisma.JsonValue,
         },
       });
       return { refundedTotal };
@@ -352,16 +353,4 @@ export class PaymentRefundService {
     }
     return { ...base, refundable: true, reason: null };
   }
-}
-
-/** Shallow-merges refund audit keys into `gatewayData` without dropping siblings. */
-function mergeRefundAudit(
-  current: Prisma.JsonValue | null,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  const base =
-    typeof current === 'object' && current !== null && !Array.isArray(current)
-      ? (current as Record<string, unknown>)
-      : {};
-  return { ...base, ...patch };
 }

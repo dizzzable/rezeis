@@ -20,6 +20,7 @@ import { StealthnetImporterService } from '../src/modules/imports/services/steal
 import type { StealthnetPayment } from '../src/modules/imports/utils/stealthnet-backup-parser';
 import { AddOnFulfillmentRecoveryService } from '../src/modules/payments/services/add-on-fulfillment-recovery.service';
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * An imported payment that turns out to be paid is handed to a person.
@@ -234,6 +235,12 @@ function sweepOver(
         where.id === 'user-1' ? { telegramId: 700100200n } : { telegramId: 700100201n },
     },
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({ transaction, trialClaim }),
+    // The sweep's `gatewayData` writes are one statement each (`writeTransactionGatewayData`).
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: (id) => byId.get(id)?.gatewayData,
+      update: (args) => transaction.updateMany(args),
+      updateMany: (args) => transaction.updateMany(args),
+    }),
   };
   const record =
     (severity: string) =>

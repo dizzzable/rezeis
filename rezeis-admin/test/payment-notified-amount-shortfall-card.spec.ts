@@ -14,6 +14,7 @@ import { EVENT_TYPES, SystemEventsService } from '../src/common/services/system-
 import { BotNotifierClient } from '../src/modules/notifications/services/bot-notifier.client';
 import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * The shortfall NOTE, told apart from the shortfall HOLD
@@ -352,6 +353,13 @@ function createReconciliation(input: {
     trialClaim: { updateMany: async () => ({ count: 0 }) },
     $queryRaw: async () => [{ id: 'tx-1' }],
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(client, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => transaction.gatewayData,
+      update: (args) => client.transaction.update(args),
+    }),
+  });
 
   const service = new PaymentReconciliationService(
     { ...client, $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(client) } as never,

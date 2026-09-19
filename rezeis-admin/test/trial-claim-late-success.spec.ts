@@ -18,6 +18,7 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * End-to-end trial-quota state machine across the provider lifecycle:
@@ -342,6 +343,13 @@ function createLedgerWorld(input: { readonly maxClaims: number }) {
     },
     paymentGateway: { findUnique: async () => null },
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(prisma, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => transaction.gatewayData,
+      update: (args) => prisma.transaction.update(args),
+    }),
+  });
   const prismaDouble = {
     ...prisma,
     $transaction: async <T>(callback: (client: unknown) => Promise<T>): Promise<T> =>

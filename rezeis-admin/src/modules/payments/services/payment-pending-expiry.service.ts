@@ -9,6 +9,7 @@ import { EVENT_TYPES, SystemEventsService } from '../../../common/services/syste
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import {
   claimForImmediateFulfillment,
   enqueueSyncJobsDeferringFailure,
@@ -214,14 +215,12 @@ export class PaymentPendingExpiryService {
       // Still open at the provider — leave local PENDING for webhook/3DS, but
       // stamp the poll so ops can see we re-checked.
       if (providerStatus === 'pending' || providerStatus === 'waiting_for_capture') {
-        await this.prismaService.transaction.updateMany({
-          where: { id: tx.id, status: TransactionStatus.PENDING },
-          data: {
-            gatewayData: mergeGatewayData(tx.gatewayData, {
-              providerStatus,
-              polledAt: new Date().toISOString(),
-            }) as Prisma.InputJsonValue,
-          },
+        // Merged in the statement: this row was read before the YooKassa call,
+        // and whatever a notification wrote meanwhile — a manual-review hold
+        // among it — was overwritten by that old copy.
+        await writeTransactionGatewayData(this.prismaService, tx.id, {
+          onlyIfStatus: TransactionStatus.PENDING,
+          merge: { providerStatus, polledAt: new Date().toISOString() },
         });
         this.logger.warn(
           `Keeping YooKassa payment ${tx.paymentId} pending after provider status ${providerStatus}`,
@@ -236,14 +235,12 @@ export class PaymentPendingExpiryService {
           await this.handImportedPaymentToOperator(tx, importedFrom);
           return 'keep';
         }
-        await this.prismaService.transaction.updateMany({
-          where: { id: tx.id, status: TransactionStatus.PENDING },
-          data: {
-            gatewayData: mergeGatewayData(tx.gatewayData, {
-              providerStatus,
-              polledAt: new Date().toISOString(),
-              polledSucceededWithoutWebhook: true,
-            }) as Prisma.InputJsonValue,
+        await writeTransactionGatewayData(this.prismaService, tx.id, {
+          onlyIfStatus: TransactionStatus.PENDING,
+          merge: {
+            providerStatus,
+            polledAt: new Date().toISOString(),
+            polledSucceededWithoutWebhook: true,
           },
         });
         const claimedAt = await claimForImmediateFulfillment(this.prismaService, tx.id);
@@ -330,19 +327,19 @@ export class PaymentPendingExpiryService {
    */
   private async handImportedPaymentToOperator(tx: StalePendingRow, importedFrom: string): Promise<void> {
     const at = new Date().toISOString();
-    const moved = await this.prismaService.transaction.updateMany({
-      where: { id: tx.id, status: TransactionStatus.PENDING },
-      data: {
-        status: TransactionStatus.COMPLETED,
-        gatewayData: mergeGatewayData(tx.gatewayData, {
-          providerStatus: 'succeeded',
-          polledAt: at,
-          polledSucceededWithoutWebhook: true,
-          paidAfterImportAt: at,
-        }) as Prisma.InputJsonValue,
+    // The claim and the merge are one statement: the row moves only while it is
+    // still PENDING, and onto what it holds at that moment.
+    const moved = await writeTransactionGatewayData(this.prismaService, tx.id, {
+      status: TransactionStatus.COMPLETED,
+      onlyIfStatus: TransactionStatus.PENDING,
+      merge: {
+        providerStatus: 'succeeded',
+        polledAt: at,
+        polledSucceededWithoutWebhook: true,
+        paidAfterImportAt: at,
       },
     });
-    if (moved.count !== 1) return;
+    if (moved !== 1) return;
 
     // Naming the customer is worth one read; the notice is not worth losing
     // to it, so a failed read only drops the Telegram id from the card.
@@ -405,8 +402,4 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  */
 function needsManualReview(gatewayData: Prisma.JsonValue | null): boolean {
   return asRecord(gatewayData)?.['paymentNeedsManualReview'] === true;
-}
-
-function mergeGatewayData(currentValue: Prisma.JsonValue | null, nextValue: Record<string, unknown>): Record<string, unknown> {
-  return { ...(asRecord(currentValue) ?? {}), ...nextValue };
 }

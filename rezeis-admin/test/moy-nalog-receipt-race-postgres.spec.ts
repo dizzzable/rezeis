@@ -85,8 +85,18 @@ class TaxService {
   }
 }
 
-function processorFor(tax: TaxService): MoyNalogProcessor {
-  const processor = new MoyNalogProcessor(prisma, tax as never);
+/**
+ * The processor, whose queue runs a cancellation it hands over at once — as a
+ * worker would take it — unless the case asks for the hand-off to be recorded
+ * and nothing more.
+ */
+function processorFor(tax: TaxService, handedOver: string[] = []): MoyNalogProcessor {
+  const processor: MoyNalogProcessor = new MoyNalogProcessor(prisma, tax as never, {
+    enqueueCancelIncomeAfterRegistration: async (transactionId: string) => {
+      handedOver.push(transactionId);
+      await processor.process(job(MOY_NALOG_JOBS.CANCEL_INCOME, transactionId));
+    },
+  } as never);
   (processor as unknown as { logger: unknown }).logger = silent;
   return processor;
 }

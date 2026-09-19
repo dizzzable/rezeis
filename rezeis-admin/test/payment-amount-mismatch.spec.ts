@@ -9,6 +9,7 @@ import { BotNotifierClient } from '../src/modules/notifications/services/bot-not
 import { ReiwaRelayQueueService } from '../src/modules/notifications/services/reiwa-relay-queue.service';
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * Underpaid invoices
@@ -334,6 +335,13 @@ function createReconciliation(input: {
       },
     },
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(client, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => transaction.gatewayData,
+      update: (args) => client.transaction.update(args),
+    }),
+  });
 
   const service = new PaymentReconciliationService(
     { ...client, $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(client) } as never,

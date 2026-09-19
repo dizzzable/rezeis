@@ -60,4 +60,27 @@ export class MoyNalogQueueService {
     );
     this.logger.debug(`Enqueued МойНалог income cancellation for transaction ${transactionId}`);
   }
+
+  /**
+   * The cancellation of a receipt the registration job recorded AFTER the
+   * refund's own cancellation had already run and found nothing to cancel.
+   * Its own job id for that reason: the refund's job is finished and kept, so
+   * enqueueing its id again would be dropped. The processor's guards make the
+   * two jobs safe to overlap — whichever runs second finds the receipt
+   * cancelled.
+   */
+  public async enqueueCancelIncomeAfterRegistration(transactionId: string): Promise<void> {
+    await this.queue.add(
+      MOY_NALOG_JOBS.CANCEL_INCOME,
+      { transactionId },
+      {
+        jobId: `moy_nalog_cancel_${transactionId}_after_registration`,
+        attempts: MOY_NALOG_CANCEL_INCOME_ATTEMPTS,
+        backoff: { type: 'exponential', delay: MOY_NALOG_CANCEL_INCOME_BACKOFF_MS },
+        removeOnComplete: 200,
+        removeOnFail: 200,
+      },
+    );
+    this.logger.debug(`Enqueued МойНалог income cancellation after registration for transaction ${transactionId}`);
+  }
 }

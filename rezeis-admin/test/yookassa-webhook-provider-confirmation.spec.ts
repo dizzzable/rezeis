@@ -14,6 +14,7 @@ import { of } from 'rxjs';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 import { YookassaPaymentVerificationService } from '../src/modules/payments/services/yookassa-payment-verification.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * YooKassa completions are confirmed with YooKassa
@@ -427,6 +428,13 @@ function createHarness(input: {
     trialClaim: { updateMany: async () => ({ count: 0 }) },
     $queryRaw: async () => [{ gatewayData: transaction.gatewayData }],
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(client, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => transaction.gatewayData,
+      update: (args) => client.transaction.update(args),
+    }),
+  });
 
   const httpService = {
     get: (url: string, config: { auth?: unknown }) => {

@@ -6,6 +6,7 @@ import { Observable, of, throwError } from 'rxjs';
 import { PaymentGatewayType, TransactionStatus } from '@prisma/client';
 
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * These drive the REAL `expireStalePending`. An earlier version of this spec
@@ -232,6 +233,12 @@ function createService(input: {
       findUnique: async () => ({ settings: { shopId: 'shop-1', apiKey: 'secret-1' } }),
     },
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(transactionClient),
+    // The poll stamps are one statement each now (`writeTransactionGatewayData`).
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => row.gatewayData,
+      update: (args) => transactionClient.transaction.updateMany(args),
+      updateMany: (args) => transactionClient.transaction.updateMany(args),
+    }),
   };
 
   const service = new PaymentPendingExpiryService(

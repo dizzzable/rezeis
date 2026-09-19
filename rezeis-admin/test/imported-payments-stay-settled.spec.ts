@@ -26,6 +26,7 @@ import { StealthnetImporterService } from '../src/modules/imports/services/steal
 import type { StealthnetPayment } from '../src/modules/imports/utils/stealthnet-backup-parser';
 import { AddOnFulfillmentRecoveryService } from '../src/modules/payments/services/add-on-fulfillment-recovery.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * A payment imported as completed stays settled.
@@ -488,6 +489,13 @@ function reconcilerFor(row: StoredRow, options: { readonly claimLostToAnotherWor
     },
     $transaction: async (work: (client: unknown) => Promise<unknown>) => work(prisma),
   };
+  // The status write is one statement now (`writeTransactionGatewayData`).
+  Object.assign(prisma, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => row.gatewayData,
+      update: (args) => prisma.transaction.update(args as never),
+    }),
+  });
   const service = new PaymentReconciliationService(
     prisma as never,
     {

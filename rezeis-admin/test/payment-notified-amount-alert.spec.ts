@@ -12,6 +12,7 @@ import {
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * The notified sum, compared against what we booked
@@ -420,6 +421,13 @@ function createReconciliation(input: {
     // The refund ledger's `SELECT ... FOR UPDATE` row lock.
     $queryRaw: async () => [{ id: 'tx-1' }],
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(client, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => transaction.gatewayData,
+      update: (args) => client.transaction.update(args),
+    }),
+  });
 
   const service = new PaymentReconciliationService(
     { ...client, $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(client) } as never,

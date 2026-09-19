@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import {
   PaymentGatewayType,
+  PaymentWebhookEvent,
   Prisma,
   SubscriptionStatus,
   SyncAction,
@@ -40,6 +41,7 @@ import {
   readRefundLedger,
   readRefundedTotal,
 } from '../utils/payment-refund-ledger.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import { enqueueSyncJobsDeferringFailure } from './payment-fulfillment-claim.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
@@ -203,6 +205,51 @@ export class PaymentReconciliationService {
         await this.paymentWebhookInboxService.markProcessed(event.id);
         return;
       }
+      // A payment refunded in full is not revived by a success notification.
+      //
+      // The revival below exists for a checkout the expiry sweep cancelled that
+      // was paid late. A refunded payment is CANCELED too, and a success
+      // notification processed after the refund — an operator's replay, or the
+      // inbox retrying a run that had failed — revived it to COMPLETED and ran
+      // its post-payment hooks again. Checked on PostgreSQL with the real
+      // services: the reversal had deleted the partner's accrual, so the hook
+      // paid the commission a second time on money that had gone back; the
+      // referral reward, keyed on a row the reversal keeps, was not paid again.
+      //
+      // So the notification is acknowledged and nothing changes: status, stamp
+      // and hooks stay as the refund left them. An operator hears about it only
+      // when the provider itself says the payment is paid after the refund —
+      // see `providerSaysPaidAfterRefund` for what counts.
+      const refundedAt = nextStatus === TransactionStatus.COMPLETED ? refundedInFullAt(transaction) : null;
+      if (refundedAt !== null) {
+        const paidAgain = providerSaysPaidAfterRefund(event, transaction, refundedAt);
+        this.logger.log(
+          `Success notification ${event.id} for transaction ${transaction.id}, refunded in full, acknowledged — ` +
+            `not revived (${paidAgain ? 'the provider reports it paid after the refund' : 'no new claim of payment from the provider'})`,
+        );
+        if (paidAgain) {
+          this.systemEvents.warn(
+            EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
+            'PAYMENT',
+            // Operator-facing detail lives in the metadata, not the message: an
+            // event type can be bound to a customer email template, whose
+            // subject is the message itself.
+            `Возвращённый платёж снова оплачен у провайдера: ${transaction.purchaseType}`,
+            {
+              userId: transaction.userId,
+              paymentId: transaction.paymentId,
+              gatewayType: transaction.gatewayType,
+              amount: transaction.amount.toString(),
+              currency: transaction.currency,
+              providerStatus: event.eventStatus,
+              paidAfterRefund: true,
+              needsManualReview: true,
+            },
+          );
+        }
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
       if (
         transaction.status !== TransactionStatus.COMPLETED &&
         isTerminalTransaction(transaction) &&
@@ -341,34 +388,38 @@ export class PaymentReconciliationService {
           : null;
 
       await this.prismaService.$transaction(async (tx) => {
-        await tx.transaction.update({
-          where: { id: transaction.id },
-          data: {
-            status: nextStatus,
-            ...(gatewayIdBackfill !== null ? { gatewayId: gatewayIdBackfill } : {}),
-            gatewayData: mergeGatewayData(transaction.gatewayData, {
-              providerStatus: event.eventStatus,
-              reconciledAt: new Date().toISOString(),
-              // Lift the provisional sweep guard, if a previous attempt on this
-              // row set one. Folded into the same write as the status it belongs
-              // to, so a row can never be COMPLETED and still sitting in the
-              // operator's review queue for a question this run just answered.
-              ...releaseVerificationSweepGuard(transaction.gatewayData, nextStatus),
-              // Folded into the status write rather than given its own UPDATE:
-              // the evidence and the completion it belongs to land together, so
-              // a crash between them cannot leave a warned-about payment with
-              // nothing on the row to show what the provider said.
-              // `paymentNeedsManualReview` is deliberately NOT among these keys
-              // — that flag is what parks a row, and this must not park one.
-              ...(notifiedAmountShortfall === null
-                ? {}
-                : {
-                    notifiedAmountShortfallAt: new Date().toISOString(),
-                    notifiedAmount: notifiedAmountShortfall.notifiedAmount,
-                  }),
-            }) as Prisma.InputJsonValue,
+        // Merged in the statement, not onto the copy read at the top: the
+        // provider check above is a network call, and the expiry sweep's poll,
+        // another notification for this payment or a manual-review hold can
+        // write this row while it runs (`writeTransactionGatewayData`).
+        const written = await writeTransactionGatewayData(tx, transaction.id, {
+          status: nextStatus,
+          ...(gatewayIdBackfill !== null ? { gatewayId: gatewayIdBackfill } : {}),
+          merge: {
+            providerStatus: event.eventStatus,
+            reconciledAt: new Date().toISOString(),
+            // Lift the provisional sweep guard, if a previous attempt on this
+            // row set one. Folded into the same write as the status it belongs
+            // to, so a row can never be COMPLETED and still sitting in the
+            // operator's review queue for a question this run just answered.
+            ...releaseVerificationSweepGuard(transaction.gatewayData, nextStatus),
+            // Folded into the status write rather than given its own UPDATE:
+            // the evidence and the completion it belongs to land together, so
+            // a crash between them cannot leave a warned-about payment with
+            // nothing on the row to show what the provider said.
+            // `paymentNeedsManualReview` is deliberately NOT among these keys
+            // — that flag is what parks a row, and this must not park one.
+            ...(notifiedAmountShortfall === null
+              ? {}
+              : {
+                  notifiedAmountShortfallAt: new Date().toISOString(),
+                  notifiedAmount: notifiedAmountShortfall.notifiedAmount,
+                }),
           },
         });
+        if (written === 0) {
+          throw new NotFoundException('Payment transaction not found');
+        }
         if (
           nextStatus === TransactionStatus.CANCELED ||
           nextStatus === TransactionStatus.FAILED
@@ -658,7 +709,7 @@ export class PaymentReconciliationService {
       // to hand straight over to the reversal without recording anything, so the
       // crossing refund left no ledger entry — and a panel refund still in flight
       // would then find nothing to deduplicate against and count it twice.
-      const gatewayData = mergeGatewayData(liveGatewayData, {
+      const ledgerPatch = {
         providerStatus,
         ...(cumulativeRefunded !== null
           ? { refundedAmountTotal: cumulativeRefunded.toFixed(2) }
@@ -667,12 +718,12 @@ export class PaymentReconciliationService {
         ...(partial
           ? { partialRefundAt: new Date().toISOString(), refundNeedsManualReview: true }
           : {}),
-      });
-      await tx.transaction.update({
-        where: { id: transaction.id },
-        data: { gatewayData: gatewayData as Prisma.InputJsonValue },
-      });
-      return { partial, refundedTotal: cumulativeRefunded, gatewayData };
+      };
+      // The totals are computed from the read above, under the row lock; the
+      // write goes through the one writer anyway, so the row holds exactly what
+      // PostgreSQL merged and no path writes `gatewayData` any other way.
+      await writeTransactionGatewayData(tx, transaction.id, { merge: ledgerPatch });
+      return { partial, refundedTotal: cumulativeRefunded, gatewayData: liveGatewayData };
     });
     if (commit === null) {
       return;
@@ -710,10 +761,10 @@ export class PaymentReconciliationService {
       return;
     }
 
-    // Carry the freshly-merged `gatewayData` forward. `reverseFulfilledPayment`
-    // merges onto whatever it is handed, so passing the outer (pre-lock)
-    // snapshot would erase the ledger entry and total this call just committed
-    // — and its own `refundReversedAt` guard would be reading a stale value.
+    // Hand over what the row held under the lock: `reverseFulfilledPayment`
+    // reads its `refundReversedAt` guard from it, and the outer snapshot from
+    // the top of reconciliation could be older than a concurrent reversal. Its
+    // own write merges in the statement, so nothing it is handed is written back.
     await this.reverseFulfilledPayment(
       { ...transaction, gatewayData: commit.gatewayData as Prisma.JsonValue },
       providerStatus,
@@ -886,18 +937,15 @@ export class PaymentReconciliationService {
       );
     }
     try {
-      await this.prismaService.transaction.update({
-        where: { id: transaction.id },
-        data: {
-          gatewayData: mergeGatewayData(transaction.gatewayData, {
-            providerVerificationUnavailableAt: new Date().toISOString(),
-            providerVerificationReason: verdict.reason,
-            // Kept well away from `gatewayId` — this is what the notification
-            // said, not something we believe. An operator resolving the row by
-            // hand needs it; no automated path may consume it.
-            ...(claimedGatewayId === null ? {} : { unverifiedGatewayId: claimedGatewayId }),
-            ...(sweepWouldCancelOnLocalTtl ? { paymentNeedsManualReview: true } : {}),
-          }) as Prisma.InputJsonValue,
+      await writeTransactionGatewayData(this.prismaService, transaction.id, {
+        merge: {
+          providerVerificationUnavailableAt: new Date().toISOString(),
+          providerVerificationReason: verdict.reason,
+          // Kept well away from `gatewayId` — this is what the notification
+          // said, not something we believe. An operator resolving the row by
+          // hand needs it; no automated path may consume it.
+          ...(claimedGatewayId === null ? {} : { unverifiedGatewayId: claimedGatewayId }),
+          ...(sweepWouldCancelOnLocalTtl ? { paymentNeedsManualReview: true } : {}),
         },
       });
     } catch (error: unknown) {
@@ -925,14 +973,8 @@ export class PaymentReconciliationService {
   }): Promise<void> {
     const { transaction } = input;
     this.logger.warn(input.logMessage);
-    await this.prismaService.transaction.update({
-      where: { id: transaction.id },
-      data: {
-        gatewayData: mergeGatewayData(transaction.gatewayData, {
-          ...input.gatewayDataPatch,
-          paymentNeedsManualReview: true,
-        }) as Prisma.InputJsonValue,
-      },
+    await writeTransactionGatewayData(this.prismaService, transaction.id, {
+      merge: { ...input.gatewayDataPatch, paymentNeedsManualReview: true },
     });
     this.systemEvents.warn(
       EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
@@ -1094,17 +1136,21 @@ export class PaymentReconciliationService {
     const revocation = await this.revokeRefundedSubscriptionBestEffort(transaction);
 
     // Mark CANCELED + stamp the reversal so it is auditable and never repeats.
-    await this.prismaService.transaction.update({
-      where: { id: transaction.id },
-      data: {
-        status: TransactionStatus.CANCELED,
-        gatewayData: mergeGatewayData(transaction.gatewayData, {
-          providerStatus,
-          refundReversedAt: new Date().toISOString(),
-          subscriptionRevoked: revocation.revoked,
-          ...revocation.audit,
-          ...(revocation.needsManualReview ? { refundNeedsManualReview: true } : {}),
-        }) as Prisma.InputJsonValue,
+    //
+    // Merged in the statement, not onto `transaction.gatewayData`: that copy is
+    // from before every step above, and a «Мой налог» registration still
+    // waiting on the tax service when the refund arrived records its receipt in
+    // between — the old copy erased it, and the income stayed declared with no
+    // receipt id left to cancel. With the receipt kept, the registration sees
+    // the refund and hands the receipt to a cancellation job.
+    await writeTransactionGatewayData(this.prismaService, transaction.id, {
+      status: TransactionStatus.CANCELED,
+      merge: {
+        providerStatus,
+        refundReversedAt: new Date().toISOString(),
+        subscriptionRevoked: revocation.revoked,
+        ...revocation.audit,
+        ...(revocation.needsManualReview ? { refundNeedsManualReview: true } : {}),
       },
     });
 
@@ -1984,20 +2030,6 @@ function isTerminalTransaction(transaction: Transaction): boolean {
 }
 
 
-function mergeGatewayData(
-  currentValue: Transaction['gatewayData'],
-  nextValue: Record<string, unknown>,
-): Record<string, unknown> {
-  const currentRecord =
-    typeof currentValue === 'object' && currentValue !== null && !Array.isArray(currentValue)
-      ? (currentValue as Record<string, unknown>)
-      : {};
-  return {
-    ...currentRecord,
-    ...nextValue,
-  };
-}
-
 /**
  * Convert a `Decimal(20, 8)` major-unit transaction amount into the
  * minor-unit integer (kopecks/cents) accepted by `PartnerEarningsService`.
@@ -2025,6 +2057,68 @@ function decimalToMinorUnits(amount: Prisma.Decimal): number {
 export function importedPaymentSource(transaction: Pick<Transaction, 'planSnapshot'>): string | null {
   const source = asRecord(transaction.planSnapshot)?.['importedFrom'];
   return typeof source === 'string' && source.length > 0 ? source : null;
+}
+
+/**
+ * When the payment was refunded in full, or null when it was not.
+ *
+ * `refundReversedAt` is the reversal's own stamp. A CANCELED row whose refund
+ * ledger reaches the paid amount is refunded in full too, stamp or not: before
+ * the «Мой налог» cancellation merged in the statement it erased that stamp on
+ * most full refunds, and the ledger — written before it — survived. The time is
+ * the stamp's, else the newest ledger entry's, else the row's last write, which
+ * is never earlier than the refund.
+ */
+function refundedInFullAt(
+  transaction: Pick<Transaction, 'status' | 'amount' | 'gatewayData' | 'updatedAt'>,
+): Date | null {
+  const gatewayData = asRecord(transaction.gatewayData) ?? {};
+  const stamped = parseInstant(gatewayData['refundReversedAt']);
+  if (stamped !== null) return stamped;
+  if (transaction.status !== TransactionStatus.CANCELED) return null;
+  const paid = Number(transaction.amount.toString());
+  if (!Number.isFinite(paid) || paid <= 0 || readRefundedTotal(gatewayData) < paid - 0.000001) return null;
+  const newestEntry = readRefundLedger(gatewayData)
+    .map((entry) => parseInstant(entry.at))
+    .filter((at): at is Date => at !== null)
+    .sort((a, b) => b.getTime() - a.getTime())[0];
+  return newestEntry ?? transaction.updatedAt;
+}
+
+/**
+ * Whether this notification is the provider saying, after the refund, that the
+ * payment is paid — the one case an operator is told about.
+ *
+ * Not a replay or a retry: those run a notification stored before, and are not
+ * the provider saying anything now. Not one received before the refund: that
+ * is the old claim the refund already answered. And not one whose own payment
+ * object shows the refund: YooKassa keeps `status: succeeded` on a refunded
+ * payment and reports the refund in `refunded_amount` (its API's Payment
+ * object; the SDKs model it as `refunded_amount`), so `succeeded` alone says
+ * nothing new. What is left is a provider reporting the payment paid and not
+ * refunded after we recorded it refunded — a chargeback reversed at the
+ * provider, say — and that is money an operator has to decide about.
+ */
+function providerSaysPaidAfterRefund(
+  event: Pick<PaymentWebhookEvent, 'receivedAt' | 'replayCount' | 'reconciliationAttempts' | 'gatewayType' | 'rawPayload'>,
+  transaction: Pick<Transaction, 'amount'>,
+  refundedAt: Date,
+): boolean {
+  if (event.replayCount > 0 || event.reconciliationAttempts > 0) return false;
+  if (event.receivedAt.getTime() <= refundedAt.getTime()) return false;
+  if (event.gatewayType === PaymentGatewayType.YOOKASSA) {
+    const payment = asRecord(asRecord(event.rawPayload)?.['object']);
+    const refunded = Number(asRecord(payment?.['refunded_amount'])?.['value']);
+    const paid = Number(transaction.amount.toString());
+    if (Number.isFinite(refunded) && Number.isFinite(paid) && refunded >= paid - 0.000001) return false;
+  }
+  return true;
+}
+
+function parseInstant(value: unknown): Date | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const at = new Date(value);
+  return Number.isNaN(at.getTime()) ? null : at;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

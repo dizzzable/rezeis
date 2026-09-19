@@ -14,6 +14,7 @@ import { of } from 'rxjs';
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 import { YookassaPaymentVerificationService } from '../src/modules/payments/services/yookassa-payment-verification.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * A completion YooKassa could not confirm must survive the expiry sweep
@@ -272,6 +273,13 @@ function createReconciliation(input: {
     trialClaim: { updateMany: async () => ({ count: 0 }) },
     $queryRaw: async () => [{ gatewayData: transaction.gatewayData }],
   };
+  // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+  Object.assign(client, {
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: () => transaction.gatewayData,
+      update: (args) => client.transaction.update(args),
+    }),
+  });
 
   const httpService = {
     get: (_url: string, _config: unknown) => {

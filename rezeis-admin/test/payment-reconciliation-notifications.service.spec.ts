@@ -24,6 +24,7 @@ import {
   ReferralPurchaseOutcome,
   ReferralQualificationService,
 } from '../src/modules/referrals/services/referral-qualification.service';
+import { gatewayDataUpdateArgs, gatewayDataWriteOf } from './helpers/gateway-data-write-double';
 
 type PaymentWebhookFindUniqueArgs = { where: { id: string } };
 type TransactionFindUniqueArgs = { where: { id: string } | { paymentId: string } };
@@ -84,6 +85,8 @@ type ReconciliationPrismaDouble = {
   $transaction: <T>(callback: (tx: ReconciliationPrismaDouble) => Promise<T>) => Promise<T>;
   /** `SELECT … FOR UPDATE` on the transaction row — the refund-ledger fence. */
   $queryRaw: (...args: readonly unknown[]) => Promise<readonly { readonly id: string }[]>;
+  /** A `gatewayData` write — one statement from `writeTransactionGatewayData`. */
+  $executeRaw: (statement: unknown) => Promise<number>;
   paymentWebhookEvent: {
     findUnique: (args: PaymentWebhookFindUniqueArgs) => Promise<ReconciliationWebhookEventRecord | null>;
   };
@@ -1054,6 +1057,22 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
 
   const prismaService = {
     $queryRaw: async (..._args: readonly unknown[]) => [{ id: 'tx-1' }],
+    // `gatewayData` writes are one statement each now (`writeTransactionGatewayData`).
+    // PostgreSQL merges when the statement runs, onto the row as it is then —
+    // so a writer armed for this instant lands first, as in `update` below,
+    // and the patch goes on top of what it left.
+    $executeRaw: async (statement: unknown) => {
+      const write = gatewayDataWriteOf(statement);
+      firePanelRefund('write');
+      await Promise.resolve();
+      const args = gatewayDataUpdateArgs(write, state.gatewayDataOverride);
+      state.transactionUpdateCalls.push(args as TransactionUpdateArgs);
+      state.gatewayDataOverride = args.data.gatewayData;
+      state.updatedStatus = write.status;
+      state.commitOrder.push('webhook');
+      state.callOrder.push('update');
+      return 1;
+    },
     paymentWebhookEvent: {
       findUnique: async (_args: PaymentWebhookFindUniqueArgs) => state.event,
     },

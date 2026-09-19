@@ -6,11 +6,14 @@ import { Job } from 'bullmq';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MOY_NALOG_JOBS, MOY_NALOG_QUEUE } from '../constants/moy-nalog.constant';
 import { MoyNalogApiService, MoyNalogAuth } from '../services/moy-nalog-api.service';
+import { MoyNalogQueueService } from '../services/moy-nalog-queue.service';
 import { renderIncomeName } from '../utils/moy-nalog-income-name.util';
 import {
   encryptGatewaySettingsForStorage,
   readGatewaySettings,
 } from '../utils/payment-gateway-settings.util';
+import { readRefundedTotal } from '../utils/payment-refund-ledger.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 
 /**
  * Registers a COMPLETED YooKassa transaction as self-employed income in
@@ -26,6 +29,7 @@ export class MoyNalogProcessor extends WorkerHost {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly moyNalogApiService: MoyNalogApiService,
+    private readonly moyNalogQueueService: MoyNalogQueueService,
   ) {
     super();
   }
@@ -64,7 +68,9 @@ export class MoyNalogProcessor extends WorkerHost {
 
     const gatewayData = readGatewayData(transaction.gatewayData);
     if (typeof gatewayData.moyNalogReceiptUuid === 'string' && gatewayData.moyNalogReceiptUuid.length > 0) {
-      // Already registered — idempotent guard against retries / replays.
+      // Already registered — idempotent guard against retries / replays. A
+      // retry of a run whose hand-off below failed hands the receipt over now.
+      await this.handReceiptToCancellationIfRefunded(transaction);
       return;
     }
     // Money that went back is not income. This job retries for minutes when the
@@ -112,6 +118,43 @@ export class MoyNalogProcessor extends WorkerHost {
       moyNalogRegisteredAt: new Date().toISOString(),
     });
     this.logger.log(`Registered МойНалог income for transaction ${transactionId}`);
+
+    // Read back AFTER the receipt is on the row. A refund that landed while the
+    // tax service was answering enqueued its cancellation before there was a
+    // receipt to cancel, and that job found nothing and finished. One of the
+    // two always sees the other: the refund records its total under the row
+    // lock before it enqueues the cancellation, so either that cancellation
+    // reads this receipt, or this read sees the refund.
+    const now = await this.prismaService.transaction.findUnique({ where: { id: transaction.id } });
+    if (now !== null) {
+      await this.handReceiptToCancellationIfRefunded(now);
+    }
+  }
+
+  /**
+   * Enqueues a cancellation for a receipt registered on a payment that was
+   * refunded in full meanwhile, and not cancelled yet. Its own job id: the
+   * refund's cancellation job has already finished — finding no receipt — and
+   * BullMQ keeps finished jobs, so enqueueing that id again would do nothing.
+   */
+  private async handReceiptToCancellationIfRefunded(
+    transaction: Pick<Transaction, 'id' | 'status' | 'amount' | 'gatewayData'>,
+  ): Promise<void> {
+    const gatewayData = readGatewayData(transaction.gatewayData);
+    const receipt = gatewayData.moyNalogReceiptUuid;
+    if (typeof receipt !== 'string' || receipt.length === 0) return;
+    if (typeof gatewayData.moyNalogCancelledAt === 'string' && gatewayData.moyNalogCancelledAt.length > 0) return;
+    const paid = Number(transaction.amount.toString());
+    const refundedInFull =
+      transaction.status !== TransactionStatus.COMPLETED ||
+      typeof gatewayData.refundReversedAt === 'string' ||
+      (Number.isFinite(paid) && paid > 0 && readRefundedTotal(gatewayData) >= paid - 0.000001);
+    if (!refundedInFull) return;
+    this.logger.warn(
+      `МойНалог income for transaction ${transaction.id} was registered while the payment was refunded — ` +
+        'handing the receipt to a cancellation',
+    );
+    await this.moyNalogQueueService.enqueueCancelIncomeAfterRegistration(transaction.id);
   }
 
   /**
@@ -163,29 +206,19 @@ export class MoyNalogProcessor extends WorkerHost {
   }
 
   /**
-   * Adds `patch` to the transaction's `gatewayData` in ONE statement, merged by
-   * PostgreSQL onto whatever the row holds at that moment.
-   *
-   * Not `update({ gatewayData: { ...read, ...patch } })`: the row is read before
-   * the tax service is called, and whatever other paths wrote while it answered
-   * would be overwritten by that old read. Two did, checked on PostgreSQL 17
-   * with the real refund path: the cancellation this job runs for a refund
-   * erased the reversal's own `refundReversedAt`, `refundNeedsManualReview` and
-   * `subscriptionRevoked` in 19 of 20 runs; and a registration still waiting on
-   * the tax service erased a partial refund's ledger entry, so the refund that
-   * completed the amount was booked as partial again and the reversal never ran.
+   * Adds `patch` to the transaction's `gatewayData` through the one writer
+   * (`writeTransactionGatewayData`), merged by PostgreSQL onto whatever the row
+   * holds at that moment. The row was read before the tax service was called;
+   * writing that copy back erased what the refund path wrote meanwhile — the
+   * reversal's own record in 19 of 20 full refunds, and a partial refund's
+   * ledger entry.
    *
    * Zero rows means the transaction is gone; there is nothing left to record
    * the receipt on, and throwing would only make BullMQ call the tax service
    * again.
    */
   private async recordOnTransaction(transactionId: string, patch: Record<string, unknown>): Promise<void> {
-    const updated = await this.prismaService.$executeRaw(Prisma.sql`
-      UPDATE "transactions"
-         SET "gateway_data" = COALESCE("gateway_data", '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
-             "updated_at" = now()
-       WHERE "id" = ${transactionId}
-    `);
+    const updated = await writeTransactionGatewayData(this.prismaService, transactionId, { merge: patch });
     if (updated === 0) {
       this.logger.warn(`МойНалог receipt for transaction ${transactionId} not recorded: the transaction is gone`);
     }
