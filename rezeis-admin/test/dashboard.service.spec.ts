@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { SubscriptionStatus, TransactionStatus } from '@prisma/client';
+import { type Prisma, SubscriptionStatus, TransactionStatus } from '@prisma/client';
 
-import { DashboardService } from '../src/modules/dashboard/services/dashboard.service';
+import {
+  assembleLifetimeRevenue,
+  DashboardService,
+} from '../src/modules/dashboard/services/dashboard.service';
+import type { FxSnapshot } from '../src/modules/business-analytics/utils/analytics-money.util';
 
 describe('DashboardService', () => {
   it('aggregates the current bounded KPI summary and caches the result briefly', async () => {
@@ -38,10 +42,6 @@ describe('DashboardService', () => {
             if (serialized.includes(TransactionStatus.PENDING)) return 2;
             if (serialized.includes(TransactionStatus.FAILED)) return 5;
             return 0;
-          },
-          aggregate: async (input: unknown) => {
-            calls.push(['transaction.aggregate', input]);
-            return { _sum: { amount: { toString: () => '25.50' } } };
           },
           findMany: async (input: unknown) => {
             calls.push(['transaction.findMany', input]);
@@ -86,6 +86,16 @@ describe('DashboardService', () => {
             return 0;
           },
         },
+        $queryRaw: async (query: Prisma.Sql) => {
+          calls.push(['$queryRaw', query.sql]);
+          return [{ currency: 'RUB', amount: '25.50', payments: 3 }];
+        },
+        fxRate: {
+          findMany: async (input: unknown) => {
+            calls.push(['fxRate.findMany', input]);
+            return [];
+          },
+        },
       } as never,
       {
         getOrSet: async (key: string, loader: () => Promise<unknown>, ttlSeconds: number) => {
@@ -93,6 +103,7 @@ describe('DashboardService', () => {
           return loader();
         },
       } as never,
+      { getBaseCurrency: () => 'RUB' } as never,
     );
 
     const result = await service.getSummary();
@@ -107,7 +118,13 @@ describe('DashboardService', () => {
     assert.equal(result.transactions.completed, 7);
     assert.equal(result.transactions.pending, 2);
     assert.equal(result.transactions.failed, 5);
-    assert.equal(result.transactions.grossVolume, '25.50');
+    // Withdrawn: a dashboard opened before the update prints a dash, not the old sum.
+    assert.equal(result.transactions.grossVolume, '—');
+    assert.deepStrictEqual(result.revenue, {
+      figure: { value: 25.5, byCurrency: [{ currency: 'RUB', amount: 25.5 }] },
+      money: { currency: 'RUB', converted: false, rates: [], unconverted: [] },
+      payments: 3,
+    });
     assert.equal(result.operations.broadcastDrafts, 6);
     assert.equal(result.operations.importDryRunAvailable, true);
     assert.deepStrictEqual(result.financeOps, {
@@ -118,7 +135,8 @@ describe('DashboardService', () => {
       disputeRecords: 0,
       reconciliationExceptions: 0,
     });
-    assert.equal(result.metrics.length, 13);
+    assert.equal(result.metrics.length, 12);
+    assert.equal(result.metrics.some((metric) => metric.code === 'GROSS_VOLUME'), false);
     assert.deepStrictEqual(result.operationsTimeline, []);
     assert.deepStrictEqual(result.financeOpsTimeline, []);
     // Attention list is now populated from the live counters: expiring7d=8 (>0
@@ -131,7 +149,61 @@ describe('DashboardService', () => {
       })),
       [{ kind: 'SUBSCRIPTION_EXPIRING', severity: 'INFO', count: 8 }],
     );
-    assert.deepStrictEqual(calls[0], ['cache.getOrSet', { key: 'dashboard:summary', ttlSeconds: 60 }]);
-    assert.equal(calls.some((call) => Array.isArray(call) && call[0] === 'transaction.aggregate'), true);
+    // The summary is cached as the parsed object: its shape changed, so did its key.
+    assert.deepStrictEqual(calls[0], ['cache.getOrSet', { key: 'dashboard:summary:v2', ttlSeconds: 60 }]);
+    assert.deepStrictEqual(calls.find((call) => Array.isArray(call) && call[0] === 'fxRate.findMany'), [
+      'fxRate.findMany',
+      { where: { base: 'RUB' }, select: { quote: true, rate: true, source: true, fetchedAt: true } },
+    ]);
+  });
+});
+
+describe('«Выручка за всё время»', () => {
+  const fetchedAt = new Date('2026-09-18T09:00:00.000Z');
+  const fx = (rates: Record<string, number>): FxSnapshot => ({
+    base: 'RUB',
+    rates: new Map(Object.entries(rates).map(([quote, rate]) => [quote, { rate, source: 'TEST', fetchedAt }])),
+  });
+
+  it('states the whole history in the base at the panel’s rate — never 1 000 + 10 = 1 010 — and names the one with no rate', () => {
+    const revenue = assembleLifetimeRevenue(
+      [
+        { currency: 'RUB', amount: '1000', payments: 2 },
+        { currency: 'USDT', amount: '10', payments: 1 },
+        { currency: 'XTR', amount: '500', payments: 1 },
+      ],
+      fx({ USDT: 80 }),
+    );
+    assert.deepStrictEqual(revenue, {
+      figure: {
+        value: 1800,
+        byCurrency: [
+          { currency: 'RUB', amount: 1000 },
+          { currency: 'USDT', amount: 10 },
+          { currency: 'XTR', amount: 500 },
+        ],
+      },
+      money: {
+        currency: 'RUB',
+        converted: true,
+        rates: [{ currency: 'USDT', rate: 80, source: 'TEST', fetchedAt: fetchedAt.toISOString() }],
+        unconverted: ['XTR'],
+      },
+      payments: 4,
+    });
+  });
+
+  it('states one currency natively, whatever the base is', () => {
+    const revenue = assembleLifetimeRevenue([{ currency: 'USDT', amount: '12.5', payments: 1 }], fx({ USDT: 80 }));
+    assert.deepStrictEqual(revenue.money, { currency: 'USDT', converted: false, rates: [], unconverted: [] });
+    assert.equal(revenue.figure.value, 12.5);
+  });
+
+  it('has nothing to say before the first payment: zero in the base currency', () => {
+    assert.deepStrictEqual(assembleLifetimeRevenue([], fx({})), {
+      figure: { value: 0, byCurrency: [] },
+      money: { currency: 'RUB', converted: false, rates: [], unconverted: [] },
+      payments: 0,
+    });
   });
 });

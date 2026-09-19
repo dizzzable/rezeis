@@ -11,9 +11,15 @@
  * operator who clicks "Backups" and lands on theme settings stops trusting the
  * search box.
  */
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { describe, expect, it } from 'vitest'
 
-import { HUB_TABS, canShowNavItem, deepLinkNavItems, navGroups } from './admin-nav-config'
+import { RBAC_RESOURCES, SYSTEM_ROLES } from '../../../../src/modules/rbac/rbac.resources'
+
+import { HUB_TABS, canShowNavItem, deepLinkNavItems, navGroups, type NavItem } from './admin-nav-config'
 import { en } from '@/i18n/en'
 import { ru } from '@/i18n/ru'
 
@@ -153,5 +159,83 @@ describe('deepLinkNavItems vs the sidebar', () => {
     const paths = deepLinkNavItems.map((i) => i.path)
     expect(new Set(keys).size).toBe(keys.length)
     expect(new Set(paths).size).toBe(paths.length)
+  })
+})
+
+/**
+ * The side menu is where the dashboard's quick actions take their gates from
+ * (`dashboard-quick-actions.tsx`), so an ungated item here was an ungated
+ * button there too. «Пользователи», «Рассылки» and «Платформа» carried no
+ * permission although every read their pages make is guarded: a role without
+ * it saw the item and the button, and the page answered with 403s.
+ */
+describe('sidebar gates of «Пользователи», «Рассылки» and «Платформа»', () => {
+  const MODULES = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'src', 'modules')
+  const source = (relative: string): string => readFileSync(resolve(MODULES, relative), 'utf8')
+  const item = (key: string): NavItem => {
+    const found = navGroups.flatMap((group) => group.items).find((entry) => entry.key === key)
+    if (found === undefined) throw new Error(`no sidebar item "${key}"`)
+    return found
+  }
+  const holding = (tokens: readonly string[]) => (resource: string, action: string): boolean => tokens.includes(`${resource}:${action}`)
+
+  /**
+   * What each page reads, and the permission the SERVER puts on that read —
+   * each one checked against the controller below, so the menu follows the
+   * server and not a second list. «Пользователи» is three tabs, and each works
+   * on its own: the list, «Массовые операции» (it only posts ids), and the
+   * blocklist.
+   */
+  const PAGE_READS = {
+    users: [
+      { permission: 'users:view', controller: 'users/controllers/admin-users.controller.ts', guard: /@Get\(\)\s*@RequirePermission\('users', 'view'\)\s*public async listUsers/ },
+      { permission: 'users:bulk_operations', controller: 'users/controllers/admin-bulk-users.controller.ts', guard: /@RequirePermission\('users', 'bulk_operations'\)\s*@ApiOperation\(\{ summary: 'Executes a bulk action/ },
+      { permission: 'blocked_identities:view', controller: 'blocked-identities/controllers/admin-blocked-identities.controller.ts', guard: /@Get\(\)\s*@RequirePermission\('blocked_identities', 'view'\)/ },
+    ],
+    broadcast: [
+      { permission: 'broadcasts:view', controller: 'broadcast/controllers/admin-broadcast.controller.ts', guard: /@RequirePermission\('broadcasts', 'view'\)\s*@Controller\('admin\/broadcast'\)/ },
+    ],
+    platform: [
+      { permission: 'settings:view', controller: 'settings/controllers/settings.controller.ts', guard: /@RequirePermission\('settings', 'view'\)\s*export class SettingsController/ },
+    ],
+  } as const
+  const PAGES = ['users', 'broadcast', 'platform'] as const
+
+  it('reads each page’s gate off the server’s own controller', () => {
+    for (const page of PAGES) {
+      for (const read of PAGE_READS[page]) {
+        expect(source(read.controller), `${page}: ${read.controller} no longer guards the read with ${read.permission}`).toMatch(read.guard)
+      }
+    }
+  })
+
+  it('shows each item to a role holding any permission its page can be worked with — and to no other', () => {
+    for (const page of PAGES) {
+      expect(canShowNavItem(item(page), true, holding(['dashboard:view'])), `${page} without any of its permissions`).toBe(false)
+      for (const read of PAGE_READS[page]) {
+        expect(canShowNavItem(item(page), true, holding([read.permission])), `${page} with only ${read.permission}`).toBe(true)
+      }
+    }
+  })
+
+  it('takes no item from a system role that can open its page, and shows none to a role that cannot', () => {
+    const everyPermission = Object.entries(RBAC_RESOURCES).flatMap(([resource, actions]) =>
+      (actions as readonly string[]).map((action) => `${resource}:${action}`),
+    )
+    const table = SYSTEM_ROLES.map((role) => {
+      // The superadmin's list is filled at start-up from the whole catalog.
+      const tokens = role.name === 'superadmin' ? everyPermission : role.permissions.map((p) => `${p.resource}:${p.action}`)
+      const canOpen = PAGES.map((page) => PAGE_READS[page].some((read) => tokens.includes(read.permission)))
+      const shown = PAGES.map((page) => canShowNavItem(item(page), true, holding(tokens)))
+      expect(shown, `${role.name}: the menu disagrees with what the role can load`).toEqual(canOpen)
+      return [role.name, ...shown]
+    })
+    expect(table).toEqual([
+      ['superadmin', true, true, true],
+      // The operator's role holds no `settings:view`: «Платформа» answered it with a 403.
+      ['operator', true, true, false],
+      ['support', true, false, false],
+      ['finance', false, false, false],
+    ])
   })
 })

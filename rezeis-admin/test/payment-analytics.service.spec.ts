@@ -5,9 +5,11 @@ import {
   Currency,
   PaymentGatewayType,
   PaymentWebhookLifecycleStatus,
+  type Prisma,
 } from '@prisma/client';
 
 import { PaymentAnalyticsService } from '../src/modules/payment-analytics/services/payment-analytics.service';
+import { readPlatformBranding } from '../src/modules/settings/utils/platform-branding.util';
 
 describe('PaymentAnalyticsService diagnostic redaction', () => {
   it('redacts provider failure reason labels before returning analytics responses', async () => {
@@ -19,9 +21,12 @@ describe('PaymentAnalyticsService diagnostic redaction', () => {
     ].join(' ');
     const service = createService({
       gateways: [createGateway(PaymentGatewayType.YOOKASSA)],
-      rawQuery: (sql) => {
-        if (sql.includes("gateway_data->>'providerStatus'")) {
-          return [{ gateway_type: PaymentGatewayType.YOOKASSA, reason: rawReason, count: 3n }];
+      query: (sql) => {
+        if (sql.includes("'providerStatus'")) {
+          return [{ gateway: PaymentGatewayType.YOOKASSA, reason: rawReason, count: 3 }];
+        }
+        if (sql.includes('AS "outcome"')) {
+          return [{ previous: 0, gateway: PaymentGatewayType.YOOKASSA, outcome: 'failed', currency: 'RUB', checkouts: 3, payments: 0, amount: '0' }];
         }
         return [];
       },
@@ -40,6 +45,8 @@ describe('PaymentAnalyticsService diagnostic redaction', () => {
     assert.equal(serialized.includes('pay.example'), false);
     assert.equal(serialized.includes('pay_1234567890abcdef'), false);
     assert.equal(serialized.includes('payer@example.com'), false);
+    // A share is of every failed or canceled checkout of the gateway, not of the listed ones.
+    assert.equal(failure.share, 1);
   });
 
   it('redacts webhook error labels before returning analytics responses', async () => {
@@ -50,7 +57,8 @@ describe('PaymentAnalyticsService diagnostic redaction', () => {
       'signature=raw-webhook-signature',
     ].join(' ');
     const service = createService({
-      rawQuery: (sql) => {
+      query: () => [],
+      unsafeQuery: (sql) => {
         if (sql.includes('GROUP BY gateway_type, status')) {
           return [{
             gateway_type: PaymentGatewayType.YOOKASSA,
@@ -85,19 +93,66 @@ describe('PaymentAnalyticsService diagnostic redaction', () => {
   });
 });
 
+describe('PaymentAnalyticsService window', () => {
+  it('opens both reports at local midnight of the panel’s time zone, and says which zone', async () => {
+    const bound: unknown[] = [];
+    const service = createService({
+      timezone: 'Europe/Moscow',
+      query: (sql, values) => {
+        if (sql.includes('pg_timezone_names')) return [{ canonical: true, typed: true }];
+        bound.push(...values);
+        return [];
+      },
+      unsafeQuery: (_sql, values) => {
+        bound.push(...values);
+        return sql0(_sql);
+      },
+    });
+    const providers = await service.getProviderReport(7);
+    const webhooks = await service.getWebhookHealth(7);
+
+    // Midnight in Moscow is 21:00 UTC of the day before.
+    assert.match(providers.windowStart, /T21:00:00\.000Z$/);
+    assert.equal(webhooks.windowStart, providers.windowStart, 'the two halves of the tab cover the same days');
+    assert.deepEqual([providers.timeZone, providers.timeZoneFallback], ['Europe/Moscow', false]);
+    assert.ok(
+      bound.some((value) => value instanceof Date && value.toISOString() === providers.windowStart),
+      'the local midnight is what the statements are bound to',
+    );
+  });
+
+  it('counts UTC days, and says so, when the panel’s time zone is not a zone', async () => {
+    const service = createService({ timezone: 'Mars/Olympus_Mons', query: () => [] });
+    const report = await service.getProviderReport(7);
+    assert.match(report.windowStart, /T00:00:00\.000Z$/);
+    assert.deepEqual([report.timeZone, report.timeZoneFallback], ['UTC', true]);
+  });
+});
+
+function sql0(sql: string): readonly unknown[] {
+  return sql.includes('transactions_missing_webhook') ? [{ transactions_missing_webhook: 0n, webhooks_missing_transaction: 0n }] : [];
+}
+
 function createService(input: {
   readonly gateways?: readonly Record<string, unknown>[];
-  readonly rawQuery: (sql: string) => readonly unknown[];
+  readonly timezone?: string | null;
+  readonly query: (sql: string, values: readonly unknown[]) => readonly unknown[];
+  readonly unsafeQuery?: (sql: string, values: readonly unknown[]) => readonly unknown[];
 }): PaymentAnalyticsService {
-  return new PaymentAnalyticsService({
-    paymentGateway: {
-      findMany: async () => input.gateways ?? [],
-    },
-    transaction: {
-      groupBy: async () => [],
-    },
-    $queryRawUnsafe: async (sql: string) => input.rawQuery(sql),
-  } as never);
+  return new PaymentAnalyticsService(
+    {
+      paymentGateway: {
+        findMany: async () => input.gateways ?? [],
+      },
+      fxRate: {
+        findMany: async () => [],
+      },
+      $queryRaw: async (query: Prisma.Sql) => input.query(query.sql, query.values),
+      $queryRawUnsafe: async (sql: string, ...values: unknown[]) => (input.unsafeQuery ?? sql0)(sql, values),
+    } as never,
+    { getBaseCurrency: () => 'RUB' } as never,
+    { getPlatformBranding: async () => readPlatformBranding({ timezone: input.timezone === undefined ? 'UTC' : input.timezone }) } as never,
+  );
 }
 
 function createGateway(type: PaymentGatewayType): Record<string, unknown> {

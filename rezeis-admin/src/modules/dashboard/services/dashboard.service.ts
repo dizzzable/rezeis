@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
   PaymentWebhookLifecycleStatus,
+  Prisma,
   SubscriptionStatus,
   TransactionStatus,
   WithdrawalStatus,
@@ -8,10 +9,14 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
+import { moneyReceivedSql, netAmountSql } from '../../business-analytics/utils/analytics-money-received.util';
+import { chooseMoneyView, type FxSnapshot, moneyFigure, readFxSnapshot } from '../../business-analytics/utils/analytics-money.util';
+import { FxRateService } from '../../fx/fx-rate.service';
 import {
   DashboardAttentionItemInterface,
   DashboardAttentionSeverity,
   DashboardMetricInterface,
+  DashboardRevenueInterface,
   DashboardSummaryInterface,
   DashboardTimelineEntryInterface,
   DashboardTimelineStatus,
@@ -20,8 +25,58 @@ import {
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 
-/** Cache key for the dashboard summary. */
-const DASHBOARD_SUMMARY_CACHE_KEY = 'dashboard:summary';
+/**
+ * Cache key for the dashboard summary — with the number of its shape. The
+ * summary is cached as the parsed object, and Redis outlives an image
+ * update: a panel reading a summary an older panel wrote would hand the page
+ * a shape it does not know. v2: `revenue` added, `grossVolume` withdrawn.
+ */
+const DASHBOARD_SUMMARY_CACHE_KEY = 'dashboard:summary:v2';
+
+/** What `transactions.grossVolume` holds since the tile became `revenue`. */
+const GROSS_VOLUME_WITHDRAWN = '—';
+
+type SqlNumeric = Prisma.Decimal | string | number | bigint | null;
+
+export interface LifetimeRevenueRow {
+  readonly currency: string;
+  readonly amount: SqlNumeric;
+  readonly payments: number;
+}
+
+/**
+ * Money received over the panel's whole history, per currency — the rule of
+ * «Бизнес-аналитика» (`analytics-money-received.util.ts`): completed, for more
+ * than nothing, not paid from a partner's balance, net of a partial refund.
+ * «Выручка» there is the same sum over a window.
+ */
+export function lifetimeRevenueSql(): Prisma.Sql {
+  return Prisma.sql`
+    SELECT t."currency"::text AS "currency", SUM(${netAmountSql()}) AS "amount", COUNT(*)::int AS "payments"
+      FROM "transactions" t
+     WHERE ${moneyReceivedSql()}
+     GROUP BY 1`;
+}
+
+/**
+ * The tile's figure: one currency natively, several in the reporting base at
+ * the panel's rates — a currency with no rate left out and named
+ * (`analytics-money.util.ts`).
+ */
+export function assembleLifetimeRevenue(rows: readonly LifetimeRevenueRow[], fx: FxSnapshot): DashboardRevenueInterface {
+  const sums = new Map<string, number>();
+  let payments = 0;
+  for (const row of rows) {
+    const amount = row.amount === null ? 0 : Number(row.amount);
+    sums.set(row.currency, (sums.get(row.currency) ?? 0) + amount);
+    payments += row.payments;
+  }
+  const money = chooseMoneyView(
+    [...sums.entries()].filter(([, amount]) => amount !== 0).map(([currency]) => currency),
+    fx,
+  );
+  return { figure: moneyFigure(money, sums), money, payments };
+}
 /** Cache TTL in seconds — 60s keeps the dashboard fresh while reducing DB load by ~95%. */
 const DASHBOARD_SUMMARY_TTL_SECONDS = 60;
 
@@ -44,6 +99,11 @@ export class DashboardService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly cacheService: RawCacheService,
+    /**
+     * Only for the reporting base currency: the rates themselves are READ from
+     * `fx_rates`, never fetched — the summary must not wait on an exchange.
+     */
+    private readonly fxRateService: FxRateService,
   ) {}
 
   public async getSummary(): Promise<DashboardSummaryInterface> {
@@ -70,7 +130,8 @@ export class DashboardService {
       transactionsCompleted,
       transactionsPending,
       transactionsFailed,
-      grossVolumeAggregate,
+      lifetimeRevenueRows,
+      fx,
       broadcastDrafts,
       importDryRunCount,
       withdrawalsPending,
@@ -103,10 +164,9 @@ export class DashboardService {
       this.prismaService.transaction.count({
         where: { status: TransactionStatus.FAILED },
       }),
-      this.prismaService.transaction.aggregate({
-        where: { status: TransactionStatus.COMPLETED },
-        _sum: { amount: true },
-      }),
+      // «Выручка за всё время»: the money of «Бизнес-аналитика» → «Выручка», without a window.
+      this.prismaService.$queryRaw<LifetimeRevenueRow[]>(lifetimeRevenueSql()),
+      readFxSnapshot(this.prismaService, this.fxRateService.getBaseCurrency()),
       // Phase 4 broadcast drafts (Broadcast model). Bounded count.
       this.prismaService.broadcast.count({ where: { status: 'DRAFT' } }),
       // Phase 4 import dry runs available (Imports model).
@@ -119,7 +179,7 @@ export class DashboardService {
       }),
     ]);
 
-    const grossVolume = (grossVolumeAggregate._sum.amount ?? 0).toString();
+    const revenue = assembleLifetimeRevenue(lifetimeRevenueRows, fx);
 
     // Recent rows powering the two activity timelines. Bounded `take` + a
     // PII-free `select` (no user ids, no payment ids, no raw payloads) keep the
@@ -182,7 +242,8 @@ export class DashboardService {
       { code: 'COMPLETED_TRANSACTIONS', label: 'Completed transactions', value: transactionsCompleted, description: null },
       { code: 'PENDING_TRANSACTIONS', label: 'Pending transactions', value: transactionsPending, description: null },
       { code: 'FAILED_TRANSACTIONS', label: 'Failed transactions', value: transactionsFailed, description: null },
-      { code: 'GROSS_VOLUME', label: 'Gross volume', value: grossVolume, description: null },
+      // No money here: a number without its currency is how «Валовой оборот»
+      // came to add roubles to USDT. The money is `revenue`.
       { code: 'BROADCAST_DRAFTS', label: 'Broadcast drafts', value: broadcastDrafts, description: null },
       { code: 'IMPORT_DRY_RUN_AVAILABLE', label: 'Imports awaiting commit', value: importDryRunCount, description: null },
     ];
@@ -219,8 +280,9 @@ export class DashboardService {
         completed: transactionsCompleted,
         pending: transactionsPending,
         failed: transactionsFailed,
-        grossVolume,
+        grossVolume: GROSS_VOLUME_WITHDRAWN,
       },
+      revenue,
       operations: {
         broadcastDrafts,
         importDryRunAvailable: importDryRunCount > 0,

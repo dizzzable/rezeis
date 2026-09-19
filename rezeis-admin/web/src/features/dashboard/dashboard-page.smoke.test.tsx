@@ -66,6 +66,11 @@ describe('DashboardPage', () => {
       users: { total: 42, blocked: 3, recentRegistered7d: 5 },
       subscriptions: { active: 11, limited: 2, expired: 7, expiring7d: 8 },
       transactions: { completed: 9, pending: 4, failed: 1, grossVolume: '125.50' },
+      revenue: {
+        figure: { value: 2400, byCurrency: [{ currency: 'RUB', amount: 2400 }] },
+        money: { currency: 'RUB', converted: false, rates: [], unconverted: [] },
+        payments: 7,
+      },
   operations: { broadcastDrafts: 6, importDryRunAvailable: true },
   financeOps: { refundRequests: 2, executedRefunds: 1, correctionNotes: 3, correctionRequests: 4, disputeRecords: 5, reconciliationExceptions: 6 },
       metrics: [
@@ -124,8 +129,11 @@ describe('DashboardPage', () => {
     expect(await screen.findByText('5 registered in 7d')).toBeInTheDocument()
     expect((await screen.findAllByText('11')).length).toBeGreaterThan(0)
     expect(await screen.findByText('2 limited subscriptions')).toBeInTheDocument()
-    expect(await screen.findByText('125.50')).toBeInTheDocument()
-    expect(await screen.findByText('9 completed transactions')).toBeInTheDocument()
+    // «Выручка за всё время», in its currency — and never the withdrawn gross volume.
+    expect(await screen.findByText('Revenue, all time')).toBeInTheDocument()
+    expect(await screen.findByText('₽2.4K')).toBeInTheDocument()
+    expect(await screen.findByText('7 payments')).toBeInTheDocument()
+    expect(screen.queryByText('125.50')).not.toBeInTheDocument()
     expect((await screen.findAllByText('6')).length).toBeGreaterThan(0)
     expect(await screen.findByText('Broadcast drafts waiting for delivery phases')).toBeInTheDocument()
     expect(await screen.findByText('Needs attention')).toBeInTheDocument()

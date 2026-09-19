@@ -56,15 +56,29 @@ import type { SidebarGroupOrder } from '@/stores/sidebar-store';
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon';
 import type { RbacAction } from '@/features/rbac';
 
+export interface NavPermission {
+  readonly resource: string;
+  readonly action: RbacAction;
+}
+
 export interface NavItem {
   /** i18n key under `adminNav.items.*` */
   readonly key: string;
   readonly path: string;
   readonly icon: ElementType;
-  readonly requiredPermission?: {
-    readonly resource: string;
-    readonly action: RbacAction;
-  };
+  /**
+   * What the page loads with. The dashboard's quick actions take their gates
+   * from here too (`dashboard-quick-actions.tsx`), so an item without one is a
+   * button every role is shown.
+   */
+  readonly requiredPermission?: NavPermission;
+  /**
+   * Permissions that each open a working part of the page on their own — a
+   * tab with its own gate. The item shows when the role holds
+   * `requiredPermission` OR any of these: gating a page must not take it from
+   * a role that can use it.
+   */
+  readonly alsoOpenedBy?: ReadonlyArray<NavPermission>;
 }
 
 export interface NavGroup {
@@ -81,7 +95,8 @@ export function canShowNavItem(
   hasPermission: PermissionChecker,
 ): boolean {
   if (!permissionsLoaded || !item.requiredPermission) return true;
-  return hasPermission(item.requiredPermission.resource, item.requiredPermission.action);
+  const holds = (permission: NavPermission): boolean => hasPermission(permission.resource, permission.action);
+  return holds(item.requiredPermission) || (item.alsoOpenedBy ?? []).some(holds);
 }
 
 export const navGroups: ReadonlyArray<NavGroup> = [
@@ -89,7 +104,20 @@ export const navGroups: ReadonlyArray<NavGroup> = [
     key: 'operations',
     items: [
       { key: 'dashboard', path: '/', icon: LayoutDashboard },
-      { key: 'users', path: '/users', icon: Users },
+      {
+        key: 'users',
+        path: '/users',
+        icon: Users,
+        // The list reads `GET /admin/users` behind `users:view`. The page's two
+        // other tabs work without it: «Массовые операции» only posts ids
+        // (`users:bulk_operations`), and «Чёрный список» has its own read
+        // (`blocked_identities:view`) — a role holding either keeps the item.
+        requiredPermission: { resource: 'users', action: 'view' },
+        alsoOpenedBy: [
+          { resource: 'users', action: 'bulk_operations' },
+          { resource: 'blocked_identities', action: 'view' },
+        ],
+      },
       { key: 'subscriptions', path: '/subscriptions', icon: CreditCard },
       {
         key: 'payments',
@@ -116,7 +144,14 @@ export const navGroups: ReadonlyArray<NavGroup> = [
       { key: 'plans', path: '/plans', icon: Package },
       { key: 'addOns', path: '/add-ons', icon: Puzzle },
       { key: 'promocodes', path: '/promocodes', icon: Tag },
-      { key: 'broadcast', path: '/broadcast', icon: Megaphone },
+      {
+        key: 'broadcast',
+        path: '/broadcast',
+        icon: Megaphone,
+        // Every route of the page sits behind the controller's own
+        // `broadcasts:view` (`admin-broadcast.controller.ts`).
+        requiredPermission: { resource: 'broadcasts', action: 'view' },
+      },
       { key: 'emojiPacks', path: '/emoji-packs', icon: Smile },
     ],
   },
@@ -170,7 +205,14 @@ export const navGroups: ReadonlyArray<NavGroup> = [
   {
     key: 'configuration',
     items: [
-      { key: 'platform', path: '/settings', icon: Settings },
+      {
+        key: 'platform',
+        path: '/settings',
+        icon: Settings,
+        // The whole page is one read of `/admin/settings`, behind `settings:view`
+        // (`settings.controller.ts`) — the default operator role has none.
+        requiredPermission: { resource: 'settings', action: 'view' },
+      },
       { key: 'webReiwa', path: '/web-reiwa', icon: Smartphone },
       {
         key: 'subpageConfig',

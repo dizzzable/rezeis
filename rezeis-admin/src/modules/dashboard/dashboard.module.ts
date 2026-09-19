@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { FxModule } from '../fx/fx.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { AdminDashboardController } from './controllers/admin-dashboard.controller';
 import { AdminQuickSearchController } from './controllers/admin-quick-search.controller';
@@ -13,9 +14,12 @@ import { SystemHealthService } from './services/system-health.service';
  *
  * Includes the Cmd+K cross-domain quick-search backing the
  * `quick-search-overlay.tsx` component on the frontend.
+ *
+ * `FxModule` is imported for the reporting base currency of «Выручка за всё
+ * время», stated the way «Бизнес-аналитика» states money.
  */
 @Module({
-  imports: [AuthModule, RbacModule],
+  imports: [AuthModule, RbacModule, FxModule],
   controllers: [AdminDashboardController, AdminQuickSearchController],
   providers: [DashboardService, QuickSearchService, SystemHealthService],
   exports: [DashboardService, QuickSearchService, SystemHealthService],

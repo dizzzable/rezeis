@@ -28,7 +28,8 @@ export class AdminPaymentAnalyticsController {
   @ApiOperation({
     summary: 'Per-gateway payment performance report',
     description:
-      'Aggregates transactions in the requested window into a per-provider breakdown: GMV, ' +
+      'Aggregates the checkouts started in the requested window (local days of the panel time zone) ' +
+      'into a per-provider breakdown: money received net of refunds, stated in one currency view, ' +
       'success/checkout rates, percentile time-to-pay, top failure reasons, channel mix, ' +
       'period-over-period delta and a daily trend series for sparklines.',
   })

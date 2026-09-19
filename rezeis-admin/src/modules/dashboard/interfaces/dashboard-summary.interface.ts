@@ -9,6 +9,11 @@
  * UI can render every panel without conditional fallbacks.
  */
 
+import type {
+  MoneyFigureInterface,
+  MoneyViewInterface,
+} from '../../business-analytics/interfaces/business-analytics.types';
+
 export type DashboardMetricCode =
   | 'TOTAL_USERS'
   | 'BLOCKED_USERS'
@@ -20,7 +25,6 @@ export type DashboardMetricCode =
   | 'COMPLETED_TRANSACTIONS'
   | 'PENDING_TRANSACTIONS'
   | 'FAILED_TRANSACTIONS'
-  | 'GROSS_VOLUME'
   | 'BROADCAST_DRAFTS'
   | 'IMPORT_DRY_RUN_AVAILABLE';
 
@@ -115,7 +119,28 @@ export interface DashboardTransactionsSummaryInterface {
   readonly completed: number;
   readonly pending: number;
   readonly failed: number;
+  /**
+   * Withdrawn: always `'—'`. It was the sum of every completed amount across
+   * currencies — 1 000 RUB + 10 USDT read «1010», partner-balance spends and
+   * partial refunds included. It stays so a dashboard opened before the update
+   * prints a dash instead of that number; the figure is `revenue`.
+   */
   readonly grossVolume: string;
+}
+
+/**
+ * «Выручка за всё время»: money received over the panel's whole history —
+ * completed payments for more than nothing, net of partial refunds, without
+ * partner-balance spends — by the rule and in the money view of
+ * «Бизнес-аналитика» → «Выручка».
+ */
+export interface DashboardRevenueInterface {
+  /** The value in `money.currency`, and the exact sum in every currency it was made of. */
+  readonly figure: MoneyFigureInterface;
+  /** One currency natively; several in the reporting base at the panel's rates, the ones with no rate named. */
+  readonly money: MoneyViewInterface;
+  /** The payments whose money `figure` is. */
+  readonly payments: number;
 }
 
 export interface DashboardOperationsSummaryInterface {
@@ -137,6 +162,7 @@ export interface DashboardSummaryInterface {
   readonly users: DashboardUsersSummaryInterface;
   readonly subscriptions: DashboardSubscriptionsSummaryInterface;
   readonly transactions: DashboardTransactionsSummaryInterface;
+  readonly revenue: DashboardRevenueInterface;
   readonly operations: DashboardOperationsSummaryInterface;
   readonly financeOps: DashboardFinanceOpsSummaryInterface;
   readonly metrics: readonly DashboardMetricInterface[];

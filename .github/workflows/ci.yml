@@ -210,3 +210,5 @@ jobs:
           test/account-merge-recovery-hold-postgres.spec.ts
           test/imported-payments-backfill-postgres.spec.ts
           test/moy-nalog-receipt-race-postgres.spec.ts
+          test/payment-analytics-postgres.spec.ts
+          test/dashboard-revenue-postgres.spec.ts

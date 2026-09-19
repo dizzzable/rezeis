@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
+import type { MoneyFigure, MoneyView } from '@/features/analytics/analytics-api'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -16,7 +17,6 @@ export type DashboardMetricCode =
   | 'COMPLETED_TRANSACTIONS'
   | 'PENDING_TRANSACTIONS'
   | 'FAILED_TRANSACTIONS'
-  | 'GROSS_VOLUME'
   | 'BROADCAST_DRAFTS'
   | 'IMPORT_DRY_RUN_AVAILABLE'
 
@@ -90,6 +90,19 @@ export interface DashboardAttentionItemInterface {
   readonly status: 'ACTIVE' | 'PENDING' | 'RESOLVED'
 }
 
+/**
+ * «Выручка за всё время»: money received over the panel's whole history —
+ * completed payments above zero, net of refunds, without partner-balance
+ * spends — by the rule and in the money view of «Бизнес-аналитика» → «Выручка».
+ */
+export interface DashboardRevenue {
+  /** The value in `money.currency`, and the exact sum in every currency it was made of. */
+  readonly figure: MoneyFigure
+  readonly money: MoneyView
+  /** The payments whose money `figure` is. */
+  readonly payments: number
+}
+
 export interface DashboardSummaryInterface {
   readonly checkedAt: string
   readonly users: {
@@ -107,8 +120,18 @@ export interface DashboardSummaryInterface {
     readonly completed: number
     readonly pending: number
     readonly failed: number
+    /**
+     * Withdrawn: the server sends `'—'`. It was every completed amount added
+     * across currencies («1 000 RUB + 10 USDT» read «1010»). Never shown; the
+     * figure is `revenue`.
+     */
     readonly grossVolume: string
   }
+  /**
+   * Optional on purpose: a summary a panel a release behind wrote into the
+   * cache has none, and the tile then says «—» instead of a number.
+   */
+  readonly revenue?: DashboardRevenue
   readonly operations: {
     readonly broadcastDrafts: number
     readonly importDryRunAvailable: boolean

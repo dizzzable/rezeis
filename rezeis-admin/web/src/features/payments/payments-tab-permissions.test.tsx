@@ -66,14 +66,23 @@ const HEALTH = {
   generatedAt: '2026-06-04T10:00:00.000Z',
 }
 
+// The report as the panel sends it since its money follows «Бизнес-аналитика»:
+// with the currency its figures are in. The tab refuses one without it.
 const PROVIDERS_REPORT = {
   windowDays: 30,
   windowStart: '2026-05-05T00:00:00.000Z',
   previousWindowStart: '2026-04-05T00:00:00.000Z',
+  previousWindowEnd: '2026-05-05T00:00:00.000Z',
   generatedAt: '2026-06-04T00:00:00.000Z',
-  totalGrossRevenue: 0,
+  timeZone: 'UTC',
+  timeZoneFallback: false,
+  money: { currency: 'RUB', converted: false, rates: [], unconverted: [] },
+  revenue: { value: 0, byCurrency: [] },
+  payments: 0,
+  partnerBalance: { figure: { value: 0, byCurrency: [] }, payments: 0 },
   totalTransactions: 0,
   totalCompleted: 0,
+  totalPaid: 0,
   providers: [],
 }
 

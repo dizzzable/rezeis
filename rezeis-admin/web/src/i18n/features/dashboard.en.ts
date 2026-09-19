@@ -16,34 +16,6 @@ export const en = {
       primaryMetricLabel: 'Total users',
       secondaryMetricLabel: 'Completed transactions',
     },
-    stats: {
-      loadingChange: 'Loading backend-owned dashboard metric…',
-      totalUsers: {
-        label: 'Total users',
-        value: '18,420',
-        change: 'Waiting for backend summary',
-      },
-      activeSubscriptions: {
-        label: 'Active subscriptions',
-        value: '1,284',
-        change: 'Limited subscriptions shown as watch pressure',
-      },
-      grossVolume: {
-        label: 'Gross volume',
-        value: '$42.8k',
-        change: 'Waiting for backend summary',
-      },
-      broadcastDrafts: {
-        label: 'Broadcast drafts',
-        value: '0',
-        change: 'Waiting for delivery phases',
-      },
-      financeOps: {
-        label: 'Finance ops records',
-        value: '0',
-        change: 'Refunds, correction notes, disputes, and reconciliation records',
-      },
-    },
     needsAttention: {
       title: 'Needs attention',
       description: 'Read-only operational counters that help operators decide where to drill in next. No raw user, payment, subscription, or provider identifiers are shown here.',
@@ -151,8 +123,18 @@ export const en = {
       totalUsersDescription: '{{count}} registered in 7d',
       activeSubscriptions: 'Active subscriptions',
       activeSubscriptionsDescription: '{{count}} limited subscriptions',
-      grossVolume: 'Gross volume',
-      grossVolumeDescription: '{{count}} completed transactions',
+      revenue: 'Revenue, all time',
+      revenuePayments_one: '{{count, number}} payment',
+      revenuePayments_other: '{{count, number}} payments',
+      revenueUnconverted: 'plus {{amount}} with no rate',
+      revenueInfo:
+        'All the money over the whole payment history, payments imported from another bot included: completed payments above zero, less refunds (a partial refund is subtracted). Purchases paid from a partner’s balance are left out: that money was counted when their referrals paid. Counted exactly as “Revenue” in Business analytics, which shows the same sum for a chosen period.',
+      revenueConverted: 'Amounts in other currencies are converted to {{currency}} at the panel’s rates as of {{date}}: {{rates}}.',
+      revenueNoRate_one: '{{currencies}} has no rate — that money is not in the sum: {{amount}}.',
+      revenueNoRate_other: '{{currencies}} have no rate — that money is not in the sum: {{amount}}.',
+      revenueWhereToSetRate:
+        'The panel has no screen for rates yet: a rate is set with a POST /api/admin/advertising/fx-rates request, which needs the “Advertising: Edit” permission.',
+      aboutLabel: 'About: {{title}}',
       broadcastDrafts: 'Broadcast drafts',
       broadcastDraftsDescription: 'Broadcast drafts waiting for delivery phases',
       expiring7d: 'Subscriptions expiring in 7 days',
