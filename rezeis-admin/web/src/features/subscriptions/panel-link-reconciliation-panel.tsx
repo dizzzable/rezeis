@@ -91,6 +91,7 @@ import {
   type PanelLinkReconciliationRequest,
   type PanelLinkReconciliationRow,
 } from './panel-link-reconciliation-api'
+import { ownerProofKind, OWNER_UNPROVEN } from './owner-proof'
 
 /**
  * Everything the operator has learned in this sweep, across however many
@@ -187,12 +188,19 @@ interface OutcomeGroup {
   readonly rows: readonly KeyedRow[]
 }
 
-/** Known outcomes in their declared order; anything newer sorts after them. */
+/**
+ * Known outcomes in their declared order; anything newer sorts after them.
+ *
+ * Grouped by the outcome AS SHOWN: a `notOwned` row whose reason says nothing
+ * proves the owner becomes {@link OWNER_UNPROVEN} and gets its own heading and
+ * remedy, right after `notOwned` — see `owner-proof.ts`.
+ */
 function groupByOutcome(rows: readonly PanelLinkReconciliationRow[]): readonly OutcomeGroup[] {
   const groups = new Map<string, PanelLinkReconciliationRow[]>()
   for (const row of rows) {
-    const existing = groups.get(row.outcome)
-    if (existing === undefined) groups.set(row.outcome, [row])
+    const shown = ownerProofKind(row.outcome, row.reason)
+    const existing = groups.get(shown)
+    if (existing === undefined) groups.set(shown, [row])
     else existing.push(row)
   }
   return [...groups.entries()]
@@ -207,9 +215,14 @@ function groupByOutcome(rows: readonly PanelLinkReconciliationRow[]): readonly O
       return { outcome, rows: keyed }
     })
     .sort((a, b) => {
-      const byRank = outcomeRank(a.outcome) - outcomeRank(b.outcome)
+      const byRank = shownOutcomeRank(a.outcome) - shownOutcomeRank(b.outcome)
       return byRank !== 0 ? byRank : a.outcome.localeCompare(b.outcome)
     })
+}
+
+/** The unproven kind sorts with `notOwned`, the code it was split from. */
+function shownOutcomeRank(outcome: string): number {
+  return outcomeRank(outcome === OWNER_UNPROVEN ? 'notOwned' : outcome)
 }
 
 /**
@@ -218,6 +231,7 @@ function groupByOutcome(rows: readonly PanelLinkReconciliationRow[]): readonly O
  * nobody can act on.
  */
 function outcomeLabel(t: TFunction, outcome: string): string {
+  if (outcome === OWNER_UNPROVEN) return t('panelLinkReconciliation.outcomes.ownerUnproven')
   if (isKnownOutcome(outcome)) return t(`panelLinkReconciliation.outcomes.${outcome}`)
   return outcome.length > 0 ? outcome : t('panelLinkReconciliation.fieldMissing')
 }
@@ -866,6 +880,13 @@ function RowSection({
                 rows: group.rows.length,
               })}
             </p>
+            {/* "Nobody proved whose it is" needs a next step that "it is
+                somebody else's" must not have: how to prove it. */}
+            {group.outcome === OWNER_UNPROVEN ? (
+              <p className="text-xs text-muted-foreground">
+                {t('panelLinkReconciliation.ownerUnprovenRemedy')}
+              </p>
+            ) : null}
             <Table>
               <TableHeader>
                 <TableRow>

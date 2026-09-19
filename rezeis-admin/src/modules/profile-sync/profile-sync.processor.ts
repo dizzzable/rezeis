@@ -26,6 +26,7 @@ import {
 import { PanelInfraClient } from '../remnawave/services/panel-infra.client';
 import {
   PanelUsersClient,
+  type PanelUser,
   type UpdatePanelUserBody,
 } from '../remnawave/services/panel-users.client';
 import {
@@ -37,6 +38,7 @@ import {
   PROFILE_SYNC_MAX_ATTEMPTS,
   PROFILE_SYNC_QUEUE,
 } from './profile-sync.constants';
+import { readProfileOwnerMarker, readProfileOwnerMarkers } from './panel-owner-marker';
 import { ProfileSyncQueueService } from './profile-sync-queue.service';
 import { RemnawaveProfileNamingService } from './remnawave-profile-naming.service';
 
@@ -127,7 +129,11 @@ export class ProfileSyncProcessor extends WorkerHost {
     try {
       switch (syncJob.action) {
         case SyncAction.CREATE:
-          await this.handleCreate(syncJob);
+          // An ADOPTED profile carries whatever state it had, so it gets the
+          // PATCH an UPDATE sends before the job may complete.
+          if ((await this.handleCreate(syncJob)) === 'adopted') {
+            await this.handleUpdate(syncJob);
+          }
           break;
         case SyncAction.UPDATE:
           await this.handleUpdate(syncJob);
@@ -312,6 +318,9 @@ export class ProfileSyncProcessor extends WorkerHost {
             // between a lazy re-resolve and a permanently unreachable profile.
             remnawavePanelId: true,
             remnawavePanelUsername: true,
+            // What the last CREATE recorded before its POST — see `handleCreate`.
+            remnawavePendingUsername: true,
+            remnawavePendingOwnerId: true,
             configUrl: true,
             trafficLimit: true,
             deviceLimit: true,
@@ -745,12 +754,12 @@ export class ProfileSyncProcessor extends WorkerHost {
      * outbound webhook.
      */
     reprovision = false,
-  ): Promise<void> {
+  ): Promise<CreateOutcome | 'updated'> {
     const subscription = syncJob.subscription;
     if (subscription.remnawaveId !== null) {
       // Already provisioned — treat as update instead
       await this.handleUpdate(syncJob);
-      return;
+      return 'updated';
     }
 
     // Generate profile name using the naming service.
@@ -768,6 +777,27 @@ export class ProfileSyncProcessor extends WorkerHost {
         `Generated profile name '${naming.username}' exceeds Remnawave's ${PANEL_USERNAME_MAX_LENGTH}-character limit; using '${panelUsername}' for subscription ${subscription.id}`,
       );
     }
+    // The names a NEW profile may take, in order: today's rule, then the
+    // fallbacks for a name that belongs to somebody else. Clamped exactly like
+    // `panelUsername`, for the same reason.
+    const creatableNames = distinctPanelUsernames([
+      panelUsername,
+      ...(naming.fallbackUsernames ?? []).map(clampPanelUsername),
+    ]);
+    // Every name this subscription's profile may ALREADY carry, most
+    // authoritative first: the name this purchase's last CREATE recorded before
+    // its POST, the name the panel gave the profile when it was last linked,
+    // today's rule, the login-first rule before it (a customer who linked
+    // Telegram since computes a different name now — a profile's name never
+    // changes), and the fallbacks. See `findOwnPanelProfile`.
+    const recorded = recordedCreateOf(subscription);
+    const lookupNames = distinctPanelUsernames([
+      recorded?.name ?? null,
+      readPanelString(subscription.remnawavePanelUsername),
+      panelUsername,
+      ...(naming.legacyUsernames ?? []).map(clampPanelUsername),
+      ...creatableNames,
+    ]);
     const contacts = await this.namingService.getContactInfo(subscription.userId);
 
     // Read plan snapshot for squads/limits
@@ -791,81 +821,45 @@ export class ProfileSyncProcessor extends WorkerHost {
     // transient blip therefore permanently failed a paid provision. Now the
     // absence has to be the panel's own `404` + `A025`/`A063`; anything else is
     // raised with its own classification and retried or reported on its merits.
-    const lookup = await this.panelUsers.getUserByUsername(panelUsername);
-    if (lookup.kind !== 'ok') {
-      const failure = readPanelFailure(lookup);
-      if (failure.kind !== 'missing') {
-        throw this.panelFailure(
-          failure,
-          `Looking up Remnawave profile '${panelUsername}' for subscription ${subscription.id}`,
-        );
-      }
+    //
+    // ASKED UNDER EVERY NAME THE PROFILE MAY CARRY, not only today's — see
+    // `findOwnPanelProfile` for why each name is on the list and what makes a
+    // profile found under one of them this subscription's.
+    const search = await this.findOwnPanelProfile(subscription, lookupNames, recorded);
+    if (search.kind === 'recordedUnproven') {
+      // Neither adopted nor created around. The profile may be the one this
+      // purchase's interrupted CREATE made, its `reiwa_id` line since edited
+      // out: a second profile would duplicate a paid one, and adopting a
+      // description that proves nobody could hand this customer a stranger's.
+      // Classified TERMINAL on purpose, so an operator is told.
+      throw new Error(
+        `Refusing to provision subscription ${subscription.id}: Remnawave already has a user named ` +
+          `'${search.name}', the name this subscription's last CREATE chose before it was cut off, and ` +
+          "that user's description has no single 'reiwa_id' line naming its owner. If it is this " +
+          "customer's, link it on the customer's card; if it is not, rename or remove it in Remnawave " +
+          'and retry the sync.',
+      );
     }
-    if (lookup.kind === 'ok') {
-      const existing = lookup.data.response;
+    if (search.kind === 'contested') {
+      throw new Error(
+        `Refusing to link Remnawave profile '${String(search.panelId)}' to subscription ` +
+          `${subscription.id}: subscription ${search.holder.id} (user ${search.holder.userId}) is already ` +
+          'live on it. Two subscriptions sharing one panel profile overwrite each other and ' +
+          "delete each other's service.",
+      );
+    }
+    if (search.kind === 'adopt') {
+      const existing = search.profile;
       // The panel's own identity for this row. On 3.x that is the numeric id in
       // decimal — there is no uuid to prefer, and `Subscription.remnawaveId`
       // stores exactly this spelling for anything provisioned since.
-      const existingPanelId = readPanelUserId(existing);
-      if (existingPanelId === null) {
-        throw new Error(
-          `Refusing to adopt Remnawave profile '${panelUsername}' for subscription ` +
-            `${subscription.id}: the panel's answer carries no usable numeric id, so nothing ` +
-            'here names a profile. Linking it would record a dead identity on a live row.',
-        );
-      }
+      const existingPanelId = search.panelId;
       const existingRemnawaveId = String(existingPanelId);
-      // "A profile answers to this name" is not "this profile is mine" — see
-      // `assertPanelProfileOwnership`.
-      assertPanelProfileOwnership(panelUsername, existing.description, subscription.userId);
-      // …and "this profile is this user's" is not "this profile is FREE". The
-      // ownership check reads a marker in the panel description, which says
-      // whose profile it is and nothing about which of that user's
-      // subscriptions already holds it. Adopting one that another live
-      // subscription is on puts two rows on one panel profile: they then write
-      // each other's limits and expiry through it, and whichever is deleted
-      // first takes the other's service down. The database cannot forbid it —
-      // `remnawaveId` carries no unique constraint, and migration
-      // 20260810160000 records why one cannot safely be added to live data — so
-      // it is refused here, where the refusal can name both rows instead of
-      // aborting a deploy.
-      //
-      // Only the ADOPT path needs this. A profile the panel has just minted
-      // carries an identity no existing row can be holding.
-      //
-      // ASKED ABOUT THE PANEL IDENTITY, NOT ABOUT ONE STRING. The panel names
-      // this profile by its numeric id, and that is what a row provisioned on
-      // 3.x stores in `remnawaveId`. Every subscription provisioned or imported
-      // BEFORE the operator upgraded still stores the 2.x UUID there — so a
-      // check that only compares `remnawaveId` compares a decimal against a
-      // uuid and can never match. It would be inert for exactly the population
-      // this guard exists to protect. The two supplementary columns name the
-      // same profile the other way round, and the panel username is the key a
-      // resolve would land on, so all three are asked at once.
       const existingUsername = readPanelString(existing.username);
-      const holderClaims: Prisma.SubscriptionWhereInput[] = [
-        { remnawaveId: existingRemnawaveId },
-        { remnawavePanelId: existingPanelId },
-      ];
-      if (existingUsername !== null) {
-        holderClaims.push({ remnawavePanelUsername: existingUsername });
-      }
-      const holder = await this.prismaService.subscription.findFirst({
-        where: {
-          id: { not: subscription.id },
-          status: { not: SubscriptionStatus.DELETED },
-          OR: holderClaims,
-        },
-        select: { id: true, userId: true },
-      });
-      if (holder !== null) {
-        throw new Error(
-          `Refusing to link Remnawave profile '${existingRemnawaveId}' to subscription ` +
-            `${subscription.id}: subscription ${holder.id} (user ${holder.userId}) is already ` +
-            'live on it. Two subscriptions sharing one panel profile overwrite each other and ' +
-            "delete each other's service.",
-        );
-      }
+      // The name the profile answers to: its stored name, the login-first name
+      // or a fallback as often as today's `panelUsername`. The log line and the
+      // operator card name the profile that was linked.
+      const adoptedUsername = existingUsername ?? search.name;
       const deleteScheduled = await this.persistProfileLink(
         subscription.id,
         existingRemnawaveId,
@@ -883,20 +877,38 @@ export class ProfileSyncProcessor extends WorkerHost {
         this.logger.warn(
           `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existingRemnawaveId}'`,
         );
-        return;
+        return 'deleted';
       }
       this.logger.log(
-        `Linked existing Remnawave profile '${existingRemnawaveId}' (username: ${panelUsername}) to subscription ${subscription.id}`,
+        `Linked existing Remnawave profile '${existingRemnawaveId}' (username: ${adoptedUsername}) to subscription ${subscription.id}`,
       );
+      if (search.staleNameHolder !== null) {
+        // Nothing is changed on that row — only an operator can say what its
+        // stored name should be — but it is named, once, where they look.
+        const stale = search.staleNameHolder;
+        const message =
+          `Subscription ${stale.id} (user ${stale.userId}) carries the name '${adoptedUsername}' of ` +
+          `Remnawave profile '${existingRemnawaveId}', which is user ${subscription.userId}'s by its ` +
+          `reiwa_id line and is now linked to subscription ${subscription.id}. That stored name is stale: ` +
+          "the row's own panel identity points at a different profile. Nothing was changed on it.";
+        this.logger.warn(message);
+        this.events.warn(EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC, 'SYSTEM', message, {
+          subscriptionId: subscription.id,
+          userId: subscription.userId,
+          remnawaveId: existingRemnawaveId,
+          staleNameSubscriptionId: stale.id,
+          staleNameUserId: stale.userId,
+        });
+      }
       // Same card as the CREATE branch below, so the same fields: which branch
       // ran is an internal detail, and an operator reading two notifications
       // titled "Подписка создана" must not get the plan named in one and not
       // the other.
-      this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${panelUsername}`, {
+      this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile linked: ${adoptedUsername}`, {
         subscriptionId: subscription.id,
         userId: subscription.userId,
         remnawaveId: existingRemnawaveId,
-        remnawaveUsername: panelUsername,
+        remnawaveUsername: adoptedUsername,
         ...(readOptionalString(planSnapshot, 'name') !== undefined
           ? { planName: readOptionalString(planSnapshot, 'name') }
           : {}),
@@ -907,11 +919,37 @@ export class ProfileSyncProcessor extends WorkerHost {
       });
       if (!reprovision) this.announceTrialGranted(
         syncJob,
-        panelUsername,
+        adoptedUsername,
         readOptionalString(planSnapshot, 'name'),
         expireAt,
       );
-      return;
+      // LINKED IS NOT UP TO DATE. The profile carries whatever the panel had:
+      // the expiry and limits of an earlier attempt, ACTIVE for an owner
+      // blocked since, the description of a previous owner. Every caller
+      // pushes the desired state next, as an UPDATE (`process`, `handleUpdate`).
+      return 'adopted';
+    }
+
+    // Nothing the panel holds is this subscription's, so it gets a new profile
+    // under the first name nobody holds: today's name when it is free, else the
+    // first free fallback. A customer whose name another customer's profile
+    // holds is therefore provisioned under a name of their own — the same one
+    // on every retry — instead of being refused for good or handed the other
+    // customer's profile.
+    const createUsername = creatableNames.find((name) => search.free.has(name));
+    if (createUsername === undefined) {
+      throw new Error(
+        `Refusing to create a Remnawave profile for subscription ${subscription.id}: every name ` +
+          `it may take (${creatableNames.join(', ')}) belongs to a profile that is not provably ` +
+          `user ${subscription.userId}'s. Check those profiles in Remnawave; if one of them is this ` +
+          "customer's but its description has no 'reiwa_id' line, link it to the subscription by hand.",
+      );
+    }
+    if (createUsername !== panelUsername) {
+      this.logger.warn(
+        `Remnawave profile name '${panelUsername}' belongs to a profile that is not provably user ` +
+          `${subscription.userId}'s; creating subscription ${subscription.id}'s profile as '${createUsername}'`,
+      );
     }
 
     // A blocked owner is DISABLED from the moment the profile exists.
@@ -931,14 +969,43 @@ export class ProfileSyncProcessor extends WorkerHost {
     const ownerBlocked = subscription.user?.isBlocked === true;
     if (ownerBlocked) {
       this.logger.warn(
-        `Creating Remnawave profile '${panelUsername}' DISABLED: subscription ` +
+        `Creating Remnawave profile '${createUsername}' DISABLED: subscription ` +
           `${subscription.id} belongs to a blocked account`,
+      );
+    }
+
+    // THE NAME IS RECORDED BEFORE THE PANEL IS ASKED FOR IT, and durably. The
+    // POST can commit and its answer be lost, and the link write after it can
+    // fail; either way the job is retried, and the retry computes the name
+    // again from inputs that may have moved in between — the @username is
+    // rewritten on every /start, an operator edits the prefix, Telegram is
+    // unlinked, an account merge moves the subscription. Asked for today's
+    // names only, the panel answers 404 to every one of them and a second
+    // profile is minted beside the first, which stays live with the paid
+    // expiry until the next Remnawave import turns it into a second
+    // subscription. The retry asks for this name first (`recordedCreateOf`).
+    //
+    // The owner goes with it: a merge between the attempts moves the row to
+    // another customer, while the profile's marker still names the one it was
+    // made for. Only `remnawave_id IS NULL` is recorded over: a row linked in
+    // the meantime gets no second profile.
+    const recordedNow = await this.prismaService.subscription.updateMany({
+      where: { id: subscription.id, remnawaveId: null },
+      data: {
+        remnawavePendingUsername: createUsername,
+        remnawavePendingOwnerId: subscription.userId,
+      },
+    });
+    if (recordedNow.count !== 1) {
+      throw new ServiceUnavailableException(
+        `Not creating a Remnawave profile for subscription ${subscription.id}: the row was linked or ` +
+          'removed while this CREATE ran. The retry reads it again.',
       );
     }
 
     // Create user on Remnawave panel
     const created = await this.panelUsers.createUser({
-      username: panelUsername,
+      username: createUsername,
       ...(ownerBlocked ? { status: 'DISABLED' as const } : {}),
       telegramId: contacts.telegramId ? Number(contacts.telegramId) : null,
       email: contacts.email,
@@ -963,7 +1030,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     if (created.kind !== 'ok') {
       throw this.panelFailure(
         readPanelFailure(created),
-        `Creating Remnawave profile '${panelUsername}' for subscription ${subscription.id}`,
+        `Creating Remnawave profile '${createUsername}' for subscription ${subscription.id}`,
       );
     }
     const panelUser = created.data.response;
@@ -998,11 +1065,11 @@ export class ProfileSyncProcessor extends WorkerHost {
       this.logger.warn(
         `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${remnawaveId}'`,
       );
-      return;
+      return 'deleted';
     }
 
     this.logger.log(
-      `Created Remnawave profile '${remnawaveId}' (username: ${panelUsername}) for subscription ${subscription.id}`,
+      `Created Remnawave profile '${remnawaveId}' (username: ${createUsername}) for subscription ${subscription.id}`,
     );
 
     // Emit event
@@ -1016,18 +1083,186 @@ export class ProfileSyncProcessor extends WorkerHost {
     // `planSnapshot` and `expireAt` are the ones already read above for the
     // panel payload — the same values, not a second reading of the same row.
     const planName = readOptionalString(planSnapshot, 'name');
-    this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${panelUsername}`, {
+    this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${createUsername}`, {
       subscriptionId: subscription.id,
       userId: subscription.userId,
       remnawaveId,
-      remnawaveUsername: panelUsername,
+      remnawaveUsername: createUsername,
       ...(planName !== undefined ? { planName } : {}),
       expireAt,
       ...(typeof subscription.deviceLimit === 'number'
         ? { deviceLimit: subscription.deviceLimit }
         : {}),
     });
-    if (!reprovision) this.announceTrialGranted(syncJob, panelUsername, planName, expireAt);
+    if (!reprovision) this.announceTrialGranted(syncJob, createUsername, planName, expireAt);
+    return 'created';
+  }
+
+  /**
+   * Looks for the panel profile THIS subscription already has, before a CREATE
+   * mints one. Every name on `names` is asked; the first profile that is
+   * provably this customer's and free is returned for adoption.
+   *
+   * WHY SEVERAL NAMES. A profile's name is fixed when it is created — no
+   * Remnawave version renames through its API — while the name this
+   * subscription COMPUTES can move: the rule of 18.09.2026 puts a linked
+   * Telegram @username before the login, and an @username changes; an
+   * operator can change the prefix; a fallback may have been taken. A lookup
+   * under today's name alone misses such a profile and mints a second one,
+   * leaving the first live with nobody's link on it. So the caller passes, in
+   * this order: the name this purchase's last CREATE RECORDED before its POST,
+   * the stored name, today's name, the login-first name and the fallbacks.
+   * The recorded name is the one that covers a retry whatever moved between
+   * the attempts — nick, login, prefix, Telegram link, owner. The login-first
+   * name covers profiles made before the rule changed; a prefix changed since
+   * a profile was made is covered only by the recorded or the stored name.
+   *
+   * WHAT MAKES A PROFILE THIS SUBSCRIPTION'S:
+   *  • its description has the line `reiwa_id: <this user>` — PROVEN, not
+   *    merely "not disproven". A profile with no marker, or with another
+   *    customer's, is somebody else's: a hand-made or donor profile named like
+   *    our scheme, or customer A whose login `johnny` gives the same name as
+   *    customer B's @johnny. Adopting it would hand B the other profile — its
+   *    traffic, its devices, its config link. Our own CREATE always writes the
+   *    marker, so a profile an earlier attempt made always carries it. Under
+   *    the RECORDED name the customer it was recorded for counts as well: an
+   *    account merge between two attempts moves the row, not the marker.
+   *  • no other live subscription is on it. The marker says WHOSE profile it
+   *    is and nothing about which of that user's subscriptions holds it.
+   *    Adopting one another live subscription is on puts two rows on one panel
+   *    profile: they then write each other's limits and expiry through it, and
+   *    whichever is deleted first takes the other's service down. The database
+   *    cannot forbid it — `remnawaveId` carries no unique constraint, and
+   *    migration 20260810160000 records why one cannot safely be added to live
+   *    data.
+   *
+   * A PROFILE OF THIS CUSTOMER'S THAT ANOTHER ROW HOLDS IS `contested`, and the
+   * CREATE refuses as it always has — unless another name turns up a profile it
+   * can adopt. A row holds it through the panel identity (id or numeric id), or
+   * — when it is this customer's own row — through the name. Minting a new one
+   * instead is not safe: such a holder may be a duplicate row for the same
+   * purchase (the importer's uuid-versus-decimal miss produced exactly those),
+   * which a second profile would turn into a second free subscription. Only an
+   * operator can tell.
+   *
+   * ANOTHER CUSTOMER'S ROW THAT CARRIES ONLY THE NAME is a stale name, not a
+   * holder: its identity names a different profile. The marker says whose the
+   * profile is, and it is adopted (owner's decision, 19.09.2026). Refusing left
+   * a paid subscription FAILED — naming by @username makes the collision
+   * common, because a handle changes hands on Telegram — and taking a fresh
+   * name instead left this customer's profile live and unlinked, which the next
+   * Remnawave import turns into a second subscription. The same holds when the
+   * name is this row's own STORED name: the rows the 3.x decode defect left with
+   * a name and no id. That other row still names a profile it is not on, so it
+   * is reported once the link is written (`handleCreate`).
+   *
+   * A PROFILE UNDER THE RECORDED NAME THAT PROVES NO OWNER is
+   * `recordedUnproven` unless another name finds one to adopt. It may be this
+   * purchase's profile with its marker edited out, or a stranger's that won
+   * the name; only an operator can tell, and neither a second profile nor an
+   * adoption is safe.
+   *
+   * ASKED ABOUT THE PANEL IDENTITY, NOT ABOUT ONE STRING. Every subscription
+   * provisioned or imported BEFORE the operator upgraded to 3.x still stores
+   * the 2.x UUID in `remnawaveId`, so a check comparing only that column would
+   * compare a decimal against a uuid and never match. The two supplementary
+   * columns name the same profile the other way round, and the panel username
+   * is the key a resolve would land on, so all three are asked at once.
+   *
+   * ONLY A GENUINE ABSENCE COUNTS AS FREE: anything but the panel's own `404`
+   * is raised with its own classification, and nothing is created on a
+   * partial answer.
+   */
+  private async findOwnPanelProfile(
+    subscription: SyncJobRecord['subscription'],
+    names: readonly string[],
+    recorded: RecordedCreate | null,
+  ): Promise<OwnPanelProfileSearch> {
+    const free = new Set<string>();
+    let contested: Extract<OwnPanelProfileSearch, { kind: 'contested' }> | null = null;
+    let recordedUnproven: Extract<OwnPanelProfileSearch, { kind: 'recordedUnproven' }> | null = null;
+    for (const name of names) {
+      const lookup = await this.panelUsers.getUserByUsername(name);
+      if (lookup.kind !== 'ok') {
+        const failure = readPanelFailure(lookup);
+        if (failure.kind !== 'missing') {
+          throw this.panelFailure(
+            failure,
+            `Looking up Remnawave profile '${name}' for subscription ${subscription.id}`,
+          );
+        }
+        free.add(name);
+        continue;
+      }
+      const existing = lookup.data.response;
+      const owner = readProfileOwnerMarker(existing.description);
+      const isRecorded = recorded !== null && name === recorded.name;
+      if (isRecorded && owner === null) {
+        this.logger.warn(
+          `Remnawave profile '${name}', the name subscription ${subscription.id}'s last CREATE ` +
+            'recorded, proves no owner; not adopting it and creating nothing beside it',
+        );
+        recordedUnproven ??= { kind: 'recordedUnproven', name };
+        continue;
+      }
+      const ours =
+        owner === subscription.userId ||
+        (isRecorded && owner !== null && owner === recorded.ownerId);
+      if (!ours) {
+        this.logger.warn(
+          `Remnawave profile '${name}' is not provably user ${subscription.userId}'s ` +
+            `(reiwa_id line: ${owner ?? 'none'}); not adopting it for subscription ${subscription.id}`,
+        );
+        continue;
+      }
+      const existingPanelId = readPanelUserId(existing);
+      if (existingPanelId === null) {
+        throw new Error(
+          `Refusing to adopt Remnawave profile '${name}' for subscription ` +
+            `${subscription.id}: the panel's answer carries no usable numeric id, so nothing ` +
+            'here names a profile. Linking it would record a dead identity on a live row.',
+        );
+      }
+      const existingRemnawaveId = String(existingPanelId);
+      const existingUsername = readPanelString(existing.username);
+      // ON IT: the same panel identity from any row, the same name from one of
+      // this customer's own rows.
+      const holderClaims: Prisma.SubscriptionWhereInput[] = [
+        { remnawaveId: existingRemnawaveId },
+        { remnawavePanelId: existingPanelId },
+      ];
+      if (existingUsername !== null) {
+        holderClaims.push({ remnawavePanelUsername: existingUsername, userId: subscription.userId });
+      }
+      const holder = await this.prismaService.subscription.findFirst({
+        where: {
+          id: { not: subscription.id },
+          status: { not: SubscriptionStatus.DELETED },
+          OR: holderClaims,
+        },
+        select: { id: true, userId: true },
+      });
+      if (holder !== null) {
+        contested ??= { kind: 'contested', panelId: existingPanelId, holder };
+        continue;
+      }
+      // Another customer's row that carries only the NAME — its own identity
+      // names a different profile. Adopted all the same; the caller names that
+      // row to the operator once the link is written.
+      const staleNameHolder =
+        existingUsername === null
+          ? null
+          : await this.prismaService.subscription.findFirst({
+              where: {
+                id: { not: subscription.id },
+                status: { not: SubscriptionStatus.DELETED },
+                OR: [{ remnawavePanelUsername: existingUsername }],
+              },
+              select: { id: true, userId: true },
+            });
+      return { kind: 'adopt', name, profile: existing, panelId: existingPanelId, staleNameHolder };
+    }
+    return recordedUnproven ?? contested ?? { kind: 'none', free };
   }
 
 
@@ -1216,6 +1451,10 @@ export class ProfileSyncProcessor extends WorkerHost {
           remnawavePanelId: panelId ?? undefined,
           remnawavePanelUsername: panelUsername ?? undefined,
           configUrl,
+          // Linked: no CREATE is outstanding any more, so nothing is left to
+          // look for under the name the last one recorded.
+          remnawavePendingUsername: null,
+          remnawavePendingOwnerId: null,
         },
       });
       await this.stampMonthRollingAnchor(tx, subscriptionId, panelCreatedAt, current.status);
@@ -1277,8 +1516,15 @@ export class ProfileSyncProcessor extends WorkerHost {
         this.logger.warn(
           `Subscription ${subscription.id} has no remnawaveId during UPDATE; provisioning via CREATE`,
         );
-        await this.handleCreate(current);
-        return;
+        // AN ADOPTED PROFILE STILL NEEDS THIS UPDATE. CREATE links a profile it
+        // did not make exactly as it found it — ACTIVE for an owner blocked
+        // since, the expiry and limits it had — and this job would otherwise be
+        // COMPLETED without a single PATCH. So the next round PATCHes the
+        // profile just linked; the round limit below bounds a panel that
+        // answers "missing" to a profile it has just served.
+        if ((await this.handleCreate(current)) !== 'adopted') return;
+        current = await this.reloadDuringUpdate(syncJob.id);
+        continue;
       }
 
       // Non-null by the guard above; `panelIdentityOf` re-checks so the helper
@@ -1359,7 +1605,10 @@ export class ProfileSyncProcessor extends WorkerHost {
       const address = await this.panelUserIdFor(updateIdentity);
       if (address.kind !== 'ok') {
         if (address.kind === 'missing') {
-          return this.reprovisionThroughCreate(syncJob, subscription, address.detail);
+          // Re-provisioned; an adopted profile gets this UPDATE's PATCH too.
+          if ((await this.reprovisionThroughCreate(syncJob, subscription, address.detail)) !== 'adopted') return;
+          current = await this.reloadDuringUpdate(syncJob.id);
+          continue;
         }
         throw this.panelFailure(address, `Updating subscription ${subscription.id}`);
       }
@@ -1385,7 +1634,10 @@ export class ProfileSyncProcessor extends WorkerHost {
       if (patched.kind !== 'ok') {
         const failure = readPanelFailure(patched);
         if (failure.kind === 'missing') {
-          return this.reprovisionThroughCreate(syncJob, subscription, failure.detail);
+          // Re-provisioned; an adopted profile gets this UPDATE's PATCH too.
+          if ((await this.reprovisionThroughCreate(syncJob, subscription, failure.detail)) !== 'adopted') return;
+          current = await this.reloadDuringUpdate(syncJob.id);
+          continue;
         }
         // Only when the panel ANSWERED. An unreachable panel cannot be asked
         // which squads it knows, and asking a down panel twice on every retry
@@ -1485,8 +1737,18 @@ export class ProfileSyncProcessor extends WorkerHost {
     }
 
     throw new ServiceUnavailableException(
-      `Subscription ${current.subscription.id} changed repeatedly during profile UPDATE`,
+      `Subscription ${current.subscription.id} changed repeatedly during profile UPDATE, or the ` +
+        'panel reported the profile it had just linked as missing',
     );
+  }
+
+  /** The job as it stands now, for the next round of `handleUpdate`. */
+  private async reloadDuringUpdate(syncJobId: string): Promise<SyncJobRecord> {
+    const latest = await this.loadSyncJob(this.prismaService, syncJobId);
+    if (latest === null) {
+      throw new Error(`Profile sync job ${syncJobId} disappeared during UPDATE`);
+    }
+    return latest;
   }
 
   /**
@@ -1515,7 +1777,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     syncJob: SyncJobRecord,
     subscription: SyncJobRecord['subscription'],
     detail: string,
-  ): Promise<void> {
+  ): Promise<CreateOutcome | 'updated'> {
     if (subscription.remnawaveId !== null) {
       await this.reprovisionMissingProfile(subscription.id, subscription.remnawaveId);
     }
@@ -1529,7 +1791,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       `Remnawave profile for subscription ${subscription.id} was missing (${detail}); ` +
         're-provisioning via CREATE',
     );
-    await this.handleCreate(refreshed, true);
+    return this.handleCreate(refreshed, true);
   }
 
   /**
@@ -1917,6 +2179,19 @@ export class ProfileSyncProcessor extends WorkerHost {
           : []),
         ...(identity.panelId !== null ? [`panel id ${identity.panelId}`] : []),
       ].join(', ');
+      if (
+        collision.remnawaveId === null &&
+        collision.remnawavePendingUsername !== undefined &&
+        collision.remnawavePendingUsername !== null &&
+        collision.remnawavePendingUsername === identity.panelUsername
+      ) {
+        throw new Error(
+          `Refusing to delete Remnawave profile '${targetRemnawaveId}' for subscription ` +
+            `${subscription.id}: subscription ${collision.id}'s interrupted CREATE recorded its name ` +
+            `'${identity.panelUsername}' and adopts it on its retry. Deleting it would take the profile ` +
+            'of a subscription that is still being provisioned. Nothing was deleted.',
+        );
+      }
       throw new Error(
         `Refusing to delete Remnawave profile '${targetRemnawaveId}' for subscription ` +
           `${subscription.id}: it is claimed by subscription ${collision.id}, which is live on ` +
@@ -2147,7 +2422,11 @@ export class ProfileSyncProcessor extends WorkerHost {
     subscriptionId: string,
     identity: StoredPanelIdentity,
     targetRemnawaveId: string,
-  ): Promise<{ readonly id: string; readonly remnawaveId: string | null } | null> {
+  ): Promise<{
+    readonly id: string;
+    readonly remnawaveId: string | null;
+    readonly remnawavePendingUsername?: string | null;
+  } | null> {
     // ASKED AS "WHO IS ON THIS PROFILE", NOT "WHO HOLDS AN ID".
     //
     // The question this check exists to answer is what a resolve BY USERNAME
@@ -2174,6 +2453,11 @@ export class ProfileSyncProcessor extends WorkerHost {
     const username = identity.panelUsername;
     if (username !== null && username.length > 0) {
       claims.push({ remnawavePanelUsername: username });
+      // A row whose interrupted CREATE recorded this name is about to adopt the
+      // profile (`handleCreate` asks for the recorded name first): deleting it
+      // takes a paid subscription's profile away before it is ever linked. The
+      // doomed row's own record does not count — it is being retired with it.
+      claims.push({ remnawavePendingUsername: username, id: { not: subscriptionId } });
     }
     if (identity.panelId !== null && Number.isSafeInteger(identity.panelId)) {
       // Both spellings of one numeric id: a row provisioned on 3.x stores the
@@ -2189,7 +2473,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         status: { not: SubscriptionStatus.DELETED },
         OR: claims,
       },
-      select: { id: true, remnawaveId: true },
+      select: { id: true, remnawaveId: true, remnawavePendingUsername: true },
       take: 5,
     });
     // EXACTLY ONE row may be excused: the doomed subscription ITSELF, still
@@ -2498,6 +2782,16 @@ function readPanelString(value: unknown): string | null {
 }
 
 /**
+ * The name this subscription's last CREATE recorded before its POST, and the
+ * customer it recorded it for — `null` when no CREATE is outstanding.
+ */
+function recordedCreateOf(subscription: SyncJobRecord['subscription']): RecordedCreate | null {
+  const name = readPanelString(subscription.remnawavePendingUsername);
+  if (name === null) return null;
+  return { name, ownerId: readPanelString(subscription.remnawavePendingOwnerId) };
+}
+
+/**
  * A panel timestamp as the ISO string the callers downstream parse.
  *
  * The client hands the panel's own JSON over, so a date field arrives as the
@@ -2535,6 +2829,8 @@ type SyncJobRecord = NonNullable<
     remnawaveId: string | null;
     remnawavePanelId: number | null;
     remnawavePanelUsername: string | null;
+    remnawavePendingUsername: string | null;
+    remnawavePendingOwnerId: string | null;
     configUrl: string | null;
     trafficLimit: number | null;
     deviceLimit: number;
@@ -2614,6 +2910,49 @@ interface SyncJobClaim {
   readonly syncJob: SyncJobRecord;
   readonly leaseStartedAt: Date;
 }
+
+/**
+ * What `findOwnPanelProfile` found under the names a subscription's profile
+ * may carry:
+ *  • `adopt` — a profile provably this customer's that no other live
+ *    subscription is on;
+ *  • `contested` — one that is provably this customer's while another live
+ *    row claims it, and no other name found one to adopt;
+ *  • `recordedUnproven` — a profile exists under the name this subscription's
+ *    last CREATE recorded, and its description proves no owner: it may be the
+ *    very profile that CREATE made, with its marker edited out;
+ *  • `none` — nothing of this subscription's; `free` holds the names the panel
+ *    said nobody has.
+ */
+type OwnPanelProfileSearch =
+  | {
+      readonly kind: 'adopt';
+      readonly name: string;
+      readonly profile: PanelUser;
+      readonly panelId: number;
+      /** Another customer's row that still carries this profile's NAME — reported once linked. */
+      readonly staleNameHolder: { readonly id: string; readonly userId: string } | null;
+    }
+  | {
+      readonly kind: 'contested';
+      readonly panelId: number;
+      readonly holder: { readonly id: string; readonly userId: string };
+    }
+  | { readonly kind: 'recordedUnproven'; readonly name: string }
+  | { readonly kind: 'none'; readonly free: ReadonlySet<string> };
+
+/**
+ * The name the last CREATE of a subscription chose, and the customer it chose
+ * it for — `Subscription.remnawavePendingUsername` / `remnawavePendingOwnerId`,
+ * written before the POST (see `handleCreate`).
+ */
+interface RecordedCreate {
+  readonly name: string;
+  readonly ownerId: string | null;
+}
+
+/** What `handleCreate` did: the caller brings an ADOPTED profile up to date. */
+type CreateOutcome = 'created' | 'adopted' | 'deleted';
 
 type RecoveryClassification = 'TRANSIENT' | 'TERMINAL';
 
@@ -2851,12 +3190,16 @@ const PANEL_USERNAME_DIGEST_LENGTH = 10;
  *     and every process, for the same reason.
  *
  * Truncation alone would break a third property — injectivity. Two logins
- * sharing a long prefix would collapse onto ONE panel profile, and because the
- * CREATE path treats "a profile with this username exists" as "this is my
- * profile", customer B would be handed customer A's subscription. So the cut
- * name carries a digest of the WHOLE original: same input → same name, and two
- * different originals share a name only on a 40-bit hash collision. See
- * `assertPanelProfileOwnership` for the second half of that defence.
+ * sharing a long prefix would collapse onto ONE panel name, and customer B
+ * would find customer A's profile where theirs should be. So the cut name
+ * carries a digest of the WHOLE original: same input → same name, and two
+ * different originals share a name only on a 40-bit hash collision. The second
+ * half of that defence is `findOwnPanelProfile`, which adopts nothing whose
+ * `reiwa_id` line does not name this customer.
+ *
+ * Every name the naming service produces fits after this clamp — primary,
+ * previous-rule and fallback names, ordinals included, under any settings the
+ * settings form accepts (`test/remnawave-profile-naming.service.spec.ts`).
  */
 export function clampPanelUsername(username: string): string {
   if (username.length >= PANEL_USERNAME_MIN_LENGTH && username.length <= PANEL_USERNAME_MAX_LENGTH) {
@@ -2876,53 +3219,66 @@ export function clampPanelUsername(username: string): string {
   return `${head}_${digest}`;
 }
 
-/**
- * `reiwa_id: <id>` — the ownership marker this system writes into every profile
- * description it creates, and the same marker the Remnawave importer
- * (`remnawave-importer.service.ts`) resolves identity by.
- *
- * The character class is deliberately WIDER than the importer's `[a-z0-9]+`:
- * that one only has to detect presence, while this one's capture is compared
- * for equality. An id carrying a `-` or `_` would be captured short, and a
- * short capture reads as "a different owner" — which would refuse to relink a
- * profile that IS ours and turn crash recovery into a permanent failure.
- */
-const PANEL_OWNER_MARKER = /reiwa_id:\s*([A-Za-z0-9_-]+)/;
-
-function readPanelOwnerId(description: string | null | undefined): string | null {
-  if (typeof description !== 'string') return null;
-  const match = PANEL_OWNER_MARKER.exec(description);
-  return match === null ? null : match[1];
+/** The non-empty names in order, each once: one lookup per name is enough. */
+function distinctPanelUsernames(names: ReadonlyArray<string | null>): string[] {
+  const distinct: string[] = [];
+  for (const name of names) {
+    if (name !== null && name.length > 0 && !distinct.includes(name)) distinct.push(name);
+  }
+  return distinct;
 }
 
 /**
- * Refuses to adopt a panel profile that provably belongs to someone else.
+ * Refuses to link a panel profile unless its description PROVES it belongs to
+ * `expectedUserId`.
  *
- * `handleCreate` reuses an existing profile found by username so a crash
- * between "created upstream" and "persisted the link" does not leave an orphan.
- * That lookup keys on a name that is no longer guaranteed unique per user once
- * it can be truncated, and the automated path — unlike the manual admin-link
- * path — never checked whose profile it found. Linking customer A's profile to
- * customer B's subscription hands over their traffic, their devices and their
- * config URL.
+ * Used by the panel-link reconciliation and the duplicate-subscription merge.
+ * Both are run by an operator, preview first, and both report a refusal as a
+ * `notOwned` row carrying this message. `handleCreate` does not use it; a
+ * CREATE applies the same proof itself (see `findOwnPanelProfile`). Linking
+ * customer A's profile to customer B's subscription hands over their traffic,
+ * their devices and their config URL.
  *
- * Deliberately only refuses on a PROVEN mismatch. A description with no marker
- * (imported, or edited by an operator) keeps the previous behaviour — it is
- * genuinely indeterminate, and failing those closed would strand every legacy
- * profile. Throwing a plain `Error` classifies TERMINAL, so a real collision
- * pages an operator instead of quietly cross-linking two paying customers.
+ * THE OWNER COMES FROM THE MARKER LINE (`readProfileOwnerMarkers`), never from
+ * the first `reiwa_id:` anywhere in the text. The display name sits on the line
+ * above the marker and is the customer's own text: a Telegram first name of
+ * `reiwa_id: <victim>` used to make Mallory's profile read as the victim's —
+ * and made the victim's real owner a stranger to their own profile.
+ *
+ * PROOF, NOT "NO PROVEN MISMATCH". A description with no marker line used to
+ * pass as "indeterminate", which let both callers link whatever answered — the
+ * reconciliation resolves a row without a short uuid by its stored NAME, and
+ * our own naming can hand that name to a different customer. It is refused
+ * now, with a reason that says what to do. Every profile rezeis creates has
+ * carried the line since the naming service arrived (34205982, 21.05.2026) and
+ * every sync rewrites it, so what this refuses are profiles rezeis did not
+ * make, or ones edited by hand. Throwing a plain `Error` classifies TERMINAL.
  */
 export function assertPanelProfileOwnership(
   panelUsername: string,
   description: string | null | undefined,
   expectedUserId: string,
 ): void {
-  const owner = readPanelOwnerId(description);
-  if (owner !== null && owner !== expectedUserId) {
+  const owners = [...new Set(readProfileOwnerMarkers(description))];
+  if (owners.length === 1 && owners[0] === expectedUserId) return;
+  if (owners.length === 1) {
     throw new Error(
-      `Remnawave profile '${panelUsername}' is owned by reiwa_id ${owner}, not ${expectedUserId} — refusing to link`,
+      `Remnawave profile '${panelUsername}' is owned by reiwa_id ${owners[0]}, not ${expectedUserId} — refusing to link`,
     );
   }
+  if (owners.length === 0) {
+    throw new Error(
+      `Remnawave profile '${panelUsername}' has no 'reiwa_id: <id>' line naming its owner, so it is not ` +
+        `proven to be ${expectedUserId}'s — refusing to link it automatically. If it is this customer's, ` +
+        "link it on the customer's card with «Link an existing Remnawave profile»: a matching Telegram id, " +
+        'e-mail or verified web-account e-mail proves it, and with none of them you can confirm it yourself',
+    );
+  }
+  throw new Error(
+    `Remnawave profile '${panelUsername}' names more than one owner in its 'reiwa_id' lines ` +
+      `(${owners.join(', ')}) — refusing to link it to ${expectedUserId} automatically. Correct the lines ` +
+      'in Remnawave first: nothing links a profile while a line names somebody else',
+  );
 }
 
 /**

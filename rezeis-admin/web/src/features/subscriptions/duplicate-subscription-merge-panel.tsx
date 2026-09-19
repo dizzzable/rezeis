@@ -102,6 +102,7 @@ import {
   type DuplicateMergeRequest,
   type DuplicateMergeRow,
 } from './duplicate-subscription-merge-api'
+import { ownerProofKind, OWNER_UNPROVEN } from './owner-proof'
 import {
   PANEL_ERA_2X,
   PANEL_ERA_3X,
@@ -191,14 +192,20 @@ interface RefusalGroup {
   readonly rows: readonly KeyedMergeRow[]
 }
 
-/** Refused rows, grouped by their named refusal, in the declared order. */
+/**
+ * Refused rows, grouped by their named refusal, in the declared order.
+ *
+ * Grouped by the refusal AS SHOWN: a `notOwned` pair whose reason says nothing
+ * proves the owner becomes {@link OWNER_UNPROVEN}, with its own heading and
+ * remedy, right after `notOwned` — see `owner-proof.ts`.
+ */
 function groupByRefusal(rows: readonly DuplicateMergeRow[]): readonly RefusalGroup[] {
   const groups = new Map<string, DuplicateMergeRow[]>()
   for (const row of rows) {
     // A refusal with no code still has to reach the screen: a refused pair that
     // silently vanished is the exact silence this whole family of code exists
     // to stop producing.
-    const refusal = row.refusal ?? ''
+    const refusal = ownerProofKind(row.refusal ?? '', row.reason)
     const existing = groups.get(refusal)
     if (existing === undefined) groups.set(refusal, [row])
     else existing.push(row)
@@ -206,9 +213,14 @@ function groupByRefusal(rows: readonly DuplicateMergeRow[]): readonly RefusalGro
   return [...groups.entries()]
     .map(([refusal, grouped]) => ({ refusal, rows: keyPairs(grouped) }))
     .sort((a, b) => {
-      const byRank = refusalRank(a.refusal) - refusalRank(b.refusal)
+      const byRank = shownRefusalRank(a.refusal) - shownRefusalRank(b.refusal)
       return byRank !== 0 ? byRank : a.refusal.localeCompare(b.refusal)
     })
+}
+
+/** The unproven kind sorts with `notOwned`, the code it was split from. */
+function shownRefusalRank(refusal: string): number {
+  return refusalRank(refusal === OWNER_UNPROVEN ? 'notOwned' : refusal)
 }
 
 /**
@@ -217,6 +229,7 @@ function groupByRefusal(rows: readonly DuplicateMergeRow[]): readonly RefusalGro
  * refusal nobody can act on.
  */
 function refusalLabel(t: TFunction, refusal: string): string {
+  if (refusal === OWNER_UNPROVEN) return t('duplicateMerge.refusals.ownerUnproven')
   if (isKnownRefusal(refusal)) return t(`duplicateMerge.refusals.${refusal}`)
   return refusal.length > 0 ? refusal : t('duplicateMerge.refusalUnnamed')
 }
@@ -729,8 +742,11 @@ function RefusalHeading({
   readonly rows: number
 }): JSX.Element {
   const { t } = useTranslation()
-  const known = isKnownRefusal(refusal)
-  const cls = refusalClass(refusal)
+  // The unproven kind is this page's own split of `notOwned`, so it is known,
+  // and it is BLOCKED rather than `never`: pressing the merge again returns the
+  // same refusal until somebody proves the owner, after which it can succeed.
+  const known = isKnownRefusal(refusal) || refusal === OWNER_UNPROVEN
+  const cls = refusal === OWNER_UNPROVEN ? 'blocked' : refusalClass(refusal)
   const tone =
     cls === 'retryable'
       ? 'warning'

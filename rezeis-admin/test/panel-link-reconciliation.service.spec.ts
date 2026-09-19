@@ -1409,6 +1409,54 @@ describe('PanelLinkReconciliationService — ownership', () => {
   });
 });
 
+describe('PanelLinkReconciliationService — the owner comes from the marker LINE, and has to be proven', () => {
+  // Exactly what the naming service writes for Mallory, whose display name is
+  // `reiwa_id: user-1`: the first `reiwa_id:` in the text is the forged one.
+  const FORGED = 'name: reiwa_id: user-1\nlogin: mallory\nusername: mallory_tg\nreiwa_id: user-999';
+
+  it('refuses a profile whose display name forges this row\'s owner', async () => {
+    const prisma = prismaHarness([subscriptionRow()]);
+    const panel = panelHarness({
+      profile: () => ({ kind: 'ok', user: { description: FORGED, username: 'rz_alice_sub' } }),
+    });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.equal(report.linked, 0);
+    assert.equal(report.unrepaired[0]?.outcome, 'notOwned');
+    assert.match(report.unrepaired[0]?.reason ?? '', /owned by reiwa_id user-999, not user-1/);
+    assert.deepEqual(prisma.writes, [], "Mallory's profile is never linked to the victim's row");
+  });
+
+  it('refuses — and says why — a profile that has no reiwa_id line at all', async () => {
+    // Linking on "nothing proves it is someone else's" is the silent adopt: a
+    // row without a short uuid is resolved by its stored NAME, which our own
+    // naming can hand to a different customer. The operator is told instead,
+    // in the row, in the preview and in the real run alike.
+    const prisma = prismaHarness([subscriptionRow()]);
+    const panel = panelHarness({
+      profile: () => ({
+        kind: 'ok',
+        user: { description: 'imported from a donor panel', username: 'rz_alice_sub' },
+      }),
+    });
+
+    const preview = await service(prisma, panel).reconcile({ dryRun: true });
+    assert.deepEqual(
+      preview.repaired.map((row) => row.outcome),
+      [],
+      'no "would link" for a profile nobody has proven is this customer\'s',
+    );
+    assert.equal(preview.unrepaired[0]?.outcome, 'notOwned');
+    assert.match(preview.unrepaired[0]?.reason ?? '', /no 'reiwa_id: <id>' line/);
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+    assert.equal(report.linked, 0);
+    assert.equal(report.unrepaired[0]?.outcome, 'notOwned');
+    assert.deepEqual(prisma.writes, []);
+  });
+});
+
 describe('PanelLinkReconciliationService — exclusivity', () => {
   it('takes the profile advisory lock and refuses a link another subscription holds', async () => {
     const prisma = prismaHarness([subscriptionRow()], () => [{ conflictId: 'sub-holder' }]);

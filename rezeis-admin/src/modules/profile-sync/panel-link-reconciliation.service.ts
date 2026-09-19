@@ -66,7 +66,11 @@ export type PanelLinkReconciliationOutcome =
   | 'wouldLink'
   /** The panel could not name the profile from either route. */
   | 'unresolved'
-  /** The profile carries somebody else's `reiwa_id` marker. */
+  /**
+   * The profile's description does not PROVE it is this row's customer's: its
+   * `reiwa_id` line names somebody else, there is no such line, or the lines
+   * disagree. The reason says which.
+   */
   | 'notOwned'
   /** Another live subscription already holds that panel profile. */
   | 'conflict'
@@ -1120,12 +1124,12 @@ export class PanelLinkReconciliationService {
     const profile = outcome.data.response;
 
     try {
-      // "A profile answers to this name" is not "this profile is mine". Same
-      // helper the CREATE path adopts a profile through, with the same
-      // semantics: a PROVEN mismatch refuses; a description with no marker
-      // (imported, or hand-edited by an operator) stays indeterminate and is
-      // allowed, because failing those closed would strand every legacy profile
-      // with no other route back.
+      // "A profile answers to this name" is not "this profile is mine". The
+      // owner is read from the `reiwa_id` LINE — a display name forging it
+      // does not count — and it has to be PROVEN: a description with no such
+      // line is refused as `notOwned` with a reason naming the manual route,
+      // because a row resolved by its stored name can land on another
+      // customer's profile. See `assertPanelProfileOwnership`.
       assertPanelProfileOwnership(panelUsername, profile.description, row.userId);
     } catch (err: unknown) {
       return alone(describe('notOwned', (err as Error).message, remnawaveId, resolved.id));

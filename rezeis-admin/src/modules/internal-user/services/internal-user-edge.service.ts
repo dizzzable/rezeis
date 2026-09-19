@@ -188,10 +188,22 @@ export class InternalUserEdgeService {
     }
 
     const language = this.parseLocale(input.language);
+    // THE VERIFIED @USERNAME, AND THE ACCOUNT IT BELONGS TO — always as a pair,
+    // and from here alone. This bootstrap runs on the bot's `/start` and on the
+    // Mini App sign-in, and both hand over what Telegram itself sent for this
+    // very account, so this is the one place the nick is Telegram's own word.
+    // An account with no nick is recorded as exactly that: NULL with its id.
+    // `username` beside it has other writers (importers, the admin form) and
+    // survives a rebind naming the old account; the pair is valid only while
+    // its id is the row's `telegramId` — see `verifiedTelegramUsername`.
+    const telegramUsername =
+      typeof input.username === 'string' && input.username.length > 0 ? input.username : null;
     const data: Prisma.UserCreateInput = {
       telegramId: telegramIdBig,
       name: input.name,
       username: input.username ?? null,
+      telegramUsername,
+      telegramUsernameTgId: telegramIdBig,
       ...(language !== null ? { language } : {}),
     };
     const user = await this.prismaService.user.upsert({
@@ -200,6 +212,8 @@ export class InternalUserEdgeService {
       update: {
         name: input.name,
         username: input.username ?? null,
+        telegramUsername,
+        telegramUsernameTgId: telegramIdBig,
         ...(language !== null ? { language } : {}),
       },
       include: INTERNAL_USER_INCLUDE,

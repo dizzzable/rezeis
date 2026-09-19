@@ -78,6 +78,9 @@ is_auto_recoverable_migration() {
     20260918160000_backfill_imported_payments_fulfilled_at)
       return 0
       ;;
+    20260919100000_user_verified_telegram_username)
+      return 0
+      ;;
     *)
       return 1
       ;;

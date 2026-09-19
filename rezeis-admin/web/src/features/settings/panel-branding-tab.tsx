@@ -8,15 +8,16 @@
  *   - Remnawave profile naming template (since admin operates the profiles)
  */
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { useForm } from 'react-hook-form'
+import { useForm, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2, Paintbrush, Save, Upload, X } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -30,9 +31,18 @@ import {
   FormField,
   FormItem,
   FormLabel,
+  FormMessage,
 } from '@/components/ui/form'
 import { api } from '@/lib/api'
 import { applyAdminPwaIcon } from '@/lib/admin-pwa-icon'
+import { getErrorMessage } from '@/lib/http-errors'
+import {
+  effectiveNamingPart,
+  NAMING_ALPHABET,
+  NAMING_PREFIX,
+  NAMING_SEPARATOR,
+  NAMING_SUFFIX,
+} from './profile-naming-rule'
 
 interface BrandingSettings {
   readonly projectName?: string | null
@@ -48,6 +58,53 @@ interface BrandingSettings {
 
 interface AdminSettingsPayload {
   readonly branding?: BrandingSettings | null
+}
+
+/** The naming inputs, in the order they appear — the first invalid one is where the operator is taken. */
+const NAMING_FIELD_NAMES = ['namingPrefix', 'namingSeparator', 'namingSuffixBase'] as const
+type NamingFieldName = (typeof NAMING_FIELD_NAMES)[number]
+
+/**
+ * How the server names each naming part in a 400 (`ProfileNamingDto`, flattened
+ * by the global `ValidationPipe` as `profileNaming.<part> must be …`), and the
+ * input and the words that say the same thing here.
+ */
+const NAMING_SERVER_FIELDS: ReadonlyArray<readonly [string, NamingFieldName, string]> = [
+  ['profileNaming.prefix', 'namingPrefix', 'panelBrandingTab.naming.errors.prefix'],
+  ['profileNaming.separator', 'namingSeparator', 'panelBrandingTab.naming.errors.separator'],
+  ['profileNaming.suffixBase', 'namingSuffixBase', 'panelBrandingTab.naming.errors.suffixBase'],
+]
+
+/**
+ * What the last press of «Save» came to, when it did not simply succeed.
+ *
+ *  • `refused` — nothing was saved: the form's own check refused it, or the
+ *    server answered with a refusal (any 4xx but 408). `field` says whether a
+ *    naming field is to blame; only then is the operator sent to "the field
+ *    above".
+ *  • `uncertain` — the server never said: no answer at all, a 408 (the panel
+ *    cuts a request at 30 seconds while the handler goes on and commits), or
+ *    a 5xx. The save may well have happened, and «Nothing was saved» would be
+ *    a false statement the operator acts on.
+ */
+type SaveOutcome =
+  | { readonly kind: 'refused'; readonly problems: readonly string[]; readonly field: boolean }
+  | { readonly kind: 'uncertain' }
+
+/** A failed save that may have been committed all the same. */
+function saveMayHaveCommitted(error: unknown): boolean {
+  const status = (error as { response?: { status?: unknown } } | null)?.response?.status
+  return typeof status !== 'number' || status === 408 || status >= 500
+}
+
+/** The lines of a refused request's `message`: one per field for a `ValidationPipe` 400. */
+function serverMessageLines(error: unknown): string[] {
+  const message = (error as { response?: { data?: { message?: unknown } } } | null)?.response?.data
+    ?.message
+  if (Array.isArray(message)) {
+    return message.filter((line): line is string => typeof line === 'string' && line.length > 0)
+  }
+  return typeof message === 'string' && message.length > 0 ? [message] : []
 }
 
 export default function PanelBrandingTab() {
@@ -81,14 +138,35 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
     brandName: z.string().trim(),
     logoUrl: z.string().trim(),
     adminPwaIconUrl: z.string().trim(),
-    namingPrefix: z.string().trim(),
-    namingSeparator: z.string().max(2),
-    namingSuffixBase: z.string().trim(),
+    namingPrefix: z.string().trim().regex(NAMING_PREFIX, t('panelBrandingTab.naming.errors.prefix')),
+    namingSeparator: z.string().regex(NAMING_SEPARATOR, t('panelBrandingTab.naming.errors.separator')),
+    namingSuffixBase: z
+      .string()
+      .trim()
+      .regex(NAMING_SUFFIX, t('panelBrandingTab.naming.errors.suffixBase')),
   })
   type FormValues = z.infer<typeof schema>
 
+  // A value stored before the alphabet was checked (or carried in by a config
+  // import) keeps the form from saving until it is corrected — the field says
+  // why. Meanwhile the server repairs it for every new profile, so the warning
+  // shows the name new profiles actually get.
+  const storedNaming: NonNullable<BrandingSettings['profileNaming']> = branding.profileNaming ?? {}
+  const storedNamingInvalid = (['prefix', 'separator', 'suffixBase'] as const).some((part) => {
+    const value = storedNaming[part]
+    return typeof value === 'string' && value.length > 0 && !NAMING_ALPHABET.test(value)
+  })
+  const effectiveNamingExample = [
+    effectiveNamingPart(storedNaming.prefix, 'prefix'),
+    'john',
+    effectiveNamingPart(storedNaming.suffixBase, 'suffixBase'),
+  ].join(effectiveNamingPart(storedNaming.separator, 'separator'))
+
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
+    // Focus is moved by `revealField` below, which also scrolls the field to
+    // the middle of the screen; two competing focus moves would fight.
+    shouldFocusError: false,
     defaultValues: {
       brandName: branding.projectName ?? branding.brandName ?? '',
       logoUrl: branding.logoUrl ?? '',
@@ -129,6 +207,40 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
   })
   const iconInputRef = useRef<HTMLInputElement>(null)
 
+  // ── The save gate says WHY ────────────────────────────────────────────────
+  //
+  // One «Save» covers the whole tab, so an invalid naming value also stops the
+  // panel name and the icon from saving. A refusal — the form's own check or
+  // the server's 400 — therefore takes the operator to the field and says, at
+  // the button, which field and why. Five silent gates were found in this very
+  // save before; this one is not allowed to be the sixth. And it says only
+  // what is true: a save the server never answered may have gone through.
+  //
+  // Cleared in ONE place, when «Save» is pressed again: the verdict belongs to
+  // the attempt it describes, and a second place would only hide the first.
+  const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null)
+  const namingInputs = useRef<Partial<Record<NamingFieldName, HTMLInputElement | null>>>({})
+
+  const revealField = (name: NamingFieldName) => {
+    const input = namingInputs.current[name]
+    if (input === null || input === undefined) return
+    input.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    input.focus({ preventScroll: true })
+  }
+
+  const onInvalid = (errors: FieldErrors<FormValues>) => {
+    const invalidNaming = NAMING_FIELD_NAMES.filter((name) => errors[name] !== undefined)
+    const problems = invalidNaming
+      .map((name) => errors[name]?.message)
+      .filter((message): message is string => typeof message === 'string' && message.length > 0)
+    setSaveOutcome({
+      kind: 'refused',
+      problems: problems.length > 0 ? problems : [t('panelBrandingTab.saveFailed')],
+      field: invalidNaming.length > 0,
+    })
+    if (invalidNaming.length > 0) revealField(invalidNaming[0])
+  }
+
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) =>
       api.patch('/admin/settings/branding', {
@@ -146,13 +258,44 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
       applyAdminPwaIcon(values.adminPwaIconUrl.trim() === '' ? null : values.adminPwaIconUrl.trim())
       toast.success(t('panelBrandingTab.saved'))
     },
-    onError: () => toast.error(t('panelBrandingTab.saveFailed')),
+    // The server's refusal, in its own words when this form does not know the
+    // field, and on the field itself when it does — never a bare "failed".
+    onError: (error) => {
+      if (saveMayHaveCommitted(error)) {
+        setSaveOutcome({ kind: 'uncertain' })
+        toast.error(t('panelBrandingTab.saveUncertain.title'), {
+          description: t('panelBrandingTab.saveUncertain.hint'),
+        })
+        return
+      }
+      const problems: string[] = []
+      let firstField: NamingFieldName | null = null
+      for (const line of serverMessageLines(error)) {
+        const known = NAMING_SERVER_FIELDS.find(([path]) => line.startsWith(`${path} `))
+        if (known === undefined) {
+          problems.push(line)
+          continue
+        }
+        const [, name, messageKey] = known
+        const message = String(t(messageKey))
+        form.setError(name, { type: 'server', message })
+        problems.push(message)
+        firstField ??= name
+      }
+      if (problems.length === 0) problems.push(getErrorMessage(error, t('panelBrandingTab.saveFailed')))
+      setSaveOutcome({ kind: 'refused', problems, field: firstField !== null })
+      if (firstField !== null) revealField(firstField)
+      toast.error(t('panelBrandingTab.saveFailed'), { description: problems[0] })
+    },
   })
 
   return (
     <Form {...form}>
       <form
-        onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))}
+        onSubmit={form.handleSubmit((values) => {
+          setSaveOutcome(null)
+          saveMutation.mutate(values)
+        }, onInvalid)}
         className="space-y-6"
       >
         <Card>
@@ -279,13 +422,24 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
             <Separator />
 
             <div className="space-y-3">
-              <div>
+              <div className="space-y-1">
                 <p className="text-sm font-semibold">{t('panelBrandingTab.naming.title')}</p>
                 <p className="text-xs text-muted-foreground">
                   {t('panelBrandingTab.naming.hint')}{' '}
-                  <code className="rounded bg-muted px-1">{'{prefix}{sep}{login}{sep}{suffix}'}</code>
+                  <code className="rounded bg-muted px-1">{t('panelBrandingTab.naming.pattern')}</code>
+                </p>
+                <p className="text-xs text-muted-foreground">{t('panelBrandingTab.naming.identity')}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t('panelBrandingTab.naming.existingKept')}
                 </p>
               </div>
+              {storedNamingInvalid ? (
+                <Alert variant="destructive">
+                  <AlertDescription className="text-xs">
+                    {t('panelBrandingTab.naming.storedInvalid', { example: effectiveNamingExample })}
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               <div className="grid gap-4 sm:grid-cols-3">
                 <FormField
                   control={form.control}
@@ -296,8 +450,17 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
                         {t('panelBrandingTab.naming.prefix')}
                       </FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="rz" className="h-9" />
+                        <Input
+                          {...field}
+                          ref={(input) => {
+                            field.ref(input)
+                            namingInputs.current.namingPrefix = input
+                          }}
+                          placeholder="rz"
+                          className="h-9"
+                        />
                       </FormControl>
+                      <FormMessage className="text-xs" />
                     </FormItem>
                   )}
                 />
@@ -310,8 +473,18 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
                         {t('panelBrandingTab.naming.separator')}
                       </FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="_" className="h-9" maxLength={2} />
+                        <Input
+                          {...field}
+                          ref={(input) => {
+                            field.ref(input)
+                            namingInputs.current.namingSeparator = input
+                          }}
+                          placeholder="_"
+                          className="h-9"
+                          maxLength={2}
+                        />
                       </FormControl>
+                      <FormMessage className="text-xs" />
                     </FormItem>
                   )}
                 />
@@ -324,8 +497,17 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
                         {t('panelBrandingTab.naming.suffixBase')}
                       </FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="sub" className="h-9" />
+                        <Input
+                          {...field}
+                          ref={(input) => {
+                            field.ref(input)
+                            namingInputs.current.namingSuffixBase = input
+                          }}
+                          placeholder="sub"
+                          className="h-9"
+                        />
                       </FormControl>
+                      <FormMessage className="text-xs" />
                     </FormItem>
                   )}
                 />
@@ -346,6 +528,32 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
                 </code>
               </p>
             </div>
+
+            {saveOutcome?.kind === 'refused' ? (
+              <Alert variant="destructive" aria-label={t('panelBrandingTab.saveBlocked.title')}>
+                <AlertDescription className="space-y-1 text-xs">
+                  <p className="font-semibold">{t('panelBrandingTab.saveBlocked.title')}</p>
+                  <ul className="list-disc space-y-0.5 pl-4">
+                    {saveOutcome.problems.map((problem) => (
+                      <li key={problem}>{problem}</li>
+                    ))}
+                  </ul>
+                  <p>
+                    {saveOutcome.field
+                      ? t('panelBrandingTab.saveBlocked.hint')
+                      : t('panelBrandingTab.saveBlocked.refusedHint')}
+                  </p>
+                </AlertDescription>
+              </Alert>
+            ) : null}
+            {saveOutcome?.kind === 'uncertain' ? (
+              <Alert aria-label={t('panelBrandingTab.saveUncertain.title')}>
+                <AlertDescription className="space-y-1 text-xs">
+                  <p className="font-semibold">{t('panelBrandingTab.saveUncertain.title')}</p>
+                  <p>{t('panelBrandingTab.saveUncertain.hint')}</p>
+                </AlertDescription>
+              </Alert>
+            ) : null}
 
             <Button type="submit" disabled={saveMutation.isPending}>
               {saveMutation.isPending ? (

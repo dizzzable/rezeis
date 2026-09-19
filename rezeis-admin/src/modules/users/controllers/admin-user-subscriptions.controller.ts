@@ -43,6 +43,7 @@ import { RequirePermission } from '../../rbac/decorators/require-permission.deco
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
+import { readProfileOwnerMarkers } from '../../profile-sync/panel-owner-marker';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { sameSquadSet } from '../../plans/utils/plan-squads.util';
 import {
@@ -726,12 +727,20 @@ export class AdminUserSubscriptionsController {
    * {@link isLinkableRemnawaveId} — is verified against the panel before
    * persisting, and the profile that read identifies is then checked against
    * every other subscription, not just the string the operator typed.
+   *
+   * It is also where the panel-link repair and the duplicate merge send every
+   * profile they refuse for want of proof, so it must be able to link one:
+   * besides the `reiwa_id` line it accepts a matching Telegram id, account
+   * e-mail or verified web-account e-mail, and, with none of them, the
+   * operator's explicit `confirmedWithoutProof` (audited as such). A line
+   * naming another customer refuses with no override (owner's decision,
+   * 19.09.2026).
    */
   @Patch('subscriptions/:subscriptionId/remnawave-link')
   @RequirePermission('subscriptions', 'edit')
   public async linkRemnawaveProfile(
     @Param('subscriptionId') subscriptionId: string,
-    @Body() body: { remnawaveId?: unknown },
+    @Body() body: { remnawaveId?: unknown; confirmedWithoutProof?: unknown },
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
@@ -747,7 +756,15 @@ export class AdminUserSubscriptionsController {
         userId: true,
         remnawaveId: true,
         configUrl: true,
-        user: { select: { id: true, telegramId: true, email: true } },
+        user: {
+          select: {
+            id: true,
+            telegramId: true,
+            email: true,
+            // For web-only customers the address lives on the web account alone.
+            webAccount: { select: { email: true, emailNormalized: true, emailVerifiedAt: true } },
+          },
+        },
       },
     });
     if (subscription === null) throw new NotFoundException('Subscription not found');
@@ -839,20 +856,57 @@ export class AdminUserSubscriptionsController {
       throw new BadRequestException('This Remnawave profile is already linked to another subscription');
     }
 
-    const expectedMarker = `reiwa_id: ${subscription.user.id}`;
-    const markerMatches = panelUser.description
-      ?.split(/\r?\n/)
-      .some((line) => line.trim() === expectedMarker) ?? false;
-    const telegramMatches =
-      subscription.user.telegramId !== null &&
-      panelUser.telegramId !== null &&
-      subscription.user.telegramId.toString() === String(panelUser.telegramId);
-    const emailMatches =
-      subscription.user.email !== null &&
-      panelUser.email !== null &&
-      subscription.user.email.trim().toLowerCase() === panelUser.email.trim().toLowerCase();
-    if (!markerMatches && !telegramMatches && !emailMatches) {
-      throw new BadRequestException('Remnawave profile does not belong to this subscription user');
+    // ── Whose profile it is, decided in this order ──────────────────────────
+    //
+    // 1. A `reiwa_id` LINE naming ANOTHER customer refuses, whatever else
+    //    matches and whatever the operator confirms. The line is rezeis's own
+    //    write; a Telegram id or an e-mail can be re-bound, reused or mistyped.
+    //    The refusal names that customer, so the operator knows whose it is.
+    // 2. Marker lines that all name THIS customer prove it.
+    // 3. Otherwise a matching Telegram id, account e-mail or VERIFIED web
+    //    account e-mail proves it — the last is the only address a web-only
+    //    customer has, and the repair tools send exactly those customers here.
+    // 4. With no proof at all, the operator may confirm it by hand. The link is
+    //    written, and the audit row says it was confirmed without proof.
+    //
+    // The lines are read the one way every owner check reads them: a line that
+    // IS the marker, never a `reiwa_id:` inside a display name.
+    const markerOwners = [...new Set(readProfileOwnerMarkers(panelUser.description))];
+    const otherOwners = markerOwners.filter((owner) => owner !== subscription.user.id);
+    if (otherOwners.length > 0) {
+      throw new BadRequestException(
+        `The reiwa_id line of this Remnawave user names another customer: ${await this.describeMarkerOwners(otherOwners)}. ` +
+          "It cannot be linked here, confirmed or not. Link it on that customer's card, or correct " +
+          'the line in Remnawave first.',
+      );
+    }
+    const panelEmail = panelUser.email?.trim().toLowerCase() ?? null;
+    const sameEmail = (candidate: string | null | undefined): boolean =>
+      panelEmail !== null &&
+      panelEmail.length > 0 &&
+      typeof candidate === 'string' &&
+      candidate.trim().toLowerCase() === panelEmail;
+    const webAccount = subscription.user.webAccount;
+    const proof: 'reiwa_id' | 'telegram_id' | 'email' | 'web_account_email' | null =
+      markerOwners.length > 0
+        ? 'reiwa_id'
+        : subscription.user.telegramId !== null &&
+            panelUser.telegramId !== null &&
+            subscription.user.telegramId.toString() === String(panelUser.telegramId)
+          ? 'telegram_id'
+          : sameEmail(subscription.user.email)
+            ? 'email'
+            : webAccount?.emailVerifiedAt instanceof Date &&
+                (sameEmail(webAccount.email) || sameEmail(webAccount.emailNormalized))
+              ? 'web_account_email'
+              : null;
+    const confirmedWithoutProof = proof === null && body.confirmedWithoutProof === true;
+    if (proof === null && !confirmedWithoutProof) {
+      throw new BadRequestException(
+        "Nothing proves this Remnawave user is this customer's: no reiwa_id line names them, and " +
+          "neither the Telegram id nor an e-mail matches (the account's, or the web account's once " +
+          'verified). If you have checked that it is theirs, confirm that and link again.',
+      );
     }
 
     const linked = await this.prismaService.subscription.update({
@@ -869,6 +923,10 @@ export class AdminUserSubscriptionsController {
         remnawavePanelId: panelUser.panelId ?? undefined,
         remnawavePanelUsername: panelUser.username || undefined,
         configUrl: panelUser.subscriptionUrl || subscription.configUrl,
+        // Linked: nothing is left for a CREATE to look for under the name its
+        // last attempt recorded (`ProfileSyncProcessor.handleCreate`).
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     });
     await this.auditLog(admin, req, 'user.subscription.remnawave_linked', {
@@ -876,7 +934,9 @@ export class AdminUserSubscriptionsController {
       subscriptionId,
       previousRemnawaveId: subscription.remnawaveId,
       remnawaveId,
-      ownershipVerifiedBy: markerMatches ? 'reiwa_id' : telegramMatches ? 'telegram_id' : 'email',
+      remnawaveUsername: panelUser.username || null,
+      ownershipVerifiedBy: proof ?? 'operator_confirmation',
+      confirmedWithoutProof,
       configUrlChanged: (panelUser.subscriptionUrl || subscription.configUrl) !== subscription.configUrl,
     });
     return linked;
@@ -1371,6 +1431,29 @@ export class AdminUserSubscriptionsController {
       assignedPlanId: input.assignedPlanId,
       changes,
     });
+  }
+
+  /**
+   * The customers a `reiwa_id` line names, in words the operator can act on
+   * and the safe filter lets through — NEVER the line's own value. That value
+   * is text from the panel, and one shaped like a UUID, 24 hex characters,
+   * `sub_…` or the word "token" makes `AdminSafeExceptionFilter` replace the
+   * WHOLE refusal, which then no longer says whose the profile is. A Telegram
+   * ID is digits, and it is what the customer card opens by.
+   */
+  private async describeMarkerOwners(ownerIds: readonly string[]): Promise<string> {
+    const known = await this.prismaService.user.findMany({
+      where: { id: { in: [...ownerIds] } },
+      select: { id: true, telegramId: true },
+    });
+    const descriptions = ownerIds.map((ownerId) => {
+      const owner = known.find((row) => row.id === ownerId);
+      if (owner === undefined) return 'an account this panel does not have';
+      return owner.telegramId !== null
+        ? `the customer with Telegram ID ${owner.telegramId.toString()}`
+        : 'a customer with no Telegram ID, named by the reiwa_id line in Remnawave';
+    });
+    return [...new Set(descriptions)].join('; ');
   }
 
   private async auditLog(

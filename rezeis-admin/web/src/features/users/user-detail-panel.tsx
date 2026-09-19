@@ -1386,7 +1386,7 @@ function RemnawaveProfileRow({
   isLinkingProfile,
 }: {
   sub: UserSubscription
-  onLinkProfile: (remnawaveId: string) => void
+  onLinkProfile: (remnawaveId: string, confirmedWithoutProof: boolean) => void
   isLinkingProfile: boolean
 }) {
   const { t } = useTranslation()
@@ -1394,6 +1394,13 @@ function RemnawaveProfileRow({
   const remnawaveId = sub.remnawaveId
   const presence = remnawaveProfilePresence(sub)
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
+  // The operator's word that the profile is this customer's, for when nothing
+  // proves it. It belongs to one attempt, so closing the dialog forgets it.
+  const [confirmedWithoutProof, setConfirmedWithoutProof] = useState(false)
+  const openLinkDialog = (open: boolean) => {
+    setLinkDialogOpen(open)
+    if (!open) setConfirmedWithoutProof(false)
+  }
   const [candidateId, setCandidateId] = useState('')
   const candidate = candidateId.trim()
   const candidateIsLinkable = isLinkableRemnawaveId(candidate)
@@ -1454,7 +1461,7 @@ function RemnawaveProfileRow({
           </button>
         ) : (
           <PermissionGate resource="subscriptions" action="edit">
-            <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
+            <Dialog open={linkDialogOpen} onOpenChange={openLinkDialog}>
               <DialogTrigger asChild>
                 <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]">
                   <Link2 className="mr-1 h-3 w-3" />
@@ -1494,14 +1501,36 @@ function RemnawaveProfileRow({
                       {t('userDetailPanel.subscriptions.remnawaveProfile.linkInvalid')}
                     </p>
                   ) : null}
+                  {/* For a profile nothing proves — no reiwa_id line naming this
+                      customer, no matching Telegram id, e-mail or verified
+                      web-account e-mail — the operator's word links it, and the
+                      audit log records it as such. A line naming ANOTHER
+                      customer refuses whatever is ticked (owner's decision,
+                      19.09.2026). */}
+                  <div className="flex items-start gap-2">
+                    <Checkbox
+                      id={`remnawave-profile-confirm-${sub.id}`}
+                      checked={confirmedWithoutProof}
+                      onCheckedChange={(checked) => setConfirmedWithoutProof(checked === true)}
+                      aria-describedby={`remnawave-profile-confirm-hint-${sub.id}`}
+                    />
+                    <div className="space-y-0.5">
+                      <Label htmlFor={`remnawave-profile-confirm-${sub.id}`} className="text-sm font-normal">
+                        {t('userDetailPanel.subscriptions.remnawaveProfile.confirmWithoutProof')}
+                      </Label>
+                      <p id={`remnawave-profile-confirm-hint-${sub.id}`} className="text-xs text-muted-foreground">
+                        {t('userDetailPanel.subscriptions.remnawaveProfile.confirmWithoutProofHint')}
+                      </p>
+                    </div>
+                  </div>
                   <div className="flex justify-end gap-2">
-                    <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>
+                    <Button variant="outline" onClick={() => openLinkDialog(false)}>
                       {t('userDetailPanel.subscriptions.cancel')}
                     </Button>
                     <Button
                       onClick={() => {
-                        onLinkProfile(candidate)
-                        setLinkDialogOpen(false)
+                        onLinkProfile(candidate, confirmedWithoutProof)
+                        openLinkDialog(false)
                       }}
                       disabled={!candidateIsLinkable || isLinkingProfile}
                     >
@@ -1893,8 +1922,16 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
   })
 
   const linkRemnawaveProfileMutation = useMutation({
-    mutationFn: ({ id, remnawaveId }: { id: string; remnawaveId: string }) =>
-      api.patch(`/admin/users/subscriptions/${id}/remnawave-link`, { remnawaveId }),
+    mutationFn: ({
+      id,
+      remnawaveId,
+      confirmedWithoutProof,
+    }: {
+      id: string
+      remnawaveId: string
+      confirmedWithoutProof: boolean
+    }) =>
+      api.patch(`/admin/users/subscriptions/${id}/remnawave-link`, { remnawaveId, confirmedWithoutProof }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.toasts.remnawaveLinked'))
@@ -2174,7 +2211,9 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
               deleteRefusal={deleteRefusals[sub.id] ?? null}
               customer={customerLabel}
               onAssignPlan={(planId) => assignPlanMutation.mutate({ id: sub.id, planId })}
-              onLinkRemnawaveProfile={(remnawaveId) => linkRemnawaveProfileMutation.mutate({ id: sub.id, remnawaveId })}
+              onLinkRemnawaveProfile={(remnawaveId, confirmedWithoutProof) =>
+                linkRemnawaveProfileMutation.mutate({ id: sub.id, remnawaveId, confirmedWithoutProof })
+              }
               isLinkingRemnawaveProfile={
                 linkRemnawaveProfileMutation.isPending
                 && linkRemnawaveProfileMutation.variables?.id === sub.id
@@ -2589,7 +2628,7 @@ function SubscriptionCard({
   /** Who owns this subscription — named in the delete confirmation. */
   customer: string
   onAssignPlan: (planId: string) => void
-  onLinkRemnawaveProfile: (remnawaveId: string) => void
+  onLinkRemnawaveProfile: (remnawaveId: string, confirmedWithoutProof: boolean) => void
   isLinkingRemnawaveProfile: boolean
 }) {
   const { t } = useTranslation()

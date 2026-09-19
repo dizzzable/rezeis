@@ -291,6 +291,9 @@ export const ru = {
         linkLabel: 'Идентификатор профиля Remnawave',
         linkPlaceholder: 'UUID или числовой ID профиля',
         linkInvalid: 'Укажите корректный идентификатор профиля Remnawave: UUID (панель 2.x) или числовой ID профиля (панель 3.x).',
+        confirmWithoutProof: 'Я проверил: профиль принадлежит этому клиенту',
+        confirmWithoutProofHint:
+          'Нужно, только когда ничто этого не доказывает: нет строки reiwa_id с этим клиентом и не совпадают ни Telegram ID, ни почта, ни подтверждённая почта веб-кабинета. Тогда привязка записывается в журнал действий как подтверждённая вами без доказательства. Если строка reiwa_id называет другого клиента, привязки не будет, что бы вы ни подтвердили.',
         linkAction: 'Привязать профиль',
         // Presence only — what the PANEL LOOKUP knows about the profile. The
         // job's fate is a different question with a different subject and lives

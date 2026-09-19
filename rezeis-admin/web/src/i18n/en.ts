@@ -6341,11 +6341,33 @@ export const en = {
     },
     naming: {
       title: 'Remnawave profile naming',
-      hint: 'Username template used when creating a subscription on Remnawave.',
+      hint: 'The name a new profile gets on Remnawave when a subscription is created.',
+      pattern: '{prefix}{sep}{name}{sep}{suffix}',
+      identity:
+        "{name} is the customer's Telegram @username, as Telegram reported it at their last /start or Mini App sign-in, when Telegram is linked and has one; otherwise their web login; otherwise their Telegram ID.",
+      existingKept:
+        'Profiles that already exist keep their names: Remnawave cannot rename a profile. Changes here apply to new subscriptions only.',
       prefix: 'Prefix',
       separator: 'Separator',
       suffixBase: 'Subscription suffix',
       example: 'Example:',
+      errors: {
+        prefix:
+          'Prefix: 1 to 16 characters — Latin letters, digits, _ and -. Remnawave refuses any other character, and no new profile could be created.',
+        separator: 'Separator: 1 or 2 characters — Latin letters, digits, _ or -.',
+        suffixBase: 'Subscription suffix: 1 to 32 characters — Latin letters, digits, _ and -.',
+      },
+      storedInvalid:
+        'The saved naming contains characters Remnawave does not accept. Until you correct it, new profiles are named like {{example}}. Correct the fields below and press Save.',
+    },
+    saveBlocked: {
+      title: 'Nothing was saved',
+      hint: 'Fix the field above and press Save again. The whole tab is saved at once, so none of your other changes here were saved either.',
+      refusedHint: 'The whole tab is saved at once, so none of your other changes here were saved either.',
+    },
+    saveUncertain: {
+      title: 'The save was not confirmed',
+      hint: 'The panel did not answer in time, or answered with an error, so this page cannot tell whether your changes were saved — they may have been. Reload the page and check the fields before saving again.',
     },
     save: 'Save',
   },

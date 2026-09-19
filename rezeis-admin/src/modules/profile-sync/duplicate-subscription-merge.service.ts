@@ -49,7 +49,11 @@ export type DuplicateMergeRefusal =
   | 'differentPanelProfiles'
   /** The profile resolved but could not be read back. */
   | 'profileUnreadable'
-  /** The profile carries somebody else's `reiwa_id` marker. */
+  /**
+   * The profile's description does not PROVE it is this customer's: its
+   * `reiwa_id` line names somebody else, there is no such line, or the lines
+   * disagree. The reason says which.
+   */
   | 'notOwned'
   /** Neither row is bound to the profile they resolve to. */
   | 'neitherHoldsIdentity'

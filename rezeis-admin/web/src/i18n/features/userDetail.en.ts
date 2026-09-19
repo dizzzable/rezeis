@@ -281,6 +281,9 @@ export const en = {
         linkLabel: 'Remnawave profile identifier',
         linkPlaceholder: 'UUID or numeric profile id',
         linkInvalid: 'Enter a valid Remnawave profile identifier: a UUID (panel 2.x) or a numeric profile id (panel 3.x).',
+        confirmWithoutProof: 'I checked: this profile belongs to this customer',
+        confirmWithoutProofHint:
+          'Only needed when nothing proves it — no reiwa_id line naming this customer, and no matching Telegram id, e-mail or verified web-account e-mail. The link is then recorded in the audit log as confirmed by you, without proof. A reiwa_id line naming another customer refuses the link whatever you confirm.',
         linkAction: 'Link profile',
         // Presence only — what the PANEL LOOKUP knows about the profile. The
         // job's fate is a different question with a different subject and lives

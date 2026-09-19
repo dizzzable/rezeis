@@ -939,6 +939,45 @@ describe('DuplicateSubscriptionMergeService — re-verification', () => {
     assert.deepEqual(prisma.writes, []);
   });
 
+  it('refuses a profile whose display name forges this customer\'s marker', async () => {
+    // What the naming service writes for Mallory, whose display name is
+    // `reiwa_id: user-1`. The first `reiwa_id:` in the text is the forged one.
+    const prisma = prismaHarness({ subscription: [survivorRow(), duplicateRow()] });
+    const panel = panelHarness({
+      profile: () => ({
+        kind: 'ok',
+        user: {
+          description: 'name: reiwa_id: user-1\nlogin: mallory\nusername: mallory_tg\nreiwa_id: user-999',
+          username: 'rz_alice_sub',
+        },
+      }),
+    });
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.merged, 0);
+    assert.equal(report.rows[0].refusal, 'notOwned');
+    assert.match(report.rows[0].reason ?? '', /owned by reiwa_id user-999, not user-1/);
+    assert.deepEqual(prisma.writes, []);
+  });
+
+  it('refuses — and says why — a profile that has no reiwa_id line at all', async () => {
+    const prisma = prismaHarness({ subscription: [survivorRow(), duplicateRow()] });
+    const panel = panelHarness({
+      profile: () => ({
+        kind: 'ok',
+        user: { description: 'imported from a donor panel', username: 'rz_alice_sub' },
+      }),
+    });
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.merged, 0);
+    assert.equal(report.rows[0].refusal, 'notOwned');
+    assert.match(report.rows[0].reason ?? '', /no 'reiwa_id: <id>' line/);
+    assert.deepEqual(prisma.writes, []);
+  });
+
   it('refuses when a row is already retired', async () => {
     const prisma = prismaHarness({
       subscription: [

@@ -121,11 +121,14 @@ export const en = {
       wouldLink: 'Would link',
       unresolved: 'Panel did not resolve it',
       notOwned: 'Belongs to somebody else',
+      ownerUnproven: 'Not proven to be this customer’s',
       conflict: 'Profile already held by another subscription',
       raceLost: 'Linked by a concurrent provision',
       staleIdentity: 'Stale identity, not repairable',
       duplicatePair: 'Duplicate of another subscription',
     },
+    ownerUnprovenRemedy:
+      'Nothing proves whose these profiles are: the description has no line naming the owner, or its lines name different customers. Check each one in Remnawave. If its lines name different customers, correct them there first — nothing links a profile while a line names somebody else. If it is this customer’s, link it on the customer’s card with «Link an existing Remnawave profile»: a matching Telegram id, e-mail or verified web-account e-mail proves it, and with none of them you can confirm it yourself. Or add the line «reiwa_id: <customer id>» to its description in Remnawave and run the repair again.',
 
     ranDry: 'Preview: {{repairable}} of {{scanned}} row(s) repairable',
     ranReal: 'Repaired {{linked}} of {{scanned}} row(s)',
@@ -263,6 +266,7 @@ export const en = {
       differentCustomers: 'Two different customers',
       differentPanelProfiles: 'Two different panel profiles',
       notOwned: 'The profile belongs to somebody else',
+      ownerUnproven: 'Not proven to be this customer’s',
       survivorMissing: 'The survivor row does not exist',
       duplicateMissing: 'The duplicate row does not exist',
       alreadyRetired: 'One half is already deleted',
@@ -285,6 +289,8 @@ export const en = {
         'Leave them alone. Each row resolves to its own panel profile, so both are real subscriptions and neither is a copy of the other.',
       notOwned:
         'Leave them alone. The panel profile carries another account’s ownership marker, so it is not this customer’s to merge. Check on the panel who that profile belongs to.',
+      ownerUnproven:
+        'Nothing proves whose the profile is: its description has no line naming the owner, or its lines name different customers. Check it in Remnawave. If it is this customer’s, add the line «reiwa_id: <customer id>» to its description there and preview again, removing any line that names somebody else; if it is not, leave the pair alone.',
       survivorMissing:
         'Nothing to do here — the row named as the survivor is gone. Preview again; the discovery sweep will report the pair as it stands now.',
       duplicateMissing:

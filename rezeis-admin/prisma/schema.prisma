@@ -1508,6 +1508,18 @@ model User {
   id                             String    @id @default(cuid()) @map("id")
   telegramId                     BigInt?   @unique @map("telegram_id") @db.BigInt
   username                       String?   @map("username")
+  /// The @username exactly as TELEGRAM sent it — or NULL when that account
+  /// has none — together with the Telegram account it belongs to. Written by
+  /// ONE writer, always as a pair: the Telegram-verified bootstrap (bot
+  /// `/start` and the Mini App sign-in, `InternalUserEdgeService`). Importers,
+  /// admin forms, linking, rebind and merge never write it
+  /// (`test/verified-telegram-username-writers.spec.ts`). The nick is valid
+  /// only while `telegramUsernameTgId` equals `telegramId`: a rebind, a link or
+  /// a merge moves `telegramId` and so invalidates it with no clean-up. Read
+  /// through `verifiedTelegramUsername` (`users/utils`). `username` above has
+  /// six other writers and cannot answer "is this the linked account's nick".
+  telegramUsername               String?   @map("telegram_username")
+  telegramUsernameTgId           BigInt?   @map("telegram_username_tg_id") @db.BigInt
   email                          String?   @unique @map("email")
   referralCode                   String    @unique @default(cuid()) @map("referral_code")
   name                           String    @default("") @map("name")
@@ -1915,6 +1927,18 @@ model Subscription {
   /// for an old profile can produce a DIFFERENT string — and on 3.x that string
   /// is the only way back to a profile whose numeric id we never recorded.
   remnawavePanelUsername     String?            @map("remnawave_panel_username")
+  /// The name the last CREATE of this subscription chose for its profile, and
+  /// the customer it was chosen for — recorded BEFORE the POST that creates the
+  /// profile, cleared when the CREATE path links one. A retry of the same
+  /// purchase looks this name up FIRST, so the profile an interrupted attempt
+  /// made is found whatever changed before the retry (the @username, the
+  /// login, the prefix, the Telegram link, the owner after an account merge).
+  /// Not `remnawavePanelUsername`: that one is read as "the profile this row is
+  /// linked to" (holder checks, addressing, the importer, the repair tools),
+  /// and this names a profile that may never have been created. Read only by
+  /// `ProfileSyncProcessor.handleCreate`.
+  remnawavePendingUsername   String?            @map("remnawave_pending_username")
+  remnawavePendingOwnerId    String?            @map("remnawave_pending_owner_id")
   /// User-facing connect URL.
   configUrl                  String?            @map("config_url")
   startedAt                  DateTime?          @map("started_at") @db.Timestamptz(3)

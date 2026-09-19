@@ -20,6 +20,7 @@ import {
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 import { OPERATOR_LIMIT_SOURCE } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from '../src/modules/users/controllers/subscription-sync-refusals';
 
@@ -129,9 +130,14 @@ function findFirstOver(rows: ReadonlyArray<Record<string, unknown>>, calls: unkn
 function linkRepairFor(options: {
   rows: ReadonlyArray<Record<string, unknown>>;
   panelUser: Record<string, unknown>;
+  /** Overrides on the subscription's owner: Telegram id 42, no e-mail, no web account. */
+  user?: Record<string, unknown>;
+  /** Other local accounts, for naming the customer a `reiwa_id` line points at. */
+  knownUsers?: ReadonlyArray<{ id: string; telegramId: bigint | null }>;
 }) {
   const updateCalls: unknown[] = [];
   const guardQueries: unknown[] = [];
+  const auditWrites: Array<{ data: { action: string; metadata: Record<string, unknown>; adminUser: unknown } }> = [];
   const controller = new AdminUserSubscriptionsController(
     {
       subscription: {
@@ -140,7 +146,7 @@ function linkRepairFor(options: {
           userId: 'user-1',
           remnawaveId: null,
           configUrl: null,
-          user: { id: 'user-1', telegramId: BigInt(42), email: null },
+          user: { id: 'user-1', telegramId: BigInt(42), email: null, webAccount: null, ...options.user },
         }),
         findFirst: findFirstOver(options.rows, guardQueries),
         update: async (input: unknown) => {
@@ -148,7 +154,15 @@ function linkRepairFor(options: {
           return { id: 'legacy-subscription' };
         },
       },
-      adminAuditLog: { create: async () => undefined },
+      adminAuditLog: {
+        create: async (input: (typeof auditWrites)[number]) => {
+          auditWrites.push(input);
+        },
+      },
+      user: {
+        findMany: async (input: { where: { id: { in: string[] } } }) =>
+          (options.knownUsers ?? []).filter((row) => input.where.id.in.includes(row.id)),
+      },
     } as never,
     { getPanelUserOutcome: async () => ({ kind: 'ok', user: options.panelUser }) } as never,
     {} as never,
@@ -156,14 +170,18 @@ function linkRepairFor(options: {
     {} as never,
     {} as never,
   );
-  return { controller, updateCalls, guardQueries };
+  return { controller, updateCalls, guardQueries, auditWrites };
 }
 
 /** The endpoint call itself, so each case shows only the identifier it pastes. */
-function repairLink(controller: AdminUserSubscriptionsController, pastedIdentity: string) {
+function repairLink(
+  controller: AdminUserSubscriptionsController,
+  pastedIdentity: string,
+  extra: Record<string, unknown> = {},
+) {
   return controller.linkRemnawaveProfile(
     'legacy-subscription',
-    { remnawaveId: pastedIdentity },
+    { remnawaveId: pastedIdentity, ...extra },
     ACTING_ADMIN,
     ACTING_REQUEST,
   );
@@ -402,6 +420,8 @@ describe('AdminUserSubscriptionsController', () => {
         remnawavePanelId: 4471,
         remnawavePanelUsername: 'rz_bob_1',
         configUrl: 'https://panel.example.test/sub',
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     }]);
     assert.equal(auditCalls.length, 1);
@@ -505,6 +525,8 @@ describe('AdminUserSubscriptionsController', () => {
         remnawavePanelId: 4471,
         remnawavePanelUsername: 'rz_bob_1',
         configUrl: 'https://panel.example.test/sub',
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     }]);
   });
@@ -677,6 +699,8 @@ describe('AdminUserSubscriptionsController', () => {
             remnawavePanelId: PROFILE_P_PANEL_ID,
             remnawavePanelUsername: 'rz_bob_1',
             configUrl: 'https://panel.example.test/sub',
+            remnawavePendingUsername: null,
+            remnawavePendingOwnerId: null,
           },
         }],
         `${pasted}: expected a genuine non-duplicate to be linked`,
@@ -699,6 +723,8 @@ describe('AdminUserSubscriptionsController', () => {
           findFirst: async () => null,
           update: async () => { updated = true; return {}; },
         },
+        // No local account carries the id the line names.
+        user: { findMany: async () => [] },
       } as never,
       {
         getPanelUserOutcome: async () => ({
@@ -726,9 +752,230 @@ describe('AdminUserSubscriptionsController', () => {
         { id: 'admin-1' } as never,
         { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
       ),
-      { message: 'Remnawave profile does not belong to this subscription user' },
+      // Its marker line names somebody else: refused, and that customer named —
+      // here, as an account this panel does not have.
+      { message: /names another customer: an account this panel does not have\./ },
     );
     assert.equal(updated, false);
+  });
+
+  // ── Link repair: the reiwa_id proof is the marker LINE, every line agreeing ──
+  //
+  // The customer here has Telegram id 42 and no e-mail, and every profile below
+  // answers with Telegram id 99 — so the `reiwa_id` line is the only proof on
+  // offer. It proves ownership only when every marker line names this customer:
+  // a second line naming somebody else means the description proves nobody.
+
+  it('refuses when one marker line names this customer and another names somebody else', async () => {
+    const { controller, updateCalls } = linkRepairFor({
+      rows: [],
+      panelUser: panelProfile({ telegramId: 99, description: 'name: Bob\nreiwa_id: user-1\nreiwa_id: user-999' }),
+    });
+
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+    assert.equal(failure instanceof BadRequestException, true, String(failure));
+    assert.match((failure as Error).message, /names another customer: an account this panel does not have\./);
+    assert.deepStrictEqual(updateCalls, [], 'a description that proves nobody links nothing');
+  });
+
+  it('refuses a display name that forges this customer\'s marker above somebody else\'s', async () => {
+    const { controller, updateCalls } = linkRepairFor({
+      rows: [],
+      panelUser: panelProfile({ telegramId: 99, description: 'name: reiwa_id: user-1\nreiwa_id: user-999' }),
+    });
+
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+    assert.equal(failure instanceof BadRequestException, true, String(failure));
+    assert.deepStrictEqual(updateCalls, []);
+  });
+
+  it('links a profile whose marker lines all name this customer', async () => {
+    const { controller, updateCalls } = linkRepairFor({
+      rows: [],
+      panelUser: panelProfile({ telegramId: 99, description: 'name: Bob\r\nreiwa_id: user-1\r\nnote\r\nreiwa_id: user-1' }),
+    });
+
+    await repairLink(controller, String(PROFILE_P_PANEL_ID));
+
+    assert.equal(updateCalls.length, 1);
+  });
+
+  // ── Link repair: proof, and the operator's word when there is none ───────
+  //
+  // The panel-link repair and the duplicate merge refuse every profile whose
+  // description proves no owner — stale 2.x-era imports among them — and send
+  // the operator here (owner's decision, 19.09.2026). So this endpoint has to be
+  // able to link one: by the verified e-mail on the customer's web account, the
+  // only address a web-only customer has, or — with no proof at all — by the
+  // operator's explicit confirmation, which the audit row records. A line naming
+  // ANOTHER customer refuses whatever else matches and whatever is confirmed.
+
+  it('a marker naming another customer refuses even when the Telegram id matches, and names that customer', async () => {
+    const { controller, updateCalls } = linkRepairFor({
+      rows: [],
+      knownUsers: [{ id: 'user-999', telegramId: 777000222n }],
+      panelUser: panelProfile({ telegramId: 42, description: 'name: Bob\nreiwa_id: user-999' }),
+    });
+
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+    assert.equal(failure instanceof BadRequestException, true, String(failure));
+    // By the Telegram ID the customer card opens by.
+    assert.match((failure as Error).message, /names another customer: the customer with Telegram ID 777000222\./);
+    assert.deepStrictEqual(updateCalls, []);
+  });
+
+  it('the operator\'s confirmation does not override a marker naming another customer', async () => {
+    const { controller, updateCalls } = linkRepairFor({
+      rows: [],
+      panelUser: panelProfile({ telegramId: 99, description: 'reiwa_id: user-999' }),
+    });
+
+    const failure = await captureRejection(() =>
+      repairLink(controller, String(PROFILE_P_PANEL_ID), { confirmedWithoutProof: true }),
+    );
+
+    assert.match((failure as Error).message, /names another customer/);
+    assert.deepStrictEqual(updateCalls, []);
+  });
+
+  it('names the other customer without their id, so no id shape blanks the refusal on its way out', async () => {
+    // The line's value is text from the panel. Quoted in the sentence, one that
+    // looks like hex, a UUID, `sub_…` or the word "token" made the safe filter
+    // replace the WHOLE message, and the operator learned nothing.
+    const shapes = [
+      `c${'4f'.repeat(12)}`,
+      'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+      'sub_4fe1d8c2a9',
+      'token',
+      'user-999',
+    ];
+    for (const known of [true, false]) {
+      for (const ownerId of shapes) {
+        const { controller } = linkRepairFor({
+          rows: [],
+          knownUsers: known ? [{ id: ownerId, telegramId: 777000222n }] : [],
+          panelUser: panelProfile({ telegramId: 99, description: `reiwa_id: ${ownerId}` }),
+        });
+
+        const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+        const sent = sentToOperator(failure);
+
+        assert.equal(sent, (failure as Error).message, `${ownerId}: the filter left the refusal whole`);
+        assert.equal(String(sent).includes(ownerId), false, `${ownerId}: the raw id is not in the sentence`);
+        assert.match(
+          String(sent),
+          known ? /the customer with Telegram ID 777000222/ : /an account this panel does not have/,
+          ownerId,
+        );
+      }
+    }
+  });
+
+  it('links a web-only customer by the VERIFIED e-mail on their web account', async () => {
+    const { controller, updateCalls, auditWrites } = linkRepairFor({
+      rows: [],
+      user: {
+        telegramId: null,
+        webAccount: {
+          email: 'Owner@Example.test',
+          emailNormalized: 'owner@example.test',
+          emailVerifiedAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+      },
+      panelUser: panelProfile({ telegramId: null, email: 'owner@example.test ', description: 'imported from a 2.x panel' }),
+    });
+
+    await repairLink(controller, String(PROFILE_P_PANEL_ID));
+
+    assert.equal(updateCalls.length, 1);
+    assert.equal(auditWrites[0]?.data.metadata['ownershipVerifiedBy'], 'web_account_email');
+    assert.equal(auditWrites[0]?.data.metadata['confirmedWithoutProof'], false);
+  });
+
+  it('an UNVERIFIED web-account e-mail proves nothing', async () => {
+    const { controller, updateCalls } = linkRepairFor({
+      rows: [],
+      user: {
+        telegramId: null,
+        webAccount: { email: 'owner@example.test', emailNormalized: 'owner@example.test', emailVerifiedAt: null },
+      },
+      panelUser: panelProfile({ telegramId: null, email: 'owner@example.test', description: null }),
+    });
+
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+    assert.equal(failure instanceof BadRequestException, true, String(failure));
+    assert.match((failure as Error).message, /^Nothing proves/);
+    assert.deepStrictEqual(updateCalls, []);
+  });
+
+  it('with no proof at all it refuses and says the operator may confirm; confirmed, it links and the audit row says so', async () => {
+    const setup = () =>
+      linkRepairFor({
+        rows: [],
+        panelUser: panelProfile({ telegramId: 99, email: null, description: 'imported from a 2.x panel' }),
+      });
+
+    const refused = setup();
+    const failure = await captureRejection(() => repairLink(refused.controller, String(PROFILE_P_PANEL_ID)));
+    assert.match((failure as Error).message, /If you have checked that it is theirs, confirm that and link again/);
+    assert.deepStrictEqual(refused.updateCalls, []);
+
+    const confirmed = setup();
+    await repairLink(confirmed.controller, String(PROFILE_P_PANEL_ID), { confirmedWithoutProof: true });
+    assert.equal(confirmed.updateCalls.length, 1);
+    assert.equal(confirmed.auditWrites.length, 1);
+    const audit = confirmed.auditWrites[0].data;
+    assert.equal(audit.action, 'user.subscription.remnawave_linked');
+    assert.deepEqual(audit.adminUser, { connect: { id: 'admin-1' } }, 'who confirmed it');
+    assert.equal(audit.metadata['remnawaveId'], String(PROFILE_P_PANEL_ID), 'which profile');
+    assert.equal(audit.metadata['remnawaveUsername'], 'rz_bob_1');
+    assert.equal(audit.metadata['confirmedWithoutProof'], true, 'and that nothing proved it');
+    assert.equal(audit.metadata['ownershipVerifiedBy'], 'operator_confirmation');
+  });
+
+  it('a confirmation sent when proof exists changes nothing: the proof is what the audit row records', async () => {
+    const { controller, auditWrites } = linkRepairFor({
+      rows: [],
+      panelUser: panelProfile({ telegramId: 42 }),
+    });
+
+    await repairLink(controller, String(PROFILE_P_PANEL_ID), { confirmedWithoutProof: true });
+
+    assert.equal(auditWrites[0]?.data.metadata['ownershipVerifiedBy'], 'telegram_id');
+    assert.equal(auditWrites[0]?.data.metadata['confirmedWithoutProof'], false);
+  });
+
+  it('only a literal true confirms: a string or a number from a stray client proves nothing', async () => {
+    for (const notTrue of ['true', 1, 'yes']) {
+      const { controller, updateCalls } = linkRepairFor({
+        rows: [],
+        panelUser: panelProfile({ telegramId: 99, description: null }),
+      });
+
+      const failure = await captureRejection(() =>
+        repairLink(controller, String(PROFILE_P_PANEL_ID), { confirmedWithoutProof: notTrue }),
+      );
+
+      assert.equal(failure instanceof BadRequestException, true, JSON.stringify(notTrue));
+      assert.deepStrictEqual(updateCalls, [], JSON.stringify(notTrue));
+    }
+  });
+
+  it('both refusals reach the operator in their own words: the safe filter passes them through', async () => {
+    for (const panelUser of [
+      panelProfile({ telegramId: 99, description: 'reiwa_id: user-999' }),
+      panelProfile({ telegramId: 99, description: null }),
+    ]) {
+      const { controller } = linkRepairFor({ rows: [], panelUser });
+
+      const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+      assert.equal(sentToOperator(failure), (failure as Error).message);
+    }
   });
 
   // ── Link repair: an unreachable panel is not a wrong identifier ──────────
@@ -947,6 +1194,31 @@ async function captureRejection(action: () => Promise<unknown>): Promise<unknown
     if (err instanceof assert.AssertionError) throw err;
     return err;
   }
+}
+
+/**
+ * The `message` the admin API actually sends for a refusal. The safe filter
+ * replaces a 4xx message that trips any of its patterns — the word "profile"
+ * among them — with a generic one, so a refusal written for the operator has
+ * to be checked THROUGH it, not only where it is thrown.
+ */
+function sentToOperator(exception: unknown): unknown {
+  let body: { message?: unknown } = {};
+  const response = {
+    status: () => response,
+    json: (sent: { message?: unknown }) => {
+      body = sent;
+      return response;
+    },
+  };
+  const host = {
+    switchToHttp: () => ({
+      getRequest: () => ({ originalUrl: '/api/admin/users/subscriptions/legacy-subscription/remnawave-link', headers: {} }),
+      getResponse: () => response,
+    }),
+  };
+  new AdminSafeExceptionFilter().catch(exception, host as never);
+  return body.message;
 }
 
 describe('syncSubscription — an unreachable panel is not a missing profile', () => {

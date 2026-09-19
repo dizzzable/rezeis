@@ -640,22 +640,44 @@ export class CornerRadiiDto {
 /**
  * Remnawave profile-naming template block (persisted under
  * `Settings.brandingSettings.profileNaming`). Controls how panel usernames
- * are generated: `<prefix><sep><login><sep><suffixBase>`.
+ * are generated: `<prefix><sep><identity><sep><suffixBase>`.
+ *
+ * Every part ends up inside a Remnawave username, and Remnawave accepts
+ * `^[A-Za-z0-9_-]+$` and nothing else, on every version. Only the LENGTH used
+ * to be checked here, so `prefix: "my shop"` was stored — and from then on the
+ * panel refused every profile CREATE. The maxima are the ones the settings
+ * reader keeps (`readProfileNaming`); with them the prefix and separator leave
+ * room for the customer's identity, and `clampPanelUsername` fits the finished
+ * name into the panel's 36 characters.
+ *
+ * THE MESSAGES MUST SURVIVE THE GLOBAL FILTER. `AdminSafeExceptionFilter`
+ * replaces any 4xx message containing a word it treats as sensitive —
+ * `profile`, `token`, `password` and a few more — with "Request failed". A
+ * refusal worded "…in a profile name" therefore reached the settings form as
+ * a 400 that named nothing (`test/profile-naming-settings-dto.spec.ts` runs
+ * the real pipe and the real filter).
  */
 export class ProfileNamingDto {
   @IsOptional()
   @IsString()
-  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9_-]{1,16}$/, {
+    message:
+      'prefix must be 1-16 characters: Latin letters, digits, "_" and "-". Remnawave accepts nothing else in a username.',
+  })
   public prefix?: string;
 
   @IsOptional()
   @IsString()
-  @MaxLength(2)
+  @Matches(/^[A-Za-z0-9_-]{1,2}$/, {
+    message: 'separator must be 1-2 characters: Latin letters, digits, "_" or "-".',
+  })
   public separator?: string;
 
   @IsOptional()
   @IsString()
-  @MaxLength(32)
+  @Matches(/^[A-Za-z0-9_-]{1,32}$/, {
+    message: 'suffixBase must be 1-32 characters: Latin letters, digits, "_" and "-".',
+  })
   public suffixBase?: string;
 }
 

@@ -12,6 +12,10 @@ import {
   RemnawavePanelUserList,
 } from '../../remnawave/services/remnawave-api.service';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
+import {
+  readProfileOwnerMarker,
+  readProfileOwnerMarkers,
+} from '../../profile-sync/panel-owner-marker';
 
 export interface RemnawaveImportSummary {
   readonly importRecordId: string;
@@ -42,8 +46,6 @@ interface RunInput {
    */
   readonly importRecordId?: string | null;
 }
-
-const REIWA_ID_REGEX = /reiwa_id:\s*([a-z0-9]+)/i;
 
 /**
  * The `where` arms that mean "this local row names THIS panel profile".
@@ -97,6 +99,37 @@ function panelProfileClaims(panelUser: RemnawavePanelUser): Prisma.SubscriptionW
 }
 
 /**
+ * The claim of a subscription whose interrupted CREATE is about to adopt this
+ * profile — `null` when the profile has no name to be claimed by.
+ *
+ * `ProfileSyncProcessor.handleCreate` records the name it chose, and the
+ * customer it chose it for, BEFORE the POST that makes the profile, and the
+ * retry asks for that name first and adopts what it finds. A sync that ran in
+ * between imported the profile as a SECOND subscription: the retry then found
+ * it held by that row and refused, and no tool could untangle the pair — the
+ * merge has no route, the link repair does not select the paid row, the manual
+ * link answers "already linked", and deleting the imported row deleted the
+ * live profile. So such a profile is the CREATE's: this importer neither makes
+ * a row for it nor updates the pending one (its update would stamp a paid
+ * purchase `importedFrom: 'remnawave'` and overwrite it from the panel).
+ *
+ * A claim in the sense of `panelProfileClaims`, answered the way the CREATE
+ * answers it: bound to the owner the marker line proves, so a profile under a
+ * recorded name whose line names somebody else — it won the name from that
+ * CREATE — is imported as usual. One whose lines prove nobody is left as well:
+ * the CREATE refuses it for an operator.
+ */
+function pendingCreateClaim(panelUser: RemnawavePanelUser): Prisma.SubscriptionWhereInput | null {
+  if (!panelUser.username) return null;
+  const owner = readProfileOwnerMarker(panelUser.description);
+  return {
+    remnawavePendingUsername: panelUser.username,
+    ...(owner !== null ? { remnawavePendingOwnerId: owner } : {}),
+    status: { not: SubscriptionStatus.DELETED },
+  };
+}
+
+/**
  * A stored `Json` column read back as a plain object, or `{}` when it is
  * anything else (null, an array, a scalar — all legal in that column).
  *
@@ -114,7 +147,10 @@ function jsonObjectOf(value: unknown): Prisma.InputJsonObject {
  * Two-way Remnawave importer/synchronizer.
  *
  * Matching priority (first hit wins):
- *   1. description contains "reiwa_id: {cuid}" → exact match by PK
+ *   1. the description's marker LINE "reiwa_id: {cuid}" → exact match by PK.
+ *      Read by `readProfileOwnerMarker`: a line that IS the marker, never a
+ *      `reiwa_id:` elsewhere in the text — the display name on the line above
+ *      is the customer's own text and could name somebody else's id.
  *   2. telegramId → unique match
  *   3. email → unique match
  *   4. existing Subscription.remnawaveId → recovers web-only users that
@@ -196,6 +232,25 @@ export class RemnawaveImporterService {
 
     for (const panelUser of panelUsers) {
       try {
+        // A profile an interrupted CREATE is still linking is that CREATE's —
+        // see `pendingCreateClaim`. Asked before anything is matched, so not
+        // even an account is made for it.
+        const pendingClaim = pendingCreateClaim(panelUser);
+        if (pendingClaim !== null) {
+          const pending = await this.prismaService.subscription.findFirst({
+            where: pendingClaim,
+            select: { id: true },
+          });
+          if (pending !== null) {
+            this.logger.log(
+              `Remnawave profile '${panelUser.username}' is the one subscription ${pending.id}'s ` +
+                'interrupted CREATE recorded; leaving it for that CREATE to adopt',
+            );
+            skipped += 1;
+            continue;
+          }
+        }
+
         const userId = await this.matchOrCreateUser(panelUser, input.mode);
         if (userId === null) {
           skipped += 1;
@@ -301,10 +356,12 @@ export class RemnawaveImporterService {
     panelUser: RemnawavePanelUser,
     mode: 'import' | 'sync',
   ): Promise<string | null> {
-    // Priority 1: reiwa_id in description
-    const reiwaIdMatch = panelUser.description?.match(REIWA_ID_REGEX);
-    if (reiwaIdMatch) {
-      const reiwaId = reiwaIdMatch[1];
+    // Priority 1: the reiwa_id marker LINE in the description. Only a line that
+    // is the marker counts, and only when every such line names one owner: a
+    // Telegram first name of `reiwa_id: <victim>` used to move this profile —
+    // and the subscription built from it — into the victim's account.
+    const reiwaId = readProfileOwnerMarker(panelUser.description);
+    if (reiwaId !== null) {
       const user = await this.prismaService.user.findUnique({
         where: { id: reiwaId },
         select: { id: true },
@@ -384,19 +441,21 @@ export class RemnawaveImporterService {
   /**
    * The panel username as a PUBLIC HANDLE — or `null` when it is not one.
    *
-   * A profile whose description names a `reiwa_id` was created by US, and its
-   * username is the string our own naming service generated,
+   * A profile whose description carries a `reiwa_id` marker LINE was created
+   * by US, and its username is the string our own naming service generated,
    * `{prefix}_{identity}_{suffix}` — never a handle a person chose. Copying it
    * into `User.username` is how `2GET_Lant35_sub` came to stand on the
    * operator's screen as a subscriber's public username; and because the
-   * importer runs on every sync, correcting it by hand never stuck.
+   * importer runs on every sync, correcting it by hand never stuck. Any marker
+   * line counts here, even lines that disagree: the question is "did we write
+   * this description", not "whose is it".
    *
    * For a FOREIGN profile the panel username may be the only handle that
    * exists. That is the case this field was added for, and it still works.
    */
   private publicHandleFrom(panelUser: RemnawavePanelUser): string | null {
     if (!panelUser.username) return null;
-    if (REIWA_ID_REGEX.test(panelUser.description ?? '')) return null;
+    if (readProfileOwnerMarkers(panelUser.description).length > 0) return null;
     return panelUser.username;
   }
 
@@ -598,8 +657,11 @@ export class RemnawaveImporterService {
     panelUser: RemnawavePanelUser,
   ): Promise<boolean> {
     const currentDescription = panelUser.description ?? '';
-    if (REIWA_ID_REGEX.test(currentDescription)) {
-      // Already has reiwa_id — nothing to do
+    if (readProfileOwnerMarkers(currentDescription).length > 0) {
+      // Already has a reiwa_id LINE — nothing to do. Any marker line stops the
+      // write: appending a second one that disagrees would leave the
+      // description proving nobody. A `reiwa_id:` elsewhere in a line is not a
+      // marker, so such a profile still gets its line written.
       return false;
     }
 

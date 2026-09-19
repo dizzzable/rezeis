@@ -499,6 +499,7 @@ describe('ProfileSyncProcessor', () => {
   it('creates missing Remnawave profiles and stores returned linkage metadata', async () => {
     const profileSyncUpdates: unknown[] = [];
     const subscriptionUpdates: unknown[] = [];
+    const recordedNames: unknown[] = [];
     const termAnchorUpdates: unknown[] = [];
     const remnawaveCreates: unknown[] = [];
     const infoEvents: unknown[] = [];
@@ -530,6 +531,11 @@ describe('ProfileSyncProcessor', () => {
         },
         subscription: {
           update: async (input: unknown) => { subscriptionUpdates.push(input); },
+          // The name recorded before the POST (see `handleCreate`).
+          updateMany: async (input: unknown) => {
+            recordedNames.push(input);
+            return { count: 1 };
+          },
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
@@ -589,6 +595,10 @@ describe('ProfileSyncProcessor', () => {
       activeInternalSquads: ['internal-b'],
       externalSquadUuid: null,
     }]);
+    assert.deepStrictEqual(recordedNames, [{
+      where: { id: 'subscription-1', remnawaveId: null },
+      data: { remnawavePendingUsername: 'rz_subscription_1', remnawavePendingOwnerId: 'user-1' },
+    }]);
     assert.deepStrictEqual(subscriptionUpdates, [{
       where: { id: 'subscription-1' },
       data: {
@@ -598,6 +608,8 @@ describe('ProfileSyncProcessor', () => {
         remnawavePanelId: 4471,
         remnawavePanelUsername: 'rz_subscription_1',
         configUrl: 'https://sub.example/created',
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     }]);
     assert.deepStrictEqual(termAnchorUpdates, [{
@@ -630,6 +642,8 @@ describe('ProfileSyncProcessor', () => {
           updateMany: async () => ({ count: 1 }),
           update: async () => undefined,
         },
+        // The name recorded before the POST.
+        subscription: { updateMany: async () => ({ count: 1 }) },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
@@ -670,6 +684,20 @@ describe('ProfileSyncProcessor', () => {
   it('reuses existing panel profiles during CREATE retries instead of creating duplicates', async () => {
     let createCalled = false;
     const subscriptionUpdates: unknown[] = [];
+    const panelUpdates: Array<Record<string, unknown>> = [];
+    // The row as the database holds it: the link write lands here, and the
+    // PATCH that follows an adoption re-reads it.
+    const row: Record<string, unknown> = {
+      id: 'subscription-1',
+      userId: 'user-1',
+      remnawaveId: null,
+      trafficLimit: null,
+      deviceLimit: 0,
+      internalSquads: [],
+      externalSquad: null,
+      expiresAt: new Date('2099-03-01T00:00:00.000Z'),
+      planSnapshot: {},
+    };
     const processor = new ProfileSyncProcessor(
       {
         profileSyncJob: {
@@ -678,17 +706,7 @@ describe('ProfileSyncProcessor', () => {
             action: SyncAction.CREATE,
             status: SyncJobStatus.PENDING,
             attempts: 0,
-            subscription: {
-              id: 'subscription-1',
-              userId: 'user-1',
-              remnawaveId: null,
-              trafficLimit: null,
-              deviceLimit: 0,
-              internalSquads: [],
-              externalSquad: null,
-              expiresAt: new Date('2099-03-01T00:00:00.000Z'),
-              planSnapshot: {},
-            },
+            subscription: { ...row },
           }),
           updateMany: async () => ({ count: 1 }),
           update: async () => undefined,
@@ -703,7 +721,10 @@ describe('ProfileSyncProcessor', () => {
           $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
           subscription: {
-            update: async (input: unknown) => { subscriptionUpdates.push(input); },
+            update: async (input: { data: Record<string, unknown> }) => {
+              subscriptionUpdates.push(input);
+              Object.assign(row, input.data);
+            },
           },
           // The adopted panel row carries a `createdAt`, so the MONTH_ROLLING
           // anchor stamp runs on the adopt path too.
@@ -721,11 +742,18 @@ describe('ProfileSyncProcessor', () => {
             id: 902,
             username: 'rz_subscription_1',
             subscriptionUrl: 'https://sub.example/existing',
+            // What the earlier attempt's own CREATE wrote. Only a profile whose
+            // `reiwa_id` line names this customer is adopted (18.09.2026).
+            description: 'name: Test\nreiwa_id: user-1',
           });
         },
         createUser: async () => {
           createCalled = true;
           return panelOk();
+        },
+        updateUser: async (input: Record<string, unknown>) => {
+          panelUpdates.push(input);
+          return panelOk({ id: 902, username: 'rz_subscription_1' });
         },
       } as never,
       {
@@ -748,8 +776,13 @@ describe('ProfileSyncProcessor', () => {
         remnawavePanelId: 902,
         remnawavePanelUsername: 'rz_subscription_1',
         configUrl: 'https://sub.example/existing',
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     }]);
+    // …and brought to the row's state, since it was made by an earlier attempt.
+    assert.deepEqual(panelUpdates.map((input) => input['id']), [902]);
+    assert.equal((panelUpdates[0]['expireAt'] as string | undefined), '2099-03-01T00:00:00.000Z');
   });
 
   /**
@@ -1277,6 +1310,8 @@ describe('ProfileSyncProcessor', () => {
             return { count: 1 };
           },
         },
+        // The name recorded before the POST.
+        subscription: { updateMany: async () => ({ count: 1 }) },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
@@ -1710,15 +1745,22 @@ describe('ProfileSyncProcessor', () => {
         configUrl: null,
       },
     });
+    // ...the name recorded before the POST...
+    assert.deepStrictEqual(subscriptionUpdates[1], {
+      where: { id: 'subscription-imported', remnawaveId: null },
+      data: { remnawavePendingUsername: 'rz_subscription_imported', remnawavePendingOwnerId: 'user-1' },
+    });
     // ...and the fresh profile was linked back, under the identity this panel
     // actually answers to.
-    assert.deepStrictEqual(subscriptionUpdates[1], {
+    assert.deepStrictEqual(subscriptionUpdates[2], {
       where: { id: 'subscription-imported' },
       data: {
         remnawaveId: '5150',
         remnawavePanelId: 5150,
         remnawavePanelUsername: 'rz_subscription_imported',
         configUrl: 'https://sub.example/fresh',
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     });
   });
@@ -1895,14 +1937,21 @@ describe('ProfileSyncProcessor', () => {
 
     assert.equal(updatePanelCalled, false, 'must not PATCH — there is no linked profile to update');
     assert.equal(createCalled, true, 'must provision the missing profile via CREATE');
-    // The fresh profile was linked back to the previously-unlinked subscription.
+    // The name recorded before the POST...
     assert.deepStrictEqual(subscriptionUpdates[0], {
+      where: { id: 'subscription-unlinked', remnawaveId: null },
+      data: { remnawavePendingUsername: 'rz_subscription_unlinked', remnawavePendingOwnerId: 'user-1' },
+    });
+    // ...and the fresh profile linked back to the previously-unlinked subscription.
+    assert.deepStrictEqual(subscriptionUpdates[1], {
       where: { id: 'subscription-unlinked' },
       data: {
         remnawaveId: '7788',
         remnawavePanelId: 7788,
         remnawavePanelUsername: 'rz_subscription_unlinked',
         configUrl: 'https://sub/fresh',
+        remnawavePendingUsername: null,
+        remnawavePendingOwnerId: null,
       },
     });
   });
@@ -2025,12 +2074,17 @@ describe('ProfileSyncProcessor', () => {
     expectRejection?: boolean;
     /** The subscription the adopt path finds already live on the profile. */
     profileHolder?: { id: string; userId: string };
+    /** What the naming service offers when the primary name is somebody else's. */
+    fallbackUsernames?: readonly string[];
   }): Promise<CreateRunResult> {
     const failureWrites: unknown[] = [];
     const completedWrites: unknown[] = [];
     const errorEvents: unknown[] = [];
     const requests: PanelRequest[] = [];
     const linkWrites: unknown[] = [];
+    // What the link write put on the row: a profile the CREATE path adopts is
+    // PATCHed next, and that UPDATE reads the row again.
+    const linked: Record<string, unknown> = {};
     const processor = new ProfileSyncProcessor(
       {
         profileSyncJob: {
@@ -2053,6 +2107,7 @@ describe('ProfileSyncProcessor', () => {
               status: SubscriptionStatus.ACTIVE,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'),
               planSnapshot: options.planSnapshot ?? {},
+              ...linked,
             },
           }),
           updateMany: async (input: unknown) => {
@@ -2066,12 +2121,19 @@ describe('ProfileSyncProcessor', () => {
           // The exclusivity lookup on the adopt path: "is another live
           // subscription already on this panel profile?"
           findFirst: async () => options.profileHolder ?? null,
+          // The name recorded before the POST.
+          updateMany: async () => ({ count: 1 }),
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
-          subscription: { update: async (input: unknown) => { linkWrites.push(input); } },
+          subscription: {
+            update: async (input: { data: Record<string, unknown> }) => {
+              linkWrites.push(input);
+              Object.assign(linked, input.data);
+            },
+          },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete-job' }) },
         }),
@@ -2081,6 +2143,9 @@ describe('ProfileSyncProcessor', () => {
         generateProfileName: async () => ({
           username: options.username ?? 'rz_login_sub',
           description: 'name: Test\nreiwa_id: user-1',
+          ...(options.fallbackUsernames === undefined
+            ? {}
+            : { fallbackUsernames: options.fallbackUsernames }),
         }),
         getContactInfo: async () => ({ email: null, telegramId: null }),
       } as never,
@@ -2415,25 +2480,22 @@ describe('ProfileSyncProcessor', () => {
   });
 
   it('still links a profile that carries this user\'s own marker (crash recovery)', async () => {
-    const { linkWrites, failureWrites } = await runCreate({
+    const mine = {
+      // The numeric id AND the username: without them the fixture would prove
+      // the link is written but not that the identity every later job
+      // addresses by is recorded with it.
+      id: 1201,
+      username: 'rz_subscription_1',
+      subscriptionUrl: 'https://sub/mine',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      description: 'name: Test\nreiwa_id: user-1',
+    };
+    const { linkWrites, failureWrites, requests } = await runCreate({
       expectRejection: false,
       respond: (request) =>
-        request.url.startsWith('/api/users/by-username/')
-          ? {
-              status: 200,
-              data: {
-                response: {
-                  // The numeric id AND the username: without them the fixture
-                  // would prove the link is written but not that the identity
-                  // every later job addresses by is recorded with it.
-                  id: 1201,
-                  username: 'rz_subscription_1',
-                  subscriptionUrl: 'https://sub/mine',
-                  createdAt: '2026-01-01T00:00:00.000Z',
-                  description: 'name: Test\nreiwa_id: user-1',
-                },
-              },
-            }
+        request.url.startsWith('/api/users/by-username/') ||
+        (request.method.toLowerCase() === 'patch' && request.url === '/api/users/')
+          ? { status: 200, data: { response: mine } }
           : { status: 500 },
     });
 
@@ -2446,42 +2508,70 @@ describe('ProfileSyncProcessor', () => {
           remnawavePanelId: 1201,
           remnawavePanelUsername: 'rz_subscription_1',
           configUrl: 'https://sub/mine',
+          remnawavePendingUsername: null,
+          remnawavePendingOwnerId: null,
         },
       },
     ]);
+    // The profile an earlier attempt made is brought to the row's state.
+    const patches = requests.filter((request) => request.method.toLowerCase() === 'patch');
+    assert.equal(patches.length, 1);
+    assert.equal((patches[0].data as { id?: unknown }).id, 1201);
   });
 
-  it('still links a marker-less profile (imported/legacy) exactly as before', async () => {
-    // Indeterminate ownership keeps the previous behaviour on purpose —
-    // failing those closed would strand every profile that predates the marker.
-    const { linkWrites, failureWrites } = await runCreate({
+  it('does not adopt a marker-less profile under its name: it gets a profile of its own', async () => {
+    // Reversed on 18.09.2026 — the owner's rule is to adopt only when the
+    // `reiwa_id` line PROVES the customer. It used to link such a profile on
+    // "nothing proves it is someone else's", which handed a customer whatever
+    // hand-made or donor profile happened to carry their name. No profile
+    // rezeis created predates the marker: the line has been in every
+    // description since the naming service arrived (34205982, 21.05.2026).
+    const { linkWrites, failureWrites, requests } = await runCreate({
       expectRejection: false,
-      respond: (request) =>
-        request.url.startsWith('/api/users/by-username/')
-          ? {
-              status: 200,
-              data: {
-                response: {
-                  id: 1202,
-                  username: 'rz_subscription_1',
-                  subscriptionUrl: 'https://sub/legacy',
-                  createdAt: '2026-01-01T00:00:00.000Z',
-                  description: 'imported from donor panel',
-                },
+      fallbackUsernames: ['rz_login_7f3a2b_sub'],
+      respond: (request) => {
+        if (request.url === '/api/users/by-username/rz_login_sub') {
+          return {
+            status: 200,
+            data: {
+              response: {
+                id: 1202,
+                username: 'rz_login_sub',
+                subscriptionUrl: 'https://sub/legacy',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                description: 'imported from donor panel',
               },
-            }
-          : { status: 500 },
+            },
+          };
+        }
+        if (request.url.startsWith('/api/users/by-username/')) return USER_NOT_FOUND;
+        return {
+          status: 200,
+          data: {
+            response: {
+              id: 1203,
+              username: 'rz_login_7f3a2b_sub',
+              subscriptionUrl: 'https://sub/own',
+              createdAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        };
+      },
     });
 
     assert.equal(failureWrites.length, 0);
+    const created = requests.find((request) => request.url === '/api/users/');
+    assert.equal((created?.data as Record<string, unknown> | undefined)?.['username'], 'rz_login_7f3a2b_sub');
     assert.deepEqual(linkWrites, [
       {
         where: { id: 'subscription-1' },
         data: {
-          remnawaveId: '1202',
-          remnawavePanelId: 1202,
-          remnawavePanelUsername: 'rz_subscription_1',
-          configUrl: 'https://sub/legacy',
+          remnawaveId: '1203',
+          remnawavePanelId: 1203,
+          remnawavePanelUsername: 'rz_login_7f3a2b_sub',
+          configUrl: 'https://sub/own',
+          remnawavePendingUsername: null,
+          remnawavePendingOwnerId: null,
         },
       },
     ]);
@@ -2947,6 +3037,8 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
             );
           },
           update: async () => undefined,
+          // The name recorded before the POST.
+          updateMany: async () => ({ count: 1 }),
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
@@ -3139,6 +3231,8 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
     readonly rowStatus: SubscriptionStatus;
     readonly rowRemnawaveId: string | null;
     readonly claimants: ReadonlyArray<{ id: string; remnawaveId: string | null }>;
+    /** Rows the claimant query is EVALUATED over, instead of a fixed answer. */
+    readonly rows?: ReadonlyArray<Record<string, unknown>>;
   }) {
     const deletedTargets: unknown[] = [];
     const processor = new ProfileSyncProcessor(
@@ -3175,7 +3269,10 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
           update: async () => undefined,
         },
         subscription: {
-          findMany: async () => options.claimants,
+          findMany: async (input: { where: Record<string, unknown> }) =>
+            options.rows === undefined
+              ? options.claimants
+              : options.rows.filter((row) => matchesWhere(row as never, input.where)),
           updateMany: async () => ({ count: 1 }),
         },
       } as never,
@@ -3217,6 +3314,66 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
       assert.deepEqual(deletion.deletedTargets, [], `a ${liveStatus} row keeps its panel profile`);
     });
   }
+
+  it('refuses a DELETE of a profile another row\'s interrupted CREATE recorded — that CREATE is about to adopt it', async () => {
+    // The paid row's CREATE made `rz_john_sub` and lost the link write, and a
+    // Remnawave import in between gave the profile a row of its own. Deleting
+    // THAT row sent a panel DELETE for the profile the paid row's retry adopts.
+    const deletion = deleteProcessor({
+      rowStatus: SubscriptionStatus.DELETED,
+      rowRemnawaveId: '4471',
+      claimants: [],
+      rows: [
+        {
+          id: 'subscription-1',
+          userId: 'user-1',
+          status: SubscriptionStatus.DELETED,
+          remnawaveId: '4471',
+          remnawavePanelId: 4471,
+          remnawavePanelUsername: 'rz_john_sub',
+          remnawavePendingUsername: null,
+        },
+        {
+          id: 'subscription-paid',
+          userId: 'user-1',
+          status: SubscriptionStatus.ACTIVE,
+          remnawaveId: null,
+          remnawavePanelId: null,
+          remnawavePanelUsername: null,
+          remnawavePendingUsername: 'rz_john_sub',
+        },
+      ],
+    });
+
+    await assert.rejects(deletion.run(), /subscription subscription-paid's interrupted CREATE recorded its name 'rz_john_sub'/);
+
+    assert.deepEqual(deletion.deletedTargets, [], 'the profile a CREATE is about to adopt is not deleted');
+  });
+
+  it('does not let the doomed row\'s own recorded name stop its own DELETE', async () => {
+    // Only its recorded name could match it here — no identity column is set —
+    // and a row does not stand in the way of its own retirement.
+    const deletion = deleteProcessor({
+      rowStatus: SubscriptionStatus.DELETED,
+      rowRemnawaveId: '4471',
+      claimants: [],
+      rows: [
+        {
+          id: 'subscription-1',
+          userId: 'user-1',
+          status: SubscriptionStatus.ACTIVE,
+          remnawaveId: null,
+          remnawavePanelId: null,
+          remnawavePanelUsername: null,
+          remnawavePendingUsername: 'rz_john_sub',
+        },
+      ],
+    });
+
+    await deletion.run();
+
+    assert.deepEqual(deletion.deletedTargets, [4471]);
+  });
 
   it('refuses a DELETE when a SECOND live subscription sits on the very same profile', async () => {
     // `remnawaveId` carries no unique constraint, so "whoever holds the target
@@ -3449,6 +3606,12 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
     };
   }
 
+  /** The one write a CREATE makes before its POST: the name it chose, for whom. */
+  const RECORDED_BEFORE_POST = {
+    where: { id: 'subscription-1', remnawaveId: null },
+    data: { remnawavePendingUsername: 'rz_subscription_1', remnawavePendingOwnerId: 'user-1' },
+  };
+
   it('refuses a created profile whose identity did not decode, instead of completing empty', async () => {
     // A body with no `id` at all — which the lenient executor hands straight
     // through. `String(undefined)` is `'undefined'`, a NON-EMPTY string that
@@ -3465,7 +3628,8 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
     await assert.rejects(attempt.go(), /empty Remnawave identity/);
 
     assert.deepEqual(attempt.transactionsOpened, [], 'no transaction, hence no advisory lock');
-    assert.deepEqual(attempt.subscriptionWrites, [], 'nothing may be written');
+    // Nothing but the name recorded BEFORE the POST — no identity is written.
+    assert.deepEqual(attempt.subscriptionWrites, [RECORDED_BEFORE_POST], 'nothing may be linked');
     // …and the job is FAILED, never COMPLETED. That is the whole difference:
     // before, this exact input produced a COMPLETED job and a NULL column.
     const statuses = attempt.jobWrites.map((write) => write.data['status']);
@@ -3485,7 +3649,7 @@ describe('ProfileSyncProcessor — a panel identity that will not decode fails t
 
     await assert.rejects(attempt.go(), /empty Remnawave identity/);
     assert.deepEqual(attempt.transactionsOpened, []);
-    assert.deepEqual(attempt.subscriptionWrites, []);
+    assert.deepEqual(attempt.subscriptionWrites, [RECORDED_BEFORE_POST]);
   });
 });
 
@@ -3688,7 +3852,8 @@ describe('provisioning a trial', () => {
           updateMany: async () => ({ count: 1 }),
           update: async () => undefined,
         },
-        subscription: { update: async () => undefined },
+        // `updateMany`: the name recorded before the POST.
+        subscription: { update: async () => undefined, updateMany: async () => ({ count: 1 }) },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           $executeRaw: async () => 1,
           $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
