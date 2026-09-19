@@ -317,8 +317,14 @@ export class PaymentsTransactionsService {
     let providerSubscriptionTerms: ProviderSubscriptionTerms | null = null;
     if (providerSubscription) {
       // A plan upgrade or change is priced for the difference, once; a paid
-      // trial is a one-off by definition. Neither is a sum to repeat.
-      if (input.purchaseType !== PurchaseType.NEW && input.purchaseType !== PurchaseType.RENEW) {
+      // trial is a one-off by definition. Neither is a sum to repeat. A second
+      // subscription (ADDITIONAL) is created by its first charge like a first
+      // one, and renewed by the later charges the same way.
+      if (
+        input.purchaseType !== PurchaseType.NEW &&
+        input.purchaseType !== PurchaseType.ADDITIONAL &&
+        input.purchaseType !== PurchaseType.RENEW
+      ) {
         throw autopayNotAvailable('PURCHASE_TYPE');
       }
       if (selectedPlan.availability === PlanAvailability.TRIAL) {
