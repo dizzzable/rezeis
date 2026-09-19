@@ -71,6 +71,34 @@ export const HINT_ROUTE_TARGETS = [
   '/settings/transactions',
 ] as const;
 
+/**
+ * DOORS: button targets that are not a path but a place the CABINET resolves.
+ *
+ * `@connect` is «Подключить» — exactly what the dashboard's Connect button
+ * opens: the internal connect screen or the external subscription page, by the
+ * operator's one switch. That is the door `/subscription/connect` could not be
+ * (see the note in the list above): the cabinet resolves it through the same
+ * code as the button, so the switch governs this entry point too.
+ *
+ * ── Why a door is NEGOTIATED ─────────────────────────────────────────────────
+ *
+ * A cabinet older than the door navigates to `ctaTarget` verbatim, so it would
+ * send the customer to a path called `@connect`. So a cabinet DECLARES the
+ * doors it opens, in the `x-reiwa-hint-doors` header, exactly as it declares
+ * the modes it draws, and `nextFor` holds a hint aimed at a door the asking
+ * cabinet did not declare. Held, not closed: it waits for a cabinet that can
+ * open it, within its own expiry.
+ *
+ * ── The rules a door obeys ───────────────────────────────────────────────────
+ *
+ * A door is a ROUTE target and nothing else: an EXTERNAL button is a URL, and
+ * `@connect` is not one. Names are CASE-SENSITIVE and are never upper-cased the
+ * way the mode names are; the cabinet sends `@connect` and nothing else opens
+ * it. Every door starts with `@`, which no path does — the delivery filter
+ * relies on that to tell a door from a route.
+ */
+export const HINT_DOOR_TARGETS = ['@connect'] as const;
+
 /** Surfaces the cabinet reports for itself. Mirrors its own three-way probe. */
 export const HINT_SURFACES = ['tma', 'pwa', 'browser'] as const;
 export const HINT_FORM_FACTORS = ['mobile', 'tablet', 'desktop'] as const;
@@ -179,7 +207,8 @@ export class UpsertUserHintDto {
 
   /**
    * Validated by KIND in the service, not here: a ROUTE must be one of
-   * {@link HINT_ROUTE_TARGETS} and an EXTERNAL must be an absolute https URL.
+   * {@link HINT_ROUTE_TARGETS} or {@link HINT_DOOR_TARGETS}, and an EXTERNAL
+   * must be an absolute https URL.
    * A single decorator cannot express "depends on another field", and encoding
    * it as a permissive regex would accept a route for an external button and
    * vice versa.

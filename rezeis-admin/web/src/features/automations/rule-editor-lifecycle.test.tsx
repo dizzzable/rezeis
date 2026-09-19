@@ -706,9 +706,15 @@ describe('a rule that shows a hint to an audience', () => {
     )
     await user.keyboard('{Escape}')
 
-    // Picking one gives the save back.
+    // Picking one gives the save back. A rule that never held the old «все»
+    // name is not offered it — only the two buckets.
     await user.click(picker)
-    await user.click(await screen.findByRole('option', { name: says('automationsPage.audiences.paid-not-connected') }))
+    const offered = (await screen.findAllByRole('option')).map((option) => option.textContent)
+    expect(offered).toEqual([
+      says('automationsPage.audiences.purchase-not-connected'),
+      says('automationsPage.audiences.trial-not-connected'),
+    ])
+    await user.click(await screen.findByRole('option', { name: says('automationsPage.audiences.purchase-not-connected') }))
     expect(picker).not.toHaveAttribute('aria-invalid')
     expect(screen.queryByText(says('automationsPage.actions.audienceMissing'))).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: says('automationsPage.editor.save') })).toBeEnabled()
@@ -719,8 +725,41 @@ describe('a rule that shows a hint to an audience', () => {
         NO_AUDIENCE.id,
         expect.objectContaining({
           actions: [
-            { type: 'show_hint_to_audience', params: { hintKey: 'payment-failed', audience: 'paid-not-connected' } },
+            { type: 'show_hint_to_audience', params: { hintKey: 'payment-failed', audience: 'purchase-not-connected' } },
           ],
+        }),
+      )
+    })
+  })
+
+  it('offers the old «все» audience only to a rule that already holds it, and keeps it on save', async () => {
+    // A rule saved before the split holds `paid-not-connected`. It still runs,
+    // so its picker must show it — under its honest name — and a save that
+    // touches nothing else must keep it.
+    servePanel([EVERY_CONTROL])
+    renderPage()
+    const user = userEvent.setup()
+    await screen.findByRole('textbox', { name: says('automationsPage.config.name') })
+
+    const picker = screen.getByRole('combobox', { name: says('automationsPage.actions.audienceLabel') })
+    expect(picker).toHaveTextContent(says('automationsPage.audiences.paid-not-connected'))
+    await user.click(picker)
+    const offered = (await screen.findAllByRole('option')).map((option) => option.textContent)
+    expect(offered).toEqual([
+      says('automationsPage.audiences.purchase-not-connected'),
+      says('automationsPage.audiences.trial-not-connected'),
+      says('automationsPage.audiences.paid-not-connected'),
+    ])
+    await user.keyboard('{Escape}')
+
+    await user.click(screen.getByRole('button', { name: says('automationsPage.editor.save') }))
+    await waitFor(() => {
+      expect(updateRule).toHaveBeenCalledWith(
+        EVERY_CONTROL.id,
+        expect.objectContaining({
+          actions: expect.arrayContaining([
+            { type: 'show_hint_to_audience', params: { hintKey: 'payment-failed', audience: 'paid-not-connected' } },
+          ]),
         }),
       )
     })

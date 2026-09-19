@@ -203,6 +203,7 @@ export const POPUP_CAPABLE_EVENT_TYPES: readonly string[] = [
   'payment.completed',
   'payment.failed',
   'promocode.activated',
+  'subscription.not_connected',
   'remnawave.user.expire_soon',
   'remnawave.user.expired',
   'remnawave.user.bandwidth_threshold',
@@ -244,7 +245,46 @@ export function canCarryPopup(triggerSpec: string): boolean {
  * `popup-audience.test.ts`. Anything else — or none — fails every run with
  * "requires `audience`".
  */
-export const HINT_AUDIENCE_NAMES: readonly string[] = ['paid-not-connected']
+export const HINT_AUDIENCE_NAMES: readonly string[] = [
+  'purchase-not-connected',
+  'trial-not-connected',
+  'paid-not-connected',
+]
+
+/**
+ * The name every rule saved before «Оплатил» and «Пробный период или подарок»
+ * were split holds. The server still runs it — as both buckets together — and
+ * always will, so a stored rule keeps working; the picker offers it only to a
+ * rule that already has it, labelled as what it is.
+ */
+export const LEGACY_HINT_AUDIENCE = 'paid-not-connected'
+
+/** What the picker offers any rule. */
+export const OFFERED_HINT_AUDIENCES: readonly string[] = HINT_AUDIENCE_NAMES.filter(
+  (name) => name !== LEGACY_HINT_AUDIENCE,
+)
+
+function holdsLegacyAudience(audience: unknown): boolean {
+  return typeof audience === 'string' && audience.trim() === LEGACY_HINT_AUDIENCE
+}
+
+/**
+ * The picker's items for one audience action: the offered audiences, and the
+ * legacy one only while THIS rule holds it — in the draft, or as saved. A rule
+ * that switched away can still switch back before it is saved; a new rule is
+ * never offered it.
+ */
+export function audiencePickerItems(
+  current: unknown,
+  saved: ReadonlyArray<{ readonly type: string; readonly params?: Record<string, unknown> | null }>,
+): readonly string[] {
+  const stored = saved.some(
+    (action) => action.type === 'show_hint_to_audience' && holdsLegacyAudience(action.params?.['audience']),
+  )
+  return stored || holdsLegacyAudience(current)
+    ? [...OFFERED_HINT_AUDIENCES, LEGACY_HINT_AUDIENCE]
+    : OFFERED_HINT_AUDIENCES
+}
 
 export function isKnownAudience(audience: string | null): boolean {
   return audience !== null && HINT_AUDIENCE_NAMES.includes(audience.trim())

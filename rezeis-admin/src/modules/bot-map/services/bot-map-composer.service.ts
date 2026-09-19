@@ -477,13 +477,18 @@ function composeNotificationButtonEdge(
   const target = button.target.trim();
   if (button.kind === 'webApp') {
     if (target.length === 0) return invalidEdge(id, source, label, 'empty-webapp');
-    if (KNOWN_MINI_APP_ROUTES.has(target)) {
-      referencedTerminals.add(target);
+    // THE PATH IS THE ROUTE; the query and the fragment are what it is asked.
+    // «📲 Подключить» opens `/dashboard?connect=help&subscriptionId=…` — the
+    // dashboard, told which card to open — and comparing the whole string
+    // marked that working button red on «Карта бота».
+    const route = routePathOf(target);
+    if (KNOWN_MINI_APP_ROUTES.has(route)) {
+      referencedTerminals.add(route);
       return {
         id,
         source,
         sourceLabel: label,
-        target: miniAppTerminalNodeId(target),
+        target: miniAppTerminalNodeId(route),
         destination: { kind: 'webApp', route: target },
         valid: true,
       };
@@ -597,6 +602,12 @@ function safeHost(url: string): string {
 }
 
 /** Detect a relative path like `/renew` (no scheme); returns null for absolute URLs. */
+/** A Mini App target without its query string and fragment: `/dashboard?connect=help` → `/dashboard`. */
+function routePathOf(target: string): string {
+  const cut = target.search(/[?#]/);
+  return cut === -1 ? target : target.slice(0, cut);
+}
+
 function relativeRoute(value: string): string | null {
   if (value.length === 0) return null;
   if (value.includes('://')) return null;

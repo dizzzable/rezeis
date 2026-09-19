@@ -14,6 +14,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
+import { HINT_DOOR_TARGETS } from '../dto/user-hint.dto';
 import {
   MODES_THIS_PANEL_KNOWS,
   UserHintDeliveryService,
@@ -112,6 +113,53 @@ export function parseDrawableModes(header: string | undefined): string[] | null 
 }
 
 /**
+ * The header a cabinet declares the DOORS it opens in — `@connect` today.
+ *
+ * A header for the same reason the modes are one: an old panel does not read
+ * it, so the pair deploys in either order. Silence means a cabinet older than
+ * the header, and such a cabinet navigates to a hint's target verbatim — so it
+ * is handed no hint aimed at a door (`HINT_DOOR_TARGETS`).
+ */
+export const HINT_DOORS_HEADER = 'x-reiwa-hint-doors';
+
+/**
+ * How much of the doors header is read at all, and how many names in it.
+ *
+ * It arrives from the network, so it is bounded twice: in characters before it
+ * is split, and in entries after. A real cabinet sends `@connect` — eight
+ * characters, one name — so both ceilings sit far above anything honest.
+ * What a bound can cost is a door, and that is the safe direction: a door not
+ * read holds a hint for the next ask, it never sends one to a cabinet that
+ * cannot open it.
+ */
+const DOORS_HEADER_MAX_CHARACTERS = 512;
+const DOORS_HEADER_MAX_NAMES = 16;
+
+/**
+ * The doors out of that header, as this panel knows them; `[]` when it did not
+ * say.
+ *
+ * Unlike the modes, the answer is only ever KNOWN names. A mode is filtered in
+ * the query against the schema's enum; a door is compared as a string with the
+ * hint's target, so an unknown name here would be a target the query matches
+ * and nothing validated — and there is nothing a newer cabinet could gain by it,
+ * because no hint can be aimed at a door this panel does not know.
+ *
+ * CASE-SENSITIVE, and deliberately not normalised the way the modes are:
+ * `@connect` is the door, and `@Connect` is a different string that nothing
+ * resolves. Only the whitespace a comma-separated header picks up is trimmed.
+ */
+export function parseHintDoors(header: string | undefined): string[] {
+  if (typeof header !== 'string') return [];
+  const doors = new Set<string>();
+  for (const name of header.slice(0, DOORS_HEADER_MAX_CHARACTERS).split(',', DOORS_HEADER_MAX_NAMES)) {
+    const door = name.trim();
+    if ((HINT_DOOR_TARGETS as readonly string[]).includes(door)) doors.add(door);
+  }
+  return [...doors];
+}
+
+/**
  * Moments the CABINET detects for itself, and may therefore raise.
  *
  * ── Why a closed list, when the identity is already the session's ─────────
@@ -182,6 +230,7 @@ export class InternalUserHintsController {
   public async next(
     @Body() dto: HintAudienceDto,
     @Headers(HINT_MODES_HEADER) modesHeader?: string,
+    @Headers(HINT_DOORS_HEADER) doorsHeader?: string,
   ): Promise<{ hint: ResolvedHint | null }> {
     const userId = await this.resolveUserId(dto);
     if (userId === null) return { hint: null };
@@ -212,6 +261,10 @@ export class InternalUserHintsController {
         // had every hint request rejected and shown nobody anything. An unknown
         // header is simply not read.
         modes: parseDrawableModes(modesHeader),
+        // And the doors it can open: a hint whose button is `@connect` goes
+        // only to a cabinet that said so, because an older one would navigate
+        // to the string itself. Silence is none.
+        doors: parseHintDoors(doorsHeader),
       },
     });
     return { hint };

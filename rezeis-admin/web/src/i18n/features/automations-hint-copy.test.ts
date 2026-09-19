@@ -34,6 +34,8 @@ import { en as coreEn } from '../en'
 import { ru as coreRu } from '../ru'
 import { en } from './automations.en'
 import { ru } from './automations.ru'
+import { en as notificationsEn } from './notifications.en'
+import { ru as notificationsRu } from './notifications.ru'
 
 /** The lazy automations bundle over a real i18next, as the page loads it. */
 function instance(lng: 'en' | 'ru'): I18nInstance {
@@ -211,6 +213,53 @@ const DELIVERY = readFileSync(
   'utf8',
 )
 
+// -----------------------------------------------------------------------------
+// «Не получилось подключиться?»: the card's (i) says when its event exists
+// -----------------------------------------------------------------------------
+
+describe('the connect_help template card', () => {
+  /**
+   * `subscription.not_connected` exists only while «Помощь с подключением»
+   * sends automatically — for trials and gifts only with its second switch —
+   * and only after the message was tried. An operator applying the template
+   * with the help switched off gets a rule that never fires, so the (i) names
+   * the switches, by the labels the notifications page actually shows.
+   */
+  const card = notificationsRu.notificationsPage.connectHelp
+  const cardEn = notificationsEn.notificationsPage.connectHelp
+
+  it('has an (i) at all', () => {
+    const template = HINT_TEMPLATES.find((candidate) => candidate.id === 'connect_help')
+    expect(template?.info).toBe(true)
+  })
+
+  it('names, in Russian, the page, the tab, the card and both switches as they are labelled', () => {
+    const info = RU.t('automationsPage.hintTemplates.connect_help.info')
+    expect(info).toContain(`«${notificationsRu.notificationsPage.title}»`)
+    expect(info).toContain(`«${notificationsRu.notificationsPage.tabs.user}»`)
+    expect(info).toContain(`«${card.title}»`)
+    expect(info).toContain(`«${card.enabled.label}»`)
+    expect(info).toContain(`«${card.trials.label}»`)
+    // …and that it comes after the message was tried, once per subscription.
+    expect(info).toMatch(/после попытки отправить/)
+    expect(info).toMatch(/один раз на подписку/)
+  })
+
+  it('names them in English too', () => {
+    const info = EN.t('automationsPage.hintTemplates.connect_help.info')
+    expect(info).toContain(`${notificationsEn.notificationsPage.title} page`)
+    expect(info).toContain(`${notificationsEn.notificationsPage.tabs.user} tab`)
+    expect(info).toContain(`"${cardEn.title}"`)
+    expect(info).toContain(`"${cardEn.enabled.label}"`)
+    expect(info).toContain(`"${cardEn.trials.label}"`)
+    expect(info).toMatch(/after the attempt to message/)
+    expect(info).toMatch(/once per subscription/)
+  })
+})
+
+/** The group the delivery reader guards, read out of the service rather than restated. */
+const CONNECT_HELP_GROUP = /export const CONNECT_HELP_HINT_GROUP = '([^']+)'/.exec(DELIVERY)?.[1] ?? ''
+
 describe('userHints.fields.groupKeyHint', () => {
   /** Both halves: the prefix is computed AND a query actually filters on it. */
   const lapsesSubGroups =
@@ -251,15 +300,35 @@ describe('userHints.fields.groupKeyHint', () => {
       ['en', EN],
     ] as const) {
       const hint = i18n.t('userHints.fields.groupKeyHint')
-      const quoted = [...hint.matchAll(/[«“]([a-z][a-z-]*)[»”]/g)].map(
-        (match) => match[1] ?? '',
-      )
+      // The reserved connect-help group is named in the same field (the block
+      // below checks that sentence); the worked example is the other pair.
+      const quoted = [...hint.matchAll(/[«“]([a-z][a-z-]*)[»”]/g)]
+        .map((match) => match[1] ?? '')
+        .filter((name) => name !== CONNECT_HELP_GROUP && !name.startsWith(`${CONNECT_HELP_GROUP}-`))
       expect(quoted.length, `${lng}: the sentence lost its worked example`).toBe(2)
       const parent = quoted[0] ?? ''
       const child = quoted[1] ?? ''
       expect(child.startsWith(`${parent}-`), `${lng}: ${child} is not below ${parent}`).toBe(true)
       expect(parent.startsWith(`${child}-`), `${lng}: the example runs backwards`).toBe(false)
     }
+  })
+
+  it('names the connect-help group while the server guards it, in both languages', () => {
+    // `nextFor` closes a waiting hint of this group, and of its sub-groups,
+    // once the customer has nothing left waiting to connect or switched the
+    // help off. An operator may put their own hints there on purpose — so the
+    // field says it, and says it only while the server does it.
+    expect(CONNECT_HELP_GROUP, 'CONNECT_HELP_HINT_GROUP was not found in the delivery service').toBe('connect-help')
+    expect(DELIVERY).toMatch(/isConnectHelpGroup\(row\.hint\.groupKey\)/)
+    const ruHint = RU.t('userHints.fields.groupKeyHint')
+    expect(ruHint).toContain(`«${CONNECT_HELP_GROUP}»`)
+    expect(ruHint).toMatch(/подгрупп/)
+    expect(ruHint).toMatch(/подключ/)
+    expect(ruHint).toMatch(/отключит/)
+    const enHint = EN.t('userHints.fields.groupKeyHint')
+    expect(enHint).toContain(`“${CONNECT_HELP_GROUP}”`)
+    expect(enHint).toMatch(/sub-groups/)
+    expect(enHint).toMatch(/switches connection help off/)
   })
 
   it('does not promise the group leaves a window, which nine templates do not', () => {

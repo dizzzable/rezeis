@@ -1,8 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, UserHint, UserHintDelivery } from '@prisma/client';
+import {
+  Prisma,
+  SubscriptionStatus,
+  UserHint,
+  UserHintCtaKind,
+  UserHintDelivery,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { connectHelpOptedOut } from '../../connect-signal/connect-evidence.util';
 import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
+import { HINT_DOOR_TARGETS } from '../dto/user-hint.dto';
 
 /**
  * The feed row a delivered hint leaves behind.
@@ -69,6 +77,56 @@ export function drawableModesForQuery(declared: readonly string[] | null): strin
   if (declared === null) return [...MODES_ANY_CABINET_DRAWS];
   return declared.filter((mode) => MODES_THIS_PANEL_KNOWS.includes(mode));
 }
+
+/**
+ * The doors to filter on, for the cabinet asking: the ones it declared that
+ * this panel knows. Silence — and a cabinet older than the header says nothing
+ * — is none. Compared exactly; a door is never case-folded.
+ */
+export function openableDoorsForQuery(declared: readonly string[] | undefined): string[] {
+  return (declared ?? []).filter((door) => (HINT_DOOR_TARGETS as readonly string[]).includes(door));
+}
+
+/** The door arm of the delivery filter: the declared doors, or no arm at all when there are none. */
+function doorArm(doors: readonly string[]): Array<{ ctaTarget: { in: string[] } }> {
+  return doors.length === 0 ? [] : [{ ctaTarget: { in: [...doors] } }];
+}
+
+/**
+ * The hint group whose pop-ups say "your VPN has never connected".
+ *
+ * ── Why a group has a rule of its own ────────────────────────────────────
+ *
+ * «Не получилось подключиться?» is raised when `subscription.not_connected`
+ * fires and SHOWN when the customer next opens the cabinet — hours or days
+ * later, and they may have connected in between. A delivery has no retraction,
+ * and the writers that learn of a connection live in another module. So the
+ * check is made where the pop-up is handed out: `nextFor` closes a waiting
+ * delivery of this group, and of every sub-group below it (`connect-help-…`),
+ * as lapsed, and moves on, once the customer no longer has a live subscription
+ * that is not known to have connected — or has switched «Помощь с
+ * подключением» off in the cabinet.
+ *
+ * An operator's own hint in the group gets the same treatment; the group
+ * field's (i) says so. The ready-made template puts its hint here.
+ */
+export const CONNECT_HELP_HINT_GROUP = 'connect-help';
+
+/** Whether a hint's group is {@link CONNECT_HELP_HINT_GROUP} or one of its sub-groups. */
+export function isConnectHelpGroup(groupKey: string | null): boolean {
+  if (groupKey === null) return false;
+  return groupKey === CONNECT_HELP_HINT_GROUP || groupKey.startsWith(`${CONNECT_HELP_HINT_GROUP}-`);
+}
+
+/**
+ * How many candidates one ask may lapse before it gives up for this call.
+ *
+ * A lapse closes EVERY waiting delivery of the group at once — the reason is
+ * about the person, not the delivery — so the second read already sees past
+ * them. The third is for a delivery raised in between, and a fourth round
+ * would be a loop; the cabinet asks again on its next page.
+ */
+const NEXT_FOR_ROUNDS = 3;
 
 /**
  * The pattern that finds a group's SUB-GROUPS, or `null` when it has none.
@@ -176,6 +234,13 @@ export interface HintAudience {
    * and a dismissed delivery never comes back.
    */
   readonly modes: readonly string[] | null;
+  /**
+   * The doors (`HINT_DOOR_TARGETS`) the asking cabinet opens. Absent or empty
+   * means none — what a cabinet older than the header can do, since it would
+   * navigate to `@connect` as a path. A hint aimed at a door the cabinet did
+   * not name is held for a later ask, never handed over.
+   */
+  readonly doors?: readonly string[];
 }
 
 /**
@@ -592,29 +657,107 @@ export class UserHintDeliveryService {
     readonly now?: Date;
   }): Promise<ResolvedHint | null> {
     const now = input.now ?? new Date();
-    const row = await this.prismaService.userHintDelivery.findFirst({
+    // Asked at most once per call, and only when a candidate is in the group.
+    let connectHelpOwed: boolean | null = null;
+    for (let round = 0; round < NEXT_FOR_ROUNDS; round += 1) {
+      const row = await this.prismaService.userHintDelivery.findFirst({
+        where: {
+          userId: input.userId,
+          shownAt: null,
+          // A CLOSED DELIVERY IS NOT PENDING, and leaving these two terms out was
+          // a defect. `shownAt` alone is not enough: the cabinet stamps "shown"
+          // fire-and-forget and swallows a failure, so a hint the customer read
+          // and dismissed can carry a null `shownAt` for ever — and without this
+          // it came back on every page load until it expired, with no way for
+          // them to be rid of it.
+          dismissedAt: null,
+          actedAt: null,
+          expiresAt: { gt: now },
+          // Read live, which is the whole point of pointing at the library: a
+          // hint switched off stops appearing without anybody having to sweep
+          // the queue, and switching it back on resumes it.
+          hint: { isActive: true, ...this.audienceFilter(input.audience) },
+        },
+        orderBy: { createdAt: 'asc' },
+        include: { hint: true },
+      });
+      if (row === null) return null;
+      // ── «Не получилось подключиться?» after the customer connected ───────
+      //
+      // Only a candidate of the group costs a read; every other hint is handed
+      // over exactly as before. See `CONNECT_HELP_HINT_GROUP`.
+      if (!isConnectHelpGroup(row.hint.groupKey)) return this.resolve(row.id, row.hint, input.locale);
+      connectHelpOwed ??= await this.connectHelpStillOwed(input.userId);
+      if (connectHelpOwed) return this.resolve(row.id, row.hint, input.locale);
+      await this.lapseConnectHelp(input.userId, now);
+    }
+    return null;
+  }
+
+  /**
+   * Whether a «не подключился» pop-up is still true for this person.
+   *
+   * TRUE while they have a live (ACTIVE or LIMITED) subscription that is not
+   * KNOWN to have connected — no state row, or one with no first connection —
+   * and they have not switched «Помощь с подключением» off.
+   *
+   * NOT "help is pending" (`hasPendingConnectHelp`), and the difference is a
+   * whole outcome. Pending counts only the channels that actually reached the
+   * customer; `skipped_template_off` — the operator switched the message off
+   * and relies on this very pop-up instead — is not one of them. A guard built
+   * on pending would close the pop-up in exactly the case it exists for.
+   */
+  private async connectHelpStillOwed(userId: string): Promise<boolean> {
+    const person = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: {
+        notificationPrefs: true,
+        subscriptions: {
+          where: {
+            status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.LIMITED] },
+            // "Not known to have connected": no state row at all, or one
+            // whose first connection is still unset.
+            NOT: { connectState: { is: { firstConnectedAt: { not: null } } } },
+          },
+          select: { id: true },
+          take: 1,
+        },
+      },
+    });
+    if (person === null) return false;
+    return person.subscriptions.length > 0 && !connectHelpOptedOut(person.notificationPrefs);
+  }
+
+  /**
+   * Closes every waiting delivery of the connect-help group — and its
+   * sub-groups — for this person, as LAPSED: the same `expiresAt = now` that
+   * supersession writes, so the row stays countable for "once" and puts no
+   * dismissal in the customer's mouth. The same three "waiting" terms as
+   * everywhere else, so nothing shown, closed or already lapsed is rewritten.
+   */
+  private async lapseConnectHelp(userId: string, now: Date): Promise<void> {
+    const lapsed = await this.prismaService.userHintDelivery.updateMany({
       where: {
-        userId: input.userId,
+        userId,
         shownAt: null,
-        // A CLOSED DELIVERY IS NOT PENDING, and leaving these two terms out was
-        // a defect. `shownAt` alone is not enough: the cabinet stamps "shown"
-        // fire-and-forget and swallows a failure, so a hint the customer read
-        // and dismissed can carry a null `shownAt` for ever — and without this
-        // it came back on every page load until it expired, with no way for
-        // them to be rid of it.
         dismissedAt: null,
         actedAt: null,
         expiresAt: { gt: now },
-        // Read live, which is the whole point of pointing at the library: a
-        // hint switched off stops appearing without anybody having to sweep
-        // the queue, and switching it back on resumes it.
-        hint: { isActive: true, ...this.audienceFilter(input.audience) },
+        hint: {
+          OR: [
+            { groupKey: CONNECT_HELP_HINT_GROUP },
+            { groupKey: { startsWith: `${CONNECT_HELP_HINT_GROUP}-` } },
+          ],
+        },
       },
-      orderBy: { createdAt: 'asc' },
-      include: { hint: true },
+      data: { expiresAt: now },
     });
-    if (row === null) return null;
-    return this.resolve(row.id, row.hint, input.locale);
+    if (lapsed.count > 0) {
+      this.logger.debug(
+        `Hint group "${CONNECT_HELP_HINT_GROUP}": lapsed ${lapsed.count} waiting delivery(ies) for ` +
+          `${userId} — nothing of theirs is still waiting to connect, or they switched the help off`,
+      );
+    }
   }
 
   /**
@@ -659,6 +802,29 @@ export class UserHintDeliveryService {
         // A hint skipped here stays queued for the next ask, so an upgraded
         // cabinet still gets it, TTL permitting.
         { mode: { in: drawableModesForQuery(audience.modes ?? null) } },
+        // THE DOORS THE CABINET ASKING CAN OPEN.
+        //
+        // A button aimed at a door (`@connect`) goes only to a cabinet that
+        // declared it; an older one would navigate to the string as a path.
+        // Everything else passes exactly as before — which is what each arm is
+        // for:
+        //
+        //   - not a ROUTE button (none, or an external link);
+        //   - a ROUTE with no target at all. Only another hand can write that
+        //     row, and this filter has no business holding it: `NOT LIKE` is
+        //     NULL for a NULL target, and an OR of NULLs holds the row;
+        //   - an ordinary path — no path starts with `@`;
+        //   - a door this cabinet named.
+        //
+        // A hint skipped here stays queued for a later ask, TTL permitting.
+        {
+          OR: [
+            { ctaKind: { not: UserHintCtaKind.ROUTE } },
+            { ctaTarget: null },
+            { NOT: { ctaTarget: { startsWith: '@' } } },
+            ...doorArm(openableDoorsForQuery(audience.doors)),
+          ],
+        },
       ],
     };
   }

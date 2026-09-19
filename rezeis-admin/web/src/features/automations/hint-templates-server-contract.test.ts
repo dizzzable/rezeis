@@ -97,6 +97,35 @@ function arrayLiteral(name: string): string[] {
 
 const ROUTE_TARGETS = arrayLiteral('HINT_ROUTE_TARGETS')
 
+/**
+ * The DOORS a ROUTE button may name besides a path — `@connect` — read out of
+ * the DTO like the paths. A door is valid for ROUTE only, so a template aiming
+ * at one is checked against this list and nothing else.
+ */
+const DOOR_TARGETS = arrayLiteral('HINT_DOOR_TARGETS')
+
+/** The group the delivery reader closes once the customer connects (`CONNECT_HELP_HINT_GROUP`). */
+const CONNECT_HELP_GROUP = (() => {
+  const delivery = readFileSync(
+    resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      '..',
+      '..',
+      'src',
+      'modules',
+      'user-hints',
+      'services',
+      'user-hint-delivery.service.ts',
+    ),
+    'utf8',
+  )
+  const match = /export const CONNECT_HELP_HINT_GROUP = '([^']+)'/.exec(delivery)
+  expect(match, 'CONNECT_HELP_HINT_GROUP is no longer declared the way this test reads it').not.toBeNull()
+  return match![1]!
+})()
+
 const RENDERABLE_MODES = (() => {
   const line = /RENDERABLE_HINT_MODES[^=]*=\s*\[([^\]]*)\]/.exec(DTO_CODE)
   expect(line, 'RENDERABLE_HINT_MODES is no longer declared the way this test reads it').not.toBeNull()
@@ -161,11 +190,32 @@ describe('every template is a payload the panel API accepts', () => {
     }
   })
 
-  it('points its button at a route the panel knows', () => {
+  it('points its button at a route or a door the panel knows', () => {
+    // Anti-emptiness: a door list parsed empty would let a template aimed at
+    // one fail below for the wrong reason — or, worse, the parse be skipped.
+    expect(DOOR_TARGETS).toContain('@connect')
     for (const template of HINT_TEMPLATES) {
       if (template.route === null) continue
-      expect(ROUTE_TARGETS, `${template.id}: route ${template.route}`).toContain(template.route)
+      expect([...ROUTE_TARGETS, ...DOOR_TARGETS], `${template.id}: route ${template.route}`).toContain(
+        template.route,
+      )
     }
+  })
+
+  it('aims «Не получилось подключиться?» at the door, in the group the reader closes', () => {
+    // The door, not `/subscription/connect`: only the door goes through the
+    // operator's switch between the internal screen and the external page.
+    // And the group is the one `nextFor` guards, or a pop-up about a VPN that
+    // never connected would still be shown to somebody who has connected since.
+    const template = HINT_TEMPLATES.find((candidate) => candidate.id === 'connect_help')
+    expect(template, 'the connect_help template is gone').toBeDefined()
+    expect(template!.route).toBe('@connect')
+    expect(DOOR_TARGETS).toContain(template!.route)
+    expect(template!.groupKey).toBe(CONNECT_HELP_GROUP)
+    expect(template!.triggerSpec).toBe('subscription.not_connected')
+    const hint = buildHint(template!, text)
+    expect(hint.ctaKind).toBe('ROUTE')
+    expect(hint.ctaTarget).toBe('@connect')
   })
 
   it('writes text that fits the columns it goes into', () => {

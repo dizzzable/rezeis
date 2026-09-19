@@ -75,7 +75,54 @@ function hint(over: Partial<FakeHint> = {}): FakeHint {
   };
 }
 
-function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: string) {
+/**
+ * What the connect-help guard reads about one person: whether a live
+ * subscription of theirs is not known to have connected, and their
+ * notification preferences. The query's own meaning is proved on PostgreSQL
+ * (`user-hint-delivery-postgres.spec.ts`); here it is an answer.
+ */
+interface FakePerson {
+  readonly waiting: boolean;
+  readonly prefs?: unknown;
+}
+
+/**
+ * The door arm of the delivery filter, read the way PostgreSQL reads it —
+ * NULL included: `NOT (NULL LIKE '@%')` is NULL, and an OR of NULLs is not
+ * true. A clause this fake does not know fails the case rather than passing it.
+ */
+function doorTermMatches(term: Record<string, unknown>, h: FakeHint): boolean {
+  const clauses = term.OR as ReadonlyArray<Record<string, unknown>>;
+  return clauses.some((clause) => {
+    if ('ctaKind' in clause) return h.ctaKind !== (clause.ctaKind as { not: string }).not;
+    if ('NOT' in clause) {
+      const prefix = (clause.NOT as { ctaTarget: { startsWith: string } }).ctaTarget.startsWith;
+      return h.ctaTarget !== null && !h.ctaTarget.startsWith(prefix);
+    }
+    if ('ctaTarget' in clause) {
+      if (clause.ctaTarget === null) return h.ctaTarget === null;
+      const list = (clause.ctaTarget as { in?: readonly string[] }).in;
+      if (list !== undefined) return h.ctaTarget !== null && list.includes(h.ctaTarget);
+    }
+    throw new Error(`the fake does not understand this door clause: ${JSON.stringify(clause)}`);
+  });
+}
+
+function isDoorTerm(term: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(term.OR) &&
+    (term.OR as ReadonlyArray<Record<string, unknown>>).some((clause) => 'ctaKind' in clause)
+  );
+}
+
+function build(
+  hints: FakeHint[],
+  deliveries: FakeDelivery[] = [],
+  language?: string,
+  people: Readonly<Record<string, FakePerson>> = {},
+) {
+  /** Every read the connect-help guard made, with what it asked. */
+  const guardReads: Array<{ readonly where: unknown; readonly select: Record<string, unknown> }> = [];
   let seq = 0;
   /**
    * What happened on the way to the queue, in order: `begin`/`commit` for each
@@ -97,7 +144,19 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
   const prisma = {
     // The recipient's language, for the feed copy the popup leaves behind.
     user: {
-      findUnique: async () => ({ language: language ?? 'RU' }),
+      findUnique: async (args?: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        // The connect-help guard: the only read that selects subscriptions.
+        if (args?.select !== undefined && 'subscriptions' in args.select) {
+          guardReads.push({ where: args.where, select: args.select });
+          const person = people[args.where?.id ?? ''];
+          if (person === undefined) return null;
+          return {
+            notificationPrefs: person.prefs ?? null,
+            subscriptions: person.waiting ? [{ id: 'sub-waiting' }] : [],
+          };
+        }
+        return { language: language ?? 'RU' };
+      },
     },
     // Where that copy lands. Modelled rather than stubbed away: without it the
     // copy failed inside its own catch and every test here stayed green while
@@ -173,7 +232,7 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
           dismissedAt?: null;
           actedAt?: null;
           expiresAt?: { gt: Date };
-          hint?: { groupKey: string };
+          hint?: { groupKey?: unknown; OR?: ReadonlyArray<{ groupKey: unknown }> };
         };
         const hit = deliveries.filter((d) => {
           if (w.id !== undefined && d.id !== w.id) return false;
@@ -190,7 +249,17 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
           if (w.expiresAt !== undefined && !(d.expiresAt > w.expiresAt.gt)) return false;
           if (w.hint !== undefined) {
             const h = hints.find((x) => x.id === d.hintId);
-            if (h?.groupKey !== w.hint.groupKey) return false;
+            const family = w.hint.OR;
+            if (family !== undefined) {
+              // The connect-help lapse: the group itself, or a key below it.
+              const inFamily = family.some(({ groupKey }) =>
+                typeof groupKey === 'string'
+                  ? h?.groupKey === groupKey
+                  : typeof h?.groupKey === 'string' &&
+                    h.groupKey.startsWith((groupKey as { startsWith: string }).startsWith),
+              );
+              if (!inFamily) return false;
+            } else if (h?.groupKey !== w.hint.groupKey) return false;
           }
           return true;
         });
@@ -247,6 +316,7 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
               // does not understand is a filter nothing here is testing.
               const mode = term.mode as { in?: readonly string[] } | undefined;
               if (mode !== undefined) return (mode.in ?? []).includes(d.hint.mode);
+              if (isDoorTerm(term)) return doorTermMatches(term, d.hint);
               return termMatches(
                 term,
                 JSON.stringify(term).includes('surfaces')
@@ -308,7 +378,7 @@ function build(hints: FakeHint[], deliveries: FakeDelivery[] = [], language?: st
     },
   });
   const service = new UserHintDeliveryService(client as never);
-  return { service, deliveries, prisma, feedRows, ops, locks, transactionOptions };
+  return { service, deliveries, prisma, feedRows, ops, locks, transactionOptions, guardReads };
 }
 
 /**
@@ -1548,5 +1618,189 @@ describe('one writer per customer’s queue', () => {
       { maxWait: 10_000, timeout: 20_000 },
       { maxWait: 10_000, timeout: 20_000 },
     ]);
+  });
+});
+
+describe('a button aimed at a door', () => {
+  /**
+   * `@connect` is not a path: the cabinet opens whatever its Connect button
+   * opens. A cabinet older than the door navigates to a hint's target as it
+   * stands, so it must never be handed one — it is HELD for a cabinet that
+   * declared the door in `x-reiwa-hint-doors`, as a mode is.
+   */
+  const DOOR_HINT = { key: 'connect-door', ctaKind: 'ROUTE', ctaLabelRu: 'Подключить', ctaTarget: '@connect' };
+  const DOORLESS = AUDIENCE;
+  const CONNECTING = { ...AUDIENCE, doors: ['@connect'] };
+
+  it('is held from a cabinet that declared no door, and handed to one that did', async () => {
+    const { service } = build([hint(DOOR_HINT)]);
+    await service.raise({ userId: 'u1', hintKey: 'connect-door', source: 's', now: NOW });
+
+    assert.equal(
+      await service.nextFor({ userId: 'u1', locale: 'ru', audience: DOORLESS, now: NOW }),
+      null,
+      'a door was handed to a cabinet that would navigate to "@connect" as a path',
+    );
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: CONNECTING, now: NOW });
+    assert.equal(next?.key, 'connect-door');
+    assert.equal(next?.ctaTarget, '@connect');
+  });
+
+  it('waits for that cabinet rather than dying', async () => {
+    const { service, deliveries } = build([hint(DOOR_HINT)]);
+    await service.raise({ userId: 'u1', hintKey: 'connect-door', source: 's', now: NOW });
+    const before = { ...deliveries[0]! };
+
+    await service.nextFor({ userId: 'u1', locale: 'ru', audience: DOORLESS, now: NOW });
+
+    assert.deepStrictEqual(deliveries[0], before, 'holding the hint rewrote its delivery');
+  });
+
+  it('opens a door only by its exact name', async () => {
+    // Doors are case-sensitive and never upper-cased the way modes are.
+    const { service } = build([hint(DOOR_HINT)]);
+    await service.raise({ userId: 'u1', hintKey: 'connect-door', source: 's', now: NOW });
+
+    const next = await service.nextFor({
+      userId: 'u1',
+      locale: 'ru',
+      audience: { ...AUDIENCE, doors: ['@CONNECT', '@other'] },
+      now: NOW,
+    });
+
+    assert.equal(next, null);
+  });
+
+  it('passes every other button to a doorless cabinet exactly as before', async () => {
+    // Each arm of the filter has a row here that only it lets through: no
+    // button, an external link, an ordinary path — and a ROUTE with no target
+    // at all, which only another hand can write, and which `NOT LIKE` alone
+    // would hold because it is NULL for a NULL target.
+    const cases = [
+      hint({ key: 'none', id: 'h-none' }),
+      hint({ key: 'external', id: 'h-ext', ctaKind: 'EXTERNAL', ctaLabelRu: 'Канал', ctaTarget: 'https://t.me/x' }),
+      hint({ key: 'path', id: 'h-path', ctaKind: 'ROUTE', ctaLabelRu: 'Тарифы', ctaTarget: '/plans' }),
+      hint({ key: 'route-null', id: 'h-null', ctaKind: 'ROUTE', ctaLabelRu: 'Куда-то', ctaTarget: null }),
+    ];
+    for (const one of cases) {
+      const { service } = build([one]);
+      await service.raise({ userId: 'u1', hintKey: one.key, source: 's', now: NOW });
+
+      const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: DOORLESS, now: NOW });
+
+      assert.equal(next?.key, one.key, `${one.key} was held from a cabinet with no doors`);
+    }
+  });
+});
+
+describe('«Не получилось подключиться?» after the customer connected', () => {
+  /**
+   * The pop-up is raised when `subscription.not_connected` fires and shown when
+   * the customer next opens the cabinet — they may have connected in between.
+   * So `nextFor` asks, for a candidate of the `connect-help` group only,
+   * whether the person still has a live subscription not known to have
+   * connected and has not switched the help off; if not, every waiting
+   * delivery of the group is closed as lapsed and the next hint is offered.
+   *
+   * Whether the QUERY means that is proved on PostgreSQL; here the person's
+   * answer is given, and what `nextFor` does with it is checked.
+   */
+  const CONNECT_HELP = { key: 'tpl-connect-help', id: 'h-connect', groupKey: 'connect-help', isRepeatable: true };
+  const OTHER = { key: 'welcome', id: 'h-welcome' };
+
+  it('hands it over while a live subscription is still waiting to connect', async () => {
+    const { service, guardReads } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true } });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.equal(next?.key, 'tpl-connect-help');
+    assert.equal(guardReads.length, 1);
+  });
+
+  it('closes it as lapsed once nothing of theirs is waiting, and offers the next hint', async () => {
+    const { service, deliveries } = build([hint(CONNECT_HELP), hint(OTHER)], [], undefined, {
+      u1: { waiting: false },
+    });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+    await service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.equal(next?.key, 'welcome', 'the stale pop-up was handed over, or blocked the one behind it');
+    const lapsed = deliveries.find((d) => d.hintId === 'h-connect');
+    assert.equal(lapsed?.expiresAt.getTime(), NOW.getTime(), 'the stale pop-up was not closed as lapsed');
+    // Lapsed, not dismissed: nothing is put in the customer's mouth.
+    assert.equal(lapsed?.dismissedAt, null);
+    assert.equal(lapsed?.shownAt, null);
+    assert.equal(deliveries.find((d) => d.hintId === 'h-welcome')?.expiresAt.getTime() !== NOW.getTime(), true);
+  });
+
+  it('closes it for somebody who switched the help off in the cabinet', async () => {
+    const { service, deliveries } = build([hint(CONNECT_HELP)], [], undefined, {
+      u1: { waiting: true, prefs: { connect_help: false } },
+    });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+
+    assert.equal(await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW }), null);
+    assert.equal(deliveries[0]?.expiresAt.getTime(), NOW.getTime());
+  });
+
+  it('keeps it for somebody whose other notification switches are off', async () => {
+    // Only `connect_help === false` is the opt-out.
+    const { service } = build([hint(CONNECT_HELP)], [], undefined, {
+      u1: { waiting: true, prefs: { payment_failed: false, connect_help: true } },
+    });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.equal(next?.key, 'tpl-connect-help');
+  });
+
+  it('guards the sub-groups too, and not a group that merely begins with the same letters', async () => {
+    const sub = build([hint({ ...CONNECT_HELP, key: 'own', groupKey: 'connect-help-own' })], [], undefined, {
+      u1: { waiting: false },
+    });
+    await sub.service.raise({ userId: 'u1', hintKey: 'own', source: 's', now: NOW });
+    assert.equal(await sub.service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW }), null);
+    assert.equal(sub.guardReads.length, 1);
+
+    const lookalike = build([hint({ ...CONNECT_HELP, key: 'near', groupKey: 'connect-helpful' })], [], undefined, {
+      u1: { waiting: false },
+    });
+    await lookalike.service.raise({ userId: 'u1', hintKey: 'near', source: 's', now: NOW });
+    const next = await lookalike.service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+    assert.equal(next?.key, 'near');
+    assert.equal(lookalike.guardReads.length, 0, '"connect-helpful" is not a sub-group of "connect-help"');
+  });
+
+  it('costs a hint outside the group nothing', async () => {
+    const { service, guardReads } = build([hint(OTHER)], [], undefined, { u1: { waiting: false } });
+    await service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.equal(next?.key, 'welcome');
+    assert.equal(guardReads.length, 0, 'a hint outside the group paid for the guard');
+  });
+
+  it('asks about "not known to have connected", not about help being pending', async () => {
+    // Pending help leaves out `skipped_template_off` — the operator switched
+    // the message off and relies on this very pop-up — so a guard on pending
+    // would close it in exactly the case it exists for. The live-row proof is
+    // `user-hint-delivery-postgres.spec.ts`; this pins what is asked.
+    const { service, guardReads } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true } });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+
+    await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.deepStrictEqual(guardReads[0]?.where, { id: 'u1' });
+    const subscriptions = guardReads[0]?.select['subscriptions'] as { where: unknown };
+    assert.deepStrictEqual(subscriptions.where, {
+      status: { in: ['ACTIVE', 'LIMITED'] },
+      NOT: { connectState: { is: { firstConnectedAt: { not: null } } } },
+    });
+    assert.equal(guardReads[0]?.select['notificationPrefs'], true);
   });
 });

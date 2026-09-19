@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { TFunction } from 'i18next'
 import { Lightbulb, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -86,6 +87,20 @@ function toDraft(hint: UserHint): UpsertUserHintInput {
     isRepeatable: hint.isRepeatable,
     isActive: hint.isActive,
   }
+}
+
+/**
+ * A button target in the operator's words.
+ *
+ * A path reads as itself. A DOOR — `@connect`, a place the cabinet resolves on
+ * its own (`HINT_DOOR_TARGETS` on the server) — is named: the raw string means
+ * nothing to an operator, and one this panel has no name for still gets words
+ * rather than the string.
+ */
+function routeTargetLabel(t: TFunction, route: string): string {
+  if (!route.startsWith('@')) return route
+  const named = String(t(`userHints.doors.${route.slice(1)}`, { defaultValue: '' }))
+  return named.length > 0 ? named : String(t('userHints.doors.unknown'))
 }
 
 /**
@@ -500,7 +515,7 @@ export function UserHintsTab() {
                                 route is renamed. */}
                             {(vocabulary?.routes ?? []).map((route) => (
                               <SelectItem key={route} value={route}>
-                                {route}
+                                {routeTargetLabel(t, route)}
                               </SelectItem>
                             ))}
                           </SelectContent>

@@ -19,7 +19,10 @@ import { planArrival } from './hint-templates'
 import {
   EVENT_HOME_SURFACES,
   HINT_AUDIENCE_NAMES,
+  LEGACY_HINT_AUDIENCE,
+  OFFERED_HINT_AUDIENCES,
   POPUP_CAPABLE_EVENT_TYPES,
+  audiencePickerItems,
   canCarryPopup,
   isKnownAudience,
   isWildcardPattern,
@@ -198,6 +201,57 @@ describe('an operator-facing name for every event a pop-up can be bound to', () 
     const t = translatorFor(ru)
     expect(popupEventName(t, 'user.registered')).toMatch(/Telegram/)
     expect(popupEventName(t, 'user.web_registered')).toMatch(/сайт/)
+  })
+})
+
+describe('the audience picker', () => {
+  const OFFERED = ['purchase-not-connected', 'trial-not-connected']
+
+  it('offers any rule the two buckets, and never the old «все» name', () => {
+    expect([...OFFERED_HINT_AUDIENCES]).toEqual(OFFERED)
+    expect(audiencePickerItems(undefined, [])).toEqual(OFFERED)
+    expect(audiencePickerItems('', [])).toEqual(OFFERED)
+    expect(audiencePickerItems('trial-not-connected', [])).toEqual(OFFERED)
+  })
+
+  it('adds the old name only for a rule that holds it — in the draft or as saved', () => {
+    const withLegacy = [...OFFERED, 'paid-not-connected']
+    expect(audiencePickerItems('paid-not-connected', [])).toEqual(withLegacy)
+    expect(audiencePickerItems('  paid-not-connected ', [])).toEqual(withLegacy)
+    // Switched away in the draft, still held as saved: it can be picked back.
+    expect(
+      audiencePickerItems('purchase-not-connected', [
+        { type: 'show_hint_to_audience', params: { hintKey: 'x', audience: 'paid-not-connected' } },
+      ]),
+    ).toEqual(withLegacy)
+    // The same string under another action is not an audience.
+    expect(
+      audiencePickerItems(undefined, [{ type: 'show_hint', params: { audience: 'paid-not-connected' } }]),
+    ).toEqual(OFFERED)
+  })
+
+  it('covers exactly the names the server accepts', () => {
+    expect(LEGACY_HINT_AUDIENCE).toBe('paid-not-connected')
+    expect([...OFFERED_HINT_AUDIENCES, LEGACY_HINT_AUDIENCE].sort()).toEqual([...HINT_AUDIENCE_NAMES].sort())
+  })
+
+  it('names every audience in both languages, the old one as what it now is', () => {
+    for (const bundle of [ru, en]) {
+      const t = translatorFor(bundle)
+      for (const audience of HINT_AUDIENCE_NAMES) {
+        const label = String(t(`automationsPage.audiences.${audience}`))
+        expect(label, `${audience} has no label`).not.toContain('automationsPage.')
+      }
+    }
+    const legacy = String(translatorFor(ru)('automationsPage.audiences.paid-not-connected'))
+    expect(legacy).toMatch(/все/)
+    expect(legacy).toMatch(/устаревшее/)
+    expect(String(translatorFor(ru)('automationsPage.audiences.purchase-not-connected'))).toBe(
+      'Оплатил и не подключился',
+    )
+    expect(String(translatorFor(ru)('automationsPage.audiences.trial-not-connected'))).toBe(
+      'Пробный период или подарок — не подключился',
+    )
   })
 })
 

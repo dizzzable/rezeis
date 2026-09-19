@@ -79,6 +79,7 @@ import { ArrivalTemplateCard } from './arrival-template-card';
 import { translateAutomationError } from './automation-errors';
 import { findHintCollisionsWithCompanions } from './hint-collision';
 import { getEventCatalog } from './event-catalog-api';
+import { audiencePickerItems } from './popup-audience';
 import { ACTION_LABEL_KEYS, actionLabel } from './rule-action-labels';
 import { ButtonTip } from './rule-button-tip';
 import {
@@ -925,8 +926,19 @@ function HelpAndTemplates({
                       )}
                       {cards.map((tpl) => (
                         <div key={tpl.id} className="flex flex-col rounded-lg border p-3">
-                          <p className="text-xs font-medium">
+                          <p className="flex items-center gap-1 text-xs font-medium">
                             {t(`automationsPage.hintTemplates.${tpl.id}.name`)}
+                            {/* A template whose event has conditions of its
+                                own says them behind an (i). */}
+                            {tpl.info === true && (
+                              <InfoTip
+                                label={t('automationsPage.infoAria', {
+                                  subject: t(`automationsPage.hintTemplates.${tpl.id}.name`),
+                                })}
+                              >
+                                {t(`automationsPage.hintTemplates.${tpl.id}.info`)}
+                              </InfoTip>
+                            )}
                           </p>
                           <p className="mt-0.5 mb-2 flex-1 text-[11px] text-muted-foreground">
                             {t(`automationsPage.hintTemplates.${tpl.id}.description`)}
@@ -2137,9 +2149,13 @@ function ActionsEditor({
                           <SelectValue placeholder={t('automationsPage.actions.pickAudience')} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="paid-not-connected">
-                            {t('automationsPage.audiences.paid-not-connected')}
-                          </SelectItem>
+                          {/* The two buckets, and the old «все» name only for a
+                              rule that already holds it (`audiencePickerItems`). */}
+                          {audiencePickerItems(action.params?.audience, savedActions).map((audience) => (
+                            <SelectItem key={audience} value={audience}>
+                              {t(`automationsPage.audiences.${audience}`)}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                       {audienceEmpty && (

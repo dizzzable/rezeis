@@ -291,6 +291,50 @@ describe('BotMapComposerService.compose', () => {
     assert.equal((promoDefault.destination as { route: string }).route, '/promo');
   });
 
+  it('reads a notification button by its PATH, so a query string or fragment is not a broken route', () => {
+    // «📲 Подключить» on the connect-help notice opens the dashboard told which
+    // card to open. Compared whole, the string matched no known route and the
+    // working button was drawn red on «Карта бота».
+    const composer = makeComposer();
+    const target = '/dashboard?connect=help&subscriptionId={subscriptionId}';
+    const out = composer.compose({
+      flow: null,
+      replyButtons: [],
+      templates: [
+        {
+          id: 'tpl-connect-help',
+          type: 'connect_help',
+          title: 'Не получилось подключиться?',
+          body: 'Откройте экран подключения',
+          titleEn: null,
+          bodyEn: null,
+          isActive: true,
+          buttons: [
+            { labelRu: '📲 Подключить', labelEn: '📲 Connect', kind: 'webApp', target },
+            { labelRu: 'Продлить', labelEn: 'Renew', kind: 'webApp', target: '/renew#plans' },
+            { labelRu: 'Опечатка', labelEn: 'Typo', kind: 'webApp', target: '/dashbord?connect=help' },
+          ],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ] as never,
+    });
+
+    const edges = out.edges.filter((e) => e.source === 'notif:connect_help');
+    assert.equal(edges.length, 3);
+    const [connect, renew, typo] = edges;
+    assert.equal(connect?.valid, true, 'the connect button was marked broken');
+    assert.equal(connect?.target, 'mini-app:/dashboard');
+    // The operator still reads the whole link it opens.
+    assert.deepStrictEqual(connect?.destination, { kind: 'webApp', route: target });
+    assert.equal(renew?.valid, true, 'a fragment made a known route broken');
+    assert.equal(renew?.target, 'mini-app:/renew');
+    // Only the query is forgiven, never the path: a misspelt route stays red.
+    assert.equal(typo?.valid, false);
+    const terminals = out.nodes.filter((n) => n.kind === 'mini-app-terminal').map((n) => n.id).sort();
+    assert.deepStrictEqual(terminals, ['mini-app:/dashboard', 'mini-app:/renew']);
+  });
+
   it('property — every edge.source is a real node id', () => {
     const composer = makeComposer();
     const samples = TEMPLATES as unknown as ReadonlyArray<unknown>;

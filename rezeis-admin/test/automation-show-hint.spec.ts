@@ -495,9 +495,71 @@ describe('the scheduled audience action', () => {
 
     assert.equal(result.status, 'success');
     assert.equal(result.code, 'audience_blind');
-    assert.deepStrictEqual(result.details, { reason: 'no account has a first-traffic timestamp' });
+    // `cause` is what the panel words; the reason stays for the log.
+    assert.deepStrictEqual(result.details, {
+      reason: 'no account has a first-traffic timestamp',
+      cause: 'signal_blind',
+    });
     assert.match(String(result.message), /stood down/);
     assert.deepStrictEqual(raised, [], 'and above all: it hinted nobody');
+  });
+
+  it('FAILS, naming the cause, when the audience is too large for a pop-up', async () => {
+    // Unlike a blind signal, the operator has something to do here — narrow
+    // the window or send a broadcast — so the run is red.
+    const reason = 'more than 20000 people are verified as not connected — too many for a pop-up';
+    const { registry, raised } = buildRegistry({
+      audience: { kind: 'refused', cause: 'too_large', reason, limit: 20_000 },
+    });
+
+    const result = await registry.execute(0, AUDIENCE_ACTION as never, CRON_CONTEXT as never);
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.code, 'audience_blind');
+    assert.deepStrictEqual(result.details, {
+      audience: 'paid-not-connected',
+      cause: 'too_large',
+      reason,
+      limit: 20_000,
+    });
+    assert.match(String(result.message), /hinted nobody/);
+    assert.deepStrictEqual(raised, []);
+  });
+
+  it('FAILS, naming the cause, when the database stopped the cohort at its timeout', async () => {
+    const reason = 'working out the audience took longer than 10s and the database stopped it';
+    const { registry, raised } = buildRegistry({
+      audience: { kind: 'refused', cause: 'timeout', reason, limit: null },
+    });
+
+    const result = await registry.execute(0, AUDIENCE_ACTION as never, CRON_CONTEXT as never);
+
+    assert.equal(result.status, 'failed');
+    assert.equal(result.code, 'audience_blind');
+    assert.deepStrictEqual(result.details, {
+      audience: 'paid-not-connected',
+      cause: 'timeout',
+      reason,
+      limit: null,
+    });
+    assert.deepStrictEqual(raised, []);
+  });
+
+  it('runs each of the two new audiences, asking the service for exactly that one', async () => {
+    for (const audience of ['purchase-not-connected', 'trial-not-connected']) {
+      const { registry, raised, resolved } = buildRegistry();
+
+      const result = await registry.execute(
+        0,
+        { type: 'show_hint_to_audience', params: { hintKey: 'connect', audience } } as never,
+        CRON_CONTEXT as never,
+      );
+
+      assert.equal(result.status, 'success', audience);
+      assert.equal(result.code, 'audience_queued', audience);
+      assert.equal(resolved[0]?.audience, audience);
+      assert.equal(raised[0]?.source, `audience:${audience}`);
+    }
   });
 
   it('refuses an audience nobody defined, with a message and no code', async () => {

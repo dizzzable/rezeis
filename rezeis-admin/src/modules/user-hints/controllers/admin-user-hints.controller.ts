@@ -21,6 +21,7 @@ import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import {
+  HINT_DOOR_TARGETS,
   HINT_FORM_FACTORS,
   HINT_ROUTE_TARGETS,
   HINT_SURFACES,
@@ -63,7 +64,11 @@ export class AdminUserHintsController {
     modes: readonly string[];
   } {
     return {
-      routes: HINT_ROUTE_TARGETS,
+      // The doors ride in `routes` because they ARE route targets — the form
+      // offers them under «Раздел кабинета», and the server accepts them for
+      // ROUTE only. The editor names each one in words; the raw `@connect`
+      // never reaches an operator's screen.
+      routes: [...HINT_ROUTE_TARGETS, ...HINT_DOOR_TARGETS],
       surfaces: HINT_SURFACES,
       formFactors: HINT_FORM_FACTORS,
       modes: RENDERABLE_HINT_MODES,

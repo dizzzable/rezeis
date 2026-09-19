@@ -114,10 +114,10 @@ describe('show_hint_to_audience codes', () => {
         result({
           type: 'show_hint_to_audience',
           code: 'audience_queued',
-          details: { hintKey: 'tpl-n', audience: 'paid-not-connected', queued: 3, matched, capped: false },
+          details: { hintKey: 'tpl-n', audience: 'purchase-not-connected', queued: 3, matched, capped: false },
         }),
       )
-    expect(at(1)).toContain('для 3 из 1 клиента аудитории «Оплатил, но ни разу не подключился»')
+    expect(at(1)).toContain('для 3 из 1 клиента аудитории «Оплатил и не подключился»')
     expect(at(21)).toContain('из 21 клиента')
     expect(at(2)).toContain('из 2 клиентов')
     expect(at(40)).toContain('из 40 клиентов')
@@ -126,10 +126,10 @@ describe('show_hint_to_audience codes', () => {
       result({
         type: 'show_hint_to_audience',
         code: 'audience_queued',
-        details: { hintKey: 'tpl-n', audience: 'paid-not-connected', queued: 3, matched: 40, capped: false },
+        details: { hintKey: 'tpl-n', audience: 'purchase-not-connected', queued: 3, matched: 40, capped: false },
       }),
     )
-    expect(english).toBe('Hint "tpl-n" queued for 3 of 40 customers in the "Paid, but has never connected" audience.')
+    expect(english).toBe('Hint "tpl-n" queued for 3 of 40 customers in the "Paid and has not connected" audience.')
   })
 
   it('audience_queued says when the run was capped, and only then', () => {
@@ -155,7 +155,7 @@ describe('show_hint_to_audience codes', () => {
         code: 'audience_partial',
         details: {
           hintKey: 'tpl-n',
-          audience: 'paid-not-connected',
+          audience: 'trial-not-connected',
           matched: 40,
           queued: 34,
           failed: 3,
@@ -170,11 +170,11 @@ describe('show_hint_to_audience codes', () => {
     it('names the hint, the audience and all four numbers, in the operator’s words', () => {
       const text = expectWorded(resultCodeText(RU, partial()))
       expect(text).toContain('«tpl-n»')
-      expect(text).toContain('«Оплатил, но ни разу не подключился»')
+      expect(text).toContain('«Пробный период или подарок — не подключился»')
       expect(text).toContain('34 из 40 подошедших клиентов')
       expect(text).toContain('Ещё 3 клиентам подсказку поставить не удалось')
       expect(expectWorded(resultCodeText(EN, partial()))).toBe(
-        'Hint "tpl-n", audience "Paid, but has never connected": 34 of 40 matched customers queued.' +
+        'Hint "tpl-n", audience "Trial or gift — has not connected": 34 of 40 matched customers queued.' +
           ' Another 3 customers could not be queued — why is in the panel log.',
       )
     })
@@ -233,16 +233,69 @@ describe('show_hint_to_audience codes', () => {
     })
   })
 
-  it('audience_empty names the audience', () => {
+  it('audience_empty names the audience — the old «все» one by what it now honestly is', () => {
     const entry = result({ type: 'show_hint_to_audience', code: 'audience_empty', details: { audience: 'paid-not-connected' } })
-    expect(expectWorded(resultCodeText(RU, entry))).toContain('«Оплатил, но ни разу не подключился»')
-    expect(expectWorded(resultCodeText(EN, entry))).toContain('Paid, but has never connected')
+    expect(expectWorded(resultCodeText(RU, entry))).toContain(
+      '«Не подключился: все (оплаченные, пробные и подарки) — устаревшее»',
+    )
+    expect(expectWorded(resultCodeText(EN, entry))).toContain('Not connected: everyone (paid, trials and gifts) — legacy')
   })
 
-  it('audience_blind carries the reason the server gave', () => {
-    const entry = result({ type: 'show_hint_to_audience', code: 'audience_blind', details: { reason: 'no first-traffic timestamps' } })
-    expect(expectWorded(resultCodeText(RU, entry))).toContain('no first-traffic timestamps')
-    expect(expectWorded(resultCodeText(EN, entry))).toContain('no first-traffic timestamps')
+  it('audience_blind carries the reason the server gave, when it names no cause', () => {
+    // A row written before causes, or by a panel with a cause this one lacks.
+    const rows: ReadonlyArray<Record<string, string>> = [
+      { reason: 'no first-traffic timestamps' },
+      { reason: 'no first-traffic timestamps', cause: 'tomorrow' },
+    ]
+    for (const details of rows) {
+      const entry = result({ type: 'show_hint_to_audience', code: 'audience_blind', details })
+      expect(expectWorded(resultCodeText(RU, entry))).toContain('no first-traffic timestamps')
+      expect(expectWorded(resultCodeText(EN, entry))).toContain('no first-traffic timestamps')
+    }
+  })
+
+  describe('audience_blind with a cause — the sentence is the panel’s, not the server’s', () => {
+    const ENGLISH_REASON = 'the panel cannot tell right now who has connected'
+
+    it('a blind signal says what to check, in Russian', () => {
+      const entry = result({
+        type: 'show_hint_to_audience',
+        code: 'audience_blind',
+        details: { reason: ENGLISH_REASON, cause: 'signal_blind' },
+      })
+      const text = expectWorded(resultCodeText(RU, entry))
+      expect(text).toContain('не может понять, кто подключился')
+      expect(text).toContain('Remnawave')
+      expect(text).not.toContain(ENGLISH_REASON)
+      expect(expectWorded(resultCodeText(EN, entry))).toContain('cannot tell right now who has connected')
+    })
+
+    it('too many people names the audience and the ceiling, and points at a broadcast', () => {
+      const entry = result({
+        type: 'show_hint_to_audience',
+        status: 'failed',
+        code: 'audience_blind',
+        details: { audience: 'purchase-not-connected', cause: 'too_large', reason: 'more than 20000', limit: 20000 },
+      })
+      const text = expectWorded(resultCodeText(RU, entry))
+      expect(text).toContain('«Оплатил и не подключился»')
+      expect(text).toContain('больше 20000 клиентов')
+      expect(text).toContain('«Подключение VPN»')
+      expect(expectWorded(resultCodeText(EN, entry))).toContain('more than 20000 customers in the "Paid and has not connected" audience')
+    })
+
+    it('a timeout names the audience and says the next run tries again', () => {
+      const entry = result({
+        type: 'show_hint_to_audience',
+        status: 'failed',
+        code: 'audience_blind',
+        details: { audience: 'trial-not-connected', cause: 'timeout', reason: 'took longer than 10s', limit: null },
+      })
+      const text = expectWorded(resultCodeText(RU, entry))
+      expect(text).toContain('«Пробный период или подарок — не подключился»')
+      expect(text).toContain('при следующем запуске')
+      expect(expectWorded(resultCodeText(EN, entry))).toContain('tries again on its next run')
+    })
   })
 
   it('words every code the contract lists, in both languages', () => {

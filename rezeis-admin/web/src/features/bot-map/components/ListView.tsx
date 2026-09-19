@@ -42,7 +42,12 @@ export function ListView({ payload, visibleNodes, selectedId, onSelect }: ListVi
           groups.map((group) => (
             <section key={group.key} className="space-y-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                {t(`botMapPage.rail.groups.${group.key}` as never, { defaultValue: group.key })}
+                {/* `nsSeparator: false` — see NodeRail: a ':' in the group
+                    key is not a namespace. */}
+                {t(`botMapPage.rail.groups.${group.key}` as never, {
+                  defaultValue: group.key,
+                  nsSeparator: false,
+                })}
               </h3>
               <ul className="space-y-2">
                 {group.nodes.map((node) => (

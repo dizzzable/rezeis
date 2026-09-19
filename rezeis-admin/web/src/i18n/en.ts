@@ -2285,8 +2285,8 @@ export const en = {
     // character: one comma out of place and the operator sees the raw English.
     'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger':
       'The "Show a hint on a schedule" action picks its own recipients, so it cannot run on an event. Choose the "On a schedule (cron)" trigger.',
-    'Action "show_hint_to_audience" needs an audience, one of: paid-not-connected':
-      'The "Show a hint on a schedule" action has no audience picked. Choose one in the Audience field: "Paid, but has never connected" is the one available.',
+    'Action "show_hint_to_audience" needs an audience, one of: purchase-not-connected, trial-not-connected, paid-not-connected':
+      'The "Show a hint on a schedule" action has no audience picked. Choose one in the Audience field: "Paid and has not connected" or "Trial or gift — has not connected".',
     'A pop-up needs somebody to show it to, and a schedule names nobody — bind this rule to an event about a customer, or run it manually with a user id':
       'A pop-up has nobody to show itself to: a schedule names no customer. Bind the rule to an event that names one, or run it with "Run now" and pick a customer.',
   },

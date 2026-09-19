@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { ConnectAudienceService } from '../src/modules/connect-audience/services/connect-audience.service';
+import { HintAudienceService } from '../src/modules/user-hints/services/hint-audience.service';
 import { UserHintDeliveryService } from '../src/modules/user-hints/services/user-hint-delivery.service';
 
 /**
@@ -488,5 +490,411 @@ run('the hint queue on PostgreSQL', () => {
       'two waiting deliveries in one group for one customer',
     );
     assert.equal((await handedOut(me, now)).length, 1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// «Купил, но не подключился» in the queue: the `@connect` door, the stale
+// pop-up guard, and the hint audiences through the real audience service.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A second client of its own: the block above disconnects its client in its
+ * own `after`. Rows are this block's, under `prefix`, and removed in `after`.
+ *
+ * Instants are BOUND everywhere: the guard reads no clock, the lapse writes the
+ * bound `now`, and the audiences run on a synthetic clock years from today
+ * (2033) so that no row another spec left behind can fall inside a window.
+ * Run it on a UTC database AND on one whose `timezone` is not UTC.
+ */
+run('the connect door, the stale pop-up guard and the hint audiences on PostgreSQL', () => {
+  let db: PrismaService;
+  let queue: UserHintDeliveryService;
+  const door = `${prefix}-door`;
+  const made = { users: [] as string[], hints: [] as string[] };
+  let seq = 0;
+  const id = (label: string): string => `${door}-${label}-${++seq}`;
+
+  /** A cabinet that says nothing about itself — and therefore opens no door. */
+  const OLD_CABINET = { surface: null, formFactor: null, modes: null };
+  /** The same cabinet, declaring `@connect` in `x-reiwa-hint-doors`. */
+  const CONNECTING_CABINET = { ...OLD_CABINET, doors: ['@connect'] };
+
+  async function person(label: string, prefs?: Prisma.InputJsonValue): Promise<string> {
+    const userId = id(`user-${label}`);
+    await db.user.create({
+      data: {
+        id: userId,
+        referralCode: `${userId}-ref`,
+        name: label,
+        ...(prefs === undefined ? {} : { notificationPrefs: prefs }),
+      },
+    });
+    made.users.push(userId);
+    return userId;
+  }
+
+  async function authored(
+    label: string,
+    data: Partial<Prisma.UserHintUncheckedCreateInput> = {},
+  ): Promise<{ readonly id: string; readonly key: string }> {
+    const hint = await db.userHint.create({
+      data: { key: id(label), titleRu: `Заголовок: ${label}`, bodyRu: `Текст: ${label}`, ttlHours: 48, ...data },
+      select: { id: true, key: true },
+    });
+    made.hints.push(hint.id);
+    return hint;
+  }
+
+  /**
+   * A delivery waiting for `userId`. `queuedMinutesAgo` sets its place in the
+   * queue explicitly: two rows created in one millisecond tie on `createdAt`,
+   * and the queue's order between them would be the database's to choose.
+   */
+  async function waiting(userId: string, hintId: string, now: Date, queuedMinutesAgo = 5): Promise<string> {
+    const row = await db.userHintDelivery.create({
+      data: {
+        userId,
+        hintId,
+        source: `${door}-fixture`,
+        expiresAt: new Date(now.getTime() + 24 * HOUR_MS),
+        createdAt: new Date(now.getTime() - queuedMinutesAgo * 60 * 1000),
+      },
+      select: { id: true },
+    });
+    return row.id;
+  }
+
+  async function subscription(input: {
+    readonly userId: string;
+    readonly createdAt: Date;
+    readonly status?: 'ACTIVE' | 'LIMITED' | 'EXPIRED';
+    readonly isTrial?: boolean;
+  }): Promise<string> {
+    const subscriptionId = id('sub');
+    await db.$executeRaw(Prisma.sql`
+      INSERT INTO "subscriptions" ("id", "user_id", "status", "is_trial", "plan_snapshot", "remnawave_id",
+                                   "created_at", "updated_at")
+      VALUES (${subscriptionId}, ${input.userId}, ${input.status ?? 'ACTIVE'}::"SubscriptionStatus",
+              ${input.isTrial ?? false}, ${JSON.stringify({ name: 'Standard' })}::jsonb, ${subscriptionId},
+              ${input.createdAt}, ${input.createdAt})
+    `);
+    return subscriptionId;
+  }
+
+  async function payment(input: {
+    readonly userId: string;
+    readonly subscriptionId: string;
+    readonly purchaseType: 'NEW' | 'RENEW';
+    readonly createdAt: Date;
+  }): Promise<void> {
+    const transactionId = id('tx');
+    await db.$executeRaw(Prisma.sql`
+      INSERT INTO "transactions"
+        ("id", "payment_id", "user_id", "subscription_id", "status", "purchase_type", "gateway_type", "currency",
+         "amount", "plan_snapshot", "fulfilled_at", "created_at", "updated_at")
+      VALUES (${transactionId}, ${`${transactionId}-pay`}, ${input.userId}, ${input.subscriptionId},
+              'COMPLETED'::"TransactionStatus", ${input.purchaseType}::"PurchaseType",
+              'PLATEGA'::"PaymentGatewayType", 'RUB'::"Currency", 499, ${JSON.stringify({})}::jsonb,
+              ${input.createdAt}::timestamptz, ${input.createdAt}, ${input.createdAt})
+    `);
+  }
+
+  async function connectState(
+    subscriptionId: string,
+    input: {
+      readonly checkedAt?: Date | null;
+      readonly firstConnectedAt?: Date | null;
+      readonly helpDecidedAt?: Date | null;
+      readonly helpOutcome?: string | null;
+    },
+  ): Promise<void> {
+    const at = input.checkedAt ?? new Date();
+    await db.$executeRaw(Prisma.sql`
+      INSERT INTO "subscription_connect_states"
+        ("subscription_id", "first_connected_at", "checked_at", "help_decided_at", "help_kind", "help_outcome",
+         "created_at", "updated_at")
+      VALUES (${subscriptionId}, ${input.firstConnectedAt ?? null}::timestamptz, ${input.checkedAt ?? null}::timestamptz,
+              ${input.helpDecidedAt ?? null}::timestamptz,
+              ${input.helpDecidedAt === undefined || input.helpDecidedAt === null ? null : 'paid'},
+              ${input.helpOutcome ?? null}, ${at}, ${at})
+    `);
+  }
+
+  async function expiresAtOf(deliveryId: string): Promise<Date> {
+    const row = await db.userHintDelivery.findUniqueOrThrow({ where: { id: deliveryId }, select: { expiresAt: true } });
+    return row.expiresAt;
+  }
+
+  before(async () => {
+    process.env.DATABASE_URL = testUrl;
+    db = new PrismaService();
+    await db.$connect();
+    queue = new UserHintDeliveryService(db);
+  });
+
+  after(async () => {
+    if (db === undefined) return;
+    await db.userHintDelivery.deleteMany({
+      where: { OR: [{ userId: { in: made.users } }, { hintId: { in: made.hints } }] },
+    });
+    await db.userHint.deleteMany({ where: { id: { in: made.hints } } });
+    const like = `${door}-%`;
+    await db.$executeRaw(Prisma.sql`DELETE FROM "transactions" WHERE "id" LIKE ${like}`);
+    await db.$executeRaw(Prisma.sql`DELETE FROM "subscriptions" WHERE "id" LIKE ${like}`);
+    await db.user.deleteMany({ where: { id: { in: made.users } } });
+    await db.$disconnect();
+  });
+
+  // ── The door ───────────────────────────────────────────────────────────────
+
+  it('holds a `@connect` hint from a cabinet that did not declare the door, and delivers it to one that did', async () => {
+    const me = await person('door');
+    const hint = await authored('door', { ctaKind: 'ROUTE', ctaLabelRu: 'Подключить', ctaTarget: '@connect' });
+    const now = new Date();
+    const deliveryId = await waiting(me, hint.id, now);
+    const before = await expiresAtOf(deliveryId);
+
+    assert.equal(
+      await queue.nextFor({ userId: me, locale: 'ru', audience: OLD_CABINET, now }),
+      null,
+      'a door was handed to a cabinet that would navigate to "@connect" as a path',
+    );
+    assert.deepEqual(await expiresAtOf(deliveryId), before, 'holding the hint rewrote it');
+    assert.equal(
+      await queue.nextFor({ userId: me, locale: 'ru', audience: { ...OLD_CABINET, doors: ['@CONNECT'] }, now }),
+      null,
+      'a door opened under another case',
+    );
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+    assert.equal(next?.deliveryId, deliveryId);
+    assert.equal(next?.ctaTarget, '@connect');
+  });
+
+  it('delivers a hint with NO button — a NULL target — to either cabinet', async () => {
+    // The NOT-LIKE-NULL trap: `NOT (cta_target LIKE '@%')` is NULL for a NULL
+    // target, and a filter made of that alone holds every button-less hint.
+    for (const audience of [OLD_CABINET, CONNECTING_CABINET]) {
+      const me = await person('no-button');
+      const hint = await authored('no-button');
+      const now = new Date();
+      const deliveryId = await waiting(me, hint.id, now);
+
+      const next = await queue.nextFor({ userId: me, locale: 'ru', audience, now });
+
+      assert.equal(next?.deliveryId, deliveryId, `held from ${JSON.stringify(audience)}`);
+    }
+  });
+
+  it('delivers a ROUTE with a NULL target — a row only another hand writes — to a doorless cabinet', async () => {
+    // The row the explicit `cta_target IS NULL` arm exists for: it is a ROUTE,
+    // so the first arm does not pass it, and `NOT LIKE` is NULL for it.
+    const me = await person('route-null');
+    const hint = await authored('route-null', { ctaKind: 'ROUTE', ctaLabelRu: 'Куда-то', ctaTarget: null });
+    const now = new Date();
+    const deliveryId = await waiting(me, hint.id, now);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: OLD_CABINET, now });
+
+    assert.equal(next?.deliveryId, deliveryId, 'the door filter held a row it has no business holding');
+  });
+
+  it('delivers an ordinary route and an external link to a doorless cabinet', async () => {
+    for (const data of [
+      { ctaKind: 'ROUTE' as const, ctaLabelRu: 'Тарифы', ctaTarget: '/plans' },
+      { ctaKind: 'EXTERNAL' as const, ctaLabelRu: 'Канал', ctaTarget: 'https://t.me/example' },
+    ]) {
+      const me = await person(`button-${data.ctaKind}`);
+      const hint = await authored(`button-${data.ctaKind}`, data);
+      const now = new Date();
+      const deliveryId = await waiting(me, hint.id, now);
+
+      const next = await queue.nextFor({ userId: me, locale: 'ru', audience: OLD_CABINET, now });
+
+      assert.equal(next?.deliveryId, deliveryId, `${data.ctaTarget} was held`);
+    }
+  });
+
+  // ── The stale pop-up guard ─────────────────────────────────────────────────
+
+  /** A connect-help pop-up waiting for `userId`, and a plain hint queued after it. */
+  async function queued(userId: string, now: Date): Promise<{ readonly popup: string; readonly plain: string }> {
+    const popupHint = await authored('connect-help', {
+      groupKey: 'connect-help',
+      isRepeatable: true,
+      ctaKind: 'ROUTE',
+      ctaLabelRu: 'Подключить',
+      ctaTarget: '@connect',
+    });
+    const plainHint = await authored('plain');
+    // The pop-up first in the queue, so the guard is what decides whether the
+    // plain hint behind it is reached.
+    const popup = await waiting(userId, popupHint.id, now, 2);
+    const plain = await waiting(userId, plainHint.id, now, 1);
+    return { popup, plain };
+  }
+
+  it('keeps the pop-up open when the message was switched off (`skipped_template_off`)', async () => {
+    // THE case a guard on "help is pending" gets wrong: the operator switched
+    // the message template off and relies on this very pop-up, and pending
+    // help does not count that outcome.
+    const me = await person('template-off');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, {
+      checkedAt: new Date(now.getTime() - HOUR_MS),
+      helpDecidedAt: new Date(now.getTime() - 2 * HOUR_MS),
+      helpOutcome: 'skipped_template_off',
+    });
+    const { popup } = await queued(me, now);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+
+    assert.equal(next?.deliveryId, popup, 'the pop-up the operator relies on was closed');
+  });
+
+  it('keeps it open for a live subscription the panel knows nothing about yet', async () => {
+    // No state row: not KNOWN to have connected.
+    const me = await person('no-state');
+    const now = new Date();
+    await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS), status: 'LIMITED' });
+    const { popup } = await queued(me, now);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+
+    assert.equal(next?.deliveryId, popup);
+  });
+
+  it('lapses it once the customer connected, and hands over the next hint untouched', async () => {
+    const me = await person('connected');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, {
+      checkedAt: new Date(now.getTime() - HOUR_MS),
+      firstConnectedAt: new Date(now.getTime() - 3 * HOUR_MS),
+      helpDecidedAt: new Date(now.getTime() - 5 * HOUR_MS),
+      helpOutcome: 'bot',
+    });
+    const { popup, plain } = await queued(me, now);
+    const plainBefore = await expiresAtOf(plain);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+
+    assert.equal(next?.deliveryId, plain, 'the stale pop-up was handed over, or blocked the hint behind it');
+    assert.deepEqual(await expiresAtOf(popup), now, 'the stale pop-up was not closed as lapsed');
+    assert.deepEqual(await expiresAtOf(plain), plainBefore, 'a hint outside the group was rewritten');
+    const closed = await db.userHintDelivery.findUniqueOrThrow({
+      where: { id: popup },
+      select: { shownAt: true, dismissedAt: true, actedAt: true },
+    });
+    assert.deepEqual(closed, { shownAt: null, dismissedAt: null, actedAt: null });
+  });
+
+  it('lapses it when nothing of theirs is live any more', async () => {
+    const me = await person('expired');
+    const now = new Date();
+    await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS), status: 'EXPIRED' });
+    const { popup, plain } = await queued(me, now);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+
+    assert.equal(next?.deliveryId, plain);
+    assert.deepEqual(await expiresAtOf(popup), now);
+  });
+
+  it('lapses it for somebody who switched «Помощь с подключением» off, though they never connected', async () => {
+    const me = await person('opted-out', { connect_help: false });
+    const now = new Date();
+    await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    const { popup, plain } = await queued(me, now);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+
+    assert.equal(next?.deliveryId, plain);
+    assert.deepEqual(await expiresAtOf(popup), now);
+  });
+
+  it('leaves a hint outside the group alone for a connected customer', async () => {
+    const me = await person('outside');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, { checkedAt: now, firstConnectedAt: new Date(now.getTime() - HOUR_MS) });
+    const plainHint = await authored('outside-plain', { groupKey: 'connect-helpful' });
+    const plain = await waiting(me, plainHint.id, now);
+    const before = await expiresAtOf(plain);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+
+    assert.equal(next?.deliveryId, plain, '"connect-helpful" is not the connect-help group');
+    assert.deepEqual(await expiresAtOf(plain), before);
+  });
+
+  // ── The hint audiences, through the real audience service ──────────────────
+
+  it('resolves the two new audiences and the legacy one from real rows', async () => {
+    const NOW = new Date('2033-05-20T12:00:00.000Z');
+    const at = (hours: number): Date => new Date(NOW.getTime() - hours * HOUR_MS);
+    const read = at(1);
+
+    // Paid, bought inside the 24–72 h window, read after the purchase: in.
+    const paid = await person('aud-paid');
+    const paidSub = await subscription({ userId: paid, createdAt: at(48) });
+    await payment({ userId: paid, subscriptionId: paidSub, purchaseType: 'NEW', createdAt: at(48) });
+    await connectState(paidSub, { checkedAt: read });
+
+    // Paid and already helped by the automatic message: STILL in — the pop-up
+    // is shown after the message on purpose.
+    const helped = await person('aud-helped');
+    const helpedSub = await subscription({ userId: helped, createdAt: at(50) });
+    await payment({ userId: helped, subscriptionId: helpedSub, purchaseType: 'NEW', createdAt: at(50) });
+    await connectState(helpedSub, { checkedAt: read, helpDecidedAt: at(20), helpOutcome: 'bot' });
+
+    // Paid inside the window by a RENEWAL of a subscription created long
+    // before it: the paid window is the payment's time, not the subscription's.
+    const renewed = await person('aud-renewed');
+    const renewedSub = await subscription({ userId: renewed, createdAt: at(400) });
+    await payment({ userId: renewed, subscriptionId: renewedSub, purchaseType: 'NEW', createdAt: at(400) });
+    await payment({ userId: renewed, subscriptionId: renewedSub, purchaseType: 'RENEW', createdAt: at(30) });
+    await connectState(renewedSub, { checkedAt: read });
+
+    // Trial, granted inside the window: in the trial bucket only.
+    const trial = await person('aud-trial');
+    const trialSub = await subscription({ userId: trial, createdAt: at(40), isTrial: true });
+    await connectState(trialSub, { checkedAt: read });
+
+    // Out: connected; never read; granted outside the window.
+    const connected = await person('aud-connected');
+    const connectedSub = await subscription({ userId: connected, createdAt: at(48) });
+    await payment({ userId: connected, subscriptionId: connectedSub, purchaseType: 'NEW', createdAt: at(48) });
+    await connectState(connectedSub, { checkedAt: read, firstConnectedAt: at(10) });
+    const unread = await person('aud-unread');
+    const unreadSub = await subscription({ userId: unread, createdAt: at(48) });
+    await payment({ userId: unread, subscriptionId: unreadSub, purchaseType: 'NEW', createdAt: at(48) });
+    const old = await person('aud-old-trial');
+    const oldSub = await subscription({ userId: old, createdAt: at(100), isTrial: true });
+    await connectState(oldSub, { checkedAt: read });
+
+    const HEALTH = { state: 'live' } as never;
+    const audiences = new HintAudienceService(new ConnectAudienceService(db, { current: async () => HEALTH } as never));
+    const ids = async (audience: 'purchase-not-connected' | 'trial-not-connected' | 'paid-not-connected') => {
+      const outcome = await audiences.resolve({ audience, afterHours: 24, beforeHours: 72, now: NOW });
+      assert.equal(outcome.kind, 'ok', `${audience}: ${JSON.stringify(outcome)}`);
+      return [...(outcome as { userIds: readonly string[] }).userIds].sort();
+    };
+
+    assert.deepEqual(await ids('purchase-not-connected'), [paid, helped, renewed].sort());
+    assert.deepEqual(await ids('trial-not-connected'), [trial]);
+    assert.deepEqual(await ids('paid-not-connected'), [paid, helped, renewed, trial].sort());
+  });
+
+  it('stands the audiences down on a blind signal before reading a row', async () => {
+    const blind = new HintAudienceService(
+      new ConnectAudienceService(db, { current: async () => ({ state: 'blind' }) } as never),
+    );
+
+    const outcome = await blind.resolve({ audience: 'paid-not-connected', now: new Date('2033-05-20T12:00:00.000Z') });
+
+    assert.equal(outcome.kind, 'blind');
   });
 });

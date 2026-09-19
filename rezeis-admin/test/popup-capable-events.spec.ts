@@ -216,6 +216,20 @@ describe('the trigger every ready-made pop-up binds to', () => {
   });
 });
 
+describe('subscription.not_connected', () => {
+  // The ready-made «Не получилось подключиться?» binds to it. The loops above
+  // prove the entry against the sweep's source; this names the one fact the
+  // template depends on, so losing the entry fails here by name.
+  it('is capable, named by userId, and emitted by the connect-help sweep', () => {
+    const entry = POPUP_CAPABLE_EVENTS.find((event) => event.type === 'subscription.not_connected');
+    assert.ok(entry, 'subscription.not_connected is not in POPUP_CAPABLE_EVENTS');
+    assert.equal(entry.namedBy, 'userId');
+    assert.equal(entry.emittedIn, 'src/modules/connect-help/services/connect-help-sweep.service.ts');
+    assert.equal(canCarryPopup('subscription.not_connected'), true);
+    assert.equal(EVENT_TYPES.SUBSCRIPTION_NOT_CONNECTED, 'subscription.not_connected');
+  });
+});
+
 describe('canCarryPopup', () => {
   it('accepts a wildcard that covers at least one capable event', () => {
     assert.equal(canCarryPopup('remnawave.user.*'), true);

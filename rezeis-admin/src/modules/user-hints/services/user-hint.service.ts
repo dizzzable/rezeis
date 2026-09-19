@@ -8,7 +8,7 @@ import {
 import { Prisma, UserHint, UserHintCtaKind } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { HINT_ROUTE_TARGETS, UpsertUserHintDto } from '../dto/user-hint.dto';
+import { HINT_DOOR_TARGETS, HINT_ROUTE_TARGETS, UpsertUserHintDto } from '../dto/user-hint.dto';
 
 /**
  * The hint LIBRARY — authoring, not delivery.
@@ -138,9 +138,16 @@ export class UserHintService {
       throw new BadRequestException('ctaTarget is required when the hint has a button');
     }
     if (kind === UserHintCtaKind.ROUTE) {
-      if (!(HINT_ROUTE_TARGETS as readonly string[]).includes(value)) {
+      // A DOOR IS A ROUTE TARGET, and only that. The cabinet resolves it the
+      // way the dashboard's Connect button does, and it is not an address:
+      // the EXTERNAL branch below refuses it because it is no URL at all.
+      // Compared exactly — `@CONNECT` is not a door, whatever it looks like.
+      if (
+        !(HINT_ROUTE_TARGETS as readonly string[]).includes(value) &&
+        !(HINT_DOOR_TARGETS as readonly string[]).includes(value)
+      ) {
         throw new BadRequestException(
-          `ctaTarget must be one of the known cabinet routes: ${HINT_ROUTE_TARGETS.join(', ')}`,
+          `ctaTarget must be one of the known cabinet routes: ${[...HINT_ROUTE_TARGETS, ...HINT_DOOR_TARGETS].join(', ')}`,
         );
       }
       return value;

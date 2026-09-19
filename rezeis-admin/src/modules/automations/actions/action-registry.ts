@@ -644,15 +644,19 @@ export class AutomationActionRegistry {
    *
    * ── Standing down is a success, not a failure ─────────────────────────
    *
-   * `HintAudienceService` answers `blind` when it cannot tell "has never
-   * connected" from "we were never told" — which is the state of any install
-   * whose Remnawave webhooks are not arriving. Acting on that would hint the
-   * entire customer base, including people connected for months.
+   * `HintAudienceService` answers `blind` when the connect signal is blind —
+   * the panel has not read Remnawave for half an hour and no webhook arrived
+   * in a day — so "has never connected" cannot be told from "we could not
+   * look". Acting on that would hint people who are connected.
    *
    * The action reports that as a SUCCESS with the reason in its message,
    * deliberately. A failed execution invites an operator to retry, and a retry
    * cannot fix a missing webhook; the message is what tells them what to fix.
    * The audience service logs it at warn level as well.
+   *
+   * A REFUSAL is different: too many people for a pop-up, or a cohort the
+   * database stopped at its statement timeout. Those are FAILED, with the same
+   * `audience_blind` code and a `cause` — see the branch below.
    *
    * ── The hint is asked about BEFORE the audience ───────────────────────
    *
@@ -758,10 +762,29 @@ export class AutomationActionRegistry {
       if (outcome.reason.includes('window is empty')) {
         throw new Error(`show_hint_to_audience: ${outcome.reason}`);
       }
+      // `cause` is what the panel words: the reason stays for the log and for
+      // a panel older than the word.
       return actionSucceeded(
         `stood down without hinting anybody: ${outcome.reason}`,
         'audience_blind',
-        { reason: outcome.reason },
+        { reason: outcome.reason, cause: 'signal_blind' },
+      );
+    }
+    if (outcome.kind === 'refused') {
+      // REFUSED, NOT STOOD DOWN. Too many people for a pop-up, or a cohort the
+      // database gave up on after its statement timeout: nobody was hinted,
+      // and unlike a blind signal the operator has something to do — narrow
+      // the window, send a broadcast instead, or look at why the database is
+      // slow — so the run is red.
+      //
+      // The code is `audience_blind`, the one that already means "the audience
+      // was not worked out, nobody was hinted", with `cause` saying which way;
+      // the panel words each cause on its own. `reason` carries no database
+      // text: it is the audience service's own sentence.
+      throw new ActionFailure(
+        `show_hint_to_audience hinted nobody: ${outcome.reason}`,
+        'audience_blind',
+        { audience, cause: outcome.cause, reason: outcome.reason, limit: outcome.limit },
       );
     }
     if (outcome.userIds.length === 0) {

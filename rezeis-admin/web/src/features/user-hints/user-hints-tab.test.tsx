@@ -378,6 +378,41 @@ describe('the hints tab', () => {
     )
   })
 
+  it('names the connect door in words, and never shows the raw "@connect"', async () => {
+    // `@connect` is not a path the operator could recognise: it is the door the
+    // cabinet opens like its own «Подключить» button. The vocabulary serves it
+    // among the routes; the form names it.
+    const door: UserHint = {
+      ...WELCOME_HINT,
+      id: 'hint-door',
+      key: 'tpl-connect-help',
+      titleRu: 'Не получилось подключиться?',
+      ctaKind: 'ROUTE',
+      ctaLabelRu: 'Подключить',
+      ctaTarget: '@connect',
+      surfaces: [],
+    }
+    vi.mocked(listUserHints).mockResolvedValue([door])
+    vi.mocked(getHintVocabulary).mockResolvedValue({
+      routes: ['/plans', '@connect', '@teleport'],
+      surfaces: ['tma', 'pwa', 'browser'],
+      formFactors: ['mobile', 'tablet', 'desktop'],
+      modes: ['MODAL', 'TOAST'],
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<UserHintsTab />)
+    await user.click(await screen.findByRole('button', { name: /Не получилось подключиться/ }))
+
+    const target = await screen.findByLabelText(says('userHints.fields.ctaTarget'))
+    await waitFor(() => expect(target).toHaveTextContent(says('userHints.doors.connect')))
+    expect(target).not.toHaveTextContent('@connect')
+
+    await user.click(target)
+    const options = (await screen.findAllByRole('option')).map((option) => option.textContent)
+    // A door this panel has no name for still gets words, not its string.
+    expect(options).toEqual(['/plans', says('userHints.doors.connect'), says('userHints.doors.unknown')])
+  })
+
   it('says a new hint is only created by «Сохранить», and keeps that tooltip while it saves', async () => {
     const user = userEvent.setup()
     vi.mocked(createUserHint).mockReturnValue(new Promise(() => undefined))

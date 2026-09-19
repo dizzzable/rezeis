@@ -168,6 +168,12 @@ describe('the pop-up an operator gets', () => {
     // Anti-emptiness anchor: a set of one would fail every template below
     // rather than pass it, but a set built from the wrong block might not.
     expect(known.size).toBeGreaterThan(8)
+    // The DOORS a ROUTE button may name besides a path (`@connect`), from the
+    // DTO as well — whole quoted names that start with "@", nothing looser.
+    const doors = /export const HINT_DOOR_TARGETS = \[([^\]]*)\] as const/.exec(dto)
+    expect(doors, 'HINT_DOOR_TARGETS is gone from the DTO').not.toBeNull()
+    for (const match of (doors as RegExpExecArray)[1].matchAll(/'(@[a-z-]+)'/g)) known.add(match[1])
+    expect(known.has('@connect'), 'the door list parsed empty').toBe(true)
     for (const template of HINT_TEMPLATES) {
       if (template.route === null) continue
       expect(known.has(template.route), `${template.id} → ${template.route}`).toBe(true)

@@ -2370,8 +2370,8 @@ export const ru = {
     // символ: одна лишняя запятая, и оператор увидит английский текст.
     'Action "show_hint_to_audience" picks its own recipients, so it cannot run on an event — use a scheduled trigger':
       'Действие «Показать подсказку по расписанию» само выбирает, кому показать, поэтому по событию оно работать не может. Выберите триггер «По расписанию (cron)».',
-    'Action "show_hint_to_audience" needs an audience, one of: paid-not-connected':
-      'В действии «Показать подсказку по расписанию» не выбрана аудитория. Выберите её в поле «Аудитория»: сейчас доступна «Оплатил, но ни разу не подключился».',
+    'Action "show_hint_to_audience" needs an audience, one of: purchase-not-connected, trial-not-connected, paid-not-connected':
+      'В действии «Показать подсказку по расписанию» не выбрана аудитория. Выберите её в поле «Аудитория»: «Оплатил и не подключился» или «Пробный период или подарок — не подключился».',
     'A pop-up needs somebody to show it to, and a schedule names nobody — bind this rule to an event about a customer, or run it manually with a user id':
       'Подсказку некому показать: расписание не называет клиента. Привяжите правило к событию, в котором клиент назван, или запускайте его кнопкой «Запустить сейчас», выбрав клиента.',
   },

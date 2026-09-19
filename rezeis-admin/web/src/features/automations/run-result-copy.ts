@@ -200,7 +200,25 @@ export function resultCodeText(t: TFunction, result: AutomationActionResult): st
     case 'audience_empty':
       return String(t(key, { audience: audienceName(t, text(details, 'audience')) }))
     case 'audience_blind':
-      return String(t(key, { reason: text(details, 'reason') }))
+      // The audience was not worked out and nobody was hinted; `cause` says
+      // why (contract: `show_hint_to_audience` in `action-registry.ts`). A
+      // row without one — written before causes, or by a panel that has a cause
+      // this one does not know — falls back to the server's own reason.
+      switch (text(details, 'cause')) {
+        case 'signal_blind':
+          return String(t(`${key}_signal`))
+        case 'too_large':
+          return String(
+            t(`${key}_too_large`, {
+              audience: audienceName(t, text(details, 'audience')),
+              limit: count(details, 'limit'),
+            }),
+          )
+        case 'timeout':
+          return String(t(`${key}_timeout`, { audience: audienceName(t, text(details, 'audience')) }))
+        default:
+          return String(t(key, { reason: text(details, 'reason') }))
+      }
     case 'block_address_missing':
       return String(t(key))
     case 'block_address_invalid':

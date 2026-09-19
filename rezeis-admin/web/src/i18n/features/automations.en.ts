@@ -28,7 +28,12 @@ export const en = {
       fix: 'If that is not deliberate, give both hints the same group — then only the newest is shown.',
     },
     audiences: {
-      'paid-not-connected': 'Paid, but has never connected',
+      'purchase-not-connected': 'Paid and has not connected',
+      'trial-not-connected': 'Trial or gift — has not connected',
+      // The name rules saved before the split hold. The server runs it as both
+      // buckets together, and the audience picker offers it only to a rule
+      // that already has it.
+      'paid-not-connected': 'Not connected: everyone (paid, trials and gifts) — legacy',
     },
     // The operator's words for the events a hint can be shown on. Keyed by the
     // event type with dots turned into underscores (`popupEventNameKey`), since
@@ -43,6 +48,9 @@ export const en = {
       payment_completed: 'A payment went through',
       payment_failed: 'A payment failed',
       promocode_activated: 'A promo code was applied',
+      // Raised by Connection help, once per subscription, after the attempt to
+      // send its message (`connect-help-sweep.service.ts`).
+      subscription_not_connected: 'Has not connected since the purchase — raised by Connection help, once per subscription',
       remnawave_user_expire_soon: 'The subscription ends soon',
       remnawave_user_expired: 'The subscription has ended',
       remnawave_user_bandwidth_threshold: 'Traffic is running out',
@@ -351,6 +359,11 @@ export const en = {
       audienceStopped_other: 'The run stopped before it reached the end — {{count}} customers were never reached. What was queued stays queued; the rule can be run again for the rest.',
       audience_empty: 'Nobody is in the "{{audience}}" audience right now.',
       audience_blind: 'The hint was queued for nobody: the panel cannot pick the audience reliably. The server said: {{reason}}',
+      // The same code with a `cause`: why the audience was not worked out. A
+      // row without one (older, or from another panel version) reads the line above.
+      audience_blind_signal: 'The hint was queued for nobody: the panel cannot tell right now who has connected. The connection check has not been able to read Remnawave for half an hour, and no user webhook has arrived in a day, so "never connected" cannot be told from "could not check". Check how the panel connects to Remnawave, or the webhooks; the rule tries again on its next run.',
+      audience_blind_too_large: 'The hint was queued for nobody: more than {{limit}} customers in the "{{audience}}" audience are verified as not connected — that is a broadcast, not a hint. If the rule sets its own window (afterHours and beforeHours), narrow it; to write to this many people, send a broadcast with the "VPN connection" filter.',
+      audience_blind_timeout: 'The hint was queued for nobody: working out the "{{audience}}" audience took longer than allowed, and the database stopped it. The rule tries again on its next run. If this keeps happening, the database is overloaded or the audience is too large: check the database load, and if the rule sets its own window (afterHours and beforeHours), narrow it.',
       conditionsNotMatched: "Skipped: the rule's conditions did not match.",
       ruleDisabled: 'Skipped: the rule is switched off.',
       actionsNotList: "Nothing ran: the rule's actions are not a list. Open the rule, add its actions again and save — or delete it.",
@@ -643,6 +656,20 @@ export const en = {
         bodyEn: 'The devices you connect from are listed in your account, and you can unlink any of them there.',
         ctaRu: 'Мои устройства',
         ctaEn: 'My devices',
+      },
+      // The event comes from the Connection help sender, the button is the
+      // @connect door, and a waiting hint of the connect-help group lapses once
+      // the customer connects.
+      connect_help: {
+        name: 'Could not connect',
+        description: 'A window for a customer whose VPN never connected after the purchase, with a button that opens what the Connect button on the cabinet home screen opens. If the customer has connected by then, the window does not appear.',
+        info: 'The subscription.not_connected event is raised by the "Connection help" card on the Notifications page, User tab. It happens only while "Send automatically" is on there, and for trials and gifts only with "Also trials and gifts" ticked. It comes once per subscription and after the attempt to message the customer, so the customer sees the window after the message — when they open the cabinet.\n\nThe window does not appear if by then the customer has no live subscription left whose VPN never connected, or has switched connection help off in their cabinet. An older cabinet does not show such a window: it waits for the cabinet to be updated until the hint expires.',
+        titleRu: 'Не получилось подключиться?',
+        bodyRu: 'Похоже, VPN ещё ни разу не подключался. Откройте экран подключения — там приложение для вашего устройства и подписка в одно касание.',
+        titleEn: 'Having trouble connecting?',
+        bodyEn: 'It looks like your VPN has never connected yet. Open the connection screen: it has the app for your device and adds your subscription in one tap.',
+        ctaRu: 'Подключить',
+        ctaEn: 'Connect',
       },
       payment_completed: {
         name: 'Payment went through',
@@ -941,7 +968,7 @@ export const en = {
       ctaLabelRu: 'Button label',
       ctaLabelHint: 'Up to 48 characters. A customer whose cabinet is in English sees the English label if a ready-made hint brought one, and this one otherwise.',
       ctaTarget: 'Destination',
-      ctaTargetHint: 'A cabinet section is picked from the list — the panel accepts no other address. An external link is a full address starting with https://.',
+      ctaTargetHint: 'A cabinet section is picked from the list — the panel accepts no other address. An external link is a full address starting with https://. "Connection screen" opens what the Connect button on the cabinet home screen opens; a cabinet that cannot do that yet does not get such a hint until it is updated.',
       externalPlaceholder: 'for example: https://t.me/your_channel',
       pickRoute: 'Pick a section',
       surfaces: 'Where to show it',
@@ -951,7 +978,7 @@ export const en = {
       formFactorsHint: 'Which device the cabinet may draw the hint on. Nothing ticked means any.',
       groupKey: 'Group',
       groupKeyHint:
-        'Hints in one group supersede each other: anything not yet shown lapses when the next one arrives. A single purchase emits several events, so a shared group leaves one hint instead of four. A name extended with a hyphen is a sub-group: “payment-attempt” lapses “payment-attempt-method”, never the other way round.',
+        'Hints in one group supersede each other: anything not yet shown lapses when the next one arrives. A single purchase emits several events, so a shared group leaves one hint instead of four. A name extended with a hyphen is a sub-group: “payment-attempt” lapses “payment-attempt-method”, never the other way round. The “connect-help” group and its sub-groups are special: a hint waiting in them lapses as soon as the customer has no live subscription left whose VPN never connected, or switches connection help off in their cabinet.',
       // A sample, not a value: a grey `purchase` was read as a group filled in.
       groupKeyPlaceholder: 'for example: payment-attempt',
       isActive: 'Show it',
@@ -1034,6 +1061,13 @@ export const en = {
       NONE: 'No button',
       ROUTE: 'Cabinet section',
       EXTERNAL: 'External link',
+    },
+    // Doors: button targets the cabinet resolves itself (`HINT_DOOR_TARGETS`
+    // on the server). Keyed by the door without its "@". The raw "@connect"
+    // never reaches an operator.
+    doors: {
+      connect: 'Connection screen (like the Connect button)',
+      unknown: 'A special cabinet screen',
     },
     surfaces: {
       tma: 'Telegram',

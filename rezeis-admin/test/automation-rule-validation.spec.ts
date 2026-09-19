@@ -215,6 +215,8 @@ describe('a pop-up bound to an event that cannot carry one', () => {
       'subscription.trial_granted',
       'remnawave.user.expire_soon',
       'remnawave.user.bandwidth_threshold',
+      // «Не получилось подключиться?» — the ready-made pop-up's own trigger.
+      'subscription.not_connected',
     ]) {
       const { service, created } = buildService();
       await service.createRule(popup(trigger), 'admin-1');
@@ -314,7 +316,7 @@ describe('the refusals an operator can be shown in their own language', () => {
 
     assert.equal(
       sentence,
-      'Action "show_hint_to_audience" needs an audience, one of: paid-not-connected',
+      'Action "show_hint_to_audience" needs an audience, one of: purchase-not-connected, trial-not-connected, paid-not-connected',
     );
   });
 
@@ -386,7 +388,10 @@ describe('an audience rule has to name its audience', () => {
       () => service.createRule(audienceRule({ hintKey: 'connect' }), 'admin-1'),
       (error: unknown) => {
         assert.equal((error as { getStatus?: () => number }).getStatus?.(), 400);
-        assert.match(String((error as Error).message), /needs an audience, one of: paid-not-connected/);
+        assert.match(
+          String((error as Error).message),
+          /needs an audience, one of: purchase-not-connected, trial-not-connected, paid-not-connected$/,
+        );
         return true;
       },
     );
@@ -434,6 +439,18 @@ describe('an audience rule has to name its audience', () => {
     await service.createRule(audienceRule({ hintKey: 'connect', audience: '  paid-not-connected  ' }), 'admin-1');
 
     assert.equal(created.length, 1);
+  });
+
+  it('accepts both new audiences and keeps accepting the one stored rules hold', async () => {
+    // `paid-not-connected` is what every rule saved before the split holds;
+    // refusing it would refuse the next save of each of them.
+    for (const audience of ['purchase-not-connected', 'trial-not-connected', 'paid-not-connected']) {
+      const { service, created } = buildService();
+
+      await service.createRule(audienceRule({ hintKey: 'connect', audience }), 'admin-1');
+
+      assert.equal(created.length, 1, `${audience} was refused`);
+    }
   });
 
   it('leaves the audience of every other action alone', async () => {

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { ConnectAudienceModule } from '../connect-audience/connect-audience.module';
 import { RbacModule } from '../rbac/rbac.module';
 import { AdminUserHintsController } from './controllers/admin-user-hints.controller';
 import { InternalUserHintsController } from './controllers/internal-user-hints.controller';
@@ -28,7 +29,10 @@ import { UserHintService } from './services/user-hint.service';
  * an operator's hands should be authoring hint copy.
  */
 @Module({
-  imports: [AuthModule, RbacModule],
+  // `ConnectAudienceModule` for the scheduled audiences: who has never
+  // connected is the connect signal's answer, read through the same service the
+  // broadcast filter uses. Nothing it imports reaches back here.
+  imports: [AuthModule, RbacModule, ConnectAudienceModule],
   controllers: [AdminUserHintsController, InternalUserHintsController],
   providers: [UserHintService, UserHintDeliveryService, HintAudienceService],
   exports: [UserHintDeliveryService, HintAudienceService],

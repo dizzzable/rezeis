@@ -1,90 +1,127 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  CONNECT_AUDIENCE_STATEMENT_TIMEOUT,
+  ConnectAudienceService,
+  ConnectAudienceTooLargeError,
+  isStatementTimeout,
+  type ConnectBucket,
+} from '../../connect-audience/services/connect-audience.service';
 
-/** Audiences a scheduled rule may address. */
-export const HINT_AUDIENCES = ['paid-not-connected'] as const;
+/**
+ * Audiences a scheduled rule may address.
+ *
+ * Three names, two of them buckets of «Купил, но не подключился» and one the
+ * name every rule saved before the split holds. That one stays valid for ever:
+ * it is stored as a plain string in `automation_rules.actions[].params`, and a
+ * rule whose audience stopped being accepted would fail every night from the
+ * night of the upgrade.
+ */
+export const HINT_AUDIENCES = ['purchase-not-connected', 'trial-not-connected', 'paid-not-connected'] as const;
 export type HintAudienceName = (typeof HINT_AUDIENCES)[number];
+
+/**
+ * The name rules saved before the split hold. Its label says «Оплатил» and it
+ * always included trials, so it now means exactly what it did — every bucket —
+ * and is labelled so; the editor offers it only to a rule that already has it.
+ */
+export const LEGACY_HINT_AUDIENCE: HintAudienceName = 'paid-not-connected';
+
+/**
+ * Which buckets of `ConnectAudienceService` each audience reads.
+ *
+ *   purchase-not-connected   «Оплатил и не подключился» — paid money, a paid
+ *                            trial and a partner-balance purchase included;
+ *   trial-not-connected      «Пробный период или подарок — не подключился»;
+ *   paid-not-connected       both, each by its own window: the payment's time
+ *                            for the paid bucket, the grant for the trial one.
+ */
+export const HINT_AUDIENCE_BUCKETS: Readonly<Record<HintAudienceName, readonly ConnectBucket[]>> = {
+  'purchase-not-connected': ['paid'],
+  'trial-not-connected': ['trial'],
+  'paid-not-connected': ['paid', 'trial'],
+};
+
+/** Why an audience was refused rather than resolved. Both hint nobody. */
+export type AudienceRefusalCause = 'too_large' | 'timeout';
 
 /** What one audience resolution found, and whether it could look at all. */
 export type AudienceOutcome =
   | { readonly kind: 'ok'; readonly userIds: readonly string[]; readonly truncated: boolean }
-  | { readonly kind: 'blind'; readonly reason: string };
+  | { readonly kind: 'blind'; readonly reason: string }
+  | {
+      readonly kind: 'refused';
+      readonly cause: AudienceRefusalCause;
+      readonly reason: string;
+      /** The ceiling that was passed, for `too_large`; `null` otherwise. */
+      readonly limit: number | null;
+    };
 
 /**
  * Ceiling on one run. A rule that would hint more people than this is not a
- * nudge, it is a broadcast, and it is far likelier to be a misconfiguration —
- * or the blindness below going undetected — than a real cohort.
+ * nudge, it is a broadcast, and it is far likelier to be a misconfiguration
+ * than a real cohort. The longest-waiting are taken and the run says it was
+ * capped.
  */
 const MAX_USERS_PER_RUN = 500;
+
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * The reason a rule stands down on a blind signal, in the words its run log
+ * keeps. The panel words it for the operator from the result's `cause`; this is
+ * the log's and an older panel's copy.
+ */
+const SIGNAL_BLIND_REASON =
+  'the panel cannot tell right now who has connected: the connection check has read nothing ' +
+  'from Remnawave for 30 minutes and no Remnawave user webhook arrived in the last 24 hours, so ' +
+  '"never connected" cannot be told from "could not look". Check the panel\'s connection to ' +
+  'Remnawave, or its webhooks';
 
 /**
  * Who to hint, for the cases where the trigger is the ABSENCE of something.
  *
  * ── Why this cannot be an event ───────────────────────────────────────────
  *
- * Every other hint follows something that happened: a payment cleared, a
- * device was unbound. The most useful hint of all follows something that did
- * NOT happen — the customer paid a day ago and has still never connected —
- * and nothing emits an event for a thing not occurring. So it is a query, run
- * on a schedule, and this is where that query lives.
+ * Every other hint follows something that happened. The most useful one
+ * follows something that did NOT happen — the customer paid a day ago and has
+ * still never connected — and a schedule is how that is asked. (The automatic
+ * help now also emits `subscription.not_connected`, which a pop-up can follow
+ * directly; this is the operator's own schedule beside it.)
  *
- * ── THE FAILURE MODE THIS IS BUILT AROUND ─────────────────────────────────
+ * ── WHERE "NOT CONNECTED" COMES FROM ───────────────────────────────────────
  *
- * `User.firstTrafficAt` is the only marker of "has connected", and exactly one
- * thing writes it: the Remnawave `user.first_connected` / bandwidth webhook.
- * On an install where webhooks were never configured — or where they broke —
- * that column is NULL for absolutely everybody.
+ * `ConnectAudienceService`, and nothing else. A person is named only when a
+ * successful read of their profile, made after the purchase (or the grant) and
+ * at most a day old, found it never connected — the per-subscription signal
+ * the broadcast filter «Подключение VPN» reads. The old question, "does this
+ * PERSON have a first-traffic timestamp", counted "we were never told" as
+ * "never connected", and could only guard against that by asking whether ANY
+ * account in the install had one.
  *
- * Read naively, that says every customer who ever paid has never connected,
- * and the rule would send a "here is how to connect" modal to the entire
- * customer base, including people who have been connected for months. That is
- * not a smaller version of working correctly; it is the worst outcome the
- * whole hint feature can produce, because it teaches every customer at once
- * that our hints are noise.
+ * ── STANDING DOWN ──────────────────────────────────────────────────────────
  *
- * So the resolver asks a second question first: does ANY account in this
- * install carry a `firstTrafficAt`? If none does, the signal is not working
- * and the answer is `blind` — the rule stands down and says why. "We looked
- * and nobody has connected" and "we cannot tell who has connected" are
- * different facts, and only the first is safe to act on.
+ * When the signal is `blind` — the check has not reached Remnawave for half an
+ * hour and no webhook arrived in a day — the answer is `blind`, and the rule
+ * hints nobody. The other states proceed: in them nobody is named without a
+ * fresh read, so a slow or partial signal can only name FEWER people.
+ *
+ * ── THE HINT IS ITS OWN CHANNEL ────────────────────────────────────────────
+ *
+ * `excludeHelped` is off. It leaves out subscriptions the automatic help or a
+ * broadcast already reached — right for a second MESSAGE, wrong here: the
+ * pop-up is shown after the message on purpose, and the hint's own once-only
+ * rule and group are what keep it from repeating.
  */
-/**
- * WHAT BOUNDS ONE RESOLVE.
- *
- * The two reads below run inside one interactive transaction, and the reason is
- * the TIMER, not the atomicity. The pool itself now gives up on a checkout:
- * `PrismaService` builds it with `connectionTimeoutMillis` of 15 s
- * (`DB_CONNECTION_TIMEOUT_MS`), so on a pool held by an export or a plan
- * migration an ordinary query fails after 15 s instead of hanging, as it did
- * before that was set. Inside the transaction `maxWait` — 10 s — covers the
- * same checkout and binds first: Prisma races `startTransaction`, which is what
- * takes the connection from that pool, against it and throws P2028 while the
- * pool's 15 s is still running. The pool's timer is the backstop behind it.
- *
- * WHY IT MATTERS MORE HERE THAN ANYWHERE ELSE IN A RUN. This resolves the
- * cohort BEFORE the audience loop exists, so nothing downstream can stop it:
- * the loop's wall-clock budget and its failure streak only start counting once
- * there is a cohort to walk. A run that hangs here hangs with no counts, no
- * `audience_partial` and nothing in the panel log — the operator's request is
- * answered 408 at 120 s while the job still holds a worker.
- *
- * THE SAME TWO NUMBERS AS ONE RAISE, deliberately: they are argued at length
- * over `RAISE_TRANSACTION_OPTIONS` in `user-hint-delivery.service.ts`, and the
- * pool they are protecting is the same one. 10 s + 20 s means a resolve answers
- * or throws within 30 s, well inside the 60 s budget the loop after it is given.
- */
-const RESOLVE_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 20_000 } as const;
-
 @Injectable()
 export class HintAudienceService {
   private readonly logger = new Logger(HintAudienceService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(private readonly connectAudienceService: ConnectAudienceService) {}
 
   public async resolve(input: {
     readonly audience: HintAudienceName;
-    /** Only subscriptions at least this old. Default a day. */
+    /** Only purchases (or grants) at least this old. Default a day. */
     readonly afterHours?: number;
     /** …and no older than this. Default three days. */
     readonly beforeHours?: number;
@@ -94,68 +131,50 @@ export class HintAudienceService {
     const afterHours = input.afterHours ?? 24;
     const beforeHours = input.beforeHours ?? 72;
     if (afterHours >= beforeHours) {
+      // Answered from the arguments alone: taking a connection to say so would
+      // be a wait with nothing to show for it.
       return {
         kind: 'blind',
         reason: `the window is empty: afterHours (${afterHours}) must be less than beforeHours (${beforeHours})`,
       };
     }
-
+    const buckets = HINT_AUDIENCE_BUCKETS[input.audience];
+    if (buckets === undefined) {
+      throw new RangeError(`hint audience: unknown audience ${String(input.audience)}`);
+    }
     // A WINDOW, not "older than": an open-ended lower bound would re-scan the
-    // entire history on every run, and the hint's own once-only rule would be
-    // the only thing standing between that and a daily sweep of every customer
-    // who ever failed to connect. Bounding it here keeps the query small and
-    // the intent honest — this is about people who bought RECENTLY.
-    const createdAfter = new Date(now.getTime() - beforeHours * 60 * 60 * 1000);
-    const createdBefore = new Date(now.getTime() - afterHours * 60 * 60 * 1000);
+    // whole history on every run. `from` is the far end.
+    const window = {
+      from: new Date(now.getTime() - beforeHours * HOUR_MS),
+      to: new Date(now.getTime() - afterHours * HOUR_MS),
+    };
 
-    const rows = await this.prismaService.$transaction(async (tx) => {
-      // ── Can we tell who has connected at all? ────────────────────────
-      //
-      // IN HERE TOO. It is one cheap count, but it is the FIRST statement of
-      // the run, so it is the one that queues for a connection — and a count
-      // that never returns is indistinguishable from a cohort that is slow to
-      // build. Bounded, it throws, and the action reports a failed run.
-      const anyConnected = await tx.user.count({
-        where: { firstTrafficAt: { not: null } },
-        take: 1,
-      });
-      // `null` is blindness, answered below. The reason is a paragraph written
-      // for an operator, and none of it is the transaction's business.
-      if (anyConnected === 0) return null;
-
-      return tx.user.findMany({
-        where: {
-          isBlocked: false,
-          firstTrafficAt: null,
-          subscriptions: {
-            some: {
-              createdAt: { gte: createdAfter, lte: createdBefore },
-              // A trial counts: somebody who took a free trial and never
-              // connected is precisely who this is for.
-              status: { in: ['ACTIVE', 'LIMITED'] },
-            },
-          },
-        },
-        select: { id: true },
-        // Oldest first, so a run that hits the ceiling takes the people who
-        // have been waiting longest rather than an arbitrary slice.
-        orderBy: { createdAt: 'asc' },
-        take: MAX_USERS_PER_RUN + 1,
-      });
-    }, RESOLVE_TRANSACTION_OPTIONS);
-
-    if (rows === null) {
-      return {
-        kind: 'blind',
-        reason:
-          'no account in this install has a first-traffic timestamp, so "has never connected" ' +
-          'cannot be told from "we were never told". `User.firstTrafficAt` is written only by ' +
-          'the Remnawave webhook — check that webhooks are configured and arriving before ' +
-          'relying on this audience.',
-      };
+    const health = await this.connectAudienceService.health(now);
+    if (health.state === 'blind') {
+      this.logger.warn(`Hint audience "${input.audience}" stood down: ${SIGNAL_BLIND_REASON}`);
+      return { kind: 'blind', reason: SIGNAL_BLIND_REASON };
     }
 
-    const truncated = rows.length > MAX_USERS_PER_RUN;
+    // One bucket after the other, not in parallel: the legacy name reads two,
+    // and each already holds a connection for up to its own bound
+    // (`CONNECT_AUDIENCE_TRANSACTION_OPTIONS`). A refusal of the first spares
+    // the second.
+    const lists: string[][] = [];
+    try {
+      for (const bucket of buckets) {
+        lists.push(
+          await this.connectAudienceService.userIds({ bucket, window, excludeHelped: false, now }),
+        );
+      }
+    } catch (error) {
+      const refusal = refusalOf(error, input.audience);
+      if (refusal === null) throw error;
+      this.logger.warn(`Hint audience "${input.audience}" was refused: ${refusal.reason}`);
+      return refusal;
+    }
+
+    const people = interleaveDistinct(lists);
+    const truncated = people.length > MAX_USERS_PER_RUN;
     if (truncated) {
       this.logger.warn(
         `Hint audience "${input.audience}" matched more than ${MAX_USERS_PER_RUN} accounts. ` +
@@ -163,10 +182,59 @@ export class HintAudienceService {
           'misconfigured window than a real cohort — check the hours before widening the cap.',
       );
     }
+    return { kind: 'ok', userIds: people.slice(0, MAX_USERS_PER_RUN), truncated };
+  }
+}
+
+/** The refusal an error from the audience service stands for, or `null` for any other error. */
+function refusalOf(
+  error: unknown,
+  audience: HintAudienceName,
+): Extract<AudienceOutcome, { readonly kind: 'refused' }> | null {
+  if (error instanceof ConnectAudienceTooLargeError) {
     return {
-      kind: 'ok',
-      userIds: rows.slice(0, MAX_USERS_PER_RUN).map((row) => row.id),
-      truncated,
+      kind: 'refused',
+      cause: 'too_large',
+      limit: error.limit,
+      reason:
+        `more than ${error.limit} people are verified as not connected for "${audience}" — too many ` +
+        'for a pop-up, so nobody was hinted. If the rule sets its own window (afterHours, ' +
+        'beforeHours), narrow it; to reach this many people, send a broadcast with the ' +
+        '«Подключение VPN» filter',
     };
   }
+  if (isStatementTimeout(error)) {
+    return {
+      kind: 'refused',
+      cause: 'timeout',
+      limit: null,
+      reason:
+        `working out the "${audience}" audience took longer than ${CONNECT_AUDIENCE_STATEMENT_TIMEOUT} ` +
+        'and the database stopped it, so nobody was hinted; the next run tries again',
+    };
+  }
+  return null;
+}
+
+/**
+ * The lists merged one from each in turn, each person once.
+ *
+ * Every list comes oldest anchor first, and the anchors of two buckets are
+ * different moments (a payment, a grant), so there is no single order to merge
+ * them by. Taking one from each in turn keeps each bucket's longest-waiting at
+ * the front, so a capped run is not all one bucket.
+ */
+function interleaveDistinct(lists: readonly (readonly string[])[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  const longest = lists.reduce((max, list) => Math.max(max, list.length), 0);
+  for (let index = 0; index < longest; index += 1) {
+    for (const list of lists) {
+      const id = list[index];
+      if (id === undefined || seen.has(id)) continue;
+      seen.add(id);
+      merged.push(id);
+    }
+  }
+  return merged;
 }

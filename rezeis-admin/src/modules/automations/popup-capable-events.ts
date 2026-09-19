@@ -108,6 +108,16 @@ export const POPUP_CAPABLE_EVENTS: readonly PopupCapableEvent[] = [
     emittedIn: 'src/modules/promocodes/services/promocode-lifecycle.service.ts',
     moment: 'A promo code was redeemed',
   },
+  // Once per subscription, from the «Помощь с подключением» sweep in the
+  // worker, after its message was tried — and only while that help is switched
+  // on (for trials and gifts, only with «Также пробным периодам и подаркам»).
+  // The bridge hears it because the sweep emits in the same process.
+  {
+    type: 'subscription.not_connected',
+    namedBy: 'userId',
+    emittedIn: 'src/modules/connect-help/services/connect-help-sweep.service.ts',
+    moment: 'Bought (or was granted) a subscription and has never connected since',
+  },
 
   // ── Running out ────────────────────────────────────────────────────────────
   //

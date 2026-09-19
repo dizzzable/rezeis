@@ -65,7 +65,13 @@ export function NodeRail({
             {groups.map((group) => (
               <li key={group.key}>
                 <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  {t(`botMapPage.rail.groups.${group.key}` as never, { defaultValue: group.key })}
+                  {/* `nsSeparator: false`: the notification groups are keyed
+                      `notification:expires`, and i18next reads a ':' as a
+                      namespace boundary — the raw key was the header. */}
+                  {t(`botMapPage.rail.groups.${group.key}` as never, {
+                    defaultValue: group.key,
+                    nsSeparator: false,
+                  })}
                 </p>
                 <ul className="space-y-0.5">
                   {group.nodes.map((node) => {

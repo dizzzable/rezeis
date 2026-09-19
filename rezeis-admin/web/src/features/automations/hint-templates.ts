@@ -128,6 +128,11 @@ export interface HintTemplate {
   readonly stage: HintTemplateStage
   /** How long the pop-up stays worth showing if the person does not open the app. */
   readonly ttlHours: number
+  /**
+   * The card carries an (i) — `automationsPage.hintTemplates.<id>.info` — for
+   * an event that fires only under conditions an operator sets elsewhere.
+   */
+  readonly info?: boolean
 }
 
 /**
@@ -254,6 +259,30 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
     repeatable: false,
     // No group, for the reason on its twin above.
     ttlHours: 24,
+  },
+  {
+    id: 'connect_help',
+    stage: 'start',
+    // «Помощь с подключением» found a purchase (or, if the operator asked, a
+    // trial or gift) whose VPN never connected, tried its message, and emits
+    // this once per subscription — only while that help is switched on.
+    triggerSpec: 'subscription.not_connected',
+    hintKey: 'tpl-connect-help',
+    mode: 'MODAL',
+    tone: 'INFO',
+    // THE DOOR, not a path: the cabinet opens whatever its Connect button
+    // opens — the internal screen or the external subscription page, by the
+    // operator's switch. A cabinet too old to know the door never gets it.
+    route: '@connect',
+    // Once per SUBSCRIPTION is the event's rule; a later subscription that
+    // does not connect needs the pop-up again.
+    repeatable: true,
+    // The group the delivery reader watches: a waiting pop-up of it is closed
+    // once the customer connects or switches the help off, and never shown
+    // after the fact. It also collapses two such pop-ups into the newest.
+    groupKey: 'connect-help',
+    ttlHours: 48,
+    info: true,
   },
 
   // ── Оплата ─────────────────────────────────────────────────────────────────
