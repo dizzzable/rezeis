@@ -117,9 +117,13 @@ export interface BroadcastAudiencePreviewInterface {
  *               для фильтра «не подключился» — уменьшите срок»);
  *   timeout     the count did not finish within its 10 s;
  *   unreadable  the stored filter is a shape this panel version cannot read —
- *               it matches nobody.
+ *               it matches nobody;
+ *   signal_down the connection signal is `webhooks_only` or `blind`
+ *               (`connectAudienceUsable`): the panel cannot currently tell a
+ *               customer who connected from one who did not, so nothing is
+ *               counted or sent until it can. `health` says which and since when.
  */
-export type BroadcastConnectRefusal = 'too_many' | 'timeout' | 'unreadable';
+export type BroadcastConnectRefusal = 'too_many' | 'timeout' | 'unreadable' | 'signal_down';
 
 export interface BroadcastConnectPreviewInterface {
   /** People verified not connected — who the message can reach. `null` when not counted. */

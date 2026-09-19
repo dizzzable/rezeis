@@ -9,6 +9,7 @@ import {
   AutomationActionRegistry,
   resolveTriggerUserId,
 } from '../src/modules/automations/actions/action-registry';
+import { HintAudienceService } from '../src/modules/user-hints/services/hint-audience.service';
 
 /**
  * Queuing a hint from a rule — and the defect that made every such rule inert
@@ -502,6 +503,27 @@ describe('the scheduled audience action', () => {
     });
     assert.match(String(result.message), /stood down/);
     assert.deepStrictEqual(raised, [], 'and above all: it hinted nobody');
+  });
+
+  it('stands down as the same SUCCESS on webhooks alone — through the real audience service', async () => {
+    // `webhooks_only`: a read made before the customer connected stays
+    // "verified not connected" until a webhook that may never come. The
+    // audience answers `blind`, and the run is the green stand-down the panel
+    // words from `cause` — whose copy is true of both states.
+    const audiences = new HintAudienceService({
+      health: async () => ({ state: 'webhooks_only' }),
+      userIds: async () => assert.fail('the audience was resolved on webhooks alone'),
+    } as never);
+    const outcome = await audiences.resolve({ audience: 'paid-not-connected', now: new Date('2026-09-19T12:00:00.000Z') });
+    const { registry, raised } = buildRegistry({ audience: outcome });
+
+    const result = await registry.execute(0, AUDIENCE_ACTION as never, CRON_CONTEXT as never);
+
+    assert.equal(result.status, 'success');
+    assert.equal(result.code, 'audience_blind');
+    assert.equal(result.details?.cause, 'signal_blind');
+    assert.match(String(result.details?.reason), /webhooks alone do not say it/);
+    assert.deepStrictEqual(raised, []);
   });
 
   it('FAILS, naming the cause, when the audience is too large for a pop-up', async () => {

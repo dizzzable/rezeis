@@ -174,8 +174,21 @@ describe('standing down when the signal cannot tell', () => {
     assert.match((outcome as { reason: string }).reason, /webhook/);
   });
 
-  it('proceeds in every other state: a slow signal names fewer people, never wrong ones', async () => {
-    for (const state of ['live', 'starting', 'webhooks_only'] as const) {
+  it('stands down on webhooks alone too — a lost webhook would name somebody who connected — and says so', async () => {
+    const { service, asked } = build({ state: 'webhooks_only', paid: ['p-1'] });
+
+    const outcome = await service.resolve({ audience: 'paid-not-connected', now: NOW });
+
+    assert.equal(outcome.kind, 'blind', 'hinted on webhooks alone');
+    assert.deepStrictEqual(asked, [], 'the audience was resolved on webhooks alone');
+    const reason = (outcome as { reason: string }).reason;
+    assert.match(reason, /read nothing from Remnawave for 30 minutes/);
+    assert.match(reason, /webhooks alone do not say it/);
+    assert.doesNotMatch(reason, /no Remnawave user webhook arrived/, 'the blind sentence, where webhooks DO arrive');
+  });
+
+  it('proceeds while the probe reads Remnawave: live and starting', async () => {
+    for (const state of ['live', 'starting'] as const) {
       const { service } = build({ state, paid: ['p-1'] });
 
       const outcome = await service.resolve({ audience: 'purchase-not-connected', now: NOW });

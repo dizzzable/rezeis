@@ -270,6 +270,23 @@ describe('show_hint_to_audience codes', () => {
       expect(expectWorded(resultCodeText(EN, entry))).toContain('cannot tell right now who has connected')
     })
 
+    it('is true of BOTH states the audience stands down in — webhooks arriving or not', () => {
+      // `signal_blind` is written for `webhooks_only` as well as `blind`
+      // (`hint-audience.service.ts`), and the entry carries no state. A sentence
+      // that says no webhook arrived would be false in the first of them.
+      const entry = result({
+        type: 'show_hint_to_audience',
+        code: 'audience_blind',
+        details: { reason: ENGLISH_REASON, cause: 'signal_blind' },
+      })
+      const ru = expectWorded(resultCodeText(RU, entry))
+      expect(ru).toContain('одних вебхуков для этого мало')
+      expect(ru).not.toMatch(/не пришло ни одного вебхука/)
+      const en = expectWorded(resultCodeText(EN, entry))
+      expect(en).toContain('webhooks alone are not enough')
+      expect(en).not.toMatch(/no user webhook has arrived/)
+    })
+
     it('too many people names the audience and the ceiling, and points at a broadcast', () => {
       const entry = result({
         type: 'show_hint_to_audience',

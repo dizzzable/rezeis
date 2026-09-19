@@ -3,7 +3,10 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { UserHintDeliveryService } from '../src/modules/user-hints/services/user-hint-delivery.service';
+import {
+  CONNECT_HELP_SHOW_MAX_CHECK_AGE_MS,
+  UserHintDeliveryService,
+} from '../src/modules/user-hints/services/user-hint-delivery.service';
 
 /**
  * The queue that owes hints to people
@@ -77,13 +80,42 @@ function hint(over: Partial<FakeHint> = {}): FakeHint {
 
 /**
  * What the connect-help guard reads about one person: whether a live
- * subscription of theirs is not known to have connected, and their
- * notification preferences. The query's own meaning is proved on PostgreSQL
+ * subscription of theirs is not known to have connected (`waiting`), whether
+ * one of those was READ within the last fifteen minutes and found never
+ * connected (`fresh`, default false), and their notification preferences.
+ * The query's own meaning is proved on PostgreSQL
  * (`user-hint-delivery-postgres.spec.ts`); here it is an answer.
  */
 interface FakePerson {
   readonly waiting: boolean;
+  readonly fresh?: boolean;
   readonly prefs?: unknown;
+}
+
+/**
+ * A group term of the queue read, the way PostgreSQL reads it — NULL
+ * included: `group_key = 'x'` and `LIKE` are NULL for a hint with no group,
+ * `NOT` of NULL is NULL, and a row passes only on TRUE. A clause this fake
+ * does not know fails the case rather than passing it.
+ */
+function groupTerm(term: Record<string, unknown>, groupKey: string | null): boolean | null {
+  if (Array.isArray(term.OR)) {
+    const parts = (term.OR as ReadonlyArray<Record<string, unknown>>).map((part) => groupTerm(part, groupKey));
+    return parts.includes(true) ? true : parts.includes(null) ? null : false;
+  }
+  if (term.NOT !== undefined) {
+    const inner = groupTerm(term.NOT as Record<string, unknown>, groupKey);
+    return inner === null ? null : !inner;
+  }
+  if ('groupKey' in term) {
+    const condition = term.groupKey;
+    if (condition === null) return groupKey === null;
+    if (groupKey === null) return null;
+    if (typeof condition === 'string') return groupKey === condition;
+    const prefix = (condition as { startsWith?: string }).startsWith;
+    if (typeof prefix === 'string') return groupKey.startsWith(prefix);
+  }
+  throw new Error(`the fake does not understand this group term: ${JSON.stringify(term)}`);
 }
 
 /**
@@ -121,8 +153,8 @@ function build(
   language?: string,
   people: Readonly<Record<string, FakePerson>> = {},
 ) {
-  /** Every read the connect-help guard made, with what it asked. */
-  const guardReads: Array<{ readonly where: unknown; readonly select: Record<string, unknown> }> = [];
+  /** Every read the connect-help guard made: the statement and what it bound. */
+  const guardReads: Array<{ readonly sql: string; readonly values: readonly unknown[] }> = [];
   let seq = 0;
   /**
    * What happened on the way to the queue, in order: `begin`/`commit` for each
@@ -142,21 +174,21 @@ function build(
     readAt: Date | null;
   }> = [];
   const prisma = {
+    // The connect-help guard: its one statement, answered from `people`.
+    $queryRaw: async (query: { readonly sql: string; readonly values: readonly unknown[] }) => {
+      if (!/AS "waiting"/.test(query.sql) || !/AS "fresh"/.test(query.sql)) {
+        throw new Error(`the fake does not know this statement: ${query.sql.slice(0, 120)}`);
+      }
+      guardReads.push({ sql: query.sql, values: query.values });
+      // The person is the one string bound (every other value is an instant).
+      const userId = query.values.find((value): value is string => typeof value === 'string') ?? '';
+      const person = people[userId];
+      if (person === undefined) return [];
+      return [{ prefs: person.prefs ?? null, waiting: person.waiting, fresh: person.fresh ?? false }];
+    },
     // The recipient's language, for the feed copy the popup leaves behind.
     user: {
-      findUnique: async (args?: { where?: { id?: string }; select?: Record<string, unknown> }) => {
-        // The connect-help guard: the only read that selects subscriptions.
-        if (args?.select !== undefined && 'subscriptions' in args.select) {
-          guardReads.push({ where: args.where, select: args.select });
-          const person = people[args.where?.id ?? ''];
-          if (person === undefined) return null;
-          return {
-            notificationPrefs: person.prefs ?? null,
-            subscriptions: person.waiting ? [{ id: 'sub-waiting' }] : [],
-          };
-        }
-        return { language: language ?? 'RU' };
-      },
+      findUnique: async () => ({ language: language ?? 'RU' }),
     },
     // Where that copy lands. Modelled rather than stubbed away: without it the
     // copy failed inside its own catch and every test here stayed green while
@@ -285,7 +317,12 @@ function build(
           dismissedAt?: null;
           actedAt?: null;
           expiresAt: { gt: Date };
-          hint: { isActive: boolean; AND?: ReadonlyArray<Record<string, unknown>> };
+          hint: {
+            isActive: boolean;
+            AND?: ReadonlyArray<Record<string, unknown>>;
+            /** The held connect-help group, read past (`OUTSIDE_CONNECT_HELP_FAMILY`). */
+            OR?: ReadonlyArray<Record<string, unknown>>;
+          };
         };
         const termMatches = (
           term: Record<string, unknown>,
@@ -308,6 +345,7 @@ function build(
           .filter((d) => d.expiresAt > w.expiresAt.gt)
           .map((d) => ({ ...d, hint: hints.find((h) => h.id === d.hintId)! }))
           .filter((d) => d.hint.isActive === w.hint.isActive)
+          .filter((d) => w.hint.OR === undefined || groupTerm({ OR: w.hint.OR }, d.hint.groupKey) === true)
           .filter((d) =>
             (w.hint.AND ?? []).every((term) => {
               // The mode term is a plain `in`, not the empty-or-has shape the
@@ -1697,10 +1735,12 @@ describe('«Не получилось подключиться?» after the cust
   /**
    * The pop-up is raised when `subscription.not_connected` fires and shown when
    * the customer next opens the cabinet — they may have connected in between.
-   * So `nextFor` asks, for a candidate of the `connect-help` group only,
-   * whether the person still has a live subscription not known to have
-   * connected and has not switched the help off; if not, every waiting
-   * delivery of the group is closed as lapsed and the next hint is offered.
+   * So `nextFor` decides, for a candidate of the `connect-help` group only and
+   * once per person: SHOW on a read at most fifteen minutes old that found the
+   * VPN never connected; LAPSE — every waiting delivery of the group closed —
+   * once nothing live is left that is not known to have connected, or the help
+   * was switched off; otherwise HOLD: skipped, not closed, and the next hint
+   * offered.
    *
    * Whether the QUERY means that is proved on PostgreSQL; here the person's
    * answer is given, and what `nextFor` does with it is checked.
@@ -1708,14 +1748,68 @@ describe('«Не получилось подключиться?» after the cust
   const CONNECT_HELP = { key: 'tpl-connect-help', id: 'h-connect', groupKey: 'connect-help', isRepeatable: true };
   const OTHER = { key: 'welcome', id: 'h-welcome' };
 
-  it('hands it over while a live subscription is still waiting to connect', async () => {
-    const { service, guardReads } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true } });
+  it('hands it over on a fresh read that the VPN is still not connected', async () => {
+    const { service, guardReads } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true, fresh: true } });
     await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
 
     const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
 
     assert.equal(next?.key, 'tpl-connect-help');
     assert.equal(guardReads.length, 1);
+  });
+
+  it('HOLDS it on an old read: not shown, not closed — and offers the next hint', async () => {
+    // The customer may have connected since that read, with the webhook lost:
+    // the cabinet's own subscriptions read, on this very page load, is what
+    // writes the truth, and the cabinet asks again seconds later.
+    const { service, deliveries, guardReads } = build([hint(CONNECT_HELP), hint(OTHER)], [], undefined, {
+      u1: { waiting: true, fresh: false },
+    });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+    await service.raise({ userId: 'u1', hintKey: 'welcome', source: 's', now: NOW });
+    const popup = deliveries.find((d) => d.hintId === 'h-connect');
+    const expiresBefore = popup?.expiresAt.getTime();
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.equal(next?.key, 'welcome', 'the held pop-up was handed over, or blocked the hint behind it');
+    assert.equal(popup?.expiresAt.getTime(), expiresBefore, 'held is not lapsed');
+    assert.equal(popup?.shownAt, null);
+    assert.equal(popup?.dismissedAt, null);
+    assert.equal(guardReads.length, 1, 'the person is asked about once');
+  });
+
+  it('HOLDS with nothing behind it: no hint, and the pop-up still waiting for the next ask', async () => {
+    const { service, deliveries } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true, fresh: false } });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+
+    assert.equal(await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW }), null);
+    assert.ok((deliveries[0]?.expiresAt.getTime() ?? 0) > NOW.getTime(), 'the held pop-up was closed');
+
+    // The cabinet's read then finds it still not connected: the next ask shows it.
+    const later = build([hint(CONNECT_HELP)], deliveries, undefined, { u1: { waiting: true, fresh: true } });
+    const next = await later.service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+    assert.equal(next?.key, 'tpl-connect-help');
+  });
+
+  it('holds a sub-group with it, and a hint with no group is never held along', async () => {
+    const { service } = build(
+      [
+        hint({ ...CONNECT_HELP, key: 'own', id: 'h-own', groupKey: 'connect-help-own' }),
+        hint(CONNECT_HELP),
+        hint({ key: 'plain', id: 'h-plain' }),
+      ],
+      [],
+      undefined,
+      { u1: { waiting: true, fresh: false } },
+    );
+    await service.raise({ userId: 'u1', hintKey: 'own', source: 's', now: NOW });
+    await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
+    await service.raise({ userId: 'u1', hintKey: 'plain', source: 's', now: NOW });
+
+    const next = await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
+
+    assert.equal(next?.key, 'plain', 'a held sub-group was handed over, or the group-less hint was held too');
   });
 
   it('closes it as lapsed once nothing of theirs is waiting, and offers the next hint', async () => {
@@ -1736,9 +1830,9 @@ describe('«Не получилось подключиться?» after the cust
     assert.equal(deliveries.find((d) => d.hintId === 'h-welcome')?.expiresAt.getTime() !== NOW.getTime(), true);
   });
 
-  it('closes it for somebody who switched the help off in the cabinet', async () => {
+  it('closes it for somebody who switched the help off in the cabinet, however fresh the read', async () => {
     const { service, deliveries } = build([hint(CONNECT_HELP)], [], undefined, {
-      u1: { waiting: true, prefs: { connect_help: false } },
+      u1: { waiting: true, fresh: true, prefs: { connect_help: false } },
     });
     await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
 
@@ -1749,7 +1843,7 @@ describe('«Не получилось подключиться?» after the cust
   it('keeps it for somebody whose other notification switches are off', async () => {
     // Only `connect_help === false` is the opt-out.
     const { service } = build([hint(CONNECT_HELP)], [], undefined, {
-      u1: { waiting: true, prefs: { payment_failed: false, connect_help: true } },
+      u1: { waiting: true, fresh: true, prefs: { payment_failed: false, connect_help: true } },
     });
     await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
 
@@ -1785,22 +1879,25 @@ describe('«Не получилось подключиться?» after the cust
     assert.equal(guardReads.length, 0, 'a hint outside the group paid for the guard');
   });
 
-  it('asks about "not known to have connected", not about help being pending', async () => {
+  it('asks one bound statement: "not known to have connected" to lapse, a read at most 15 min old to show', async () => {
     // Pending help leaves out `skipped_template_off` — the operator switched
     // the message off and relies on this very pop-up — so a guard on pending
     // would close it in exactly the case it exists for. The live-row proof is
     // `user-hint-delivery-postgres.spec.ts`; this pins what is asked.
-    const { service, guardReads } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true } });
+    const { service, guardReads } = build([hint(CONNECT_HELP)], [], undefined, { u1: { waiting: true, fresh: true } });
     await service.raise({ userId: 'u1', hintKey: 'tpl-connect-help', source: 's', now: NOW });
 
     await service.nextFor({ userId: 'u1', locale: 'ru', audience: AUDIENCE, now: NOW });
 
-    assert.deepStrictEqual(guardReads[0]?.where, { id: 'u1' });
-    const subscriptions = guardReads[0]?.select['subscriptions'] as { where: unknown };
-    assert.deepStrictEqual(subscriptions.where, {
-      status: { in: ['ACTIVE', 'LIMITED'] },
-      NOT: { connectState: { is: { firstConnectedAt: { not: null } } } },
-    });
-    assert.equal(guardReads[0]?.select['notificationPrefs'], true);
+    assert.equal(CONNECT_HELP_SHOW_MAX_CHECK_AGE_MS, 15 * 60 * 1000);
+    const read = guardReads[0];
+    assert.ok(read !== undefined);
+    assert.match(read.sql, /LEFT JOIN "subscription_connect_states" "c"[\s\S]*"c"\."first_connected_at" IS NULL\s*\) AS "waiting"/);
+    assert.match(read.sql, /"s"\."status" IN \('ACTIVE', 'LIMITED'\)/);
+    assert.match(read.sql, /"c"\."profile_missing_at" < "c"\."checked_at"/, 'no missing profile after that read');
+    assert.doesNotMatch(read.sql, /\bnow\(\)|current_timestamp/i, 'the clock is bound, never SQL now()');
+    assert.ok(read.values.includes('u1'));
+    const instants = read.values.filter((value): value is Date => value instanceof Date).map((date) => date.getTime());
+    assert.ok(instants.includes(NOW.getTime() - 15 * 60 * 1000), 'the read may be at most 15 minutes older than now');
   });
 });

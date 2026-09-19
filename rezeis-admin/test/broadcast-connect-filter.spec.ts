@@ -217,6 +217,8 @@ describe('the where: synchronous narrows connect to nobody, async resolves it', 
 function previewHarness(input: {
   readonly audienceFilter: unknown;
   readonly resolve?: () => Promise<unknown>;
+  /** What `health()` answers — the signal as the preview first reads it. */
+  readonly health?: ConnectSignalHealth;
 }) {
   const counted: unknown[] = [];
   const asked: unknown[] = [];
@@ -228,8 +230,9 @@ function previewHarness(input: {
     },
     userIds: async () => assert.fail('the preview resolves ONCE, through resolve()'),
     counts: async () => assert.fail('the preview resolves ONCE, through resolve()'),
-    health: async () => HEALTH,
+    health: async () => input.health ?? HEALTH,
     markHelpedByBroadcast: async () => assert.fail('a preview never marks'),
+    stageBroadcast: async () => assert.fail('a preview never stages'),
   };
   const service = new BroadcastService(
     {
@@ -342,13 +345,79 @@ describe('the audience preview with connect', () => {
     assert.equal('connect' in preview, false);
     assert.equal(asked.length, 0);
   });
+
+  for (const state of ['webhooks_only', 'blind'] as const) {
+    it(`a signal that cannot tell (${state}) is a refusal, not a number — and the audience is not even asked`, async () => {
+      const down: ConnectSignalHealth = {
+        ...HEALTH,
+        state,
+        lastUserWebhookAt: state === 'webhooks_only' ? '2026-09-19T09:40:00.000Z' : null,
+        probe: { ...HEALTH.probe, failingSince: '2026-09-19T09:00:00.000Z' },
+      };
+      const { service, counted, asked } = previewHarness({
+        audienceFilter: CONNECT_FILTER,
+        health: down,
+        resolve: async () => assert.fail('resolved on a signal that cannot tell'),
+      });
+      const preview = await service.previewAudience('bc-1');
+      assert.equal(preview.totalRecipients, null);
+      assert.deepStrictEqual(
+        [preview.connect?.refusal, preview.connect?.verified, preview.connect?.unverified],
+        ['signal_down', null, null],
+      );
+      assert.equal(preview.connect?.health.state, state, 'the health says which, for the sentence under the refusal');
+      assert.equal(preview.connect?.health.failingSince, '2026-09-19T09:00:00.000Z');
+      assert.equal(asked.length, 0);
+      assert.equal(counted.length, 0);
+    });
+  }
+
+  it('a signal that went down between the two reads is a refusal too', async () => {
+    const { service, counted } = previewHarness({
+      audienceFilter: CONNECT_FILTER,
+      resolve: async () => ({
+        userIds: ['u-1'],
+        verified: 1,
+        unverified: 0,
+        health: { ...HEALTH, state: 'webhooks_only' },
+        limit: 20_000,
+      }),
+    });
+    const preview = await service.previewAudience('bc-1');
+    assert.equal(preview.totalRecipients, null);
+    assert.equal(preview.connect?.refusal, 'signal_down');
+    assert.equal(counted.length, 0);
+  });
 });
 
 describe('checkConnectAudience — the verdict staging acts on', () => {
-  function withUserIds(userIds: () => Promise<string[]>): BroadcastService {
-    return new BroadcastService({} as never, { userIds } as never);
+  function withUserIds(userIds: () => Promise<string[]>, health: ConnectSignalHealth = HEALTH): BroadcastService {
+    return new BroadcastService({} as never, { userIds, health: async () => health } as never);
   }
   const now = new Date('2026-09-19T12:00:00.000Z');
+
+  it('refuses while the signal cannot tell — webhooks_only and blind — before asking for anybody', async () => {
+    for (const state of ['webhooks_only', 'blind'] as const) {
+      const verdict = await withUserIds(async () => assert.fail('asked on a signal that cannot tell'), {
+        ...HEALTH,
+        state,
+      }).checkConnectAudience(PAID, now);
+      assert.equal(verdict.ok, false, state);
+      if (verdict.ok) return;
+      assert.equal(verdict.refusal, 'signal_down');
+      assert.deepStrictEqual(verdict.metadata, { state });
+      assert.match(verdict.reason, /не может отличить подключившихся от неподключившихся/);
+      assert.match(verdict.reason, /Отправьте рассылку снова, когда проверка заработает/);
+    }
+    const webhooksOnly = await withUserIds(async () => [], { ...HEALTH, state: 'webhooks_only' }).checkConnectAudience(PAID, now);
+    assert.ok(!webhooksOnly.ok && /вебхук не пришёл/.test(webhooksOnly.reason), 'says why webhooks alone are not enough');
+    const blind = await withUserIds(async () => [], { ...HEALTH, state: 'blind' }).checkConnectAudience(PAID, now);
+    assert.ok(!blind.ok && /ни одного вебхука/.test(blind.reason));
+    for (const state of ['live', 'starting'] as const) {
+      const verdict = await withUserIds(async () => ['u-1'], { ...HEALTH, state }).checkConnectAudience(PAID, now);
+      assert.deepStrictEqual(verdict, { ok: true, userIds: ['u-1'] }, state);
+    }
+  });
 
   it('hands the people through', async () => {
     assert.deepStrictEqual(await withUserIds(async () => ['u-1']).checkConnectAudience(PAID, now), {
@@ -399,6 +468,8 @@ function stagingHarness(input: {
   readonly audienceFilter: unknown;
   readonly verdict?: unknown;
   readonly recipients?: readonly string[];
+  /** Who `stageConnectRecipients` finds still reachable; default: every recipient it is handed. */
+  readonly reachable?: readonly string[];
 }): { readonly service: BroadcastDeliveryService; readonly record: StagingRecord } {
   const record: StagingRecord = {
     updateMany: [],
@@ -445,7 +516,11 @@ function stagingHarness(input: {
       createMany: async (args: unknown) => {
         record.createMany.push({ via: 'root', args });
       },
-      findMany: async () => (input.recipients ?? []).map((id) => ({ id: `msg-${id}` })),
+      // The rows staging wrote, whichever client wrote them.
+      findMany: async () =>
+        record.createMany.flatMap((entry) =>
+          (entry.args as { data: Array<{ userId: string }> }).data.map((row) => ({ id: `msg-${row.userId}` })),
+        ),
     },
     $transaction: async (fn: (client: unknown) => Promise<unknown>, options: unknown) => {
       record.transactions.push(options);
@@ -459,9 +534,10 @@ function stagingHarness(input: {
       if (input.verdict === undefined) throw new Error('checkConnectAudience was not expected');
       return input.verdict;
     },
-    markConnectHelped: async (args: Record<string, unknown>) => {
+    stageConnectRecipients: async (args: Record<string, unknown>) => {
       record.marks.push(args);
-      return (args['userIds'] as unknown[]).length;
+      const handed = args['userIds'] as readonly string[];
+      return input.reachable === undefined ? handed : handed.filter((id) => input.reachable!.includes(id));
     },
   };
   const events = (severity: string) => (type: string, _source: string, message: string, metadata: unknown) => {
@@ -488,6 +564,7 @@ describe('staging a broadcast with connect', () => {
     ['too_many', `${CONNECT_AUDIENCE_TOO_LARGE_MESSAGE}. Подходит 20001, предел — 20000.`],
     ['timeout', 'Получателей фильтра «не подключился» не удалось посчитать за 10 секунд.'],
     ['unreadable', 'Фильтр «Подключение VPN» сохранён в виде, который эта версия панели не читает.'],
+    ['signal_down', 'Фильтр «Подключение VPN» сейчас не может отличить подключившихся от неподключившихся.'],
   ] as const) {
     it(`refuses BEFORE the claim (${refusal}): back to DRAFT, one error card, nothing staged`, async () => {
       const { service, record } = stagingHarness({
@@ -551,6 +628,54 @@ describe('staging a broadcast with connect', () => {
 
     assert.ok(record.events.every((event) => event.type !== 'subscription.not_connected'), 'staging emits no «не подключился»');
     assert.ok(record.events.every((event) => event.severity !== 'error'));
+    assert.ok(
+      record.updates.some((args) => JSON.stringify(args) === JSON.stringify({ where: { id: 'bc-1' }, data: { totalCount: 2 } })),
+      JSON.stringify(record.updates),
+    );
+  });
+
+  it('writes rows for the list NARROWED in the transaction — and the total follows it, not the resolved list', async () => {
+    // u-2 was reached by the automatic help, or connected, between the
+    // resolution and staging: `stageConnectRecipients` no longer names them.
+    const { service, record } = stagingHarness({
+      audienceFilter: CONNECT_FILTER,
+      verdict: { ok: true, userIds: ['u-1', 'u-2', 'u-3'] },
+      recipients: ['u-1', 'u-2', 'u-3'],
+      reachable: ['u-3', 'u-1'],
+    });
+    assert.deepStrictEqual(await service.stageRecipients('bc-1'), ['msg-u-1', 'msg-u-3']);
+    assert.deepStrictEqual(record.marks[0]?.['userIds'], ['u-1', 'u-2', 'u-3'], 'narrowed from the whole resolved list');
+    assert.deepStrictEqual(record.createMany, [
+      {
+        via: 'tx',
+        args: {
+          data: [
+            { broadcastId: 'bc-1', userId: 'u-1', status: BroadcastMessageStatus.PENDING },
+            { broadcastId: 'bc-1', userId: 'u-3', status: BroadcastMessageStatus.PENDING },
+          ],
+        },
+      },
+    ]);
+    assert.ok(
+      record.updates.some((args) => JSON.stringify(args) === JSON.stringify({ where: { id: 'bc-1' }, data: { totalCount: 2 } })),
+      `the total is the narrowed list: ${JSON.stringify(record.updates)}`,
+    );
+  });
+
+  it('everybody narrowed away: completed with nobody, and not one row written', async () => {
+    const { service, record } = stagingHarness({
+      audienceFilter: CONNECT_FILTER,
+      verdict: { ok: true, userIds: ['u-1'] },
+      recipients: ['u-1'],
+      reachable: [],
+    });
+    assert.deepStrictEqual(await service.stageRecipients('bc-1'), []);
+    assert.equal(record.transactions.length, 1, 'narrowed inside the staging transaction');
+    assert.deepStrictEqual(record.createMany, []);
+    const completed = record.updates.find((args) => JSON.stringify(args).includes(BroadcastStatus.COMPLETED)) as
+      | { data: { status: string; totalCount: number } }
+      | undefined;
+    assert.equal(completed?.data.totalCount, 0);
   });
 
   it('zero people after the other chips: completed with nobody, nothing marked', async () => {

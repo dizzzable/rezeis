@@ -107,14 +107,15 @@ export const en = {
       title: 'VPN connection',
       infoLabel: 'More: VPN connection',
       info:
-        'Only verified customers count: after the purchase or the grant the panel read their profile in Remnawave — no more than a day ago — and the VPN had never connected on it. Customers nobody could verify will not get this broadcast; their number is shown separately under the audience check.\n\n"Paid" means the subscription was bought for money, including from a partner balance and a paid trial. A 0 ₽ subscription from a promo code, a free trial, a gift and a bonus count as "Trial or gift".',
+        'Only verified customers count: after the purchase or the grant the panel read their profile in Remnawave — no more than a day ago — and the VPN had never connected on it. Customers nobody could verify will not get this broadcast; their number is shown separately under the audience check. Customers who switched connection help off in their cabinet never get this broadcast.\n\nWhile the panel cannot check connections — Remnawave has not answered its requests for more than 30 minutes — broadcasts with this filter are not sent, just as the automatic connection help is not.\n\n"Paid" means the subscription was bought for money, including from a partner balance and a paid trial. A 0 ₽ subscription from a promo code, a free trial, a gift and a bonus count as "Trial or gift".',
       bucket: {
         paid: 'Paid and not connected',
         trial: 'Trial or gift — not connected',
       },
       days: 'Over the last, days',
       excludeHelped: 'Skip customers who were already helped',
-      excludeHelpedHint: 'Connection help already went to them — automatically or in an earlier broadcast.',
+      excludeHelpedHint:
+        'Skips subscriptions connection help already went out for, or is going out for right now — automatically (including for another subscription of the same customer) or in an earlier broadcast — and those where the customer turned it down. If the automatic help sent nothing for a subscription — for example, the message was switched off or the subscription could not be checked — this broadcast still goes to it.',
       companion:
         'While this filter is on, the segment is "Active subscribers" and the subscription is "Active" and "Limited".',
       unverified_one: '{{count}} more not verified — they will not get it',
@@ -124,13 +125,14 @@ export const en = {
         'Could not count the "not connected" recipients within 10 seconds — shorten the period or check again later',
       unreadable:
         'The "VPN connection" filter was saved in a form this panel version cannot read — choose it again',
+      signalDown: 'This filter cannot send right now: the panel cannot check who has already connected',
       health: {
         starting:
           'Checking subscriptions for the first time — this takes up to {{hours}} h. Checked so far: {{done}} of {{total}}.',
         webhooks_only:
-          'Remnawave has not answered requests since {{time}}. Connections are learned from webhooks only — customers no webhook arrived for will not make the list.',
+          'Remnawave has not answered requests since {{time}}. The panel learns of connections only from webhooks right now, so a customer who connected but whose webhook never arrived would look not connected and get the message. That is why broadcasts with this filter are not sent right now — nor is the automatic help.',
         blind:
-          "We can't tell who has connected right now: Remnawave has not answered since {{time}} and no webhooks are arriving. Automatic help is paused.",
+          "We can't tell who has connected right now: Remnawave has not answered since {{time}} and no webhooks are arriving. Broadcasts with this filter are not sent, and the automatic help is paused too.",
       },
     },
     channels: {

@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   Prisma,
-  SubscriptionStatus,
   UserHint,
   UserHintCtaKind,
   UserHintDelivery,
@@ -9,6 +8,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { connectHelpOptedOut } from '../../connect-signal/connect-evidence.util';
+import { verifiedNotConnectedSql } from '../../connect-signal/connect-sql';
 import { coerceNotificationLocale } from '../../notifications/utils/notification-template-locale.util';
 import { HINT_DOOR_TARGETS } from '../dto/user-hint.dto';
 
@@ -101,11 +101,13 @@ function doorArm(doors: readonly string[]): Array<{ ctaTarget: { in: string[] } 
  * fires and SHOWN when the customer next opens the cabinet — hours or days
  * later, and they may have connected in between. A delivery has no retraction,
  * and the writers that learn of a connection live in another module. So the
- * check is made where the pop-up is handed out: `nextFor` closes a waiting
- * delivery of this group, and of every sub-group below it (`connect-help-…`),
- * as lapsed, and moves on, once the customer no longer has a live subscription
- * that is not known to have connected — or has switched «Помощь с
- * подключением» off in the cabinet.
+ * check is made where the pop-up is handed out, for a delivery of this group
+ * or of any sub-group below it (`connect-help-…`), per person
+ * ({@link ConnectHelpVerdict}): it is SHOWN only on a fresh read that the VPN
+ * still has not connected; it is closed as LAPSED once the customer no longer
+ * has a live subscription that is not known to have connected — or has
+ * switched «Помощь с подключением» off in the cabinet; and otherwise it is
+ * HELD — not shown, not closed — while the queue moves on to the next hint.
  *
  * An operator's own hint in the group gets the same treatment; the group
  * field's (i) says so. The ready-made template puts its hint here.
@@ -116,6 +118,83 @@ export const CONNECT_HELP_HINT_GROUP = 'connect-help';
 export function isConnectHelpGroup(groupKey: string | null): boolean {
   if (groupKey === null) return false;
   return groupKey === CONNECT_HELP_HINT_GROUP || groupKey.startsWith(`${CONNECT_HELP_HINT_GROUP}-`);
+}
+
+/**
+ * What `nextFor` does with a waiting connect-help pop-up, decided per person:
+ *
+ *   show   some live (ACTIVE or LIMITED) subscription was READ at most
+ *          {@link CONNECT_HELP_SHOW_MAX_CHECK_AGE_MS} ago and found never
+ *          connected, not reported missing since — and the person did not
+ *          switch the help off;
+ *   lapse  no live subscription is left that is not known to have connected,
+ *          or the person switched the help off: the pop-up is no longer true
+ *          and every waiting delivery of the group is closed;
+ *   hold   neither — the newest read is older than that, or there is none. The
+ *          pop-up is skipped WITHOUT being closed, and the next hint offered.
+ */
+export type ConnectHelpVerdict = 'show' | 'hold' | 'lapse';
+
+/**
+ * How old the read may be that a «не подключился» pop-up is shown on.
+ *
+ * The cabinet's own subscriptions read re-stamps "still not connected" at most
+ * every ten minutes (`CABINET_CHECK_WRITE_INTERVAL_MS` in
+ * `internal-user.service.ts`), and writes a connection at once — so after the
+ * dashboard's read, a customer who did not connect has a read at most ten
+ * minutes old, and one who did is known to have connected. Fifteen leaves that
+ * cadence a margin; the cabinet asks again four and fifteen seconds after it
+ * mounts (`FOLLOW_UP_ASK_DELAYS_MS` in the cabinet's `hint-controller.tsx`).
+ */
+export const CONNECT_HELP_SHOW_MAX_CHECK_AGE_MS = 15 * 60 * 1000;
+
+/** The connect-help group and every sub-group of it, as a hint filter. */
+const CONNECT_HELP_FAMILY = {
+  OR: [
+    { groupKey: CONNECT_HELP_HINT_GROUP },
+    { groupKey: { startsWith: `${CONNECT_HELP_HINT_GROUP}-` } },
+  ],
+};
+
+/**
+ * Every hint OUTSIDE {@link CONNECT_HELP_FAMILY}. NULL-safe on purpose: a hint
+ * with no group is outside it, and `NOT (group_key = …)` alone is NULL — not
+ * true — for one, which would hold every group-less hint along with the pop-up.
+ */
+const OUTSIDE_CONNECT_HELP_FAMILY = {
+  OR: [{ groupKey: null }, { NOT: CONNECT_HELP_FAMILY }],
+};
+
+/**
+ * The person's side of {@link ConnectHelpVerdict} in one statement: their
+ * notification preferences, whether a live subscription is not known to have
+ * connected (`waiting` — no state row, or no first connection), and whether
+ * one of those was read fresh and found never connected (`fresh` —
+ * `verifiedNotConnectedSql` with the read's lower bound at `now − 15 min`). No
+ * row = no such person.
+ */
+export function connectHelpVerdictSql(userId: string, now: Date): Prisma.Sql {
+  const freshSince = new Date(now.getTime() - CONNECT_HELP_SHOW_MAX_CHECK_AGE_MS);
+  return Prisma.sql`
+    SELECT "u"."notification_prefs" AS "prefs",
+           EXISTS (
+             SELECT 1
+               FROM "subscriptions" "s"
+               LEFT JOIN "subscription_connect_states" "c" ON "c"."subscription_id" = "s"."id"
+              WHERE "s"."user_id" = "u"."id"
+                AND "s"."status" IN ('ACTIVE', 'LIMITED')
+                AND "c"."first_connected_at" IS NULL
+           ) AS "waiting",
+           EXISTS (
+             SELECT 1
+               FROM "subscriptions" "s"
+               JOIN "subscription_connect_states" "c" ON "c"."subscription_id" = "s"."id"
+              WHERE "s"."user_id" = "u"."id"
+                AND "s"."status" IN ('ACTIVE', 'LIMITED')
+                AND ${verifiedNotConnectedSql('c', freshSince, now)}
+           ) AS "fresh"
+      FROM "users" "u"
+     WHERE "u"."id" = ${userId}`;
 }
 
 /**
@@ -658,7 +737,7 @@ export class UserHintDeliveryService {
   }): Promise<ResolvedHint | null> {
     const now = input.now ?? new Date();
     // Asked at most once per call, and only when a candidate is in the group.
-    let connectHelpOwed: boolean | null = null;
+    let connectHelp: ConnectHelpVerdict | null = null;
     for (let round = 0; round < NEXT_FOR_ROUNDS; round += 1) {
       const row = await this.prismaService.userHintDelivery.findFirst({
         where: {
@@ -676,7 +755,13 @@ export class UserHintDeliveryService {
           // Read live, which is the whole point of pointing at the library: a
           // hint switched off stops appearing without anybody having to sweep
           // the queue, and switching it back on resumes it.
-          hint: { isActive: true, ...this.audienceFilter(input.audience) },
+          hint: {
+            isActive: true,
+            ...this.audienceFilter(input.audience),
+            // HELD: the connect-help group waits, untouched, and the queue
+            // moves on past it to the next hint.
+            ...(connectHelp === 'hold' ? OUTSIDE_CONNECT_HELP_FAMILY : {}),
+          },
         },
         orderBy: { createdAt: 'asc' },
         include: { hint: true },
@@ -687,45 +772,55 @@ export class UserHintDeliveryService {
       // Only a candidate of the group costs a read; every other hint is handed
       // over exactly as before. See `CONNECT_HELP_HINT_GROUP`.
       if (!isConnectHelpGroup(row.hint.groupKey)) return this.resolve(row.id, row.hint, input.locale);
-      connectHelpOwed ??= await this.connectHelpStillOwed(input.userId);
-      if (connectHelpOwed) return this.resolve(row.id, row.hint, input.locale);
-      await this.lapseConnectHelp(input.userId, now);
+      connectHelp ??= await this.connectHelpVerdict(input.userId, now);
+      if (connectHelp === 'show') return this.resolve(row.id, row.hint, input.locale);
+      // HOLD: skipped, NOT lapsed — the next round reads past the whole group.
+      if (connectHelp === 'lapse') await this.lapseConnectHelp(input.userId, now);
     }
     return null;
   }
 
   /**
-   * Whether a «не подключился» pop-up is still true for this person.
+   * Whether a «не подключился» pop-up may be shown to this person NOW, must
+   * wait, or is no longer true. See {@link ConnectHelpVerdict}.
    *
-   * TRUE while they have a live (ACTIVE or LIMITED) subscription that is not
-   * KNOWN to have connected — no state row, or one with no first connection —
-   * and they have not switched «Помощь с подключением» off.
+   * ── Why "not known to have connected" is not enough to SHOW ────────────
+   *
+   * A state row records what the panel last READ, and the read can be old: the
+   * probe re-reads a subscription only hourly once its help was decided, and a
+   * connection whose webhook was lost is learned only by a read. A customer who
+   * connected an hour ago opens the cabinet, and the stored row still says "not
+   * connected". The cabinet's own subscriptions read — made on the same page
+   * load, in parallel with this ask — is what writes the truth
+   * (`InternalUserService.resolveConnectHelp` → `recordCabinetSignal`: the
+   * connection, or a fresh "still not connected" at most every ten minutes).
+   * So the pop-up is shown only on a read at most
+   * {@link CONNECT_HELP_SHOW_MAX_CHECK_AGE_MS} old; on an older one it WAITS,
+   * and the cabinet's follow-up asks, seconds later, find the fresh read. A
+   * subscription the panel has never read has nothing to show it on, and
+   * waits too.
+   *
+   * ── Why the lapse is still "not known to have connected" ───────────────
    *
    * NOT "help is pending" (`hasPendingConnectHelp`), and the difference is a
    * whole outcome. Pending counts only the channels that actually reached the
    * customer; `skipped_template_off` — the operator switched the message off
    * and relies on this very pop-up instead — is not one of them. A guard built
-   * on pending would close the pop-up in exactly the case it exists for.
+   * on pending would close the pop-up in exactly the case it exists for. And
+   * nothing is closed on staleness alone: a read that is merely old proves
+   * nothing either way.
+   *
+   * One statement; every instant is BOUND (`now`), never SQL `now()` — the
+   * rows it compares were written with bound instants too.
    */
-  private async connectHelpStillOwed(userId: string): Promise<boolean> {
-    const person = await this.prismaService.user.findUnique({
-      where: { id: userId },
-      select: {
-        notificationPrefs: true,
-        subscriptions: {
-          where: {
-            status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.LIMITED] },
-            // "Not known to have connected": no state row at all, or one
-            // whose first connection is still unset.
-            NOT: { connectState: { is: { firstConnectedAt: { not: null } } } },
-          },
-          select: { id: true },
-          take: 1,
-        },
-      },
-    });
-    if (person === null) return false;
-    return person.subscriptions.length > 0 && !connectHelpOptedOut(person.notificationPrefs);
+  private async connectHelpVerdict(userId: string, now: Date): Promise<ConnectHelpVerdict> {
+    const rows = await this.prismaService.$queryRaw<
+      Array<{ readonly prefs: unknown; readonly waiting: boolean; readonly fresh: boolean }>
+    >(connectHelpVerdictSql(userId, now));
+    const person = rows[0];
+    if (person === undefined) return 'lapse';
+    if (!person.waiting || connectHelpOptedOut(person.prefs)) return 'lapse';
+    return person.fresh ? 'show' : 'hold';
   }
 
   /**
@@ -743,12 +838,7 @@ export class UserHintDeliveryService {
         dismissedAt: null,
         actedAt: null,
         expiresAt: { gt: now },
-        hint: {
-          OR: [
-            { groupKey: CONNECT_HELP_HINT_GROUP },
-            { groupKey: { startsWith: `${CONNECT_HELP_HINT_GROUP}-` } },
-          ],
-        },
+        hint: CONNECT_HELP_FAMILY,
       },
       data: { expiresAt: now },
     });

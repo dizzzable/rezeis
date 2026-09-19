@@ -4,6 +4,7 @@ import {
   CONNECT_AUDIENCE_STATEMENT_TIMEOUT,
   ConnectAudienceService,
   ConnectAudienceTooLargeError,
+  connectAudienceUsable,
   isStatementTimeout,
   type ConnectBucket,
 } from '../../connect-audience/services/connect-audience.service';
@@ -68,15 +69,23 @@ const MAX_USERS_PER_RUN = 500;
 const HOUR_MS = 60 * 60 * 1000;
 
 /**
- * The reason a rule stands down on a blind signal, in the words its run log
- * keeps. The panel words it for the operator from the result's `cause`; this is
- * the log's and an older panel's copy.
+ * The reason a rule stands down on a signal that cannot tell, in the words its
+ * run log keeps — one per state, since each has its own fix. The panel words it
+ * for the operator from the result's `cause`; this is the log's and an older
+ * panel's copy.
  */
-const SIGNAL_BLIND_REASON =
-  'the panel cannot tell right now who has connected: the connection check has read nothing ' +
-  'from Remnawave for 30 minutes and no Remnawave user webhook arrived in the last 24 hours, so ' +
-  '"never connected" cannot be told from "could not look". Check the panel\'s connection to ' +
-  'Remnawave, or its webhooks';
+const SIGNAL_DOWN_REASONS: Readonly<Record<'webhooks_only' | 'blind', string>> = {
+  blind:
+    'the panel cannot tell right now who has connected: the connection check has read nothing ' +
+    'from Remnawave for 30 minutes and no Remnawave user webhook arrived in the last 24 hours, so ' +
+    '"never connected" cannot be told from "could not look". Check the panel\'s connection to ' +
+    'Remnawave, or its webhooks',
+  webhooks_only:
+    'the panel cannot tell right now who has connected: the connection check has read nothing ' +
+    'from Remnawave for 30 minutes, and webhooks alone do not say it — a customer whose ' +
+    'connection webhook was lost would still look never connected and be hinted wrongly. ' +
+    'Check the panel\'s connection to Remnawave',
+};
 
 /**
  * Who to hint, for the cases where the trigger is the ABSENCE of something.
@@ -101,10 +110,13 @@ const SIGNAL_BLIND_REASON =
  *
  * ── STANDING DOWN ──────────────────────────────────────────────────────────
  *
- * When the signal is `blind` — the check has not reached Remnawave for half an
- * hour and no webhook arrived in a day — the answer is `blind`, and the rule
- * hints nobody. The other states proceed: in them nobody is named without a
- * fresh read, so a slow or partial signal can only name FEWER people.
+ * When the check has not reached Remnawave for half an hour — `webhooks_only`
+ * or `blind` — the answer is `blind`, and the rule hints nobody, exactly as the
+ * automatic help sends nothing and the broadcast filter refuses
+ * (`connectAudienceUsable`). Webhooks alone are not enough: a read made before
+ * the customer connected stays "verified not connected" for a day, and only a
+ * webhook that may never arrive would correct it — so a partial signal names
+ * people WRONGLY, not just fewer of them. `live` and `starting` proceed.
  *
  * ── THE HINT IS ITS OWN CHANNEL ────────────────────────────────────────────
  *
@@ -150,9 +162,10 @@ export class HintAudienceService {
     };
 
     const health = await this.connectAudienceService.health(now);
-    if (health.state === 'blind') {
-      this.logger.warn(`Hint audience "${input.audience}" stood down: ${SIGNAL_BLIND_REASON}`);
-      return { kind: 'blind', reason: SIGNAL_BLIND_REASON };
+    if (!connectAudienceUsable(health.state)) {
+      const reason = SIGNAL_DOWN_REASONS[health.state === 'webhooks_only' ? 'webhooks_only' : 'blind'];
+      this.logger.warn(`Hint audience "${input.audience}" stood down: ${reason}`);
+      return { kind: 'blind', reason };
     }
 
     // One bucket after the other, not in parallel: the legacy name reads two,

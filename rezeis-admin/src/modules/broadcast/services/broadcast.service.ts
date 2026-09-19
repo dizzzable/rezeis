@@ -23,8 +23,13 @@ import {
   ConnectAudienceService,
   ConnectAudienceTooLargeError,
   connectAudienceHealthView,
+  connectAudienceUsable,
   isStatementTimeout,
 } from '../../connect-audience/services/connect-audience.service';
+import type {
+  ConnectSignalHealth,
+  ConnectSignalState,
+} from '../../connect-signal/services/connect-signal-health.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { normalizeCode } from '../../promocodes/utils/code-normalizer.util';
 import { BROADCAST_BLOCKED_REASON, TELEGRAM_CAPTION_LIMIT } from '../broadcast.constants';
@@ -57,6 +62,7 @@ export type ConnectAudienceVerdict =
   | { readonly ok: true; readonly userIds: readonly string[] }
   | {
       readonly ok: false;
+      /** `signal_down`: the connection signal is `webhooks_only` or `blind`. */
       readonly refusal: BroadcastConnectRefusal | 'failed';
       /** A whole sentence for the operator's event, after «Рассылка не отправлена.» */
       readonly reason: string;
@@ -726,8 +732,19 @@ export class BroadcastService {
         view: { verified: null, unverified: null, health, refusal: 'unreadable', limit: CONNECT_AUDIENCE_MAX_USERS },
       };
     }
+    // A SIGNAL THAT CANNOT TELL IS A REFUSAL, NOT A NUMBER. In `webhooks_only`
+    // a customer whose connection webhook was lost still reads "verified not
+    // connected"; the automatic help sends nothing then, and staging refuses
+    // (`checkConnectAudience`) — so the preview says so rather than counting
+    // people the send would never reach. Asked first: the audience statement
+    // is the expensive half, and a slow signal is when it is slowest.
+    const signal = await this.connectAudience.health(now);
+    if (!connectAudienceUsable(signal.state)) return signalDownPreview(signal);
     try {
       const resolution = await this.connectAudience.resolve(connectQuery(connect, now));
+      // The same answer from the health the resolution itself carried, in
+      // case the signal went down between the two reads.
+      if (!connectAudienceUsable(resolution.health.state)) return signalDownPreview(resolution.health);
       return {
         userIds: resolution.userIds,
         view: {
@@ -757,6 +774,9 @@ export class BroadcastService {
    * 10-second statement, and one that timed out under load will time out on
    * BullMQ's retry five seconds later just the same — silently, for an
    * immediate send, where a refusal is a card the operator sees.
+   *
+   * So is a signal that cannot tell (`webhooks_only`, `blind`): the automatic
+   * help sends nothing then, and neither does this.
    */
   public async checkConnectAudience(
     connect: BroadcastConnectFilter | UnreadableConnectFilter,
@@ -773,6 +793,18 @@ export class BroadcastService {
       };
     }
     try {
+      // Refused like the automatic help stands down: in `webhooks_only` or
+      // `blind` the panel cannot tell a customer who connected from one who did
+      // not, and this send cannot be taken back.
+      const signal = await this.connectAudience.health(now);
+      if (!connectAudienceUsable(signal.state)) {
+        return {
+          ok: false,
+          refusal: 'signal_down',
+          reason: signalDownReason(signal.state),
+          metadata: { state: signal.state },
+        };
+      }
       return { ok: true, userIds: await this.connectAudience.userIds(connectQuery(connect, now)) };
     } catch (error) {
       if (error instanceof ConnectAudienceTooLargeError) {
@@ -804,23 +836,58 @@ export class BroadcastService {
   }
 
   /**
-   * The once-marker for a staged «не подключился» broadcast (§2.3), inside
-   * staging's own transaction: the recipients' matching subscriptions become
-   * `help_decided_at = now, help_source = 'broadcast:<id>', help_outcome =
-   * 'broadcast'`, so the automatic «Помощь с подключением» never repeats them.
+   * Staging's half of a «не подключился» broadcast, inside staging's own
+   * transaction: the once-marker for the recipients' matching subscriptions
+   * (`help_decided_at = now, help_source = 'broadcast:<id>', help_outcome =
+   * 'broadcast'`, so the automatic «Помощь с подключением» never repeats
+   * them), then the recipients still reachable — `userIds` narrowed to the
+   * people still verified not connected and, with «Не слать тем, кому уже
+   * помогли», still this broadcast's to help (`ConnectAudienceService.stageBroadcast`).
+   * The recipient rows are written for exactly this list.
    */
-  public async markConnectHelped(input: {
+  public async stageConnectRecipients(input: {
     readonly broadcastId: string;
     readonly connect: BroadcastConnectFilter;
     readonly userIds: readonly string[];
     readonly now: Date;
     readonly client: Prisma.TransactionClient;
-  }): Promise<number> {
-    return this.connectAudience.markHelpedByBroadcast(input.broadcastId, connectQuery(input.connect, input.now), {
+  }): Promise<readonly string[]> {
+    const staged = await this.connectAudience.stageBroadcast(input.broadcastId, connectQuery(input.connect, input.now), {
       userIds: input.userIds,
       client: input.client,
     });
+    return staged.recipients;
   }
+}
+
+/** The preview's answer while the signal cannot tell: no count, the refusal, and the health that says why. */
+function signalDownPreview(health: ConnectSignalHealth): {
+  readonly userIds: readonly string[] | null;
+  readonly view: BroadcastConnectPreviewInterface;
+} {
+  return {
+    userIds: null,
+    view: {
+      verified: null,
+      unverified: null,
+      health: connectAudienceHealthView(health),
+      refusal: 'signal_down',
+      limit: CONNECT_AUDIENCE_MAX_USERS,
+    },
+  };
+}
+
+/** Staging's sentence for a signal that cannot tell, after «Рассылка не отправлена.» */
+function signalDownReason(state: ConnectSignalState): string {
+  const why =
+    state === 'blind'
+      ? 'проверка подключений больше 30 минут не может прочитать Remnawave, и за сутки не пришло ни одного вебхука о пользователях'
+      : 'проверка подключений больше 30 минут не может прочитать Remnawave, а по одним вебхукам не узнать о подключении, ' +
+        'для которого вебхук не пришёл, — такой клиент получил бы сообщение, хотя уже подключился';
+  return (
+    `Фильтр «Подключение VPN» сейчас не может отличить подключившихся от неподключившихся: ${why}. ` +
+    'Автоматическая помощь с подключением тоже ничего не отправляет. Отправьте рассылку снова, когда проверка заработает.'
+  );
 }
 
 function connectQuery(connect: BroadcastConnectFilter, now: Date) {

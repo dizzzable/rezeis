@@ -131,7 +131,12 @@ export interface BroadcastConnectHealth {
   readonly firstPassHours: number
 }
 
-export type BroadcastConnectRefusal = 'too_many' | 'timeout' | 'unreadable'
+/**
+ * `signal_down`: the connection signal is `webhooks_only` or `blind` — the
+ * panel cannot tell who connected, so nothing is counted or sent; `health`
+ * says which and since when.
+ */
+export type BroadcastConnectRefusal = 'too_many' | 'timeout' | 'unreadable' | 'signal_down'
 
 export interface BroadcastConnectPreview {
   readonly verified: number | null

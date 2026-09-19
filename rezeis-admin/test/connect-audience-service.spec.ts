@@ -8,6 +8,7 @@ import { Test } from '@nestjs/testing';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { ConnectAudienceModule } from '../src/modules/connect-audience/connect-audience.module';
+import { HELPED_OUTCOMES } from '../src/modules/connect-audience/connect-audience.sql';
 import {
   CONNECT_AUDIENCE_MAX_USERS,
   CONNECT_AUDIENCE_TOO_LARGE_MESSAGE,
@@ -15,9 +16,11 @@ import {
   ConnectAudienceService,
   ConnectAudienceTooLargeError,
   connectAudienceHealthView,
+  connectAudienceUsable,
   connectAudienceWindowOf,
   isStatementTimeout,
 } from '../src/modules/connect-audience/services/connect-audience.service';
+import { HELP_OUTCOMES } from '../src/modules/connect-signal/connect-sql';
 import { BroadcastModule } from '../src/modules/broadcast/broadcast.module';
 import { BroadcastService } from '../src/modules/broadcast/services/broadcast.service';
 import { ConnectSignalModule } from '../src/modules/connect-signal/connect-signal.module';
@@ -177,7 +180,8 @@ describe('ConnectAudienceService', () => {
   });
 
   it('drops the helped unless told not to', async () => {
-    const helped = /"c"\."help_decided_at" IS NULL/;
+    // The HELPED predicate (`helpedSql`), negated — not "any decision".
+    const helped = /AND NOT COALESCE\(\("c"\."help_outcome" IN \(/;
     const byDefault = harness(idRows(0, { verified: 0, unverified: 0 }));
     await byDefault.service.counts({ bucket: 'paid', withinDays: 7, now: NOW });
     assert.match(byDefault.recorded.transactions[0]?.statements[1] ?? '', helped);
@@ -251,16 +255,118 @@ describe('ConnectAudienceService', () => {
     assert.equal(recorded.transactions.length, 0, 'no second transaction of its own');
     assert.equal(statements[0], "SET LOCAL statement_timeout = '10s'");
     const update = statements[1] ?? '';
-    assert.match(update, /WHERE "st"\."subscription_id" = "t"\."subscription_id"\s+AND "st"\."help_decided_at" IS NULL/);
-    assert.match(update, /"c"\."help_decided_at" IS NULL/);
+    // Guarded twice on NOT helped — the locking read and the write itself.
+    assert.match(update, /WHERE "st"\."subscription_id" = "t"\."subscription_id"\s+AND NOT COALESCE\(\("st"\."help_outcome" IN \(/);
+    assert.match(update, /AND NOT COALESCE\(\("c"\."help_outcome" IN \(/);
+    assert.match(update, /"st"\."help_decided_at" IS NOT NULL AND "st"\."help_outcome" IS NULL/, 'a ladder in flight is helped');
     assert.match(update, /FOR UPDATE OF "c"/);
     assert.match(update, /"help_outcome" = 'broadcast'/);
+    assert.match(update, /"help_attempts" = '\[\]'::jsonb/, 'a skipped row it takes over loses the ladder it did not run');
+    assert.match(update, /\("u"\."notification_prefs" -> 'connect_help'\) IS DISTINCT FROM 'false'::jsonb/);
     assert.doesNotMatch(update, /\bnow\(\)/i);
     const bound = values[1] ?? [];
     assert.ok(bound.some((value) => Array.isArray(value) && value.join(',') === 'u-1,u-2'), 'recipients as one array');
     assert.ok(bound.includes('broadcast:bc-9'));
     assert.ok(bound.includes('trial'));
     assert.ok(bound.some((value) => value instanceof Date && value.getTime() === NOW.getTime()), 'help_decided_at = the bound now');
+    for (const outcome of HELPED_OUTCOMES) assert.ok(bound.includes(outcome), `${outcome} is bound as helped`);
+    assert.ok(!bound.includes('skipped_template_off') && !bound.includes('skipped_unverifiable'), 'a skip is not help');
+  });
+
+  it('HELPED is an allowlist: exactly the contract’s seven, and every other outcome — later ones included — is not helped', () => {
+    assert.deepStrictEqual(
+      [...HELPED_OUTCOMES].sort(),
+      ['banner', 'bot', 'broadcast', 'email', 'merged', 'opted_out', 'push'],
+    );
+    // Every helped value is a real outcome; everything else the column may hold is not helped.
+    for (const outcome of HELPED_OUTCOMES) assert.ok((HELP_OUTCOMES as readonly string[]).includes(outcome), outcome);
+    const notHelped = HELP_OUTCOMES.filter((outcome) => !(HELPED_OUTCOMES as readonly string[]).includes(outcome));
+    assert.ok(notHelped.includes('skipped_template_off') && notHelped.includes('skipped_unverifiable'), notHelped.join(', '));
+  });
+
+  it('acts on a list only while the signal can tell: live and starting, never webhooks_only or blind', () => {
+    assert.deepStrictEqual(
+      (['live', 'starting', 'webhooks_only', 'blind'] as const).map((state) => [state, connectAudienceUsable(state)]),
+      [
+        ['live', true],
+        ['starting', true],
+        ['webhooks_only', false],
+        ['blind', false],
+      ],
+    );
+  });
+
+  it('never names somebody who switched the help off, in the audience statement too', async () => {
+    const { service, recorded } = harness(idRows(0, { verified: 0, unverified: 0 }));
+    await service.counts({ bucket: 'trial', withinDays: 7, now: NOW });
+    const statement = recorded.transactions[0]?.statements[1] ?? '';
+    assert.match(
+      statement,
+      /JOIN "users" "u" ON "u"\."id" = "b"\."user_id" AND "u"\."is_blocked" = false\s+AND \("u"\."notification_prefs" -> 'connect_help'\) IS DISTINCT FROM 'false'::jsonb/,
+    );
+  });
+
+  it('stages in the caller’s transaction: the timeout, the marker, THEN who is still reachable — in the list’s own order', async () => {
+    const { service, recorded } = harness([]);
+    const statements: string[] = [];
+    const values: unknown[][] = [];
+    const tx = {
+      $executeRaw: async (sql: Prisma.Sql) => {
+        statements.push(sql.sql);
+        values.push(sql.values);
+        return 0;
+      },
+      $queryRaw: async (sql: Prisma.Sql) => {
+        statements.push(sql.sql);
+        values.push(sql.values);
+        // The marker answers the subscriptions it marked; the narrowing, the people.
+        return /UPDATE "subscription_connect_states"/.test(sql.sql)
+          ? [{ subscriptionId: 's-3' }]
+          : [{ userId: 'u-3' }, { userId: 'u-1' }];
+      },
+    };
+    const staged = await service.stageBroadcast(
+      'bc-7',
+      { bucket: 'paid', withinDays: 7, now: NOW },
+      { userIds: ['u-1', 'u-2', 'u-3'], client: tx as never },
+    );
+    assert.deepStrictEqual(staged, { recipients: ['u-1', 'u-3'], marked: 1 }, 'u-2 is gone; the order is the list’s');
+    assert.equal(recorded.transactions.length, 0, 'no transaction of its own');
+    assert.equal(statements[0], "SET LOCAL statement_timeout = '10s'");
+    assert.match(statements[1] ?? '', /UPDATE "subscription_connect_states"/, 'the marker first');
+    const narrowing = statements[2] ?? '';
+    assert.match(narrowing, /SELECT DISTINCT "b"\."user_id" AS "userId"/, 'then the narrowing, as a statement of its own');
+    assert.match(narrowing, /AND "c"\."help_source" = /, 'excludeHelped (the default): only this broadcast’s marker');
+    assert.match(narrowing, /\("u"\."notification_prefs" -> 'connect_help'\) IS DISTINCT FROM 'false'::jsonb/);
+    assert.doesNotMatch(narrowing, /\bnow\(\)/i);
+    assert.ok((values[2] ?? []).includes('broadcast:bc-7'));
+    assert.ok((values[2] ?? []).some((value) => Array.isArray(value) && value.join(',') === 'u-1,u-2,u-3'));
+    assert.equal(statements.length, 3);
+  });
+
+  it('stages without the marker condition when the helped are kept, and asks nothing for nobody', async () => {
+    const kept: string[] = [];
+    const tx = {
+      $executeRaw: async () => 0,
+      $queryRaw: async (sql: Prisma.Sql) => {
+        kept.push(sql.sql);
+        return [];
+      },
+    };
+    const staged = await harness([]).service.stageBroadcast(
+      'bc-8',
+      { bucket: 'trial', withinDays: 3, excludeHelped: false, now: NOW },
+      { userIds: ['u-1'], client: tx as never },
+    );
+    assert.deepStrictEqual(staged, { recipients: [], marked: 0 });
+    assert.doesNotMatch(kept[1] ?? '', /"help_source" = /, 'still verified is all it asks');
+
+    const { service, recorded } = harness([]);
+    assert.deepStrictEqual(
+      await service.stageBroadcast('bc-9', { bucket: 'paid', withinDays: 7, now: NOW }, { userIds: [] }),
+      { recipients: [], marked: 0 },
+    );
+    assert.equal(recorded.transactions.length, 0);
   });
 
   it('marks in a bounded transaction of its own when not given one', async () => {

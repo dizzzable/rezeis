@@ -228,22 +228,58 @@ describe('«Подключение VPN» — the preview', () => {
     expect(screen.queryByText(/Remnawave|first time/)).not.toBeInTheDocument()
   })
 
-  it('names the moment Remnawave stopped answering when the panel is blind', async () => {
+  it('on a blind signal: the refusal instead of a count, and the moment Remnawave stopped answering', async () => {
     mockGet(
-      preview({
-        unverified: 2,
-        health: { ...LIVE, state: 'blind', failingSince: '2026-09-18T10:10:00.000Z' },
-      }),
+      preview(
+        {
+          refusal: 'signal_down',
+          verified: null,
+          unverified: null,
+          health: { ...LIVE, state: 'blind', failingSince: '2026-09-18T10:10:00.000Z' },
+        },
+        null,
+      ),
     )
     mockPost()
     const user = await openCompose()
     await user.click(screen.getByRole('button', { name: PAID }))
     await user.click(screen.getByRole('button', { name: 'Check audience' }))
     expect(
-      await screen.findByText(
-        /^We can't tell who has connected right now: Remnawave has not answered since .*2026.* and no webhooks are arriving\. Automatic help is paused\.$/,
+      await screen.findByText('This filter cannot send right now: the panel cannot check who has already connected'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        /^We can't tell who has connected right now: Remnawave has not answered since .*2026.* and no webhooks are arriving\. Broadcasts with this filter are not sent, and the automatic help is paused too\.$/,
       ),
     ).toBeInTheDocument()
+    expect(screen.queryByText(/recipients match/)).not.toBeInTheDocument()
+  })
+
+  it('on webhooks alone: the refusal, and the risk the right way round — a lost webhook would write to somebody who connected', async () => {
+    mockGet(
+      preview(
+        {
+          refusal: 'signal_down',
+          verified: null,
+          unverified: null,
+          health: { ...LIVE, state: 'webhooks_only', failingSince: '2026-09-18T10:10:00.000Z' },
+        },
+        null,
+      ),
+    )
+    mockPost()
+    const user = await openCompose()
+    await user.click(screen.getByRole('button', { name: PAID }))
+    await user.click(screen.getByRole('button', { name: 'Check audience' }))
+    expect(
+      await screen.findByText('This filter cannot send right now: the panel cannot check who has already connected'),
+    ).toBeInTheDocument()
+    const sentence = screen.getByText(/^Remnawave has not answered requests since /)
+    expect(sentence.textContent).toMatch(/customer who connected but whose webhook never arrived would look not connected and get the message/)
+    expect(sentence.textContent).toMatch(/broadcasts with this filter are not sent right now/)
+    expect(sentence.textContent).not.toMatch(/will not make the list/)
+    expect(screen.queryByText(/recipients match/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/not verified/)).not.toBeInTheDocument()
   })
 
   it('shows the refusal instead of a count when there are too many', async () => {
@@ -369,6 +405,37 @@ describe('«Подключение VPN» in Russian', () => {
     expect(await screen.findByText('Подходит получателей: 12')).toBeInTheDocument()
     // 21 is the singular form in Russian.
     expect(screen.getByText('Ещё 21 не проверен — ему не придёт')).toBeInTheDocument()
+    // «Не слать тем, кому уже помогли» says what it leaves IN, too.
+    expect(screen.getByText(/ничего не отправила/)).toBeInTheDocument()
+  })
+
+  it('says, in Russian, that the filter refuses while the panel cannot check — and why, the right way round', async () => {
+    await i18n.changeLanguage('ru')
+    await waitFor(() => {
+      expect(i18n.hasResourceBundle('ru', 'translation')).toBe(true)
+    })
+    await loadFeatureBundle('broadcast')
+    mockGet(
+      preview(
+        {
+          refusal: 'signal_down',
+          verified: null,
+          unverified: null,
+          health: { ...LIVE, state: 'webhooks_only', failingSince: '2026-09-18T10:10:00.000Z' },
+        },
+        null,
+      ),
+    )
+    mockPost()
+    const user = userEvent.setup()
+    renderWithProviders(<BroadcastPage />, { route: '/broadcast?compose=connect-help&bucket=paid&days=7' })
+    await user.click(await screen.findByRole('button', { name: 'Проверить аудиторию' }))
+    expect(
+      await screen.findByText('Сейчас рассылка с этим фильтром не отправится: панель не может проверить, кто уже подключился'),
+    ).toBeInTheDocument()
+    const sentence = screen.getByText(/^Remnawave не отвечает на запросы с /)
+    expect(sentence.textContent).toMatch(/выглядел бы неподключившимся и получил бы сообщение/)
+    expect(sentence.textContent).not.toMatch(/не попадут в список/)
   })
 })
 

@@ -11,6 +11,7 @@ import {
   CONNECT_BUCKETS,
   connectAudienceSql,
   markHelpedByBroadcastSql,
+  stagedRecipientsSql,
   type ConnectAudienceRow,
   type ConnectAudienceWindow,
   type ConnectBucket,
@@ -66,7 +67,11 @@ export interface ConnectAudienceQuery {
    * creation (paid) or the grant (trial) must fall in it, both ends inclusive.
    */
   readonly window?: ConnectAudienceWindow;
-  /** Leave out subscriptions whose once-marker is set (helped automatically or by a broadcast). Default `true`. */
+  /**
+   * Leave out HELPED subscriptions (`helpedSql`): help reached the customer or
+   * is on its way, automatically or by a broadcast. A decision that sent
+   * nothing (`skipped_…`) stays in. Default `true`.
+   */
   readonly excludeHelped?: boolean;
   /** The clock: the verification's 24 hours and `withinDays` count back from it. Default: now. */
   readonly now?: Date;
@@ -86,6 +91,30 @@ export interface ConnectAudienceResolution extends ConnectAudienceCounts {
   /** The verified people, oldest anchor first; `null` when there are more than {@link limit}. */
   readonly userIds: readonly string[] | null;
   readonly limit: number;
+}
+
+/**
+ * The signal states in which a «не подключился» list may be USED — sent a
+ * broadcast, shown a hint. The automatic help sends nothing in the others, and
+ * neither does anything built on these lists:
+ *
+ *   live, starting   the probe reads Remnawave; a connection is seen within
+ *                    its next read of the profile;
+ *   webhooks_only    the probe has read nothing for 30 minutes. A connection is
+ *                    learned only when its webhook arrives, so a customer
+ *                    whose webhook was lost keeps a "verified not connected"
+ *                    read made before they connected — for up to a day — and
+ *                    would be written to as never connected;
+ *   blind            nothing is learned at all.
+ *
+ * The lists are still COUNTED in every state (the counts say what is known);
+ * only acting on them stands down.
+ */
+export const CONNECT_AUDIENCE_USABLE_STATES: readonly ConnectSignalState[] = ['live', 'starting'];
+
+/** Whether a «не подключился» list may be acted on in this signal state. */
+export function connectAudienceUsable(state: ConnectSignalState): boolean {
+  return CONNECT_AUDIENCE_USABLE_STATES.includes(state);
 }
 
 /** More verified people than {@link CONNECT_AUDIENCE_MAX_USERS}. */
@@ -236,19 +265,20 @@ export class ConnectAudienceService {
   }
 
   /**
-   * THE ONCE-MARKER FOR A STAGED BROADCAST (§2.3).
+   * THE ONCE-MARKER FOR A STAGED BROADCAST (§2.3), alone.
    *
    * Marks the subscriptions of `userIds` — the broadcast's recipients, never
    * the whole bucket: a customer the operator's other chips left out received
-   * nothing and must stay open to the automatic help — that are in the bucket
-   * and verified not connected at `query.now`. Only where the marker is unset,
-   * so re-staging is a no-op and neither this nor the automatic sender ever
-   * overwrites the other. Emits nothing: `subscription.not_connected` is the
-   * automatic moment's alone.
+   * nothing and must stay open to the automatic help — that are in the bucket,
+   * verified not connected at `query.now` and not HELPED (`helpedSql`): never
+   * a row help already reached, and never one the automatic sender is still
+   * working on, so re-staging is a no-op and neither this nor the automatic
+   * sender ever overwrites the other. Emits nothing:
+   * `subscription.not_connected` is the automatic moment's alone.
    *
-   * `client` runs it inside the caller's transaction — staging writes the
-   * recipient rows and the markers together, both or neither. Returns how many
-   * subscriptions were marked.
+   * `client` runs it inside the caller's transaction. Returns how many
+   * subscriptions were marked. Staging itself goes through
+   * {@link stageBroadcast}, which also decides who is still written to.
    */
   public async markHelpedByBroadcast(
     broadcastId: string,
@@ -277,6 +307,66 @@ export class ConnectAudienceService {
       `connect-audience: broadcast ${broadcastId} marked ${marked} subscription(s) helped (${query.bucket})`,
     );
     return marked;
+  }
+
+  /**
+   * STAGING A «НЕ ПОДКЛЮЧИЛСЯ» BROADCAST: the marker, then who is still written to.
+   *
+   * `userIds` is the list the audience was resolved to BEFORE the claim — and
+   * the channel post, and the other chips — so the seconds in between belong
+   * to everybody else: the automatic help may claim a subscription, a webhook
+   * may record a connection, a customer may switch the help off. In ONE
+   * transaction (the caller's, when `client` is given — staging writes the
+   * recipient rows in it too, both or neither):
+   *
+   *   1. the once-marker ({@link markHelpedByBroadcast}'s statement), which
+   *      locks and marks what is still this broadcast's to mark;
+   *   2. then, reading after it, the people of `userIds` who are still
+   *      reachable (`stagedRecipientsSql`): still verified not connected, and
+   *      — with `excludeHelped` — holding a subscription with THIS broadcast's
+   *      marker, just written or written by an earlier staging of it.
+   *
+   * Two statements, not one: a single statement reads the snapshot it started
+   * with, so a claim the marker waited for would still look unclaimed to it.
+   * `recipients` keeps the order of `userIds`. Both statements run under the
+   * same 10 s `statement_timeout`.
+   */
+  public async stageBroadcast(
+    broadcastId: string,
+    query: ConnectAudienceQuery,
+    options: { readonly userIds: readonly string[]; readonly client?: Prisma.TransactionClient },
+  ): Promise<{ readonly recipients: readonly string[]; readonly marked: number }> {
+    if (options.userIds.length === 0) return { recipients: [], marked: 0 };
+    const now = query.now ?? new Date();
+    const bucket = checkedBucket(query.bucket);
+    const window = connectAudienceWindowOf(query, now);
+    const mark = markHelpedByBroadcastSql({ broadcastId, bucket, window, now, userIds: options.userIds });
+    const reachable = stagedRecipientsSql({
+      broadcastId,
+      bucket,
+      window,
+      now,
+      userIds: options.userIds,
+      excludeHelped: query.excludeHelped !== false,
+    });
+    const run = async (
+      tx: Prisma.TransactionClient,
+    ): Promise<{ readonly recipients: readonly string[]; readonly marked: number }> => {
+      await tx.$executeRaw(SET_STATEMENT_TIMEOUT);
+      const marked = await tx.$queryRaw<Array<{ readonly subscriptionId: string }>>(mark);
+      const still = await tx.$queryRaw<Array<{ readonly userId: string }>>(reachable);
+      const keep = new Set(still.map((row) => row.userId));
+      return { recipients: options.userIds.filter((userId) => keep.has(userId)), marked: marked.length };
+    };
+    const staged =
+      options.client === undefined
+        ? await this.prismaService.$transaction(run, CONNECT_AUDIENCE_TRANSACTION_OPTIONS)
+        : await run(options.client);
+    this.logger.log(
+      `connect-audience: broadcast ${broadcastId} marked ${staged.marked} subscription(s) helped (${bucket}); ` +
+        `${staged.recipients.length} of ${options.userIds.length} resolved recipient(s) still reachable`,
+    );
+    return staged;
   }
 
   private async read(

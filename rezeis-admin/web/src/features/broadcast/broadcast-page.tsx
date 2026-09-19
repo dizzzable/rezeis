@@ -134,6 +134,7 @@ const CONNECT_REFUSAL_KEYS: Readonly<Record<NonNullable<BroadcastConnectPreview[
   too_many: 'broadcastPage.connect.tooMany',
   timeout: 'broadcastPage.connect.timeout',
   unreadable: 'broadcastPage.connect.unreadable',
+  signal_down: 'broadcastPage.connect.signalDown',
 }
 
 /**

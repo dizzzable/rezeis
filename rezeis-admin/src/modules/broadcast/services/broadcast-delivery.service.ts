@@ -374,12 +374,15 @@ export class BroadcastDeliveryService {
     // ── «ПОДКЛЮЧЕНИЕ VPN» IS RESOLVED BEFORE THE CLAIM ────────────────────
     //
     // Its people come from one bounded query, and that query can refuse: more
-    // than 20 000 of them, a count that did not finish in its 10 s, or a
-    // stored filter this panel version cannot read. Each is refused HERE, like
-    // the caption and the promo above — back to DRAFT, where the operator can
-    // shorten the period, with one card that says why — and never after the
-    // claim, where the channel copy has already gone out and the only exit is
-    // FAILED. The list it produces is the list staged below, not a second read.
+    // than 20 000 of them, a count that did not finish in its 10 s, a stored
+    // filter this panel version cannot read, or a connection signal that
+    // cannot currently tell who connected (`webhooks_only`, `blind`). Each is
+    // refused HERE, like the caption and the promo above — back to DRAFT, where
+    // the operator can shorten the period or send again later, with one card
+    // that says why — and never after the claim, where the channel copy has
+    // already gone out and the only exit is FAILED. The list it produces is the
+    // list staged below, only ever NARROWED there: whoever the automatic help
+    // reached, or who connected, in the seconds in between is left out.
     const filter = normalizeAudienceFilter(broadcast.audienceFilter);
     const now = new Date();
     let connectUserIds: readonly string[] | undefined;
@@ -488,11 +491,13 @@ export class BroadcastDeliveryService {
         return [];
       }
 
-      const recipientRows = recipientUserIds.map((userId) => ({
-        broadcastId,
-        userId,
-        status: BroadcastMessageStatus.PENDING,
-      }));
+      const rowsFor = (userIds: readonly string[]) =>
+        userIds.map((userId) => ({
+          broadcastId,
+          userId,
+          status: BroadcastMessageStatus.PENDING,
+        }));
+      let stagedUserIds: readonly string[] = recipientUserIds;
       const connect = filter?.connect;
       if (connect !== undefined && !isUnreadableConnectFilter(connect)) {
         // ── THE ONCE-MARKER, WITH THE ROWS IT IS ABOUT ─────────────────────
@@ -502,20 +507,40 @@ export class BroadcastDeliveryService {
         // never repeats them. Written in the SAME transaction as the recipient
         // rows — marked without rows would silence the automatic help for
         // people nothing reached; rows without the mark would let it write to
-        // them a second time. Guarded (`help_decided_at IS NULL`), so a re-run
-        // marks nothing; no event, the automatic moment owns that one.
-        await this.prismaService.$transaction(async (tx) => {
-          await tx.broadcastMessage.createMany({ data: recipientRows });
-          await this.broadcastService.markConnectHelped({
+        // them a second time. No event: the automatic moment owns that one.
+        //
+        // AND THE ROWS ARE FOR WHO IS STILL THERE. The list was resolved
+        // before the claim and the channel post; in between, the automatic
+        // help may have claimed a subscription, or a connection may have been
+        // recorded. So the rows are written for the list NARROWED after the
+        // marker, in this transaction: people still verified not connected
+        // and — with «Не слать тем, кому уже помогли» — holding a subscription
+        // this broadcast marked. A second message to somebody the automatic
+        // help just reached, or a «не подключился» to somebody who just
+        // connected, is what this prevents.
+        stagedUserIds = await this.prismaService.$transaction(async (tx) => {
+          const reachable = await this.broadcastService.stageConnectRecipients({
             broadcastId,
             connect,
             userIds: recipientUserIds,
             now,
             client: tx,
           });
+          if (reachable.length > 0) {
+            await tx.broadcastMessage.createMany({ data: rowsFor(reachable) });
+          }
+          return reachable;
         }, CONNECT_AUDIENCE_TRANSACTION_OPTIONS);
+        if (stagedUserIds.length === 0) {
+          // Everybody it named was reached or connected in those seconds.
+          await this.prismaService.broadcast.update({
+            where: { id: broadcastId },
+            data: { status: BroadcastStatus.COMPLETED, totalCount: 0, completedAt: new Date() },
+          });
+          return [];
+        }
       } else {
-        await this.prismaService.broadcastMessage.createMany({ data: recipientRows });
+        await this.prismaService.broadcastMessage.createMany({ data: rowsFor(recipientUserIds) });
       }
 
       const messages = await this.prismaService.broadcastMessage.findMany({
@@ -525,10 +550,10 @@ export class BroadcastDeliveryService {
       });
 
       // Status is already PROCESSING and startedAt is set (atomic claim above);
-      // here we only record the resolved recipient total.
+      // here we only record the recipient total — the rows actually written.
       await this.prismaService.broadcast.update({
         where: { id: broadcastId },
-        data: { totalCount: recipientUserIds.length },
+        data: { totalCount: stagedUserIds.length },
       });
 
       // NOT `SYSTEM_BROADCAST_SENT`. This fires before a single message has

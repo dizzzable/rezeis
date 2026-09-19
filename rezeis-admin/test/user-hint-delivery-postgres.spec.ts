@@ -5,6 +5,7 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { ConnectAudienceService } from '../src/modules/connect-audience/services/connect-audience.service';
+import { InternalUserService } from '../src/modules/internal-user/services/internal-user.service';
 import { HintAudienceService } from '../src/modules/user-hints/services/hint-audience.service';
 import { UserHintDeliveryService } from '../src/modules/user-hints/services/user-hint-delivery.service';
 
@@ -605,6 +606,7 @@ run('the connect door, the stale pop-up guard and the hint audiences on PostgreS
     input: {
       readonly checkedAt?: Date | null;
       readonly firstConnectedAt?: Date | null;
+      readonly profileMissingAt?: Date | null;
       readonly helpDecidedAt?: Date | null;
       readonly helpOutcome?: string | null;
     },
@@ -612,14 +614,38 @@ run('the connect door, the stale pop-up guard and the hint audiences on PostgreS
     const at = input.checkedAt ?? new Date();
     await db.$executeRaw(Prisma.sql`
       INSERT INTO "subscription_connect_states"
-        ("subscription_id", "first_connected_at", "checked_at", "help_decided_at", "help_kind", "help_outcome",
-         "created_at", "updated_at")
+        ("subscription_id", "first_connected_at", "checked_at", "profile_missing_at", "help_decided_at", "help_kind",
+         "help_outcome", "created_at", "updated_at")
       VALUES (${subscriptionId}, ${input.firstConnectedAt ?? null}::timestamptz, ${input.checkedAt ?? null}::timestamptz,
-              ${input.helpDecidedAt ?? null}::timestamptz,
+              ${input.profileMissingAt ?? null}::timestamptz, ${input.helpDecidedAt ?? null}::timestamptz,
               ${input.helpDecidedAt === undefined || input.helpDecidedAt === null ? null : 'paid'},
               ${input.helpOutcome ?? null}, ${at}, ${at})
     `);
   }
+
+  /**
+   * The cabinet's dashboard read — the real `InternalUserService.getAllSubscriptions`,
+   * on this database — with Remnawave answering every profile with `traffic`.
+   * It is what writes the connection signal on a page load
+   * (`resolveConnectHelp` → `recordCabinetSignal`).
+   */
+  async function cabinetRead(userId: string, traffic: Record<string, unknown>): Promise<void> {
+    const remnawave = {
+      getPanelUserUsage: async () => ({
+        username: 'profile',
+        usedTrafficBytes: 0,
+        status: 'ACTIVE',
+        expireAt: null,
+        trafficLimitBytes: null,
+        hwidDeviceLimit: null,
+        userTraffic: traffic,
+      }),
+    };
+    const cabinet = new InternalUserService(db, {} as never, {} as never, undefined, remnawave as never, undefined);
+    await cabinet.getAllSubscriptions({ userId } as never);
+  }
+
+  const NEVER_CONNECTED = { usedTrafficBytes: 0, lifetimeUsedTrafficBytes: 0, onlineAt: null, firstConnectedAt: null };
 
   async function expiresAtOf(deliveryId: string): Promise<Date> {
     const row = await db.userHintDelivery.findUniqueOrThrow({ where: { id: deliveryId }, select: { expiresAt: true } });
@@ -735,7 +761,7 @@ run('the connect door, the stale pop-up guard and the hint audiences on PostgreS
     return { popup, plain };
   }
 
-  it('keeps the pop-up open when the message was switched off (`skipped_template_off`)', async () => {
+  it('shows the pop-up when the message was switched off (`skipped_template_off`) and a fresh read says not connected', async () => {
     // THE case a guard on "help is pending" gets wrong: the operator switched
     // the message template off and relies on this very pop-up, and pending
     // help does not count that outcome.
@@ -743,7 +769,7 @@ run('the connect door, the stale pop-up guard and the hint audiences on PostgreS
     const now = new Date();
     const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
     await connectState(subscriptionId, {
-      checkedAt: new Date(now.getTime() - HOUR_MS),
+      checkedAt: new Date(now.getTime() - 5 * 60 * 1000),
       helpDecidedAt: new Date(now.getTime() - 2 * HOUR_MS),
       helpOutcome: 'skipped_template_off',
     });
@@ -754,16 +780,104 @@ run('the connect door, the stale pop-up guard and the hint audiences on PostgreS
     assert.equal(next?.deliveryId, popup, 'the pop-up the operator relies on was closed');
   });
 
-  it('keeps it open for a live subscription the panel knows nothing about yet', async () => {
-    // No state row: not KNOWN to have connected.
+  /** The pop-up and the plain hint: the plain one handed over, the pop-up neither shown nor closed. */
+  async function assertHeld(me: string, popup: string, plain: string, now: Date, popupBefore: Date): Promise<void> {
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+    assert.equal(next?.deliveryId, plain, 'a held pop-up was handed over, or blocked the hint behind it');
+    assert.deepEqual(await expiresAtOf(popup), popupBefore, 'a held pop-up was closed as lapsed');
+    const untouched = await db.userHintDelivery.findUniqueOrThrow({
+      where: { id: popup },
+      select: { shownAt: true, dismissedAt: true, actedAt: true },
+    });
+    assert.deepEqual(untouched, { shownAt: null, dismissedAt: null, actedAt: null });
+  }
+
+  it('HOLDS it for a live subscription the panel never read: not shown, not closed, and the next hint offered', async () => {
+    // No state row: not KNOWN to have connected — and nothing to show it on.
     const me = await person('no-state');
     const now = new Date();
     await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS), status: 'LIMITED' });
-    const { popup } = await queued(me, now);
+    const { popup, plain } = await queued(me, now);
 
-    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now });
+    await assertHeld(me, popup, plain, now, await expiresAtOf(popup));
+  });
 
-    assert.equal(next?.deliveryId, popup);
+  it('HOLDS it on a read older than fifteen minutes — the customer may have connected since', async () => {
+    const me = await person('stale-read');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, {
+      checkedAt: new Date(now.getTime() - 16 * 60 * 1000),
+      helpDecidedAt: new Date(now.getTime() - 2 * HOUR_MS),
+      helpOutcome: 'bot',
+    });
+    const { popup, plain } = await queued(me, now);
+
+    await assertHeld(me, popup, plain, now, await expiresAtOf(popup));
+  });
+
+  it('HOLDS it when the profile was reported missing after the fresh read', async () => {
+    const me = await person('missing-after-read');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, {
+      checkedAt: new Date(now.getTime() - 5 * 60 * 1000),
+      profileMissingAt: new Date(now.getTime() - 60 * 1000),
+    });
+    const { popup, plain } = await queued(me, now);
+
+    await assertHeld(me, popup, plain, now, await expiresAtOf(popup));
+  });
+
+  it('a customer who connected with no webhook: HELD before the cabinet read, LAPSED after it wrote the connection', async () => {
+    // The finding: the help was decided, the probe re-reads only hourly now,
+    // the webhook was lost — and the stored row still says "not connected".
+    const me = await person('connected-no-webhook');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, {
+      checkedAt: new Date(now.getTime() - 50 * 60 * 1000),
+      helpDecidedAt: new Date(now.getTime() - 55 * 60 * 1000),
+      helpOutcome: 'bot',
+    });
+    const { popup, plain } = await queued(me, now);
+
+    // The hint ask of the page load, answered before the dashboard's read.
+    await assertHeld(me, popup, plain, now, await expiresAtOf(popup));
+
+    // The dashboard's read, on the same page load: Remnawave says it connected.
+    const connectedAt = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
+    await cabinetRead(me, { usedTrafficBytes: 4096, lifetimeUsedTrafficBytes: 4096, onlineAt: connectedAt, firstConnectedAt: connectedAt });
+    const written = await db.subscriptionConnectState.findUniqueOrThrow({
+      where: { subscriptionId },
+      select: { firstConnectedAt: true, connectedSource: true },
+    });
+    assert.ok(written.firstConnectedAt !== null, 'the cabinet read did not write the connection');
+    assert.equal(written.connectedSource, 'cabinet');
+
+    // The cabinet's follow-up ask: the pop-up is no longer true, and goes.
+    const later = new Date();
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now: later });
+    assert.equal(next?.deliveryId, plain);
+    assert.deepEqual(await expiresAtOf(popup), later, 'the pop-up for a connected customer was not closed');
+  });
+
+  it('a customer who did NOT connect: HELD before the cabinet read, SHOWN after it wrote a fresh read', async () => {
+    const me = await person('not-connected-stale');
+    const now = new Date();
+    const subscriptionId = await subscription({ userId: me, createdAt: new Date(now.getTime() - 30 * HOUR_MS) });
+    await connectState(subscriptionId, {
+      checkedAt: new Date(now.getTime() - 50 * 60 * 1000),
+      helpDecidedAt: new Date(now.getTime() - 55 * 60 * 1000),
+      helpOutcome: 'push',
+    });
+    const { popup, plain } = await queued(me, now);
+    await assertHeld(me, popup, plain, now, await expiresAtOf(popup));
+
+    await cabinetRead(me, NEVER_CONNECTED);
+
+    const next = await queue.nextFor({ userId: me, locale: 'ru', audience: CONNECTING_CABINET, now: new Date() });
+    assert.equal(next?.deliveryId, popup, 'the cabinet read did not refresh the read the pop-up waits for');
   });
 
   it('lapses it once the customer connected, and hands over the next hint untouched', async () => {
@@ -896,5 +1010,46 @@ run('the connect door, the stale pop-up guard and the hint audiences on PostgreS
     const outcome = await blind.resolve({ audience: 'paid-not-connected', now: new Date('2033-05-20T12:00:00.000Z') });
 
     assert.equal(outcome.kind, 'blind');
+  });
+
+  it('stands them down on webhooks alone too', async () => {
+    const webhooksOnly = new HintAudienceService(
+      new ConnectAudienceService(db, { current: async () => ({ state: 'webhooks_only' }) } as never),
+    );
+
+    const outcome = await webhooksOnly.resolve({ audience: 'paid-not-connected', now: new Date('2033-05-20T12:00:00.000Z') });
+
+    assert.equal(outcome.kind, 'blind');
+  });
+
+  it('never names somebody who switched «Помощь с подключением» off — paid or trial — and still names the rest', async () => {
+    const NOW = new Date('2033-07-11T12:00:00.000Z');
+    const at = (hours: number): Date => new Date(NOW.getTime() - hours * HOUR_MS);
+    const read = at(1);
+
+    const optedOut = await person('aud-opted-out', { connect_help: false });
+    const optedOutSub = await subscription({ userId: optedOut, createdAt: at(48) });
+    await payment({ userId: optedOut, subscriptionId: optedOutSub, purchaseType: 'NEW', createdAt: at(48) });
+    await connectState(optedOutSub, { checkedAt: read });
+
+    const optedOutTrial = await person('aud-opted-out-trial', { connect_help: false, payment_failed: true });
+    const optedOutTrialSub = await subscription({ userId: optedOutTrial, createdAt: at(40), isTrial: true });
+    await connectState(optedOutTrialSub, { checkedAt: read });
+
+    // Other switches off, or connect_help explicitly on: still in.
+    const otherSwitch = await person('aud-other-switch', { payment_failed: false, connect_help: true });
+    const otherSub = await subscription({ userId: otherSwitch, createdAt: at(47) });
+    await payment({ userId: otherSwitch, subscriptionId: otherSub, purchaseType: 'NEW', createdAt: at(47) });
+    await connectState(otherSub, { checkedAt: read });
+
+    const audiences = new HintAudienceService(
+      new ConnectAudienceService(db, { current: async () => ({ state: 'live' }) } as never),
+    );
+    const outcome = await audiences.resolve({ audience: 'paid-not-connected', afterHours: 24, beforeHours: 72, now: NOW });
+    assert.equal(outcome.kind, 'ok', JSON.stringify(outcome));
+    const named = (outcome as { userIds: readonly string[] }).userIds;
+    assert.ok(!named.includes(optedOut), 'a paid customer who switched the help off was named');
+    assert.ok(!named.includes(optedOutTrial), 'a trial customer who switched the help off was named');
+    assert.ok(named.includes(otherSwitch), 'another switch was read as the help being off');
   });
 });

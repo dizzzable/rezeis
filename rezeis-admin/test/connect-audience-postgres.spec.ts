@@ -78,11 +78,15 @@ function audienceService(): ConnectAudienceService {
   return new ConnectAudienceService(prisma, { current: async () => HEALTH } as never);
 }
 
-async function user(label: string, options: { readonly blocked?: boolean; readonly surface?: string } = {}): Promise<string> {
+async function user(
+  label: string,
+  options: { readonly blocked?: boolean; readonly surface?: string; readonly prefs?: unknown } = {},
+): Promise<string> {
   const id = key(`user-${label}`);
+  const prefs = options.prefs === undefined ? null : JSON.stringify(options.prefs);
   await prisma.$executeRaw(Prisma.sql`
-    INSERT INTO "users" ("id", "referral_code", "is_blocked", "last_surface", "updated_at")
-    VALUES (${id}, ${`${id}-ref`}, ${options.blocked ?? false}, ${options.surface ?? null}, ${new Date()})
+    INSERT INTO "users" ("id", "referral_code", "is_blocked", "last_surface", "notification_prefs", "updated_at")
+    VALUES (${id}, ${`${id}-ref`}, ${options.blocked ?? false}, ${options.surface ?? null}, ${prefs}::jsonb, ${new Date()})
   `);
   return id;
 }
@@ -145,17 +149,43 @@ async function state(
     readonly helpDecidedAt?: Date | null;
     readonly helpOutcome?: string | null;
     readonly helpSource?: string | null;
+    readonly helpAttempts?: readonly unknown[];
+    readonly helpEventId?: string | null;
   },
 ): Promise<void> {
   const at = input.checkedAt ?? new Date();
   await prisma.$executeRaw(Prisma.sql`
     INSERT INTO "subscription_connect_states"
       ("subscription_id", "first_connected_at", "checked_at", "profile_missing_at", "help_decided_at",
-       "help_outcome", "help_source", "created_at", "updated_at")
+       "help_outcome", "help_source", "help_attempts", "help_event_id", "created_at", "updated_at")
     VALUES (${subscriptionId}, ${input.firstConnectedAt ?? null}::timestamptz, ${input.checkedAt ?? null}::timestamptz,
             ${input.profileMissingAt ?? null}::timestamptz, ${input.helpDecidedAt ?? null}::timestamptz,
-            ${input.helpOutcome ?? null}, ${input.helpSource ?? null}, ${at}, ${at})
+            ${input.helpOutcome ?? null}, ${input.helpSource ?? null},
+            ${JSON.stringify(input.helpAttempts ?? [])}::jsonb, ${input.helpEventId ?? null}, ${at}, ${at})
   `);
+}
+
+/**
+ * The automatic sender's claim, as `connect-help.sql.ts` `claimSql` writes it
+ * for a ladder about to run: the once-marker set, no outcome yet. Mirrored
+ * here rather than imported, so this spec states the contract it relies on —
+ * `UPDATE … WHERE help_decided_at IS NULL`, one row = ours — instead of
+ * following that file's edits. Returns how many rows it claimed (0 or 1).
+ */
+async function sweepClaims(subscriptionId: string, now: Date, client: Pick<Prisma.TransactionClient, '$executeRaw'> = prisma): Promise<number> {
+  return client.$executeRaw(Prisma.sql`
+    UPDATE "subscription_connect_states"
+       SET "help_decided_at" = ${now}::timestamptz,
+           "help_kind" = 'paid',
+           "help_anchor_at" = ${now}::timestamptz,
+           "help_source" = 'auto',
+           "help_outcome" = NULL,
+           "help_attempts" = '[]'::jsonb,
+           "help_deferrals" = 0,
+           "help_event_id" = NULL,
+           "updated_at" = ${now}::timestamptz
+     WHERE "subscription_id" = ${subscriptionId}
+       AND "help_decided_at" IS NULL`);
 }
 
 /** A person with one paid subscription: NEW money at `paidAt`, optionally read at `checkedAt`. */
@@ -163,7 +193,7 @@ async function paidPerson(
   label: string,
   paidAt: Date,
   checkedAt: Date | null,
-  options: { readonly blocked?: boolean; readonly surface?: string } = {},
+  options: { readonly blocked?: boolean; readonly surface?: string; readonly prefs?: unknown } = {},
 ): Promise<{ readonly userId: string; readonly subscriptionId: string }> {
   const userId = await user(label, options);
   const subscriptionId = await subscription({ userId, createdAt: paidAt });
@@ -600,6 +630,147 @@ run('the «не подключился» audience in PostgreSQL', () => {
     });
   });
 
+  describe('who counts as helped, and who switched the help off', () => {
+    // Its own clock: nothing above or below can fall in these windows.
+    const NOW = new Date('2031-09-01T12:00:00.000Z');
+    const ago = (ms: number): Date => new Date(NOW.getTime() - ms);
+    const query = { bucket: 'paid' as const, withinDays: 7, now: NOW };
+    const people: Record<string, { userId: string; subscriptionId: string }> = {};
+
+    /** A verified paid person whose subscription the automatic sender decided with `outcome`. */
+    async function decided(label: string, outcome: string | null, extra: Parameters<typeof state>[1] = {}) {
+      const person = await paidPerson(label, ago(30 * HOUR), null);
+      await state(person.subscriptionId, {
+        checkedAt: ago(HOUR),
+        helpDecidedAt: ago(5 * HOUR),
+        helpOutcome: outcome,
+        helpSource: 'auto',
+        ...extra,
+      });
+      people[label] = person;
+    }
+
+    before(async () => {
+      // NOT helped: the automatic sender decided, and sent nothing.
+      await decided('template-off', 'skipped_template_off', {
+        helpAttempts: [{ channel: 'bot', result: 'template_off', at: ago(5 * HOUR).toISOString() }],
+        helpEventId: 'evt-template-off',
+      });
+      await decided('unverifiable', 'skipped_unverifiable');
+      // A terminal value this spec has never heard of: the allowlist puts it
+      // on the not-helped side without anybody listing it.
+      await decided('future-skip', 'skipped_some_later_reason');
+      // HELPED: help went out, merged into a sibling's, the customer said no,
+      // or a ladder still in flight (decided, no outcome yet).
+      await decided('bot', 'bot');
+      await decided('merged', 'merged');
+      await decided('said-no', 'opted_out');
+      await decided('in-flight', null);
+      // Switched «Помощь с подключением» off in the cabinet: never named.
+      people['opted-out'] = await paidPerson('opted-out', ago(30 * HOUR), ago(HOUR), { prefs: { connect_help: false } });
+      people['opted-out-unread'] = await paidPerson('opted-out-unread', ago(30 * HOUR), null, {
+        prefs: { connect_help: false, payment_failed: true },
+      });
+      // Other switches, or connect_help anything but JSON false: still in —
+      // exactly what `connectHelpOptedOut` reads.
+      people['other-switch'] = await paidPerson('other-switch', ago(30 * HOUR), ago(HOUR), { prefs: { payment_failed: false } });
+      people['explicit-on'] = await paidPerson('explicit-on', ago(30 * HOUR), ago(HOUR), { prefs: { connect_help: true } });
+      people['string-false'] = await paidPerson('string-false', ago(30 * HOUR), ago(HOUR), { prefs: { connect_help: 'false' } });
+    });
+
+    const everybody = (): string[] => Object.values(people).map((person) => person.userId);
+    const names = (ids: readonly string[]): string[] =>
+      sorted(ids.map((id) => Object.entries(people).find(([, person]) => person.userId === id)?.[0] ?? `foreign:${id}`));
+    const mine = (ids: readonly string[]): string[] => ids.filter((id) => everybody().includes(id));
+
+    async function row(subscriptionId: string) {
+      const rows = await prisma.$queryRaw<
+        Array<{
+          readonly decided_now: boolean | null;
+          readonly help_source: string | null;
+          readonly help_outcome: string | null;
+          readonly help_attempts: unknown;
+          readonly help_event_id: string | null;
+        }>
+      >(Prisma.sql`
+        SELECT ("help_decided_at" = ${NOW}::timestamptz) AS "decided_now", "help_source", "help_outcome",
+               "help_attempts", "help_event_id"
+          FROM "subscription_connect_states" WHERE "subscription_id" = ${subscriptionId}`);
+      return rows[0] ?? null;
+    }
+
+    it('«Не слать тем, кому уже помогли» drops exactly the HELPED — a decision that sent nothing stays in', async () => {
+      const ids = mine(await audienceService().userIds(query));
+      assert.deepStrictEqual(
+        names(ids),
+        sorted(['template-off', 'unverifiable', 'future-skip', 'other-switch', 'explicit-on', 'string-false']),
+      );
+    });
+
+    it('with the helped kept, the helped and the in-flight come back — the opted-out never do', async () => {
+      const ids = mine(await audienceService().userIds({ ...query, excludeHelped: false }));
+      assert.deepStrictEqual(
+        names(ids),
+        sorted([
+          'template-off', 'unverifiable', 'future-skip', 'bot', 'merged', 'said-no', 'in-flight',
+          'other-switch', 'explicit-on', 'string-false',
+        ]),
+      );
+    });
+
+    it('somebody who switched the help off is in neither count — verified or not', async () => {
+      // The window holds only this block's people (the clock is its own).
+      const counts = await audienceService().counts({ ...query, excludeHelped: false });
+      assert.deepStrictEqual([counts.verified, counts.unverified], [10, 0], 'opted-out-unread is not "not verified"');
+    });
+
+    it('the marker takes over a row the automatic sender skipped, and never a helped or an in-flight one', async () => {
+      const marked = await audienceService().markHelpedByBroadcast('bc-H', { ...query, excludeHelped: false }, { userIds: everybody() });
+      assert.equal(marked, 6, 'three skipped rows and three undecided ones (other-switch, explicit-on, string-false)');
+
+      const takenOver = await row(people['template-off']!.subscriptionId);
+      assert.deepStrictEqual(takenOver, {
+        decided_now: true,
+        help_source: 'broadcast:bc-H',
+        help_outcome: 'broadcast',
+        help_attempts: [],
+        help_event_id: null,
+      }, 'the skipped ladder’s bookkeeping is not left under the broadcast’s outcome');
+      for (const label of ['unverifiable', 'future-skip', 'other-switch', 'explicit-on', 'string-false']) {
+        assert.equal((await row(people[label]!.subscriptionId))?.help_source, 'broadcast:bc-H', label);
+      }
+      for (const [label, outcome] of [['bot', 'bot'], ['merged', 'merged'], ['said-no', 'opted_out'], ['in-flight', null]] as const) {
+        const untouched = await row(people[label]!.subscriptionId);
+        assert.equal(untouched?.help_source, 'auto', `${label} was overwritten`);
+        assert.equal(untouched?.help_outcome, outcome, label);
+        assert.equal(untouched?.decided_now, false, label);
+      }
+      assert.equal((await row(people['opted-out']!.subscriptionId))?.help_source, null, 'a person who switched the help off was marked');
+    });
+
+    it('and once it is the broadcast’s, the default audience leaves it out like any help', async () => {
+      const ids = mine(await audienceService().userIds(query));
+      assert.deepStrictEqual(ids, []);
+    });
+
+    it('the marker and the automatic claim racing for one row: exactly one wins, and the row is the winner’s', async () => {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const person = await paidPerson(`race-${attempt}`, ago(30 * HOUR), ago(HOUR));
+        const [marked, claimed] = await Promise.all([
+          audienceService().markHelpedByBroadcast(`bc-R${attempt}`, query, { userIds: [person.userId] }),
+          sweepClaims(person.subscriptionId, NOW),
+        ]);
+        assert.equal(marked + claimed, 1, `attempt ${attempt}: marked ${marked}, claimed ${claimed}`);
+        const final = await row(person.subscriptionId);
+        if (marked === 1) {
+          assert.deepStrictEqual([final?.help_source, final?.help_outcome], [`broadcast:bc-R${attempt}`, 'broadcast']);
+        } else {
+          assert.deepStrictEqual([final?.help_source, final?.help_outcome], ['auto', null], 'the marker overwrote a claim in flight');
+        }
+      }
+    });
+  });
+
   describe('the 20 000 cap', () => {
     const NOW = new Date('2032-01-10T12:00:00.000Z');
     const paidAt = new Date(NOW.getTime() - DAY);
@@ -743,6 +914,135 @@ run('the «не подключился» audience in PostgreSQL', () => {
         Prisma.sql`SELECT count(*)::int AS "n" FROM "broadcast_messages" WHERE "broadcast_id" = ${broadcastId} AND "user_id" = ${recipient.userId}`,
       );
       assert.equal(count[0]?.n, 1, 'one message row, not two');
+    });
+  });
+
+  describe('staging after the world moved: resolved before the claim, narrowed in the staging transaction', () => {
+    const events: Array<{ readonly type: string; readonly severity: string }> = [];
+
+    async function broadcastRow(id: string, excludeHelped: boolean): Promise<void> {
+      await prisma.$executeRaw(Prisma.sql`
+        INSERT INTO "broadcasts" ("id", "status", "audience", "audience_filter", "payload", "created_at", "updated_at")
+        VALUES (${id}, 'DRAFT'::"BroadcastStatus", 'ACTIVE_SUBSCRIBERS'::"BroadcastAudience",
+                ${JSON.stringify({ subscription: ['ACTIVE', 'LIMITED'], connect: { bucket: 'paid', withinDays: 7, excludeHelped } })}::jsonb,
+                ${JSON.stringify({ text: 'Не получилось подключиться?' })}::jsonb, ${new Date()}, ${new Date()})`);
+    }
+
+    /**
+     * Staging whose audience is resolved by the real `checkConnectAudience`,
+     * and then — before the claim, the channel post and the recipient rows —
+     * `meanwhile` runs: the seconds in which the rest of the panel moves.
+     */
+    function delivery(meanwhile: () => Promise<void>, resolved: string[][]): BroadcastDeliveryService {
+      const broadcasts = new BroadcastService(prisma, audienceService());
+      const check = broadcasts.checkConnectAudience.bind(broadcasts);
+      broadcasts.checkConnectAudience = async (connect, now) => {
+        const verdict = await check(connect, now);
+        if (verdict.ok) resolved.push([...verdict.userIds]);
+        await meanwhile();
+        return verdict;
+      };
+      const record = (severity: string) => (type: string) => {
+        events.push({ type, severity });
+      };
+      return new BroadcastDeliveryService(
+        prisma,
+        { get: () => undefined } as never,
+        { info: record('info'), warn: record('warn'), error: record('error') } as never,
+        {} as never,
+        {} as never,
+        { isEnabled: false } as never,
+        { isEnabled: false } as never,
+        broadcasts,
+      );
+    }
+
+    /**
+     * Every user staged for the broadcast. The audience is the real one on the
+     * real clock, so people other cases of this file left verified may be in
+     * it too; each case asserts on its own people, and on the total against
+     * the rows actually written.
+     */
+    async function stagedUsers(broadcastId: string): Promise<string[]> {
+      const rows = await prisma.$queryRaw<Array<{ readonly user_id: string }>>(Prisma.sql`
+        SELECT "user_id" FROM "broadcast_messages" WHERE "broadcast_id" = ${broadcastId}`);
+      return rows.map((r) => r.user_id);
+    }
+
+    async function totalCount(broadcastId: string): Promise<{ readonly status: string; readonly total_count: number } | undefined> {
+      const rows = await prisma.$queryRaw<Array<{ readonly status: string; readonly total_count: number }>>(
+        Prisma.sql`SELECT "status"::text AS "status", "total_count" FROM "broadcasts" WHERE "id" = ${broadcastId}`,
+      );
+      return rows[0];
+    }
+
+    async function marker(subscriptionId: string) {
+      const rows = await prisma.$queryRaw<Array<{ readonly help_source: string | null; readonly help_outcome: string | null }>>(
+        Prisma.sql`SELECT "help_source", "help_outcome" FROM "subscription_connect_states" WHERE "subscription_id" = ${subscriptionId}`,
+      );
+      return rows[0] ?? null;
+    }
+
+    it('the automatic help claims one in between, another connects, a third switches the help off: only the fourth is staged', async () => {
+      const broadcastId = `${prefix}-bc-race`;
+      const now = Date.now();
+      const claimed = await paidPerson('race-claimed', new Date(now - 30 * HOUR), new Date(now - HOUR), { surface: 'tma' });
+      const connected = await paidPerson('race-connected', new Date(now - 30 * HOUR), new Date(now - HOUR), { surface: 'tma' });
+      const optingOut = await paidPerson('race-opting-out', new Date(now - 30 * HOUR), new Date(now - HOUR), { surface: 'tma' });
+      const stays = await paidPerson('race-stays', new Date(now - 30 * HOUR), new Date(now - HOUR), { surface: 'tma' });
+      await broadcastRow(broadcastId, true);
+      const resolved: string[][] = [];
+
+      await delivery(async () => {
+        assert.equal(await sweepClaims(claimed.subscriptionId, new Date()), 1, 'the automatic help claims it');
+        await prisma.$executeRaw(Prisma.sql`
+          UPDATE "subscription_connect_states"
+             SET "first_connected_at" = ${new Date()}::timestamptz, "connected_source" = 'webhook'
+           WHERE "subscription_id" = ${connected.subscriptionId}`);
+        await prisma.$executeRaw(Prisma.sql`
+          UPDATE "users" SET "notification_prefs" = '{"connect_help": false}'::jsonb WHERE "id" = ${optingOut.userId}`);
+      }, resolved).stageRecipients(broadcastId);
+
+      const four = [claimed.userId, connected.userId, optingOut.userId, stays.userId];
+      assert.deepStrictEqual(
+        sorted((resolved[0] ?? []).filter((id) => four.includes(id))),
+        sorted(four),
+        'all four were in the audience as it was resolved',
+      );
+      const staged = await stagedUsers(broadcastId);
+      assert.deepStrictEqual(staged.filter((id) => four.includes(id)), [stays.userId]);
+      assert.deepStrictEqual(
+        await totalCount(broadcastId),
+        { status: 'PROCESSING', total_count: staged.length },
+        'the total is the rows written, not the list resolved',
+      );
+      assert.ok(staged.length < (resolved[0] ?? []).length, 'narrowed, so smaller than the resolved list');
+      assert.deepStrictEqual(await marker(claimed.subscriptionId), { help_source: 'auto', help_outcome: null }, 'the claim in flight was overwritten');
+      assert.equal((await marker(connected.subscriptionId))?.help_source, null, 'a connected customer was marked');
+      assert.equal((await marker(optingOut.subscriptionId))?.help_source, null, 'somebody who switched the help off was marked');
+      assert.deepStrictEqual(await marker(stays.subscriptionId), { help_source: `broadcast:${broadcastId}`, help_outcome: 'broadcast' });
+      assert.ok(events.every((event) => event.severity !== 'error'), JSON.stringify(events));
+    });
+
+    it('with the helped kept, a claim in between still gets the message — a connection in between still does not', async () => {
+      const broadcastId = `${prefix}-bc-race-kept`;
+      const now = Date.now();
+      const claimed = await paidPerson('kept-claimed', new Date(now - 30 * HOUR), new Date(now - HOUR));
+      const connected = await paidPerson('kept-connected', new Date(now - 30 * HOUR), new Date(now - HOUR));
+      await broadcastRow(broadcastId, false);
+
+      await delivery(async () => {
+        assert.equal(await sweepClaims(claimed.subscriptionId, new Date()), 1);
+        await prisma.$executeRaw(Prisma.sql`
+          UPDATE "subscription_connect_states"
+             SET "first_connected_at" = ${new Date()}::timestamptz, "connected_source" = 'probe'
+           WHERE "subscription_id" = ${connected.subscriptionId}`);
+      }, []).stageRecipients(broadcastId);
+
+      const staged = await stagedUsers(broadcastId);
+      assert.deepStrictEqual(staged.filter((id) => id === claimed.userId || id === connected.userId), [claimed.userId]);
+      assert.deepStrictEqual(await marker(claimed.subscriptionId), { help_source: 'auto', help_outcome: null }, 'still the sender’s');
+      assert.equal((await totalCount(broadcastId))?.total_count, staged.length);
     });
   });
 });

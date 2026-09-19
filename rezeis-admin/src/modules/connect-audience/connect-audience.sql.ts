@@ -36,9 +36,12 @@
  * subscriptions is; UNVERIFIED when none is and at least one is not known to
  * have connected — "ещё M не проверены — им не придёт" counts exactly the
  * people the message will not reach. Known-connected subscriptions are in
- * neither. Blocked users are in neither. `excludeHelped` drops a SUBSCRIPTION
- * whose once-marker is set (the automatic help or an earlier broadcast), before
- * the person is counted.
+ * neither. Blocked users are in neither, and neither is anybody who switched
+ * «Помощь с подключением» off in the cabinet ({@link connectPersonSql}).
+ * `excludeHelped` drops a SUBSCRIPTION that was HELPED ({@link helpedSql}) before
+ * the person is counted: help reached them or is on its way, automatically or
+ * by an earlier broadcast. A decision that sent nothing (`skipped_…`) is not
+ * help, and leaves the subscription in.
  *
  * ── Time ──────────────────────────────────────────────────────────────────
  * Every instant is a BOUND `Date`, never SQL `now()`: see `connect-sql.ts` for
@@ -47,10 +50,62 @@
 import { Prisma } from '@prisma/client';
 
 import {
+  PENDING_HELP_OUTCOMES,
   paidMoneyLinksSql,
   trialBucketSql,
   verifiedNotConnectedSql,
+  type HelpOutcome,
 } from '../connect-signal/connect-sql';
+
+/**
+ * The outcomes after which a subscription counts as HELPED — an ALLOWLIST.
+ *
+ *   bot | push | email | banner | broadcast   help reached the customer
+ *                                             (`PENDING_HELP_OUTCOMES`);
+ *   merged                                    it went out for a sibling
+ *                                             subscription of the same person;
+ *   opted_out                                 the customer said no.
+ *
+ * Every other outcome — `skipped_unverifiable`, `skipped_template_off`, and
+ * any terminal value added later — means nothing was sent, and is NOT helped
+ * by construction: a new value lands on that side without anybody having to
+ * remember this list. A ladder still in flight (decided, no outcome yet) is
+ * helped too; see {@link helpedSql}.
+ */
+export const HELPED_OUTCOMES = [...PENDING_HELP_OUTCOMES, 'merged', 'opted_out'] as const satisfies readonly HelpOutcome[];
+
+/**
+ * Whether the state row `alias` is HELPED: its outcome is one of
+ * {@link HELPED_OUTCOMES}, or it was decided and has no outcome yet (the
+ * automatic ladder is on its way). TRUE or FALSE, never NULL — an absent row
+ * (every column NULL) is not helped.
+ *
+ * What «Не слать тем, кому уже помогли» leaves out, and what the broadcast's
+ * once-marker never touches: a helped row is somebody else's decision, and a
+ * row in flight is the automatic sender's until it lands.
+ */
+export function helpedSql(alias: 'c' | 'st'): Prisma.Sql {
+  const outcome = Prisma.raw(`"${alias}"."help_outcome"`);
+  const decidedAt = Prisma.raw(`"${alias}"."help_decided_at"`);
+  return Prisma.sql`COALESCE((${outcome} IN (${Prisma.join([...HELPED_OUTCOMES])})
+      OR (${decidedAt} IS NOT NULL AND ${outcome} IS NULL)), false)`;
+}
+
+/**
+ * Who a «не подключился» list may name at all, on the users row `"u"`: not
+ * blocked, and not somebody who switched «Помощь с подключением» off in the
+ * cabinet — `notification_prefs.connect_help` is JSON `false`, exactly what
+ * `connectHelpOptedOut` reads. A missing key, `true`, a string, NULL prefs or
+ * prefs that are not an object all leave the person in, as they do there.
+ *
+ * One predicate for every reader — the broadcast preview, its counts, its
+ * staging and the hint audiences — so none of them can name a person the
+ * others would not.
+ */
+export function connectPersonSql(): Prisma.Sql {
+  return Prisma.sql`"u"."is_blocked" = false
+         AND ("u"."notification_prefs" -> 'connect_help') IS DISTINCT FROM 'false'::jsonb`;
+}
 
 /** «Оплатил и не подключился» / «Пробный период или подарок — не подключился». */
 export const CONNECT_BUCKETS = ['paid', 'trial'] as const;
@@ -115,14 +170,14 @@ export function connectAudienceSql(input: {
   readonly excludeHelped: boolean;
   readonly idLimit: number;
 }): Prisma.Sql {
-  const helped = input.excludeHelped ? Prisma.sql`AND "c"."help_decided_at" IS NULL` : Prisma.empty;
+  const helped = input.excludeHelped ? Prisma.sql`AND NOT ${helpedSql('c')}` : Prisma.empty;
   return Prisma.sql`
     WITH "wp4b_subs" AS MATERIALIZED (
       SELECT "b"."user_id" AS "user_id",
              "b"."anchor_at" AS "anchor_at",
              ${verifiedNotConnectedSql('c', Prisma.sql`"b"."anchor_at"`, input.now)} AS "verified"
         FROM ${connectBucketSql(input.bucket, input.window)} "b"
-        JOIN "users" "u" ON "u"."id" = "b"."user_id" AND "u"."is_blocked" = false
+        JOIN "users" "u" ON "u"."id" = "b"."user_id" AND ${connectPersonSql()}
         LEFT JOIN "subscription_connect_states" "c" ON "c"."subscription_id" = "b"."subscription_id"
        WHERE "c"."first_connected_at" IS NULL
          ${helped}
@@ -148,18 +203,34 @@ export function connectAudienceSql(input: {
     ORDER BY "ord" ASC NULLS LAST`;
 }
 
+/** `help_source` of the subscriptions one broadcast marked. */
+export function broadcastHelpSource(broadcastId: string): string {
+  return `broadcast:${broadcastId}`;
+}
+
 /**
  * The once-marker for a staged broadcast: every subscription of `userIds`
- * (the broadcast's recipients) that is in the bucket and VERIFIED not
- * connected right now gets `help_decided_at`, `help_kind`, `help_anchor_at`,
- * `help_source = 'broadcast:<id>'` and `help_outcome = 'broadcast'` — only
- * where the marker is still unset, so a second staging, the automatic sender
- * and this never overwrite one another.
+ * (the broadcast's recipients) that is in the bucket, VERIFIED not connected
+ * right now and not HELPED ({@link helpedSql}) gets `help_decided_at`,
+ * `help_kind`, `help_anchor_at`, `help_source = 'broadcast:<id>'` and
+ * `help_outcome = 'broadcast'`, with the ladder's bookkeeping cleared the way
+ * the automatic claim clears it.
+ *
+ * Two kinds of row qualify: one nobody decided yet, and one the automatic
+ * sender decided WITHOUT sending anything (`skipped_…`) — this broadcast is
+ * then the first help that reaches the customer, and the row says so. A
+ * helped row (help went out, merged, opted out, another broadcast) and a row
+ * in flight (claimed, no outcome yet — the automatic ladder may be sending
+ * right now) are never touched, so a second staging, the automatic sender and
+ * this never overwrite one another. The automatic sender never claims a
+ * decided row again, so overwriting a `skipped_…` one races nothing.
  *
  * The rows are locked in subscription order first (`FOR UPDATE`, ordered), so
  * this multi-row write cannot deadlock against the signal's writers, which
  * lock in the same order. A row the sender claims while this waits is
- * re-checked after the wait and skipped. Returns the ids marked.
+ * re-checked after the wait and skipped. The person must still be one the
+ * lists may name ({@link connectPersonSql}), so nobody who switched the help
+ * off in the seconds since the list was made is marked. Returns the ids marked.
  */
 export function markHelpedByBroadcastSql(input: {
   readonly broadcastId: string;
@@ -168,15 +239,16 @@ export function markHelpedByBroadcastSql(input: {
   readonly now: Date;
   readonly userIds: readonly string[];
 }): Prisma.Sql {
-  const source = `broadcast:${input.broadcastId}`;
+  const source = broadcastHelpSource(input.broadcastId);
   return Prisma.sql`
     WITH "wp4b_targets" AS MATERIALIZED (
       SELECT "c"."subscription_id" AS "subscription_id", "b"."anchor_at" AS "anchor_at"
         FROM ${connectBucketSql(input.bucket, input.window)} "b"
+        JOIN "users" "u" ON "u"."id" = "b"."user_id" AND ${connectPersonSql()}
         JOIN "subscription_connect_states" "c" ON "c"."subscription_id" = "b"."subscription_id"
        WHERE "b"."user_id" = ANY(${[...input.userIds]}::text[])
          AND ${verifiedNotConnectedSql('c', Prisma.sql`"b"."anchor_at"`, input.now)}
-         AND "c"."help_decided_at" IS NULL
+         AND NOT ${helpedSql('c')}
        ORDER BY "c"."subscription_id"
          FOR UPDATE OF "c"
     )
@@ -186,9 +258,49 @@ export function markHelpedByBroadcastSql(input: {
            "help_anchor_at" = "t"."anchor_at",
            "help_source" = ${source}::text,
            "help_outcome" = 'broadcast',
+           "help_attempts" = '[]'::jsonb,
+           "help_deferrals" = 0,
+           "help_event_id" = NULL,
            "updated_at" = ${input.now}::timestamptz
       FROM "wp4b_targets" "t"
      WHERE "st"."subscription_id" = "t"."subscription_id"
-       AND "st"."help_decided_at" IS NULL
+       AND NOT ${helpedSql('st')}
     RETURNING "st"."subscription_id" AS "subscriptionId"`;
+}
+
+/**
+ * Of `userIds` — the broadcast's recipients as the audience was resolved,
+ * seconds ago and before the claim — the people this broadcast may still
+ * write to, read INSIDE staging's transaction, after the marker:
+ *
+ *   • still one the lists may name ({@link connectPersonSql});
+ *   • with a bucket subscription still VERIFIED not connected — a connection
+ *     recorded in between takes them out;
+ *   • with `excludeHelped`, that subscription must also carry THIS broadcast's
+ *     marker: marked just now, or by an earlier staging of the same broadcast,
+ *     so a retried staging finds the same people. A subscription the
+ *     automatic help claimed in between carries the sender's marker instead,
+ *     and its person is not written to twice.
+ *
+ * One row per person, in no particular order; the caller keeps its own.
+ */
+export function stagedRecipientsSql(input: {
+  readonly broadcastId: string;
+  readonly bucket: ConnectBucket;
+  readonly window: ConnectAudienceWindow;
+  readonly now: Date;
+  readonly userIds: readonly string[];
+  readonly excludeHelped: boolean;
+}): Prisma.Sql {
+  const ours = input.excludeHelped
+    ? Prisma.sql`AND "c"."help_source" = ${broadcastHelpSource(input.broadcastId)}::text`
+    : Prisma.empty;
+  return Prisma.sql`
+    SELECT DISTINCT "b"."user_id" AS "userId"
+      FROM ${connectBucketSql(input.bucket, input.window)} "b"
+      JOIN "users" "u" ON "u"."id" = "b"."user_id" AND ${connectPersonSql()}
+      JOIN "subscription_connect_states" "c" ON "c"."subscription_id" = "b"."subscription_id"
+     WHERE "b"."user_id" = ANY(${[...input.userIds]}::text[])
+       AND ${verifiedNotConnectedSql('c', Prisma.sql`"b"."anchor_at"`, input.now)}
+       ${ours}`;
 }
