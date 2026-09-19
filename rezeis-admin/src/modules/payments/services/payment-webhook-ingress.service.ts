@@ -112,6 +112,26 @@ export class PaymentWebhookIngressService {
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
+    // RollyPay posts a subscription's charges as ordinary payment events, with
+    // an `order_id` RollyPay made up itself («Не разбирайте автоматически
+    // сформированный order_id») and without the subscription's id, which only
+    // the payment object carries. An order that is not one of our payments is
+    // therefore looked up by its payment instead of failing the pipeline below.
+    const rollypayForeignPaymentId = await this.findRollypayForeignPaymentId(input.gatewayType, input.rawBody);
+    if (rollypayForeignPaymentId !== null) {
+      if (input.verifySignature) {
+        this.paymentWebhookNormalizerService.verifyWebhookSignature({
+          gatewayType: input.gatewayType,
+          rawBody: input.rawBody,
+          headers: input.headers,
+          clientIp: input.clientIp,
+          gatewaySettings: gateway.settings,
+        });
+      }
+      await this.providerSubscriptionService.enqueuePaymentLookup(input.gatewayType, rollypayForeignPaymentId);
+      return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
+    }
+
     const envelope = this.paymentWebhookNormalizerService.normalizeWebhook({
       gatewayType: input.gatewayType,
       rawBody: input.rawBody,
@@ -156,6 +176,54 @@ export class PaymentWebhookIngressService {
         : PAYMENT_WEBHOOK_STATUS_ENQUEUED,
     };
   }
+
+  /**
+   * The RollyPay payment to look up when a callback's `order_id` is none of
+   * our payments. Every checkout's transaction exists, under its `paymentId`,
+   * before RollyPay is asked for a link, so an unknown order is not a race.
+   */
+  private async findRollypayForeignPaymentId(
+    gatewayType: PaymentGatewayType,
+    rawBody: Buffer,
+  ): Promise<string | null> {
+    const references = readRollypayCallbackReferences(gatewayType, rawBody);
+    if (references === null) {
+      return null;
+    }
+    const ours = await this.prismaService.transaction.findUnique({
+      where: { paymentId: references.orderId },
+      select: { id: true },
+    });
+    return ours === null ? references.paymentId : null;
+  }
+}
+
+/**
+ * A RollyPay callback's `order_id` and `payment_id`, or null when this is not
+ * a RollyPay callback that carries both.
+ */
+export function readRollypayCallbackReferences(
+  gatewayType: PaymentGatewayType,
+  rawBody: Buffer,
+): { readonly orderId: string; readonly paymentId: string } | null {
+  if (gatewayType !== PaymentGatewayType.ROLLYPAY) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const orderId = root['order_id'];
+  const paymentId = root['payment_id'];
+  if (typeof orderId !== 'string' || orderId.trim().length === 0) return null;
+  if (typeof paymentId !== 'string' || paymentId.trim().length === 0) return null;
+  return { orderId: orderId.trim(), paymentId: paymentId.trim() };
 }
 
 /**

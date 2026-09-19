@@ -871,6 +871,8 @@ describe('GatewaySettingsPage hidden gateway secrets', () => {
     expect(readSavedSettings(patchSpy)).toEqual({
       apiKey: '********c8e5',
       signingSecret: 'signing-rotated',
+      // «Автоплатежи одобрены провайдером», untouched: never set reads as OFF.
+      savePaymentMethod: 'false',
     })
   })
 })

@@ -107,6 +107,8 @@ export const en = {
       apiToken: 'API Token',
       serviceId: 'Service ID',
       signingSecret: 'Signing Secret',
+      rollypayTerminalId: 'Terminal ID (terminal_id)',
+      rollypaySubscriptionPlanIds: 'Subscription tariff IDs',
       lavaOfferId: 'Offer ID',
       defaultCurrency: 'Default currency',
     },
@@ -158,6 +160,12 @@ export const en = {
         'Secret key #2 from the AuraPay terminal settings. Used to verify the X-SIGNATURE webhook header.',
       rollypaySigningSecret:
         'signing_secret of the RollyPay terminal. Used to verify the X-Signature header on webhooks.',
+      rollypayAutopay:
+        'Turn on once RollyPay has confirmed the terminal and its tariffs for recurring SBP payments. The cabinet then shows a second RollyPay option, «for automatic charging»: the customer confirms the subscription in their bank, RollyPay charges every period on its own, and access is extended for each paid charge. Offered only for 30, 90, 180 and 365 days and for a price in whole roubles. Without the terminal ID and at least one tariff ID below the option is not shown. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in «Payment methods». Off by default.',
+      rollypayTerminalId:
+        'The UUID of your RollyPay terminal. The panel reads its tariffs and creates subscriptions under it.',
+      rollypaySubscriptionPlanIds:
+        'UUIDs of the tariffs RollyPay set up for your terminal, separated by commas or new lines. The panel takes the tariff whose period matches the plan duration (30 days — month, 90 — quarter, 180 — half_year, 365 — year) and whose charge equals the price; a tariff with a cap fits any price up to the cap. If none fits, the customer sees «Automatic charging is not available for this purchase» and picks the ordinary payment.',
       severpayToken:
         'SeverPay merchant secret token. Used for both request signing and webhook verification.',
       lavaApiKey:

@@ -579,6 +579,29 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         secret: true,
         hintKey: 'paymentGateways.hints.rollypaySigningSecret',
       },
+      {
+        key: 'savePaymentMethod',
+        labelKey: 'paymentGateways.fields.savePaymentMethod',
+        placeholder: '',
+        type: 'toggle',
+        hintKey: 'paymentGateways.hints.rollypayAutopay',
+      },
+      {
+        // RollyPay sets the tariffs up for the kassa itself; the panel only
+        // names them (rollypay-subscription.util.ts on the server).
+        key: 'terminalId',
+        labelKey: 'paymentGateways.fields.rollypayTerminalId',
+        placeholder: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
+        dependsOn: 'savePaymentMethod',
+        hintKey: 'paymentGateways.hints.rollypayTerminalId',
+      },
+      {
+        key: 'subscriptionPlanIds',
+        labelKey: 'paymentGateways.fields.rollypaySubscriptionPlanIds',
+        placeholder: '8f1c0b6e-2a44-4f0f-9d1b-6d2f9a3c7b10, …',
+        dependsOn: 'savePaymentMethod',
+        hintKey: 'paymentGateways.hints.rollypaySubscriptionPlanIds',
+      },
     ],
   },
   {
@@ -1379,7 +1402,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                   {field.hintKey && (
                     <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
                   )}
-                  {field.key === 'savePaymentMethod' && gateway.type === 'PLATEGA' && (
+                  {field.key === 'savePaymentMethod' && (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY') && (
                     <ProviderAutopaySummary gatewayType={gateway.type} />
                   )}
                 </div>

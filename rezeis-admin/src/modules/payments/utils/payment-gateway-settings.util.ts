@@ -305,10 +305,30 @@ const aurapaySettingsSchema = z
   })
   .strict();
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * RollyPay's kassa and the tariffs RollyPay set up for it (rollypay-subscription.util.ts).
+ * Checked on save: a mistyped id would otherwise just make the automatic
+ * option disappear from the cabinet, with nothing to say why.
+ */
+const rollypayTerminalIdSetting = z.string().trim().regex(UUID_PATTERN);
+const rollypayPlanIdsSetting = z
+  .string()
+  .trim()
+  .refine((value) => {
+    const tokens = value.split(/[\s,;]+/).filter((token) => token.length > 0);
+    return tokens.length > 0 && tokens.every((token) => UUID_PATTERN.test(token));
+  });
+
 const rollypaySettingsSchema = z
   .object({
     apiKey: z.string().min(1).optional(),
     signingSecret: z.string().min(1).optional(),
+    // «Автоплатежи одобрены провайдером»: recurring SBP subscriptions (gateway-autopay.util.ts).
+    savePaymentMethod: yookassaBooleanSetting.optional(),
+    terminalId: rollypayTerminalIdSetting.optional(),
+    subscriptionPlanIds: rollypayPlanIdsSetting.optional(),
   })
   .strict();
 

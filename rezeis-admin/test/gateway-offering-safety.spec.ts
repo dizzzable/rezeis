@@ -268,14 +268,36 @@ describe('buyer-facing gateway list', () => {
         orderIndex: 4,
         settings: { savePaymentMethod: true },
       }),
-      // The switch alone does not make a gateway charge again: RollyPay's repeat
-      // charges are not built yet, so its checkout must not promise them.
+      // RollyPay signs a payer up only on a tariff it set up for the kassa: the
+      // switch without the kassa and a tariff would offer what every sign-up refuses.
       gatewayRow({
-        id: 'not-built',
+        id: 'rollypay-no-tariffs',
         type: PaymentGatewayType.ROLLYPAY,
         isActive: true,
         isConfigured: true,
         orderIndex: 5,
+        settings: { savePaymentMethod: true },
+      }),
+      gatewayRow({
+        id: 'rollypay-approved',
+        type: PaymentGatewayType.ROLLYPAY,
+        isActive: true,
+        isConfigured: true,
+        orderIndex: 6,
+        settings: {
+          savePaymentMethod: 'true',
+          terminalId: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
+          subscriptionPlanIds: '8f1c0b6e-2a44-4f0f-9d1b-6d2f9a3c7b10',
+        },
+      }),
+      // The switch alone does not make a gateway charge again: Lava's repeat
+      // charges are not built yet, so its checkout must not promise them.
+      gatewayRow({
+        id: 'not-built',
+        type: PaymentGatewayType.LAVA,
+        isActive: true,
+        isConfigured: true,
+        orderIndex: 7,
         settings: { savePaymentMethod: true },
       }),
     ]);
@@ -287,6 +309,8 @@ describe('buyer-facing gateway list', () => {
         ['approved', true],
         ['refused', false],
         ['platega-approved', true],
+        ['rollypay-no-tariffs', false],
+        ['rollypay-approved', true],
         ['not-built', false],
       ],
     );

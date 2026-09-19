@@ -5,6 +5,8 @@ import type { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.
 import {
   plategaPeriodForDays,
   type ProviderIntervalUnit,
+  type ProviderPeriod,
+  rollypayPeriodForDays,
   wholeRoubles,
 } from './provider-subscription-period.util';
 
@@ -16,7 +18,19 @@ import {
  */
 export const PROVIDER_SUBSCRIPTION_GATEWAY_TYPES: ReadonlySet<PaymentGatewayType> = new Set([
   PaymentGatewayType.PLATEGA,
+  PaymentGatewayType.ROLLYPAY,
 ]);
+
+function providerPeriodForDays(gatewayType: PaymentGatewayType, durationDays: number): ProviderPeriod | null {
+  switch (gatewayType) {
+    case PaymentGatewayType.PLATEGA:
+      return plategaPeriodForDays(durationDays);
+    case PaymentGatewayType.ROLLYPAY:
+      return rollypayPeriodForDays(durationDays);
+    default:
+      return null;
+  }
+}
 
 /** Written into the draft's `planSnapshot`; its presence is what makes a draft a provider subscription. */
 export const PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY = 'providerSubscription';
@@ -50,7 +64,9 @@ export type ProviderSubscriptionRefusal =
   | 'ITEMS'
   | 'ADD_ONS'
   /** This VPN subscription already renews itself: a second one would charge twice a period. */
-  | 'ALREADY_ACTIVE';
+  | 'ALREADY_ACTIVE'
+  /** RollyPay: none of the operator's tariffs charges this sum every this period. */
+  | 'PLAN';
 
 export type ProviderSubscriptionTermsResult =
   | { readonly terms: ProviderSubscriptionTerms }
@@ -63,8 +79,9 @@ export type ProviderSubscriptionTermsResult =
  * first charge's sum every period, forever. So a one-time promo discount would
  * be charged again every month (a personal discount is permanent and may be);
  * a price with kopecks cannot be charged at all (Platega takes whole roubles,
- * and rounding would charge a sum nobody was shown); and a term that is not one
- * of the provider's periods would be charged on a schedule nobody bought.
+ * and rounding would charge a sum nobody was shown; RollyPay is held to the
+ * same rule so the cabinet can tell from the price alone); and a term that is
+ * not one of the provider's periods would be charged on a schedule nobody bought.
  */
 export function resolveProviderSubscriptionTerms(input: {
   readonly gatewayType: PaymentGatewayType;
@@ -75,10 +92,10 @@ export function resolveProviderSubscriptionTerms(input: {
   readonly planId: string;
   readonly subscriptionId: string | null;
 }): ProviderSubscriptionTermsResult {
-  if (input.gatewayType !== PaymentGatewayType.PLATEGA) return { refusal: 'GATEWAY' };
+  if (!PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(input.gatewayType)) return { refusal: 'GATEWAY' };
   if (input.currency !== 'RUB') return { refusal: 'CURRENCY' };
   if (input.discountSource === 'PURCHASE') return { refusal: 'DISCOUNT' };
-  const period = plategaPeriodForDays(input.durationDays);
+  const period = providerPeriodForDays(input.gatewayType, input.durationDays);
   if (period === null) return { refusal: 'DURATION' };
   const amount = wholeRoubles(input.amount);
   if (amount === null) return { refusal: 'AMOUNT' };

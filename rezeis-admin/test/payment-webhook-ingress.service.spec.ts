@@ -420,3 +420,74 @@ describe('PaymentWebhookIngressService', () => {
     assert.equal(result.accepted, true);
   });
 });
+
+describe('PaymentWebhookIngressService on RollyPay subscription charges', () => {
+  function service(knownPaymentIds: readonly string[]) {
+    const calls: unknown[] = [];
+    const ingress = new PaymentWebhookIngressService(
+      {
+        paymentGateway: {
+          findUnique: async () => ({ type: PaymentGatewayType.ROLLYPAY, settings: { signingSecret: 'sig-1' } }),
+        },
+        transaction: {
+          findUnique: async ({ where }: { where: { paymentId: string } }) =>
+            knownPaymentIds.includes(where.paymentId) ? { id: `tx-${where.paymentId}` } : null,
+        },
+      } as never,
+      {
+        verifyWebhookSignature: () => {
+          calls.push(['verified']);
+        },
+        normalizeWebhook: () => {
+          calls.push(['normalized']);
+          return {
+            gatewayType: PaymentGatewayType.ROLLYPAY,
+            paymentId: 'order-ours',
+            providerEventId: 'pay_1',
+            eventStatus: 'paid',
+            receivedAt: '2026-09-20T12:00:00.000Z',
+            payloadHash: 'hash-1',
+            rawPayload: {},
+          };
+        },
+      } as never,
+      {
+        recordReceived: async () => ({
+          duplicate: false,
+          event: { id: 'event-row-1', paymentId: 'order-ours', gatewayType: PaymentGatewayType.ROLLYPAY },
+        }),
+        markEnqueued: async () => ({ id: 'event-row-1', status: 'ENQUEUED' }),
+      } as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
+      { add: async () => ({ id: 'job-1' }) } as never,
+      {
+        enqueueSync: async () => undefined,
+        enqueuePaymentLookup: async (gatewayType: PaymentGatewayType, paymentId: string) => {
+          calls.push(['lookup', gatewayType, paymentId]);
+        },
+      } as never,
+    );
+    const ingest = (body: Record<string, unknown>) =>
+      ingress.ingestWebhook({
+        gatewayType: PaymentGatewayType.ROLLYPAY,
+        rawBody: Buffer.from(JSON.stringify(body), 'utf8'),
+        headers: {},
+        clientIp: '203.0.113.1',
+        verifySignature: true,
+      });
+    return { calls, ingest };
+  }
+
+  it('looks a charge up by its payment when RollyPay made the order id up itself', async () => {
+    const { calls, ingest } = service(['order-ours']);
+    const result = await ingest({ event_type: 'payment.paid', status: 'paid', order_id: 'rp-auto-17', payment_id: 'pay_9' });
+    assert.equal(result.accepted, true);
+    assert.deepStrictEqual(calls, [['verified'], ['lookup', PaymentGatewayType.ROLLYPAY, 'pay_9']]);
+  });
+
+  it('leaves a payment of ours to the payment pipeline', async () => {
+    const { calls, ingest } = service(['order-ours']);
+    await ingest({ event_type: 'payment.paid', status: 'paid', order_id: 'order-ours', payment_id: 'pay_1' });
+    assert.deepStrictEqual(calls, [['normalized']]);
+  });
+});

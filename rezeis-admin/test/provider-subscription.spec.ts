@@ -26,12 +26,24 @@ import {
   strandedReason,
 } from '../src/modules/payments/services/provider-subscription.service';
 import { PLATEGA_PROVIDER_CHOICE } from '../src/modules/payments/utils/payment-gateway-settings.util';
+import { rollypayPeriodForDays } from '../src/modules/payments/utils/provider-subscription-period.util';
 import {
   AUTOPAY_NOT_AVAILABLE_CODE,
   PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
   readProviderSubscriptionTerms,
   resolveProviderSubscriptionTerms,
 } from '../src/modules/payments/utils/provider-subscription-terms.util';
+import {
+  isRollypayStopTaken,
+  mapRollypaySubscriptionStatus,
+  parseRollypayCharges,
+  parseRollypayPlans,
+  pickRollypayPlan,
+  readRollypayPlanIds,
+  readRollypayTerminalId,
+  rollypayPaidCycles,
+  rollypayPayerId,
+} from '../src/modules/payments/utils/rollypay-subscription.util';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -262,7 +274,8 @@ interface Harness {
   readonly items: Array<Record<string, unknown>>;
   readonly events: Array<{ providerEventId: string; paymentId: string }>;
   readonly jobs: Array<{ name: string; data: Record<string, unknown>; options: Record<string, unknown> }>;
-  setProvider(state: Record<string, unknown>): void;
+  /** The provider's answer: one body for every GET, or one per URL. */
+  setProvider(state: Record<string, unknown> | ((url: string) => unknown)): void;
   deliverFirst(subscriptionId: string): void;
 }
 
@@ -294,7 +307,7 @@ function harness(initial: Partial<ProviderSubscription> = {}): Harness {
     updatedAt: new Date(),
     ...initial,
   };
-  let provider: Record<string, unknown> = {};
+  let provider: Record<string, unknown> | ((url: string) => unknown) = {};
   const transactions: Array<Record<string, unknown>> = [
     {
       id: 'tx-first',
@@ -324,7 +337,11 @@ function harness(initial: Partial<ProviderSubscription> = {}): Harness {
   };
   const prisma = {
     paymentGateway: {
-      findUnique: async () => ({ type: PaymentGatewayType.PLATEGA, settings: { merchantId: 'm-1', secret: 's-1' } }),
+      findUnique: async () => ({
+        type: row.gatewayType,
+        settings:
+          row.gatewayType === PaymentGatewayType.ROLLYPAY ? { apiKey: 'k-1' } : { merchantId: 'm-1', secret: 's-1' },
+      }),
     },
     transaction: {
       findUnique: async ({ where }: { where: Record<string, unknown> }) => findTransaction(where),
@@ -374,7 +391,9 @@ function harness(initial: Partial<ProviderSubscription> = {}): Harness {
       jobs.push({ name, data, options });
     },
   };
-  const http = { get: () => of({ data: provider }) };
+  const http = {
+    get: (url: string) => of({ data: typeof provider === 'function' ? provider(url) : provider }),
+  };
   const service = new ProviderSubscriptionService(prisma as never, http as never, inbox as never, queue as never);
   return {
     service,
@@ -542,5 +561,304 @@ describe('ProviderSubscriptionService.syncRow', () => {
 
     assert.equal(h.row().status, ProviderSubscriptionStatus.CANCELLED);
     assert.equal(h.row().cancelledBy, 'PROVIDER');
+  });
+});
+
+const KASSA = 'd290f1ee-6c54-4b01-90e6-d701748f0851';
+const PLAN_MONTH_299 = '8f1c0b6e-2a44-4f0f-9d1b-6d2f9a3c7b10';
+const PLAN_MONTH_CAP = '1a2b3c4d-0000-4000-8000-000000000001';
+const PLAN_QUARTER_299 = '1a2b3c4d-0000-4000-8000-000000000002';
+const PLAN_NOT_NAMED = '1a2b3c4d-0000-4000-8000-000000000003';
+
+describe('RollyPay terms and tariffs', () => {
+  it('offers only the periods its fixed tariffs count in days', () => {
+    assert.deepEqual(rollypayPeriodForDays(30), { unit: 'month', count: 1 });
+    assert.deepEqual(rollypayPeriodForDays(90), { unit: 'month', count: 3 });
+    assert.deepEqual(rollypayPeriodForDays(180), { unit: 'month', count: 6 });
+    assert.deepEqual(rollypayPeriodForDays(365), { unit: 'year', count: 1 });
+    for (const days of [1, 7, 31, 60, 360]) assert.equal(rollypayPeriodForDays(days), null, `${days} days`);
+    assert.deepEqual(
+      resolveProviderSubscriptionTerms({
+        gatewayType: PaymentGatewayType.ROLLYPAY,
+        currency: 'RUB',
+        amount: '299',
+        durationDays: 90,
+        discountSource: 'NONE',
+        planId: 'plan-1',
+        subscriptionId: null,
+      }),
+      { terms: { unit: 'month', count: 3, amount: 299, durationDays: 90, planId: 'plan-1', subscriptionId: null } },
+    );
+  });
+
+  it('reads the operator ids leniently and the payer id stably', () => {
+    assert.deepEqual(
+      readRollypayPlanIds({
+        subscriptionPlanIds: `${PLAN_MONTH_299.toUpperCase()}, ${PLAN_MONTH_CAP}\n junk;${PLAN_MONTH_299}`,
+      }),
+      [PLAN_MONTH_299, PLAN_MONTH_CAP],
+    );
+    assert.equal(readRollypayTerminalId({ terminalId: ` ${KASSA} ` }), KASSA);
+    assert.equal(readRollypayTerminalId({ terminalId: 'kassa-1' }), null);
+    const payer = rollypayPayerId('user-1');
+    assert.match(payer, /^[a-z0-9]{32}$/);
+    assert.equal(rollypayPayerId('user-1'), payer);
+    assert.notEqual(rollypayPayerId('user-2'), payer);
+  });
+
+  it('picks the tariff that charges what the payer was shown, a fixed one before one with a cap', () => {
+    const plans = parseRollypayPlans({
+      items: [
+        { id: PLAN_MONTH_CAP, interval: 'month', cap_amount_rub: '1000.00' },
+        { id: PLAN_MONTH_299, interval: 'month', payer_amount_rub: '299.00', merchant_amount_rub: '290.00' },
+        { id: PLAN_QUARTER_299, interval: 'quarter', payer_amount_rub: '299.00' },
+        { id: PLAN_NOT_NAMED, interval: 'year', payer_amount_rub: '299.00' },
+      ],
+    });
+    const named = [PLAN_MONTH_CAP, PLAN_MONTH_299, PLAN_QUARTER_299];
+    const month = { unit: 'month', count: 1 } as const;
+    assert.equal(pickRollypayPlan(plans, named, month, 299)?.id, PLAN_MONTH_299);
+    assert.equal(pickRollypayPlan(plans, named, month, 399)?.id, PLAN_MONTH_CAP);
+    assert.equal(pickRollypayPlan(plans, named, month, 1001), null);
+    assert.equal(pickRollypayPlan(plans, named, { unit: 'month', count: 3 }, 299)?.id, PLAN_QUARTER_299);
+    // RollyPay has the year tariff, but the operator did not name it.
+    assert.equal(pickRollypayPlan(plans, named, { unit: 'year', count: 1 }, 299), null);
+  });
+
+  it('counts a cycle paid once, and never one under review or outside the books', () => {
+    const paid = rollypayPaidCycles(
+      parseRollypayCharges([
+        { cycle_number: 3, status: 'payed', validation_status: 'accepted', payment_id: null },
+        { cycle_number: 2, status: 'payed', validation_status: 'review', payment_id: 'pay_2' },
+        { cycle_number: 1, status: 'fail', payment_id: null },
+        { cycle_number: 1, status: 'payed', validation_status: 'accepted', payment_id: 'pay_1' },
+        { cycle_number: 2, status: 'payed', validation_status: 'accepted', payment_id: 'pay_2b' },
+      ]),
+    );
+    assert.deepEqual(
+      paid.map((charge) => [charge.cycle, charge.paymentId]),
+      [
+        [1, 'pay_1'],
+        [2, 'pay_2b'],
+      ],
+    );
+  });
+
+  it('reads both of its status fields, and keeps ours while a person or RollyPay still has to decide', () => {
+    const map = (state: string | null, billingStatus: string | null, lastAttemptFailed = false) =>
+      mapRollypaySubscriptionStatus({ state, billingStatus, lastAttemptFailed });
+    assert.equal(map('new', 'consent_pending'), ProviderSubscriptionStatus.PENDING);
+    assert.equal(map('active', 'enabled'), ProviderSubscriptionStatus.ACTIVE);
+    assert.equal(map('active', 'enabled', true), ProviderSubscriptionStatus.PAST_DUE);
+    assert.equal(map('active', 'review'), null);
+    assert.equal(map('active', 'stop_pending'), null);
+    assert.equal(map('active', 'pending'), null);
+    assert.equal(map('stop', 'stopped'), ProviderSubscriptionStatus.CANCELLED);
+    assert.equal(isRollypayStopTaken({ state: 'active', billing_status: 'stop_pending' }), true);
+    assert.equal(isRollypayStopTaken({ state: 'active', billing_status: 'enabled' }), false);
+  });
+});
+
+describe('RollyPay subscription checkout', () => {
+  function checkout(input: {
+    readonly settings?: Record<string, unknown>;
+    readonly plans?: readonly Record<string, unknown>[];
+    readonly created?: Record<string, unknown>;
+  }) {
+    const calls: Array<{
+      method: string;
+      url: string;
+      body?: Record<string, unknown>;
+      headers: Record<string, string>;
+    }> = [];
+    const service = new PaymentProviderExecutionService(
+      {
+        get: (url: string, config: { headers: Record<string, string> }) => {
+          calls.push({ method: 'GET', url, headers: config.headers });
+          return of({ data: { items: input.plans ?? [] } });
+        },
+        post: (url: string, body: unknown, config: { headers: Record<string, string> }) => {
+          calls.push({ method: 'POST', url, body: body as Record<string, unknown>, headers: config.headers });
+          return of({
+            data: url.endsWith('/stop')
+              ? { ok: true }
+              : (input.created ?? {
+                  id: 'rp-sub-1',
+                  state: 'new',
+                  billing_status: 'consent_pending',
+                  payer_amount_rub: '299.00',
+                  pay_url: 'https://pay.rollypay.io/pay/recurring/TOKEN',
+                }),
+          });
+        },
+      } as never,
+      { domain: 'https://user.example', botToken: 'bot' } as never,
+      new PaymentWebhookPayloadRedactionService(),
+    );
+    const result = service.createCheckout({
+      gateway: {
+        id: 'gateway-1',
+        type: PaymentGatewayType.ROLLYPAY,
+        orderIndex: 1,
+        currency: Currency.RUB,
+        isActive: true,
+        settings: input.settings ?? {
+          apiKey: 'k-1',
+          signingSecret: 'sig-1',
+          savePaymentMethod: 'true',
+          terminalId: KASSA,
+          subscriptionPlanIds: `${PLAN_MONTH_CAP} ${PLAN_MONTH_299}`,
+        },
+      } as never,
+      transaction: {
+        id: 'tx-1',
+        paymentId: 'payment-1',
+        userId: 'user-1',
+        gatewayType: PaymentGatewayType.ROLLYPAY,
+        currency: Currency.RUB,
+        amount: new Prisma.Decimal('299'),
+        purchaseType: PurchaseType.NEW,
+        planSnapshot: {
+          id: 'plan-1',
+          [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: {
+            unit: 'month',
+            count: 1,
+            amount: 299,
+            durationDays: 30,
+            planId: 'plan-1',
+            subscriptionId: null,
+          },
+        },
+      } as never,
+      description: 'VPN 30 days',
+      successUrl: 'https://reiwa.example/success',
+      failUrl: 'https://reiwa.example/fail',
+    });
+    return { calls, result };
+  }
+
+  it('signs the payer up on the named fixed tariff, once per checkout, and keeps the subscription as the checkout id', async () => {
+    const { calls, result } = checkout({
+      plans: [
+        { id: PLAN_MONTH_CAP, interval: 'month', cap_amount_rub: '1000.00' },
+        { id: PLAN_MONTH_299, interval: 'month', payer_amount_rub: '299.00' },
+      ],
+    });
+    const created = await result;
+    assert.deepEqual(
+      calls.map((call) => `${call.method} ${call.url}`),
+      ['GET https://rollypay.io/api/v1/subscription-plans', 'POST https://rollypay.io/api/v1/subscriptions'],
+    );
+    assert.deepEqual(calls[1]?.body, {
+      terminal_id: KASSA,
+      plan_id: PLAN_MONTH_299,
+      payer_id: rollypayPayerId('user-1'),
+      merchant_subscription_ref: 'payment-1',
+    });
+    assert.equal(calls[1]?.headers['Idempotency-Key'], 'rezeis-tx-1');
+    assert.equal(calls[1]?.headers['X-API-Key'], 'k-1');
+    assert.notEqual(calls[0]?.headers['X-Nonce'], calls[1]?.headers['X-Nonce']);
+    assert.equal(created.gatewayId, 'rp-sub-1');
+    assert.equal(created.checkoutUrl, 'https://pay.rollypay.io/pay/recurring/TOKEN');
+  });
+
+  it('fixes the price on a tariff with a cap, and sends no payer id there', async () => {
+    const { calls, result } = checkout({
+      plans: [{ id: PLAN_MONTH_CAP, interval: 'month', cap_amount_rub: '1000.00' }],
+    });
+    await result;
+    assert.deepEqual(calls[1]?.body, {
+      terminal_id: KASSA,
+      plan_id: PLAN_MONTH_CAP,
+      amount: '299.00',
+      merchant_subscription_ref: 'payment-1',
+    });
+  });
+
+  it('refuses when no named tariff charges this sum every this period', async () => {
+    const { calls, result } = checkout({
+      plans: [{ id: PLAN_MONTH_299, interval: 'month', payer_amount_rub: '349.00' }],
+    });
+    await assert.rejects(result, (error: { getResponse?: () => unknown }) => {
+      const response = error.getResponse?.() as { code?: string; reason?: string };
+      assert.equal(response.code, AUTOPAY_NOT_AVAILABLE_CODE);
+      assert.equal(response.reason, 'PLAN');
+      return true;
+    });
+    assert.equal(calls.filter((call) => call.method === 'POST').length, 0);
+  });
+
+  it('stops a sign-up whose charge would not be the price the payer was shown', async () => {
+    const { calls, result } = checkout({
+      plans: [{ id: PLAN_MONTH_CAP, interval: 'month', cap_amount_rub: '1000.00' }],
+      created: { id: 'rp-sub-2', payer_amount_rub: '309.00', pay_url: 'https://pay.rollypay.io/pay/recurring/T2' },
+    });
+    await assert.rejects(result, (error: { getResponse?: () => unknown }) => {
+      assert.equal((error.getResponse?.() as { reason?: string }).reason, 'PLAN');
+      return true;
+    });
+    assert.equal(calls[calls.length - 1]?.url, 'https://rollypay.io/api/v1/subscriptions/rp-sub-2/stop');
+  });
+
+  it('signs nobody up without the kassa and a tariff named, however the switch is set', async () => {
+    const { calls, result } = checkout({
+      settings: { apiKey: 'k-1', signingSecret: 'sig-1', savePaymentMethod: 'true' },
+    });
+    await assert.rejects(result, (error: { getResponse?: () => unknown }) => {
+      assert.equal((error.getResponse?.() as { reason?: string }).reason, 'NOT_APPROVED');
+      return true;
+    });
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe('ProviderSubscriptionService.syncRow on RollyPay', () => {
+  const nextCharge = new Date(Date.now() + 30 * DAY).toISOString();
+  function rollypay(paymentStatus: string) {
+    return (url: string): unknown => {
+      if (url.endsWith('/subscriptions/rp-sub-1')) {
+        return { state: 'active', billing_status: 'enabled', successful_cycles: 1, next_charge_at: nextCharge };
+      }
+      if (url.endsWith('/subscriptions/rp-sub-1/charges')) {
+        return [
+          {
+            cycle_number: 1,
+            status: 'payed',
+            validation_status: 'accepted',
+            payment_id: 'pay_1',
+            actual_at: new Date().toISOString(),
+          },
+        ];
+      }
+      if (url.endsWith('/payments/pay_1')) {
+        return { payment_id: 'pay_1', status: paymentStatus, subscription_id: 'rp-sub-1' };
+      }
+      throw new Error(`unexpected GET ${url}`);
+    };
+  }
+
+  it('delivers a paid cycle once its payment is paid, on the checkout the payer confirmed', async () => {
+    const h = harness({ gatewayType: PaymentGatewayType.ROLLYPAY, providerSubscriptionId: 'rp-sub-1' });
+    h.setProvider(rollypay('paid'));
+
+    await h.service.syncRow(h.row());
+
+    assert.deepEqual(
+      h.events.map((event) => [event.providerEventId, event.paymentId]),
+      [['subscription:rp-sub-1:charge:1', 'payment-first']],
+    );
+    assert.equal(h.row().appliedChargeCount, 1);
+    assert.equal(h.row().status, ProviderSubscriptionStatus.ACTIVE);
+    assert.equal(h.row().providerStatus, 'active/enabled');
+  });
+
+  it('waits while the cycle is «payed» but its payment is not paid yet', async () => {
+    const h = harness({ gatewayType: PaymentGatewayType.ROLLYPAY, providerSubscriptionId: 'rp-sub-1' });
+    h.setProvider(rollypay('processing'));
+
+    await h.service.syncRow(h.row());
+
+    assert.equal(h.events.length, 0);
+    assert.equal(h.row().appliedChargeCount, 0);
   });
 });

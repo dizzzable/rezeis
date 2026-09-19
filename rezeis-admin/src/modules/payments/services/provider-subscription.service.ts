@@ -35,6 +35,16 @@ import {
   ProviderSubscriptionTerms,
   readProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
+import {
+  isRollypayStopTaken,
+  mapRollypaySubscriptionStatus,
+  parseRollypayCharges,
+  ROLLYPAY_API,
+  ROLLYPAY_CHARGES_PAGE,
+  ROLLYPAY_TAKEN_PAYMENT_STATUSES,
+  rollypayHeaders,
+  rollypayPaidCycles,
+} from '../utils/rollypay-subscription.util';
 import { requireSetting } from './payment-provider-execution.helpers';
 import { PaymentWebhookInboxService } from './payment-webhook-inbox.service';
 
@@ -86,14 +96,16 @@ export interface CustomerProviderSubscriptionInterface {
 }
 
 /**
- * Subscriptions the PROVIDER runs (Platega): the payer confirms a fixed sum and
- * period once, and the provider charges on its own schedule.
+ * Subscriptions the PROVIDER runs (Platega, RollyPay): the payer confirms a
+ * fixed sum and period once, and the provider charges on its own schedule.
  *
- * The provider's callbacks are only a reason to look. They are authenticated by
- * two static headers and nothing else, their status words differ from the ones
- * the API returns, and a lost one must not lose a renewal. So every look is a
- * `GET /subscription/{id}` with our own keys, and the count of successful
- * charges in it is the ledger: each charge above `appliedChargeCount` becomes
+ * The provider's callbacks are only a reason to look. Platega's are
+ * authenticated by two static headers and nothing else, their status words
+ * differ from the ones the API returns; RollyPay's name no subscription at all
+ * and it sends none when one stops; and a lost one must not lose a renewal. So
+ * every look reads the subscription with our own keys, and its count of
+ * successful charges (Platega's `chargesSuccess`, RollyPay's paid cycles, each
+ * confirmed by its payment) is the ledger: each charge above `appliedChargeCount` becomes
  * one delivered renewal, keyed by subscription and charge number, so a repeated
  * callback, a callback and the sweep at once, or a crash half-way all deliver
  * each charge exactly once.
@@ -158,6 +170,51 @@ export class ProviderSubscriptionService {
     );
   }
 
+  /**
+   * Queues a look at whatever subscription a provider payment belongs to.
+   * RollyPay's callback for a subscription's charge is an ordinary
+   * `payment.paid` that names neither the subscription nor a payment of ours;
+   * only the payment object does.
+   */
+  public async enqueuePaymentLookup(gatewayType: PaymentGatewayType, providerPaymentId: string): Promise<void> {
+    await runPaymentReconciliationEnqueueWithTimeout(() =>
+      this.paymentReconciliationQueue.add(
+        PROVIDER_SUBSCRIPTION_SYNC_JOB,
+        { gatewayType, providerPaymentId },
+        {
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 30_000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      ),
+    );
+  }
+
+  public async syncByPayment(gatewayType: PaymentGatewayType, providerPaymentId: string): Promise<void> {
+    if (gatewayType !== PaymentGatewayType.ROLLYPAY) {
+      throw new Error(`No payment lookup for ${gatewayType}`);
+    }
+    const gateway = await this.prismaService.paymentGateway.findUnique({ where: { type: gatewayType } });
+    if (gateway === null) {
+      this.logger.warn(`Gateway ${gatewayType} is gone; payment ${providerPaymentId} cannot be read`);
+      return;
+    }
+    const settings = readGatewaySettings(gateway.settings);
+    const response = await firstValueFrom(
+      this.httpService.get(`${ROLLYPAY_API}/payments/${encodeURIComponent(providerPaymentId)}`, {
+        headers: rollypayHeaders(requireSetting(settings, 'apiKey')),
+      }),
+    );
+    const subscriptionId = asRecord(response.data)['subscription_id'];
+    if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
+      // A one-off payment we did not create: another integration on the same kassa.
+      this.logger.warn(`${gatewayType} payment ${providerPaymentId} is not ours and not a subscription's; ignored`);
+      return;
+    }
+    await this.sync(gatewayType, subscriptionId);
+  }
+
   public async sync(gatewayType: PaymentGatewayType, providerSubscriptionId: string): Promise<void> {
     const row =
       (await this.prismaService.providerSubscription.findUnique({
@@ -180,7 +237,7 @@ export class ProviderSubscriptionService {
       this.logger.warn(`Gateway ${row.gatewayType} is gone; subscription ${row.id} cannot be read`);
       return;
     }
-    const state = await this.fetchState(row.gatewayType, gateway.settings, row.providerSubscriptionId);
+    const state = await this.fetchState(row, gateway.settings);
 
     let applied = row.appliedChargeCount;
     let subscriptionId = row.subscriptionId;
@@ -729,21 +786,104 @@ export class ProviderSubscriptionService {
   }
 
   private async fetchState(
-    gatewayType: PaymentGatewayType,
+    row: ProviderSubscription,
     settingsJson: Prisma.JsonValue,
-    providerSubscriptionId: string,
   ): Promise<ProviderSubscriptionState> {
-    if (gatewayType !== PaymentGatewayType.PLATEGA) {
-      throw new Error(`No provider subscription API for ${gatewayType}`);
-    }
     const settings = readGatewaySettings(settingsJson);
-    const response = await firstValueFrom(
-      this.httpService.get(
-        `${PLATEGA_API}/subscription/${encodeURIComponent(providerSubscriptionId)}`,
-        { headers: plategaHeaders(settings) },
-      ),
+    switch (row.gatewayType) {
+      case PaymentGatewayType.PLATEGA: {
+        const response = await firstValueFrom(
+          this.httpService.get(
+            `${PLATEGA_API}/subscription/${encodeURIComponent(row.providerSubscriptionId)}`,
+            { headers: plategaHeaders(settings) },
+          ),
+        );
+        return parsePlategaSubscription(response.data);
+      }
+      case PaymentGatewayType.ROLLYPAY:
+        return this.fetchRollypayState(row, requireSetting(settings, 'apiKey'));
+      default:
+        throw new Error(`No provider subscription API for ${row.gatewayType}`);
+    }
+  }
+
+  /**
+   * RollyPay keeps no count of paid charges one could trust alone: a charge
+   * marked `payed` may still be under review, and «Выдавайте оплаченный доступ
+   * только по подтверждённому платежу paid». So the count is the paid cycles
+   * in the charge history, each new one confirmed by its payment, in order:
+   * the first that is not confirmed yet stops the count until the next look.
+   */
+  private async fetchRollypayState(row: ProviderSubscription, apiKey: string): Promise<ProviderSubscriptionState> {
+    const base = `${ROLLYPAY_API}/subscriptions/${encodeURIComponent(row.providerSubscriptionId)}`;
+    const subscription = asRecord(
+      (await firstValueFrom(this.httpService.get(base, { headers: rollypayHeaders(apiKey) }))).data,
     );
-    return parsePlategaSubscription(response.data);
+    const charges = parseRollypayCharges(
+      (await firstValueFrom(this.httpService.get(`${base}/charges`, { headers: rollypayHeaders(apiKey) }))).data,
+    );
+    const paid = rollypayPaidCycles(charges);
+    // A full page may have pushed the oldest paid cycles out of sight; they
+    // were delivered long ago, and `successful_cycles` says how many there are.
+    const reported = readCount(subscription['successful_cycles']);
+    const hidden =
+      charges.length >= ROLLYPAY_CHARGES_PAGE && reported !== null && reported > paid.length
+        ? reported - paid.length
+        : 0;
+    let confirmed = Math.min(row.appliedChargeCount, hidden + paid.length);
+    for (let chargeNumber = confirmed + 1; chargeNumber <= hidden + paid.length; chargeNumber += 1) {
+      const charge = paid[chargeNumber - 1 - hidden];
+      if (charge !== undefined && !(await this.isRollypayChargeTaken(row, charge.cycle, charge.paymentId, apiKey))) {
+        break;
+      }
+      confirmed = chargeNumber;
+    }
+    const last = charges[charges.length - 1];
+    const state = typeof subscription['state'] === 'string' ? subscription['state'] : null;
+    const billingStatus = typeof subscription['billing_status'] === 'string' ? subscription['billing_status'] : null;
+    return {
+      status: mapRollypaySubscriptionStatus({
+        state,
+        billingStatus,
+        lastAttemptFailed: last !== undefined && last.status === 'fail',
+      }),
+      providerStatus: state === null && billingStatus === null ? null : `${state ?? '?'}/${billingStatus ?? '?'}`,
+      chargesSuccess: Math.max(confirmed, row.appliedChargeCount),
+      nextChargeAt: readDate(subscription['next_charge_at']),
+      lastChargeAt: paid[paid.length - 1]?.at ?? null,
+    };
+  }
+
+  private async isRollypayChargeTaken(
+    row: ProviderSubscription,
+    cycle: number,
+    paymentId: string | null,
+    apiKey: string,
+  ): Promise<boolean> {
+    if (paymentId === null) return false;
+    const response = await firstValueFrom(
+      this.httpService.get(`${ROLLYPAY_API}/payments/${encodeURIComponent(paymentId)}`, {
+        headers: rollypayHeaders(apiKey),
+      }),
+    );
+    const payment = asRecord(response.data);
+    const owner = payment['subscription_id'];
+    if (typeof owner === 'string' && owner.length > 0 && owner !== row.providerSubscriptionId) {
+      this.logger.error(
+        `RollyPay cycle ${cycle} of ${row.providerSubscriptionId} names payment ${paymentId}, ` +
+          `which belongs to subscription ${owner}; not delivered`,
+      );
+      return false;
+    }
+    const status = typeof payment['status'] === 'string' ? payment['status'].toLowerCase() : '';
+    if (ROLLYPAY_TAKEN_PAYMENT_STATUSES.has(status)) return true;
+    if (status !== 'created' && status !== 'processing') {
+      this.logger.error(
+        `RollyPay cycle ${cycle} of ${row.providerSubscriptionId} is «payed» but its payment ${paymentId} ` +
+          `is ${status || 'unreadable'}; later cycles wait for it`,
+      );
+    }
+    return false;
   }
 
   private async cancelAtProvider(
@@ -751,18 +891,32 @@ export class ProviderSubscriptionService {
     settingsJson: Prisma.JsonValue,
     providerSubscriptionId: string,
   ): Promise<void> {
-    if (gatewayType !== PaymentGatewayType.PLATEGA) {
-      throw new Error(`No provider subscription API for ${gatewayType}`);
-    }
     const settings = readGatewaySettings(settingsJson);
-    // Idempotent at Platega: cancelling a cancelled subscription answers the same.
-    await firstValueFrom(
-      this.httpService.post(
-        `${PLATEGA_API}/subscription/${encodeURIComponent(providerSubscriptionId)}/cancel`,
-        {},
-        { headers: plategaHeaders(settings) },
-      ),
-    );
+    if (gatewayType === PaymentGatewayType.PLATEGA) {
+      // Idempotent at Platega: cancelling a cancelled subscription answers the same.
+      await firstValueFrom(
+        this.httpService.post(
+          `${PLATEGA_API}/subscription/${encodeURIComponent(providerSubscriptionId)}/cancel`,
+          {},
+          { headers: plategaHeaders(settings) },
+        ),
+      );
+      return;
+    }
+    if (gatewayType === PaymentGatewayType.ROLLYPAY) {
+      // «Перечитайте подписку и убедитесь»: RollyPay's `ok` is not the stop
+      // itself, and a customer must not be told it stopped when it did not.
+      // Stopping a stopped one is allowed.
+      const apiKey = requireSetting(settings, 'apiKey');
+      const base = `${ROLLYPAY_API}/subscriptions/${encodeURIComponent(providerSubscriptionId)}`;
+      await firstValueFrom(this.httpService.post(`${base}/stop`, {}, { headers: rollypayHeaders(apiKey) }));
+      const after = await firstValueFrom(this.httpService.get(base, { headers: rollypayHeaders(apiKey) }));
+      if (!isRollypayStopTaken(after.data)) {
+        throw new Error(`RollyPay did not stop subscription ${providerSubscriptionId}`);
+      }
+      return;
+    }
+    throw new Error(`No provider subscription API for ${gatewayType}`);
   }
 }
 

@@ -22,8 +22,12 @@ export class PaymentReconciliationProcessor extends WorkerHost {
 
   public override async process(job: Job): Promise<void> {
     if (job.name === PROVIDER_SUBSCRIPTION_SYNC_JOB) {
-      const { gatewayType, providerSubscriptionId } = readSyncTarget(job.data);
-      await this.providerSubscriptionService.sync(gatewayType, providerSubscriptionId);
+      const target = readSyncTarget(job.data);
+      if ('providerPaymentId' in target) {
+        await this.providerSubscriptionService.syncByPayment(target.gatewayType, target.providerPaymentId);
+      } else {
+        await this.providerSubscriptionService.sync(target.gatewayType, target.providerSubscriptionId);
+      }
       return;
     }
     if (job.name !== PAYMENT_RECONCILIATION_JOB) {
@@ -34,22 +38,27 @@ export class PaymentReconciliationProcessor extends WorkerHost {
   }
 }
 
-function readSyncTarget(data: unknown): {
-  readonly gatewayType: PaymentGatewayType;
-  readonly providerSubscriptionId: string;
-} {
+/** A look at one subscription, or at whichever one a provider payment belongs to. */
+function readSyncTarget(
+  data: unknown,
+):
+  | { readonly gatewayType: PaymentGatewayType; readonly providerSubscriptionId: string }
+  | { readonly gatewayType: PaymentGatewayType; readonly providerPaymentId: string } {
   const record =
     typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   const gatewayType = record.gatewayType;
-  const providerSubscriptionId = record.providerSubscriptionId;
-  if (
-    !(Object.values(PaymentGatewayType) as unknown[]).includes(gatewayType) ||
-    typeof providerSubscriptionId !== 'string' ||
-    providerSubscriptionId.length === 0
-  ) {
+  if (!(Object.values(PaymentGatewayType) as unknown[]).includes(gatewayType)) {
     throw new Error('Provider subscription sync job payload is invalid');
   }
-  return { gatewayType: gatewayType as PaymentGatewayType, providerSubscriptionId };
+  const providerSubscriptionId = record.providerSubscriptionId;
+  if (typeof providerSubscriptionId === 'string' && providerSubscriptionId.length > 0) {
+    return { gatewayType: gatewayType as PaymentGatewayType, providerSubscriptionId };
+  }
+  const providerPaymentId = record.providerPaymentId;
+  if (typeof providerPaymentId === 'string' && providerPaymentId.length > 0) {
+    return { gatewayType: gatewayType as PaymentGatewayType, providerPaymentId };
+  }
+  throw new Error('Provider subscription sync job payload is invalid');
 }
 
 function readEventId(data: unknown): string {

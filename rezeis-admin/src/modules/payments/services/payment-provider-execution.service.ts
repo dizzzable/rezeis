@@ -19,7 +19,21 @@ import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payme
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
-import { autopayNotAvailable, readProviderSubscriptionTerms } from '../utils/provider-subscription-terms.util';
+import {
+  autopayNotAvailable,
+  type ProviderSubscriptionTerms,
+  readProviderSubscriptionTerms,
+} from '../utils/provider-subscription-terms.util';
+import {
+  parseRollypayPlans,
+  pickRollypayPlan,
+  readRollypayPlanIds,
+  readRollypayTerminalId,
+  ROLLYPAY_API,
+  rollypayHeaders,
+  rollypayKopecks,
+  rollypayPayerId,
+} from '../utils/rollypay-subscription.util';
 import {
   buildResultUrl,
   buildWebhookUrl,
@@ -1320,6 +1334,10 @@ export class PaymentProviderExecutionService {
     const crypto = await import('crypto');
     const settings = readGatewaySettings(input.gateway.settings);
     const apiKey = requireSetting(settings, 'apiKey');
+    const subscriptionTerms = readProviderSubscriptionTerms(input.transaction.planSnapshot);
+    if (subscriptionTerms !== null) {
+      return this.createRollypaySubscription(input.transaction, settings, apiKey, subscriptionTerms);
+    }
 
     const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
@@ -1350,6 +1368,108 @@ export class PaymentProviderExecutionService {
       providerMode: 'REDIRECT',
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
       gatewayData: { provider: 'ROLLYPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['pay_url']) },
+    };
+  }
+
+  /**
+   * A recurring SBP subscription on one of the tariffs RollyPay set up for the
+   * kassa (docs.rollypay.io/api/recurring). The payer confirms it in the bank
+   * from `pay_url`; each paid cycle is then read back by
+   * `ProviderSubscriptionService`, never taken from this response.
+   */
+  private async createRollypaySubscription(
+    transaction: Transaction,
+    settings: Record<string, unknown>,
+    apiKey: string,
+    terms: ProviderSubscriptionTerms,
+  ): Promise<ProviderCheckoutResult> {
+    // Re-checked here, not only when the draft was made: a draft outlives the
+    // operator's switch, and nothing may sign a payer up the shop is not
+    // approved for.
+    if (!isAutopayApproved(PaymentGatewayType.ROLLYPAY, settings)) {
+      throw autopayNotAvailable('NOT_APPROVED');
+    }
+    const terminalId = readRollypayTerminalId(settings) as string;
+    const plansResponse = await firstValueFrom(
+      this.httpService.get(`${ROLLYPAY_API}/subscription-plans`, {
+        params: { terminal_id: terminalId },
+        headers: rollypayHeaders(apiKey),
+      }),
+    );
+    const plan = pickRollypayPlan(
+      parseRollypayPlans(plansResponse.data),
+      readRollypayPlanIds(settings),
+      terms,
+      terms.amount,
+    );
+    if (plan === null) {
+      throw autopayNotAvailable('PLAN');
+    }
+    // A fixed tariff takes its own sum and refuses `amount`; a tariff with a
+    // cap takes the sum instead of a payer id. The payer id is stable per
+    // customer, and the key makes a retried request return the same
+    // subscription instead of a second one.
+    const body =
+      plan.capKopecks === null
+        ? {
+            terminal_id: terminalId,
+            plan_id: plan.id,
+            payer_id: rollypayPayerId(transaction.userId),
+            merchant_subscription_ref: transaction.paymentId,
+          }
+        : {
+            terminal_id: terminalId,
+            plan_id: plan.id,
+            amount: `${terms.amount}.00`,
+            merchant_subscription_ref: transaction.paymentId,
+          };
+    const response = await firstValueFrom(
+      this.httpService.post(`${ROLLYPAY_API}/subscriptions`, body, {
+        headers: {
+          ...rollypayHeaders(apiKey),
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `rezeis-${transaction.id}`,
+        },
+      }),
+    );
+    const data = (response.data ?? {}) as Record<string, unknown>;
+    const providerSubscriptionId = readOptionalString(data, ['id']);
+    // `redirect_url` instead of `pay_url` on a kassa with H2H switched on.
+    const checkoutUrl = readOptionalString(data, ['pay_url', 'redirect_url']);
+    if (providerSubscriptionId === null || checkoutUrl === null) {
+      throw new ServiceUnavailableException('RollyPay create subscription: missing id or checkout url');
+    }
+    // The sum each charge will take is RollyPay's to say. A commission put on
+    // the payer would make it more than the price the cabinet showed, and the
+    // payer would be agreeing to a sum nobody told them: such a sign-up is
+    // stopped before anyone confirms it.
+    const payerKopecks = rollypayKopecks(data['payer_amount_rub']);
+    if (payerKopecks !== null && payerKopecks !== terms.amount * 100) {
+      try {
+        await firstValueFrom(
+          this.httpService.post(
+            `${ROLLYPAY_API}/subscriptions/${encodeURIComponent(providerSubscriptionId)}/stop`,
+            {},
+            { headers: rollypayHeaders(apiKey) },
+          ),
+        );
+      } catch {
+        // Unconfirmed and unshown: it cannot charge anyone.
+      }
+      throw autopayNotAvailable('PLAN');
+    }
+    return {
+      gatewayId: providerSubscriptionId,
+      checkoutUrl,
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['billing_status', 'state']),
+      gatewayData: {
+        provider: 'ROLLYPAY',
+        providerResponse: this.redactProviderResponse(data),
+        checkoutUrl,
+        providerSubscriptionId,
+        rollypayPlanId: plan.id,
+      },
     };
   }
 

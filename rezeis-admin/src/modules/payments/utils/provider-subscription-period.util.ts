@@ -42,6 +42,37 @@ export function plategaPeriodForDays(durationDays: number): ProviderPeriod | nul
   return null;
 }
 
+/** RollyPay's `interval` codes. */
+export type RollypayInterval = 'month' | 'quarter' | 'half_year' | 'year';
+
+/**
+ * RollyPay's periods, as its fixed tariffs count them: a month of 30 days, a
+ * quarter of 90, half a year of 180, a year of 365. Its `day` is left out:
+ * nobody sells a VPN by the day, and a daily tariff would overrun the 100
+ * charges RollyPay lists for a subscription within a few months.
+ */
+const ROLLYPAY_PERIODS: ReadonlyArray<{
+  readonly days: number;
+  readonly interval: RollypayInterval;
+  readonly period: ProviderPeriod;
+}> = [
+  { days: 30, interval: 'month', period: { unit: 'month', count: 1 } },
+  { days: 90, interval: 'quarter', period: { unit: 'month', count: 3 } },
+  { days: 180, interval: 'half_year', period: { unit: 'month', count: 6 } },
+  { days: 365, interval: 'year', period: { unit: 'year', count: 1 } },
+];
+
+export function rollypayPeriodForDays(durationDays: number): ProviderPeriod | null {
+  return ROLLYPAY_PERIODS.find((entry) => entry.days === durationDays)?.period ?? null;
+}
+
+export function rollypayIntervalFor(period: ProviderPeriod): RollypayInterval | null {
+  return (
+    ROLLYPAY_PERIODS.find((entry) => entry.period.unit === period.unit && entry.period.count === period.count)
+      ?.interval ?? null
+  );
+}
+
 /**
  * Platega takes the amount of one charge as an integer number of roubles, so a
  * price with kopecks cannot be charged as it is. Rounding would charge a price
