@@ -12,7 +12,9 @@ import {
   LADDER_BOT_DEADLINE_MS,
   LADDER_MAX_BOT_DEFERRALS,
   UserNotificationsService,
+  type DeliverFirstReachableInput,
   type DeliverFirstReachableResult,
+  type LadderAttempt,
 } from '../src/modules/notifications/services/user-notifications.service';
 import { OfflineBullMqQueue } from './helpers/bullmq-offline-queue';
 
@@ -231,13 +233,18 @@ function harness(options: HarnessOptions = {}) {
     undefined,
     emailDelivery,
   );
-  const deliver = (input: { eventId?: string | null; deferrals?: number } = {}) =>
+  const deliver = (
+    input: Pick<DeliverFirstReachableInput, 'eventId' | 'deferrals' | 'beforeSend' | 'afterSend' | 'skipChannels'> = {},
+  ) =>
     service.deliverFirstReachable({
       userId: 'user-anna',
       type: options.type ?? 'connect_help',
       payload: { subscriptionId: SUBSCRIPTION_ID, kind: 'paid', plan: 'Премиум', planName: 'Премиум' },
       eventId: input.eventId,
       deferrals: input.deferrals,
+      beforeSend: input.beforeSend,
+      afterSend: input.afterSend,
+      skipChannels: input.skipChannels,
       onFeedRowWritten: async (id) => {
         // Before any channel runs: nothing may have left yet.
         assert.equal(recorded.fetchCalls.length, 0, 'the bot was asked before the feed row id was reported');
@@ -504,6 +511,85 @@ describe('the e-mail rung', () => {
       assert.equal(outcome.attempts[2].detail, detail);
     });
   }
+});
+
+describe('a push or a letter is on record before and after it is asked', () => {
+  const NO_PUSH = { attempted: 0, delivered: 0, disabled: false } as const;
+
+  it('announces each step before asking it, with the steps so far, and its answer before going on', async () => {
+    const { recorded, deliver, queue } = harness({ fetch: UNCONFIRMED_204, push: NO_PUSH });
+    const log: string[] = [];
+    const outcome = await deliver({
+      beforeSend: async (channel, attempts) => {
+        log.push(`before ${channel} [${attempts.map((a) => `${a.channel}:${a.result}`).join(',')}]`);
+        // Nothing of this channel may have left yet.
+        log.push(`asked so far: push ${recorded.pushCalls.length}, letters ${queue.admitted.length}`);
+        return true;
+      },
+      afterSend: async (attempt: LadderAttempt) => {
+        log.push(`after ${attempt.channel}:${attempt.result}`);
+      },
+    });
+
+    assert.equal(outcome.outcome, 'email');
+    assert.deepEqual(log, [
+      'before push [bot:unconfirmed]',
+      'asked so far: push 0, letters 0',
+      'after push:unavailable',
+      'before email [bot:unconfirmed,push:unavailable]',
+      'asked so far: push 1, letters 0',
+      'after email:queued',
+    ]);
+  });
+
+  it('puts a bot message on record before it returns, and nothing about a bot that did not take it', async () => {
+    const delivered = harness({ fetch: CONFIRMED });
+    const seen: string[] = [];
+    const outcome = await delivered.deliver({
+      afterSend: async (attempt, attempts) => {
+        seen.push(`${attempt.channel}:${attempt.result} of [${attempts.map((a) => a.result).join(',')}]`);
+      },
+    });
+    assert.equal(outcome.outcome, 'bot');
+    assert.deepEqual(seen, ['bot:confirmed of [confirmed]']);
+
+    const deferred = harness({ fetch: BUSY_503 });
+    const unseen: string[] = [];
+    const later = await deferred.deliver({
+      afterSend: async (attempt) => {
+        unseen.push(attempt.result);
+      },
+    });
+    assert.equal(later.outcome, 'deferred');
+    assert.deepEqual(unseen, []);
+  });
+
+  it('asks nothing more, and answers busy, when a step is refused', async () => {
+    for (const refused of ['push', 'email'] as const) {
+      const { recorded, deliver, queue } = harness({ fetch: UNCONFIRMED_204, push: NO_PUSH });
+      const outcome = await deliver({ beforeSend: async (channel) => channel !== refused });
+
+      assert.equal(outcome.outcome, 'busy', `${refused} refused`);
+      assert.equal(recorded.pushCalls.length, refused === 'push' ? 0 : 1, `${refused} refused`);
+      assert.equal(queue.admitted.length, 0, `a letter went out with ${refused} refused`);
+    }
+  });
+
+  it('never asks a step a dead run began, and goes on without it', async () => {
+    const { recorded, deliver, queue } = harness({ fetch: UNCONFIRMED_204 });
+    const outcome = await deliver({ eventId: EVENT_ID, skipChannels: ['push'] });
+
+    assert.equal(outcome.outcome, 'email');
+    assert.equal(recorded.pushCalls.length, 0, 'the push a dead run began was asked again');
+    assert.deepEqual(channels(outcome), ['bot:unconfirmed', 'email:queued']);
+    assert.equal(queue.admitted.length, 1);
+
+    const { recorded: again, deliver: deliverAgain, queue: noLetters } = harness({ fetch: UNCONFIRMED_204 });
+    const banner = await deliverAgain({ eventId: EVENT_ID, skipChannels: ['push', 'email'] });
+    assert.equal(banner.outcome, 'banner');
+    assert.equal(again.pushCalls.length, 0);
+    assert.equal(noLetters.admitted.length, 0);
+  });
 });
 
 describe('the feed row, the switch and the template', () => {

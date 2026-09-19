@@ -8,6 +8,7 @@ import {
   CONNECT_HELP_CLOSING_MS,
   CONNECT_HELP_CRON,
   CONNECT_HELP_LAST_RESULT_KEY,
+  CONNECT_HELP_RESUME_CAP,
 } from '../src/modules/connect-help/connect-help.constants';
 import { connectHelpCandidatesSql, connectHelpWindow } from '../src/modules/connect-help/connect-help.sql';
 import { ConnectHelpSweepService } from '../src/modules/connect-help/services/connect-help-sweep.service';
@@ -37,6 +38,11 @@ describe('the window, on a fixed clock', () => {
     assert.equal(week.to.toISOString(), '2026-09-12T10:40:00.000Z');
   });
 
+  it('keeps most of a cycle for new candidates: resumed ladders take at most a fifth of it', () => {
+    assert.equal(CONNECT_HELP_BATCH, 100);
+    assert.equal(CONNECT_HELP_RESUME_CAP, 20);
+  });
+
   it('closes on the last twenty minutes, and bounds the payment’s creation a day earlier', () => {
     const window = connectHelpWindow(now, 24);
     assert.equal(CONNECT_HELP_CLOSING_MS, 20 * 60 * 1000);
@@ -50,11 +56,15 @@ describe('the window, on a fixed clock', () => {
         now,
         settings: { enabled: true, delayHours: 24, includeTrials },
         limit: CONNECT_HELP_BATCH,
+        resumeCap: CONNECT_HELP_RESUME_CAP,
       });
       assert.doesNotMatch(query.sql, /now\(\)|current_timestamp|localtimestamp/i);
       const instants = query.values.filter((value): value is Date => value instanceof Date);
-      assert.ok(instants.length >= 4, `only ${instants.length} bound instants`);
+      // The paid window's three (and the trial window's two): the begun ladders
+      // are listed at any age, so they bind none.
+      assert.equal(instants.length, includeTrials ? 5 : 3, `${instants.length} bound instants`);
       assert.equal(query.values.includes(CONNECT_HELP_BATCH), true);
+      assert.equal(query.values.includes(CONNECT_HELP_RESUME_CAP), true, 'the resumed ladders are not capped');
       assert.equal(/'trial'::text/.test(query.sql), includeTrials, 'the trial arm follows the switch');
     }
   });

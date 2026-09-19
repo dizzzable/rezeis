@@ -49,6 +49,8 @@ const LIVE_STATUS = {
     merged: 0,
     skippedUnverifiable: 0,
     skippedTemplateOff: 0,
+    stopped: 0,
+    failed: 0,
     deferred: 0,
     leftOver: 0,
     errors: 0,

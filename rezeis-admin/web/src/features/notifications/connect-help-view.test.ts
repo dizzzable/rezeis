@@ -65,6 +65,8 @@ function cycle(overrides: Partial<ConnectHelpCycle> = {}): ConnectHelpCycle {
     merged: 0,
     skippedUnverifiable: 0,
     skippedTemplateOff: 0,
+    stopped: 0,
+    failed: 0,
     deferred: 0,
     leftOver: 0,
     errors: 0,
@@ -163,7 +165,20 @@ describe('the last-cycle line', () => {
 
   it('adds what else happened', () => {
     const line = lastCycleSentence(tRu, cycle({ deferred: 2, merged: 1 }), { timezone: 'UTC', locale: 'ru' })
-    expect(line).toMatch(/ждут проверки 5\. Ещё: бот не ответил, повторим через 10 минут — 2, уже помогли по другой подписке — 1\.$/)
+    expect(line).toMatch(/ждут проверки 5\. Ещё: бот не ответил, повторим в следующих проходах — 2, уже помогли по другой подписке — 1\.$/)
+  })
+
+  it('says how begun ladders ended without sending', () => {
+    const line = lastCycleSentence(tRu, cycle({ stopped: 2, failed: 1 }), { timezone: 'UTC', locale: 'ru' })
+    expect(line).toMatch(/Ещё: остановлено, ничего не отправлено — 2, не удалось отправить — 1.$/)
+    const english = lastCycleSentence(tEn, cycle({ stopped: 2, failed: 1 }), { timezone: 'UTC', locale: 'en' })
+    expect(english).toMatch(/stopped, nothing sent — 2, could not send — 1.$/)
+  })
+
+  it('says what switching the help off stopped', () => {
+    expect(lastCycleSentence(tRu, cycle({ standDown: 'disabled', stopped: 3 }), { timezone: 'UTC', locale: 'ru' })).toBe(
+      'Последний проход в 07:40: автоматическая отправка была выключена. Ещё: остановлено, ничего не отправлено — 3.',
+    )
   })
 
   it('says when the help was off, and when there was no pass at all', () => {
@@ -186,6 +201,20 @@ describe('the log in words', () => {
     expect(outcomeLabel(tRu, 'skipped_unverifiable')).toBe('Не удалось проверить')
     expect(outcomeLabel(tRu, null)).toBe('В процессе')
     expect(outcomeLabel(tRu, 'something_new')).toBe('something_new')
+  })
+
+  it('names how a begun ladder ended without sending, in both languages', () => {
+    expect(outcomeLabel(tRu, 'skipped_connected')).toBe('Подключился до отправки')
+    expect(outcomeLabel(tRu, 'skipped_stopped')).toBe('Остановлено, ничего не отправлено')
+    expect(outcomeLabel(tRu, 'skipped_failed')).toBe('Не удалось отправить')
+    expect(outcomeLabel(tEn, 'skipped_connected')).toBe('Connected before sending')
+    expect(outcomeLabel(tEn, 'skipped_stopped')).toBe('Stopped, nothing sent')
+    expect(outcomeLabel(tEn, 'skipped_failed')).toBe('Could not send')
+    expect(attemptLabel(tRu, { channel: 'push', result: 'interrupted', at: '' })).toBe(
+      'push: прервано, повторно не отправляли',
+    )
+    expect(attemptLabel(tRu, { channel: 'email', result: 'sending', at: '' })).toBe('почта: отправляется')
+    expect(attemptLabel(tEn, { channel: 'push', result: 'interrupted', at: '' })).toBe('push: interrupted, not sent again')
   })
 
   it('says every step', () => {
@@ -225,6 +254,20 @@ describe('the log in words', () => {
 })
 
 describe('the status answer', () => {
+  it('reads how many begun ladders the last pass stopped or gave up', () => {
+    const status = readConnectHelpStatus({
+      lastCycle: { finishedAt: '2026-09-19T07:40:00.000Z', stopped: 4, failed: 1 },
+      templates: {},
+      timezone: 'UTC',
+    })
+    expect(status?.lastCycle?.stopped).toBe(4)
+    expect(status?.lastCycle?.failed).toBe(1)
+    expect(readConnectHelpStatus({ lastCycle: { finishedAt: 'x', stopped: -1, failed: 'many' } })?.lastCycle).toMatchObject({
+      stopped: 0,
+      failed: 0,
+    })
+  })
+
   it('reads a zone, and UTC when the panel has none', () => {
     expect(readConnectHelpStatus({ timezone: 'Asia/Vladivostok' })?.timezone).toBe('Asia/Vladivostok')
     expect(readConnectHelpStatus({})?.timezone).toBe('UTC')

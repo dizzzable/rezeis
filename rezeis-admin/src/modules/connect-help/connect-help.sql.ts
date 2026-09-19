@@ -32,12 +32,34 @@ import {
 import {
   CONNECT_HELP_CLOSING_MS,
   CONNECT_HELP_FULFILMENT_SLACK_MS,
-  CONNECT_HELP_IN_FLIGHT_MS,
   CONNECT_HELP_MERGE_WINDOW_MS,
   CONNECT_HELP_SOURCE_AUTO,
 } from './connect-help.constants';
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * A push or e-mail step recorded in `help_attempts` as begun and not yet
+ * answered ({@link recordStepsSql}); `interrupted` is one whose run died
+ * before the answer. Both are the sender's words, never a channel's.
+ */
+export const STEP_SENDING = 'sending';
+export const STEP_INTERRUPTED = 'interrupted';
+
+/** The results that mean a channel TOOK the notice: bot `confirmed`, push `delivered`, e-mail `queued`. */
+const TAKEN_RESULTS = ['confirmed', 'delivered', 'queued'] as const;
+
+/**
+ * The sender's own closes of a claim it had made: the ladder stops, nothing
+ * was sent. Written only on an open claim ({@link closeClaimSql}).
+ */
+export const CLOSE_OUTCOMES = [
+  'skipped_connected',
+  'skipped_stopped',
+  'skipped_unverifiable',
+  'skipped_failed',
+] as const satisfies readonly HelpOutcome[];
+export type CloseOutcome = (typeof CLOSE_OUTCOMES)[number];
 
 /** `paid` — the customer paid; `trial` — a trial, a gift, a promo, a 0 ₽ checkout. */
 export type ConnectHelpKind = 'paid' | 'trial';
@@ -81,7 +103,7 @@ export interface ConnectHelpCandidateRow {
   readonly anchorAt: Date;
   /** The payment that made it paid; `null` for a trial or gift and for a resumed row. */
   readonly anchorTransactionId: string | null;
-  /** Already claimed by the sender and not finished — a deferred bot step. */
+  /** Claimed by the sender and not finished — a deferred bot step, or a claim to close. */
   readonly inFlight: boolean;
   /** The feed row of a resumed ladder. */
   readonly eventId: string | null;
@@ -103,25 +125,30 @@ function eligibleSql(): Prisma.Sql {
 }
 
 /**
- * The cycle's candidates, oldest moment first, at most `limit`:
+ * The cycle's candidates, at most `limit`:
  *
+ *   in flight the sender's own claims whose ladder has not finished — resumed
+ *             with their feed row and deferrals. EVERY one of them, whatever
+ *             its age, kind or eligibility now: a claimed row must reach a
+ *             final outcome, and one no longer eligible (connected, ended,
+ *             trials switched off) is listed exactly so that it is closed. At
+ *             most `resumeCap`, oldest decision first, and they go first;
  *   paid      the payment that made the subscription PAID (its first paid
  *             money, never a renewal — `becamePaidAnchorSql`) fulfilled inside
  *             the window;
  *   trial     with trials switched on: a subscription in «пробный или
- *             подарок» (`trialBucketSql`) created inside the window;
- *   in flight the sender's own claims whose ladder has not finished, decided
- *             within the last day — resumed with their feed row and deferrals.
+ *             подарок» (`trialBucketSql`) created inside the window.
  *
- * New candidates must be undecided; every candidate must still be eligible.
+ * New candidates — oldest moment first — must be undecided and eligible, and
+ * always keep at least `limit − resumeCap` places.
  */
 export function connectHelpCandidatesSql(input: {
   readonly now: Date;
   readonly settings: ConnectHelpSettingsView;
   readonly limit: number;
+  readonly resumeCap: number;
 }): Prisma.Sql {
   const window = connectHelpWindow(input.now, input.settings.delayHours);
-  const inFlightSince = new Date(input.now.getTime() - CONNECT_HELP_IN_FLIGHT_MS);
   const trialArm = input.settings.includeTrials
     ? Prisma.sql`
       UNION ALL
@@ -136,16 +163,24 @@ export function connectHelpCandidatesSql(input: {
          AND ${eligibleSql()}
          AND "c"."help_decided_at" IS NULL`
     : Prisma.empty;
-  const inFlightKinds = input.settings.includeTrials
-    ? Prisma.sql`('paid', 'trial')`
-    : Prisma.sql`('paid')`;
   return Prisma.sql`
     SELECT "subscriptionId", "userId", "kind", "anchorAt", "anchorTransactionId", "inFlight",
            "eventId", "deferrals"
       FROM (
-      SELECT "s"."id" AS "subscriptionId", "s"."user_id" AS "userId", 'paid'::text AS "kind",
-             "a"."anchor_at" AS "anchorAt", "a"."transaction_id" AS "anchorTransactionId",
-             false AS "inFlight", NULL::text AS "eventId", 0 AS "deferrals"
+      (SELECT "s"."id" AS "subscriptionId", "s"."user_id" AS "userId", "c"."help_kind" AS "kind",
+              COALESCE("c"."help_anchor_at", "c"."help_decided_at") AS "anchorAt",
+              NULL::text AS "anchorTransactionId", true AS "inFlight",
+              "c"."help_event_id" AS "eventId", "c"."help_deferrals" AS "deferrals"
+         FROM "subscription_connect_states" "c"
+         JOIN "subscriptions" "s" ON "s"."id" = "c"."subscription_id"
+        WHERE "c"."help_decided_at" IS NOT NULL
+          AND "c"."help_outcome" IS NULL
+          AND "c"."help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+        ORDER BY "c"."help_decided_at" ASC, "c"."subscription_id" ASC
+        LIMIT ${input.resumeCap})
+      UNION ALL
+      SELECT "s"."id", "s"."user_id", 'paid'::text, "a"."anchor_at", "a"."transaction_id",
+             false, NULL::text, 0
         FROM ${becamePaidAnchorSql()} "a"
         JOIN "subscriptions" "s" ON "s"."id" = "a"."subscription_id"
         JOIN "users" "u" ON "u"."id" = "s"."user_id"
@@ -155,20 +190,8 @@ export function connectHelpCandidatesSql(input: {
          AND "a"."anchor_at" <= ${window.to}
          AND ${eligibleSql()}
          AND "c"."help_decided_at" IS NULL${trialArm}
-      UNION ALL
-      SELECT "s"."id", "s"."user_id", "c"."help_kind", "c"."help_anchor_at", NULL::text,
-             true, "c"."help_event_id", "c"."help_deferrals"
-        FROM "subscription_connect_states" "c"
-        JOIN "subscriptions" "s" ON "s"."id" = "c"."subscription_id"
-        JOIN "users" "u" ON "u"."id" = "s"."user_id"
-       WHERE "c"."help_decided_at" >= ${inFlightSince}
-         AND "c"."help_outcome" IS NULL
-         AND "c"."help_source" = ${CONNECT_HELP_SOURCE_AUTO}
-         AND "c"."help_kind" IN ${inFlightKinds}
-         AND "c"."help_anchor_at" IS NOT NULL
-         AND ${eligibleSql()}
       ) "candidate"
-     ORDER BY "anchorAt" ASC, "subscriptionId" ASC
+     ORDER BY "inFlight" DESC, "anchorAt" ASC, "subscriptionId" ASC
      LIMIT ${input.limit}`;
 }
 
@@ -180,6 +203,15 @@ export interface ConnectHelpRecheckRow {
   readonly undecided: boolean;
   /** Paid: the anchor payment is still COMPLETED. Trial: still in «пробный или подарок». */
   readonly stillQualifies: boolean;
+  /** A connection is on record (webhook, cabinet or probe). */
+  readonly connected: boolean;
+  /** The sender's own claim, still without a final outcome. */
+  readonly open: boolean;
+  readonly decidedAt: Date | null;
+  /** `help_attempts` as stored — the steps a resumed ladder already took. */
+  readonly attempts: unknown;
+  /** The subscription's owner NOW — after an account merge, the surviving account. */
+  readonly userId: string;
   /** The facts the notice may print — the same fields every subscription notice carries. */
   readonly planName: string | null;
   readonly expiresAt: Date | null;
@@ -209,6 +241,13 @@ export function connectHelpRecheckSql(input: {
     SELECT (${eligibleSql()}) AS "eligible",
            ("c"."help_decided_at" IS NULL) AS "undecided",
            (${qualifies}) AS "stillQualifies",
+           ("c"."first_connected_at" IS NOT NULL) AS "connected",
+           COALESCE("c"."help_decided_at" IS NOT NULL
+                    AND "c"."help_outcome" IS NULL
+                    AND "c"."help_source" = ${CONNECT_HELP_SOURCE_AUTO}, false) AS "open",
+           "c"."help_decided_at" AS "decidedAt",
+           "c"."help_attempts" AS "attempts",
+           "s"."user_id" AS "userId",
            NULLIF("s"."plan_snapshot"->>'name', '') AS "planName",
            "s"."expires_at" AS "expiresAt",
            "s"."traffic_limit" AS "trafficLimit",
@@ -330,7 +369,12 @@ export function recordDeferralSql(input: {
 /**
  * The final outcome. Guarded on `help_outcome IS NULL`, so of two replicas
  * finishing one resumed ladder only one matches — and only that one emits the
- * event.
+ * event. `attempts` are the steps not yet on the row.
+ *
+ * One exception: a channel that TOOK the notice (bot, push, e-mail) finishes
+ * over one of the sender's own closes ({@link CLOSE_OUTCOMES}) that a second
+ * replica wrote while this one was sending — a message went out, and the log
+ * must say so rather than «ничего не отправлено».
  */
 export function finalizeSql(input: {
   readonly subscriptionId: string;
@@ -339,6 +383,10 @@ export function finalizeSql(input: {
   readonly eventId: string | null;
   readonly now: Date;
 }): Prisma.Sql {
+  const taken = input.outcome === 'bot' || input.outcome === 'push' || input.outcome === 'email';
+  const open = taken
+    ? Prisma.sql`("help_outcome" IS NULL OR "help_outcome" IN (${Prisma.join([...CLOSE_OUTCOMES])}))`
+    : Prisma.sql`"help_outcome" IS NULL`;
   return Prisma.sql`
     UPDATE "subscription_connect_states"
        SET "help_outcome" = ${input.outcome},
@@ -347,7 +395,141 @@ export function finalizeSql(input: {
            "updated_at" = ${input.now}::timestamptz
      WHERE "subscription_id" = ${input.subscriptionId}
        AND "help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+       AND ${open}`;
+}
+
+/**
+ * A claimed ladder closed WITHOUT sending — connected first, stopped, not
+ * verifiable in time, failed for good. Only an open claim: a close never
+ * overwrites an outcome.
+ */
+export function closeClaimSql(input: {
+  readonly subscriptionId: string;
+  readonly outcome: CloseOutcome;
+  readonly now: Date;
+}): Prisma.Sql {
+  return Prisma.sql`
+    UPDATE "subscription_connect_states"
+       SET "help_outcome" = ${input.outcome}, "updated_at" = ${input.now}::timestamptz
+     WHERE "subscription_id" = ${input.subscriptionId}
+       AND "help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+       AND "help_decided_at" IS NOT NULL
        AND "help_outcome" IS NULL`;
+}
+
+/**
+ * The channel a row's steps say already took the notice — `bot`, `push`,
+ * `email` — or NULL. A close written over a claim whose delivery is on record
+ * (its finish was lost) says that channel, never «ничего не отправлено».
+ */
+function takenOutcomeSql(): Prisma.Sql {
+  return Prisma.sql`(SELECT CASE "wp4_t"."value"->>'channel' WHEN 'bot' THEN 'bot' WHEN 'push' THEN 'push' ELSE 'email' END
+       FROM jsonb_array_elements("help_attempts") WITH ORDINALITY AS "wp4_t"("value", "position")
+      WHERE ("wp4_t"."value"->>'channel', "wp4_t"."value"->>'result')
+            IN (('bot', 'confirmed'), ('push', 'delivered'), ('email', 'queued'))
+      ORDER BY "wp4_t"."position"
+      LIMIT 1)`;
+}
+
+/**
+ * Every open claim of the sender, closed as `skipped_stopped`: the operator
+ * switched the automatic help off, and a ladder begun before must not finish
+ * by itself the day it is switched on again. One whose delivery is on record
+ * gets that channel instead. Returns each row's outcome.
+ */
+export function closeAllOpenClaimsSql(now: Date): Prisma.Sql {
+  return Prisma.sql`
+    UPDATE "subscription_connect_states"
+       SET "help_outcome" = COALESCE(${takenOutcomeSql()}, 'skipped_stopped'), "updated_at" = ${now}::timestamptz
+     WHERE "help_decided_at" IS NOT NULL
+       AND "help_outcome" IS NULL
+       AND "help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+    RETURNING "help_outcome" AS "outcome"`;
+}
+
+/**
+ * Steps put on record AT ONCE, with the steps this call took before them, so
+ * the row keeps them in order. Two uses:
+ *
+ *   a push or e-mail step recorded as BEGUN (`sending`) before the channel is
+ *   asked — a push cannot be taken back and a second one is a second message,
+ *   so neither a resume nor a second replica may ask again what one run began;
+ *   the bot's `confirmed`, the moment it came back — a resume then finishes on
+ *   it instead of asking a relay that may be down by then, and going on to push.
+ *
+ * One row updated = recorded by this run; zero = the claim is no longer open,
+ * a channel already took the notice, or another run has a step begun and not
+ * answered.
+ */
+export function recordStepsSql(input: {
+  readonly subscriptionId: string;
+  readonly steps: readonly unknown[];
+  readonly now: Date;
+}): Prisma.Sql {
+  return Prisma.sql`
+    UPDATE "subscription_connect_states"
+       SET "help_attempts" = "help_attempts" || ${JSON.stringify(input.steps)}::jsonb,
+           "updated_at" = ${input.now}::timestamptz
+     WHERE "subscription_id" = ${input.subscriptionId}
+       AND "help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+       AND "help_outcome" IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements("help_attempts") AS "wp4_e"("value")
+          WHERE "wp4_e"."value"->>'result' IN (${Prisma.join([STEP_SENDING, ...TAKEN_RESULTS])}))`;
+}
+
+/**
+ * The answer to a begun step, written in its place — at once, before the
+ * ladder goes on, so a push that went out is on record even if everything
+ * after it fails. Also turns a begun step whose run died into `interrupted`.
+ */
+export function recordStepResultSql(input: {
+  readonly subscriptionId: string;
+  readonly begun: unknown;
+  readonly result: unknown;
+  readonly now: Date;
+}): Prisma.Sql {
+  const begun = JSON.stringify(input.begun);
+  return Prisma.sql`
+    UPDATE "subscription_connect_states"
+       SET "help_attempts" = (
+             SELECT COALESCE(jsonb_agg(CASE WHEN "wp4_e"."value" = ${begun}::jsonb
+                                            THEN ${JSON.stringify(input.result)}::jsonb
+                                            ELSE "wp4_e"."value" END
+                                       ORDER BY "wp4_e"."position"), '[]'::jsonb)
+               FROM jsonb_array_elements("help_attempts") WITH ORDINALITY AS "wp4_e"("value", "position")),
+           "updated_at" = ${input.now}::timestamptz
+     WHERE "subscription_id" = ${input.subscriptionId}
+       AND "help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+       AND "help_attempts" @> jsonb_build_array(${begun}::jsonb)`;
+}
+
+/**
+ * A throw while the sender held an open claim, counted on the row (an entry
+ * with `error`, which the log does not show as a step). At `maxFailures` the
+ * claim is given up as `skipped_failed` — or as the channel whose delivery is
+ * on record, if one is. Returns the outcome it left.
+ */
+export function recordFailureSql(input: {
+  readonly subscriptionId: string;
+  readonly detail: string;
+  readonly maxFailures: number;
+  readonly now: Date;
+}): Prisma.Sql {
+  const entry = JSON.stringify([{ error: input.detail, at: input.now.toISOString() }]);
+  return Prisma.sql`
+    UPDATE "subscription_connect_states"
+       SET "help_attempts" = "help_attempts" || ${entry}::jsonb,
+           "help_outcome" = CASE
+             WHEN (SELECT count(*) FROM jsonb_array_elements("help_attempts") AS "wp4_e"("value")
+                    WHERE ("wp4_e"."value"->>'error') IS NOT NULL) + 1 >= ${input.maxFailures}
+             THEN COALESCE(${takenOutcomeSql()}, 'skipped_failed') ELSE NULL END,
+           "updated_at" = ${input.now}::timestamptz
+     WHERE "subscription_id" = ${input.subscriptionId}
+       AND "help_source" = ${CONNECT_HELP_SOURCE_AUTO}
+       AND "help_decided_at" IS NOT NULL
+       AND "help_outcome" IS NULL
+    RETURNING "help_outcome" AS "outcome"`;
 }
 
 /** The log's filter: an outcome, or `in_flight` for a decision whose ladder has not finished. */

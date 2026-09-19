@@ -129,6 +129,10 @@ export interface OperatorMessageResult {
  * `relay_off`, `not_configured`, `no_subscription`, `no_mailer`,
  * `not_mailable`, `smtp_off`, `notify_users_off`, `no_verified_email`) or how
  * it failed.
+ *
+ * The caller may also record a push or e-mail step as `sending` before it is
+ * asked (`beforeSend`) and, if its run dies before the answer, as
+ * `interrupted` — the caller's words for the row, never the ladder's.
  */
 export interface LadderAttempt {
   readonly channel: 'bot' | 'push' | 'email';
@@ -149,7 +153,10 @@ export interface LadderAttempt {
  *                         written and nothing is sent;
  *   deferred              the bot could not be asked (a timeout, a network
  *                         failure, a 5xx): call again later with the same
- *                         `eventId` and one more deferral.
+ *                         `eventId` and one more deferral;
+ *   busy                  the caller's `beforeSend` refused a push or e-mail
+ *                         step — another run holds it, or the notice is no
+ *                         longer the caller's to send: nothing more was asked.
  */
 export type LadderOutcome =
   | 'bot'
@@ -158,7 +165,8 @@ export type LadderOutcome =
   | 'banner'
   | 'opted_out'
   | 'skipped_template_off'
-  | 'deferred';
+  | 'deferred'
+  | 'busy';
 
 export interface DeliverFirstReachableInput {
   readonly userId: string;
@@ -178,6 +186,26 @@ export interface DeliverFirstReachableInput {
    * bookkeeping then resumes on the same id rather than minting another.
    */
   readonly onFeedRowWritten?: (eventId: string) => Promise<void>;
+  /**
+   * Push and e-mail steps an earlier run of this same notice began and never
+   * answered (the worker died mid-step): not asked again — a push cannot be
+   * taken back, and a second one is a second message.
+   */
+  readonly skipChannels?: ReadonlyArray<'push' | 'email'>;
+  /**
+   * Awaited right BEFORE push or e-mail is asked, with the steps this call
+   * took so far, so the caller can record the step as begun first. `false`:
+   * the channel is not asked, nothing after it either, and the call answers
+   * `busy`.
+   */
+  readonly beforeSend?: (channel: 'push' | 'email', attempts: readonly LadderAttempt[]) => Promise<boolean>;
+  /**
+   * Awaited right AFTER push or e-mail answered, and after the bot DELIVERED,
+   * with that step and the steps this call took so far (it included), before
+   * the ladder returns or goes on — so an answer, a delivery above all, is on
+   * record even when whatever comes after it fails.
+   */
+  readonly afterSend?: (attempt: LadderAttempt, attempts: readonly LadderAttempt[]) => Promise<void>;
 }
 
 export interface DeliverFirstReachableResult {
@@ -616,6 +644,11 @@ export class UserNotificationsService {
    * No operator mirror: the sender's own `subscription.not_connected` event is
    * the operator's copy, and a mirror would put the same customer in the topic
    * twice.
+   *
+   * A caller that resumes the ladder passes `beforeSend` / `afterSend` (push
+   * and e-mail recorded as begun, then answered; a bot delivery recorded at
+   * once) and `skipChannels` (the steps a dead run began): the bot may be
+   * asked again — it deduplicates on the event id — a push or a letter never.
    */
   public async deliverFirstReachable(
     input: DeliverFirstReachableInput,
@@ -683,29 +716,45 @@ export class UserNotificationsService {
       bannerUrl,
     });
     attempts.push(bot.attempt);
-    if (bot.verdict === 'delivered') return { outcome: 'bot', eventId, attempts };
+    if (bot.verdict === 'delivered') {
+      if (input.afterSend !== undefined) await input.afterSend(bot.attempt, [...attempts]);
+      return { outcome: 'bot', eventId, attempts };
+    }
     if (bot.verdict === 'retry' && (input.deferrals ?? 0) < LADDER_MAX_BOT_DEFERRALS) {
       return { outcome: 'deferred', eventId, attempts };
     }
 
-    const push = await this.ladderPushStep({
-      eventId,
-      userId: input.userId,
-      type: input.type,
-      payload: input.payload,
-      rendered,
-    });
-    attempts.push(push.attempt);
-    if (push.verdict === 'delivered') return { outcome: 'push', eventId, attempts };
+    const skip = new Set(input.skipChannels ?? []);
+    if (!skip.has('push')) {
+      if (input.beforeSend !== undefined && !(await input.beforeSend('push', [...attempts]))) {
+        return { outcome: 'busy', eventId, attempts };
+      }
+      const push = await this.ladderPushStep({
+        eventId,
+        userId: input.userId,
+        type: input.type,
+        payload: input.payload,
+        rendered,
+      });
+      attempts.push(push.attempt);
+      if (input.afterSend !== undefined) await input.afterSend(push.attempt, [...attempts]);
+      if (push.verdict === 'delivered') return { outcome: 'push', eventId, attempts };
+    }
 
-    const email = await this.ladderEmailStep({
-      eventId,
-      userId: input.userId,
-      type: input.type,
-      rendered,
-    });
-    attempts.push(email.attempt);
-    if (email.verdict === 'delivered') return { outcome: 'email', eventId, attempts };
+    if (!skip.has('email')) {
+      if (input.beforeSend !== undefined && !(await input.beforeSend('email', [...attempts]))) {
+        return { outcome: 'busy', eventId, attempts };
+      }
+      const email = await this.ladderEmailStep({
+        eventId,
+        userId: input.userId,
+        type: input.type,
+        rendered,
+      });
+      attempts.push(email.attempt);
+      if (input.afterSend !== undefined) await input.afterSend(email.attempt, [...attempts]);
+      if (email.verdict === 'delivered') return { outcome: 'email', eventId, attempts };
+    }
 
     return { outcome: 'banner', eventId, attempts };
   }

@@ -12,6 +12,30 @@ export const CONNECT_HELP_CRON = '*/10 * * * *';
 /** At most this many subscriptions decided (or resumed) per cycle, oldest first. */
 export const CONNECT_HELP_BATCH = 100;
 
+/**
+ * Of those, at most this many are claimed ladders being resumed, so the new
+ * candidates always keep the rest. A resumed row costs at most the bot's 15 s
+ * (a relay outage defers every one of them), so twenty take five of the eight
+ * minutes at worst and new candidates still get three — rather than the
+ * resumed rows, oldest first, eating the whole cycle every cycle.
+ */
+export const CONNECT_HELP_RESUME_CAP = 20;
+
+/**
+ * Throws after which a claimed ladder is given up as `skipped_failed`,
+ * counted on the row across cycles: nothing may stay «В процессе» for ever
+ * because one step keeps failing.
+ */
+export const CONNECT_HELP_MAX_FAILURES = 5;
+
+/**
+ * A push or e-mail step recorded as begun (`sending`) but never answered is
+ * taken to be interrupted — the worker died mid-step — once it is this old:
+ * one cron period, far longer than any step takes. Younger, it may belong to
+ * another replica that is sending right now, and the row is left alone.
+ */
+export const CONNECT_HELP_STEP_STALE_MS = 10 * 60 * 1000;
+
 /** The notice for a customer who PAID — the text may say «оплачена». */
 export const CONNECT_HELP_TYPE = 'connect_help';
 
@@ -29,9 +53,11 @@ export const CONNECT_HELP_SOURCE_AUTO = 'auto';
 export const CONNECT_HELP_MERGE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * How long a claimed row whose ladder has not finished — a bot step deferred
- * by a relay outage — keeps being resumed. Three deferrals take half an hour;
- * the rest is room for the worker being down.
+ * How long, counted from `help_decided_at`, a claimed row whose ladder has not
+ * finished — a bot step deferred by a relay outage — may wait for the panel to
+ * answer. Past it, a row that still cannot be verified is closed as
+ * `skipped_unverifiable`. Three deferrals take half an hour; the rest is room
+ * for Remnawave or the worker being down.
  */
 export const CONNECT_HELP_IN_FLIGHT_MS = 24 * 60 * 60 * 1000;
 

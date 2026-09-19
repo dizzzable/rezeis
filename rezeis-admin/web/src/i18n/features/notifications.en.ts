@@ -93,7 +93,7 @@ export const en = {
       },
       lastCycle: {
         infoLabel: 'About: the last pass',
-        info: '“Checked” is how many subscriptions the server re-read in Remnawave before sending. “Awaiting a check” could not be checked yet: no message goes to them until a check succeeds, and if the three days run out first, the log shows them as “Could not verify”.',
+        info: '“Checked” is how many subscriptions the server re-read in Remnawave before sending. “Awaiting a check” could not be checked yet: no message goes to them until a check succeeds, and if the three days run out first, the log shows them as “Could not verify”. If checking stops working once sending has begun (the bot did not answer and it is being retried), the wait is one day from the decision — then the outcome is the same.',
         none: 'No passes yet.',
         disabled: 'Last pass at {{time}}: sending automatically was off.',
         summary:
@@ -106,11 +106,13 @@ export const en = {
         },
         more: 'Also: {{parts}}.',
         extras: {
-          deferred: 'the bot did not answer, retrying in 10 minutes — {{count}}',
+          deferred: 'the bot did not answer, retrying in the next passes — {{count}}',
           optedOut: 'the customer switched these notices off — {{count}}',
           merged: 'already helped for another subscription — {{count}}',
           skippedUnverifiable: 'could not verify — {{count}}',
           skippedTemplateOff: 'template switched off — {{count}}',
+          stopped: 'stopped, nothing sent — {{count}}',
+          failed: 'could not send — {{count}}',
           leftOver: 'not reached in this pass — {{count}}',
           errors: 'errors — {{count}}',
         },
@@ -133,7 +135,7 @@ export const en = {
         broadcastInfo: 'The automatic help goes out for new purchases only. This link opens a broadcast draft filtered to “Paid and did not connect” for the last 7 days, with the text filled in. Whoever the broadcast reaches will not get the automatic message.',
         log: 'Log',
         logInfoLabel: 'About: the log',
-        logInfo: 'Every decision about a subscription: when, for whom, which channel reached the customer and what was tried. Times are in the panel’s time zone.',
+        logInfo: 'Every decision about a subscription: when, for whom, which channel reached the customer and what was tried. “In progress” means sending has begun and has not finished: for example, the bot did not answer and it is retried in the next passes. Begun sending always ends somehow: the customer connected in the meantime — “Connected before sending”; the help or the trials were switched off, or the subscription ended — “Stopped, nothing sent”; sending failed again and again — “Could not send”. Times are in the panel’s time zone.',
       },
       toasts: {
         saved: 'Connection help settings saved',
@@ -160,6 +162,9 @@ export const en = {
           merged: 'Already helped for another subscription',
           skipped_unverifiable: 'Could not verify',
           skipped_template_off: 'Template off',
+          skipped_connected: 'Connected before sending',
+          skipped_stopped: 'Stopped, nothing sent',
+          skipped_failed: 'Could not send',
           broadcast: 'Broadcast',
           in_flight: 'In progress',
         },
@@ -187,10 +192,14 @@ export const en = {
           push: {
             delivered: 'delivered',
             failed: 'refused by the browser',
+            sending: 'sending',
+            interrupted: 'interrupted, not sent again',
           },
           email: {
             queued: 'letter sent',
             failed: 'could not send',
+            sending: 'sending',
+            interrupted: 'interrupted, not sent again',
           },
           unavailable: {
             no_telegram: 'no Telegram',

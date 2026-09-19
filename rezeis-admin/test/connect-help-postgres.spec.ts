@@ -5,7 +5,11 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
-import { CONNECT_HELP_LAST_RESULT_KEY } from '../src/modules/connect-help/connect-help.constants';
+import {
+  CONNECT_HELP_LAST_RESULT_KEY,
+  CONNECT_HELP_MAX_FAILURES,
+} from '../src/modules/connect-help/connect-help.constants';
+import { connectHelpCandidatesSql, type ConnectHelpCandidateRow } from '../src/modules/connect-help/connect-help.sql';
 import {
   ConnectHelpSweepService,
   type ConnectHelpCycleResult,
@@ -169,6 +173,19 @@ async function stateOf(subscriptionId: string): Promise<StateRow | null> {
   return rows[0] ?? null;
 }
 
+/** The steps on the row as `channel:result` — without the sender's failure entries, which carry no channel. */
+function stepsOf(state: StateRow | null): string[] {
+  const entries = Array.isArray(state?.help_attempts) ? (state.help_attempts as Array<Record<string, unknown>>) : [];
+  return entries
+    .filter((entry) => typeof entry['channel'] === 'string')
+    .map((entry) => `${String(entry['channel'])}:${String(entry['result'])}`);
+}
+
+function failuresOf(state: StateRow | null): number {
+  const entries = Array.isArray(state?.help_attempts) ? (state.help_attempts as Array<Record<string, unknown>>) : [];
+  return entries.filter((entry) => typeof entry['error'] === 'string').length;
+}
+
 interface FeedRow {
   readonly id: string;
   readonly type: string;
@@ -208,6 +225,11 @@ interface World {
   readonly events: Array<{ readonly type: string; readonly metadata: Record<string, unknown> }>;
   readonly cache: Map<string, unknown>;
   signal: ConnectSignalState;
+  /**
+   * The worker dies at the sender's next statement whose SQL matches: it
+   * throws instead of running, once. What ran before it stays done.
+   */
+  dieAt: RegExp | null;
 }
 
 function newWorld(): World {
@@ -222,7 +244,27 @@ function newWorld(): World {
     events: [],
     cache: new Map(),
     signal: 'live',
+    dieAt: null,
   };
+}
+
+/** The sender's own database handle, through which {@link World.dieAt} kills it. */
+function mortalPrisma(): PrismaService {
+  return new Proxy(prisma, {
+    get(target, property) {
+      if (property === '$executeRaw') {
+        return async (query: Prisma.Sql) => {
+          if (world.dieAt !== null && world.dieAt.test(query.sql)) {
+            world.dieAt = null;
+            throw new Error('the worker died here');
+          }
+          return target.$executeRaw(query);
+        };
+      }
+      const value = Reflect.get(target, property) as unknown;
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
 }
 
 let world: World = newWorld();
@@ -230,7 +272,7 @@ let subscriptionOfProfile = new Map<string, string>();
 
 const NEVER = { usedTrafficBytes: 0, lifetimeUsedTrafficBytes: 0, onlineAt: null, firstConnectedAt: null };
 
-function sender(): ConnectHelpSweepService {
+function sender(options: { readonly ladder?: 'throws' } = {}): ConnectHelpSweepService {
   const events = {
     info: (type: string, _category: string, _message: string, metadata?: Record<string, unknown>) => {
       world.events.push({ type, metadata: metadata ?? {} });
@@ -285,8 +327,13 @@ function sender(): ConnectHelpSweepService {
     // SMTP off, as on the owner's production.
     { getSmtpSettings: async () => ({ enabled: false, notifyUsers: false }), send: async () => undefined } as never,
   );
+  if (options.ladder === 'throws') {
+    notifications.deliverFirstReachable = async () => {
+      throw new Error('the template renderer blew up');
+    };
+  }
   return new ConnectHelpSweepService(
-    prisma,
+    mortalPrisma(),
     new ConnectHelpSettingsService(prisma),
     probe,
     health as never,
@@ -904,6 +951,292 @@ run('«Помощь с подключением» on real rows', () => {
       assert.equal(metadata['helpedBy'], 'bot');
       assert.equal(metadata['planName'], 'Премиум');
       assert.match(String(metadata['note']), /^Оплатил: прошло 7 ч, VPN ни разу не подключался\./);
+    });
+  });
+
+  describe('every claim ends', () => {
+    it('closes a begun ladder when the customer connects before any channel took it', async () => {
+      await setSettings(ON);
+      const now = nowFor(60);
+      const byPanel = await paidCustomer(now, 25);
+      const byWebhook = await paidCustomer(now, 26);
+      for (const customer of [byPanel, byWebhook]) world.bot.set(String(customer.owner.telegramId), 'dropped');
+      await cycle(now);
+      for (const customer of [byPanel, byWebhook]) {
+        assert.equal((await stateOf(customer.subscriptionId))?.help_deferrals, 1, 'the first pass did not defer');
+      }
+      // Before the next pass the panel sees traffic on one, and a webhook reports the other.
+      world.panel.set(byPanel.subscriptionId, 'connected');
+      await prisma.$executeRaw(Prisma.sql`
+        UPDATE "subscription_connect_states" SET "first_connected_at" = ${new Date(now.getTime() + 5 * MIN)}
+         WHERE "subscription_id" = ${byWebhook.subscriptionId}
+      `);
+      const asked = world.botCalls.length;
+
+      // The very pass that finds the connection closes the ladder.
+      const result = await cycle(new Date(now.getTime() + 10 * MIN));
+      for (const [label, customer] of [['the panel', byPanel], ['a webhook', byWebhook]] as const) {
+        const state = await stateOf(customer.subscriptionId);
+        assert.equal(state?.help_outcome, 'skipped_connected', `connected per ${label}, still «В процессе»`);
+        assert.equal(state?.help_deferrals, 1, `connected per ${label}, and deferred again`);
+      }
+      assert.equal(result.connected, 2);
+      await cycle(new Date(now.getTime() + 20 * MIN));
+
+      for (const customer of [byPanel, byWebhook]) {
+        assert.equal((await stateOf(customer.subscriptionId))?.help_outcome, 'skipped_connected');
+        assert.deepEqual(notConnectedEvents(customer.subscriptionId), [], 'a customer who connected was announced');
+      }
+      assert.equal(world.botCalls.length, asked, 'a customer who connected was written to again');
+      assert.equal(world.pushCalls.length, 0);
+    });
+
+    it('closes a begun ladder the panel cannot verify for a day after the decision: skipped_unverifiable', async () => {
+      await setSettings(ON);
+      const now = nowFor(61);
+      const { owner, subscriptionId } = await paidCustomer(now, 25);
+      world.bot.set(String(owner.telegramId), 'dropped');
+      await cycle(now);
+      world.panel.set(subscriptionId, 'unavailable');
+
+      const early = await cycle(new Date(now.getTime() + 10 * MIN));
+      assert.equal((await stateOf(subscriptionId))?.help_outcome, null, 'closed long before the day was out');
+      assert.equal(early.waiting, 1);
+      // Remnawave stays down; by now the connection signal has gone blind as well.
+      world.signal = 'blind';
+      await cycle(new Date(now.getTime() + DAY - MIN));
+      assert.equal((await stateOf(subscriptionId))?.help_outcome, null, 'closed a minute before the day was out');
+
+      await cycle(new Date(now.getTime() + DAY + MIN));
+
+      const state = await stateOf(subscriptionId);
+      assert.equal(state?.help_outcome, 'skipped_unverifiable');
+      assert.equal(state?.help_deferrals, 1);
+      assert.equal(world.botCalls.length, 1, 'written to while it could not be verified');
+      assert.deepEqual(notConnectedEvents(subscriptionId), [], 'never verified again, so never announced');
+    });
+
+    it('stops a begun ladder, sending nothing, when the trials, the subscription or the help itself go away', async () => {
+      await setSettings({ ...ON, includeTrials: true });
+      const now = nowFor(62);
+      const trial = await insertUser();
+      const trialSub = await insertSubscription(trial, { createdAt: new Date(now.getTime() - 25 * HOUR), isTrial: true });
+      const ended = await paidCustomer(now, 26);
+      const helpOff = await paidCustomer(now, 27);
+      for (const owner of [trial, ended.owner, helpOff.owner]) world.bot.set(String(owner.telegramId), 'dropped');
+      await cycle(now);
+      for (const subscriptionId of [trialSub, ended.subscriptionId, helpOff.subscriptionId]) {
+        assert.equal((await stateOf(subscriptionId))?.help_deferrals, 1, 'the first pass did not defer');
+      }
+      const asked = world.botCalls.length;
+
+      // While their ladders wait, the trials are switched off and one subscription ends.
+      await setSettings({ ...ON, includeTrials: false });
+      await prisma.$executeRaw(Prisma.sql`
+        UPDATE "subscriptions" SET "status" = 'EXPIRED'::"SubscriptionStatus" WHERE "id" = ${ended.subscriptionId}
+      `);
+      await cycle(new Date(now.getTime() + 10 * MIN));
+      assert.equal((await stateOf(trialSub))?.help_outcome, 'skipped_stopped', 'trials switched off');
+      assert.equal((await stateOf(ended.subscriptionId))?.help_outcome, 'skipped_stopped', 'the subscription ended');
+      assert.equal((await stateOf(helpOff.subscriptionId))?.help_outcome, null);
+      assert.equal(world.botCalls.length, asked + 1, 'a stopped ladder asked the bot');
+
+      // Then the automatic help itself is switched off…
+      await setSettings({ ...ON, enabled: false });
+      const off = await cycle(new Date(now.getTime() + 20 * MIN));
+      assert.equal(off.standDown, 'disabled');
+      assert.ok(off.stopped >= 1, 'the disabled pass stopped nothing');
+      assert.equal((await stateOf(helpOff.subscriptionId))?.help_outcome, 'skipped_stopped', 'the help switched off');
+      // …and on again: nothing begun before goes out by itself.
+      await setSettings(ON);
+      world.bot.clear();
+      await cycle(new Date(now.getTime() + 30 * MIN));
+      assert.equal(world.botCalls.length, asked + 1);
+      assert.equal(world.pushCalls.length, 0);
+      for (const subscriptionId of [trialSub, ended.subscriptionId, helpOff.subscriptionId]) {
+        assert.deepEqual(notConnectedEvents(subscriptionId), [], 'a stopped ladder was announced');
+      }
+    });
+
+    it(`gives up a ladder that throws ${CONNECT_HELP_MAX_FAILURES} times: skipped_failed, nothing sent, the operator told once`, async () => {
+      await setSettings(ON);
+      const now = nowFor(63);
+      const { owner, subscriptionId } = await paidCustomer(now, 25);
+      const broken = sender({ ladder: 'throws' });
+      for (let pass = 0; pass < CONNECT_HELP_MAX_FAILURES; pass += 1) {
+        const result = await cycle(new Date(now.getTime() + pass * 10 * MIN), broken);
+        assert.equal(result.errors, 1, `pass ${pass}`);
+        const state = await stateOf(subscriptionId);
+        assert.notEqual(state?.help_decided_at ?? null, null, `pass ${pass}: not claimed`);
+        if (pass < CONNECT_HELP_MAX_FAILURES - 1) assert.equal(state?.help_outcome, null, `pass ${pass}: given up early`);
+      }
+      const state = await stateOf(subscriptionId);
+      assert.equal(state?.help_outcome, 'skipped_failed');
+      assert.equal(failuresOf(state), CONNECT_HELP_MAX_FAILURES);
+
+      // Mended, the sender does not come back to it.
+      await cycle(new Date(now.getTime() + DAY));
+      assert.equal((await stateOf(subscriptionId))?.help_outcome, 'skipped_failed');
+      assert.deepEqual(await feedRowsOf(owner.id), []);
+      assert.equal(world.botCalls.length, 0);
+      assert.deepEqual(
+        notConnectedEvents(subscriptionId).map((metadata) => metadata['helpedBy']),
+        ['skipped_failed'],
+      );
+    });
+
+    it('asks the one-message-per-person question again on a resume: an account merge sends nothing twice', async () => {
+      await setSettings(ON);
+      const now = nowFor(64);
+      const survivor = await insertUser();
+      const helped = await paidCustomer(now, 30, { owner: survivor });
+      await prisma.$executeRaw(Prisma.sql`
+        INSERT INTO "subscription_connect_states"
+          ("subscription_id", "help_decided_at", "help_source", "help_outcome", "help_kind", "created_at", "updated_at")
+        VALUES (${helped.subscriptionId}, ${new Date(now.getTime() - HOUR)}, 'auto', 'bot', 'paid', ${now}, ${now})
+      `);
+      const moved = await paidCustomer(now, 25);
+      world.bot.set(String(moved.owner.telegramId), 'dropped');
+      await cycle(now);
+      assert.equal((await stateOf(moved.subscriptionId))?.help_deferrals, 1, 'the first pass did not defer');
+      // The accounts are merged: the waiting subscription now belongs to a person helped an hour ago.
+      await prisma.$executeRaw(Prisma.sql`
+        UPDATE "subscriptions" SET "user_id" = ${survivor.id} WHERE "id" = ${moved.subscriptionId}
+      `);
+      world.bot.clear();
+      const asked = world.botCalls.length;
+
+      await cycle(new Date(now.getTime() + 10 * MIN));
+
+      assert.equal((await stateOf(moved.subscriptionId))?.help_outcome, 'merged');
+      assert.equal(world.botCalls.length, asked, 'the surviving account got a second message');
+      assert.equal(world.pushCalls.length, 0);
+      const events = notConnectedEvents(moved.subscriptionId);
+      assert.deepEqual(events.map((metadata) => metadata['helpedBy']), ['merged']);
+      assert.equal(events[0]?.['userId'], survivor.id);
+    });
+
+    it('never asks a push again once it went out — the worker died before the outcome was written', async () => {
+      await setSettings(ON);
+      const now = nowFor(65);
+      const { owner, subscriptionId } = await paidCustomer(now, 25, { user: { telegram: false } });
+      world.push.set(owner.id, { attempted: 1, delivered: 1 });
+      world.dieAt = /SET "help_outcome" = /;
+
+      const died = await cycle(now);
+      assert.equal(died.errors, 1);
+      const between = await stateOf(subscriptionId);
+      assert.equal(between?.help_outcome, null);
+      assert.deepEqual(stepsOf(between), ['bot:unavailable', 'push:delivered'], 'the push was not on record');
+
+      await cycle(new Date(now.getTime() + 10 * MIN));
+
+      const state = await stateOf(subscriptionId);
+      assert.equal(state?.help_outcome, 'push');
+      assert.equal(world.pushCalls.length, 1, 'the push went out twice');
+      assert.deepEqual(stepsOf(state), ['bot:unavailable', 'push:delivered']);
+      assert.equal((await feedRowsOf(owner.id)).length, 1);
+      assert.deepEqual(notConnectedEvents(subscriptionId).map((metadata) => metadata['helpedBy']), ['push']);
+    });
+
+    it('never says «nothing sent» over a push that went out: the help switched off before the outcome was written', async () => {
+      await setSettings(ON);
+      const now = nowFor(69);
+      const { owner, subscriptionId } = await paidCustomer(now, 25, { user: { telegram: false } });
+      world.push.set(owner.id, { attempted: 1, delivered: 1 });
+      world.dieAt = /SET "help_outcome" = /;
+      await cycle(now);
+      assert.equal((await stateOf(subscriptionId))?.help_outcome, null);
+
+      await setSettings({ ...ON, enabled: false });
+      const off = await cycle(new Date(now.getTime() + 10 * MIN));
+
+      assert.equal((await stateOf(subscriptionId))?.help_outcome, 'push');
+      assert.equal(off.sent.push, 1);
+      assert.equal(world.pushCalls.length, 1);
+    });
+
+    it('finishes on a bot message that went out without asking again — the relay down by the resume, no push', async () => {
+      await setSettings(ON);
+      const now = nowFor(68);
+      const { owner, subscriptionId } = await paidCustomer(now, 25);
+      world.push.set(owner.id, { attempted: 1, delivered: 1 });
+      world.dieAt = /SET "help_outcome" = /;
+
+      await cycle(now);
+      assert.deepEqual(stepsOf(await stateOf(subscriptionId)), ['bot:confirmed'], 'the bot message was not on record');
+      // By the next pass the relay is down: asked again, it would be put off and end in a push.
+      world.bot.set(String(owner.telegramId), 'dropped');
+
+      await cycle(new Date(now.getTime() + 10 * MIN));
+
+      const state = await stateOf(subscriptionId);
+      assert.equal(state?.help_outcome, 'bot');
+      assert.equal(state?.help_deferrals, 0);
+      assert.equal(world.botCalls.length, 1, 'the bot was asked again');
+      assert.equal(world.pushCalls.length, 0, 'a second message went out by push');
+      assert.deepEqual(notConnectedEvents(subscriptionId).map((metadata) => metadata['helpedBy']), ['bot']);
+    });
+
+    it('never asks again a push a dead run began — and leaves alone one another replica may be sending', async () => {
+      await setSettings(ON);
+      const now = nowFor(67);
+      const { owner, subscriptionId } = await paidCustomer(now, 25, { user: { telegram: false } });
+      world.push.set(owner.id, { attempted: 1, delivered: 1 });
+      // The push goes out, and the worker dies before its answer is written.
+      world.dieAt = /SET "help_attempts" = \(/;
+      await cycle(now);
+      assert.deepEqual(stepsOf(await stateOf(subscriptionId)), ['bot:unavailable', 'push:sending']);
+
+      // A minute later the step may still be another replica's, mid-send: left alone.
+      await cycle(new Date(now.getTime() + MIN));
+      assert.equal((await stateOf(subscriptionId))?.help_outcome, null);
+      assert.equal(world.pushCalls.length, 1);
+
+      await cycle(new Date(now.getTime() + 11 * MIN));
+
+      const state = await stateOf(subscriptionId);
+      assert.equal(world.pushCalls.length, 1, 'a push a dead run began was sent again');
+      assert.equal(state?.help_outcome, 'banner', 'the ladder did not go on without the push');
+      assert.deepEqual(stepsOf(state), ['bot:unavailable', 'push:interrupted', 'bot:unavailable', 'email:unavailable']);
+    });
+
+    it('leaves new candidates their places however many begun ladders wait to resume', async () => {
+      await setSettings(ON);
+      const now = nowFor(66);
+      const waiting: string[] = [];
+      for (let index = 0; index < 4; index += 1) {
+        const { subscriptionId } = await paidCustomer(now, 30 + index);
+        await prisma.$executeRaw(Prisma.sql`
+          INSERT INTO "subscription_connect_states"
+            ("subscription_id", "help_decided_at", "help_kind", "help_anchor_at", "help_source", "help_deferrals",
+             "created_at", "updated_at")
+          VALUES (${subscriptionId}, ${new Date(now.getTime() - (index + 1) * 10 * MIN)}, 'paid',
+                  ${new Date(now.getTime() - (30 + index) * HOUR)}, 'auto', 1, ${now}, ${now})
+        `);
+        waiting.push(subscriptionId);
+      }
+      const fresh = new Set<string>();
+      for (let index = 0; index < 3; index += 1) fresh.add((await paidCustomer(now, 25 + index)).subscriptionId);
+
+      try {
+        const rows = await prisma.$queryRaw<ConnectHelpCandidateRow[]>(
+          connectHelpCandidatesSql({ now, settings: ON, limit: 5, resumeCap: 2 }),
+        );
+
+        assert.equal(rows.filter((row) => row.inFlight).length, 2, 'the resumed ladders were not capped');
+        assert.equal(rows.filter((row) => fresh.has(row.subscriptionId)).length, 3, 'a new candidate got no place');
+        assert.deepEqual(
+          rows.map((row) => row.inFlight),
+          [true, true, false, false, false],
+          'the resumed ladders do not go first',
+        );
+      } finally {
+        await prisma.$executeRaw(Prisma.sql`
+          UPDATE "subscription_connect_states" SET "help_outcome" = 'skipped_stopped'
+           WHERE "subscription_id" IN (${Prisma.join(waiting)})
+        `);
+      }
     });
   });
 

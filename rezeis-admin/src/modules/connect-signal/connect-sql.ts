@@ -50,13 +50,27 @@ export const CONNECT_VERIFICATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  */
 export const PENDING_HELP_OUTCOMES = ['bot', 'push', 'email', 'banner', 'broadcast'] as const;
 
-/** Every value `subscription_connect_states.help_outcome` may hold (TEXT, validated in code). */
+/**
+ * Every value `subscription_connect_states.help_outcome` may hold (TEXT, validated in code).
+ *
+ * The last three close a ladder the sender had already claimed, and each means
+ * NO help reached the customer — so a later broadcast may still reach them:
+ *
+ *   skipped_connected  the VPN connected before any channel took the notice;
+ *   skipped_stopped    stopped half-way, nothing sent: the help or the trials
+ *                      were switched off, or the subscription stopped being one
+ *                      to help (ended, blocked, imported, became paid);
+ *   skipped_failed     the ladder failed again and again and was given up.
+ */
 export const HELP_OUTCOMES = [
   ...PENDING_HELP_OUTCOMES,
   'opted_out',
   'merged',
   'skipped_unverifiable',
   'skipped_template_off',
+  'skipped_connected',
+  'skipped_stopped',
+  'skipped_failed',
 ] as const;
 
 export type HelpOutcome = (typeof HELP_OUTCOMES)[number];

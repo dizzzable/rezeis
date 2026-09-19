@@ -43,6 +43,10 @@ export interface ConnectHelpCycle {
   readonly merged: number
   readonly skippedUnverifiable: number
   readonly skippedTemplateOff: number
+  /** Begun ladders stopped with nothing sent: the help or the trials were switched off, the subscription ended. */
+  readonly stopped: number
+  /** Begun ladders given up after failing again and again. */
+  readonly failed: number
   readonly deferred: number
   readonly leftOver: number
   readonly errors: number
@@ -101,6 +105,9 @@ export const CONNECT_HELP_LOG_FILTERS = [
   'merged',
   'skipped_unverifiable',
   'skipped_template_off',
+  'skipped_connected',
+  'skipped_stopped',
+  'skipped_failed',
   'broadcast',
   'in_flight',
 ] as const
@@ -183,6 +190,8 @@ function readCycle(raw: unknown): ConnectHelpCycle | null {
     merged: readCount(raw['merged']),
     skippedUnverifiable: readCount(raw['skippedUnverifiable']),
     skippedTemplateOff: readCount(raw['skippedTemplateOff']),
+    stopped: readCount(raw['stopped']),
+    failed: readCount(raw['failed']),
     deferred: readCount(raw['deferred']),
     leftOver: readCount(raw['leftOver']),
     errors: readCount(raw['errors']),
@@ -283,8 +292,13 @@ export function lastCycleSentence(
 ): string {
   if (cycle === null) return t('notificationsPage.connectHelp.lastCycle.none')
   const time = formatInZone(cycle.finishedAt, context.timezone, context.locale, 'time')
-  if (cycle.standDown === 'disabled') return t('notificationsPage.connectHelp.lastCycle.disabled', { time })
   const key = 'notificationsPage.connectHelp.lastCycle'
+  if (cycle.standDown === 'disabled') {
+    const off = t(`${key}.disabled`, { time })
+    return cycle.stopped > 0
+      ? `${off} ${t(`${key}.more`, { parts: t(`${key}.extras.stopped`, { count: cycle.stopped }) })}`
+      : off
+  }
   const sentParts = (['bot', 'push', 'email'] as const)
     .filter((channel) => cycle.sent[channel] > 0)
     .map((channel) => t(`${key}.channels.${channel}`, { count: cycle.sent[channel] }))
@@ -304,6 +318,8 @@ export function lastCycleSentence(
       ['merged', cycle.merged],
       ['skippedUnverifiable', cycle.skippedUnverifiable],
       ['skippedTemplateOff', cycle.skippedTemplateOff],
+      ['stopped', cycle.stopped],
+      ['failed', cycle.failed],
       ['leftOver', cycle.leftOver],
       ['errors', cycle.errors],
     ] as const
@@ -330,8 +346,8 @@ export function outcomeLabel(t: TFunction, outcome: string | null): string {
 
 const RESULTS: Readonly<Record<ConnectHelpAttempt['channel'], ReadonlySet<string>>> = {
   bot: new Set(['confirmed', 'unconfirmed', 'rejected', 'disabled', 'timeout', 'failed']),
-  push: new Set(['delivered', 'failed']),
-  email: new Set(['queued', 'failed']),
+  push: new Set(['delivered', 'failed', 'sending', 'interrupted']),
+  email: new Set(['queued', 'failed', 'sending', 'interrupted']),
 }
 
 const UNAVAILABLE = new Set([
