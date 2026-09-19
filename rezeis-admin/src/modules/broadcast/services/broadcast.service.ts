@@ -8,11 +8,23 @@ import {
 } from '@prisma/client';
 
 import {
-  buildAudienceWhere,
+  isUnreadableConnectFilter,
   normalizeAudienceFilter,
+  resolveAudienceWhere,
+  type BroadcastAudienceFilter,
+  type BroadcastConnectFilter,
+  type UnreadableConnectFilter,
 } from '../utils/broadcast-audience.util';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  CONNECT_AUDIENCE_MAX_USERS,
+  CONNECT_AUDIENCE_TOO_LARGE_MESSAGE,
+  ConnectAudienceService,
+  ConnectAudienceTooLargeError,
+  connectAudienceHealthView,
+  isStatementTimeout,
+} from '../../connect-audience/services/connect-audience.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { normalizeCode } from '../../promocodes/utils/code-normalizer.util';
 import { BROADCAST_BLOCKED_REASON, TELEGRAM_CAPTION_LIMIT } from '../broadcast.constants';
@@ -25,6 +37,8 @@ import {
 } from '../dto/broadcast-payload.dto';
 import {
   BroadcastAudiencePreviewInterface,
+  BroadcastConnectPreviewInterface,
+  BroadcastConnectRefusal,
   BroadcastInterface,
   BroadcastPayloadInterface,
 } from '../interfaces/broadcast.interface';
@@ -34,9 +48,30 @@ import {
   isBroadcastPromocodeUsable,
 } from '../utils/broadcast-promo.util';
 
+/**
+ * What staging hears back about «Подключение VPN»: the people, or why there
+ * are none to send to — in the shape `checkPromoCodeDispatchable` answers, so
+ * staging decides for itself what a refusal does to the broadcast.
+ */
+export type ConnectAudienceVerdict =
+  | { readonly ok: true; readonly userIds: readonly string[] }
+  | {
+      readonly ok: false;
+      readonly refusal: BroadcastConnectRefusal | 'failed';
+      /** A whole sentence for the operator's event, after «Рассылка не отправлена.» */
+      readonly reason: string;
+      readonly metadata: Readonly<Record<string, unknown>>;
+    };
+
 @Injectable()
 export class BroadcastService {
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    // REQUIRED, like the promo gate in delivery: a broadcast filtered by
+    // «Подключение VPN» cannot be counted or staged without it, and a missing
+    // resolver must stop Nest at boot rather than surface as a send.
+    private readonly connectAudience: ConnectAudienceService,
+  ) {}
 
   /**
    * Writes down that a send is pending, and when.
@@ -624,17 +659,35 @@ export class BroadcastService {
     if (broadcast === null) {
       throw new NotFoundException('Broadcast not found');
     }
-    const totalRecipients = await this.countAudience({
-      audience: broadcast.audience,
-      audienceFilter: broadcast.audienceFilter,
-    });
-    return {
+    const filter = normalizeAudienceFilter(broadcast.audienceFilter);
+    const now = new Date();
+    const base = {
       audience: broadcast.audience,
       audiencePlanId: broadcast.audiencePlanId,
-      audienceFilter: normalizeAudienceFilter(broadcast.audienceFilter),
-      totalRecipients,
-      generatedAt: new Date().toISOString(),
+      audienceFilter: filter,
+      generatedAt: now.toISOString(),
     };
+    const connect = filter?.connect;
+    if (connect === undefined) {
+      return {
+        ...base,
+        totalRecipients: await this.countAudience({ audience: broadcast.audience, filter, now }),
+      };
+    }
+    // «Подключение VPN»: ONE pass gives the people, both counts and the
+    // signal's health; the recipient count then reuses the same list, so the
+    // number shown is the list staging will be handed.
+    const resolved = await this.previewConnect(connect, now);
+    const totalRecipients =
+      resolved.userIds === null
+        ? null
+        : await this.countAudience({
+            audience: broadcast.audience,
+            filter,
+            now,
+            connectUserIds: resolved.userIds,
+          });
+    return { ...base, totalRecipients, connect: resolved.view };
   }
 
   /**
@@ -646,14 +699,137 @@ export class BroadcastService {
    */
   private async countAudience(input: {
     readonly audience: BroadcastAudience;
-    readonly audienceFilter: Prisma.JsonValue | null;
+    readonly filter: BroadcastAudienceFilter | null;
+    readonly now: Date;
+    /** «Подключение VPN» already resolved; otherwise it is resolved here. */
+    readonly connectUserIds?: readonly string[];
   }): Promise<number> {
-    const where = buildAudienceWhere(
+    const where = await resolveAudienceWhere(
       input.audience,
-      normalizeAudienceFilter(input.audienceFilter),
+      input.filter,
+      async (connect) =>
+        input.connectUserIds ?? (await this.connectAudience.userIds(connectQuery(connect, input.now))),
+      input.now,
     );
     return this.prismaService.user.count({ where });
   }
+
+  private async previewConnect(
+    connect: BroadcastConnectFilter | UnreadableConnectFilter,
+    now: Date,
+  ): Promise<{ readonly userIds: readonly string[] | null; readonly view: BroadcastConnectPreviewInterface }> {
+    if (isUnreadableConnectFilter(connect)) {
+      // Matches nobody (see `UnreadableConnectFilter`), and says why.
+      const health = connectAudienceHealthView(await this.connectAudience.health(now));
+      return {
+        userIds: [],
+        view: { verified: null, unverified: null, health, refusal: 'unreadable', limit: CONNECT_AUDIENCE_MAX_USERS },
+      };
+    }
+    try {
+      const resolution = await this.connectAudience.resolve(connectQuery(connect, now));
+      return {
+        userIds: resolution.userIds,
+        view: {
+          verified: resolution.verified,
+          unverified: resolution.unverified,
+          health: connectAudienceHealthView(resolution.health),
+          refusal: resolution.userIds === null ? 'too_many' : null,
+          limit: resolution.limit,
+        },
+      };
+    } catch (error) {
+      if (!isStatementTimeout(error)) throw error;
+      // Answered, not hung: the operator reads why inside the request's 30 s.
+      const health = connectAudienceHealthView(await this.connectAudience.health(now));
+      return {
+        userIds: null,
+        view: { verified: null, unverified: null, health, refusal: 'timeout', limit: CONNECT_AUDIENCE_MAX_USERS },
+      };
+    }
+  }
+
+  /**
+   * «Подключение VPN» at the moment a send STARTS — before staging claims the
+   * broadcast, so a refusal leaves nothing half-done (no channel post, no
+   * recipient rows) and the broadcast can go back to DRAFT for the operator to
+   * fix. Every failure is a refusal here, not a throw: the count is a bounded
+   * 10-second statement, and one that timed out under load will time out on
+   * BullMQ's retry five seconds later just the same — silently, for an
+   * immediate send, where a refusal is a card the operator sees.
+   */
+  public async checkConnectAudience(
+    connect: BroadcastConnectFilter | UnreadableConnectFilter,
+    now: Date,
+  ): Promise<ConnectAudienceVerdict> {
+    if (isUnreadableConnectFilter(connect)) {
+      return {
+        ok: false,
+        refusal: 'unreadable',
+        reason:
+          'Фильтр «Подключение VPN» сохранён в виде, который эта версия панели не читает. ' +
+          'Откройте черновик и выберите фильтр заново.',
+        metadata: {},
+      };
+    }
+    try {
+      return { ok: true, userIds: await this.connectAudience.userIds(connectQuery(connect, now)) };
+    } catch (error) {
+      if (error instanceof ConnectAudienceTooLargeError) {
+        return {
+          ok: false,
+          refusal: 'too_many',
+          reason: `${CONNECT_AUDIENCE_TOO_LARGE_MESSAGE}. Подходит ${error.verified}, предел — ${error.limit}.`,
+          metadata: { verified: error.verified, limit: error.limit },
+        };
+      }
+      if (isStatementTimeout(error)) {
+        return {
+          ok: false,
+          refusal: 'timeout',
+          reason:
+            'Получателей фильтра «не подключился» не удалось посчитать за 10 секунд — ' +
+            'уменьшите срок или отправьте позже.',
+          metadata: {},
+        };
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        refusal: 'failed',
+        reason: `Получателей фильтра «не подключился» не удалось посчитать (${message.slice(0, 300)}).`,
+        metadata: {},
+      };
+    }
+  }
+
+  /**
+   * The once-marker for a staged «не подключился» broadcast (§2.3), inside
+   * staging's own transaction: the recipients' matching subscriptions become
+   * `help_decided_at = now, help_source = 'broadcast:<id>', help_outcome =
+   * 'broadcast'`, so the automatic «Помощь с подключением» never repeats them.
+   */
+  public async markConnectHelped(input: {
+    readonly broadcastId: string;
+    readonly connect: BroadcastConnectFilter;
+    readonly userIds: readonly string[];
+    readonly now: Date;
+    readonly client: Prisma.TransactionClient;
+  }): Promise<number> {
+    return this.connectAudience.markHelpedByBroadcast(input.broadcastId, connectQuery(input.connect, input.now), {
+      userIds: input.userIds,
+      client: input.client,
+    });
+  }
+}
+
+function connectQuery(connect: BroadcastConnectFilter, now: Date) {
+  return {
+    bucket: connect.bucket,
+    withinDays: connect.withinDays,
+    excludeHelped: connect.excludeHelped,
+    now,
+  } as const;
 }
 
 function promoStatusMessage(code: string, status: BroadcastPromoStatus): string {

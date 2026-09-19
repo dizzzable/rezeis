@@ -25,7 +25,51 @@ export interface BroadcastAudienceFilter {
   readonly platforms?: ReadonlyArray<AudiencePlatform>;
   /** Contactability channels the user has (any-of). */
   readonly contact?: ReadonlyArray<AudienceContact>;
+  /**
+   * «Подключение VPN»: only people VERIFIED not connected in one bucket —
+   * resolved by `ConnectAudienceService` into a list of user ids, so only the
+   * ASYNC {@link resolveAudienceWhere} can apply it. The synchronous builder
+   * narrows it to nobody (see there).
+   */
+  readonly connect?: BroadcastConnectFilter | UnreadableConnectFilter;
 }
+
+/** «Подключение VPN» as a broadcast stores it (`audienceFilter.connect`). */
+export interface BroadcastConnectFilter {
+  /** «Оплатил и не подключился» or «Пробный период или подарок — не подключился». Never both. */
+  readonly bucket: 'paid' | 'trial';
+  /** «За последние, дней», 1–30. */
+  readonly withinDays: number;
+  /** «Не слать тем, кому уже помогли». */
+  readonly excludeHelped: boolean;
+}
+
+/**
+ * A `connect` block this image cannot read: a newer panel's shape after a
+ * rollback, or a damaged row. Dropping it the way unknown values are dropped
+ * everywhere else would WIDEN the audience — to the other chips, or to the
+ * preset — so it is kept, and it matches nobody.
+ */
+export interface UnreadableConnectFilter {
+  readonly unreadable: true;
+}
+
+export const CONNECT_FILTER_MIN_DAYS = 1;
+export const CONNECT_FILTER_MAX_DAYS = 30;
+export const CONNECT_FILTER_DEFAULT_DAYS = 7;
+
+export function isUnreadableConnectFilter(
+  connect: BroadcastConnectFilter | UnreadableConnectFilter,
+): connect is UnreadableConnectFilter {
+  return 'unreadable' in connect;
+}
+
+/**
+ * Where «Подключение VPN» gets its people from: `ConnectAudienceService`, or
+ * a list already resolved (staging resolves before its claim, to refuse
+ * cleanly, and hands the same list on).
+ */
+export type ConnectUserIdsSource = (connect: BroadcastConnectFilter) => Promise<readonly string[]>;
 
 export type SubscriptionAudienceBucket = 'ACTIVE' | 'EXPIRED' | 'TRIAL' | 'LIMITED' | 'NONE';
 export type AudiencePlatform = 'telegram' | 'miniapp' | 'web';
@@ -60,6 +104,7 @@ export function normalizeAudienceFilter(raw: unknown): BroadcastAudienceFilter |
     inactiveDays?: number;
     platforms?: AudiencePlatform[];
     contact?: AudienceContact[];
+    connect?: BroadcastConnectFilter | UnreadableConnectFilter;
   } = {};
 
   const subscription = readStringArray(record.subscription).filter((v): v is SubscriptionAudienceBucket =>
@@ -85,13 +130,50 @@ export function normalizeAudienceFilter(raw: unknown): BroadcastAudienceFilter |
   );
   if (contact.length > 0) filter.contact = contact;
 
+  const connect = readConnectFilter(record.connect);
+  if (connect !== undefined) filter.connect = connect;
+
   return Object.keys(filter).length > 0 ? filter : null;
+}
+
+const CONNECT_KEYS: ReadonlySet<string> = new Set(['bucket', 'withinDays', 'excludeHelped']);
+const UNREADABLE_CONNECT: UnreadableConnectFilter = { unreadable: true };
+
+/**
+ * `connect` as stored. Absent or `null` is "no such filter". A readable one is
+ * normalised (days clamped into 1–30 — narrowing, never widening — and
+ * `excludeHelped` on unless it is literally `false`). Anything else, including
+ * a key this image does not know, is {@link UnreadableConnectFilter}.
+ */
+function readConnectFilter(value: unknown): BroadcastConnectFilter | UnreadableConnectFilter | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) return UNREADABLE_CONNECT;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !CONNECT_KEYS.has(key))) return UNREADABLE_CONNECT;
+  const bucket = record.bucket;
+  if (bucket !== 'paid' && bucket !== 'trial') return UNREADABLE_CONNECT;
+  const days = record.withinDays;
+  let withinDays: number;
+  if (days === undefined) {
+    withinDays = CONNECT_FILTER_DEFAULT_DAYS;
+  } else if (typeof days === 'number' && Number.isFinite(days)) {
+    withinDays = Math.min(CONNECT_FILTER_MAX_DAYS, Math.max(CONNECT_FILTER_MIN_DAYS, Math.floor(days)));
+  } else {
+    return UNREADABLE_CONNECT;
+  }
+  return { bucket, withinDays, excludeHelped: record.excludeHelped !== false };
 }
 
 /**
  * Build the Prisma `User` where-clause for a broadcast audience. When a
  * structured `filter` is provided it takes precedence; otherwise the legacy
  * `audience` enum preset is used. `now` is injectable for deterministic tests.
+ *
+ * SYNCHRONOUS, so it cannot resolve «Подключение VPN» (`filter.connect`): that
+ * part narrows to NOBODY here. The broadcast preview and staging use
+ * {@link resolveAudienceWhere}; quests and contests, which share this builder,
+ * never store a `connect` (their DTO refuses the key) — and should one appear
+ * anyway, it must not become "everyone the other chips allow".
  */
 export function buildAudienceWhere(
   audience: BroadcastAudience,
@@ -99,12 +181,39 @@ export function buildAudienceWhere(
   now: Date = new Date(),
 ): Prisma.UserWhereInput {
   if (filter !== null) {
-    return buildFromFilter(filter, now);
+    return buildFromFilter(filter, now, []);
   }
   return buildFromPreset(audience);
 }
 
-function buildFromFilter(filter: BroadcastAudienceFilter, now: Date): Prisma.UserWhereInput {
+/**
+ * {@link buildAudienceWhere} with «Подключение VPN» resolved: its people
+ * become one more AND-ed condition, `{ id: { in: [...] } }`, next to the other
+ * chips. `connectUserIds` is asked only when the filter carries a readable
+ * `connect`; an unreadable one narrows to nobody without asking. The broadcast
+ * preview (`countAudience`) and staging (`resolveRecipients`) both build their
+ * where here, so the number shown and the people reached cannot diverge.
+ */
+export async function resolveAudienceWhere(
+  audience: BroadcastAudience,
+  filter: BroadcastAudienceFilter | null,
+  connectUserIds: ConnectUserIdsSource,
+  now: Date = new Date(),
+): Promise<Prisma.UserWhereInput> {
+  if (filter === null) {
+    return buildFromPreset(audience);
+  }
+  const connect = filter.connect;
+  const ids =
+    connect === undefined || isUnreadableConnectFilter(connect) ? [] : await connectUserIds(connect);
+  return buildFromFilter(filter, now, ids);
+}
+
+function buildFromFilter(
+  filter: BroadcastAudienceFilter,
+  now: Date,
+  connectUserIds: readonly string[],
+): Prisma.UserWhereInput {
   const and: Prisma.UserWhereInput[] = [];
 
   if (filter.subscription && filter.subscription.length > 0) {
@@ -134,6 +243,10 @@ function buildFromFilter(filter: BroadcastAudienceFilter, now: Date): Prisma.Use
   }
   if (filter.contact && filter.contact.length > 0) {
     and.push({ OR: filter.contact.map(contactWhere) });
+  }
+  if (filter.connect !== undefined) {
+    // Resolved or not, present means NARROWED: an empty list is nobody.
+    and.push({ id: { in: [...connectUserIds] } });
   }
 
   if (and.length === 0) {

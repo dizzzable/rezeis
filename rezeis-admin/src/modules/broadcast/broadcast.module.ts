@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
 import { AuthModule } from '../auth/auth.module';
+import { ConnectAudienceModule } from '../connect-audience/connect-audience.module';
 import { CustomEmojiModule } from '../custom-emoji/custom-emoji.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ReiwaRelayModule } from '../notifications/reiwa-relay.module';
@@ -29,6 +30,9 @@ import { BroadcastService } from './services/broadcast.service';
     ReiwaRelayModule,
     SettingsModule,
     CustomEmojiModule,
+    // «Подключение VPN»: `BroadcastService` resolves its people for the preview
+    // and for staging, and writes the once-marker when a broadcast is staged.
+    ConnectAudienceModule,
     BullModule.registerQueue({ name: BROADCAST_DELIVERY_QUEUE }),
   ],
   controllers: [AdminBroadcastController],

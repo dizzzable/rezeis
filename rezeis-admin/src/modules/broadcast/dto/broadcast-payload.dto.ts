@@ -5,13 +5,37 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsObject,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
 import { BroadcastAudience } from '@prisma/client';
+
+/**
+ * «Подключение VPN»: people VERIFIED not connected, in ONE bucket — the two
+ * are never mixed (the owner's «чтобы не смешивать»). Its own nested class so
+ * the global `forbidNonWhitelisted` pipe refuses an unknown key inside it too.
+ */
+export class ConnectAudienceFilterDto {
+  /** «Оплатил и не подключился» (`paid`) or «Пробный период или подарок — не подключился» (`trial`). */
+  @IsIn(['paid', 'trial'])
+  public bucket!: 'paid' | 'trial';
+
+  /** «За последние, дней». */
+  @IsInt()
+  @Min(1)
+  @Max(30)
+  public withinDays!: number;
+
+  /** «Не слать тем, кому уже помогли»; on when omitted. */
+  @IsOptional()
+  @IsBoolean()
+  public excludeHelped?: boolean;
+}
 
 /**
  * Structured, multi-select audience filter. Every field is optional; unknown
@@ -44,6 +68,12 @@ export class AudienceFilterDto {
   @IsArray()
   @IsString({ each: true })
   public contact?: string[];
+
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type((): typeof ConnectAudienceFilterDto => ConnectAudienceFilterDto)
+  public connect?: ConnectAudienceFilterDto;
 }
 
 export class BroadcastPayloadDto {

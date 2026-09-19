@@ -28,7 +28,13 @@ import {
 import { buildPromoButton } from '../utils/broadcast-promo.util';
 import { captionOverflowOf, isMediaPayload } from '../utils/broadcast-caption.util';
 import { BroadcastService } from './broadcast.service';
-import { buildAudienceWhere, normalizeAudienceFilter } from '../utils/broadcast-audience.util';
+import {
+  isUnreadableConnectFilter,
+  normalizeAudienceFilter,
+  resolveAudienceWhere,
+  type BroadcastAudienceFilter,
+} from '../utils/broadcast-audience.util';
+import { CONNECT_AUDIENCE_TRANSACTION_OPTIONS } from '../../connect-audience/services/connect-audience.service';
 // THE allow-list renderer. This module used to carry its own escape-everything
 // copy under the same name, so adding the util beside it changed nothing: both
 // call sites kept resolving to the local one, and the reported "HTML does not
@@ -365,6 +371,36 @@ export class BroadcastDeliveryService {
       return [];
     }
 
+    // ── «ПОДКЛЮЧЕНИЕ VPN» IS RESOLVED BEFORE THE CLAIM ────────────────────
+    //
+    // Its people come from one bounded query, and that query can refuse: more
+    // than 20 000 of them, a count that did not finish in its 10 s, or a
+    // stored filter this panel version cannot read. Each is refused HERE, like
+    // the caption and the promo above — back to DRAFT, where the operator can
+    // shorten the period, with one card that says why — and never after the
+    // claim, where the channel copy has already gone out and the only exit is
+    // FAILED. The list it produces is the list staged below, not a second read.
+    const filter = normalizeAudienceFilter(broadcast.audienceFilter);
+    const now = new Date();
+    let connectUserIds: readonly string[] | undefined;
+    if (filter?.connect !== undefined) {
+      const verdict = await this.broadcastService.checkConnectAudience(filter.connect, now);
+      if (!verdict.ok) {
+        await this.prismaService.broadcast.updateMany({
+          where: { id: broadcastId, status: { in: [BroadcastStatus.DRAFT, BroadcastStatus.SCHEDULED] } },
+          data: { status: BroadcastStatus.DRAFT, scheduledAt: null, queueJobId: null },
+        });
+        this.systemEventsService.error(
+          EVENT_TYPES.BROADCAST_STARTED,
+          'SYSTEM',
+          `Рассылка не отправлена. ${verdict.reason}`,
+          { broadcastId, reason: `connect_${verdict.refusal}`, ...verdict.metadata },
+        );
+        return [];
+      }
+      connectUserIds = verdict.userIds;
+    }
+
     // Atomically CLAIM the broadcast (DRAFT → PROCESSING) before doing any
     // side-effecting work. The start job runs with attempts:3, so a throw after
     // the channel post but before the status flip would otherwise let a retry
@@ -440,7 +476,9 @@ export class BroadcastDeliveryService {
 
       const recipientUserIds = await this.resolveRecipients(
         broadcast.audience,
-        broadcast.audienceFilter,
+        filter,
+        connectUserIds,
+        now,
       );
       if (recipientUserIds.length === 0) {
         await this.prismaService.broadcast.update({
@@ -450,13 +488,35 @@ export class BroadcastDeliveryService {
         return [];
       }
 
-      await this.prismaService.broadcastMessage.createMany({
-        data: recipientUserIds.map((userId) => ({
-          broadcastId,
-          userId,
-          status: BroadcastMessageStatus.PENDING,
-        })),
-      });
+      const recipientRows = recipientUserIds.map((userId) => ({
+        broadcastId,
+        userId,
+        status: BroadcastMessageStatus.PENDING,
+      }));
+      const connect = filter?.connect;
+      if (connect !== undefined && !isUnreadableConnectFilter(connect)) {
+        // ── THE ONCE-MARKER, WITH THE ROWS IT IS ABOUT ─────────────────────
+        //
+        // A «не подключился» broadcast IS help given: the recipients' matching
+        // subscriptions are marked so the automatic «Помощь с подключением»
+        // never repeats them. Written in the SAME transaction as the recipient
+        // rows — marked without rows would silence the automatic help for
+        // people nothing reached; rows without the mark would let it write to
+        // them a second time. Guarded (`help_decided_at IS NULL`), so a re-run
+        // marks nothing; no event, the automatic moment owns that one.
+        await this.prismaService.$transaction(async (tx) => {
+          await tx.broadcastMessage.createMany({ data: recipientRows });
+          await this.broadcastService.markConnectHelped({
+            broadcastId,
+            connect,
+            userIds: recipientUserIds,
+            now,
+            client: tx,
+          });
+        }, CONNECT_AUDIENCE_TRANSACTION_OPTIONS);
+      } else {
+        await this.prismaService.broadcastMessage.createMany({ data: recipientRows });
+      }
 
       const messages = await this.prismaService.broadcastMessage.findMany({
         where: { broadcastId, status: BroadcastMessageStatus.PENDING },
@@ -2175,14 +2235,28 @@ export class BroadcastDeliveryService {
 
   private async resolveRecipients(
     audience: BroadcastAudience,
-    audienceFilter: Prisma.JsonValue | null,
+    filter: BroadcastAudienceFilter | null,
+    connectUserIds: readonly string[] | undefined,
+    now: Date,
   ): Promise<string[]> {
     // Single shared where-builder (SAME as the audience-count preview) so the
     // recipients actually staged always match the previewed count — the two
     // used to diverge. Web-only users (no Telegram) are intentionally included:
     // broadcasts reach them via web-push + the in-cabinet feed. A structured
     // `audienceFilter` supersedes the `audience` enum preset when present.
-    const where = buildAudienceWhere(audience, normalizeAudienceFilter(audienceFilter));
+    // «Подключение VPN» arrives resolved (before the claim); a filter that has
+    // it and no list is a bug, and refusing beats reading it as "everyone".
+    const where = await resolveAudienceWhere(
+      audience,
+      filter,
+      async () => {
+        if (connectUserIds === undefined) {
+          throw new Error('«Подключение VPN» reached staging unresolved');
+        }
+        return connectUserIds;
+      },
+      now,
+    );
     const users = await this.prismaService.user.findMany({
       where,
       select: { id: true },

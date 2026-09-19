@@ -49,6 +49,7 @@ import { WheelCabinetModule } from './modules/wheel-cabinet/wheel-cabinet.module
 import { BusinessAnalyticsModule } from './modules/business-analytics/business-analytics.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
 import { ConfigPortabilityModule } from './modules/config-portability/config-portability.module';
+import { ConnectAudienceModule } from './modules/connect-audience/connect-audience.module';
 import { ConnectHelpModule } from './modules/connect-help/connect-help.module';
 import { ConnectSignalModule } from './modules/connect-signal/connect-signal.module';
 import { ContestsModule } from './modules/contests/contests.module';
@@ -174,6 +175,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     WheelCabinetModule,
     ClientErrorsModule,
     ConfigPortabilityModule,
+    ConnectAudienceModule,
     ConnectHelpModule,
     ConnectSignalModule,
     CustomEmojiModule,

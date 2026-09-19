@@ -1,5 +1,6 @@
 import { BroadcastAudience, BroadcastStatus } from '@prisma/client';
 
+import type { ConnectAudienceHealthView } from '../../connect-audience/services/connect-audience.service';
 import type { BroadcastAudienceFilter } from '../utils/broadcast-audience.util';
 
 export interface BroadcastPayloadInterface {
@@ -99,7 +100,35 @@ export interface BroadcastAudiencePreviewInterface {
   readonly audience: BroadcastAudience;
   readonly audiencePlanId: string | null;
   readonly audienceFilter: BroadcastAudienceFilter | null;
-  /** Recipients matched by the audience filter at preview time. */
-  readonly totalRecipients: number;
+  /**
+   * Recipients matched by the audience filter at preview time. `null` only
+   * when «Подключение VPN» refused to resolve (`connect.refusal`): there is no
+   * list to count, and a number would be a guess.
+   */
+  readonly totalRecipients: number | null;
   readonly generatedAt: string;
+  /** Present exactly when the filter carries «Подключение VPN». */
+  readonly connect?: BroadcastConnectPreviewInterface;
+}
+
+/**
+ * Why «Подключение VPN» gave no list:
+ *   too_many    more verified people than `limit` («Слишком много получателей
+ *               для фильтра «не подключился» — уменьшите срок»);
+ *   timeout     the count did not finish within its 10 s;
+ *   unreadable  the stored filter is a shape this panel version cannot read —
+ *               it matches nobody.
+ */
+export type BroadcastConnectRefusal = 'too_many' | 'timeout' | 'unreadable';
+
+export interface BroadcastConnectPreviewInterface {
+  /** People verified not connected — who the message can reach. `null` when not counted. */
+  readonly verified: number | null;
+  /** People in the bucket nobody could verify — «Ещё M не проверены — им не придёт». `null` when not counted. */
+  readonly unverified: number | null;
+  /** What the signal can currently vouch for (codes and numbers only). */
+  readonly health: ConnectAudienceHealthView;
+  readonly refusal: BroadcastConnectRefusal | null;
+  /** The most people one «не подключился» broadcast may address. */
+  readonly limit: number;
 }

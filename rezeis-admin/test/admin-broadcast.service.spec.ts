@@ -97,7 +97,7 @@ describe('BroadcastService', () => {
           return [{ broadcastId: 'broadcast-1', _count: { _all: 4 } }];
         },
       },
-    } as never);
+    } as never, untouchedConnectAudience());
 
     assert.deepStrictEqual(await service.listDrafts(), [
       {
@@ -161,7 +161,7 @@ describe('BroadcastService', () => {
           });
         },
       },
-    } as never);
+    } as never, untouchedConnectAudience());
 
     const result = await service.createDraft({
       dto: {
@@ -242,7 +242,7 @@ describe('BroadcastService', () => {
           });
         },
       },
-    } as never);
+    } as never, untouchedConnectAudience());
 
     const result = await service.updateDraft({
       broadcastId: 'broadcast-1',
@@ -278,7 +278,7 @@ describe('BroadcastService', () => {
           audiencePlanId: null,
         }),
       },
-    } as never);
+    } as never, untouchedConnectAudience());
 
     await assert.rejects(
       () => service.updateDraft({ broadcastId: 'broadcast-1', dto: { payload: { text: 'New' } } }),
@@ -311,7 +311,7 @@ describe('BroadcastService', () => {
           return countCalls.length;
         },
       },
-    } as never);
+    } as never, untouchedConnectAudience());
 
     const previews = await Promise.all([
       service.previewAudience('all'),
@@ -384,7 +384,7 @@ describe('BroadcastService', () => {
         executeRawCalls += 1;
         return 0;
       },
-    } as never);
+    } as never, untouchedConnectAudience());
 
     await service.updateBroadcastContent({
       broadcastId: 'broadcast-1',
@@ -438,4 +438,22 @@ function broadcastRecord(overrides: Record<string, unknown> = {}): Record<string
     updatedAt: new Date('2026-04-24T12:10:00.000Z'),
     ...overrides,
   };
+}
+
+/**
+ * `ConnectAudienceService` for a test that never reaches «Подключение VPN».
+ * Every method FAILS the test when called, so a path that should not ask for
+ * the «не подключился» audience cannot quietly ask and pass.
+ */
+function untouchedConnectAudience(): never {
+  const refuse = (name: string) => async (): Promise<never> => {
+    throw new Error(`ConnectAudienceService.${name} was called by a test that has no «Подключение VPN» filter`);
+  };
+  return {
+    userIds: refuse('userIds'),
+    counts: refuse('counts'),
+    resolve: refuse('resolve'),
+    health: refuse('health'),
+    markHelpedByBroadcast: refuse('markHelpedByBroadcast'),
+  } as never;
 }

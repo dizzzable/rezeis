@@ -103,6 +103,36 @@ export const en = {
         hasWebPush: 'Web-push',
       },
     },
+    connect: {
+      title: 'VPN connection',
+      infoLabel: 'More: VPN connection',
+      info:
+        'Only verified customers count: after the purchase or the grant the panel read their profile in Remnawave — no more than a day ago — and the VPN had never connected on it. Customers nobody could verify will not get this broadcast; their number is shown separately under the audience check.\n\n"Paid" means the subscription was bought for money, including from a partner balance and a paid trial. A 0 ₽ subscription from a promo code, a free trial, a gift and a bonus count as "Trial or gift".',
+      bucket: {
+        paid: 'Paid and not connected',
+        trial: 'Trial or gift — not connected',
+      },
+      days: 'Over the last, days',
+      excludeHelped: 'Skip customers who were already helped',
+      excludeHelpedHint: 'Connection help already went to them — automatically or in an earlier broadcast.',
+      companion:
+        'While this filter is on, the segment is "Active subscribers" and the subscription is "Active" and "Limited".',
+      unverified_one: '{{count}} more not verified — they will not get it',
+      unverified_other: '{{count}} more not verified — they will not get it',
+      tooMany: 'Too many recipients for the "not connected" filter — shorten the period',
+      timeout:
+        'Could not count the "not connected" recipients within 10 seconds — shorten the period or check again later',
+      unreadable:
+        'The "VPN connection" filter was saved in a form this panel version cannot read — choose it again',
+      health: {
+        starting:
+          'Checking subscriptions for the first time — this takes up to {{hours}} h. Checked so far: {{done}} of {{total}}.',
+        webhooks_only:
+          'Remnawave has not answered requests since {{time}}. Connections are learned from webhooks only — customers no webhook arrived for will not make the list.',
+        blind:
+          "We can't tell who has connected right now: Remnawave has not answered since {{time}} and no webhooks are arriving. Automatic help is paused.",
+      },
+    },
     channels: {
       title: 'Additional channels (optional)',
       hint: 'These run alongside the main delivery (cabinet + web-push + Telegram DM), not instead of it.',

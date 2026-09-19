@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router'
 import { Plus, Megaphone, Send, XCircle, Trash2, Loader2, RefreshCw, RotateCcw, Upload, FileImage, FileVideo, X, Pencil, Clock, FlaskConical, Users, Undo2 } from 'lucide-react'
 import { useForm, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -33,6 +34,8 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Checkbox } from '@/components/ui/checkbox'
+import { InfoTip } from '@/components/ui/info-tip'
 import { DatePicker } from '@/components/ui/date-picker'
 import { FadeIn } from '@/lib/motion'
 import {
@@ -41,6 +44,25 @@ import {
   type BroadcastFormDraft,
   type BroadcastFormValidationMessages,
 } from './broadcast-form-schema'
+import {
+  CONNECT_BUCKETS,
+  CONNECT_HELP_BROADCAST_COPY,
+  CONNECT_COMPANION_AUDIENCE,
+  CONNECT_COMPANION_SUBSCRIPTION,
+  CONNECT_DAYS_DEFAULT,
+  CONNECT_DAYS_MAX,
+  CONNECT_DAYS_MIN,
+  clampConnectDays,
+  connectHealthSentence,
+  parseConnectPrefill,
+  readableConnect,
+  withoutConnectPrefill,
+  type BroadcastConnectFilterBody,
+  type BroadcastConnectPreview,
+  type ConnectBucket,
+  type ConnectPrefill,
+  type StoredConnectFilter,
+} from './connect-audience'
 import { EmojiPicker } from './emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { RenderedCopyPreview } from '@/features/custom-emoji/rendered-copy-preview'
@@ -69,11 +91,14 @@ function FilterChipGroup({
   options,
   selected,
   onToggle,
+  disabled = false,
 }: {
   label: string
   options: ReadonlyArray<{ value: string; label: string }>
-  selected: string[]
+  selected: readonly string[]
   onToggle: (value: string) => void
+  /** Shown as chosen by something else (the «Подключение VPN» companion) and not changeable here. */
+  disabled?: boolean
 }) {
   return (
     <div className="space-y-1.5">
@@ -87,8 +112,9 @@ function FilterChipGroup({
               type="button"
               onClick={() => onToggle(opt.value)}
               aria-pressed={active}
+              disabled={disabled}
               className={cn(
-                'rounded-full border px-3 py-1 text-xs transition-colors',
+                'rounded-full border px-3 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60',
                 active
                   ? 'border-primary bg-primary/15 text-primary'
                   : 'border-border text-muted-foreground hover:bg-muted',
@@ -99,6 +125,35 @@ function FilterChipGroup({
           )
         })}
       </div>
+    </div>
+  )
+}
+
+/** Why «Подключение VPN» gave no count, in the operator's words. */
+const CONNECT_REFUSAL_KEYS: Readonly<Record<NonNullable<BroadcastConnectPreview['refusal']>, string>> = {
+  too_many: 'broadcastPage.connect.tooMany',
+  timeout: 'broadcastPage.connect.timeout',
+  unreadable: 'broadcastPage.connect.unreadable',
+}
+
+/**
+ * Under the count, for «Подключение VPN»: the people the message will NOT
+ * reach because nobody could verify them, and — when the signal is not `live`
+ * — why the panel cannot currently tell (design §1.7).
+ */
+function ConnectPreviewNotes({ connect }: { readonly connect: BroadcastConnectPreview }) {
+  const { t } = useTranslation()
+  const unverified = connect.unverified ?? 0
+  const health = connectHealthSentence(connect.health, (iso) => new Date(iso).toLocaleString(activeLocale()))
+  if (unverified <= 0 && health === null) return null
+  return (
+    <div className="space-y-1">
+      {unverified > 0 && (
+        <p className="text-xs text-amber-600 dark:text-amber-500">
+          {t('broadcastPage.connect.unverified', { count: unverified })}
+        </p>
+      )}
+      {health !== null && <p className="text-xs text-muted-foreground">{t(health.key, health.values)}</p>}
     </div>
   )
 }
@@ -271,6 +326,7 @@ interface BroadcastDraftDetail {
     readonly platforms?: string[]
     readonly contact?: string[]
     readonly inactiveDays?: number
+    readonly connect?: StoredConnectFilter
   } | null
   readonly status: string
   /** Due time of a pending schedule; `null` for a plain draft. */
@@ -313,6 +369,21 @@ export default function BroadcastPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
+
+  // ── THE LINK THAT OPENS «НОВАЯ РАССЫЛКА» READY TO SEND ─────────────────
+  //
+  // `/broadcast?compose=connect-help&bucket=paid|trial&days=N` — what
+  // «Помощь с подключением» hands out for the people already waiting — opens
+  // the compose dialog with «Подключение VPN» set. The URL IS the state: the
+  // dialog is open while the link says so, and closing it drops the
+  // parameters, so a reload or the next «Новая рассылка» starts clean.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const connectPrefill = useMemo(() => parseConnectPrefill(searchParams), [searchParams])
+  const createOpen = showCreate || connectPrefill !== null
+  const closeCreate = (): void => {
+    setShowCreate(false)
+    if (connectPrefill !== null) setSearchParams(withoutConnectPrefill(searchParams), { replace: true })
+  }
   const [editId, setEditId] = useState<string | null>(null)
   // A draft or a pending schedule reopened in the compose dialog. Separate
   // from `editId`, which edits a broadcast that has ALREADY gone out (a
@@ -693,13 +764,13 @@ export default function BroadcastPage() {
       </Card>
 
       {/* Create Dialog */}
-      <Dialog open={showCreate} onOpenChange={setShowCreate}>
+      <Dialog open={createOpen} onOpenChange={(open) => (open ? setShowCreate(true) : closeCreate())}>
         <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('broadcastPage.newButton')}</DialogTitle>
             <DialogDescription>{t('broadcastPage.form.description')}</DialogDescription>
           </DialogHeader>
-          <CreateBroadcastForm onClose={() => setShowCreate(false)} />
+          <CreateBroadcastForm onClose={closeCreate} initialConnect={connectPrefill} />
         </DialogContent>
       </Dialog>
 
@@ -764,9 +835,12 @@ interface UploadedMedia {
 function CreateBroadcastForm({
   onClose,
   draftId = null,
+  initialConnect = null,
 }: {
   onClose: () => void
   draftId?: string | null
+  /** «Подключение VPN» from the `compose=connect-help` link, read once at mount. */
+  initialConnect?: ConnectPrefill | null
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -804,8 +878,14 @@ function CreateBroadcastForm({
   })
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
   const [audience, setAudience] = useState('ALL')
-  const [title, setTitle] = useState('')
-  const [text, setText] = useState('')
+  // A `compose=connect-help` link starts from the «Помощь с подключением»
+  // text for its bucket (see CONNECT_HELP_BROADCAST_COPY); anything else, blank.
+  const [title, setTitle] = useState(() =>
+    initialConnect?.bucket ? CONNECT_HELP_BROADCAST_COPY[initialConnect.bucket].title : '',
+  )
+  const [text, setText] = useState(() =>
+    initialConnect?.bucket ? CONNECT_HELP_BROADCAST_COPY[initialConnect.bucket].text : '',
+  )
   const [promoCode, setPromoCode] = useState('')
   const [mediaType, setMediaType] = useState<'none' | 'photo' | 'video'>('none')
   const [mediaSourceMode, setMediaSourceMode] = useState<'upload' | 'url' | 'fileId'>('upload')
@@ -817,6 +897,14 @@ function CreateBroadcastForm({
   const [platformFilters, setPlatformFilters] = useState<string[]>([])
   const [contactFilters, setContactFilters] = useState<string[]>([])
   const [inactiveDays, setInactiveDays] = useState('')
+  // «Подключение VPN»: one bucket or none — the two are never mixed (the
+  // owner's «чтобы не смешивать»). While one is chosen the preset and the
+  // subscription chips are its companion, shown locked, and sent every time.
+  const [connectBucket, setConnectBucket] = useState<ConnectBucket | null>(initialConnect?.bucket ?? null)
+  const [connectDays, setConnectDays] = useState(String(initialConnect?.days ?? CONNECT_DAYS_DEFAULT))
+  const [connectExcludeHelped, setConnectExcludeHelped] = useState(true)
+  const connectActive = connectBucket !== null
+  const effectiveAudience = connectActive ? CONNECT_COMPANION_AUDIENCE : audience
   // Plan catalog for the plan chips. Deliberately the FULL catalog, not
   // `{ active: true }`: the backend matches `planSnapshot.id` on a
   // subscription, so a switched-off or archived plan still has live
@@ -834,7 +922,13 @@ function CreateBroadcastForm({
   // Seeded with the draft being edited, so `saveDraft` PATCHes it instead of
   // creating a second row.
   const draftIdRef = useRef<string | null>(draftId)
-  const [previewCount, setPreviewCount] = useState<number | null>(null)
+  // `total` is `null` only when «Подключение VPN» refused to resolve; `connect`
+  // is the preview's own block for that filter (people it could not verify,
+  // the signal's health, or the refusal).
+  const [previewResult, setPreviewResult] = useState<{
+    readonly total: number | null
+    readonly connect: BroadcastConnectPreview | null
+  } | null>(null)
   const [previewedSignature, setPreviewedSignature] = useState<string | null>(null)
   // Additive delivery channels (on top of the always-on cabinet/web-push/TG-DM
   // fanout): email every resolved recipient with an address, and/or post the
@@ -886,11 +980,20 @@ function CreateBroadcastForm({
     setTelegramChannelChatId(editing.payload.telegramChannelChatId ?? '')
     const filter = editing.audienceFilter
     if (filter) {
-      setSubBuckets(filter.subscription ?? [])
+      const connect = readableConnect(filter.connect)
+      // A «Подключение VPN» draft's subscription chips are its companion, not
+      // the operator's choice: they come back locked, and turning the filter
+      // off leaves the chips as the operator last had them — empty.
+      setSubBuckets(connect === null ? filter.subscription ?? [] : [])
       setPlanFilters(filter.planIds ?? [])
       setPlatformFilters(filter.platforms ?? [])
       setContactFilters(filter.contact ?? [])
       setInactiveDays(filter.inactiveDays === undefined ? '' : String(filter.inactiveDays))
+      if (connect !== null) {
+        setConnectBucket(connect.bucket)
+        setConnectDays(String(connect.withinDays))
+        setConnectExcludeHelped(connect.excludeHelped)
+      }
     }
     // ── THE SCHEDULE COMES BACK TOO ──────────────────────────────────────
     //
@@ -1001,7 +1104,11 @@ function CreateBroadcastForm({
 
   function buildAudienceFilter(): Record<string, unknown> | undefined {
     const filter: Record<string, unknown> = {}
-    if (subBuckets.length > 0) filter.subscription = subBuckets
+    // With «Подключение VPN» the subscription chips are its companion, EVERY
+    // time: an older panel image drops `connect`, and must then degrade to
+    // active subscribers rather than to everyone.
+    if (connectBucket !== null) filter.subscription = [...CONNECT_COMPANION_SUBSCRIPTION]
+    else if (subBuckets.length > 0) filter.subscription = subBuckets
     // `planIds` is the live field: `normalizeAudienceFilter` reads it and
     // `buildFromFilter` turns it into a `planSnapshot.id` match that feeds
     // BOTH the preview count and delivery. (The broadcast row also carries
@@ -1012,6 +1119,14 @@ function CreateBroadcastForm({
     if (contactFilters.length > 0) filter.contact = contactFilters
     const days = Number.parseInt(inactiveDays, 10)
     if (Number.isFinite(days) && days > 0) filter.inactiveDays = days
+    if (connectBucket !== null) {
+      const connect: BroadcastConnectFilterBody = {
+        bucket: connectBucket,
+        withinDays: clampConnectDays(connectDays),
+        excludeHelped: connectExcludeHelped,
+      }
+      filter.connect = connect
+    }
     return Object.keys(filter).length > 0 ? filter : undefined
   }
 
@@ -1019,7 +1134,7 @@ function CreateBroadcastForm({
   // only shown while it still matches — a number computed for a different
   // set of chips is worse than no number, because the operator trusts it.
   const audienceSignature = JSON.stringify({
-    audience,
+    audience: effectiveAudience,
     filter: buildAudienceFilter() ?? null,
   })
 
@@ -1054,14 +1169,15 @@ function CreateBroadcastForm({
       // Captured before the awaits so a count can never be attributed to a
       // filter the operator changed while the request was in flight.
       const signature = audienceSignature
-      const draftId = await saveDraft({ audience })
-      const response = await api.get<{ totalRecipients: number }>(
-        `/admin/broadcast/${encodeURIComponent(draftId)}/audience-preview`,
-      )
-      return { total: response.data.totalRecipients, signature }
+      const draftId = await saveDraft({ audience: effectiveAudience })
+      const response = await api.get<{
+        totalRecipients: number | null
+        connect?: BroadcastConnectPreview
+      }>(`/admin/broadcast/${encodeURIComponent(draftId)}/audience-preview`)
+      return { total: response.data.totalRecipients, connect: response.data.connect ?? null, signature }
     },
-    onSuccess: ({ total, signature }) => {
-      setPreviewCount(total)
+    onSuccess: ({ total, connect, signature }) => {
+      setPreviewResult({ total, connect })
       setPreviewedSignature(signature)
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.broadcast.all })
     },
@@ -1148,7 +1264,7 @@ function CreateBroadcastForm({
 
   function validateThen(onValid: (payload: BroadcastCreateRequest) => void) {
     const draft: BroadcastFormDraft = {
-      audience,
+      audience: effectiveAudience,
       title,
       text,
       promoCode,
@@ -1184,7 +1300,7 @@ function CreateBroadcastForm({
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-2">
         <Label>{t('broadcastPage.form.audience')}</Label>
-        <Select value={audience} onValueChange={setAudience}>
+        <Select value={effectiveAudience} onValueChange={setAudience} disabled={connectActive}>
           <SelectTrigger aria-label={t('broadcastPage.form.audience')}><SelectValue /></SelectTrigger>
           <SelectContent>
             {AUDIENCES.map((a) => <SelectItem key={a.value} value={a.value}>{t(a.labelKey)}</SelectItem>)}
@@ -1198,11 +1314,75 @@ function CreateBroadcastForm({
           <Label>{t('broadcastPage.audienceFilters.title')}</Label>
           <p className="text-xs text-muted-foreground">{t('broadcastPage.audienceFilters.hint')}</p>
         </div>
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5">
+            <p className="text-xs font-medium text-muted-foreground">{t('broadcastPage.connect.title')}</p>
+            <InfoTip label={t('broadcastPage.connect.infoLabel')}>{t('broadcastPage.connect.info')}</InfoTip>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {CONNECT_BUCKETS.map((bucket) => {
+              const active = connectBucket === bucket
+              return (
+                <button
+                  key={bucket}
+                  type="button"
+                  aria-pressed={active}
+                  // Choosing one un-chooses the other: never both.
+                  onClick={() => setConnectBucket((current) => (current === bucket ? null : bucket))}
+                  className={cn(
+                    'rounded-full border px-3 py-1 text-xs transition-colors',
+                    active
+                      ? 'border-primary bg-primary/15 text-primary'
+                      : 'border-border text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  {t(`broadcastPage.connect.bucket.${bucket}`)}
+                </button>
+              )
+            })}
+          </div>
+          {connectActive && (
+            <div className="space-y-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="broadcast-connect-days" className="text-xs font-medium text-muted-foreground">
+                  {t('broadcastPage.connect.days')}
+                </Label>
+                <Input
+                  id="broadcast-connect-days"
+                  type="number"
+                  min={CONNECT_DAYS_MIN}
+                  max={CONNECT_DAYS_MAX}
+                  step={1}
+                  value={connectDays}
+                  onChange={(e) => setConnectDays(e.target.value)}
+                  onBlur={() => setConnectDays(String(clampConnectDays(connectDays)))}
+                  className="max-w-[160px]"
+                />
+              </div>
+              <div className="flex items-start gap-2">
+                <Checkbox
+                  id="broadcast-connect-exclude-helped"
+                  checked={connectExcludeHelped}
+                  onCheckedChange={(checked) => setConnectExcludeHelped(checked === true)}
+                  className="mt-0.5"
+                />
+                <div className="space-y-0.5">
+                  <Label htmlFor="broadcast-connect-exclude-helped" className="text-sm font-normal">
+                    {t('broadcastPage.connect.excludeHelped')}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">{t('broadcastPage.connect.excludeHelpedHint')}</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">{t('broadcastPage.connect.companion')}</p>
+            </div>
+          )}
+        </div>
         <FilterChipGroup
           label={t('broadcastPage.audienceFilters.subscription')}
           options={SUB_BUCKETS.map((v) => ({ value: v, label: t(`broadcastPage.audienceFilters.sub.${v}`) }))}
-          selected={subBuckets}
+          selected={connectActive ? CONNECT_COMPANION_SUBSCRIPTION : subBuckets}
           onToggle={(v) => setSubBuckets((prev) => toggleIn(prev, v))}
+          disabled={connectActive}
         />
         {plans.length > 0 ? (
           <FilterChipGroup
@@ -1265,17 +1445,26 @@ function CreateBroadcastForm({
             )}
             {t('broadcastPage.audienceFilters.preview.check')}
           </Button>
-          {previewCount !== null && previewedSignature === audienceSignature && (
-            <span className="text-xs font-medium tabular-nums">
-              {t('broadcastPage.audienceFilters.preview.result', { total: previewCount })}
-            </span>
+          {previewResult !== null && previewedSignature === audienceSignature && (
+            previewResult.connect?.refusal ? (
+              <span className="text-xs font-medium text-destructive" role="status">
+                {t(CONNECT_REFUSAL_KEYS[previewResult.connect.refusal])}
+              </span>
+            ) : (
+              <span className="text-xs font-medium tabular-nums">
+                {t('broadcastPage.audienceFilters.preview.result', { total: previewResult.total ?? 0 })}
+              </span>
+            )
           )}
-          {previewCount !== null && previewedSignature !== audienceSignature && (
+          {previewResult !== null && previewedSignature !== audienceSignature && (
             <span className="text-xs text-muted-foreground">
               {t('broadcastPage.audienceFilters.preview.stale')}
             </span>
           )}
         </div>
+        {previewResult?.connect && previewedSignature === audienceSignature && (
+          <ConnectPreviewNotes connect={previewResult.connect} />
+        )}
         <p className="text-xs text-muted-foreground">
           {t('broadcastPage.audienceFilters.preview.hint')}
         </p>

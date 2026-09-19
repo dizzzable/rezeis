@@ -48,7 +48,7 @@ function serviceWith(status: BroadcastStatus) {
       },
     },
   };
-  return { updates, service: new BroadcastService(prisma as never) };
+  return { updates, service: new BroadcastService(prisma as never, untouchedConnectAudience()) };
 }
 
 describe('correcting a broadcast that has not gone out', () => {
@@ -88,3 +88,21 @@ describe('correcting a broadcast that has not gone out', () => {
     }
   });
 });
+
+/**
+ * `ConnectAudienceService` for a test that never reaches «Подключение VPN».
+ * Every method FAILS the test when called, so a path that should not ask for
+ * the «не подключился» audience cannot quietly ask and pass.
+ */
+function untouchedConnectAudience(): never {
+  const refuse = (name: string) => async (): Promise<never> => {
+    throw new Error(`ConnectAudienceService.${name} was called by a test that has no «Подключение VPN» filter`);
+  };
+  return {
+    userIds: refuse('userIds'),
+    counts: refuse('counts'),
+    resolve: refuse('resolve'),
+    health: refuse('health'),
+    markHelpedByBroadcast: refuse('markHelpedByBroadcast'),
+  } as never;
+}
