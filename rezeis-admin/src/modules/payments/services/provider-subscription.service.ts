@@ -639,7 +639,12 @@ export class ProviderSubscriptionService {
               itemCount: 1,
               ...marker,
             } as Prisma.InputJsonValue,
-            gatewayData: { provider: row.gatewayType, ...marker } as Prisma.InputJsonValue,
+            gatewayData: {
+              provider: row.gatewayType,
+              snapshotSource: marker.snapshotSource,
+              providerSubscriptionId: marker.providerSubscriptionId,
+              chargeNumber: marker.chargeNumber,
+            } as Prisma.InputJsonValue,
             deviceTypes: [],
             idempotencyKey,
           },

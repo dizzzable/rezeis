@@ -218,3 +218,5 @@ jobs:
           test/connect-signal-sql-postgres.spec.ts
           test/connect-audience-postgres.spec.ts
           test/connect-help-postgres.spec.ts
+          test/yookassa-autopay-approved-migration-postgres.spec.ts
+          test/provider-subscriptions-postgres.spec.ts
