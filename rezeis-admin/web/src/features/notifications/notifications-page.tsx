@@ -65,6 +65,8 @@ import {
   reportTelegramTest,
   type TelegramTestResult,
 } from './telegram-test-toast'
+import { ConnectHelpCard } from './connect-help-card'
+import { NOTIFICATION_TEMPLATES_ANCHOR } from './connect-help-view'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -127,6 +129,9 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'subscription.created', 'subscription.renewed', 'subscription.upgraded',
     'subscription.expired', 'subscription.deleted', 'subscription.synced',
     'subscription.trial_granted',
+    // Помощь с подключением decided about a customer whose VPN never connected.
+    // One card per such subscription, and only while the automatic help is on.
+    'subscription.not_connected',
   ],
   DEVICE: ['user_hwid_revoked'],
   PAYMENT: [
@@ -415,6 +420,10 @@ function UserNotificationsTab() {
 
   return (
     <div className="space-y-6">
+      {/* «Помощь с подключением»: its own switches, stored apart from the map
+          below (that map reads an absent key as ON and keeps booleans only). */}
+      <ConnectHelpCard />
+
       {/* Toggles */}
       <Card>
         <CardHeader>
@@ -440,7 +449,7 @@ function UserNotificationsTab() {
       </Card>
 
       {/* Templates */}
-      <Card>
+      <Card id={NOTIFICATION_TEMPLATES_ANCHOR}>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>

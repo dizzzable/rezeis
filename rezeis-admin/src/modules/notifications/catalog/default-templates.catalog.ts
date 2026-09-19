@@ -479,6 +479,68 @@ const SUPPORT_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   },
 ];
 
+/**
+ * «Помощь с подключением»: the connect screen first, a person second.
+ *
+ * `/dashboard?connect=help` is the cabinet's one deep link for this help — the
+ * dashboard opens the connection screen through the operator's own door switch
+ * (internal screen or the external subscription page), so the button never
+ * bypasses that choice. The bot carries the query string in the Mini App path.
+ */
+const CONNECT_HELP_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
+  { labelRu: '📲 Подключить', labelEn: '📲 Connect', kind: 'webApp', target: '/dashboard?connect=help' },
+  { labelRu: '💬 Поддержка', labelEn: '💬 Support', kind: 'webApp', target: '/support' },
+];
+
+const CONNECT_HELP_ADVICE_RU =
+  '\n\nОткройте экран подключения — он подскажет приложение для вашего устройства ' +
+  'и добавит подписку в одно касание. Если что-то не выйдет, напишите нам: поможем.';
+
+const CONNECT_HELP_ADVICE_EN =
+  '\n\nOpen the connection screen: it suggests an app for your device and adds your ' +
+  "subscription in one tap. If something doesn't work, message us and we'll help.";
+
+/**
+ * Sent once per subscription, N hours after it was bought (or granted), when
+ * its VPN profile has verifiably never connected. Two types, one switch:
+ *
+ *   connect_help        the customer PAID (a paid trial and a partner-balance
+ *                       purchase included) — the text may say «оплачена»;
+ *   connect_help_trial  a free trial, an operator's gift, a promo or a 0 ₽
+ *                       checkout — nothing was paid, so the text must not say
+ *                       it was.
+ *
+ * No `{{name}}`: a customer who signed up on the web may have none, and a
+ * message that opens with a bare comma reads broken. An operator who wants the
+ * name can add it — the placeholder works as in every other template.
+ */
+const CONNECT_HELP_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: 'connect_help',
+    title: 'Не получилось подключиться?',
+    titleEn: "Couldn't connect?",
+    body:
+      'Подписка «{{plan}}» оплачена, но VPN на ней ещё ни разу не подключался.' +
+      CONNECT_HELP_ADVICE_RU,
+    bodyEn:
+      "Your “{{plan}}” subscription is paid, but the VPN hasn't connected on it yet." +
+      CONNECT_HELP_ADVICE_EN,
+    buttons: CONNECT_HELP_BUTTONS,
+  },
+  {
+    type: 'connect_help_trial',
+    title: 'Не получилось подключиться?',
+    titleEn: "Couldn't connect?",
+    body:
+      'Подписка «{{plan}}» уже работает, но VPN на ней ещё ни разу не подключался.' +
+      CONNECT_HELP_ADVICE_RU,
+    bodyEn:
+      "Your “{{plan}}” subscription is active, but the VPN hasn't connected on it yet." +
+      CONNECT_HELP_ADVICE_EN,
+    buttons: CONNECT_HELP_BUTTONS,
+  },
+];
+
 export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   ...DURATION_TEMPLATES,
   ...REFERRAL_TEMPLATES,
@@ -487,4 +549,5 @@ export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTe
   ...ADVERTISING_TEMPLATES,
   ...SYSTEM_TEMPLATES,
   ...SUPPORT_TEMPLATES,
+  ...CONNECT_HELP_TEMPLATES,
 ];

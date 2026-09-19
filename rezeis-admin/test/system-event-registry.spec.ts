@@ -623,3 +623,66 @@ async function renderOperatorCard(
   await new Promise((resolve) => setTimeout(resolve, 50));
   return cardText;
 }
+
+describe('subscription.not_connected — «Помощь с подключением» decided', () => {
+  const EVENT = {
+    type: EVENT_TYPES.SUBSCRIPTION_NOT_CONNECTED,
+    category: 'SUBSCRIPTION' as const,
+    severity: 'INFO' as const,
+    message: 'Subscription sub-1 has not connected 25h after it was bought (banner)',
+    metadata: {
+      userId: 'user-1',
+      subscriptionId: 'sub-1',
+      kind: 'paid',
+      anchorAt: '2026-09-18T09:00:00.000Z',
+      hoursSincePurchase: 25,
+      helpedBy: 'banner',
+      planName: 'Премиум',
+      note: 'Оплатил: прошло 25 ч, VPN ни разу не подключался. Как помогли: баннер в кабинете — других каналов у клиента нет.',
+    },
+  };
+
+  let savedToken: string | undefined;
+
+  beforeEach(() => {
+    savedToken = process.env.BOT_TOKEN;
+    delete process.env.BOT_TOKEN;
+  });
+
+  afterEach(() => {
+    if (savedToken === undefined) delete process.env.BOT_TOKEN;
+    else process.env.BOT_TOKEN = savedToken;
+  });
+
+  it('is registered, titled and tickable under «Подписки», in the category it is emitted with', () => {
+    assert.equal(EVENT_TYPES.SUBSCRIPTION_NOT_CONNECTED, 'subscription.not_connected');
+    assert.deepEqual(EVENT_PRESENTATION['subscription.not_connected'], {
+      emoji: '⏱',
+      title: 'Клиент не подключился после покупки',
+    });
+    const source = readFileSync(CATALOGUE_FILE, 'utf8');
+    const subscriptionGroup = source.slice(source.indexOf('  SUBSCRIPTION: ['), source.indexOf('  DEVICE: ['));
+    assert.ok(subscriptionGroup.includes("'subscription.not_connected'"), 'not ticked under «Подписки»');
+  });
+
+  it('reaches an operator in `all` mode with its own title, the customer, the plan and the note', async () => {
+    const card = await renderOperatorCard(EVENT, [], 'all');
+    assert.ok(card !== null);
+    assert.equal(headerLine(card), '⏱ <b>Событие: Клиент не подключился после покупки!</b>');
+    assert.ok(card.includes('👾 Reiwa ID: <code>user-1</code>'), card);
+    assert.ok(card.includes('🗳 ID: <code>sub-1</code>'), card);
+    assert.ok(card.includes('🏷 План: Премиум'), card);
+    assert.ok(card.includes('📝 Заметка: Оплатил: прошло 25 ч'), card);
+    // The producer's English sentence stays in the audit log.
+    assert.ok(!card.includes('has not connected'), `the raw message is on the card:\n${card}`);
+  });
+
+  it('is delivered in `selected` mode only to an operator who ticked it', async () => {
+    const catalogue = readOperatorCatalogue();
+    assert.ok(catalogue.includes('subscription.not_connected'));
+    const ticked = await renderOperatorCard(EVENT, catalogue);
+    assert.ok(ticked !== null, 'ticked, and still not delivered');
+    const savedBefore = catalogue.filter((type) => type !== 'subscription.not_connected');
+    assert.equal(await renderOperatorCard(EVENT, savedBefore), null, 'a new type is tickable, never ticked');
+  });
+});

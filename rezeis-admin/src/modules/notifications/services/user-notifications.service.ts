@@ -31,6 +31,8 @@ import {
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
 import { buildSubscriptionFacts } from '../utils/subscription-facts.util';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
+import { isRetryableRelayOutcome } from '../../backup/backup-delivery-retry.util';
+import type { NotifyDeliveryResult } from './bot-notifier.client';
 
 /**
  * Categories the user notifications fall under for topic routing when
@@ -111,6 +113,85 @@ export interface OperatorMessageResult {
   readonly eventId: string;
   readonly outcomes: readonly ChannelOutcome[];
 }
+
+/**
+ * One step of {@link UserNotificationsService.deliverFirstReachable}, as it is
+ * recorded (`subscription_connect_states.help_attempts`).
+ *
+ * `result` is a stable machine key, rendered in words by the operator's log:
+ *
+ *   bot    confirmed | unconfirmed | rejected | disabled | timeout | failed
+ *          (the relay's own status, verbatim) | unavailable
+ *   push   delivered | failed | unavailable
+ *   email  queued | failed | unavailable
+ *
+ * `detail` says why a step was unavailable (`no_telegram`, `bot_blocked`,
+ * `relay_off`, `not_configured`, `no_subscription`, `no_mailer`,
+ * `not_mailable`, `smtp_off`, `notify_users_off`, `no_verified_email`) or how
+ * it failed.
+ */
+export interface LadderAttempt {
+  readonly channel: 'bot' | 'push' | 'email';
+  readonly result: string;
+  readonly at: string;
+  readonly detail?: string;
+}
+
+/**
+ * How one {@link UserNotificationsService.deliverFirstReachable} call ended.
+ *
+ *   bot | push | email    that channel reached the customer — e-mail meaning
+ *                         queued for a verified address;
+ *   banner                no channel reached them: the cabinet shows the banner;
+ *   opted_out             the customer switched this notice off — the feed row
+ *                         is written, nothing is sent;
+ *   skipped_template_off  the template is missing or switched off: nothing is
+ *                         written and nothing is sent;
+ *   deferred              the bot could not be asked (a timeout, a network
+ *                         failure, a 5xx): call again later with the same
+ *                         `eventId` and one more deferral.
+ */
+export type LadderOutcome =
+  | 'bot'
+  | 'push'
+  | 'email'
+  | 'banner'
+  | 'opted_out'
+  | 'skipped_template_off'
+  | 'deferred';
+
+export interface DeliverFirstReachableInput {
+  readonly userId: string;
+  readonly type: string;
+  /** Stored on the feed row as it is; the renderer reads its placeholders. */
+  readonly payload: Record<string, unknown>;
+  /**
+   * The feed row an earlier, deferred call already wrote. The ladder resumes
+   * on it instead of writing a second one — and the bot deduplicates on it.
+   */
+  readonly eventId?: string | null;
+  /** How many times the bot step has been deferred for this notice so far. */
+  readonly deferrals?: number;
+  /**
+   * Awaited with the new feed row's id BEFORE any channel runs, so a caller
+   * can record the id first: a crash between a send and the caller's own
+   * bookkeeping then resumes on the same id rather than minting another.
+   */
+  readonly onFeedRowWritten?: (eventId: string) => Promise<void>;
+}
+
+export interface DeliverFirstReachableResult {
+  readonly outcome: LadderOutcome;
+  /** The feed row, or `null` when nothing was written (`skipped_template_off` on a first call). */
+  readonly eventId: string | null;
+  readonly attempts: readonly LadderAttempt[];
+}
+
+/** How long the ladder waits for the bot before it counts the step as a timeout. */
+export const LADDER_BOT_DEADLINE_MS = 15_000;
+
+/** Deferrals of the bot step after which the ladder moves on without it. */
+export const LADDER_MAX_BOT_DEFERRALS = 3;
 
 interface CreateUserNotificationInput {
   readonly userId: string;
@@ -496,6 +577,286 @@ export class UserNotificationsService {
     return { eventId: event.id, outcomes };
   }
 
+  /**
+   * THE FIRST CHANNEL THAT REACHES THE CUSTOMER — and only that one.
+   * ════════════════════════════════════════════════════════════════
+   * `create()` fans a notice out to every channel at once and learns nothing
+   * back: Telegram is only enqueued, the push result is dropped. That is right
+   * for a receipt and wrong for «Не получилось подключиться?», which should
+   * reach a person once, by the best road they have, and fall back to the
+   * cabinet banner only when nothing else can. So this walks a ladder and reads
+   * every answer:
+   *
+   *   1. bot    a linked, positive Telegram id, a bot not blocked, the relay
+   *             configured — sent SYNCHRONOUSLY and bounded by
+   *             {@link LADDER_BOT_DEADLINE_MS}. Only `confirmed` (Telegram's
+   *             own message id came back) counts. A recipient the bot cannot
+   *             reach (`unconfirmed`), a refusal (a 4xx) or an unconfigured
+   *             relay moves on. A timeout, a network failure or a 5xx is the
+   *             LINK, not the person: the call answers `deferred` so the caller
+   *             tries again later with the same event id — on which the bot
+   *             deduplicates — and after {@link LADDER_MAX_BOT_DEFERRALS} it
+   *             moves on without the bot.
+   *   2. push   VAPID configured and a browser bound; delivered to at least one.
+   *   3. email  SMTP on, the operator's «Слать уведомления клиентам на почту»
+   *             on, a type the customer can switch off, a VERIFIED address —
+   *             queued under `notify:<eventId>`, the key `fanout` uses, so the
+   *             job id stays the three parts BullMQ accepts.
+   *   4. banner nothing above delivered; the cabinet shows the banner.
+   *
+   * The feed row is written FIRST and unconditionally (unless resuming on an
+   * earlier one), and the rendered copy goes into it, so the cabinet's bell has
+   * the words whatever the channels did. The customer's own switch is read
+   * after that and stops every channel, exactly as in `fanout`.
+   *
+   * The template is looked up by the EXACT type. `connect_help_trial` shares a
+   * switch with `connect_help` through the alias map, not its words, and the
+   * paid text says «оплачена».
+   *
+   * No operator mirror: the sender's own `subscription.not_connected` event is
+   * the operator's copy, and a mirror would put the same customer in the topic
+   * twice.
+   */
+  public async deliverFirstReachable(
+    input: DeliverFirstReachableInput,
+  ): Promise<DeliverFirstReachableResult> {
+    const resumedEventId =
+      typeof input.eventId === 'string' && input.eventId.length > 0 ? input.eventId : null;
+    const template = await this.templatesService.getByType(input.type);
+    if (template === null || !template.isActive) {
+      return { outcome: 'skipped_template_off', eventId: resumedEventId, attempts: [] };
+    }
+
+    const user = await this.prismaService.user.findUnique({
+      where: { id: input.userId },
+      select: {
+        telegramId: true,
+        isBotBlocked: true,
+        name: true,
+        language: true,
+        notificationPrefs: true,
+      },
+    });
+    if (user === null) {
+      throw new Error(`deliverFirstReachable: user ${input.userId} does not exist`);
+    }
+
+    let eventId = resumedEventId;
+    if (eventId === null) {
+      const event = await this.prismaService.userNotificationEvent.create({
+        data: {
+          userId: input.userId,
+          type: input.type,
+          payload: input.payload as Prisma.InputJsonObject,
+        },
+        select: { id: true },
+      });
+      eventId = event.id;
+      if (input.onFeedRowWritten !== undefined) await input.onFeedRowWritten(eventId);
+    }
+
+    const locale = coerceNotificationLocale(user.language as string | null | undefined);
+    const rendered = await this.renderFromTemplate(template, input.payload, user.name, locale);
+    if (resumedEventId === null) {
+      await this.persistRenderedCopy(eventId, input.payload, rendered);
+    }
+
+    if (!isSubscriberNotificationEnabled(user.notificationPrefs, input.type)) {
+      return { outcome: 'opted_out', eventId, attempts: [] };
+    }
+
+    const attempts: LadderAttempt[] = [];
+    const resolvedButtons = resolveTemplateButtons(
+      { buttons: (template as { buttons?: unknown }).buttons ?? null },
+      locale,
+    );
+    const bannerUrl =
+      typeof template.bannerUrl === 'string' && template.bannerUrl.trim().length > 0
+        ? template.bannerUrl.trim()
+        : undefined;
+
+    const bot = await this.ladderBotStep({
+      eventId,
+      user,
+      html: rendered.html,
+      buttons: resolvedButtons.length > 0 ? resolvedButtons : undefined,
+      bannerUrl,
+    });
+    attempts.push(bot.attempt);
+    if (bot.verdict === 'delivered') return { outcome: 'bot', eventId, attempts };
+    if (bot.verdict === 'retry' && (input.deferrals ?? 0) < LADDER_MAX_BOT_DEFERRALS) {
+      return { outcome: 'deferred', eventId, attempts };
+    }
+
+    const push = await this.ladderPushStep({
+      eventId,
+      userId: input.userId,
+      type: input.type,
+      payload: input.payload,
+      rendered,
+    });
+    attempts.push(push.attempt);
+    if (push.verdict === 'delivered') return { outcome: 'push', eventId, attempts };
+
+    const email = await this.ladderEmailStep({
+      eventId,
+      userId: input.userId,
+      type: input.type,
+      rendered,
+    });
+    attempts.push(email.attempt);
+    if (email.verdict === 'delivered') return { outcome: 'email', eventId, attempts };
+
+    return { outcome: 'banner', eventId, attempts };
+  }
+
+  /** Step 1 of the ladder. Never throws. */
+  private async ladderBotStep(input: {
+    readonly eventId: string;
+    readonly user: { readonly telegramId: bigint | null; readonly isBotBlocked: boolean };
+    readonly html: string;
+    readonly buttons: ReadonlyArray<NotifyButton> | undefined;
+    readonly bannerUrl: string | undefined;
+  }): Promise<LadderStep> {
+    const { telegramId, isBotBlocked } = input.user;
+    if (telegramId === null || telegramId <= 0n) return ladderUnavailable('bot', 'no_telegram');
+    if (isBotBlocked) return ladderUnavailable('bot', 'bot_blocked');
+    if (this.botNotifier.isEnabled !== true) return ladderUnavailable('bot', 'relay_off');
+    let outcome: NotifyDeliveryResult;
+    try {
+      const answered = await withLadderDeadline(
+        this.botNotifier.notifyUser({
+          eventId: input.eventId,
+          telegramId: telegramId.toString(),
+          text: input.html,
+          parseMode: 'HTML',
+          buttons: input.buttons,
+          bannerUrl: input.bannerUrl,
+        }),
+        LADDER_BOT_DEADLINE_MS,
+      );
+      outcome = answered ?? {
+        status: 'timeout',
+        messageId: null,
+        httpStatus: null,
+        detail: `no answer within ${LADDER_BOT_DEADLINE_MS}ms`,
+      };
+    } catch (err: unknown) {
+      outcome = {
+        status: 'failed',
+        messageId: null,
+        httpStatus: null,
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+    const attempt: LadderAttempt = {
+      channel: 'bot',
+      result: outcome.status,
+      at: new Date().toISOString(),
+      ...(outcome.detail === null ? {} : { detail: clipLadderDetail(outcome.detail) }),
+    };
+    if (outcome.status === 'confirmed') return { verdict: 'delivered', attempt };
+    // The link, not the person — the same line broadcast delivery draws.
+    if (isRetryableRelayOutcome(outcome)) return { verdict: 'retry', attempt };
+    return { verdict: 'next', attempt };
+  }
+
+  /** Step 2 of the ladder. Never throws. */
+  private async ladderPushStep(input: {
+    readonly eventId: string;
+    readonly userId: string;
+    readonly type: string;
+    readonly payload: Record<string, unknown>;
+    readonly rendered: { readonly title: string; readonly body: string };
+  }): Promise<LadderStep> {
+    try {
+      const badgeCount = await this.countUnread(input.userId);
+      const result = await this.webPushService.sendToUser({
+        userId: input.userId,
+        title: input.rendered.title,
+        body: stripHtml(input.rendered.body),
+        url: resolveNotificationPushUrl(input.type, input.payload),
+        tag: pushTagForNotification(input.type, input.eventId),
+        ...(pushTypeForNotification(input.type) === undefined
+          ? {}
+          : { type: pushTypeForNotification(input.type) as string }),
+        ...(pushTtlForType(input.type) === undefined
+          ? {}
+          : { ttlSeconds: pushTtlForType(input.type) as number }),
+        ...(badgeCount === undefined ? {} : { badgeCount }),
+      });
+      if (result.disabled) return ladderUnavailable('push', 'not_configured');
+      if (result.attempted === 0) return ladderUnavailable('push', 'no_subscription');
+      const counted = `${result.delivered}/${result.attempted}`;
+      return result.delivered > 0
+        ? {
+            verdict: 'delivered',
+            attempt: { channel: 'push', result: 'delivered', at: new Date().toISOString(), detail: counted },
+          }
+        : {
+            verdict: 'next',
+            attempt: { channel: 'push', result: 'failed', at: new Date().toISOString(), detail: counted },
+          };
+    } catch (err: unknown) {
+      return {
+        verdict: 'next',
+        attempt: {
+          channel: 'push',
+          result: 'failed',
+          at: new Date().toISOString(),
+          detail: clipLadderDetail(err instanceof Error ? err.message : String(err)),
+        },
+      };
+    }
+  }
+
+  /** Step 3 of the ladder. Never throws. */
+  private async ladderEmailStep(input: {
+    readonly eventId: string;
+    readonly userId: string;
+    readonly type: string;
+    readonly rendered: { readonly title: string; readonly body: string; readonly html: string };
+  }): Promise<LadderStep> {
+    if (this.emailDelivery === undefined) return ladderUnavailable('email', 'no_mailer');
+    if (!isSubscriberMailableType(input.type)) return ladderUnavailable('email', 'not_mailable');
+    try {
+      const config = await this.emailDelivery.getSmtpSettings();
+      if (!config.enabled) return ladderUnavailable('email', 'smtp_off');
+      if (!config.notifyUsers) return ladderUnavailable('email', 'notify_users_off');
+      const account = await this.prismaService.webAccount.findFirst({
+        where: { userId: input.userId, emailVerifiedAt: { not: null }, email: { not: null } },
+        select: { email: true },
+      });
+      const to = account?.email ?? null;
+      if (to === null) return ladderUnavailable('email', 'no_verified_email');
+      await this.emailDelivery.send({
+        to,
+        subject: input.rendered.title,
+        templateType: input.type,
+        variables: {},
+        rawHtml: renderNotificationEmailHtml(input.rendered.html),
+        text: renderBroadcastEmailText(null, input.rendered.body),
+        // `notify:` + a cuid: BullMQ's queue id is `email:notify:<eventId>`,
+        // three parts — the one shape it accepts with a colon in it.
+        dedupeKey: `notify:${input.eventId}`,
+      });
+      return {
+        verdict: 'delivered',
+        attempt: { channel: 'email', result: 'queued', at: new Date().toISOString() },
+      };
+    } catch (err: unknown) {
+      return {
+        verdict: 'next',
+        attempt: {
+          channel: 'email',
+          result: 'failed',
+          at: new Date().toISOString(),
+          detail: clipLadderDetail(err instanceof Error ? err.message : String(err)),
+        },
+      };
+    }
+  }
+
   private async deliverOperatorTelegram(
     eventId: string,
     userId: string,
@@ -802,7 +1163,7 @@ export class UserNotificationsService {
           // the notification (renewal / referrals / feed), mirroring the
           // cabinet's `resolveNotificationTarget` so PWA pushes and the
           // in-app bell agree on destinations.
-          url: resolveNotificationPushUrl(input.type),
+          url: resolveNotificationPushUrl(input.type, input.payload),
           // WHICH notification this is. The url above is a destination and
           // many types share one, so without this the cabinet had to guess a
           // collapse key from the url and the words — and a queued weekend of
@@ -1584,16 +1945,74 @@ function renderNotificationEmailHtml(telegramHtml: string): string {
     .join('');
 }
 
+/** One rung of `deliverFirstReachable`: what happened, and whether to stop. */
+interface LadderStep {
+  /** `delivered` stops the ladder; `retry` may defer it; `next` moves on. */
+  readonly verdict: 'delivered' | 'retry' | 'next';
+  readonly attempt: LadderAttempt;
+}
+
+function ladderUnavailable(channel: LadderAttempt['channel'], reason: string): LadderStep {
+  return {
+    verdict: 'next',
+    attempt: { channel, result: 'unavailable', at: new Date().toISOString(), detail: reason },
+  };
+}
+
+/** A failure's words, bounded: they go into a JSON column and an operator's log. */
+function clipLadderDetail(detail: string): string {
+  return detail.length > 300 ? `${detail.slice(0, 299)}…` : detail;
+}
+
+/**
+ * The value, or `null` when it did not arrive within `ms`. The call is left to
+ * finish on its own — the bot deduplicates on the event id, so a late success
+ * followed by the retry is still one message.
+ */
+async function withLadderDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * «Помощь с подключением» — both of its types — opens the cabinet's one deep
+ * link for it, naming the subscription so the dashboard selects THAT card.
+ * Relative, like every other push url.
+ */
+function connectHelpPushUrl(payload: unknown): string {
+  const subscriptionId =
+    payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)['subscriptionId']
+      : undefined;
+  return typeof subscriptionId === 'string' && subscriptionId.length > 0
+    ? `/dashboard?connect=help&subscriptionId=${encodeURIComponent(subscriptionId)}`
+    : '/dashboard?connect=help';
+}
+
 /**
  * Resolve the cabinet route a web-push notification should deep-link to when
  * clicked, mirroring reiwa web's `resolveNotificationTarget` so the PWA push
  * and the in-app bell agree on destinations:
+ *   • «Помощь с подключением»           → the dashboard's connect deep link
  *   • expiry / traffic-limit reminders → the renewal page
  *   • referral / partner program       → the referrals cabinet
  *   • broadcasts / news                 → the notifications feed
  *   • everything else                   → the dashboard
+ *
+ * The connect branch is an EXACT match on the canonical type, ahead of the
+ * substring rules below, and it is the only one that reads the payload.
  */
-function resolveNotificationPushUrl(type: string): string {
+function resolveNotificationPushUrl(type: string, payload?: unknown): string {
+  if (resolveToggleKey(type) === 'connect_help') return connectHelpPushUrl(payload);
   const t = type.toLowerCase();
   if (t.includes('support')) return '/support';
   if (t.includes('expir') || t.includes('limited')) return '/renew';

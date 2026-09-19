@@ -33,6 +33,13 @@ const TYPE_ALIAS_TO_TOGGLE_KEY: Readonly<Record<string, string>> = {
   'referral.attached': 'referral_attached',
   'referral.reward': 'referral_reward',
   'referral.qualified': 'referral_qualified',
+  // «Помощь с подключением» for a trial or a gift. Its own TEMPLATE, because
+  // the paid text says «оплачена», but ONE switch for the customer: whoever
+  // turned the help off in the cabinet turned off both. So this alias drives
+  // the subscriber's switch, the push tag and the mail gate — and must never
+  // drive the template lookup: `deliverFirstReachable` fetches the template
+  // by the exact type, or a trial would be told it paid.
+  connect_help_trial: 'connect_help',
 };
 
 /**
@@ -77,6 +84,12 @@ export function isNotificationDeliveryEnabled(
  *
  * The cabinet's switches are keyed by these values, so adding one here is
  * also what makes a new switch possible.
+ *
+ * `connect_help` is the one outside the expiry family, and it is here for the
+ * same reason: «Не получилось подключиться?» is sent on the system's own
+ * schedule, and a customer who does not want it is entitled to say so. One
+ * key covers both of its types (`connect_help_trial` resolves to it). Being on
+ * this list also makes it mailable, which the help's e-mail step relies on.
  */
 export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
   'expires_in_3_days',
@@ -84,6 +97,7 @@ export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
   'expires_in_1_days',
   'expired',
   'expired_1_day_ago',
+  'connect_help',
 ] as const;
 
 export type SubscriberMutableNotificationType =

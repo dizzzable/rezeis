@@ -604,3 +604,71 @@ describe('InternalUserEdgeService.bootstrapByTelegram invite-token binding', () 
     assert.equal(consumeCalls.length, 0);
   });
 });
+
+/**
+ * `User.isBotBlocked` had one writer, and it only ever wrote `true`: the bot
+ * reports a 403 through `markBotBlocked`. A customer who blocked the bot once,
+ * unblocked it and pressed /start stayed "blocked" for every notice after —
+ * the connect help's bot step, broadcasts and the operator's own messages
+ * skipped them for good. A blocked chat cannot send /start, so the bootstrap
+ * is the proof the block is over, and it now says so.
+ */
+describe('InternalUserEdgeService.bootstrapByTelegram and the bot block', () => {
+  function recordingService(existing: { id: string; isBlocked: boolean } | null) {
+    const upserts: Array<{ create: Record<string, unknown>; update: Record<string, unknown> }> = [];
+    const prisma = {
+      user: {
+        findUnique: async () => existing,
+        upsert: async (args: { create: Record<string, unknown>; update: Record<string, unknown> }) => {
+          upserts.push(args);
+          return fakeUser();
+        },
+      },
+    };
+    const service = new InternalUserEdgeService(
+      prisma as never,
+      STUB_SETTINGS as never,
+      { evaluate: () => null } as never,
+      { info: () => undefined } as never,
+      {} as never,
+    );
+    return { service, upserts };
+  }
+
+  it('clears the flag for a returning customer who pressed /start', async () => {
+    const { service, upserts } = recordingService({ id: 'user-cuid-1', isBlocked: false });
+    await service.bootstrapByTelegram({ telegramId: '1036459677', username: 'Frodmaker', name: 'Maylo' });
+    assert.equal(upserts.length, 1);
+    assert.equal(upserts[0].update['isBotBlocked'], false);
+  });
+
+  it('starts a brand-new customer unblocked without writing the flag', async () => {
+    const { service, upserts } = recordingService(null);
+    await service.bootstrapByTelegram({ telegramId: '1036459677', username: 'Frodmaker', name: 'Maylo' });
+    assert.equal(upserts.length, 1);
+    // The column defaults to false; the create carries no opinion of its own.
+    assert.equal('isBotBlocked' in upserts[0].create, false);
+  });
+
+  it('still lets the bot mark a block, and only as a block', async () => {
+    const writes: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+    const service = new InternalUserEdgeService(
+      {
+        user: {
+          updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+            writes.push(args);
+            return { count: 1 };
+          },
+        },
+      } as never,
+      STUB_SETTINGS as never,
+      { evaluate: () => null } as never,
+      { info: () => undefined } as never,
+      {} as never,
+    );
+    await service.markBotBlocked('1036459677');
+    assert.deepEqual(writes, [
+      { where: { telegramId: BigInt(1036459677), isBotBlocked: false }, data: { isBotBlocked: true } },
+    ]);
+  });
+});

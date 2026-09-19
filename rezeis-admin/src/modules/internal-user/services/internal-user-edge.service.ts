@@ -215,6 +215,16 @@ export class InternalUserEdgeService {
         telegramUsername,
         telegramUsernameTgId: telegramIdBig,
         ...(language !== null ? { language } : {}),
+        // THE BOT IS REACHABLE AGAIN. `markBotBlocked` is the only writer of
+        // `true` — the bot reports a 403 — and nothing ever wrote `false`, so a
+        // customer who unblocked the bot and pressed /start stayed "blocked"
+        // for every notice, the connect help's bot step and broadcasts alike.
+        // A blocked chat cannot send /start, so this call is the proof.
+        // The Mini App sign-in reaches the same bootstrap and proves less (a
+        // Mini App can be opened from a link without the chat); the panel
+        // cannot tell the two apart, and a wrong `false` costs one attempt:
+        // Telegram answers it with a 403, and the bot marks the block again.
+        isBotBlocked: false,
       },
       include: INTERNAL_USER_INCLUDE,
     });

@@ -33,6 +33,11 @@ describe('notification-target-resolver', () => {
       assert.equal(resolveTerminalRouteFor('promocode.depleted'), '/promo');
     });
 
+    it('routes «Помощь с подключением» to the dashboard, which opens the connect screen', () => {
+      assert.equal(resolveTerminalRouteFor('connect_help'), '/dashboard');
+      assert.equal(resolveTerminalRouteFor('connect_help_trial'), '/dashboard');
+    });
+
     it('falls back to /dashboard for unknown types', () => {
       assert.equal(resolveTerminalRouteFor('user_registered'), '/dashboard');
       assert.equal(resolveTerminalRouteFor('node_status'), '/dashboard');
@@ -53,6 +58,9 @@ describe('notification-target-resolver', () => {
       assert.equal(resolveNotificationCategory('bot_lifetime'), 'system');
       assert.equal(resolveNotificationCategory('access_policy'), 'system');
       assert.equal(resolveNotificationCategory('something_unknown'), 'other');
+      // With the other notices about a subscription's state, not «Прочее».
+      assert.equal(resolveNotificationCategory('connect_help'), 'expires');
+      assert.equal(resolveNotificationCategory('connect_help_trial'), 'expires');
     });
   });
 });

@@ -95,6 +95,11 @@ describe('the per-notification push TTL', () => {
       'support_reply',
       'points_cashback_credited',
       'partner.earning',
+      // «Не получилось подключиться?» is as true tomorrow as today: the VPN
+      // either connected in between (and the notice is moot but harmless) or
+      // it did not, and the notice is exactly as needed as it was.
+      'connect_help',
+      'connect_help_trial',
     ]) {
       assert.equal(BY_TYPE[type], undefined, `${type} was given a short TTL`);
     }

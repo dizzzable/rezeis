@@ -84,6 +84,15 @@ export const RELAY_DIRECT_DELIVERY_EXCEPTIONS: Readonly<Record<string, string>> 
     'would leave the link readable in Redis long after its fifteen minutes, and a late ' +
     'retry could deliver a link that no longer works. One direct attempt; the outcome ' +
     'is read and logged by status, and a miss is the customer asking again.',
+  'src/modules/notifications/services/user-notifications.service.ts':
+    'ONLY `deliverFirstReachable`, the «Помощь с подключением» ladder: it has to know ' +
+    'whether the bot reached the customer before it may choose the next channel (push, ' +
+    'then e-mail, then the cabinet banner), and the queue answers that inside its ' +
+    'processor, after the caller has moved on. It reads every status: `confirmed` ends ' +
+    'the ladder, a refusal or a customer the bot cannot reach moves it on, and a ' +
+    'timeout, a network failure or a 5xx defers it to the next cycle with the SAME ' +
+    'event id, on which the bot deduplicates. Queue retries are replaced by cycle ' +
+    'retries. The ordinary `fanout` in the same file still enqueues.',
 };
 
 /** Payload of a `reiwa.relay` job. Must stay JSON-serialisable. */

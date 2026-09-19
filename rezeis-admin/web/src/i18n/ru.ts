@@ -1270,6 +1270,7 @@ export const ru = {
       remnawave_user_enabled: 'Профиль включён',
       remnawave_user_first_connected: 'Первое подключение',
       user_first_traffic: 'Пользователь начал использовать трафик',
+      subscription_not_connected: 'Клиент не подключился после покупки',
       remnawave_user_traffic_reset: 'Сброшен трафик',
       remnawave_user_expire_soon: 'Подписка скоро истекает',
       remnawave_user_bandwidth_threshold: 'Достигнут порог трафика',

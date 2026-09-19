@@ -1194,6 +1194,7 @@ export const en = {
       remnawave_user_enabled: 'Profile enabled',
       remnawave_user_first_connected: 'First connection',
       user_first_traffic: 'User started using traffic',
+      subscription_not_connected: 'Customer has not connected since the purchase',
       remnawave_user_traffic_reset: 'Traffic reset',
       remnawave_user_expire_soon: 'Subscription expiring soon',
       remnawave_user_bandwidth_threshold: 'Bandwidth threshold reached',

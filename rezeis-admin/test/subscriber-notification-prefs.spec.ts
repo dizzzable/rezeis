@@ -90,7 +90,7 @@ describe('reading a subscriber switch', () => {
     assert.equal(isSubscriberNotificationEnabled({ broadcast: false }, 'broadcast'), true);
   });
 
-  it('covers exactly the expiry family', () => {
+  it('covers exactly the expiry family and «Помощь с подключением»', () => {
     // Named here so widening the list is a deliberate edit in two places
     // rather than a quiet one in a constant.
     assert.deepEqual([...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES], [
@@ -99,7 +99,16 @@ describe('reading a subscriber switch', () => {
       'expires_in_1_days',
       'expired',
       'expired_1_day_ago',
+      'connect_help',
     ]);
+  });
+
+  it('lets one switch stop both connect-help notices', () => {
+    // The trial notice has its own template and no switch of its own: the
+    // customer turned off "help with connecting", not one of its two texts.
+    assert.equal(isSubscriberNotificationEnabled({ connect_help: false }, 'connect_help'), false);
+    assert.equal(isSubscriberNotificationEnabled({ connect_help: false }, 'connect_help_trial'), false);
+    assert.equal(isSubscriberNotificationEnabled({ connect_help_trial: false }, 'connect_help_trial'), true);
   });
 });
 
@@ -132,6 +141,15 @@ describe('the internal preferences route', () => {
     const result = await service.getNotificationPrefs('42');
     assert.deepEqual(result.prefs, { expired: false });
     assert.deepEqual([...result.available], [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES]);
+    // The cabinet draws «Помощь с подключением» only when this lists it.
+    assert.ok(result.available.includes('connect_help'));
+  });
+
+  it('stores the connect-help switch the cabinet sends, and returns it', async () => {
+    const { service, updates } = buildService({ expired: false });
+    const result = await service.updateNotificationPrefs('42', { connect_help: false });
+    assert.deepEqual(result.prefs, { expired: false, connect_help: false });
+    assert.deepEqual(updates[0].notificationPrefs, { expired: false, connect_help: false });
   });
 
   it('returns an empty map for a subscriber who never opened the screen', async () => {

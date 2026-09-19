@@ -30,6 +30,9 @@ export type MiniAppRoute =
  */
 export function resolveTerminalRouteFor(type: string): MiniAppRoute {
   const t = type.toLowerCase();
+  // «Помощь с подключением»: its deep link is `/dashboard?connect=help`, and
+  // the dashboard is the page that opens the connection screen from it.
+  if (isConnectHelpType(t)) return '/dashboard';
   if (t.includes('support')) return '/support';
   if (t.includes('expir') || t.includes('limited')) return '/renew';
   if (t.includes('partner')) return '/partner';
@@ -58,6 +61,11 @@ export type NotificationCategory =
 
 export function resolveNotificationCategory(type: string): NotificationCategory {
   const t = type.toLowerCase();
+  // A notice about the state of a subscription, so it sits with the other
+  // subscription notices (expiry, traffic) rather than under «Прочее». The
+  // rail has no group of its own for them; one would need the SPA's group
+  // list and labels as well as this function.
+  if (isConnectHelpType(t)) return 'expires';
   if (t.startsWith('expires_') || t === 'expired' || t === 'limited' || t.startsWith('expired_')) {
     return 'expires';
   }
@@ -76,4 +84,9 @@ export function resolveNotificationCategory(type: string): NotificationCategory 
     return 'system';
   }
   return 'other';
+}
+
+/** Both types of «Помощь с подключением»: paid, and trial or gift. */
+function isConnectHelpType(lowerCaseType: string): boolean {
+  return lowerCaseType === 'connect_help' || lowerCaseType === 'connect_help_trial';
 }

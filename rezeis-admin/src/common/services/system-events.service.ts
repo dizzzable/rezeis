@@ -185,6 +185,16 @@ export const EVENT_TYPES = {
   SUBSCRIPTION_DELETED: 'subscription.deleted',
   SUBSCRIPTION_SYNCED: 'subscription.synced',
   SUBSCRIPTION_TRIAL_GRANTED: 'subscription.trial_granted',
+  /**
+   * «Помощь с подключением» reached its decision about a subscription whose VPN
+   * profile verifiably never connected N hours after it was bought (or, with
+   * trials switched on, granted). Once per subscription, from the sender in
+   * `connect-help-sweep.service.ts`, and only while the automatic help is on.
+   * Metadata: `{ userId, subscriptionId, kind, anchorAt, hoursSincePurchase,
+   * helpedBy }` — `helpedBy` is the outcome (bot, push, email, banner,
+   * opted_out, merged, skipped_template_off).
+   */
+  SUBSCRIPTION_NOT_CONNECTED: 'subscription.not_connected',
   TRIAL_CLAIM_LATE_SUCCESS_OVER_CAP: 'trial.claim_late_success_over_cap',
   SUBSCRIPTION_DEVICE_REVOKED: 'user_hwid_revoked',
 
@@ -3356,6 +3366,10 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'subscription.deleted': { emoji: '🗑', title: 'Подписка удалена' },
   'subscription.synced': { emoji: '🔄', title: 'Синхронизация подписки' },
   'subscription.trial_granted': { emoji: '🎁', title: 'Выдан триал' },
+  // INFO, not a warning: a customer to help at leisure, one card per
+  // subscription. How long it has been and which road reached the customer are
+  // the producer's Russian `note`; the customer and the plan have their blocks.
+  'subscription.not_connected': { emoji: '⏱', title: 'Клиент не подключился после покупки' },
   // Emitted with category PAYMENT (see the emit site in
   // `PaymentSubscriptionMutationService`), which is why its tick-box lives
   // under «Платежи» even though the constant sits in the Subscription block.
