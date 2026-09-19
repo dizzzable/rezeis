@@ -18,8 +18,8 @@ import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import {
-  readBooleanSetting,
   readOptionalString,
   readRecord,
   requireSetting,
@@ -62,7 +62,7 @@ export class PaymentMethodSetupService {
     }
     const settings = readGatewaySettings(gateway.settings);
     return {
-      yookassaStandaloneSetup: readBooleanSetting(settings, 'savePaymentMethod', true),
+      yookassaStandaloneSetup: isAutopayApproved(PaymentGatewayType.YOOKASSA, settings),
     };
   }
 
@@ -90,7 +90,7 @@ export class PaymentMethodSetupService {
       });
     }
     const settings = readGatewaySettings(gateway.settings);
-    if (!readBooleanSetting(settings, 'savePaymentMethod', true)) {
+    if (!isAutopayApproved(PaymentGatewayType.YOOKASSA, settings)) {
       throw new BadRequestException({
         code: 'PAYMENT_METHOD_SETUP_UNAVAILABLE',
         message: 'YooKassa payment method setup is disabled',

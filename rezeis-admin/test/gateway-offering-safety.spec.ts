@@ -234,8 +234,52 @@ describe('buyer-facing gateway list', () => {
         type: PaymentGatewayType.YOOKASSA,
         currency: Currency.RUB,
         orderIndex: 1,
+        autopay: false,
       },
     ]);
+  });
+
+  it('offers autopay only where the operator confirmed the provider approved it, and only on gateways this build charges', async () => {
+    const controller = createController([
+      gatewayRow({ id: 'unset', type: PaymentGatewayType.YOOKASSA, isActive: true, isConfigured: true, orderIndex: 1 }),
+      gatewayRow({
+        id: 'approved',
+        type: PaymentGatewayType.YOOKASSA,
+        isActive: true,
+        isConfigured: true,
+        orderIndex: 2,
+        // The admin form posts booleans as strings.
+        settings: { savePaymentMethod: 'true' },
+      }),
+      gatewayRow({
+        id: 'refused',
+        type: PaymentGatewayType.YOOKASSA,
+        isActive: true,
+        isConfigured: true,
+        orderIndex: 3,
+        settings: { savePaymentMethod: false },
+      }),
+      // The switch alone does not make a gateway charge again: Platega's repeat
+      // charges are not built yet, so its checkout must not promise them.
+      gatewayRow({
+        id: 'not-built',
+        type: PaymentGatewayType.PLATEGA,
+        isActive: true,
+        isConfigured: true,
+        orderIndex: 4,
+        settings: { savePaymentMethod: true },
+      }),
+    ]);
+
+    assert.deepStrictEqual(
+      (await controller.listEnabledGateways('web')).map((gateway) => [gateway.id, gateway.autopay]),
+      [
+        ['unset', false],
+        ['approved', true],
+        ['refused', false],
+        ['not-built', false],
+      ],
+    );
   });
 
   it('keeps hiding a disabled gateway even when its credentials are complete', async () => {
@@ -310,6 +354,7 @@ function gatewayRow(input: {
   readonly isConfigured: boolean;
   readonly currency?: Currency;
   readonly orderIndex?: number;
+  readonly settings?: Record<string, unknown>;
 }) {
   return {
     id: input.id,
@@ -318,6 +363,7 @@ function gatewayRow(input: {
     orderIndex: input.orderIndex ?? 1,
     isActive: input.isActive,
     isConfigured: input.isConfigured,
+    settings: input.settings ?? {},
   };
 }
 

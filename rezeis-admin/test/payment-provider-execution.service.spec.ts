@@ -44,7 +44,7 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     const result = await service.createCheckout({
       gateway: createGateway({
         type: PaymentGatewayType.YOOKASSA,
-        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+        settings: { shopId: 'shop-1', apiKey: 'secret-1', savePaymentMethod: true },
       }),
       transaction: createTransaction({
         paymentId: 'payment-1',
@@ -150,7 +150,7 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     const result = await service.createCheckout({
       gateway: createGateway({
         type: PaymentGatewayType.YOOKASSA,
-        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+        settings: { shopId: 'shop-1', apiKey: 'secret-1', savePaymentMethod: true },
       }),
       transaction: createTransaction({
         paymentId: 'payment-c',
@@ -166,9 +166,46 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     assert.equal(body['save_payment_method'], true);
     assert.equal(result.gatewayData['savePaymentMethodConsent'], true);
     assert.equal(result.gatewayData['savePaymentMethodReason'], 'request_with_consent');
-    assert.equal(result.gatewayData['consentVersion'], 'yookassa-autopay-v1');
+    assert.equal(result.gatewayData['consentVersion'], 'yookassa-autopay-v2');
     assert.equal(typeof result.gatewayData['consentAt'], 'string');
     assert.ok(String(result.gatewayData['consentAt']).length > 0);
+  });
+
+  it('never requests save_payment_method from a shop nobody approved, even with consent', async () => {
+    // Until 19.09.2026 an unset switch read as ON; a live ЮKassa shop without
+    // its manager's approval cannot charge a saved card, so it must not save one.
+    const calls: unknown[] = [];
+    const service = createService({
+      post: (_url: string, body: unknown) => {
+        calls.push(body);
+        return of({
+          data: {
+            id: 'provider-unapproved',
+            status: 'pending',
+            confirmation: { confirmation_url: 'https://checkout.example/u' },
+          },
+        });
+      },
+    });
+    const result = await service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.YOOKASSA,
+        settings: { shopId: 'shop-1', apiKey: 'secret-1' },
+      }),
+      transaction: createTransaction({
+        paymentId: 'payment-u',
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        amount: '10.00',
+        currency: Currency.RUB,
+      }),
+      description: 'unapproved shop',
+      savePaymentMethod: true,
+      savePaymentMethodConsent: true,
+    });
+    const body = calls[0] as Record<string, unknown>;
+    assert.equal('save_payment_method' in body, false);
+    assert.equal(result.gatewayData['savePaymentMethod'], false);
+    assert.equal(result.gatewayData['savePaymentMethodReason'], 'gateway_disabled');
   });
 
   it('honours per-request savePaymentMethod:false', async () => {

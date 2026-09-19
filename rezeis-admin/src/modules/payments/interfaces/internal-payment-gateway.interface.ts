@@ -17,4 +17,10 @@ export interface InternalPaymentGatewayInterface {
   readonly type: PaymentGatewayType;
   readonly currency: Currency;
   readonly orderIndex: number;
+  /**
+   * The operator switched «Автоплатежи одобрены провайдером» on, and this build
+   * can run the gateway's repeat charges. The cabinet then offers a second
+   * option, «для автоматического списания». See `gateway-autopay.util.ts`.
+   */
+  readonly autopay: boolean;
 }

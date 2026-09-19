@@ -16,13 +16,13 @@ import {
   checkoutExpiresAt,
 } from '../constants/checkout-lifetime.constant';
 import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payment-gateway-settings.util';
+import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
   buildResultUrl,
   buildWebhookUrl,
   md5,
   sha1,
-  readBooleanSetting,
   readOptionalString,
   readRecord,
   requireSetting,
@@ -38,8 +38,13 @@ function isYookassaCanceled(providerStatus: string | null): boolean {
   return status === 'canceled' || status === 'cancelled';
 }
 
-/** Version string stamped into gatewayData / metadata for autopay consent audit. */
-export const YOOKASSA_AUTOPAY_CONSENT_VERSION = 'yookassa-autopay-v1';
+/**
+ * Version string stamped into gatewayData / metadata for autopay consent audit.
+ * v1: the «Сохранить карту для автоплатежей» switch on the payment step.
+ * v2 (19.09.2026): the customer picked the separate «для автоматического
+ * списания» payment option, whose caption says the card is saved and charged.
+ */
+export const YOOKASSA_AUTOPAY_CONSENT_VERSION = 'yookassa-autopay-v2';
 
 /**
  * Resolves whether interactive YooKassa checkout should request
@@ -47,11 +52,12 @@ export const YOOKASSA_AUTOPAY_CONSENT_VERSION = 'yookassa-autopay-v1';
  *
  * Rules (in order):
  * 1. Off-session (`paymentMethodId` set) → never save
- * 2. Gateway `savePaymentMethod: false` → never save
+ * 2. Gateway autopay not approved (`savePaymentMethod` absent or false, see gateway-autopay.util.ts) → never save
  * 3. Request `savePaymentMethod: false` → never save
  * 4. Request `savePaymentMethod: true` requires `consent === true`
  * 5. Request omitted → no save (fail-closed for YooKassa informed-consent rules;
- *    cabinets must send explicit true + consent after the user ticks the box)
+ *    cabinets send explicit true + consent when the customer picks the
+ *    «для автоматического списания» option)
  */
 export function resolveYookassaSavePaymentMethod(input: {
   readonly paymentMethodId: string | null;
@@ -243,7 +249,7 @@ export class PaymentProviderExecutionService {
     // Off-session charges never re-request save. See resolveYookassaSavePaymentMethod.
     const saveDecision = resolveYookassaSavePaymentMethod({
       paymentMethodId,
-      gatewayAllows: readBooleanSetting(settings, 'savePaymentMethod', true),
+      gatewayAllows: isAutopayApproved(PaymentGatewayType.YOOKASSA, settings),
       requestSave: input.savePaymentMethod,
       consent: input.savePaymentMethodConsent,
     });

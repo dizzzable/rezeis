@@ -91,10 +91,10 @@ describe('InternalPaymentsController', () => {
         // rows are all configured; that filter has its own coverage in
         // `gateway-offering-safety.spec.ts`.
         listGateways: async () => [
-          { id: 'stars', type: PaymentGatewayType.TELEGRAM_STARS, currency: Currency.XTR, isActive: true, isConfigured: true, orderIndex: 1 },
-          { id: 'rub', type: PaymentGatewayType.YOOKASSA, currency: Currency.RUB, isActive: true, isConfigured: true, orderIndex: 2 },
-          { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, isActive: true, isConfigured: true, orderIndex: 1 },
-          { id: 'off', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, isActive: false, isConfigured: true, orderIndex: 0 },
+          { id: 'stars', type: PaymentGatewayType.TELEGRAM_STARS, currency: Currency.XTR, isActive: true, isConfigured: true, orderIndex: 1, settings: {} },
+          { id: 'rub', type: PaymentGatewayType.YOOKASSA, currency: Currency.RUB, isActive: true, isConfigured: true, orderIndex: 2, settings: {} },
+          { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, isActive: true, isConfigured: true, orderIndex: 1, settings: {} },
+          { id: 'off', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, isActive: false, isConfigured: true, orderIndex: 0, settings: {} },
         ],
       } as never,
       {} as never,
@@ -106,8 +106,8 @@ describe('InternalPaymentsController', () => {
     );
 
     assert.deepStrictEqual(await controller.listEnabledGateways('web'), [
-      { id: 'rub', type: PaymentGatewayType.YOOKASSA, currency: Currency.RUB, orderIndex: 2 },
-      { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, orderIndex: 1 },
+      { id: 'rub', type: PaymentGatewayType.YOOKASSA, currency: Currency.RUB, orderIndex: 2, autopay: false },
+      { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, orderIndex: 1, autopay: false },
     ]);
   });
 });

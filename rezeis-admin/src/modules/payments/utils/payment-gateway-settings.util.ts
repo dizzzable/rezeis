@@ -32,7 +32,7 @@ const yookassaSettingsSchema = z
     secretKey: z.string().min(1).optional(),
     customer: z.string().min(1).optional(),
     vatCode: z.string().min(1).optional(),
-    // Request YooKassa `save_payment_method` on interactive checkout (default true at runtime).
+    // «Автоплатежи одобрены провайдером»; absent reads as OFF (gateway-autopay.util.ts).
     savePaymentMethod: yookassaBooleanSetting.optional(),
     // ── Self-employed (НПД) «Мой Налог» income sync — additive, optional ──
     // Accepts a real boolean or the string forms the admin text/select field

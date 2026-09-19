@@ -23,6 +23,7 @@ import {
   TelegramStarsWebhookService,
   type TelegramStarsPreCheckoutVerdict,
 } from '../services/telegram-stars-webhook.service';
+import { isAutopayApproved } from '../utils/gateway-autopay.util';
 
 @Controller('internal/payments')
 @UseGuards(InternalAdminAuthGuard)
@@ -117,6 +118,7 @@ export class InternalPaymentsController {
         type: gateway.type,
         currency: gateway.currency,
         orderIndex: gateway.orderIndex,
+        autopay: isAutopayApproved(gateway.type, gateway.settings),
       }))
       .sort((a, b) => {
         // Default-currency gateways first; stable on orderIndex within a group.

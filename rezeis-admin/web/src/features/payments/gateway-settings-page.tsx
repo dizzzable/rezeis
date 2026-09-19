@@ -1140,9 +1140,10 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const initialValues: Record<string, string> = Object.fromEntries(
     (meta?.fields ?? []).map((field) => {
       const raw = gateway.settings?.[field.key]
-      // YooKassa save_payment_method defaults ON when the operator never set it.
+      // «Автоплатежи одобрены провайдером» reads as OFF when never set: every
+      // provider approves repeat charges per shop (gateway-autopay.util.ts).
       if (field.key === 'savePaymentMethod' && (raw === undefined || raw === null || raw === '')) {
-        return [field.key, 'true']
+        return [field.key, 'false']
       }
       // Numbers have to survive the round-trip: the backend normalizes
       // Platega's `paymentMethod`, the RioPay/Valutix `serviceId` and

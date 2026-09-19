@@ -83,7 +83,7 @@ export const en = {
       apiKey: 'API key',
       customerEmail: 'Customer email (for receipts)',
       vatCode: 'VAT code',
-      savePaymentMethod: 'Save cards for autopayments',
+      savePaymentMethod: 'Autopayments approved by the provider',
       selfEmployedEnabled: 'Self-employed (НПД): «Мой Налог» income sync',
       moyNalogAuthMethod: '«Мой Налог» auth method',
       moyNalogInn: 'Self-employed INN',
@@ -167,7 +167,7 @@ export const en = {
       defaultCurrency:
         'The currency the customer sees when paying through this gateway. The list is restricted to currencies the gateway actually supports.',
       savePaymentMethod:
-        'On interactive checkout, request YooKassa save_payment_method so the card/wallet appears under Payment methods and can be charged off-session. Has no effect when charging an already saved method. Enabled by default.',
+        'Turn on once YooKassa has approved autopayments for your shop: a live shop runs them only after you write to your YooKassa manager. The cabinet then shows a second YooKassa option, "for automatic charging": the customer saves a card and renewals are charged automatically. Turning it off stops new sign-ups only: cards already saved keep being charged until the customer turns them off under Payment methods. Off by default.',
       selfEmployedEnabled:
         'Register every successful YooKassa payment as self-employed (НПД) income in «Мой Налог» (lknpd.nalog.ru). The receipt is created asynchronously and never blocks subscription delivery.',
       moyNalogAuthMethod:
