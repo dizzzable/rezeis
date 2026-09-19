@@ -136,6 +136,8 @@ export const en = {
         'The VAT rate Antilopay prints on the receipt. Required only when the merchant is on the ОСНО tax regime: without it Antilopay rejects every checkout with error 17 («Не предоставлена ставка НДС или недопустимое значение»). On УСН or НПД leave it empty — no rate is needed.',
       overpayPublicKey:
         'RSA public key from OverPay back office for Content-Signature verification.',
+      plategaAutopay:
+        'Turn on once Platega has approved recurring SBP subscriptions for your account. The cabinet then shows a second Platega option, "for automatic charging": the customer confirms the subscription in their bank, Platega charges the first payment at once and then charges every period by itself. Offered only for plans whose duration equals a Platega period (up to 31 days, up to 4 weeks, a 30-day month up to 12, a year up to 3) and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off under Payment methods. Off by default.',
       plategaPaymentMethod:
         'The rail Platega opens at checkout. «Payer picks the method on Platega» sends no method at all — the payer chooses it on Platega\'s own page. Leaving the field empty still means СБП / SBP (2), not the payer\'s choice. Platega has no method 1: if a gateway still holds the legacy value 1 the field shows up empty and payments keep failing until you pick a method and save.',
       riopayToken:

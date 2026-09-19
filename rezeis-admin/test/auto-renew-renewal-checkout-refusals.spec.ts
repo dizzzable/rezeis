@@ -195,7 +195,7 @@ function harness(scenario: Scenario) {
           throw new Error('the saved method must not be charged in a pre-draft refusal case');
         }),
     } as never,
-    {} as never,
+    {} as never, { recordCheckout: async () => undefined } as never,
   );
 
   const checkoutCalls: string[] = [];

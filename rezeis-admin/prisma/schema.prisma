@@ -1640,6 +1640,7 @@ model User {
   questCompletions        QuestCompletion[]        @relation("QuestCompletionUser")
   savedPaymentMethods     SavedPaymentMethod[]     @relation("UserSavedPaymentMethods")
   paymentMethodSetups     PaymentMethodSetup[]     @relation("UserPaymentMethodSetups")
+  providerSubscriptions   ProviderSubscription[]   @relation("UserProviderSubscriptions")
   fraudExemptions         FraudExemption[]         @relation("UserFraudExemptions")
   legalConsents           UserLegalConsent[]       @relation("UserLegalConsents")
   deviceObservations      DeviceObservation[]      @relation("UserDeviceObservations")
@@ -2632,6 +2633,68 @@ enum PaymentMethodSetupStatus {
   INACTIVE
   FAILED
   EXPIRED
+}
+
+/// A repeat-charge subscription the PROVIDER runs: Platega fixes the amount and
+/// the period when it is created and charges on its own schedule. Unlike a
+/// SavedPaymentMethod (ЮKassa), the panel never charges it: it turns each
+/// successful charge into a delivered renewal and can cancel it. The amount is
+/// frozen at creation, so a later price change of the plan does not reach it
+/// (the owner's rule, 19.09.2026: the old price until the customer turns it off).
+model ProviderSubscription {
+  id                     String                     @id @default(cuid()) @map("id")
+  /// Null once the account is deleted: the row outlives it so the sweep can
+  /// still cancel the provider's charges.
+  userId                 String?                    @map("user_id")
+  gatewayType            PaymentGatewayType         @map("gateway_type")
+  /// The provider's id (Platega answers it as `transactionId` on creation).
+  providerSubscriptionId String                     @map("provider_subscription_id")
+  status                 ProviderSubscriptionStatus @default(PENDING) @map("status")
+  /// The provider's own word for the status, as last read.
+  providerStatus         String?                    @map("provider_status")
+  /// The VPN subscription each charge renews. Null until the first charge has
+  /// delivered a new purchase.
+  subscriptionId         String?                    @map("subscription_id")
+  planId                 String                     @map("plan_id")
+  durationDays           Int                        @map("duration_days")
+  amount                 Decimal                    @map("amount") @db.Decimal(20, 8)
+  currency               Currency                   @map("currency")
+  /// The provider's period: `intervalCount` × `intervalUnit` (day, week, month, year).
+  intervalUnit           String                     @map("interval_unit")
+  intervalCount          Int                        @map("interval_count")
+  /// The checkout Transaction that the first charge completes.
+  firstTransactionId     String                     @unique @map("first_transaction_id")
+  /// Successful charges already turned into delivered renewals. The provider's
+  /// own count above this one is the work left; each charge is applied once.
+  appliedChargeCount     Int                        @default(0) @map("applied_charge_count")
+  nextChargeAt           DateTime?                  @map("next_charge_at") @db.Timestamptz(3)
+  lastChargeAt           DateTime?                  @map("last_charge_at") @db.Timestamptz(3)
+  lastSyncedAt           DateTime?                  @map("last_synced_at") @db.Timestamptz(3)
+  cancelledAt            DateTime?                  @map("cancelled_at") @db.Timestamptz(3)
+  /// CUSTOMER, OPERATOR or SYSTEM when the panel cancelled it; PROVIDER when it
+  /// learned of a cancellation it did not make (the payer's own link).
+  cancelledBy            String?                    @map("cancelled_by")
+  consentVersion         String                     @map("consent_version")
+  createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User? @relation("UserProviderSubscriptions", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([gatewayType, providerSubscriptionId])
+  @@index([userId, status])
+  @@index([status, nextChargeAt])
+  @@map("provider_subscriptions")
+}
+
+/// PENDING until the payer confirms at the provider; ACTIVE while it charges;
+/// PAST_DUE after a failed charge (Platega does not retry); CANCELLED by anyone;
+/// FAILED when the payer never confirmed (Platega gives 30 minutes).
+enum ProviderSubscriptionStatus {
+  PENDING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  FAILED
 }
 
 // =============================================================================

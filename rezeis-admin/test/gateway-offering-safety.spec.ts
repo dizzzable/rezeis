@@ -259,14 +259,23 @@ describe('buyer-facing gateway list', () => {
         orderIndex: 3,
         settings: { savePaymentMethod: false },
       }),
-      // The switch alone does not make a gateway charge again: Platega's repeat
-      // charges are not built yet, so its checkout must not promise them.
+      // Platega runs its own subscriptions, and this build signs payers up for them.
       gatewayRow({
-        id: 'not-built',
+        id: 'platega-approved',
         type: PaymentGatewayType.PLATEGA,
         isActive: true,
         isConfigured: true,
         orderIndex: 4,
+        settings: { savePaymentMethod: true },
+      }),
+      // The switch alone does not make a gateway charge again: RollyPay's repeat
+      // charges are not built yet, so its checkout must not promise them.
+      gatewayRow({
+        id: 'not-built',
+        type: PaymentGatewayType.ROLLYPAY,
+        isActive: true,
+        isConfigured: true,
+        orderIndex: 5,
         settings: { savePaymentMethod: true },
       }),
     ]);
@@ -277,6 +286,7 @@ describe('buyer-facing gateway list', () => {
         ['unset', false],
         ['approved', true],
         ['refused', false],
+        ['platega-approved', true],
         ['not-built', false],
       ],
     );

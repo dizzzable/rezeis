@@ -27,6 +27,12 @@ import {
   AdminPaymentTransactionInterface,
   AdminPaymentTransactionListItemInterface,
 } from '../interfaces/admin-payment-transaction.interface';
+import {
+  autopayNotAvailable,
+  PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
+  ProviderSubscriptionTerms,
+  resolveProviderSubscriptionTerms,
+} from '../utils/provider-subscription-terms.util';
 
 /**
  * The namespaces the importers put in front of a donor platform's payment id,
@@ -205,13 +211,22 @@ export class PaymentsTransactionsService {
    */
   public async createCheckoutDraft(
     input: CreateTransactionDraftDto,
+    options: {
+      /**
+       * The buyer chose «для автоматического списания» on a gateway whose
+       * provider runs the subscription. A separate option rather than a DTO
+       * field so the admin draft endpoint can never create one.
+       */
+      readonly providerSubscription?: boolean;
+    } = {},
   ): Promise<AdminPaymentTransactionInterface> {
-    return this.createDraftInternal(input, true);
+    return this.createDraftInternal(input, true, options.providerSubscription === true);
   }
 
   private async createDraftInternal(
     input: CreateTransactionDraftDto,
     allowPaidTrialReservation: boolean,
+    providerSubscription = false,
   ): Promise<AdminPaymentTransactionInterface> {
     if ((input.purchaseType as unknown as string) === 'TRIAL') {
       throw new BadRequestException({
@@ -299,10 +314,41 @@ export class PaymentsTransactionsService {
     if (selectedPlan.availability === PlanAvailability.TRIAL && !allowPaidTrialReservation) {
       throw trialDraftRequiresCheckout();
     }
+    let providerSubscriptionTerms: ProviderSubscriptionTerms | null = null;
+    if (providerSubscription) {
+      // A plan upgrade or change is priced for the difference, once; a paid
+      // trial is a one-off by definition. Neither is a sum to repeat.
+      if (input.purchaseType !== PurchaseType.NEW && input.purchaseType !== PurchaseType.RENEW) {
+        throw autopayNotAvailable('PURCHASE_TYPE');
+      }
+      if (selectedPlan.availability === PlanAvailability.TRIAL) {
+        throw autopayNotAvailable('TRIAL');
+      }
+      const resolved = resolveProviderSubscriptionTerms({
+        gatewayType: input.gatewayType,
+        currency: price.currency,
+        amount: price.price,
+        durationDays: quote.selectedDuration.days,
+        discountSource: price.discountSource,
+        planId: selectedPlan.id,
+        subscriptionId:
+          input.purchaseType === PurchaseType.RENEW
+            ? (input.sourceSubscriptionId ?? quote.selectedSubscriptionId ?? null)
+            : null,
+      });
+      if ('refusal' in resolved) {
+        throw autopayNotAvailable(resolved.refusal);
+      }
+      providerSubscriptionTerms = resolved.terms;
+    }
+    // The terms sit in the snapshot, so the pending-draft reuse below, which
+    // compares snapshots, never hands an ordinary payment link to a buyer who
+    // chose automatic charging, nor the reverse.
     const draftPlanSnapshot = buildTransactionDraftSnapshot({
       purchaseType: input.purchaseType,
       selectedPlan,
       selectedDurationDays: quote.selectedDuration.days,
+      providerSubscription: providerSubscriptionTerms,
     });
     const draftMatch = {
       userId: input.userId,
@@ -539,8 +585,12 @@ function buildTransactionDraftSnapshot(input: {
     readonly trialSettings?: TrialSettings;
   };
   readonly selectedDurationDays: number;
+  readonly providerSubscription?: ProviderSubscriptionTerms | null;
 }): Record<string, unknown> {
   return {
+    ...(input.providerSubscription
+      ? { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: input.providerSubscription }
+      : {}),
     id: input.selectedPlan.id,
     name: input.selectedPlan.name,
     availability: input.selectedPlan.availability,

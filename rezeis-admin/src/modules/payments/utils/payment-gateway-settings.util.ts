@@ -178,6 +178,8 @@ const plategaSettingsSchema = z
     merchantId: z.string().min(1).optional(),
     secret: z.string().min(1).optional(),
     paymentMethod: plategaPaymentMethodSetting.optional(),
+    // «Автоплатежи одобрены провайдером»: recurring SBP subscriptions (gateway-autopay.util.ts).
+    savePaymentMethod: yookassaBooleanSetting.optional(),
   })
   .strict();
 

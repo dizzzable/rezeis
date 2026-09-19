@@ -1,6 +1,11 @@
 export const PAYMENT_RECONCILIATION_QUEUE = 'payment-reconciliation';
 export const PAYMENT_RECONCILIATION_JOB = 'reconcile-payment';
 export const PAYMENT_RECONCILIATION_ENQUEUE_FAILED = 'FAILED';
+/**
+ * Re-reads one provider-run subscription (Platega) and turns each new
+ * successful charge into a delivered renewal. Its callbacks only trigger this.
+ */
+export const PROVIDER_SUBSCRIPTION_SYNC_JOB = 'sync-provider-subscription';
 
 /**
  * Worker concurrency for payment webhook reconciliation. Tunable via

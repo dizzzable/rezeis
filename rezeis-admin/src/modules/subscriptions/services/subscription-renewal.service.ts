@@ -12,6 +12,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
 import { AddOnEligibilityService } from '../../add-ons/services/add-on-eligibility.service';
+import type { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.interface';
 import { isPlanSoftDeleted } from '../../plans/utils/plan-deletion.util';
 import {
   SubscriptionQuotePlanInterface,
@@ -41,6 +42,7 @@ interface SingleRenewalQuote {
   readonly currency: Currency | null;
   readonly amount: string | null;
   readonly discountPercent: number;
+  readonly discountSource: CatalogDiscountSource;
   readonly renewable: boolean;
   readonly requiresPlanSelection: boolean;
   readonly warnings: readonly SubscriptionQuoteWarningInterface[];
@@ -187,6 +189,7 @@ export class SubscriptionRenewalService {
       currency: quote.currency,
       amount: quote.amount,
       discountPercent: quote.discountPercent,
+      discountSource: quote.discountSource,
       renewable: quote.renewable,
       requiresPlanSelection: quote.requiresPlanSelection,
       warnings: quote.warnings,
@@ -273,6 +276,7 @@ export class SubscriptionRenewalService {
         currency: quote.currency,
         amount: quote.amount,
         discountPercent: quote.discountPercent,
+        discountSource: quote.discountSource,
         planSnapshot: {
           id: quote.planId,
           name: quote.planName,
@@ -432,6 +436,7 @@ export class SubscriptionRenewalService {
         currency: null,
         amount: null,
         discountPercent: 0,
+        discountSource: 'NONE',
         renewable: canSelect,
         requiresPlanSelection: canSelect,
         warnings: discovery.warnings,
@@ -452,6 +457,7 @@ export class SubscriptionRenewalService {
         currency: null,
         amount: null,
         discountPercent: 0,
+        discountSource: 'NONE',
         renewable: false,
         requiresPlanSelection: false,
         warnings: discovery.warnings,
@@ -475,6 +481,7 @@ export class SubscriptionRenewalService {
         currency: null,
         amount: null,
         discountPercent: 0,
+        discountSource: 'NONE',
         renewable: false,
         requiresPlanSelection: false,
         warnings: discovery.warnings,
@@ -507,6 +514,7 @@ export class SubscriptionRenewalService {
         currency: null,
         amount: null,
         discountPercent: 0,
+        discountSource: 'NONE',
         renewable: false,
         requiresPlanSelection: false,
         warnings: mergeWarnings(warnings, priced.warnings),
@@ -523,6 +531,7 @@ export class SubscriptionRenewalService {
       currency: priced.price.currency,
       amount: priced.price.price,
       discountPercent: priced.price.discountPercent,
+      discountSource: priced.price.discountSource,
       renewable: true,
       requiresPlanSelection: false,
       warnings,

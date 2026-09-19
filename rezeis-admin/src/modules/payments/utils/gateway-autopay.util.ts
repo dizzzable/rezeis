@@ -21,8 +21,15 @@ import { readBooleanSetting } from '../services/payment-provider-execution.helpe
  */
 export const AUTOPAY_APPROVED_SETTING = 'savePaymentMethod';
 
-/** The gateways whose repeat charges this build can run. */
-export const AUTOPAY_GATEWAY_TYPES: ReadonlySet<PaymentGatewayType> = new Set([PaymentGatewayType.YOOKASSA]);
+/**
+ * The gateways whose repeat charges this build can run: ЮKassa charges a saved
+ * method on the panel's schedule, Platega runs a subscription on its own
+ * (`PROVIDER_SUBSCRIPTION_GATEWAY_TYPES`).
+ */
+export const AUTOPAY_GATEWAY_TYPES: ReadonlySet<PaymentGatewayType> = new Set([
+  PaymentGatewayType.YOOKASSA,
+  PaymentGatewayType.PLATEGA,
+]);
 
 export function isAutopayApproved(type: PaymentGatewayType, settings: Record<string, unknown>): boolean {
   return AUTOPAY_GATEWAY_TYPES.has(type) && readBooleanSetting(settings, AUTOPAY_APPROVED_SETTING, false);

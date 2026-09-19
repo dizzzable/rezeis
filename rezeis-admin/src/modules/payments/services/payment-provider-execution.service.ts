@@ -18,6 +18,8 @@ import {
 import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payment-gateway-settings.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
+import { PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
+import { autopayNotAvailable, readProviderSubscriptionTerms } from '../utils/provider-subscription-terms.util';
 import {
   buildResultUrl,
   buildWebhookUrl,
@@ -45,6 +47,9 @@ function isYookassaCanceled(providerStatus: string | null): boolean {
  * списания» payment option, whose caption says the card is saved and charged.
  */
 export const YOOKASSA_AUTOPAY_CONSENT_VERSION = 'yookassa-autopay-v2';
+
+/** Platega's recurring SBP subscription, a method of its own on `/transaction/process`. */
+export const PLATEGA_SUBSCRIPTION_PAYMENT_METHOD = 6;
 
 /**
  * Resolves whether interactive YooKassa checkout should request
@@ -370,6 +375,58 @@ export class PaymentProviderExecutionService {
     const isProviderChoice = methodChoice.kind === 'PROVIDER_CHOICE';
     const successResultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failResultUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const subscriptionTerms = readProviderSubscriptionTerms(input.transaction.planSnapshot);
+    if (subscriptionTerms !== null) {
+      // Re-checked here, not only when the draft was made: a draft outlives the
+      // operator's switch, and nothing may sign a payer up the shop is not
+      // approved for.
+      if (!isAutopayApproved(PaymentGatewayType.PLATEGA, settings)) {
+        throw autopayNotAvailable('NOT_APPROVED');
+      }
+      // A subscription is its own method (SBP only, `paymentMethod: 6`) on the
+      // v1 endpoint, whatever rail the operator chose for one-off payments. The
+      // payer confirms it in the bank, and the first charge is taken then.
+      const response = await firstValueFrom(
+        this.httpService.post(
+          'https://app.platega.io/transaction/process',
+          {
+            paymentMethod: PLATEGA_SUBSCRIPTION_PAYMENT_METHOD,
+            paymentDetails: {
+              amount: subscriptionTerms.amount,
+              currency: input.transaction.currency,
+              interval: PLATEGA_INTERVAL_CODE[subscriptionTerms.unit],
+              intervalCount: subscriptionTerms.count,
+            },
+            description: input.description.slice(0, 64),
+            payload: input.transaction.paymentId,
+            return: successResultUrl,
+            failedUrl: failResultUrl,
+          },
+          { headers: { 'X-MerchantId': merchantId, 'X-Secret': secret } },
+        ),
+      );
+      const data = response.data as Record<string, unknown>;
+      // `transactionId` in this response IS the subscription's id: every later
+      // look and the cancel go by it, so a response without one is a refusal.
+      const providerSubscriptionId = readOptionalString(data, ['transactionId', 'subscriptionId', 'id']);
+      const checkoutUrl = readOptionalString(data, ['redirect', 'paymentUrl', 'url']);
+      if (providerSubscriptionId === null || checkoutUrl === null) {
+        throw new ServiceUnavailableException('Platega create subscription: missing id or checkout url');
+      }
+      return {
+        gatewayId: providerSubscriptionId,
+        checkoutUrl,
+        providerMode: 'REDIRECT',
+        providerStatus: readOptionalString(data, ['status']),
+        gatewayData: {
+          provider: 'PLATEGA',
+          providerStatus: readOptionalString(data, ['status']),
+          providerResponse: this.redactProviderResponse(data),
+          checkoutUrl,
+          providerSubscriptionId,
+        },
+      };
+    }
     const commonPayload = {
       paymentDetails: {
         amount: Number(input.transaction.amount.toString()),

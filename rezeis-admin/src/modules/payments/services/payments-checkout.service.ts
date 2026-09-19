@@ -32,9 +32,15 @@ import {
   SubscriptionProvisioningFailureCode,
   SubscriptionProvisioningStatus,
 } from '../interfaces/internal-payment-checkout.interface';
-import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
+import { isAutopayApproved } from '../utils/gateway-autopay.util';
+import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
+import {
+  autopayNotAvailable,
+  PROVIDER_SUBSCRIPTION_GATEWAY_TYPES,
+} from '../utils/provider-subscription-terms.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
+import { ProviderSubscriptionService } from './provider-subscription.service';
 import {
   claimForImmediateFulfillment,
   enqueueSyncJobsDeferringFailure,
@@ -77,6 +83,7 @@ export class PaymentsCheckoutService {
     private readonly accessModeGuard: AccessModeGuard,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly paymentReconciliationService: PaymentReconciliationService,
+    private readonly providerSubscriptionService: ProviderSubscriptionService,
   ) {}
 
   /**
@@ -142,17 +149,27 @@ export class PaymentsCheckoutService {
     if (gateway.type === PaymentGatewayType.TELEGRAM_STARS && channel === PurchaseChannel.WEB) {
       throw new BadRequestException('PAYMENT_GATEWAY_CHANNEL_UNSUPPORTED');
     }
+    // On these gateways the consent the cabinet sends for «для автоматического
+    // списания» is a provider subscription, not a saved card.
+    const providerSubscription =
+      input.savePaymentMethodConsent === true && PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(gateway.type);
+    if (providerSubscription && !isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings))) {
+      throw autopayNotAvailable('NOT_APPROVED');
+    }
 
-    const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft({
-      userId,
-      purchaseType: input.purchaseType,
-      planId: input.planId,
-      durationDays: input.durationDays,
-      gatewayType: input.gatewayType,
-      sourceSubscriptionId: input.subscriptionId,
-      channel,
-      deviceType: input.deviceType,
-    });
+    const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft(
+      {
+        userId,
+        purchaseType: input.purchaseType,
+        planId: input.planId,
+        durationDays: input.durationDays,
+        gatewayType: input.gatewayType,
+        sourceSubscriptionId: input.subscriptionId,
+        channel,
+        deviceType: input.deviceType,
+      },
+      { providerSubscription },
+    );
     const transaction = await this.prismaService.transaction.findUnique({
       where: { paymentId: createdDraft.paymentId },
     });
@@ -304,6 +321,7 @@ export class PaymentsCheckoutService {
         checkoutUrl: providerCheckout.checkoutUrl,
       },
     });
+    await this.providerSubscriptionService.recordCheckout(updatedTransaction);
 
     if (isProviderCanceled(providerCheckout.providerStatus)) {
       // Terminal cancel first so a later autopay-disable failure cannot leave

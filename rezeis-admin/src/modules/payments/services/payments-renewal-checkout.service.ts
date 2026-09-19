@@ -22,10 +22,19 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { SubscriptionRenewalService } from '../../subscriptions/services/subscription-renewal.service';
 import { PricedRenewalInterface } from '../../subscriptions/interfaces/subscription-renewal.interface';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
-import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
+import { isAutopayApproved } from '../utils/gateway-autopay.util';
+import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { buildRenewalCheckoutFingerprint, fingerprint } from '../utils/checkout-fingerprint.util';
 import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
+import {
+  autopayNotAvailable,
+  PROVIDER_SUBSCRIPTION_GATEWAY_TYPES,
+  PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
+  ProviderSubscriptionTerms,
+  resolveProviderSubscriptionTerms,
+} from '../utils/provider-subscription-terms.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
+import { ProviderSubscriptionService } from './provider-subscription.service';
 import {
   claimForImmediateFulfillment,
   enqueueSyncJobsDeferringFailure,
@@ -87,6 +96,7 @@ export class PaymentsRenewalCheckoutService {
     private readonly accessModeGuard: AccessModeGuard,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly paymentReconciliationService: PaymentReconciliationService,
+    private readonly providerSubscriptionService: ProviderSubscriptionService,
   ) {}
 
   public async renewalCheckout(
@@ -181,6 +191,7 @@ export class PaymentsRenewalCheckoutService {
       plans: input.plans,
       addOns: input.addOns,
     });
+    const providerSubscriptionTerms = resolveRenewalProviderSubscription(input, gateway, priced);
 
     // ── Request-level idempotency (T-007) ─────────────────────────────────
     // The canonical fingerprint covers the full renewal composition (each
@@ -197,6 +208,7 @@ export class PaymentsRenewalCheckoutService {
       channel,
       currency: priced.currency,
       savedPaymentMethodId: input.savedPaymentMethodId ?? null,
+      providerSubscription: providerSubscriptionTerms !== null,
       lines: priced.items.map((item) => ({
         subscriptionId: item.subscriptionId,
         planId: item.planId,
@@ -248,6 +260,7 @@ export class PaymentsRenewalCheckoutService {
         idempotencyKey,
         checkoutFingerprint,
         requestFingerprint,
+        providerSubscriptionTerms,
       ));
     // A concurrent keyed request won the unique race — replay its draft.
     if ('replay' in draft) {
@@ -433,6 +446,7 @@ export class PaymentsRenewalCheckoutService {
         checkoutUrl: providerCheckout.checkoutUrl,
       },
     });
+    await this.providerSubscriptionService.recordCheckout(updatedTransaction);
 
     if (isProviderCanceled(providerCheckout.providerStatus)) {
       const canceledTransaction = await this.prismaService.transaction.update({
@@ -547,6 +561,7 @@ export class PaymentsRenewalCheckoutService {
     idempotencyKey: string | null,
     checkoutFingerprint: string,
     requestFingerprint: string | null,
+    providerSubscription: ProviderSubscriptionTerms | null = null,
   ): Promise<Transaction | { readonly replay: InternalPaymentCheckoutInterface }> {
     try {
       return await this.prismaService.$transaction(async (tx) => {
@@ -568,6 +583,9 @@ export class PaymentsRenewalCheckoutService {
               ...(requestFingerprint === null
                 ? {}
                 : { renewalRequestFingerprint: requestFingerprint }),
+              ...(providerSubscription === null
+                ? {}
+                : { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: { ...providerSubscription } }),
             } as Prisma.InputJsonValue,
             deviceTypes: [],
             idempotencyKey,
@@ -829,6 +847,45 @@ interface ExistingRenewalDraft {
   }[];
 }
 
+/**
+ * Whether this renewal is a provider subscription, and on what terms. One line
+ * without add-ons only: the provider repeats one sum for one period, and an
+ * add-on bought for this term would be charged, and not delivered, every term
+ * after it.
+ */
+function resolveRenewalProviderSubscription(
+  input: RenewalCheckoutInput,
+  gateway: { readonly type: PaymentGatewayType; readonly settings: Prisma.JsonValue },
+  priced: PricedRenewalInterface,
+): ProviderSubscriptionTerms | null {
+  if (input.savePaymentMethodConsent !== true || !PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(gateway.type)) {
+    return null;
+  }
+  if (!isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings))) {
+    throw autopayNotAvailable('NOT_APPROVED');
+  }
+  const [item] = priced.items;
+  if (priced.items.length !== 1 || item === undefined) {
+    throw autopayNotAvailable('ITEMS');
+  }
+  if ((item.addOnLines ?? []).length > 0) {
+    throw autopayNotAvailable('ADD_ONS');
+  }
+  const resolved = resolveProviderSubscriptionTerms({
+    gatewayType: gateway.type,
+    currency: priced.currency,
+    amount: priced.total,
+    durationDays: item.durationDays,
+    discountSource: item.discountSource,
+    planId: item.planId,
+    subscriptionId: item.subscriptionId,
+  });
+  if ('refusal' in resolved) {
+    throw autopayNotAvailable(resolved.refusal);
+  }
+  return resolved.terms;
+}
+
 function buildRenewalRequestFingerprint(input: {
   readonly input: RenewalCheckoutInput;
   readonly userId: string;
@@ -841,6 +898,12 @@ function buildRenewalRequestFingerprint(input: {
     gatewayType: input.input.gatewayType,
     channel: input.channel,
     savedPaymentMethodId: input.input.savedPaymentMethodId ?? null,
+    // Hashed only when it can change what is created, so every other request
+    // keeps the fingerprint its persisted drafts were stored under.
+    ...(input.input.savePaymentMethodConsent === true &&
+    PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(input.input.gatewayType)
+      ? { providerSubscription: true }
+      : {}),
     subscriptionIds: [...new Set(input.input.subscriptionIds)].sort(),
     durations: [...(input.input.durations?.entries() ?? [])]
       .sort(([left], [right]) => left.localeCompare(right))

@@ -906,7 +906,7 @@ function createService(input: {
         runPostFulfillmentHooksBestEffort: async (transaction: { id: string }) => {
           state.postFulfillmentHookCalls.push(transaction.id)
         },
-      } as never,
+      } as never, { recordCheckout: async () => undefined } as never,
     ),
     state,
   }

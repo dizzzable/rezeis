@@ -34,6 +34,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { SavedPaymentMethodService } from '../../payments/services/saved-payment-method.service';
 import { PaymentMethodSetupService } from '../../payments/services/payment-method-setup.service';
+import { ProviderSubscriptionService } from '../../payments/services/provider-subscription.service';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 
 class UpdatePaymentMethodAutopayDto {
@@ -64,6 +65,7 @@ export class InternalUserPaymentMethodsController {
     private readonly prismaService: PrismaService,
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly paymentMethodSetupService: PaymentMethodSetupService,
+    private readonly providerSubscriptionService: ProviderSubscriptionService,
   ) {}
 
   /**
@@ -74,11 +76,31 @@ export class InternalUserPaymentMethodsController {
   @Get(':userRef/payment-methods')
   public async listPaymentMethods(@Param('userRef') userRef: string) {
     const userId = await this.resolveUserId(userRef);
-    const [methods, capabilities] = await Promise.all([
+    const [methods, capabilities, providerSubscriptions] = await Promise.all([
       this.savedPaymentMethodService.listActiveForUser(userId),
       this.paymentMethodSetupService.getCapabilities(),
+      // Subscriptions the provider runs (Platega): no saved method exists for
+      // them, and «Способы оплаты» is where the customer switches them off.
+      this.providerSubscriptionService.listForUser(userId),
     ]);
-    return { ...methods, capabilities };
+    return { ...methods, capabilities, providerSubscriptions };
+  }
+
+  /**
+   * «Отключить автосписание» for a subscription the provider runs: cancelled
+   * at the provider first, then here.
+   *
+   * Reiwa calls: `POST /api/internal/user/:userRef/provider-subscriptions/:id/cancel`
+   */
+  @Post(':userRef/provider-subscriptions/:subscriptionId/cancel')
+  @HttpCode(HttpStatus.OK)
+  public async cancelProviderSubscription(
+    @Param('userRef') userRef: string,
+    @Param('subscriptionId') subscriptionId: string,
+  ) {
+    const userId = await this.resolveUserId(userRef);
+    await this.providerSubscriptionService.cancelForCustomer(userId, subscriptionId);
+    return { cancelled: true };
   }
 
   /** Starts a zero-amount hosted YooKassa card binding. */

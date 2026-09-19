@@ -1,5 +1,7 @@
 import { Currency } from '@prisma/client';
 
+import type { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.interface';
+
 import { SubscriptionQuoteWarningInterface } from './subscription-quote.interface';
 
 /**
@@ -19,6 +21,8 @@ export interface RenewalItemInterface {
   readonly currency: Currency | null;
   readonly amount: string | null;
   readonly discountPercent: number;
+  /** `PURCHASE` is a one-time promo discount: a provider subscription would repeat it every period. */
+  readonly discountSource: CatalogDiscountSource;
   readonly renewable: boolean;
   /**
    * True when the subscription can be renewed but has no inherent plan
@@ -62,6 +66,8 @@ export interface PricedRenewalItemInterface {
   readonly currency: Currency;
   readonly amount: string;
   readonly discountPercent: number;
+  /** `PURCHASE` is a one-time promo discount: a provider subscription would repeat it every period. */
+  readonly discountSource: CatalogDiscountSource;
   readonly planSnapshot: Record<string, unknown>;
   /** Selected renewal add-ons for this line, priced + eligibility-checked.
    *  Empty when none selected or the `renewalAddOns` flag is off. */

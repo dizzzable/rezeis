@@ -87,6 +87,9 @@ is_auto_recoverable_migration() {
     20260919120500_settings_connect_help)
       return 0
       ;;
+    20260919200000_yookassa_autopay_approved|20260919210000_provider_subscriptions)
+      return 0
+      ;;
     *)
       return 1
       ;;

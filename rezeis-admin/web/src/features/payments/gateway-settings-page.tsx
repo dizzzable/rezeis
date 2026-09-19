@@ -302,6 +302,13 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         ],
         hintKey: 'paymentGateways.hints.plategaPaymentMethod',
       },
+      {
+        key: 'savePaymentMethod',
+        labelKey: 'paymentGateways.fields.savePaymentMethod',
+        placeholder: '',
+        type: 'toggle',
+        hintKey: 'paymentGateways.hints.plategaAutopay',
+      },
     ],
   },
   {

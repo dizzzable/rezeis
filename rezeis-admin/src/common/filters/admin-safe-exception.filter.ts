@@ -92,6 +92,11 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // checks the code through this filter.
   'PAYMENT_DRAFT_PLAN_NOT_AVAILABLE',
   'PAYMENT_DRAFT_TRIAL_UNSUPPORTED',
+  // «для автоматического списания» refused for this purchase (a promo price,
+  // kopecks, a term the provider has no period for, add-ons, several
+  // subscriptions, or approval switched off since the list loaded). The cabinet
+  // answers it by offering the ordinary payment. `provider-subscription-terms.util.ts`.
+  'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE',
   'PARTNER_BALANCE_DISABLED',
   'PARTNER_BALANCE_NOT_AVAILABLE',
   'USER_DELETE_PROTECTED_HISTORY',

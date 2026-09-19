@@ -227,7 +227,7 @@ async function boot(
     { getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC' }) } as never,
     { evaluate: () => null } as never,
     { resolveActiveForCharge: async () => null } as never,
-    { runPostFulfillmentHooksBestEffort: async () => undefined } as never,
+    { runPostFulfillmentHooksBestEffort: async () => undefined } as never, { recordCheckout: async () => undefined } as never,
   );
 
   const testingModule: TestingModule = await Test.createTestingModule({

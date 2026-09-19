@@ -45,7 +45,7 @@ describe('PaymentWebhookIngressService', () => {
           calls.push(['queue.add', ...args]);
           return { id: 'job-1' };
         },
-      } as never,
+      } as never, { enqueueSync: async () => undefined } as never,
     );
 
     const result = await service.ingestWebhook({
@@ -104,7 +104,7 @@ describe('PaymentWebhookIngressService', () => {
           calls.push(['queue.add', ...args]);
           return { id: 'job-1' };
         },
-      } as never,
+      } as never, { enqueueSync: async () => undefined } as never,
     );
 
     const result = await service.ingestWebhook({
@@ -157,7 +157,7 @@ describe('PaymentWebhookIngressService', () => {
       { handleYookassaPaymentMethodEvent: async () => undefined } as never,
       {
         add: async () => ({ id: 'job-1' }),
-      } as never,
+      } as never, { enqueueSync: async () => undefined } as never,
     );
 
     const result = await service.ingestWebhook({
@@ -272,7 +272,7 @@ describe('PaymentWebhookIngressService', () => {
         add: async () => {
           throw new Error(rawError);
         },
-      } as never,
+      } as never, { enqueueSync: async () => undefined } as never,
     );
 
     await assert.rejects(
@@ -335,7 +335,7 @@ describe('PaymentWebhookIngressService', () => {
           calls.push(['queue.add', ...args]);
           return { id: 'job-1' };
         },
-      } as never,
+      } as never, { enqueueSync: async () => undefined } as never,
     );
 
     const result = await service.ingestWebhook({
@@ -394,7 +394,7 @@ describe('PaymentWebhookIngressService', () => {
           enqueued = true;
           return { id: 'job' };
         },
-      } as never,
+      } as never, { enqueueSync: async () => undefined } as never,
     );
 
     const body = Buffer.from(

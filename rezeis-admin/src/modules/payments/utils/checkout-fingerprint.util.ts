@@ -104,6 +104,12 @@ export interface RenewalCheckoutFingerprintInput {
   readonly currency: string;
   /** Local SavedPaymentMethod.id when charging off-session; null/omit for hosted checkout. */
   readonly savedPaymentMethodId?: string | null;
+  /**
+   * The buyer chose automatic charging on a gateway whose provider runs the
+   * subscription. Hashed only when true, so every ordinary renewal keeps the
+   * fingerprint it had, and a draft of one kind is never reused for the other.
+   */
+  readonly providerSubscription?: boolean;
   readonly lines: readonly RenewalLineFingerprintInput[];
 }
 
@@ -149,6 +155,7 @@ export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprin
     channel: input.channel,
     currency: input.currency,
     savedPaymentMethodId: input.savedPaymentMethodId ?? null,
+    ...(input.providerSubscription === true ? { providerSubscription: true } : {}),
     lines,
   });
 }

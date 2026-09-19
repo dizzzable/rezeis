@@ -17,6 +17,7 @@ import {
 } from './payment-webhook-inbox.service';
 import { PaymentWebhookNormalizerService } from './payment-webhook-normalizer.service';
 import { PaymentMethodSetupService } from './payment-method-setup.service';
+import { ProviderSubscriptionService } from './provider-subscription.service';
 
 interface IngestWebhookInput {
   readonly gatewayType: PaymentGatewayType;
@@ -35,6 +36,7 @@ export class PaymentWebhookIngressService {
     private readonly paymentMethodSetupService: PaymentMethodSetupService,
     @InjectQueue(PAYMENT_RECONCILIATION_QUEUE)
     private readonly paymentReconciliationQueue: Queue,
+    private readonly providerSubscriptionService: ProviderSubscriptionService,
   ) {}
 
   public async verifyWebhookSignature(input: {
@@ -89,6 +91,27 @@ export class PaymentWebhookIngressService {
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
+    // Platega posts a subscription's callbacks to the same address as a
+    // payment's. A charge callback is a payment callback plus `SubscriptionId`;
+    // a status callback carries the subscription's id as `Id` and a
+    // `SUBSCRIPTION_*` status. Neither names a payment of ours, so the pipeline
+    // below would look for one and fail. Both only trigger a fresh read of the
+    // subscription, which decides what, if anything, was paid.
+    const plategaSubscriptionId = extractPlategaSubscriptionId(input.gatewayType, input.rawBody);
+    if (plategaSubscriptionId !== null) {
+      if (input.verifySignature) {
+        this.paymentWebhookNormalizerService.verifyWebhookSignature({
+          gatewayType: input.gatewayType,
+          rawBody: input.rawBody,
+          headers: input.headers,
+          clientIp: input.clientIp,
+          gatewaySettings: gateway.settings,
+        });
+      }
+      await this.providerSubscriptionService.enqueueSync(input.gatewayType, plategaSubscriptionId);
+      return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
+    }
+
     const envelope = this.paymentWebhookNormalizerService.normalizeWebhook({
       gatewayType: input.gatewayType,
       rawBody: input.rawBody,
@@ -133,6 +156,50 @@ export class PaymentWebhookIngressService {
         : PAYMENT_WEBHOOK_STATUS_ENQUEUED,
     };
   }
+}
+
+/**
+ * The Platega subscription a callback is about, or null for a payment's own
+ * callback. Keys are matched without regard to case: the documentation writes
+ * them `SubscriptionId` and `Id`, the payment callbacks this route already
+ * takes write theirs in camelCase.
+ */
+export function extractPlategaSubscriptionId(
+  gatewayType: PaymentGatewayType,
+  rawBody: Buffer,
+): string | null {
+  if (gatewayType !== PaymentGatewayType.PLATEGA) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const read = (name: string): unknown => {
+    const key = Object.keys(root).find((candidate) => candidate.toLowerCase() === name);
+    return key === undefined ? undefined : root[key];
+  };
+  const subscriptionId = read('subscriptionid');
+  if (typeof subscriptionId === 'string' && subscriptionId.trim().length > 0) {
+    return subscriptionId.trim();
+  }
+  const status = read('status');
+  const id = read('id');
+  if (
+    typeof status === 'string' &&
+    status.toUpperCase().startsWith('SUBSCRIPTION_') &&
+    typeof id === 'string' &&
+    id.trim().length > 0
+  ) {
+    return id.trim();
+  }
+  return null;
 }
 
 /**

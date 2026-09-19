@@ -219,7 +219,7 @@ function build(options: {
     settings as never,
     guard as never,
     savedMethods as never,
-    { runPostFulfillmentHooksBestEffort: async () => undefined } as never,
+    { runPostFulfillmentHooksBestEffort: async () => undefined } as never, { recordCheckout: async () => undefined } as never,
   );
   return { service, created, providerCalls: () => providerCalls };
 }
