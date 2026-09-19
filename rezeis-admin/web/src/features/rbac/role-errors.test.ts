@@ -7,6 +7,12 @@
  * `rbac.guard.ts`, `upsert-admin-role.dto.ts`, and class-validator's own
  * `Length` messages with the DTO's own limits — never retyped. A rewording on
  * the server turns this file red instead of the page silently English.
+ *
+ * class-validator's two sentences come from the server's pinned copy,
+ * `test/fixtures/class-validator-length-messages.json`, not from the package:
+ * the SPA's CI job installs only `web/`, so the server's `node_modules` is not
+ * there. The server's `class-validator-length-messages.spec.ts` holds that copy
+ * to the installed package, so a reworded class-validator still turns red.
  */
 import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -47,12 +53,17 @@ function fill(template: string, ...values: string[]): string {
   return template.replace(/\$\{[^}]*\}/g, () => values[next++])
 }
 
-/** class-validator's message for `@Length`, as that package writes it. */
+/**
+ * class-validator's message for `@Length`, from the server's pinned copy of
+ * what that package writes (see the header).
+ */
 function lengthMessage(direction: 'longer' | 'shorter', property: string, limit: number): string {
-  const text = source(join(ADMIN_ROOT, 'node_modules', 'class-validator', 'cjs', 'decorator', 'string', 'Length.js'))
-  const match = new RegExp(`'(\\$property must be ${direction} than or equal to \\$constraint[12] characters)'`).exec(text)
-  if (match === null) throw new Error(`class-validator no longer writes the "${direction}" length message`)
-  return match[1].replace('$property', property).replace(/\$constraint[12]/, String(limit))
+  const pinned = JSON.parse(
+    source(join(ADMIN_ROOT, 'test', 'fixtures', 'class-validator-length-messages.json')),
+  ) as Partial<Record<'longer' | 'shorter', string>>
+  const template = pinned[direction]
+  if (template === undefined) throw new Error(`no pinned "${direction}" length message`)
+  return template.replace('$property', property).replace(/\$constraint[12]/, String(limit))
 }
 
 /** The `@Length(min, max)` the DTO puts on `property`. */

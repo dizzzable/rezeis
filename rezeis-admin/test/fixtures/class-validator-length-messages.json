@@ -1,0 +1,4 @@
+{
+  "longer": "$property must be longer than or equal to $constraint1 characters",
+  "shorter": "$property must be shorter than or equal to $constraint2 characters"
+}
