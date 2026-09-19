@@ -93,6 +93,7 @@ function settingsRow(brandName: string): Settings {
     antiFraudSettings: {},
     pointsSettings: {},
     wheelSettings: {},
+    connectHelpSettings: {},
     updatedAt: new Date('2026-09-13T10:00:00.000Z'),
   };
 }

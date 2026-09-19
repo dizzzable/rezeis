@@ -111,11 +111,15 @@ function userEventPayload(options: {
   readonly usedTrafficBytes?: number | string;
   readonly meta?: Record<string, unknown> | null;
   readonly uuid?: string;
+  /** Replaces the whole traffic block (the connection evidence). */
+  readonly userTraffic?: Record<string, unknown>;
+  /** The envelope's time; the fixture's own by default. */
+  readonly timestamp?: string;
 }): Record<string, unknown> {
   return {
     scope: 'user',
     event: options.event,
-    timestamp: '2026-08-05T09:14:22.000Z',
+    timestamp: options.timestamp ?? '2026-08-05T09:14:22.000Z',
     data: {
       uuid: options.uuid ?? '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
       id: 4821,
@@ -144,7 +148,7 @@ function userEventPayload(options: {
         { uuid: '3e8a2d17-9f04-4c6b-a512-8d0f3b7e1c94', name: 'EU-Premium' },
       ],
       // The ONLY place either spec puts the used-traffic counter.
-      userTraffic: {
+      userTraffic: options.userTraffic ?? {
         usedTrafficBytes: options.usedTrafficBytes ?? 1_024,
         lifetimeUsedTrafficBytes: 161_061_273_600,
         onlineAt: '2026-08-05T09:11:03.000Z',
@@ -643,6 +647,13 @@ describe('panel user identity across panel versions', () => {
   });
 });
 describe('RemnawaveWebhookService first traffic usage', () => {
+  /**
+   * The claim follows the connection EVIDENCE rule (`connectEvidenceOf`), not a
+   * positive `usedTrafficBytes` alone, and it stores the evidence's own time.
+   * `user.first_traffic` is emitted only by the claim winner and only for
+   * evidence at most a day old — a customer who connected months ago and is
+   * only now heard about must not produce a "started using traffic" card.
+   */
   function buildTrafficService(options?: {
     readonly subscription?: Record<string, unknown> | null;
     readonly userByTelegram?: Record<string, unknown> | null;
@@ -651,10 +662,14 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     let firstTrafficClaimed = false;
     let firstTrafficUpdates = 0;
     const claimWheres: Array<Record<string, unknown>> = [];
+    const claimData: Array<Record<string, unknown>> = [];
     const prisma = {
       remnawaveWebhookEvent: { create: async () => ({}) },
       subscription: {
         updateMany: async () => ({ count: 0 }),
+        // The connection-state writer's fan-out read: nothing local here, so
+        // it writes nothing — this spec is about the person's claim.
+        findMany: async () => [],
         findFirst: async () =>
           options && 'subscription' in options
             ? options.subscription
@@ -668,9 +683,10 @@ describe('RemnawaveWebhookService first traffic usage', () => {
               },
       },
       user: {
-        updateMany: async (args: { where: Record<string, unknown> }) => {
+        updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
           firstTrafficUpdates += 1;
           claimWheres.push(args.where);
+          claimData.push(args.data);
           // Simulate atomic claim: only one concurrent winner gets count=1.
           if (firstTrafficClaimed) return { count: 0 };
           firstTrafficClaimed = true;
@@ -699,13 +715,35 @@ describe('RemnawaveWebhookService first traffic usage', () => {
       emitted,
       getFirstTrafficUpdates: () => firstTrafficUpdates,
       claimWheres,
+      claimData,
+    };
+  }
+
+  /** A first connection the panel saw `minutesAgo` minutes ago, reported now. */
+  function freshConnection(minutesAgo: number, usedTrafficBytes: number | string): {
+    readonly timestamp: string;
+    readonly userTraffic: Record<string, unknown>;
+    readonly connectedAt: Date;
+  } {
+    const connectedAt = new Date(Date.now() - minutesAgo * 60_000);
+    return {
+      timestamp: new Date().toISOString(),
+      connectedAt,
+      userTraffic: {
+        usedTrafficBytes,
+        lifetimeUsedTrafficBytes: typeof usedTrafficBytes === 'number' ? usedTrafficBytes : Number(usedTrafficBytes),
+        onlineAt: connectedAt.toISOString(),
+        firstConnectedAt: connectedAt.toISOString(),
+        lastConnectedNodeUuid: '5b9c0e34-2a71-4d8f-9b06-1c7a4e2d8f50',
+      },
     };
   }
 
   it('claims first traffic once from the nested counter — 2.7.4 envelope', async () => {
-    // `data.userTraffic.usedTrafficBytes` is the only spelling 2.7.4 sends.
-    const { service, emitted, getFirstTrafficUpdates, claimWheres } = buildTrafficService();
-    const payload = userEventPayload({ event: 'user.modified', usedTrafficBytes: 1_024 });
+    // `data.userTraffic` is where 2.7.4 puts the counter and the connection times.
+    const { service, emitted, getFirstTrafficUpdates, claimWheres, claimData } = buildTrafficService();
+    const fresh = freshConnection(7, 1_024);
+    const payload = userEventPayload({ event: 'user.modified', ...fresh });
     await service.handleEvent('user.modified', payload, null);
     await service.handleEvent('user.modified', payload, null);
     const firstTrafficEvents = emitted.filter((event) => event.type === 'user.first_traffic');
@@ -716,6 +754,8 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     assert.equal(firstTrafficEvents[0]?.metadata?.['usedTrafficBytes'], 1_024);
     assert.equal(getFirstTrafficUpdates(), 2);
     assert.deepEqual(claimWheres[0], { id: 'user-1', firstTrafficAt: null });
+    // The column takes the panel's own first-connection time, not "now".
+    assert.deepEqual(claimData[0], { firstTrafficAt: fresh.connectedAt });
   });
 
   it('claims first traffic once from the nested counter — 2.8.0 envelope', async () => {
@@ -724,7 +764,7 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
     const payload = userEventPayload({
       event: 'user.modified',
-      usedTrafficBytes: 4_096,
+      ...freshConnection(3, 4_096),
       meta: { notConnectedAfterHours: null, expiration: null },
     });
     await service.handleEvent('user.modified', payload, null);
@@ -757,21 +797,36 @@ describe('RemnawaveWebhookService first traffic usage', () => {
   it('accepts string counters from panel JSON', async () => {
     // Real Remnawave webhooks are JSON — counters often arrive as strings.
     // BigInt is not JSON-serializable and never reaches handleEvent storage.
-    const { service, emitted } = buildTrafficService();
+    // Here the STRING counter is the only evidence of the connection: no
+    // first-connection time, no online time, a string lifetime counter.
+    const { service, emitted, claimData } = buildTrafficService();
+    const timestamp = new Date(Date.now() - 60_000).toISOString();
     await service.handleEvent(
       'user.modified',
-      userEventPayload({ event: 'user.modified', usedTrafficBytes: '2048' }),
+      userEventPayload({
+        event: 'user.modified',
+        timestamp,
+        userTraffic: {
+          usedTrafficBytes: '2048',
+          lifetimeUsedTrafficBytes: '2048',
+          onlineAt: null,
+          firstConnectedAt: null,
+          lastConnectedNodeUuid: null,
+        },
+      }),
       null,
     );
     const events = emitted.filter((event) => event.type === 'user.first_traffic');
     assert.equal(events.length, 1);
     assert.equal(events[0]?.metadata?.['usedTrafficBytes'], 2048);
     assert.equal(events[0]?.metadata?.['trafficLimitBytes'], 53_687_091_200);
+    // With no time of its own, the evidence is dated by the event.
+    assert.deepEqual(claimData[0], { firstTrafficAt: new Date(timestamp) });
   });
 
   it('emits only once under concurrent webhooks racing the claim', async () => {
     const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
-    const payload = userEventPayload({ event: 'user.modified', usedTrafficBytes: 500 });
+    const payload = userEventPayload({ event: 'user.modified', ...freshConnection(1, 500) });
     await Promise.all([
       service.handleEvent('user.modified', payload, null),
       service.handleEvent('user.modified', payload, null),
@@ -781,15 +836,60 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     assert.equal(getFirstTrafficUpdates(), 3);
   });
 
-  it('does not claim or emit first traffic for zero nested usage', async () => {
+  it('does not claim or emit first traffic for a profile that never connected', async () => {
     const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
+    await service.handleEvent(
+      'user.modified',
+      userEventPayload({
+        event: 'user.modified',
+        userTraffic: {
+          usedTrafficBytes: 0,
+          lifetimeUsedTrafficBytes: 0,
+          onlineAt: null,
+          firstConnectedAt: null,
+          lastConnectedNodeUuid: null,
+        },
+      }),
+      null,
+    );
+    assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 0);
+    assert.equal(getFirstTrafficUpdates(), 0);
+  });
+
+  it('fills the column with a months-old first connection and announces nothing', async () => {
+    // The default envelope: the counter was reset (0 used), but the panel
+    // remembers a first connection in January and 150 GB lifetime. The old rule
+    // (a positive `usedTrafficBytes`) saw no traffic at all here; the new one
+    // sees the connection — and knows it is not news.
+    const { service, emitted, getFirstTrafficUpdates, claimData } = buildTrafficService();
     await service.handleEvent(
       'user.modified',
       userEventPayload({ event: 'user.modified', usedTrafficBytes: 0 }),
       null,
     );
+    assert.equal(getFirstTrafficUpdates(), 1);
+    assert.deepEqual(claimData[0], { firstTrafficAt: new Date('2026-01-14T11:40:09.000Z') });
     assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 0);
-    assert.equal(getFirstTrafficUpdates(), 0);
+  });
+
+  it('announces a first connection 23 hours old, and not one 25 hours old', async () => {
+    for (const [hoursAgo, expected] of [
+      [23, 1],
+      [25, 0],
+    ] as const) {
+      const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
+      await service.handleEvent(
+        'user.modified',
+        userEventPayload({ event: 'user.modified', ...freshConnection(hoursAgo * 60, 700) }),
+        null,
+      );
+      assert.equal(getFirstTrafficUpdates(), 1, `${hoursAgo} h: the claim must be made either way`);
+      assert.equal(
+        emitted.filter((event) => event.type === 'user.first_traffic').length,
+        expected,
+        `${hoursAgo} h old`,
+      );
+    }
   });
 
   it('does not emit when local user cannot be resolved', async () => {
@@ -799,7 +899,7 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     });
     await service.handleEvent(
       'user.modified',
-      userEventPayload({ event: 'user.modified', usedTrafficBytes: 999, uuid: 'unknown-uuid' }),
+      userEventPayload({ event: 'user.modified', ...freshConnection(2, 999), uuid: 'unknown-uuid' }),
       null,
     );
     assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 0);

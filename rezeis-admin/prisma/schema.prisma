@@ -1966,6 +1966,9 @@ model Subscription {
   trafficResets           SubscriptionTrafficReset[]       @relation("SubscriptionTrafficResets")
   entitlementIncidents    EntitlementIncident[]            @relation("SubscriptionEntitlementIncidents")
   trialClaim              TrialClaim?                      @relation("SubscriptionTrialClaim")
+  /// Whether this subscription's profile ever connected, and the
+  /// «Помощь с подключением» decision about it. Missing = nothing known yet.
+  connectState            SubscriptionConnectState?        @relation("SubscriptionConnectState")
 
   @@index([userId])
   @@index([status])
@@ -1997,6 +2000,69 @@ model Subscription {
   /// deletions arrive in batches from the expired-profile sweep.
   @@index([remnawavePanelUsername])
   @@map("subscriptions")
+}
+
+/// What rezeis knows about whether one subscription's VPN profile ever
+/// connected, and the once-per-subscription «Помощь с подключением» decision
+/// about it. Keyed by the SUBSCRIPTION, not the person: one customer can hold
+/// several profiles, and a second one bought for another device has not
+/// connected just because the first one has.
+///
+/// A table of its own rather than columns on `subscriptions`: every probe stamp
+/// would otherwise bump `subscriptions.updated_at`, which is how the webhook
+/// picks among duplicate rows of one profile, and the hot table would take an
+/// ALTER. No `user_id` on purpose — an account merge moves subscriptions, and
+/// this row follows its subscription for free.
+///
+/// A missing row means "we know nothing" — never "not connected". The signal
+/// columns are written only by `connect-evidence.util.ts` (webhook, cabinet
+/// read, probe); the `help_*` columns only by the guarded claims of the
+/// «Помощь с подключением» sender and of broadcast staging.
+model SubscriptionConnectState {
+  subscriptionId    String    @id @map("subscription_id")
+  /// Earliest evidence of traffic on the profile. Never cleared, only lowered.
+  firstConnectedAt  DateTime? @map("first_connected_at") @db.Timestamptz(3)
+  /// Who proved the earliest evidence: 'webhook' | 'cabinet' | 'probe'.
+  connectedSource   String?   @map("connected_source")
+  /// Last SUCCESSFUL read of the profile that carried a traffic block — the
+  /// verification clock. Only moves forward.
+  checkedAt         DateTime? @map("checked_at") @db.Timestamptz(3)
+  /// Consecutive failed probe reads (the probe's backoff); reset by any
+  /// successful read.
+  checkFailures     Int       @default(0) @map("check_failures")
+  /// The panel's own USER_NOT_FOUND for this profile; cleared by a later
+  /// successful read.
+  profileMissingAt  DateTime? @map("profile_missing_at") @db.Timestamptz(3)
+  /// THE once-marker. Set by exactly one claimer (the sender or broadcast
+  /// staging), through `UPDATE … WHERE help_decided_at IS NULL`.
+  helpDecidedAt     DateTime? @map("help_decided_at") @db.Timestamptz(3)
+  /// 'paid' | 'trial'.
+  helpKind          String?   @map("help_kind")
+  helpAnchorAt      DateTime? @map("help_anchor_at") @db.Timestamptz(3)
+  /// 'auto' | 'broadcast:<id>'.
+  helpSource        String?   @map("help_source")
+  /// NULL while the ladder is in flight; then 'bot' | 'push' | 'email' |
+  /// 'banner' | 'opted_out' | 'merged' | 'skipped_unverifiable' |
+  /// 'skipped_template_off' | 'broadcast'. TEXT validated in code, no enum.
+  helpOutcome       String?   @map("help_outcome")
+  /// Every step tried: `[{ channel, result, at, detail? }]`.
+  helpAttempts      Json      @default("[]") @map("help_attempts")
+  helpDeferrals     Int       @default(0) @map("help_deferrals")
+  /// `user_notification_events.id` of the notice — also the bot and e-mail
+  /// dedupe key.
+  helpEventId       String?   @map("help_event_id")
+  /// × on the cabinet banner, recorded server-side so it stays hidden on
+  /// every device.
+  bannerDismissedAt DateTime? @map("banner_dismissed_at") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  subscription Subscription @relation("SubscriptionConnectState", fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  /// The sender's log, newest decision first. The only index: the table is
+  /// new and empty, and everything else joins it by its primary key.
+  @@index([helpDecidedAt(sort: Desc)], map: "subscription_connect_states_help_decided_at_idx")
+  @@map("subscription_connect_states")
 }
 
 /// Background job describing the next Remnawave profile mutation for a
@@ -2946,6 +3012,12 @@ model Settings {
   /// Absent or empty means OFF, for the same reason the points block does: an
   /// update must not start a giveaway behind the operator's back.
   wheelSettings             Json       @default("{}") @map("wheel_settings")
+  /// «Помощь с подключением». Shape:
+  /// `{ enabled?: boolean, delayHours?: number, includeTrials?: boolean }`.
+  /// Absent keys mean OFF / 24 / OFF: an update must not start messaging
+  /// customers behind the operator's back. Not in `userNotifications`, whose
+  /// absent key means ON and which keeps booleans only.
+  connectHelpSettings       Json       @default("{}") @map("connect_help_settings")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")

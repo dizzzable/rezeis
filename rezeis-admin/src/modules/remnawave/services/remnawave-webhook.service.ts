@@ -15,7 +15,15 @@ import {
   type SystemEventSeverity,
 } from '../../../common/services/system-events.service';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
-import { RemnawaveApiService } from './remnawave-api.service';
+import {
+  claimFirstTraffic,
+  connectEvidenceOf,
+  firstTrafficEventDue,
+  recordCheck,
+  recordConnectEvidence,
+  type ConnectEvidence,
+} from '../../connect-signal/connect-evidence.util';
+import { decodePanelUserTraffic, RemnawaveApiService } from './remnawave-api.service';
 import { SubscriptionNoticePayloadService } from './subscription-notice-payload.service';
 import { panelTrafficLimitToGb } from '../utils/panel-traffic-limit.util';
 
@@ -243,6 +251,68 @@ function readWebhookPanelIdentity(payload: Record<string, unknown>): string | nu
   }
   const numericId = readNumericPanelId(data['id']) ?? readNumericPanelId(data['userId']);
   return numericId === null ? null : String(numericId);
+}
+
+/**
+ * When the panel observed what this webhook reports: the envelope `timestamp`,
+ * or the moment the event arrived when that is missing, unreadable, or later
+ * than now (a panel clock running ahead must not date a check in the future).
+ *
+ * The envelope's time rather than the arrival's because Remnawave retries, and
+ * anything relaying the body may too: a re-delivered "not connected" must not
+ * refresh the verification clock as though the panel had just looked again.
+ */
+function webhookEventTime(payload: Record<string, unknown>, now: Date): Date {
+  const raw = payload['timestamp'];
+  if (typeof raw === 'string' && raw.length > 0) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime()) && parsed.getTime() <= now.getTime()) return parsed;
+  }
+  return now;
+}
+
+/** What one `user.*` webhook says about whether its profile ever connected. */
+interface WebhookConnectReading {
+  readonly evidence: ConnectEvidence;
+  /** When the panel observed it — the verification time of a block-carrying event. */
+  readonly eventAt: Date;
+  /** The payload carried a traffic block this panel could read. */
+  readonly hasBlock: boolean;
+}
+
+/**
+ * Reads the connection evidence out of a user webhook.
+ *
+ * Every user event carries the whole user row in `data`, traffic block
+ * included, on every era — so every one of them is a free look at the profile,
+ * not only `user.first_connected`. Two event names say more than their block:
+ *
+ *   `user.first_connected`  connected, even with no block to read (at the
+ *                           event's time then);
+ *   `user.not_connected`    Remnawave's own "still not connected" — a
+ *                           confirmation, never a source: it only ever moves
+ *                           the verification clock of rows with no evidence.
+ */
+function webhookConnectReading(
+  normalizedEvent: string,
+  payload: Record<string, unknown>,
+  now: Date,
+): WebhookConnectReading {
+  const data =
+    payload['data'] !== null && typeof payload['data'] === 'object'
+      ? (payload['data'] as Record<string, unknown>)
+      : payload;
+  const eventAt = webhookEventTime(payload, now);
+  const block = decodePanelUserTraffic(data['userTraffic']);
+  const hasBlock = block !== null;
+  if (normalizedEvent === 'user.not_connected') {
+    return { evidence: { kind: 'not_connected' }, eventAt, hasBlock };
+  }
+  const evidence = connectEvidenceOf(block, eventAt);
+  if (normalizedEvent === 'user.first_connected' && evidence.kind !== 'connected') {
+    return { evidence: { kind: 'connected', at: eventAt }, eventAt, hasBlock };
+  }
+  return { evidence, eventAt, hasBlock };
 }
 
 /**
@@ -491,6 +561,12 @@ export class RemnawaveWebhookService {
     this.logger.log(`Webhook event received: ${eventType}`);
 
     const normalized = normalizeRemnawaveEventName(eventType);
+    // Whether the profile ever connected, as this event tells it. Read once,
+    // here, and used twice below: for the subscription's connection state and
+    // for the person's first-traffic claim.
+    const connect = normalized.startsWith('user.')
+      ? webhookConnectReading(normalized, payload, new Date())
+      : null;
 
     // Inbound reconciliation (Remnawave → rezeis): a manual operator edit in
     // the panel (status / expiry / traffic / device limits) raises a user-
@@ -530,13 +606,29 @@ export class RemnawaveWebhookService {
           }`,
         );
       }
+      // Best-effort like the reconcile: a failed state write must never drop
+      // the webhook, and the probe and the cabinet read will learn it anyway.
+      if (connect !== null) {
+        try {
+          await this.recordConnectSignal(payload, connect);
+        } catch (err: unknown) {
+          this.logger.warn(
+            `Connection state write failed for ${eventType}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
     }
 
     // Forward curated events to the system-event bus (audit log + realtime +
     // Telegram cards). Unmapped/noisy events are stored only — no Telegram
     // spam. Best-effort: emit() is fire-and-forget and never throws.
     const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
-    const hasTrafficUsage = normalized.startsWith('user.') && this.hasPositiveTrafficUsage(payload);
+    // The first-traffic claim follows the SAME evidence rule as the connection
+    // state (`connectEvidenceOf`), not a positive `usedTrafficBytes` alone:
+    // that counter resets every month, while `firstConnectedAt`, `onlineAt`
+    // and the lifetime counter do not.
+    const connectedEvidence =
+      connect !== null && connect.evidence.kind === 'connected' ? connect.evidence : null;
     // ── The customer, for every user-scoped event we forward ────────────────
     //
     // This used to resolve only for `user.first_connected` and for a payload
@@ -554,7 +646,7 @@ export class RemnawaveWebhookService {
     // best-effort: a profile we cannot place locally leaves the metadata as it
     // was, which is what every one of these events carried until now.
     const wantsCustomer =
-      hasTrafficUsage || (mapped !== undefined && normalized.startsWith('user.'));
+      connectedEvidence !== null || (mapped !== undefined && normalized.startsWith('user.'));
     let userContext: LocalUserContext | null = null;
     if (wantsCustomer) {
       try {
@@ -566,9 +658,9 @@ export class RemnawaveWebhookService {
       }
     }
 
-    if (hasTrafficUsage && userContext !== null) {
+    if (connectedEvidence !== null && userContext !== null) {
       try {
-        await this.emitFirstTrafficUsage(eventType, payload, userContext);
+        await this.emitFirstTrafficUsage(eventType, payload, userContext, connectedEvidence.at);
       } catch (err: unknown) {
         this.logger.warn(
           `First traffic usage handling failed for ${eventType}: ${err instanceof Error ? err.message : String(err)}`,
@@ -912,14 +1004,35 @@ export class RemnawaveWebhookService {
     );
   }
 
-  /** Returns whether a user webhook reports a positive traffic consumption value. */
-  private hasPositiveTrafficUsage(payload: Record<string, unknown>): boolean {
-    const data =
-      payload['data'] !== null && typeof payload['data'] === 'object'
-        ? (payload['data'] as Record<string, unknown>)
-        : payload;
-    const usedTraffic = this.readUsedTrafficBytes(data);
-    return usedTraffic !== null && usedTraffic > 0;
+  /**
+   * Writes what this event says about the connection onto EVERY local
+   * subscription the panel identity names — `panelIdentityWhere`, the same
+   * rows `reconcileSubscriptionFromEvent` mirrors, duplicates included.
+   *
+   * Connected → the evidence (verified at the event's time when it carried a
+   * block); not connected → the verification clock only, and only on rows with
+   * no evidence; unknown (no block, and no event name that says more) → nothing.
+   * A profile no local row names writes nothing and throws nothing.
+   */
+  private async recordConnectSignal(
+    payload: Record<string, unknown>,
+    connect: WebhookConnectReading,
+  ): Promise<void> {
+    const identity = readWebhookPanelIdentity(payload);
+    if (identity === null) return;
+    const subscriptions = panelIdentityWhere(identity);
+    if (connect.evidence.kind === 'connected') {
+      await recordConnectEvidence(this.prismaService, {
+        subscriptions,
+        at: connect.evidence.at,
+        source: 'webhook',
+        checkedAt: connect.hasBlock ? connect.eventAt : null,
+      });
+      return;
+    }
+    if (connect.evidence.kind === 'not_connected') {
+      await recordCheck(this.prismaService, { subscriptions, checkedAt: connect.eventAt });
+    }
   }
 
   private async resolveLocalUserContext(payload: Record<string, unknown>): Promise<LocalUserContext | null> {
@@ -997,16 +1110,26 @@ export class RemnawaveWebhookService {
     }
   }
 
+  /**
+   * Fills `User.firstTrafficAt` from connection evidence and, when this call
+   * won the claim AND the evidence is at most a day old, announces it.
+   *
+   * The column now takes the evidence's own time (`firstConnectedAt ??
+   * onlineAt ?? the event's time`), not the moment this webhook arrived. And
+   * the event is kept for a FIRST connection: a customer who connected months
+   * ago and is only now heard about — the first webhook after the operator set
+   * them up, a customer whose earlier events were lost — gets the column filled
+   * and no card or pop-up telling the operator they "started using traffic".
+   */
   private async emitFirstTrafficUsage(
     eventType: string,
     payload: Record<string, unknown>,
     context: LocalUserContext,
+    connectedAt: Date,
   ): Promise<void> {
-    const claimed = await this.prismaService.user.updateMany({
-      where: { id: context.user.id, firstTrafficAt: null },
-      data: { firstTrafficAt: new Date() },
-    });
-    if (claimed.count !== 1) return;
+    const claimed = await claimFirstTraffic(this.prismaService, context.user.id, connectedAt);
+    if (!claimed) return;
+    if (!firstTrafficEventDue(connectedAt, new Date())) return;
 
     this.systemEvents.info(
       EVENT_TYPES.USER_FIRST_TRAFFIC,

@@ -214,3 +214,5 @@ jobs:
           test/dashboard-revenue-postgres.spec.ts
           test/refund-revival-postgres.spec.ts
           test/gateway-data-atomic-writes-postgres.spec.ts
+          test/connect-signal-postgres.spec.ts
+          test/connect-signal-sql-postgres.spec.ts

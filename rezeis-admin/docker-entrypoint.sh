@@ -81,6 +81,12 @@ is_auto_recoverable_migration() {
     20260919100000_user_verified_telegram_username)
       return 0
       ;;
+    20260919120000_subscription_connect_states)
+      return 0
+      ;;
+    20260919120500_settings_connect_help)
+      return 0
+      ;;
     *)
       return 1
       ;;

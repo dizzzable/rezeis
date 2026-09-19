@@ -61,4 +61,21 @@ export interface InternalUserSubscriptionInterface {
   readonly expiresAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /**
+   * «Не получилось подключиться?» for this subscription, or `null` when no help
+   * is pending on it.
+   *
+   *   pending — help was given (bot, push, e-mail, the banner or a broadcast),
+   *             the subscription is ACTIVE or LIMITED, and its profile has
+   *             still never connected — neither by the stored state nor by the
+   *             panel read this same request made. What `/dashboard?connect=help`
+   *             picks when it names no subscription.
+   *   banner  — pending, the help reached the customer no other way (the ladder
+   *             ended at the banner), not dismissed, and not switched off in the
+   *             customer's notification settings.
+   *
+   * A panel without the feature sends no field; the cabinet reads that, `null`
+   * and `pending: false` alike.
+   */
+  readonly connectHelp: { readonly pending: boolean; readonly banner: boolean } | null;
 }

@@ -406,6 +406,108 @@ export interface RemnawavePanelUser {
   description: string | null;
   activeInternalSquads: Array<{ uuid: string; name: string }>;
   externalSquadUuid: string | null;
+  /**
+   * The row's traffic block — see {@link PanelUserTraffic}. The decoder always
+   * sets it: `null` when the row carried no block it could read.
+   *
+   * Optional in the TYPE only, so the rows tests and importers build by hand
+   * keep compiling. Absent and `null` mean the same thing, UNKNOWN, and never
+   * "this profile has not connected": that answer needs a block that is
+   * present and empty (`connectEvidenceOf`, `connect-evidence.util.ts`).
+   */
+  userTraffic?: PanelUserTraffic | null;
+}
+
+/**
+ * The traffic block of a Remnawave user row, reduced to the four facts that
+ * say whether the profile has EVER connected.
+ *
+ * Every era carries it, nested and required, under the same name with the same
+ * five keys: `UserTrafficSchema` is identical in the contracts of panels 2.7,
+ * 2.8, 3.2, 3.3 and 3.4 (`usedTrafficBytes`, `lifetimeUsedTrafficBytes`,
+ * `onlineAt`, `firstConnectedAt`, `lastConnectedNodeUuid`), on the single
+ * `GET /api/users/{id}` read, the bulk list and every user webhook alike. The
+ * decoder used to drop it: `parsePanelUserRow` read no key of it, and
+ * `getPanelUserUsage` only its `usedTrafficBytes` — which resets with every
+ * monthly traffic reset and so cannot tell "never connected" from "reset".
+ *
+ * `onlineAt` is kept because Remnawave's own "not connected" query requires it
+ * to be NULL as well as `firstConnectedAt`.
+ */
+export interface PanelUserTraffic {
+  readonly usedTrafficBytes: number | null;
+  readonly lifetimeUsedTrafficBytes: number | null;
+  /** ISO-8601, as the panel stated it; `null` when it said null. */
+  readonly onlineAt: string | null;
+  /** ISO-8601, as the panel stated it; `null` when it said null. */
+  readonly firstConnectedAt: string | null;
+}
+
+/** The keys of a traffic block this decoder reads. */
+const PANEL_USER_TRAFFIC_KEYS = [
+  'usedTrafficBytes',
+  'lifetimeUsedTrafficBytes',
+  'onlineAt',
+  'firstConnectedAt',
+] as const;
+
+/** A traffic counter: a finite number, a numeric string (webhook JSON), a safe bigint, or null. */
+function readTrafficCounter(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'bigint') {
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)
+      ? Number(value)
+      : undefined;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+/** An instant: an ISO string or a `Date` that parses, or null. */
+function readTrafficInstant(value: unknown): string | null | undefined {
+  if (value === null || value === undefined) return null;
+  const parsed =
+    value instanceof Date ? value : typeof value === 'string' && value.length > 0 ? new Date(value) : null;
+  if (parsed === null || Number.isNaN(parsed.getTime())) return undefined;
+  return parsed.toISOString();
+}
+
+/**
+ * Decodes a `userTraffic` block, or answers `null` when there is none this
+ * decoder can vouch for — not an object, none of the four keys, or any of them
+ * holding a value of the wrong kind.
+ *
+ * `null` is UNKNOWN, and the strictness is the point. A malformed block that
+ * decoded as "all four empty" would read as "this profile never connected",
+ * and that is the one answer that ends in a customer being told to connect a
+ * VPN they are already using. A key that is simply absent reads as null: every
+ * era sends all four, and a panel that one day drops one of them still answers
+ * through the other three.
+ *
+ * Used by the row decoder below AND by the webhook (whose `data` is a user row
+ * of the same shape), so both directions share one reading.
+ */
+export function decodePanelUserTraffic(raw: unknown): PanelUserTraffic | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const block = raw as Record<string, unknown>;
+  if (!PANEL_USER_TRAFFIC_KEYS.some((key) => key in block)) return null;
+  const usedTrafficBytes = readTrafficCounter(block['usedTrafficBytes']);
+  const lifetimeUsedTrafficBytes = readTrafficCounter(block['lifetimeUsedTrafficBytes']);
+  const onlineAt = readTrafficInstant(block['onlineAt']);
+  const firstConnectedAt = readTrafficInstant(block['firstConnectedAt']);
+  if (
+    usedTrafficBytes === undefined ||
+    lifetimeUsedTrafficBytes === undefined ||
+    onlineAt === undefined ||
+    firstConnectedAt === undefined
+  ) {
+    return null;
+  }
+  return { usedTrafficBytes, lifetimeUsedTrafficBytes, onlineAt, firstConnectedAt };
 }
 
 /**
@@ -752,6 +854,9 @@ function parsePanelUserRow(
       : [],
     externalSquadUuid:
       typeof value.externalSquadUuid === 'string' ? value.externalSquadUuid : null,
+    // Read, not passed through: `null` (unknown) for a row with no block this
+    // decoder can vouch for — see `decodePanelUserTraffic`.
+    userTraffic: decodePanelUserTraffic(value.userTraffic),
   };
 }
 
@@ -1799,6 +1904,11 @@ export class RemnawaveApiService {
    *
    * Returns `null` when the panel is unreachable or the profile is missing,
    * so callers fall back to the local data (UUID hidden, bar hidden).
+   *
+   * `userTraffic` is the whole traffic block of the SAME read, decoded by
+   * {@link decodePanelUserTraffic} (`null` = no block it could vouch for). The
+   * cabinet's card read is what feeds the connection signal on every dashboard
+   * load, so the signal costs no second request.
    */
   public async getPanelUserUsage(
     ref: PanelUserRef,
@@ -1809,6 +1919,7 @@ export class RemnawaveApiService {
     expireAt: string | null;
     trafficLimitBytes: number | null;
     hwidDeviceLimit: number | null;
+    userTraffic: PanelUserTraffic | null;
   } | null> {
     const segment = await this.segmentFor(ref, 'GET user usage');
     if (segment === null) return null;
@@ -1852,7 +1963,15 @@ export class RemnawaveApiService {
           ? (record['hwidDeviceLimit'] as number)
           : null;
 
-      return { username, usedTrafficBytes, status, expireAt, trafficLimitBytes, hwidDeviceLimit };
+      return {
+        username,
+        usedTrafficBytes,
+        status,
+        expireAt,
+        trafficLimitBytes,
+        hwidDeviceLimit,
+        userTraffic: decodePanelUserTraffic(record['userTraffic']),
+      };
     } catch {
       return null;
     }

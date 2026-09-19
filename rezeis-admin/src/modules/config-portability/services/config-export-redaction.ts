@@ -146,6 +146,9 @@ export const SECTION_FIELD_ALLOWLIST: Readonly<
     'aiSupportSettings',
     'antiFraudSettings',
     'pointsSettings',
+    // «Помощь с подключением»: `{ enabled, delayHours, includeTrials }` — three
+    // operator switches, no credential (`connect_help_settings`).
+    'connectHelpSettings',
     'updatedAt',
   ],
   blockedIps: [

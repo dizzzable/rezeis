@@ -61,6 +61,7 @@ import * as contractPanel344 from '@remnawave/contract-panel-3.4.4';
 import { of } from 'rxjs';
 
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
+import { connectEvidenceOf } from '../src/modules/connect-signal/connect-evidence.util';
 import {
   describePanelUserShapeDrift,
   PANEL_USER_KNOWN_ROW_KEYS,
@@ -743,7 +744,10 @@ const DECLARED_BUT_DELIBERATELY_IGNORED: Readonly<Record<string, string>> = {
   subRevokedAt: 'subscription revocation is panel-owned; nothing downstream reads it',
   updatedAt: 'resets key off createdAt and lastTrafficResetAt, never updatedAt',
   lastTriggeredThreshold: 'panel-internal bandwidth notification state',
-  userTraffic: 'usage is read through the dedicated usage call, not the write response',
+  // `userTraffic` used to be excused here ("usage is read through the dedicated
+  // usage call"). It is READ now: whether a profile ever connected comes from
+  // its `firstConnectedAt`, `onlineAt` and lifetime counter — see the traffic
+  // block section below.
 };
 
 /**
@@ -1111,5 +1115,152 @@ describe('describePanelUserShapeDrift', () => {
     const a = describePanelUserShapeDrift({ ...ROW_332.response, alpha: 1 });
     const b = describePanelUserShapeDrift({ ...ROW_332.response, beta: 1 });
     assert.notEqual(a?.signature, b?.signature);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  7. THE TRAFFIC BLOCK — "DID THIS PROFILE EVER CONNECT" — ON EVERY ERA
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * «Купил, но не подключился» reads the connection from the row's `userTraffic`
+ * block, which every era carries, nested and REQUIRED, under the same five
+ * keys. Each case below is first proven to be a row the vendor's own contract
+ * for that release accepts (`GetUserByUsernameCommand` — the single-profile read
+ * shape), then pushed through the service's real public reads — never the
+ * decoder in isolation — and the decoded block is compared with the input.
+ *
+ * Three states per era, because the whole feature depends on telling them
+ * apart: a block that shows a connection (its `usedTrafficBytes` is 0, as it is
+ * after every monthly reset — the counter the old reader relied on), a block
+ * that is present and empty (never connected), and NO block (unknown: the
+ * contract refuses such a row, and so must the "not connected" answer).
+ */
+interface TrafficEra {
+  readonly label: string;
+  readonly panelVersion: string;
+  readonly contract: unknown;
+  readonly row: PanelFixture;
+  readonly ref: EraCase['ref'];
+}
+
+const TRAFFIC_ERAS: readonly TrafficEra[] = [
+  { label: '2.7.4', panelVersion: '2.7.4', contract: contractPanel27, row: ROW_274, ref: ERAS[0]!.ref },
+  { label: '2.8.0', panelVersion: '2.8.0', contract: contractPanel28, row: ROW_280, ref: ERAS[1]!.ref },
+  { label: '3.2.1', panelVersion: '3.2.1', contract: contractPanel321, row: ROW_321, ref: ERAS[2]!.ref },
+  { label: '3.2.3', panelVersion: '3.2.3', contract: contractPanel323, row: ROW_321, ref: ERAS[2]!.ref },
+  { label: '3.3.2', panelVersion: '3.3.2', contract: contractPanel33, row: ROW_332, ref: ERAS[3]!.ref },
+  { label: '3.4.3', panelVersion: '3.4.3', contract: contractPanel343, row: ROW_332, ref: ERAS[3]!.ref },
+  { label: '3.4.4', panelVersion: '3.4.4', contract: contractPanel344, row: ROW_332, ref: ERAS[3]!.ref },
+];
+
+/** A connection the panel remembers, on a counter that was just reset. */
+const CONNECTED_BLOCK = {
+  usedTrafficBytes: 0,
+  lifetimeUsedTrafficBytes: 5_368_709_120,
+  onlineAt: '2026-09-01T10:00:00.000Z',
+  firstConnectedAt: '2026-08-20T08:00:00.000Z',
+  lastConnectedNodeUuid: '5b9c0e34-2a71-4d8f-9b06-1c7a4e2d8f50',
+};
+
+function acceptedByContract(contract: unknown, row: Record<string, unknown>): boolean {
+  const schema = (contract as { GetUserByUsernameCommand: UserCommand }).GetUserByUsernameCommand.ResponseSchema;
+  return schema.safeParse({ response: row }).success;
+}
+
+describe('the traffic block decodes on every era the panel serves', () => {
+  for (const era of TRAFFIC_ERAS) {
+    it(`${era.label}: a connection survives a traffic reset — decoded, and read as connected`, async () => {
+      const row = { ...era.row.response, userTraffic: CONNECTED_BLOCK };
+      assert.equal(acceptedByContract(era.contract, row), true, 'the fixture is not a row this release sends');
+      const { service } = panelOn(era.panelVersion, { response: row });
+
+      const outcome = await service.getPanelUserOutcome(era.ref);
+
+      assert.equal(outcome.kind, 'ok');
+      const traffic = outcome.kind === 'ok' ? outcome.user.userTraffic : undefined;
+      assert.deepStrictEqual(traffic, {
+        usedTrafficBytes: 0,
+        lifetimeUsedTrafficBytes: 5_368_709_120,
+        onlineAt: '2026-09-01T10:00:00.000Z',
+        firstConnectedAt: '2026-08-20T08:00:00.000Z',
+      });
+      const evidence = connectEvidenceOf(traffic, new Date('2026-09-19T00:00:00.000Z'));
+      assert.deepStrictEqual(evidence, { kind: 'connected', at: new Date('2026-08-20T08:00:00.000Z') });
+
+      // The cabinet's card read is the same GET, and hands the same block on.
+      const usage = await service.getPanelUserUsage(era.ref);
+      assert.deepStrictEqual(usage?.userTraffic, traffic);
+    });
+
+    it(`${era.label}: a present, empty block is "never connected"`, async () => {
+      const row = era.row.response;
+      assert.equal(acceptedByContract(era.contract, row), true);
+      assert.equal(typeof row['userTraffic'], 'object', 'precondition: the fixture carries the block');
+      const { service } = panelOn(era.panelVersion, { response: row });
+
+      const outcome = await service.getPanelUserOutcome(era.ref);
+
+      assert.equal(outcome.kind, 'ok');
+      const traffic = outcome.kind === 'ok' ? outcome.user.userTraffic : undefined;
+      assert.deepStrictEqual(traffic, {
+        usedTrafficBytes: 0,
+        lifetimeUsedTrafficBytes: 0,
+        onlineAt: null,
+        firstConnectedAt: null,
+      });
+      assert.deepStrictEqual(connectEvidenceOf(traffic, new Date()), { kind: 'not_connected' });
+    });
+
+    it(`${era.label}: NO block is unknown — never "not connected"`, async () => {
+      const row: Record<string, unknown> = { ...era.row.response };
+      delete row['userTraffic'];
+      // The vendor contract refuses such a row outright: the block is required.
+      assert.equal(acceptedByContract(era.contract, row), false);
+      const { service } = panelOn(era.panelVersion, { response: row });
+
+      const outcome = await service.getPanelUserOutcome(era.ref);
+
+      assert.equal(outcome.kind, 'ok', 'the row still decodes — only its traffic is unknown');
+      const traffic = outcome.kind === 'ok' ? outcome.user.userTraffic : undefined;
+      assert.equal(traffic, null);
+      assert.deepStrictEqual(connectEvidenceOf(traffic, new Date()), { kind: 'unknown' });
+      const usage = await service.getPanelUserUsage(era.ref);
+      assert.equal(usage?.userTraffic, null);
+    });
+  }
+
+  it('a malformed block is unknown, not an empty one', async () => {
+    const row = {
+      ...ROW_332.response,
+      userTraffic: { ...CONNECTED_BLOCK, firstConnectedAt: 'yesterday-ish', onlineAt: null },
+    };
+    const { service } = panelOn('3.3.2', { response: row });
+
+    const outcome = await service.getPanelUserOutcome(ERAS[3]!.ref);
+
+    assert.equal(outcome.kind, 'ok');
+    assert.equal(outcome.kind === 'ok' ? outcome.user.userTraffic : undefined, null);
+  });
+
+  it('the live 3.2.1 capture of a connected user decodes as connected at its own first connection', async () => {
+    // `connected-user.json` is the panel's own `user.first_connected` body.
+    const captured = fixture('3.2.1/connected-user.json');
+    const { service } = panelOn('3.2.1', { response: captured.response });
+
+    const outcome = await service.getPanelUserOutcome(ERAS[2]!.ref);
+
+    assert.equal(outcome.kind, 'ok');
+    const traffic = outcome.kind === 'ok' ? outcome.user.userTraffic : undefined;
+    assert.equal(traffic?.firstConnectedAt, '2026-08-10T12:56:15.010Z');
+    assert.deepStrictEqual(connectEvidenceOf(traffic, new Date('2026-09-19T00:00:00.000Z')), {
+      kind: 'connected',
+      at: new Date('2026-08-10T12:56:15.010Z'),
+    });
+  });
+
+  it('covers every contract the matrix above covers', () => {
+    // Anchor: the loop is not empty, and no pinned release is left out.
+    assert.equal(TRAFFIC_ERAS.length, CONTRACTS.length);
   });
 });

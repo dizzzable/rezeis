@@ -430,5 +430,6 @@ function createSubscription(): InternalUserSubscriptionInterface {
     expiresAt: '2026-05-01T00:00:00.000Z',
     createdAt: '2026-04-01T00:00:00.000Z',
     updatedAt: '2026-04-16T10:00:00.000Z',
+    connectHelp: { pending: true, banner: true },
   };
 }

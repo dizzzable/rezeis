@@ -14,15 +14,30 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
+import {
+  claimFirstTraffic,
+  connectEvidenceOf,
+  connectHelpFlags,
+  connectHelpOptedOut,
+  firstTrafficEventDue,
+  recordCheck,
+  recordConnectEvidence,
+  type ConnectEvidence,
+} from '../../connect-signal/connect-evidence.util';
 import { EmailService } from '../../email/services/email.service';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import {
   storedIdentityOf,
   type PanelIdentityColumns,
 } from '../../remnawave/services/panel-user-address';
-import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  RemnawaveApiService,
+  type PanelUserTraffic,
+} from '../../remnawave/services/remnawave-api.service';
+import { panelIdentityWhere } from '../../remnawave/services/remnawave-webhook.service';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dto';
 import { CompleteWebAccountEmailVerificationDto } from '../dto/complete-web-account-email-verification.dto';
@@ -112,6 +127,41 @@ function mapPanelSubscriptionStatus(raw: string | null): SubscriptionStatus | un
 }
 
 /**
+ * How often ONE process may stamp "still not connected" for one subscription
+ * from the cabinet's card read.
+ *
+ * The read itself is free — the dashboard already makes it for the traffic bar
+ * — but a customer reloading the page must not turn into a write per reload.
+ * Verification is good for 24 hours, so ten minutes loses nothing. A proven
+ * CONNECTION is not held back by this: it is written at once (a stamp held back
+ * could let the sender trust a "not connected" that is ten minutes stale), and
+ * it can only happen once per subscription — afterwards the state row says
+ * connected and nothing is written again.
+ */
+const CABINET_CHECK_WRITE_INTERVAL_MS = 10 * 60_000;
+
+/** Past this many remembered writes, expired ones are dropped from the throttle map. */
+const CABINET_THROTTLE_PRUNE_AT = 5_000;
+
+/** A subscription row as the connection signal needs it from the cabinet read. */
+interface CabinetConnectRow {
+  readonly id: string;
+  readonly remnawaveId: string | null;
+  /** The status the payload shows — the panel's overlay wins over the local row. */
+  readonly status: SubscriptionStatus;
+}
+
+/** The person the cabinet read is for, as far as the connection signal is concerned. */
+interface CabinetConnectUser {
+  readonly id: string;
+  readonly firstTrafficAt: Date | null;
+  readonly notificationPrefs: unknown;
+  readonly telegramId: bigint | null;
+  readonly name: string;
+  readonly username: string | null;
+}
+
+/**
  * Handles internal user session reads and narrow writes for internal admin
  * clients. Helpers (mappers, identifier resolution, email-verification
  * challenge plumbing) live in sibling files so the surface of this class
@@ -121,6 +171,12 @@ function mapPanelSubscriptionStatus(raw: string | null): SubscriptionStatus | un
 export class InternalUserService {
   private readonly logger = new Logger(InternalUserService.name);
 
+  /**
+   * When this process last wrote the connection signal from a card read, per
+   * subscription and per kind — see `CABINET_CHECK_WRITE_INTERVAL_MS`.
+   */
+  private readonly cabinetSignalWrites = new Map<string, number>();
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly passwordHashService: PasswordHashService,
@@ -129,6 +185,14 @@ export class InternalUserService {
     private readonly planCatalogService?: PlanCatalogService,
     @Optional()
     private readonly remnawaveApiService?: RemnawaveApiService,
+    /**
+     * Announces a customer's FIRST connection when the card read is what proved
+     * it (`user.first_traffic`, the same event the webhook emits). Optional so
+     * the specs that build this service positionally keep compiling; without it
+     * the column is still claimed and only the announcement is skipped.
+     */
+    @Optional()
+    private readonly systemEvents?: SystemEventsService,
   ) {}
 
   /**
@@ -367,7 +431,7 @@ export class InternalUserService {
     query: InternalUserSessionQueryDto,
   ): Promise<InternalUserSearchResultInterface> {
     const user = await this.getRequiredUser(query);
-    const subscription = await this.getCurrentSubscription(user.id);
+    const subscription = await this.getCurrentSubscription(user);
     return {
       session: mapInternalUserSession(user),
       subscription,
@@ -596,7 +660,7 @@ export class InternalUserService {
     query: InternalUserSessionQueryDto,
   ): Promise<InternalUserSubscriptionInterface | null> {
     const user = await this.getRequiredUser(query);
-    return this.getCurrentSubscription(user.id);
+    return this.getCurrentSubscription(user);
   }
 
   /**
@@ -622,6 +686,17 @@ export class InternalUserService {
     const usages = await Promise.all(
       subscriptions.map((sub) => this.resolvePanelUsage(sub)),
     );
+    // AFTER the reads, from them: a connection this very request just proved
+    // clears `connectHelp` in this response, without waiting for a probe.
+    const connectHelp = await this.resolveConnectHelp(
+      user,
+      subscriptions.map((sub, i) => ({
+        id: sub.id,
+        remnawaveId: sub.remnawaveId,
+        status: usages[i].overlay?.status ?? sub.status,
+      })),
+      usages.map((usage) => usage.userTraffic),
+    );
     return {
       subscriptions: subscriptions.map((sub, i) => {
         const u = usages[i];
@@ -643,6 +718,7 @@ export class InternalUserService {
           expiresAt: mapDateValue(o?.expiresAt !== undefined ? o.expiresAt : sub.expiresAt),
           createdAt: sub.createdAt.toISOString(),
           updatedAt: sub.updatedAt.toISOString(),
+          connectHelp: connectHelp[i] ?? null,
         };
       }),
     };
@@ -665,11 +741,11 @@ export class InternalUserService {
   // ── Internal helpers ─────────────────────────────────────────────────────
 
   private async getCurrentSubscription(
-    userId: string,
+    user: InternalUserRecord,
   ): Promise<InternalUserSubscriptionInterface | null> {
     const subscriptions = await this.prismaService.subscription.findMany({
       where: {
-        userId,
+        userId: user.id,
         status: { not: SubscriptionStatus.DELETED },
       },
       orderBy: [{ createdAt: 'desc' }],
@@ -680,6 +756,17 @@ export class InternalUserService {
     }
     const usage = await this.resolvePanelUsage(subscription);
     const o = usage.overlay;
+    const [connectHelp] = await this.resolveConnectHelp(
+      user,
+      [
+        {
+          id: subscription.id,
+          remnawaveId: subscription.remnawaveId,
+          status: o?.status ?? subscription.status,
+        },
+      ],
+      [usage.userTraffic],
+    );
     return {
       id: subscription.id,
       status: o?.status ?? subscription.status,
@@ -699,7 +786,179 @@ export class InternalUserService {
       ),
       createdAt: subscription.createdAt.toISOString(),
       updatedAt: subscription.updatedAt.toISOString(),
+      connectHelp: connectHelp ?? null,
     };
+  }
+
+  /**
+   * `connectHelp` for each row, computed from the stored connection state AND
+   * this request's own panel reads — and those reads' evidence written back
+   * (the cabinet is one of the three writers of the connection signal).
+   *
+   * No Remnawave call of its own: `readings` are the traffic blocks of the
+   * card reads `resolvePanelUsage` already made. At most one "still not
+   * connected" write per subscription per ten minutes; a proven connection is
+   * written once, at once. Best-effort throughout — a state that cannot be read
+   * or written leaves every flag `null` (no banner) and never fails the card.
+   */
+  private async resolveConnectHelp(
+    user: CabinetConnectUser,
+    rows: readonly CabinetConnectRow[],
+    readings: ReadonlyArray<PanelUserTraffic | null | undefined>,
+  ): Promise<Array<{ readonly pending: true; readonly banner: boolean } | null>> {
+    if (rows.length === 0) return [];
+    const now = new Date();
+    const evidence = readings.map((traffic) => connectEvidenceOf(traffic, now));
+    let states: Map<
+      string,
+      {
+        readonly firstConnectedAt: Date | null;
+        readonly checkedAt: Date | null;
+        readonly helpOutcome: string | null;
+        readonly bannerDismissedAt: Date | null;
+      }
+    >;
+    try {
+      const found = await this.prismaService.subscriptionConnectState.findMany({
+        where: { subscriptionId: { in: rows.map((row) => row.id) } },
+        select: {
+          subscriptionId: true,
+          firstConnectedAt: true,
+          checkedAt: true,
+          helpOutcome: true,
+          bannerDismissedAt: true,
+        },
+      });
+      states = new Map(found.map((state) => [state.subscriptionId, state]));
+    } catch (error) {
+      this.logger.warn(`Connection state read failed for user ${user.id}: ${(error as Error).message}`);
+      return rows.map(() => null);
+    }
+
+    await this.recordCabinetSignal(user, rows, evidence, states, now);
+
+    const optedOut = connectHelpOptedOut(user.notificationPrefs);
+    return rows.map((row, i) =>
+      connectHelpFlags({
+        state: states.get(row.id) ?? null,
+        connectedNow: evidence[i]?.kind === 'connected',
+        status: row.status,
+        optedOut,
+      }),
+    );
+  }
+
+  /**
+   * Writes what the card reads proved. See `resolveConnectHelp`.
+   *
+   * Connected → the evidence, when the stored row does not already hold it (or
+   * holds a later time), plus the person's first-traffic claim. Not connected →
+   * the verification clock, throttled. Unknown (no read, no block) → nothing.
+   */
+  private async recordCabinetSignal(
+    user: CabinetConnectUser,
+    rows: readonly CabinetConnectRow[],
+    evidence: readonly ConnectEvidence[],
+    states: ReadonlyMap<string, { readonly firstConnectedAt: Date | null; readonly checkedAt: Date | null }>,
+    now: Date,
+  ): Promise<void> {
+    let claimAttempted = false;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const found = evidence[i];
+      if (row.remnawaveId === null || found === undefined || found.kind === 'unknown') continue;
+      const state = states.get(row.id) ?? null;
+      try {
+        if (found.kind === 'connected') {
+          const known = state?.firstConnectedAt ?? null;
+          if ((known === null || found.at.getTime() < known.getTime()) && this.cabinetWriteDue(row.id, 'evidence', null, now)) {
+            await recordConnectEvidence(this.prismaService, {
+              subscriptions: panelIdentityWhere(row.remnawaveId),
+              at: found.at,
+              source: 'cabinet',
+              checkedAt: now,
+              now,
+            });
+          }
+          if (user.firstTrafficAt === null && !claimAttempted) {
+            claimAttempted = true;
+            await this.claimCabinetFirstTraffic(user, row, found.at, now);
+          }
+          continue;
+        }
+        // Already known to have connected: a "not connected" stamp could not
+        // land on this row anyway (`recordCheck` skips it), so it is not made.
+        if (state?.firstConnectedAt) continue;
+        if (this.cabinetWriteDue(row.id, 'check', state?.checkedAt ?? null, now)) {
+          await recordCheck(this.prismaService, {
+            subscriptions: panelIdentityWhere(row.remnawaveId),
+            checkedAt: now,
+            now,
+          });
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Connection state write failed for subscription ${row.id}: ${(error as Error).message}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * The throttle: whether this process may write the signal of `kind` for
+   * this subscription now — and, if so, the write is recorded as made. A
+   * "check" is also skipped while the stored verification is fresher than the
+   * interval, whoever wrote it.
+   */
+  private cabinetWriteDue(
+    subscriptionId: string,
+    kind: 'check' | 'evidence',
+    storedCheckedAt: Date | null,
+    now: Date,
+  ): boolean {
+    const key = `${kind}:${subscriptionId}`;
+    const last = this.cabinetSignalWrites.get(key);
+    if (last !== undefined && now.getTime() - last < CABINET_CHECK_WRITE_INTERVAL_MS) return false;
+    if (
+      kind === 'check' &&
+      storedCheckedAt !== null &&
+      now.getTime() - storedCheckedAt.getTime() < CABINET_CHECK_WRITE_INTERVAL_MS
+    ) {
+      return false;
+    }
+    if (this.cabinetSignalWrites.size >= CABINET_THROTTLE_PRUNE_AT) {
+      for (const [entry, at] of this.cabinetSignalWrites) {
+        if (now.getTime() - at >= CABINET_CHECK_WRITE_INTERVAL_MS) this.cabinetSignalWrites.delete(entry);
+      }
+    }
+    this.cabinetSignalWrites.set(key, now.getTime());
+    return true;
+  }
+
+  /**
+   * `User.firstTrafficAt` from the card read's evidence, through the one claim
+   * every writer shares; the winner announces it when the evidence is at most
+   * a day old — the same rule, and the same event, as the webhook.
+   */
+  private async claimCabinetFirstTraffic(
+    user: CabinetConnectUser,
+    row: CabinetConnectRow,
+    connectedAt: Date,
+    now: Date,
+  ): Promise<void> {
+    const won = await claimFirstTraffic(this.prismaService, user.id, connectedAt);
+    if (!won || !firstTrafficEventDue(connectedAt, now) || this.systemEvents === undefined) return;
+    this.systemEvents.info(EVENT_TYPES.USER_FIRST_TRAFFIC, 'USER', 'User started using traffic', {
+      userId: user.id,
+      ...(user.telegramId !== null ? { telegramId: user.telegramId.toString() } : {}),
+      ...(user.name ? { userName: user.name } : {}),
+      ...(user.username ? { username: user.username } : {}),
+      subscriptionId: row.id,
+      ...(row.remnawaveId !== null ? { remnawaveId: row.remnawaveId } : {}),
+      status: row.status,
+      connectedAt: connectedAt.toISOString(),
+      source: 'CABINET',
+    });
   }
 
   /**
@@ -715,6 +974,11 @@ export class InternalUserService {
     profileName: string | null;
     trafficUsedGb: number | null;
     overlay: PanelSubscriptionOverlay | null;
+    /**
+     * The same read's traffic block, for the connection signal. `null` or
+     * absent = unknown (no read, a failed read, a row without a block).
+     */
+    userTraffic: PanelUserTraffic | null | undefined;
   }> {
     // Takes the ROW, not the bare id: the numeric panel id and the panel
     // username travel with it, and on a 3.x panel they are the only way to name
@@ -723,11 +987,11 @@ export class InternalUserService {
     // bare `remnawaveId === null` check tested.
     const identity = storedIdentityOf(subscription);
     if (this.remnawaveApiService === undefined || identity === null) {
-      return { profileName: null, trafficUsedGb: null, overlay: null };
+      return { profileName: null, trafficUsedGb: null, overlay: null, userTraffic: null };
     }
     const usage = await this.remnawaveApiService.getPanelUserUsage(identity);
     if (usage === null) {
-      return { profileName: null, trafficUsedGb: null, overlay: null };
+      return { profileName: null, trafficUsedGb: null, overlay: null, userTraffic: null };
     }
     const trafficUsedGb =
       usage.usedTrafficBytes === null
@@ -759,7 +1023,7 @@ export class InternalUserService {
     ) {
       overlay.deviceLimit = usage.hwidDeviceLimit;
     }
-    return { profileName: usage.username, trafficUsedGb, overlay };
+    return { profileName: usage.username, trafficUsedGb, overlay, userTraffic: usage.userTraffic };
   }
 
   private async getRequiredUser(
