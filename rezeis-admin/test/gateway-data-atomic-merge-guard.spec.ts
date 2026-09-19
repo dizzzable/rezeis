@@ -49,16 +49,6 @@ const ALLOWED: readonly Allowed[] = [
       'are claims on the owed-refund marker, re-checked by PostgreSQL under the row lock, and the other two ' +
       'run on a row no settle can reach. Not converted: the file is in active work elsewhere (WP2).',
   },
-  {
-    file: 'src/modules/referrals/services/referral-qualification.service.ts',
-    contains: '...gatewayData',
-    count: 1,
-    reason:
-      'RACING, left for its owner — `stampReferralReversal` reads the payment without a lock on it (the lock ' +
-      'held is the referral row) and writes the copy back, inside the refund reversal. A «Мой налог» receipt or ' +
-      'a panel refund landing in that window is erased. Outside the payments module; the fix is one call to ' +
-      '`writeTransactionGatewayData`.',
-  },
 ];
 
 /** Source text with comments blanked out and line breaks kept, so offsets and lines still line up. */

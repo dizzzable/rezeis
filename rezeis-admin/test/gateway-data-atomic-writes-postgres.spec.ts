@@ -11,7 +11,13 @@ import { MOY_NALOG_JOBS } from '../src/modules/payments/constants/moy-nalog.cons
 import { MoyNalogProcessor } from '../src/modules/payments/processors/moy-nalog.processor';
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
+import { lockTransactionRefundLedger } from '../src/modules/payments/utils/payment-refund-ledger.util';
 import { writeTransactionGatewayData } from '../src/modules/payments/utils/transaction-gateway-data.util';
+import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
+import {
+  REFERRAL_REVERSED_AT_KEY,
+  ReferralQualificationService,
+} from '../src/modules/referrals/services/referral-qualification.service';
 
 /**
  * Two paths writing one payment's `gatewayData` at once both keep what they wrote.
@@ -23,6 +29,12 @@ import { writeTransactionGatewayData } from '../src/modules/payments/utils/trans
  * and the second path's write was gone. The paths are the real ones; YooKassa,
  * the tax service and the reconciler's other collaborators are stand-ins, so the
  * order in which the writes land is the test's to choose.
+ *
+ * The referral reversal's stamp waits on nothing outside: it reads the payment
+ * and writes it a moment later, holding the payer's referral row, not the
+ * payment's. Its case records a refund the way both refund writers do — the
+ * payment row taken with `lockTransactionRefundLedger`, then the write — so the
+ * stamp's write has to wait for it.
  *
  * The refund ledger's own case — a partial refund recorded while a «Мой налог»
  * registration waited — is `moy-nalog-receipt-race-postgres.spec.ts`.
@@ -45,9 +57,9 @@ function gate(): { readonly opened: Promise<void>; readonly open: () => void } {
   return { opened, open };
 }
 
-async function until(check: () => boolean, what: string): Promise<void> {
+async function until(check: () => boolean | Promise<boolean>, what: string): Promise<void> {
   const deadline = Date.now() + 5_000;
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
@@ -234,6 +246,38 @@ async function stored(transactionId: string): Promise<{ status: string; gatewayD
   return { status: row.status, gatewayData: (row.gatewayData ?? {}) as Record<string, unknown> };
 }
 
+/** A completed payment by a payer someone invited, so the reversal holds the payer's referral row. */
+async function referredPayment(gatewayData: Record<string, unknown>): Promise<string> {
+  const id = await payment({ status: 'COMPLETED', gatewayData });
+  const { userId } = await prisma.transaction.findUniqueOrThrow({ where: { id }, select: { userId: true } });
+  const referrerId = `${id}-referrer`;
+  await prisma.$executeRaw(Prisma.sql`
+    INSERT INTO "users" ("id", "referral_code", "updated_at") VALUES (${referrerId}, ${`${referrerId}-ref`}, now())
+  `);
+  await prisma.referral.create({ data: { referrerId, referredId: userId } });
+  return id;
+}
+
+/** The referral program's reversal; what it logs as an error goes to `errors`. */
+function referralReversal(errors: string[]): ReferralQualificationService {
+  const service = new ReferralQualificationService(
+    prisma,
+    { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+    new PointsWalletService(),
+    { enqueue: async () => undefined } as never,
+  );
+  (service as unknown as { logger: unknown }).logger = { ...silent, error: (message: string) => errors.push(message) };
+  return service;
+}
+
+/** How many sessions wait for a lock that session `pid` holds. */
+async function waitingOn(pid: number): Promise<number> {
+  const [{ waiting }] = await prisma.$queryRaw<[{ waiting: number }]>(Prisma.sql`
+    SELECT count(*)::int AS "waiting" FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids("pid"))
+  `);
+  return waiting;
+}
+
 run('gatewayData written by two paths at once, on PostgreSQL', () => {
   before(async () => {
     process.env.DATABASE_URL = testUrl;
@@ -251,6 +295,7 @@ run('gatewayData written by two paths at once, on PostgreSQL', () => {
   after(async () => {
     if (prisma === undefined) return;
     await prisma.$executeRaw(Prisma.sql`DELETE FROM "payment_webhook_events" WHERE "provider_event_id" LIKE ${`${prefix}-%`}`);
+    await prisma.$executeRaw(Prisma.sql`DELETE FROM "referrals" WHERE "referred_id" LIKE ${`${prefix}-%`}`);
     await prisma.$executeRaw(Prisma.sql`DELETE FROM "transactions" WHERE "id" LIKE ${`${prefix}-%`}`);
     await prisma.$executeRaw(Prisma.sql`DELETE FROM "users" WHERE "id" LIKE ${`${prefix}-%`}`);
     if (previousGateway === null) {
@@ -389,5 +434,51 @@ run('gatewayData written by two paths at once, on PostgreSQL', () => {
     const { gatewayData } = await stored(id);
     assert.equal(gatewayData['paymentNeedsManualReview'], true);
     assert.equal(typeof gatewayData['polledAt'], 'string', "the sweep's record of its poll was overwritten");
+  });
+
+  it('the referral reversal keeps a refund recorded on the payment between its read and its stamp', async () => {
+    const first = { refundId: 'refund-1', amount: '400.00', at: '2026-09-19T08:00:00.000Z' };
+    const second = { refundId: 'refund-2', amount: '600.00', at: '2026-09-19T08:05:00.000Z' };
+    const id = await referredPayment({ providerStatus: 'succeeded', refunds: [first], refundedAmountTotal: '400.00' });
+    const errors: string[] = [];
+
+    const { reversal } = await prisma.$transaction(
+      async (ledger) => {
+        // A refund recorded the way both refund writers record one: the payment
+        // row first, then the write. The reversal holds only the payer's
+        // referral row, so it reads the payment and then waits here to write
+        // its stamp.
+        await lockTransactionRefundLedger(ledger, id);
+        const [{ pid }] = await ledger.$queryRaw<[{ pid: number }]>(Prisma.sql`SELECT pg_backend_pid() AS "pid"`);
+        const reversing = referralReversal(errors).reverseQualificationForTransaction(id);
+        await until(async () => (await waitingOn(pid)) > 0, "the reversal's stamp to wait for the payment row");
+        await writeTransactionGatewayData(ledger, id, {
+          merge: { providerStatus: 'succeeded', refundedAmountTotal: '1000.00', refunds: [first, second] },
+        });
+        return { reversal: reversing };
+      },
+      { timeout: 20_000 },
+    );
+    await reversal;
+
+    const { gatewayData } = await stored(id);
+    assert.deepEqual(errors, []);
+    assert.equal(typeof gatewayData[REFERRAL_REVERSED_AT_KEY], 'string', 'the payment was not stamped');
+    assert.deepEqual(
+      { refundedAmountTotal: gatewayData['refundedAmountTotal'], refunds: gatewayData['refunds'] },
+      { refundedAmountTotal: '1000.00', refunds: [first, second] },
+      'the stamp wrote back the ledger it had read, and the refund recorded meanwhile is gone',
+    );
+  });
+
+  it('the referral reversal leaves a payment it has already stamped as it is', async () => {
+    const stampedAt = '2026-09-19T08:00:00.000Z';
+    const id = await referredPayment({ providerStatus: 'succeeded', [REFERRAL_REVERSED_AT_KEY]: stampedAt });
+    const errors: string[] = [];
+
+    await referralReversal(errors).reverseQualificationForTransaction(id);
+
+    assert.deepEqual(errors, []);
+    assert.deepEqual((await stored(id)).gatewayData, { providerStatus: 'succeeded', [REFERRAL_REVERSED_AT_KEY]: stampedAt });
   });
 });

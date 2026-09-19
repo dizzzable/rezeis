@@ -8,6 +8,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { writeTransactionGatewayData } from '../../payments/utils/transaction-gateway-data.util';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import {
@@ -886,23 +887,25 @@ export class ReferralQualificationService {
 
 // ── Module-level helpers ──────────────────────────────────────────────────────
 
-/** See `REFERRAL_REVERSED_AT_KEY`. Merged into what the row holds now, once. */
+/**
+ * See `REFERRAL_REVERSED_AT_KEY`. A payment already stamped is left as it is.
+ *
+ * The stamp is merged by PostgreSQL onto what the payment holds when it is
+ * written (`writeTransactionGatewayData`). The lock held here is the payer's
+ * referral row, not the payment's, and the copy read above used to be written
+ * back whole: a «Мой налог» receipt or a refund recorded on the payment in
+ * between was erased. Without its receipt, the refund's cancellation found
+ * nothing to cancel, and the income stayed declared.
+ */
 async function stampReferralReversal(tx: Prisma.TransactionClient, transactionId: string): Promise<void> {
   const row = await tx.transaction.findUnique({
     where: { id: transactionId },
     select: { gatewayData: true },
   });
   if (row === null) return;
-  const gatewayData = readRecord(row.gatewayData);
-  if (typeof gatewayData[REFERRAL_REVERSED_AT_KEY] === 'string') return;
-  await tx.transaction.update({
-    where: { id: transactionId },
-    data: {
-      gatewayData: {
-        ...gatewayData,
-        [REFERRAL_REVERSED_AT_KEY]: new Date().toISOString(),
-      } as Prisma.InputJsonObject,
-    },
+  if (typeof readRecord(row.gatewayData)[REFERRAL_REVERSED_AT_KEY] === 'string') return;
+  await writeTransactionGatewayData(tx, transactionId, {
+    merge: { [REFERRAL_REVERSED_AT_KEY]: new Date().toISOString() },
   });
 }
 

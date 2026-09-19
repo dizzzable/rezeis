@@ -19,6 +19,7 @@ import {
   ReferralQualificationService,
 } from '../src/modules/referrals/services/referral-qualification.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 // ── An in-memory panel database ───────────────────────────────────────────────
 //
@@ -230,6 +231,18 @@ function makeWorld(input: WorldInput = {}) {
       }
       return run(client);
     },
+    // The one write to a payment, the reversal's stamp, is one statement
+    // (`writeTransactionGatewayData`), merged onto what the row holds.
+    $executeRaw: executeGatewayDataWrites({
+      currentGatewayData: (id) => transactions.find((t) => t.id === id)?.gatewayData,
+      update: async (args) => {
+        ops.push(`transaction:${args.where.id}`);
+        const row = transactions.find((t) => t.id === args.where.id);
+        if (row === undefined) throw new Error('fixture: unknown transaction');
+        Object.assign(row, args.data);
+        return row;
+      },
+    }),
     settings: {
       findFirst: async () => ({ referralSettings: input.referralSettings ?? {} }),
     },
@@ -243,13 +256,6 @@ function makeWorld(input: WorldInput = {}) {
       findUnique: async (args: { where: { id: string }; select?: unknown }) => {
         const row = transactions.find((t) => t.id === args.where.id);
         return row === undefined ? null : project(row as unknown as Record<string, unknown>, args.select);
-      },
-      update: async (args: { where: { id: string }; data: Partial<TxRow> }) => {
-        ops.push(`transaction:${args.where.id}`);
-        const row = transactions.find((t) => t.id === args.where.id);
-        if (row === undefined) throw new Error('fixture: unknown transaction');
-        Object.assign(row, args.data);
-        return row;
       },
       // Evaluates whichever conditions the service passes, so dropping one of
       // them changes the ANSWER (and a test fails on an assertion) instead of

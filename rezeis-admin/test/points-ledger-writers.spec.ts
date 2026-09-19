@@ -7,6 +7,7 @@ import { StealthnetImporterService } from '../src/modules/imports/services/steal
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
 import { ReferralQualificationService } from '../src/modules/referrals/services/referral-qualification.service';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 
 /**
  * The writers whose own specs never reach their points path: the referral
@@ -76,11 +77,15 @@ describe('the referral reward reversal writes through the wallet', () => {
       ...walletFakes(row, recorded),
       transaction: {
         findUnique: async () => ({ userId: 'referred-1', planSnapshot: {}, gatewayData: null }),
-        update: async (args: unknown) => {
+      },
+      // The reversal stamps the payment in one statement (`writeTransactionGatewayData`).
+      $executeRaw: executeGatewayDataWrites({
+        currentGatewayData: () => null,
+        update: async (args) => {
           recorded.push({ op: 'transaction.update', args });
           return {};
         },
-      },
+      }),
       $queryRaw: async () => [],
       referral: {
         findFirst: async () => ({ id: 'referral-1' }),
