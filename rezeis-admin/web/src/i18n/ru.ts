@@ -1955,7 +1955,7 @@ export const ru = {
     withdrawal: {
       title: 'Правила вывода',
       minAmount: 'Минимальная сумма вывода (копейки)',
-      defaultHint: '500 ₽ по умолчанию',
+      defaultHint: 'Если поле пустое, минимума нет — партнёр может вывести любую сумму',
     },
     gatewayCommissions: {
       title: 'Комиссии шлюзов',
@@ -2092,6 +2092,13 @@ export const ru = {
       COMPLETED: 'Завершено',
       REJECTED: 'Отклонено',
       CANCELED: 'Отменено',
+    },
+    // What the cabinet's withdrawal dialog sends as `method`; any other value is shown as it came.
+    methods: {
+      card: 'Банковская карта',
+      sbp: 'СБП',
+      crypto: 'Криптовалюта',
+      other: 'Другой способ',
     },
     tableTitle: 'Заявки на вывод',
     empty: 'Заявок на вывод не найдено.',

@@ -1878,7 +1878,7 @@ export const en = {
     withdrawal: {
       title: 'Withdrawal Rules',
       minAmount: 'Minimum withdrawal amount (kopecks)',
-      defaultHint: '500 ₽ by default',
+      defaultHint: 'Empty — no minimum: a partner can withdraw any amount',
     },
     gatewayCommissions: {
       title: 'Gateway Commissions',
@@ -2008,6 +2008,13 @@ export const en = {
       COMPLETED: 'Completed',
       REJECTED: 'Rejected',
       CANCELED: 'Canceled',
+    },
+    // What the cabinet's withdrawal dialog sends as `method`; any other value is shown as it came.
+    methods: {
+      card: 'Bank card',
+      sbp: 'SBP (Faster Payments)',
+      crypto: 'Cryptocurrency',
+      other: 'Another method',
     },
     tableTitle: 'Withdrawal requests',
     empty: 'No withdrawal requests found.',

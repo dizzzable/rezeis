@@ -54,7 +54,7 @@ import {
 } from '@/components/ui/tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
-import { formatKopecks, formatKopecksCompact, formatNumber } from './partner-formatters'
+import { formatKopecks, formatKopecksCompact, formatNumber, withdrawalMethodLabel } from './partner-formatters'
 import { downloadCsv } from './csv-download'
 import { AnimatedCounter } from './animated-counter'
 import {
@@ -495,7 +495,9 @@ function WithdrawalsPanel({ partnerId }: { readonly partnerId: string }) {
             <TableCell>
               <WithdrawalStatusBadge status={row.status} />
             </TableCell>
-            <TableCell className="text-xs">{row.method}</TableCell>
+            <TableCell className="text-xs" title={row.method || undefined}>
+              {withdrawalMethodLabel(row.method, t)}
+            </TableCell>
             <TableCell className="text-[11px] text-muted-foreground">
               {formatDateTime(row.createdAt)}
             </TableCell>

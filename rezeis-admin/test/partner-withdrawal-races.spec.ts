@@ -3,7 +3,12 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 
 import { AdminPartnersController } from '../src/modules/partners/controllers/admin-partners.controller';
 import { PartnersService } from '../src/modules/partners/services/partners.service';
@@ -437,6 +442,19 @@ function makeDb(seedRows: {
       },
     },
     /**
+     * The operator's minimum withdrawal lives in `settings.partnerSettings`;
+     * `createWithdrawalRequest` reads it first thing inside its transaction.
+     * No fixture here sets one, so every amount above zero clears it — the
+     * minimum itself is pinned in `partner-withdrawal-refusals.spec.ts`.
+     */
+    settings: {
+      findUnique: async (args: { where: { id?: number }; select?: Record<string, unknown> }) => {
+        record('settings.findUnique');
+        assert.equal(args.where.id, 1);
+        return project({ partnerSettings: {} }, args.select);
+      },
+    },
+    /**
      * The recovery hold, which `createWithdrawalRequest` checks before its
      * transaction opens. No fixture here is under one, so a lookup for the
      * partner's own user finds nothing; a lookup for anybody else fails the
@@ -727,6 +745,31 @@ function expectRefusal(message: string) {
   };
 }
 
+/**
+ * The debit's refusals carry a code and a status of their own since the
+ * operator's minimum became real (`partner-withdrawal-rules.ts`): 409 for the
+ * partner's state, 422 for an amount it cannot take. The messages are the ones
+ * these tests always pinned.
+ */
+function expectConflict(message: string) {
+  return (error: unknown): true => {
+    assert.ok(error instanceof ConflictException, `expected ConflictException, got ${String(error)}`);
+    assert.equal((error as Error).message, message);
+    return true;
+  };
+}
+
+function expectUnprocessable(message: string) {
+  return (error: unknown): true => {
+    assert.ok(
+      error instanceof UnprocessableEntityException,
+      `expected UnprocessableEntityException, got ${String(error)}`,
+    );
+    assert.equal((error as Error).message, message);
+    return true;
+  };
+}
+
 function expectNotFound(message: string) {
   return (error: unknown): true => {
     assert.ok(
@@ -797,7 +840,7 @@ describe('a withdrawal request debits the balance (pinned, not changed)', () => 
 
     await assert.rejects(
       () => requestWithdrawal(db, OPENING_BALANCE + 1),
-      expectRefusal('Insufficient partner balance'),
+      expectUnprocessable('Insufficient partner balance'),
     );
 
     assert.equal(partnerRow(db).balance, OPENING_BALANCE, 'the balance must not move');
@@ -811,12 +854,12 @@ describe('a withdrawal request debits the balance (pinned, not changed)', () => 
     assert.equal(partnerRow(db).balance, OPENING_BALANCE - 1);
   });
 
-  it('a request against an unknown partner is a 404 and writes nothing', async () => {
+  it('a request against an unknown partner is a 409 PARTNER_NOT_FOUND and writes nothing', async () => {
     const db = seed();
 
     await assert.rejects(
       () => requestWithdrawal(db, 100, 'nope'),
-      expectNotFound('Partner not found'),
+      expectConflict('Partner not found'),
     );
 
     assert.deepEqual(db.state.withdrawals, []);
@@ -829,7 +872,7 @@ describe('a withdrawal request debits the balance (pinned, not changed)', () => 
 
     await assert.rejects(
       () => requestWithdrawal(db, 100),
-      expectRefusal('Partner is not active'),
+      expectConflict('Partner is not active'),
     );
 
     assert.equal(partnerRow(db).balance, OPENING_BALANCE);
@@ -843,7 +886,7 @@ describe('a withdrawal request debits the balance (pinned, not changed)', () => 
 
     await assert.rejects(
       () => requestWithdrawal(db, 5_000),
-      expectRefusal('Partner is not active'),
+      expectConflict('Partner is not active'),
     );
   });
 
@@ -978,6 +1021,8 @@ describe('the withdrawal debit carries its own sufficiency floor', () => {
   it('reads nothing from the partner row before that write inside the transaction', async () => {
     // A guard evaluated in JS needs a read to evaluate against. There is none
     // before the write, so the floor cannot live anywhere but in the write.
+    // The one read ahead of it is the operator's minimum, which is a setting,
+    // not a property of the row being debited.
     const db = seed();
 
     await requestWithdrawal(db, 2_500);
@@ -985,7 +1030,11 @@ describe('the withdrawal debit carries its own sufficiency floor', () => {
     const inside = insideTx(db);
     const writeAt = inside.indexOf('partner.updateMany');
     assert.notEqual(writeAt, -1, 'the guarded debit ran inside the transaction');
-    assert.deepEqual(inside.slice(0, writeAt), ['$transaction.begin'], 'nothing is read before it');
+    assert.deepEqual(
+      inside.slice(0, writeAt),
+      ['$transaction.begin', 'settings.findUnique'],
+      'nothing but the minimum is read before it',
+    );
   });
 
   it('debits before it creates, so a refused debit can leave no withdrawal row', async () => {
@@ -995,6 +1044,7 @@ describe('the withdrawal debit carries its own sufficiency floor', () => {
 
     assert.deepEqual(insideTx(db), [
       '$transaction.begin',
+      'settings.findUnique',
       'partner.updateMany',
       'partnerWithdrawal.create',
       '$transaction.commit',
@@ -1010,7 +1060,7 @@ describe('the withdrawal debit carries its own sufficiency floor', () => {
 
     await assert.rejects(
       () => requestWithdrawal(db, 100),
-      expectRefusal('Insufficient partner balance'),
+      expectUnprocessable('Insufficient partner balance'),
     );
 
     assert.equal(partnerRow(db).balance, OPENING_BALANCE, 'the balance must not move');

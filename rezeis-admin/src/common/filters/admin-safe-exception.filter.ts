@@ -34,6 +34,12 @@ interface SafeErrorResponse {
    * codes in `CODES_CARRYING_HOLD_UNTIL` — see `extractSafeHoldUntil`.
    */
   holdUntil?: string;
+  /**
+   * The operator's minimum partner withdrawal, in minor units. Carried only by
+   * the codes in `CODES_CARRYING_MIN_WITHDRAWAL_AMOUNT` — see
+   * `extractSafeMinWithdrawalAmount`.
+   */
+  minWithdrawalAmount?: number;
   error?: string;
 }
 
@@ -335,6 +341,19 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // only "Withdrawal request failed". Its `holdUntil` rides along through
   // `CODES_CARRYING_HOLD_UNTIL` below.
   'WITHDRAWAL_HOLD_AFTER_RECOVERY',
+  // The other refusals of a partner withdrawal request
+  // (`partners/utils/partner-withdrawal-rules.ts`). The first two used to be a
+  // 2xx `{ error }` body; the last three reached the cabinet as bare 400s it
+  // could only reword as "failed", sending the customer to try again at a
+  // refusal that would not change. Each needs different words and a different
+  // next step — ask support, lower the amount, raise it to the minimum — so
+  // each is a code. `WITHDRAWAL_BELOW_MINIMUM` carries the minimum itself
+  // through `CODES_CARRYING_MIN_WITHDRAWAL_AMOUNT` below.
+  'PARTNER_NOT_FOUND',
+  'PARTNER_PROGRAM_INVITED_ONLY',
+  'PARTNER_NOT_ACTIVE',
+  'WITHDRAWAL_INSUFFICIENT_BALANCE',
+  'WITHDRAWAL_BELOW_MINIMUM',
   // Sign-in with Google, Yandex or Mail.ru whose e-mail matches an account
   // where this panel never verified that address (`external-auth.service.ts`).
   // Refused, not linked — and without the code the cabinet could only say
@@ -407,6 +426,17 @@ export const CODES_CARRYING_ISSUES: ReadonlySet<string> = new Set<string>([
  */
 export const CODES_CARRYING_HOLD_UNTIL: ReadonlySet<string> = new Set<string>([
   'WITHDRAWAL_HOLD_AFTER_RECOVERY',
+]);
+/**
+ * Codes whose refusal names the minimum it was held to. Same subset rule as the
+ * sets above, on a fourth field: a code listed only here forwards nothing.
+ *
+ * The value is not copied either: only a safe non-negative whole number is
+ * written, so an amount carrying a string, a fraction or an object leaves
+ * nothing behind.
+ */
+export const CODES_CARRYING_MIN_WITHDRAWAL_AMOUNT: ReadonlySet<string> = new Set<string>([
+  'WITHDRAWAL_BELOW_MINIMUM',
 ]);
 /**
  * Caps on the list, so a refusal cannot become a payload.
@@ -559,6 +589,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       const factor = extractSafeReauthFactor(payload);
       const issues = extractSafeIssues(payload);
       const holdUntil = extractSafeHoldUntil(payload);
+      const minWithdrawalAmount = extractSafeMinWithdrawalAmount(payload);
       return {
         timestamp,
         path,
@@ -572,6 +603,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
         ...(factor ? { factor } : {}),
         ...(issues ? { issues } : {}),
         ...(holdUntil ? { holdUntil } : {}),
+        ...(minWithdrawalAmount !== undefined ? { minWithdrawalAmount } : {}),
         ...(error ? { error } : {}),
       };
     }
@@ -714,6 +746,22 @@ function extractSafeHoldUntil(
   if (Number.isNaN(instant.getTime())) return undefined;
   const serialised = instant.toISOString();
   return serialised === candidate ? serialised : undefined;
+}
+
+/**
+ * The `minWithdrawalAmount` passthrough, gated twice like `holdUntil`: the code
+ * must be one that declares it carries the minimum, and the value must be a
+ * safe non-negative whole number. What is written is that number, never the
+ * value the body held.
+ */
+function extractSafeMinWithdrawalAmount(
+  payload: { readonly code: string; readonly body: Record<string, unknown> } | undefined,
+): number | undefined {
+  if (!payload || !CODES_CARRYING_MIN_WITHDRAWAL_AMOUNT.has(payload.code)) return undefined;
+  const candidate: unknown = payload.body.minWithdrawalAmount;
+  return typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : undefined;
 }
 
 /**

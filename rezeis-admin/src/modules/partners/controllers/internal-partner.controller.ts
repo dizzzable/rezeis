@@ -7,6 +7,11 @@ import { buildUserReferenceWhere } from '../../internal-user/utils/user-referenc
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
 import { findRecoveryWithdrawalHold } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 import { PartnersService } from '../services/partners.service';
+import {
+  partnerNotFound,
+  partnerProgramInvitedOnly,
+  readMinWithdrawalAmount,
+} from '../utils/partner-withdrawal-rules';
 
 /**
  * Internal partner endpoints consumed by reiwa (user-facing edge).
@@ -70,6 +75,16 @@ export class InternalPartnerController {
       balancePaymentEnabled: partnerSettings['allowBalancePayment'] === true,
       /** Currency the partner balance is denominated in (override → default). */
       balanceCurrency,
+      /**
+       * The operator's minimum withdrawal, in minor units of `balanceCurrency`
+       * — «Правила вывода» → «Минимальная сумма вывода». `0` when none is set,
+       * which is the default: nothing below one minor unit is ever accepted
+       * anyway. ALWAYS sent, for the reason `referralPoints` gives: a key that
+       * disappears at zero would read the same as a panel too old to send it.
+       * The withdraw route refuses below it (`WITHDRAWAL_BELOW_MINIMUM`); this
+       * lets the cabinet say so before anybody asks.
+       */
+      minWithdrawalAmount: readMinWithdrawalAmount(partnerSettings),
       /**
        * Referral points (`User.points`) — a DIMENSIONLESS integer, the same
        * single pool quests and operator adjustments write to. It is NOT money
@@ -249,6 +264,12 @@ export class InternalPartnerController {
    * Creates a withdrawal request. Deducts the amount from the partner's
    * balance immediately (altshop pattern). If the admin later rejects it,
    * the balance is restored.
+   *
+   * Every refusal is an HTTP error with a `code` (`partner-withdrawal-rules.ts`).
+   * The first three used to be a 2xx `{ error }` body — an unknown user, a user
+   * who is not a partner, the invited-only program — and a caller that only
+   * catches read each of them as a created request. The only caller is the
+   * cabinet's withdrawal dialog; a cabinet from before it has no caller at all.
    */
   @Post('withdraw')
   public async withdraw(
@@ -257,7 +278,7 @@ export class InternalPartnerController {
   ) {
     const user = await this.resolveUser(telegramId);
     if (!user) {
-      return { error: 'User not found' };
+      throw partnerNotFound();
     }
 
     const partner = await this.prismaService.partner.findUnique({
@@ -265,13 +286,13 @@ export class InternalPartnerController {
       select: { id: true },
     });
     if (!partner) {
-      return { error: 'Partner not found' };
+      throw partnerNotFound();
     }
 
     // Invited-only gate: when the operator restricts the partner program to
     // invited users, a non-invited partner cannot withdraw.
     if (!(await this.isPartnerProgramAvailable(user.id))) {
-      return { error: 'PARTNER_PROGRAM_INVITED_ONLY' };
+      throw partnerProgramInvitedOnly();
     }
 
     // Three days after the password was reset by subscription link, money

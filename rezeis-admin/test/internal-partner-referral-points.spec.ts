@@ -289,12 +289,15 @@ describe('InternalPartnerController.getInfo — referral points', () => {
       'createdAt',
       'id',
       'isActive',
+      // Added with the operator's minimum withdrawal being enforced; 0 = none.
+      'minWithdrawalAmount',
       'programAvailable',
       'referralPoints',
       'totalEarned',
       'totalWithdrawn',
     ]);
     // …and the neighbours still say what they said before.
+    assert.equal(info['minWithdrawalAmount'], 0);
     assert.equal(info['balanceCurrency'], 'USD');
     assert.equal(info['balancePaymentEnabled'], true);
     assert.equal(info['programAvailable'], true);

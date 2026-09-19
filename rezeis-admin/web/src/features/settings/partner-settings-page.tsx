@@ -311,7 +311,11 @@ function PartnerSettingsForm({ partner }: PartnerSettingsFormProps) {
         level1Percent: values.level1Percent ? parseFloat(values.level1Percent) : undefined,
         level2Percent: values.level2Percent ? parseFloat(values.level2Percent) : undefined,
         level3Percent: values.level3Percent ? parseFloat(values.level3Percent) : undefined,
-        minWithdrawalAmount: values.minWithdrawal ? parseInt(values.minWithdrawal, 10) : undefined,
+        // An empty field CLEARS the minimum: `null` is stored and read as "none"
+        // (`readMinWithdrawalAmount`). Omitting the key — as this used to —
+        // kept whatever was stored, so a minimum could be set but never removed;
+        // harmless while nothing enforced it, not since the withdraw route does.
+        minWithdrawalAmount: values.minWithdrawal ? parseInt(values.minWithdrawal, 10) : null,
         autoCalculateCommission: values.autoCalculate,
         taxPercent: values.taxPercent ? parseFloat(values.taxPercent) : undefined,
         accrualStrategy: values.accrualStrategy,

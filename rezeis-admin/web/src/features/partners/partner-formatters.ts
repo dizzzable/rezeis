@@ -3,6 +3,33 @@
  * here so the page-level components can stay focused on layout.
  */
 
+import type { TFunction } from 'i18next'
+
+/**
+ * The payout methods the cabinet's withdrawal dialog sends as `method`
+ * (reiwa `PARTNER_WITHDRAWAL_METHODS`), each with its label. A Map, not an
+ * object, so a stored value like `constructor` can never resolve to a key.
+ */
+const WITHDRAWAL_METHOD_KEYS: ReadonlyMap<string, string> = new Map([
+  ['card', 'withdrawalsPage.methods.card'],
+  ['sbp', 'withdrawalsPage.methods.sbp'],
+  ['crypto', 'withdrawalsPage.methods.crypto'],
+  ['other', 'withdrawalsPage.methods.other'],
+])
+
+/**
+ * A withdrawal's payout method as the operator should read it: «Банковская
+ * карта» rather than `card`. A value this panel does not know — typed by a
+ * donor system, or sent by a future cabinet — is shown as it came, and an
+ * empty one as a dash.
+ */
+export function withdrawalMethodLabel(method: string | null | undefined, t: TFunction): string {
+  const value = typeof method === 'string' ? method.trim() : ''
+  if (value.length === 0) return '—'
+  const key = WITHDRAWAL_METHOD_KEYS.get(value)
+  return key === undefined ? value : t(key)
+}
+
 /** Convert minor units (kopecks) to a localized RUB string. */
 export function formatKopecks(kopecks: number, locale = 'ru-RU'): string {
   if (!Number.isFinite(kopecks)) return '—'

@@ -116,9 +116,18 @@ function database(options: {
       return { count: 1 };
     },
   };
+  const settings = {
+    findUnique: async () => ({
+      partnerSettings: { allowBalancePayment: true },
+      defaultCurrency: Currency.RUB,
+      platformPolicy: options.timezone === undefined ? {} : { timezone: options.timezone },
+    }),
+  };
   const tx = {
     authChallenge,
     partner,
+    // The operator's minimum is read inside the withdrawal's own transaction.
+    settings,
     partnerWithdrawal: {
       create: async (args: { data: Record<string, unknown> }) => {
         withdrawalsCreated.push(args.data);
@@ -144,13 +153,7 @@ function database(options: {
           : null,
       findFirst: async () => ({ isBlocked: false }),
     },
-    settings: {
-      findUnique: async () => ({
-        partnerSettings: { allowBalancePayment: true },
-        defaultCurrency: Currency.RUB,
-        platformPolicy: options.timezone === undefined ? {} : { timezone: options.timezone },
-      }),
-    },
+    settings,
     referral: { findUnique: async () => null },
     $transaction: async <T>(work: (client: typeof tx) => Promise<T>): Promise<T> => work(tx),
   };

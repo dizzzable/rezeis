@@ -7,6 +7,13 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { assertPartnerBalanceNotHeld } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 import {
+  insufficientPartnerBalance,
+  partnerNotActive,
+  partnerNotFound,
+  readMinWithdrawalAmount,
+  withdrawalBelowMinimum,
+} from '../utils/partner-withdrawal-rules';
+import {
   ListPartnersQueryDto,
   ListPartnerWithdrawalsQueryDto,
 } from '../dto/list-partners-query.dto';
@@ -351,8 +358,19 @@ export class PartnersService {
    * that password can ask for money.
    *
    * The three refusals are told apart only when the write matched nothing, and
-   * in the order the JS checks used to run, so callers see exactly the
-   * messages and exception types they always did.
+   * in the order the JS checks used to run, so callers see the messages they
+   * always did — now each with its own `code` (`partner-withdrawal-rules.ts`),
+   * which the cabinet branches on, and a status that says what kind of refusal
+   * it is: 409 for the partner's state, 422 for an amount it cannot take.
+   *
+   * THE OPERATOR'S MINIMUM («Правила вывода» → «Минимальная сумма вывода»).
+   * Stored for years and never applied: nothing read it, so the form promised
+   * a floor the panel did not keep. It is read HERE, as the first statement of
+   * the transaction that debits — not before the transaction like the hold,
+   * and not through `SettingsService`'s cached copy — so the amount is judged
+   * against the minimum as it stands when the money moves, and a refusal
+   * leaves nothing behind. It is not a property of the partner row, so reading
+   * it first puts no read of that row ahead of the guarded debit.
    */
   public async createWithdrawalRequest(input: {
     readonly partnerId: string;
@@ -371,6 +389,15 @@ export class PartnersService {
       await assertPartnerBalanceNotHeld(this.prismaService, owner.userId);
     }
     const result = await this.prismaService.$transaction(async (tx) => {
+      // The operator's minimum, as it stands in the transaction that debits.
+      const settingsRow = await tx.settings.findUnique({
+        where: { id: 1 },
+        select: { partnerSettings: true },
+      });
+      const minimum = readMinWithdrawalAmount(settingsRow?.partnerSettings);
+      if (input.amount < minimum) {
+        throw withdrawalBelowMinimum(minimum);
+      }
       // Deduct balance immediately (altshop pattern), conditionally: the
       // active flag and the sufficiency floor are the `where` of this very
       // statement, so no read-then-check window exists.
@@ -391,12 +418,12 @@ export class PartnersService {
           select: { id: true, isActive: true },
         });
         if (existing === null) {
-          throw new NotFoundException('Partner not found');
+          throw partnerNotFound();
         }
         if (!existing.isActive) {
-          throw new BadRequestException('Partner is not active');
+          throw partnerNotActive();
         }
-        throw new BadRequestException('Insufficient partner balance');
+        throw insufficientPartnerBalance();
       }
       const withdrawal = await tx.partnerWithdrawal.create({
         data: {

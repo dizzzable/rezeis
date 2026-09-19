@@ -33,7 +33,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { FadeIn } from '@/lib/motion'
 
-import { formatKopecks, formatKopecksCompact } from './partner-formatters'
+import { formatKopecks, formatKopecksCompact, withdrawalMethodLabel } from './partner-formatters'
 import {
   PARTNER_WITHDRAWAL_STATUSES,
   PartnerWithdrawal,
@@ -311,7 +311,9 @@ export default function PartnersWithdrawalsTab() {
                       <TableCell className="text-right font-mono font-semibold">
                         {formatKopecks(row.amount)}
                       </TableCell>
-                      <TableCell className="text-xs">{row.method || '—'}</TableCell>
+                      <TableCell className="text-xs" title={row.method || undefined}>
+                        {withdrawalMethodLabel(row.method, t)}
+                      </TableCell>
                       <TableCell
                         className="text-[11px] font-mono max-w-32 truncate"
                         title={row.requisites}
