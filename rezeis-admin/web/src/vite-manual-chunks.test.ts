@@ -110,6 +110,39 @@ describe('manualChunks', () => {
     expect(manualChunks(`${NM}victory-vendor/d3-scale.js`)).toBeUndefined()
   })
 
+  it('puts the small first-party modules the entry loads anyway into one app-core chunk', () => {
+    // One chunk instead of seven: a nested lazy page importing them made
+    // rolldown lift each into its own eager chunk (14 → 22 on the login route).
+    const SRC = 'V:/repo/rezeis-admin/web/src/'
+    for (const module of [
+      'lib/utils.ts',
+      'lib/translate-error.ts',
+      'lib/locale-storage.ts',
+      'i18n/i18n.ts',
+      'components/ui/alert.tsx',
+      'components/ui/badge.tsx',
+      'components/ui/button.tsx',
+      'components/ui/dialog.tsx',
+      'components/ui/skeleton.tsx',
+      'components/ui/tooltip.tsx',
+      'features/remnawave/remnawave-icon.tsx',
+    ]) {
+      expect(manualChunks(`${SRC}${module}`), module).toBe('app-core')
+    }
+    // Near misses stay with rolldown: a module only lazy pages use must never
+    // ride onto the login route with this group.
+    for (const module of [
+      'components/ui/alert-dialog.tsx',
+      'components/ui/button-tip.tsx',
+      'components/ui/info-tip.tsx',
+      'components/ui/copyable-id.tsx',
+      'i18n/provider.tsx',
+      'lib/utils.test.ts',
+    ]) {
+      expect(manualChunks(`${SRC}${module}`), module).toBeUndefined()
+    }
+  })
+
   it('leaves first-party sources to rolldown (route-level splitting)', () => {
     expect(manualChunks('V:/repo/rezeis-admin/web/src/features/auth/sign-in-page.tsx')).toBeUndefined()
   })

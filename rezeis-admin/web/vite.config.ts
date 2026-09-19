@@ -63,6 +63,39 @@ export default defineConfig({
             return 'vendor-state'
           }
 
+          // ── Small first-party modules the entry loads anyway, in one chunk.
+          //
+          // Each of these is already on the login route (the shell, the error
+          // boundary, the i18n bootstrap) and used to sit inside the entry
+          // chunk. Then a NESTED lazy page — loaded lazily by another lazy page,
+          // like the roles tab inside «Администраторы» — imported them too.
+          // Rolldown cannot prove the entry is loaded before a nested chunk, so
+          // it lifted every module the two share into a chunk of its own: eight
+          // chunks of 0.2–6 KB, taking the login route from 14 eager chunks to 22,
+          // over the build-graph ceiling of 15. (`utils` and `remnawave-icon` had
+          // been lifted the same way long before.) Named here, they travel
+          // together: the same bytes, one request.
+          //
+          // List a module here ONLY if the entry imports it statically. Anything
+          // else would ride onto the login route with the group.
+          if (
+            [
+              '/src/lib/utils.ts',
+              '/src/lib/translate-error.ts',
+              '/src/lib/locale-storage.ts',
+              '/src/i18n/i18n.ts',
+              '/src/components/ui/alert.tsx',
+              '/src/components/ui/badge.tsx',
+              '/src/components/ui/button.tsx',
+              '/src/components/ui/dialog.tsx',
+              '/src/components/ui/skeleton.tsx',
+              '/src/components/ui/tooltip.tsx',
+              '/src/features/remnawave/remnawave-icon.tsx',
+            ].some((module) => id.endsWith(module))
+          ) {
+            return 'app-core'
+          }
+
           if (id.includes('node_modules')) {
             // Country-flag assets are emitted as URL strings via
             // `import.meta.glob`, so they don't show up here. The page-level
