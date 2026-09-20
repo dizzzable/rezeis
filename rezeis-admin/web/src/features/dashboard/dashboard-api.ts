@@ -40,7 +40,12 @@ export type DashboardTimelineStatus =
   | 'PENDING'
   | 'ERROR'
 
-export type DashboardTimelineKind = 'IMPORT' | 'BROADCAST' | 'AUDIT' | 'PAYMENT'
+export type DashboardTimelineKind =
+  | 'IMPORT'
+  | 'BROADCAST'
+  | 'AUDIT'
+  | 'SYSTEM_EVENT'
+  | 'PAYMENT'
 
 export interface DashboardTimelineMetaInterface {
   readonly sourceType?: string
@@ -52,6 +57,10 @@ export interface DashboardTimelineMetaInterface {
   readonly totalCount?: number
   readonly failedCount?: number
   readonly action?: string
+  /** SYSTEM_EVENT: the machine type, `event.` prefix already gone. */
+  readonly eventType?: string
+  /** SYSTEM_EVENT: the server's own caption for it, absent for a type it has none for. */
+  readonly eventTitle?: string
   readonly paymentStatus?: string
   readonly purchaseType?: string
   readonly channel?: string | null

@@ -173,7 +173,6 @@ function TimelineEntries({
  * `kind` + `meta`. Falls back to the backend-composed English `title` /
  * `description` (passed as `defaultValue`) so copy stays deterministic during
  * the async i18n-bundle load gap and for entries without structured meta.
- * Audit action codes are English identifiers and are shown verbatim.
  */
 function composeTimelineCopy(
   entry: DashboardTimelineEntryInterface,
@@ -226,9 +225,38 @@ function composeTimelineCopy(
       }
     }
     case 'AUDIT':
-      // Raw dotted action code — an English identifier, shown verbatim.
-      return { title: meta.action ?? entry.title, description: entry.description }
+      return { title: auditActionLabel(t, meta.action ?? entry.title), description: entry.description }
+    case 'SYSTEM_EVENT':
+      // The caption travels with the row: `EVENT_PRESENTATION` on the server is
+      // the one table that names an event, and the Telegram card and the
+      // notification centre already read it. A second copy here would be a
+      // second answer to «как это называется» — and the one that goes stale,
+      // because a new event type is added on the server and nothing would make
+      // anybody add it here too. Without a caption the machine type is shown:
+      // that is a type chosen at runtime by an automation rule, which by
+      // construction has no entry to find.
+      return {
+        title: meta.eventTitle ?? meta.eventType ?? entry.title,
+        description: entry.description,
+      }
     default:
       return { title: entry.title, description: entry.description }
   }
+}
+
+/**
+ * The operator-facing name of an admin action, by its dotted audit code.
+ *
+ * Dots are i18next's own key separator, so the table is keyed by the code with
+ * dots replaced by underscores — the same flattening `DashboardActivityFeed`
+ * uses for Remnawave event types. A code with no entry keeps showing the code:
+ * it is an English identifier, but it is the true one, and inventing Russian
+ * for an action nobody has named would be worse than leaving it readable.
+ */
+function auditActionLabel(
+  t: ReturnType<typeof useTranslation>['t'],
+  action: string,
+): string {
+  const flatKey = action.replace(/\./g, '_')
+  return String(t(`dashboardPage.timelines.auditActions.${flatKey}`, { defaultValue: action }))
 }

@@ -5,6 +5,7 @@ import { type Prisma, SubscriptionStatus, TransactionStatus } from '@prisma/clie
 
 import {
   assembleLifetimeRevenue,
+  buildOperationsTimeline,
   DashboardService,
 } from '../src/modules/dashboard/services/dashboard.service';
 import type { FxSnapshot } from '../src/modules/business-analytics/utils/analytics-money.util';
@@ -150,11 +151,114 @@ describe('DashboardService', () => {
       [{ kind: 'SUBSCRIPTION_EXPIRING', severity: 'INFO', count: 8 }],
     );
     // The summary is cached as the parsed object: its shape changed, so did its key.
-    assert.deepStrictEqual(calls[0], ['cache.getOrSet', { key: 'dashboard:summary:v2', ttlSeconds: 60 }]);
+    assert.deepStrictEqual(calls[0], ['cache.getOrSet', { key: 'dashboard:summary:v3', ttlSeconds: 60 }]);
     assert.deepStrictEqual(calls.find((call) => Array.isArray(call) && call[0] === 'fxRate.findMany'), [
       'fxRate.findMany',
       { where: { base: 'RUB' }, select: { quote: true, rate: true, source: true, fetchedAt: true } },
     ]);
+  });
+});
+
+describe('«Лента операционной активности»', () => {
+  const at = (iso: string): Date => new Date(iso);
+
+  /**
+   * One audit table, two feeds. `SystemEventsService` writes a row for every
+   * event it raises, prefixed `event.`, and those outnumber operator actions
+   * by orders of magnitude: a single «last ten rows» read returned ten copies
+   * of whatever fired last, and the actions the «Действия» filter exists for
+   * never made the list. The two reads are what keeps both lanes populated.
+   */
+  it('keeps operator actions and the panel’s own events in separate lanes', () => {
+    const entries = buildOperationsTimeline({
+      recentImports: [],
+      recentBroadcasts: [],
+      recentAudit: [
+        { id: 'a1', action: 'plans.created', createdAt: at('2026-09-20T12:00:00.000Z') },
+      ],
+      recentSystemEvents: [
+        {
+          id: 'e1',
+          action: 'event.fraud.signal_transitioned',
+          createdAt: at('2026-09-20T12:31:42.000Z'),
+          metadata: { severity: 'INFO' },
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(
+      entries.map((entry) => ({ source: entry.source, kind: entry.kind, title: entry.title })),
+      [
+        {
+          source: 'OPS',
+          kind: 'SYSTEM_EVENT',
+          title: 'Антифрод: изменён статус сигнала',
+        },
+        { source: 'AUDIT', kind: 'AUDIT', title: 'plans.created' },
+      ],
+    );
+    assert.equal(entries[0].meta?.eventType, 'fraud.signal_transitioned');
+    assert.equal(entries[0].meta?.eventTitle, 'Антифрод: изменён статус сигнала');
+  });
+
+  /**
+   * Severity comes from the row, never from the action string. Guessing it by
+   * regex — which is what the audit lane does and all the lane has — reads
+   * `event.system.error` as INFO, and a real failure then wears a grey badge.
+   */
+  it('takes the badge from the severity the event was raised with', () => {
+    const entries = buildOperationsTimeline({
+      recentImports: [],
+      recentBroadcasts: [],
+      recentAudit: [],
+      recentSystemEvents: [
+        {
+          id: 'e1',
+          action: 'event.system.error',
+          createdAt: at('2026-09-20T12:00:00.000Z'),
+          metadata: { severity: 'ERROR' },
+        },
+        {
+          id: 'e2',
+          action: 'event.backup.completed',
+          createdAt: at('2026-09-20T11:00:00.000Z'),
+          metadata: { severity: 'WARNING' },
+        },
+        {
+          id: 'e3',
+          // No metadata at all: a row written before the field existed.
+          action: 'event.support.ticket_created',
+          createdAt: at('2026-09-20T10:00:00.000Z'),
+          metadata: null,
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.status),
+      ['ERROR', 'WARNING', 'INFO'],
+    );
+  });
+
+  /** A type an automation rule picked at runtime is in no table by construction. */
+  it('keeps the machine type as the caption when nothing names the event', () => {
+    const entries = buildOperationsTimeline({
+      recentImports: [],
+      recentBroadcasts: [],
+      recentAudit: [],
+      recentSystemEvents: [
+        {
+          id: 'e1',
+          action: 'event.custom.rule_fired',
+          createdAt: at('2026-09-20T12:00:00.000Z'),
+          metadata: { severity: 'INFO' },
+        },
+      ],
+    });
+
+    assert.equal(entries[0].title, 'custom.rule_fired');
+    assert.equal(entries[0].meta?.eventTitle, undefined);
+    assert.equal(entries[0].meta?.eventType, 'custom.rule_fired');
   });
 });
 

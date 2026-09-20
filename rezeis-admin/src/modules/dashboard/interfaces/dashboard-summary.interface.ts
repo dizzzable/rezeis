@@ -40,7 +40,12 @@ export type DashboardOperationsTimelineSource = 'BROADCAST' | 'IMPORT' | 'AUDIT'
 export type DashboardTimelineStatus = 'INFO' | 'WARNING' | 'SUCCESS' | 'PENDING' | 'ERROR';
 
 /** Discriminator that lets the SPA compose localized timeline copy. */
-export type DashboardTimelineKind = 'IMPORT' | 'BROADCAST' | 'AUDIT' | 'PAYMENT';
+export type DashboardTimelineKind =
+  | 'IMPORT'
+  | 'BROADCAST'
+  | 'AUDIT'
+  | 'SYSTEM_EVENT'
+  | 'PAYMENT';
 
 /**
  * Operator-safe structured values backing the localized timeline copy. Every
@@ -59,8 +64,18 @@ export interface DashboardTimelineMetaInterface {
   readonly successCount?: number;
   readonly totalCount?: number;
   readonly failedCount?: number;
-  // AUDIT / OPS (raw English action identifier — kept verbatim)
+  // AUDIT (raw English action identifier; the SPA holds the labels)
   readonly action?: string;
+  // SYSTEM_EVENT — a row written by `SystemEventsService`, whose audit action
+  // is `event.<type>`. `eventType` is the machine type with that prefix gone;
+  // `eventTitle` is the operator-facing title from `EVENT_PRESENTATION`, the
+  // one table the Telegram cards and the notification centre already read, so
+  // a new event type is captioned here the day it is added and can never
+  // disagree with the card the same event sent. Absent for a type outside that
+  // table (an automation rule picks its type at runtime) — then the SPA shows
+  // the machine type, which is the only honest thing left to show.
+  readonly eventType?: string;
+  readonly eventTitle?: string;
   // PAYMENT
   readonly paymentStatus?: string;
   readonly purchaseType?: string;

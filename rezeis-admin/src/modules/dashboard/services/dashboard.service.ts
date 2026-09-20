@@ -9,6 +9,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
+import { EVENT_PRESENTATION } from '../../../common/services/system-events.service';
 import { moneyReceivedSql, netAmountSql } from '../../business-analytics/utils/analytics-money-received.util';
 import { chooseMoneyView, type FxSnapshot, moneyFigure, readFxSnapshot } from '../../business-analytics/utils/analytics-money.util';
 import { FxRateService } from '../../fx/fx-rate.service';
@@ -30,11 +31,19 @@ const ONE_DAY_MS = 24 * ONE_HOUR_MS;
  * summary is cached as the parsed object, and Redis outlives an image
  * update: a panel reading a summary an older panel wrote would hand the page
  * a shape it does not know. v2: `revenue` added, `grossVolume` withdrawn.
+ * v3: system events left the AUDIT lane and carry `eventType`/`eventTitle`.
  */
-const DASHBOARD_SUMMARY_CACHE_KEY = 'dashboard:summary:v2';
+const DASHBOARD_SUMMARY_CACHE_KEY = 'dashboard:summary:v3';
 
 /** What `transactions.grossVolume` holds since the tile became `revenue`. */
 const GROSS_VOLUME_WITHDRAWN = '—';
+
+/**
+ * The prefix `SystemEventsService.persistEvent` writes its rows with, and the
+ * one `/admin/audit?systemOnly=true` filters the same rows by. Stated once
+ * here because the dashboard now reads the table from both sides of it.
+ */
+const SYSTEM_EVENT_ACTION_PREFIX = 'event.';
 
 type SqlNumeric = Prisma.Decimal | string | number | bigint | null;
 
@@ -184,7 +193,13 @@ export class DashboardService {
     // Recent rows powering the two activity timelines. Bounded `take` + a
     // PII-free `select` (no user ids, no payment ids, no raw payloads) keep the
     // dashboard contract narrow while the feeds stay live.
-    const [recentImports, recentBroadcasts, recentAudit, recentTransactions] = await Promise.all([
+    const [
+      recentImports,
+      recentBroadcasts,
+      recentAudit,
+      recentSystemEvents,
+      recentTransactions,
+    ] = await Promise.all([
       this.prismaService.importRecord.findMany({
         orderBy: { createdAt: 'desc' },
         take: 6,
@@ -211,10 +226,29 @@ export class DashboardService {
           createdAt: true,
         },
       }),
+      // Two reads of one table, because it holds two different feeds and the
+      // busier one used to bury the other. `SystemEventsService` persists
+      // every event it raises as an audit row with an `event.` prefix — the
+      // same rule `/admin/audit?systemOnly=true` filters by — and those
+      // outnumber operator actions by orders of magnitude. A single "last ten
+      // rows" read therefore returned ten copies of whatever fired last
+      // («event.fraud.signal_transitioned» ten times over, for an operator
+      // working through the anti-fraud queue), and the operator actions the
+      // «АУДИТ» filter exists for never made the list at all.
       this.prismaService.adminAuditLog.findMany({
+        where: { NOT: { action: { startsWith: SYSTEM_EVENT_ACTION_PREFIX } } },
         orderBy: { createdAt: 'desc' },
         take: 10,
         select: { id: true, action: true, createdAt: true },
+      }),
+      this.prismaService.adminAuditLog.findMany({
+        where: { action: { startsWith: SYSTEM_EVENT_ACTION_PREFIX } },
+        orderBy: { createdAt: 'desc' },
+        take: 6,
+        // `metadata` carries the severity the event was raised with. Only that
+        // one key is read (see `readEventSeverity`); nothing else from the JSON
+        // reaches the response, which keeps the PII-free contract intact.
+        select: { id: true, action: true, createdAt: true, metadata: true },
       }),
       this.prismaService.transaction.findMany({
         orderBy: { createdAt: 'desc' },
@@ -253,6 +287,7 @@ export class DashboardService {
       recentImports,
       recentBroadcasts,
       recentAudit,
+      recentSystemEvents,
     });
     const financeOpsTimeline = buildFinanceTimeline(recentTransactions);
     const attentionItems = buildAttentionItems({
@@ -415,6 +450,11 @@ interface AuditTimelineRow {
   readonly createdAt: Date;
 }
 
+interface SystemEventTimelineRow extends AuditTimelineRow {
+  /** The event's metadata JSON, of which only `severity` is read. */
+  readonly metadata: unknown;
+}
+
 interface TransactionTimelineRow {
   readonly id: string;
   readonly status: string;
@@ -425,10 +465,11 @@ interface TransactionTimelineRow {
   readonly createdAt: Date;
 }
 
-function buildOperationsTimeline(input: {
+export function buildOperationsTimeline(input: {
   readonly recentImports: readonly ImportTimelineRow[];
   readonly recentBroadcasts: readonly BroadcastTimelineRow[];
   readonly recentAudit: readonly AuditTimelineRow[];
+  readonly recentSystemEvents: readonly SystemEventTimelineRow[];
 }): DashboardTimelineEntryInterface[] {
   const entries: DashboardTimelineEntryInterface[] = [];
 
@@ -472,8 +513,9 @@ function buildOperationsTimeline(input: {
     entries.push({
       id: `audit:${audit.id}`,
       // System/ops/backup/cron audit actions feed the dedicated OPS lane; the
-      // rest stay under AUDIT. The raw action code itself is kept verbatim
-      // (an English identifier), only the lane differs.
+      // rest stay under AUDIT. The raw action code travels as `meta.action`
+      // and the SPA holds its label; `title` stays the code, which is what a
+      // page renders during the i18n-bundle load gap and in tests.
       source: isOpsAuditAction(audit.action) ? 'OPS' : 'AUDIT',
       status: mapAuditTimelineStatus(audit.action),
       title: audit.action,
@@ -481,6 +523,32 @@ function buildOperationsTimeline(input: {
       createdAt: audit.createdAt.toISOString(),
       kind: 'AUDIT',
       meta: { action: audit.action },
+    });
+  }
+
+  for (const event of input.recentSystemEvents) {
+    const eventType = event.action.slice(SYSTEM_EVENT_ACTION_PREFIX.length);
+    // The title the Telegram card for this very event carried, from the one
+    // table both channels read. An event type raised by an automation rule is
+    // not in it — by construction, the rule names its own type — so the
+    // caption then stays the machine type and nothing pretends otherwise.
+    const presentation = EVENT_PRESENTATION[eventType];
+    entries.push({
+      id: `audit:${event.id}`,
+      // Not the AUDIT lane: nobody pressed a button for these. They are what
+      // the panel itself reported, and «OPS» is the lane that already means
+      // that (backups, cron, infrastructure).
+      source: 'OPS',
+      status: mapSystemEventTimelineStatus(readEventSeverity(event.metadata)),
+      title: presentation?.title ?? eventType,
+      description: '',
+      createdAt: event.createdAt.toISOString(),
+      kind: 'SYSTEM_EVENT',
+      meta: {
+        action: event.action,
+        eventType,
+        ...(presentation === undefined ? {} : { eventTitle: presentation.title }),
+      },
     });
   }
 
@@ -548,6 +616,31 @@ function mapBroadcastTimelineStatus(status: string): DashboardTimelineStatus {
 
 function mapAuditTimelineStatus(action: string): DashboardTimelineStatus {
   return /fail|deni|error|reject/i.test(action) ? 'WARNING' : 'INFO';
+}
+
+/**
+ * The severity `SystemEventsService` raised the event with, read back out of
+ * the audit row's metadata. It is the only trustworthy source: the same guess
+ * `mapAuditTimelineStatus` makes from the action string reads
+ * `event.system.error` as INFO — the word «error» is in `system.error`, but a
+ * type that merely *contains* it is not how severity is decided, and a real
+ * ERROR arriving as a grey INFO badge is the failure that matters here.
+ */
+function readEventSeverity(metadata: unknown): string | null {
+  if (metadata === null || typeof metadata !== 'object') return null;
+  const severity = (metadata as Record<string, unknown>)['severity'];
+  return typeof severity === 'string' ? severity : null;
+}
+
+function mapSystemEventTimelineStatus(severity: string | null): DashboardTimelineStatus {
+  switch (severity) {
+    case 'ERROR':
+      return 'ERROR';
+    case 'WARNING':
+      return 'WARNING';
+    default:
+      return 'INFO';
+  }
 }
 
 /**
