@@ -3,6 +3,7 @@ import { PaymentGatewayType, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesFromTransactionSnapshot } from '../../../common/utils/plan-snapshot.util';
 
 const CHARGE_LOCK_TIMEOUT_MS = 30_000;
 
@@ -220,12 +221,15 @@ export class SavedPaymentMethodService {
     readonly userId: string;
     readonly paymentId: string;
     readonly checkoutUrl: string;
+    /** The invoice's own snapshot, so the card can say which plan is waiting. */
+    readonly planSnapshot?: unknown;
   }): void {
+    const { planSnapshot, ...rest } = input;
     this.systemEvents.warn(
       EVENT_TYPES.PAYMENT_AUTOPAY_CONFIRMATION_REQUIRED,
       'PAYMENT',
       'Автосписание ожидает подтверждения пользователя (3DS/redirect)',
-      input,
+      { ...rest, ...planNamesFromTransactionSnapshot(planSnapshot) },
     );
   }
 
