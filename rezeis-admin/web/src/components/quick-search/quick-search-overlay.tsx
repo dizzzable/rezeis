@@ -80,6 +80,21 @@ function displayText(value: string): string {
     .trim();
 }
 
+/**
+ * The part of a row's text that will be on the page verbatim.
+ *
+ * A string with `{{count}}` in it renders with a NUMBER there, so searching
+ * the page for the string as written finds nothing. The longest run of
+ * literal words between placeholders is what both the dictionary and the
+ * rendered page agree on.
+ */
+function flashNeedle(value: string): string {
+  return value
+    .split(/\{\{[^}]*\}\}/)
+    .map((part) => part.replace(/\s+/g, ' ').trim())
+    .reduce((longest, part) => (part.length > longest.length ? part : longest), '');
+}
+
 /** The query's own words, marked inside a row so the match is visible. */
 function Highlighted({
   text,
@@ -246,7 +261,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
       // A page row has arrived where it was going. A SETTING row has not: the
       // page it named can be forty fields long, so the control itself is
       // marked once the page renders.
-      if (!entry.isPage) flashTextOnPage(displayText(entry.text));
+      if (!entry.isPage) flashTextOnPage(flashNeedle(entry.text));
       onClose();
     },
     [navigate, onClose],
