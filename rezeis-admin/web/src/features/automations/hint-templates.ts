@@ -144,12 +144,14 @@ export interface HintTemplate {
  *
  * WHAT THIS GROUP DOES NOT DO, stated because the opposite is the natural
  * assumption: it does not clear a renewal warning when the customer renews. A
- * renewal extends an existing row, which takes the sync processor's UPDATE path
- * and emits only `payment.completed`. `subscription.renewed` is declared and
- * emitted from nowhere, and `subscription.created` fires only for a
- * subscription that has no panel profile yet. So nothing a paying customer does
- * cancels a queued warning — a gap in the EVENTS, which no group key can paper
- * over, and which a comment claiming otherwise would only hide.
+ * renewal extends an existing row, which takes the sync processor's UPDATE
+ * path, and `subscription.created` fires only for a subscription that has no
+ * panel profile yet. Since 0.9.7.64 a renewal does raise its own
+ * `subscription.renewed` — but it is an OPERATOR card, raised beside
+ * `payment.completed`, and nothing here consumes it. So nothing a paying
+ * customer does cancels a queued warning: the event now exists, the wiring
+ * from it to this group does not, and a comment claiming otherwise would only
+ * hide that.
  */
 const EXPIRY = 'subscription-expiry'
 
