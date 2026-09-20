@@ -21,10 +21,12 @@ import { AccessModeGuard } from '../../settings/services/access-mode-guard.servi
 import { SettingsService } from '../../settings/services/settings.service';
 import { SubscriptionRenewalService } from '../../subscriptions/services/subscription-renewal.service';
 import { PricedRenewalInterface } from '../../subscriptions/interfaces/subscription-renewal.interface';
+import { SystemEventsService } from '../../../common/services/system-events.service';
 import {
   COMBINED_RENEWAL_PLAN_NAMES_KEY,
   combinedRenewalPlanNames,
 } from '../../../common/utils/plan-snapshot.util';
+import { announceCheckoutCreated } from '../utils/checkout-created-event.util';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
@@ -101,6 +103,7 @@ export class PaymentsRenewalCheckoutService {
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly paymentReconciliationService: PaymentReconciliationService,
     private readonly providerSubscriptionService: ProviderSubscriptionService,
+    private readonly systemEvents: SystemEventsService,
   ) {}
 
   public async renewalCheckout(
@@ -524,6 +527,11 @@ export class PaymentsRenewalCheckoutService {
     if (providerCheckout.checkoutUrl !== null && typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0) {
       this.savedPaymentMethodService.notifyAutopayConfirmationRequired({ userId: transaction.userId, paymentId: transaction.paymentId, checkoutUrl: providerCheckout.checkoutUrl, planSnapshot: transaction.planSnapshot });
     }
+
+    announceCheckoutCreated(this.systemEvents, {
+      transaction: updatedTransaction,
+      checkoutUrl: providerCheckout.checkoutUrl,
+    });
 
     return mapCheckoutResponse({
       transaction: updatedTransaction,

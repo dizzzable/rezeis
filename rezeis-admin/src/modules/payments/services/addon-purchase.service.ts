@@ -20,6 +20,8 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SystemEventsService } from '../../../common/services/system-events.service';
+import { announceCheckoutCreated } from '../utils/checkout-created-event.util';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { resolveIntakeResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
 import {
@@ -85,6 +87,7 @@ export class AddOnPurchaseService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
+    private readonly systemEvents: SystemEventsService,
   ) {}
 
   public async checkout(input: AddOnCheckoutInput): Promise<InternalPaymentCheckoutInterface> {
@@ -532,6 +535,11 @@ export class AddOnPurchaseService {
         // checkout instead of creating a second invoice.
         checkoutUrl: providerCheckout.checkoutUrl,
       },
+    });
+
+    announceCheckoutCreated(this.systemEvents, {
+      transaction: updatedTransaction,
+      checkoutUrl: providerCheckout.checkoutUrl,
     });
 
     return {

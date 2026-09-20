@@ -33,6 +33,60 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.transactionUpdates.length, 1)
   })
 
+  /**
+   * «Создан счёт на оплату» had a title, an emoji, an outbound-webhook entry
+   * and a tick-box in the operator's Telegram settings — and no producer at
+   * all. An operator could tick it and wait forever.
+   */
+  it('announces the invoice it just handed to the customer, by plan and with the link', async () => {
+    const { service, state } = createService()
+
+    await service.checkout({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      channel: PurchaseChannel.WEB,
+    })
+
+    const created = state.events.filter((event) => event.type === 'payment.checkout_created')
+    assert.equal(created.length, 1)
+    assert.equal(created[0].metadata['planName'], 'Starter')
+    assert.equal(created[0].metadata['checkoutUrl'], 'https://checkout.example.com')
+    assert.equal(created[0].metadata['paymentId'], 'payment-1')
+    assert.equal(created[0].metadata['purchaseType'], PurchaseType.NEW)
+    assert.equal(created[0].metadata['amount'], '9.99')
+  })
+
+  it('says nothing when the provider cancelled the checkout at creation', async () => {
+    // There is no счёт to pay, so there is no card to read — the operator's
+    // feed must not carry an invoice that never existed.
+    const { service, state } = createService({
+      providerCheckout: {
+        gatewayId: 'provider-canceled-1',
+        checkoutUrl: null,
+        providerMode: 'IMMEDIATE',
+        providerStatus: 'CANCELLED',
+        gatewayData: { provider: 'YOOKASSA', cancellation_details: { reason: 'permission_revoked' } },
+      },
+    })
+
+    await service.checkout({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      channel: PurchaseChannel.WEB,
+    })
+
+    assert.equal(
+      state.events.filter((event) => event.type === 'payment.checkout_created').length,
+      0,
+    )
+  })
+
   // ── Access-mode wiring (real AccessModeGuard) ──────────────────────────────
   // Integration coverage for Task 36: checkout consults the platform access
   // mode through the wired guard, branching on purchaseType.
@@ -774,6 +828,8 @@ function createService(input: {
     postFulfillmentHookCalls: [] as string[],
     subscriptionQueries: [] as unknown[],
     cashbackLedgerQueries: [] as unknown[],
+    /** Every system event the checkout raised, in order. */
+    events: [] as Array<{ readonly type: string; readonly metadata: Record<string, unknown> }>,
   }
   const paymentId = 'payment-1'
   const gatewayType = input.gatewayType ?? PaymentGatewayType.YOOKASSA
@@ -959,6 +1015,12 @@ function createService(input: {
         recordCheckout: async () => undefined,
         assertNoLiveSubscriptionFor: async () => undefined,
       }) as never,
+      // SystemEventsService — «Создан счёт на оплату» and nothing else on this path.
+      {
+        info: (type: string, _category: string, _message: string, metadata: Record<string, unknown>) => {
+          state.events.push({ type, metadata })
+        },
+      } as never,
     ),
     state,
   }

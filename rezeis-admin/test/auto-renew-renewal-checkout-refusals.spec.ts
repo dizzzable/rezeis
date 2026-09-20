@@ -196,6 +196,7 @@ function harness(scenario: Scenario) {
         }),
     } as never,
     {} as never, { recordCheckout: async () => undefined } as never,
+    { info: () => undefined } as never,
   );
 
   const checkoutCalls: string[] = [];

@@ -249,6 +249,7 @@ async function askBoth(world: {
     { enqueue: async () => undefined } as never,
     { getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC' }) } as never,
     { evaluate: () => null } as never,
+    { info: () => undefined } as never,
   );
 
   let bought = false;

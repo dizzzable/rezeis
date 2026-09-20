@@ -20,6 +20,8 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SystemEventsService } from '../../../common/services/system-events.service';
+import { announceCheckoutCreated } from '../utils/checkout-created-event.util';
 import { PROFILE_SYNC_MAX_ATTEMPTS } from '../../profile-sync/profile-sync.constants';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGate, AccessModeGuard } from '../../settings/services/access-mode-guard.service';
@@ -85,6 +87,7 @@ export class PaymentsCheckoutService {
     private readonly savedPaymentMethodService: SavedPaymentMethodService,
     private readonly paymentReconciliationService: PaymentReconciliationService,
     private readonly providerSubscriptionService: ProviderSubscriptionService,
+    private readonly systemEvents: SystemEventsService,
   ) {}
 
   /**
@@ -413,6 +416,11 @@ export class PaymentsCheckoutService {
     if (providerCheckout.checkoutUrl !== null && typeof input.savedPaymentMethodId === 'string' && input.savedPaymentMethodId.length > 0) {
       this.savedPaymentMethodService.notifyAutopayConfirmationRequired({ userId: transaction.userId, paymentId: transaction.paymentId, checkoutUrl: providerCheckout.checkoutUrl, planSnapshot: transaction.planSnapshot });
     }
+
+    announceCheckoutCreated(this.systemEvents, {
+      transaction: updatedTransaction,
+      checkoutUrl: providerCheckout.checkoutUrl,
+    });
 
     return mapCheckoutResponse({
       transaction: updatedTransaction,

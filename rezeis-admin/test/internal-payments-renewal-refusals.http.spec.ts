@@ -228,6 +228,7 @@ async function boot(
     { evaluate: () => null } as never,
     { resolveActiveForCharge: async () => null } as never,
     { runPostFulfillmentHooksBestEffort: async () => undefined } as never, { recordCheckout: async () => undefined } as never,
+    { info: () => undefined } as never,
   );
 
   const testingModule: TestingModule = await Test.createTestingModule({

@@ -186,6 +186,8 @@ function build(options: {
     applyCompletedCalls: 0,
     enqueueCalls: 0,
     projectionReads: 0,
+    /** Every system event the add-on checkout raised, in order. */
+    events: [] as Array<{ readonly type: string; readonly metadata: Record<string, unknown> }>,
   };
   // The claim is lost only when the fixture says so; `undefined` means "we won".
   const claimLost = options.zeroClaimCount === 0;
@@ -280,6 +282,11 @@ function build(options: {
   const guard = { evaluate: () => null };
   const service = new AddOnPurchaseService(
     prisma as never, pricing as never, provider as never, mutation as never, queue as never, settings as never, guard as never,
+    {
+      info: (type: string, _category: string, _message: string, metadata: Record<string, unknown>) => {
+        state.events.push({ type, metadata });
+      },
+    } as never,
   );
   return { service, created, updated, state };
 }
