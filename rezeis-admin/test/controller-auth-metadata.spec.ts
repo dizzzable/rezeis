@@ -119,6 +119,16 @@ const SELF_SERVICE_ADMIN_ROUTES: ReadonlyMap<string, string> = new Map([
   ['AdminPushController.sendTest', 'sends a push to the caller own subscription'],
   ['AdminNotificationPreferencesController.list', 'the caller own notification preferences'],
   ['AdminNotificationPreferencesController.update', 'the caller own notification preferences'],
+  // The notification centre. Every one of these scopes on `admin.id` INSIDE the
+  // `where` — an id naming another operator's copy matches nothing — and what
+  // an operator was allowed to be told was decided when the event was raised,
+  // by the category's own RBAC gate. See `AdminNotificationInboxService`.
+  ['AdminNotificationsController.list', 'the caller own alerts'],
+  ['AdminNotificationsController.unreadCount', 'the caller own unread count'],
+  ['AdminNotificationsController.read', 'marks one of the caller own alerts read'],
+  ['AdminNotificationsController.readAll', 'marks the caller own alerts read'],
+  ['AdminNotificationsController.remove', 'deletes one of the caller own alerts'],
+  ['AdminNotificationsController.clear', 'clears the caller own inbox'],
   // `ThemePresetsService` scopes every one of these to `ownerId === currentAdmin.id`
   // (or `isShared`), so the authority is ownership rather than a permission.
   ['AdminThemePresetsController.list', 'the caller own + shared appearance presets'],

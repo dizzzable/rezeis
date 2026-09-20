@@ -677,6 +677,7 @@ model AdminUser {
   themePresets            AdminThemePreset[]            @relation("AdminThemePresetOwner")
   webPushSubscriptions    AdminWebPushSubscription[]    @relation("AdminUserWebPushSubscriptions")
   notificationPreferences AdminNotificationPreference[] @relation("AdminUserNotificationPreferences")
+  notifications           AdminNotification[]           @relation("AdminUserNotifications")
   fraudExemptionsGranted  FraudExemption[]              @relation("FraudExemptionCreator")
   fraudExemptionsRevoked  FraudExemption[]              @relation("FraudExemptionRevoker")
 
@@ -3003,6 +3004,49 @@ model AdminWebPushSubscription {
 /// means the category is at its default state (enabled where the admin's role
 /// permits it). Categories are gated by RBAC: a preference only matters when
 /// the admin's role grants the category's gating permission.
+/// One operator's copy of one alert — the panel's notification centre.
+///
+/// A ROW PER ADMIN, not per event: «прочитано» and «удалить» are that
+/// operator's own, and the permission check happens once, when the event is
+/// raised, by the same gate that decides who gets the push
+/// (`admin-notification-routes.ts`). An admin who loses a permission keeps the
+/// alerts they were already given, and one who gains it does not inherit the
+/// past — which is what an inbox means.
+///
+/// `title` and `url` are STORED, not recomputed on read: the alert is a record
+/// of what was said at the time, and the route table may be rewritten.
+///
+/// Kept for 30 days, and at most 500 per admin — whichever comes first. See
+/// `AdminNotificationInboxService.prune`.
+model AdminNotification {
+  id        String    @id @default(cuid()) @map("id")
+  adminId   String    @map("admin_id")
+  /// One of `ADMIN_NOTIFICATION_CATEGORIES`: support | payment | fraud | withdrawal | system.
+  category  String    @map("category")
+  /// The raising event's severity, as it was emitted (INFO | WARNING | ERROR).
+  /// What is filed at all is decided by the route table, not by severity: a
+  /// mapped type is an alert whatever it carries, and an unmapped one is an
+  /// alert only at ERROR.
+  severity  String    @map("severity")
+  /// The raising event's type, e.g. `support.ticket.created`.
+  type      String    @map("type")
+  title     String    @map("title")
+  message   String    @map("message")
+  /// Where the panel opens when the alert is chosen, e.g. `/support-tickets?ticket=…`.
+  /// The event's own metadata is NOT kept: the link already carries what the
+  /// panel needs, and a raw payload can hold a BigInt no JSON column will take.
+  url       String    @map("url")
+  readAt    DateTime? @map("read_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  admin AdminUser @relation("AdminUserNotifications", fields: [adminId], references: [id], onDelete: Cascade)
+
+  /// The list, newest first, and the unread badge over it.
+  @@index([adminId, createdAt])
+  @@index([adminId, readAt])
+  @@map("admin_notifications")
+}
+
 model AdminNotificationPreference {
   id        String   @id @default(cuid()) @map("id")
   adminId   String   @map("admin_id")

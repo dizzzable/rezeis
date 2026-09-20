@@ -78,6 +78,7 @@ import { PlansModule } from './modules/plans/plans.module';
 import { ProfileSyncModule } from './modules/profile-sync/profile-sync.module';
 import { PromocodesModule } from './modules/promocodes/promocodes.module';
 import { InternalPushModule } from './modules/push/internal-push.module';
+import { AdminNotificationsModule } from './modules/admin-notifications/admin-notifications.module';
 import { RbacModule } from './modules/rbac/rbac.module';
 import { LandingConfigModule } from './modules/landing-config/landing-config.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
@@ -206,6 +207,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     ProfileSyncModule,
     PromocodesModule,
     InternalPushModule,
+    AdminNotificationsModule,
     RbacModule,
     RealtimeModule,
     ReferralsModule,

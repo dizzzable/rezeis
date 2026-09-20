@@ -35,6 +35,9 @@ import { WebPushService } from './services/web-push.service';
   imports: [AuthModule, SettingsModule],
   controllers: [InternalPushController, AdminPushController, AdminNotificationPreferencesController],
   providers: [WebPushService, AdminNotificationDispatcher, AdminNotificationPreferencesService],
-  exports: [WebPushService],
+  // `AdminNotificationPreferencesService` is exported for the notification
+  // centre (`AdminNotificationsModule`): one operator's category opt-in decides
+  // both what reaches their phone and what is kept for their bell.
+  exports: [WebPushService, AdminNotificationPreferencesService],
 })
 export class InternalPushModule {}

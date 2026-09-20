@@ -90,6 +90,9 @@ is_auto_recoverable_migration() {
     20260919200000_yookassa_autopay_approved|20260919210000_provider_subscriptions)
       return 0
       ;;
+    20260920130000_admin_notification_inbox)
+      return 0
+      ;;
     *)
       return 1
       ;;
