@@ -180,9 +180,10 @@ export const IGNORED_NAMESPACES: ReadonlySet<string> = new Set([
   'signInPage',
   'statsFilter',
   'updateBanner',
-  // Two dictionary entries whose KEY is an English sentence — a server
-  // validation message pasted in as a key. They translate nothing and address
-  // no page; see the note in `search-pages.test.ts`.
+  // Two dictionary entries whose KEY is an English sentence. Those are real
+  // and deliberate — `lib/translate-error.ts` looks a server's own sentence up
+  // at the dictionary root — but they belong to no page, so there is nowhere
+  // to send an operator who matched one.
   'chatId must be a valid integer string',
   'threadId must be a valid integer string',
 ]);
