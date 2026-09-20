@@ -98,6 +98,7 @@ import { TriggerCatalogHint } from './trigger-catalog-hint';
 import { TriggerMapCard } from './trigger-map-card';
 import { useRuleDraft } from './use-rule-draft';
 import { WebhookHeaderField } from './webhook-header-field';
+import { HUB_TABS } from '@/components/layout/admin-nav-config';
 import { useTabSync } from '@/lib/use-tab-sync';
 import { UserHintsTab } from '@/features/user-hints/user-hints-tab';
 import { Textarea } from '@/components/ui/textarea';
@@ -221,7 +222,10 @@ export default function AutomationsPage() {
   // inside them: an operator opens it with a MOMENT in mind — "somebody is
   // about to run out and I want to say something" — not with a rule or a
   // hint in mind, which is exactly why neither of the other two could show it.
-  const { activeTab, setTab } = useTabSync(['rules', 'hints', 'map'] as const, 'rules');
+  // `HUB_TABS`, not a literal: panel search offers «Подсказки» as its own row
+  // at `/automations#hints`, and that row is only a deep link while this page
+  // and the nav config read the same list.
+  const { activeTab, setTab } = useTabSync(HUB_TABS['/automations'], 'rules');
   const queryClient = useQueryClient();
   const rulesQuery = useQuery({
     queryKey: RULES_KEY,

@@ -284,6 +284,8 @@ export const navGroups: ReadonlyArray<NavGroup> = [
  */
 export const HUB_TABS = {
   '/users': ['list', 'bulk', 'blocked-identities'],
+  '/payments': ['transactions', 'webhooks', 'analytics'],
+  '/automations': ['rules', 'hints', 'map'],
   '/partners': ['partners', 'withdrawals', 'analytics', 'settings'],
   // `blocked-identities` здесь больше нет: он закрывает вход КЛИЕНТУ и живёт
   // на странице пользователей. Здесь остаётся то, что закрывает доступ в саму

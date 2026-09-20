@@ -1,37 +1,34 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import type { ComponentType, SVGProps } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ComponentType, ReactNode, SVGProps } from 'react';
 import { useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import { Search, User, CreditCard, Tag, Handshake, Compass, Loader2, X } from 'lucide-react';
+import { Search, User, CreditCard, Tag, Handshake, Loader2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { expectArray } from '@/lib/api-utils';
 import { cn } from '@/lib/utils';
+import { flashTextOnPage } from '@/lib/flash-on-page';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { motion, AnimatePresence } from '@/lib/motion';
-import {
-  canShowNavItem,
-  deepLinkNavItems,
-  navGroups,
-  type NavItem,
-} from '@/components/layout/admin-nav-config';
+import { canShowNavItem } from '@/components/layout/admin-nav-config';
 import { usePermissionStore } from '@/features/rbac';
 import { paymentHref } from '@/features/payments/payments-filters';
+import { highlightRanges, searchQueryVariants } from './search-text';
+// Types only — see the dynamic import inside the component. The engine and the
+// twenty dictionaries it reads must not enter this file's static graph.
+import type { SearchHitInterface, SearchIndexInterface, SearchLocale } from './search-engine';
 
-interface SearchResult {
-  type: 'user' | 'subscription' | 'transaction' | 'promocode' | 'partner' | 'navigation';
-  id: string;
-  label: string;
-  subtitle?: string;
-  /** For `type: 'navigation'` only — overrides `TYPE_META.route(id)`. */
-  to?: string;
-  /** For `type: 'navigation'` only — replaces the default Compass icon. */
-  icon?: React.ElementType;
+/** What the backend's `/admin/quick-search` answers with. */
+interface DataHitInterface {
+  readonly type: 'user' | 'subscription' | 'transaction' | 'promocode' | 'partner';
+  readonly id: string;
+  readonly label: string;
+  readonly subtitle?: string;
 }
 
 const TYPE_META: Record<
-  SearchResult['type'],
+  DataHitInterface['type'],
   { icon: React.ElementType; color: string; route: (id: string) => string }
 > = {
   user: { icon: User, color: 'text-blue-500', route: (id) => `/users/${id}` },
@@ -42,44 +39,71 @@ const TYPE_META: Record<
   transaction: { icon: CreditCard, color: 'text-yellow-500', route: (id) => paymentHref(id) },
   promocode: { icon: Tag, color: 'text-purple-500', route: (_id) => `/promocodes` },
   partner: { icon: Handshake, color: 'text-orange-500', route: (_id) => `/partners` },
-  // `navigation` rows always carry their own `to`; the route() is a safe
-  // fallback so the lookup table stays exhaustive.
-  navigation: { icon: Compass, color: 'text-cyan-500', route: (id) => id },
 };
 
-async function fetchSearch(q: string): Promise<SearchResult[]> {
+async function fetchSearch(q: string): Promise<DataHitInterface[]> {
   if (q.length < 2) return [];
   const res = await api.get('/admin/quick-search', { params: { q, limit: 12 } });
-  return expectArray<SearchResult>(res.data);
+  return expectArray<DataHitInterface>(res.data);
 }
 
-/** Module-level constant so its identity is stable across renders. */
-const EMPTY_RESULTS: SearchResult[] = [];
+/** Module-level constants so their identity is stable across renders. */
+const EMPTY_DATA_HITS: DataHitInterface[] = [];
+const EMPTY_LOCAL_HITS: SearchHitInterface[] = [];
 
 /**
- * Flat navigation index used by the overlay to surface page jumps
- * alongside data hits. Group key is included as a hint shown in the
- * row subtitle so two pages with the same English label (rare) are
- * still distinguishable.
+ * Asked of the engine, then cut to `LOCAL_ROWS` after the permission filter.
  *
- * Two sources, on purpose. `navGroups` is the sidebar. `deepLinkNavItems` is
- * everything routable that the sidebar does NOT show — surfaces folded into a
- * tab of another page (`/admins#roles`, `/partners#withdrawals`,
- * `/settings/panel#backups`, …) whose standalone routes survive only as
- * redirects in `router.tsx`. Those were reachable only by an operator who
- * already knew the URL, which is the definition of not findable; indexing them
- * here fixes that without adding eleven rows to the sidebar rail.
+ * Two numbers, not one, because filtering after the cut is how a role with
+ * three permissions ends up staring at an empty overlay while the panel holds
+ * a perfectly good answer it was never asked for.
  */
-interface NavIndexEntry {
-  readonly item: NavItem;
-  readonly groupKey: string;
+const LOCAL_CANDIDATES = 24;
+const LOCAL_ROWS = 8;
+
+type SearchEngineModule = typeof import('./search-engine');
+
+interface LoadedEngineInterface {
+  readonly module: SearchEngineModule;
+  readonly index: SearchIndexInterface;
 }
-const NAV_INDEX: ReadonlyArray<NavIndexEntry> = [
-  ...navGroups.flatMap((group) => group.items.map((item) => ({ item, groupKey: group.key }))),
-  ...deepLinkNavItems.map(({ groupKey, ...item }) => ({ item, groupKey })),
-];
-/** Hard cap on navigation hits so they never crowd out data results. */
-const NAV_HITS_CAP = 6;
+
+type RowInterface =
+  | { readonly kind: 'place'; readonly hit: SearchHitInterface }
+  | { readonly kind: 'data'; readonly hit: DataHitInterface };
+
+/** Interpolation placeholders are i18next machinery; an operator reads a gap. */
+function displayText(value: string): string {
+  return value
+    .replace(/\{\{[^}]*\}\}/g, '…')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** The query's own words, marked inside a row so the match is visible. */
+function Highlighted({
+  text,
+  tokens,
+}: {
+  readonly text: string;
+  readonly tokens: ReadonlyArray<string>;
+}): ReactNode {
+  const ranges = highlightRanges(text, tokens);
+  if (ranges.length === 0) return text;
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  ranges.forEach(([start, end], index) => {
+    if (start > cursor) parts.push(text.slice(cursor, start));
+    parts.push(
+      <mark key={`${start}-${end}-${index}`} className="bg-transparent text-primary font-semibold">
+        {text.slice(start, end)}
+      </mark>,
+    );
+    cursor = end;
+  });
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
 
 interface QuickSearchOverlayProps {
   open: boolean;
@@ -87,7 +111,14 @@ interface QuickSearchOverlayProps {
 }
 
 export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
-  const { t } = useTranslation();
+  const { t, i18n: runtime } = useTranslation();
+  // Read off `useTranslation`, not off the i18next singleton: importing that
+  // module here would pull `initReactI18next` into every test that mocks
+  // react-i18next, and it makes the index follow a language switch for free.
+  const locale: SearchLocale =
+    (runtime as { language?: string } | undefined)?.language?.startsWith('ru') === true
+      ? 'ru'
+      : 'en';
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -111,43 +142,72 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   // Stable empty-array reference: TanStack returns `undefined` while
   // the query is idle/loading, but if we use `data: results = []` the
   // destructure default produces a NEW array literal on every render
-  // and breaks the `prevResults` identity check below — that drove an
+  // and breaks the `prevRows` identity check below — that drove an
   // infinite render loop and the React error #301 we were chasing.
-  const dataResults: SearchResult[] = data ?? EMPTY_RESULTS;
+  const dataHits: DataHitInterface[] = data ?? EMPTY_DATA_HITS;
 
-  // Page-jump hits are computed locally — no roundtrip needed. We match
-  // against the localised label (`adminNav.items.<key>`), the path, and
-  // the raw key. Resolved labels go through `t()` so RU and EN both work.
-  const navResults = useMemo<SearchResult[]>(() => {
-    const trimmed = trimmedQuery.toLowerCase();
-    if (trimmed.length < 2) return EMPTY_RESULTS;
-    const hits: SearchResult[] = [];
-    for (const { item, groupKey } of NAV_INDEX) {
-      if (!canShowNavItem(item, permissionsLoaded, hasPermission)) continue;
-      const itemLabel = t(`adminNav.items.${item.key}`);
-      const groupLabel = t(`adminNav.groups.${groupKey}`);
-      const haystacks = [item.key.toLowerCase(), item.path.toLowerCase(), itemLabel.toLowerCase()];
-      const matches = haystacks.some((h) => h.includes(trimmed));
-      if (!matches) continue;
-      hits.push({
-        type: 'navigation',
-        id: item.path,
-        to: item.path,
-        icon: item.icon,
-        label: itemLabel,
-        subtitle: `${groupLabel} · ${item.path}`,
+  /**
+   * The panel's own index: every page, tab and setting, by the words written
+   * on them.
+   *
+   * Loaded on first open rather than with the app. The dictionaries are ~600 KB
+   * of lazy chunks that the login route must never pull, and nothing here is
+   * needed until somebody actually searches. The cost lands once, on a
+   * deliberate action, and warms the very chunks the pages it finds will want.
+   */
+  const [engine, setEngine] = useState<LoadedEngineInterface | null>(null);
+  const [indexFailed, setIndexFailed] = useState(false);
+  const ready = engine !== null && engine.index.locale === locale;
+  // Derived, never stored. A separate `indexing` flag has to be cleared by the
+  // same effect that set it, and this effect re-runs the moment the index
+  // lands — the cleanup then cancels the clearing, and the overlay says "still
+  // reading the pages" over a finished index, for as long as it is open.
+  const indexing = !ready && !indexFailed;
+  useEffect(() => {
+    if (!open || ready) return;
+    let cancelled = false;
+    void import('./search-engine')
+      .then(async (module) => {
+        const index = await module.ensureSearchIndex(locale);
+        if (!cancelled) setEngine({ module, index });
+      })
+      .catch((error: unknown) => {
+        // Search over the operator's data still works; only the page index is
+        // missing. Failing loudly here would replace a degraded overlay with
+        // no overlay at all.
+        console.warn('[quick-search] page index unavailable:', error);
+        if (!cancelled) setIndexFailed(true);
       });
-      if (hits.length >= NAV_HITS_CAP) break;
-    }
-    return hits;
-  }, [hasPermission, permissionsLoaded, trimmedQuery, t]);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, ready, locale]);
 
-  // Navigation always wins the top of the list — Cmd+K should feel like
-  // Linear/Spotlight: type the page name, hit Enter, and you're there.
-  const results = useMemo<SearchResult[]>(() => {
-    if (navResults.length === 0) return dataResults;
-    return [...navResults, ...dataResults];
-  }, [navResults, dataResults]);
+  /**
+   * Pages, tabs and settings, gated by the same permission as the sidebar row
+   * that owns them: a result an operator cannot open is worse than no result.
+   */
+  const localHits = useMemo<SearchHitInterface[]>(() => {
+    if (engine === null || !ready || trimmedQuery.length < 2) return EMPTY_LOCAL_HITS;
+    const hits = engine.module
+      .queryIndex(engine.index, trimmedQuery, { limit: LOCAL_CANDIDATES })
+      .filter((hit) => canShowNavItem(hit.entry.target.nav, permissionsLoaded, hasPermission))
+      .slice(0, LOCAL_ROWS);
+    return hits.length === 0 ? EMPTY_LOCAL_HITS : hits;
+  }, [engine, ready, trimmedQuery, permissionsLoaded, hasPermission]);
+
+  const rows = useMemo<RowInterface[]>(
+    () => [
+      ...localHits.map((hit): RowInterface => ({ kind: 'place', hit })),
+      ...dataHits.map((hit): RowInterface => ({ kind: 'data', hit })),
+    ],
+    [localHits, dataHits],
+  );
+
+  const highlightTokens = useMemo<string[]>(() => {
+    const [primary] = searchQueryVariants(trimmedQuery);
+    return primary === undefined ? [] : primary.split(' ');
+  }, [trimmedQuery]);
 
   // Reset state when the overlay (re)opens. Uses the
   // "store-prev-prop in render" pattern.
@@ -167,17 +227,26 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
     return () => clearTimeout(focusTimer);
   }, [open]);
 
-  // Reset selection when the results array identity changes.
-  const [prevResults, setPrevResults] = useState<SearchResult[]>(results);
-  if (results !== prevResults) {
-    setPrevResults(results);
+  // Reset selection when the rows array identity changes.
+  const [prevRows, setPrevRows] = useState<RowInterface[]>(rows);
+  if (rows !== prevRows) {
+    setPrevRows(rows);
     setSelectedIndex(0);
   }
 
   const handleSelect = useCallback(
-    (result: SearchResult) => {
-      const target = result.to ?? TYPE_META[result.type].route(result.id);
-      navigate(target);
+    (row: RowInterface) => {
+      if (row.kind === 'data') {
+        navigate(TYPE_META[row.hit.type].route(row.hit.id));
+        onClose();
+        return;
+      }
+      const { entry } = row.hit;
+      navigate(entry.target.path);
+      // A page row has arrived where it was going. A SETTING row has not: the
+      // page it named can be forty fields long, so the control itself is
+      // marked once the page renders.
+      if (!entry.isPage) flashTextOnPage(displayText(entry.text));
       onClose();
     },
     [navigate, onClose],
@@ -186,16 +255,27 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setSelectedIndex((i) => Math.min(i + 1, results.length - 1));
+      setSelectedIndex((i) => Math.min(i + 1, rows.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setSelectedIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (results[selectedIndex]) handleSelect(results[selectedIndex]);
+      const row = rows[selectedIndex];
+      if (row) handleSelect(row);
     } else if (e.key === 'Escape') {
       onClose();
     }
+  };
+
+  /** Where a hit lives, in words: the page, and the tab inside it. */
+  const placeSubtitle = (hit: SearchHitInterface): string => {
+    const { target } = hit.entry;
+    if (hit.entry.isPage) {
+      return `${t(`adminNav.groups.${target.groupKey}`)} · ${target.path}`;
+    }
+    const place = t(target.labelKey);
+    return target.parentLabelKey === null ? place : `${t(target.parentLabelKey)} → ${place}`;
   };
 
   return (
@@ -206,7 +286,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
       >
         {/* Search input */}
         <div className="flex items-center border-b px-4 py-3 gap-3">
-          {isFetching ? (
+          {isFetching || indexing ? (
             <Loader2 className="h-4 w-4 shrink-0 text-muted-foreground animate-spin" />
           ) : (
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -234,7 +314,7 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
 
         {/* Results */}
         {/*
-          Three empty-looking states, three distinct renders. They used to
+          Four empty-looking states, four distinct renders. They used to
           collapse into two: while the first request was in flight
           `results.length === 0 && !isFetching` was false, so the branch below
           rendered an EMPTY `<ul>` — a blank panel with no message at all. The
@@ -242,38 +322,61 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
           sentence only for "no results", and read all three as a dead feature.
           Each state now says which one it is, and the order matters: too-short
           wins over loading (the query is disabled, so nothing is loading),
-          loading wins over empty (no answer yet is not the same as no rows).
+          loading wins over empty (no answer yet is not the same as no rows),
+          and the page index reading itself in says so rather than borrowing
+          the network's wording.
         */}
-        <div className="max-h-80 overflow-y-auto">
-          <AnimatePresence mode="wait">
+        {/* Readiness is stated, not inferred. The page index arrives
+            asynchronously, so "the row is not here" is ambiguous until it has
+            landed — and a test that asserts absence before then passes for the
+            wrong reason. */}
+        <div
+          className="max-h-96 overflow-y-auto"
+          data-search-index={ready ? 'ready' : 'loading'}
+        >
+          {/*
+            No `exit` animation, and no `mode="wait"`.
+
+            Both were here, and both are wrong for a panel that swaps states
+            while the operator is still typing. `mode="wait"` holds the next
+            state until the previous one has finished fading out, so the
+            results list waited on the spinner — and with the page index
+            loading asynchronously the overlay reached results through TWO
+            swaps and could sit on the spinner indefinitely. An exit animation
+            alone still leaves the old state mounted on top of the new one,
+            which is how «Идёт поиск…» and «Нет результатов» ended up on
+            screen together. Entering fades stay; leaving is instant.
+          */}
+          <AnimatePresence initial={false}>
             {trimmedQuery.length < 2 ? (
               <motion.div
                 key="hint"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
                 className="flex flex-col items-center gap-2 py-10 text-muted-foreground text-sm"
               >
                 <Search className="h-8 w-8 opacity-20" />
                 <p>{t('quickSearchOverlay.typeMore')}</p>
               </motion.div>
-            ) : results.length === 0 && isFetching ? (
+            ) : rows.length === 0 && (isFetching || indexing) ? (
               <motion.div
                 key="loading"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
                 className="flex flex-col items-center gap-2 py-10 text-muted-foreground text-sm"
               >
                 <Loader2 className="h-8 w-8 opacity-20 animate-spin" />
-                <p>{t('quickSearchOverlay.searching')}</p>
+                <p>
+                  {indexing
+                    ? t('quickSearchOverlay.indexing')
+                    : t('quickSearchOverlay.searching')}
+                </p>
               </motion.div>
-            ) : results.length === 0 ? (
+            ) : rows.length === 0 ? (
               <motion.div
                 key="empty"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
                 className="flex flex-col items-center gap-2 py-10 text-muted-foreground text-sm"
               >
                 <p>{t('quickSearchOverlay.noResults', { query: trimmedQuery })}</p>
@@ -283,14 +386,46 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                 key="results"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
                 className="py-1"
               >
-                {results.map((result, index) => {
-                  const meta = TYPE_META[result.type];
-                  const IconComponent = (result.icon ?? meta.icon) as ComponentType<SVGProps<SVGSVGElement>>;
+                {rows.map((row, index) => {
+                  const previous = rows[index - 1];
+                  const startsGroup = previous === undefined || previous.kind !== row.kind;
+                  const label =
+                    row.kind === 'place'
+                      ? displayText(
+                          row.hit.entry.isPage
+                            ? t(row.hit.entry.target.labelKey)
+                            : row.hit.entry.text,
+                        )
+                      : row.hit.label;
+                  const subtitle =
+                    row.kind === 'place' ? placeSubtitle(row.hit) : row.hit.subtitle;
+                  const meta = row.kind === 'data' ? TYPE_META[row.hit.type] : null;
+                  const IconComponent = (
+                    row.kind === 'place' ? row.hit.entry.target.nav.icon : meta?.icon
+                  ) as ComponentType<SVGProps<SVGSVGElement>>;
+                  const badge =
+                    row.kind === 'data'
+                      ? row.hit.type
+                      : row.hit.entry.isPage
+                        ? 'navigation'
+                        : 'setting';
+                  const key =
+                    row.kind === 'place'
+                      ? `place-${row.hit.entry.target.path}-${row.hit.entry.key}`
+                      : `data-${row.hit.type}-${row.hit.id}`;
                   return (
-                    <li key={`${result.type}-${result.id}`}>
+                    <li key={key}>
+                      {startsGroup && (
+                        <p className="px-4 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          {t(
+                            row.kind === 'place'
+                              ? 'quickSearchOverlay.groups.places'
+                              : 'quickSearchOverlay.groups.data',
+                          )}
+                        </p>
+                      )}
                       <button
                         className={cn(
                           'w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors',
@@ -299,22 +434,37 @@ export function QuickSearchOverlay({ open, onClose }: QuickSearchOverlayProps) {
                             : 'hover:bg-accent/50',
                         )}
                         onMouseEnter={() => setSelectedIndex(index)}
-                        onClick={() => handleSelect(result)}
+                        onClick={() => handleSelect(row)}
                       >
-                        <IconComponent className={cn('h-4 w-4 shrink-0', meta.color)} />
+                        <IconComponent
+                          className={cn('h-4 w-4 shrink-0', meta?.color ?? 'text-cyan-500')}
+                        />
+                        {/* `title` on both lines: they are `truncate`d, and a
+                            setting's label is exactly the kind of long string
+                            that gets cut — the operator can read the rest by
+                            hovering instead of opening the page to find out. */}
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">{result.label}</p>
-                          {result.subtitle && (
-                            <p className="text-xs text-muted-foreground truncate">{result.subtitle}</p>
+                          <p className="text-sm font-medium truncate" title={label}>
+                            {row.kind === 'place' ? (
+                              <Highlighted text={label} tokens={highlightTokens} />
+                            ) : (
+                              label
+                            )}
+                          </p>
+                          {subtitle && (
+                            <p
+                              className="text-xs text-muted-foreground truncate"
+                              title={subtitle}
+                            >
+                              {subtitle}
+                            </p>
                           )}
                         </div>
                         <Badge variant="outline" className="text-[10px] shrink-0">
-                          {/* All six, not just `navigation`: the other five
+                          {/* All seven, not just the local ones: the data hits
                               rendered the raw wire value, so an English badge
                               sat beside a Russian one in the same list. */}
-                          {t(`quickSearchOverlay.types.${result.type}`, {
-                            defaultValue: result.type,
-                          })}
+                          {t(`quickSearchOverlay.types.${badge}`, { defaultValue: badge })}
                         </Badge>
                       </button>
                     </li>

@@ -21,6 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { DatePicker } from '@/components/ui/date-picker'
 import { PermissionGate } from '@/features/rbac'
 
+import { HUB_TABS } from '@/components/layout/admin-nav-config'
 import { useTabSync } from '@/lib/use-tab-sync'
 import { ReconciliationHealthCard } from './reconciliation-health-card'
 import { WebhookReplayControl } from './webhook-replay-control'
@@ -77,19 +78,13 @@ const PaymentsAnalyticsTab = lazy(() => import('./payments-analytics-tab'))
  * am not allowed" rendering identically, which is the defect the refusal card
  * inside the tab exists to end.
  *
- * NOT yet in `HUB_TABS` (`components/layout/admin-nav-config.ts`), which is
- * where the other four pages keep their lists: that file is not this change's
- * to edit. Nothing breaks — `useTabSync` takes the array directly and
- * `HUB_TABS` only exists so `deepLinkNavItems` rows can be validated against
- * it, and Payments has no such row. Whoever owns the nav config should add:
- *
- *     '/payments': ['transactions', 'webhooks', 'analytics'],
- *
- * and then this constant becomes `HUB_TABS['/payments']`. Until then a Cmd+K
- * row pointing at `/payments#webhooks` would fail `admin-nav-config.test.ts`
- * with "no HUB_TABS entry for /payments" — a named failure that leads here.
+ * Now IN `HUB_TABS` (`components/layout/admin-nav-config.ts`), where the other
+ * four pages keep their lists — the move this comment asked for. Panel search
+ * sends operators to `/payments#analytics` and `/payments#webhooks`, and those
+ * rows are checked against `HUB_TABS`, so the list had to become the one the
+ * page actually uses rather than a second copy beside it.
  */
-const ALLOWED_TABS = ['transactions', 'webhooks', 'analytics'] as const
+const ALLOWED_TABS = HUB_TABS['/payments']
 type PaymentsTab = (typeof ALLOWED_TABS)[number]
 
 const PAGE_SIZE = 50

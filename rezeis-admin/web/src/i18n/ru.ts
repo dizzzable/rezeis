@@ -2242,10 +2242,15 @@ export const ru = {
   quickSearchOverlay: {
     aria: 'Быстрый поиск',
     clearAria: 'Очистить',
-    placeholder: 'Поиск пользователей, транзакций, промокодов…',
+    placeholder: 'Поиск по панели: страницы, настройки, пользователи, платежи…',
     typeMore: 'Введите минимум 2 символа для поиска',
     searching: 'Идёт поиск…',
+    indexing: 'Читаю страницы панели…',
     noResults: 'Нет результатов по «{{query}}»',
+    groups: {
+      places: 'Страницы и настройки',
+      data: 'Данные',
+    },
     types: {
       user: 'пользователь',
       subscription: 'подписка',
@@ -2253,6 +2258,7 @@ export const ru = {
       promocode: 'промокод',
       partner: 'партнёр',
       navigation: 'страница',
+      setting: 'настройка',
     },
     footer: {
       navigate: 'переход',

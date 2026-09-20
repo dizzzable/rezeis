@@ -2157,10 +2157,15 @@ export const en = {
   quickSearchOverlay: {
     aria: 'Quick search',
     clearAria: 'Clear',
-    placeholder: 'Search users, transactions, promo codes…',
+    placeholder: 'Search the panel: pages, settings, users, payments…',
     typeMore: 'Type at least 2 characters to search',
     searching: 'Searching…',
+    indexing: 'Reading the panel pages…',
     noResults: 'No results for "{{query}}"',
+    groups: {
+      places: 'Pages and settings',
+      data: 'Data',
+    },
     types: {
       user: 'user',
       subscription: 'subscription',
@@ -2168,6 +2173,7 @@ export const en = {
       promocode: 'promo code',
       partner: 'partner',
       navigation: 'page',
+      setting: 'setting',
     },
     footer: {
       navigate: 'navigate',

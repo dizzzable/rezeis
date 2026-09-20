@@ -83,6 +83,30 @@ function typeQuery(value: string) {
   })
 }
 
+/**
+ * The first row carrying `title`. A row prints its own label and the page it
+ * lives on, and under the mocked `t` both are the same key, so "the" element
+ * with that title does not exist — two do.
+ */
+async function findRow(title: string) {
+  const nodes = await screen.findAllByTitle(title)
+  return nodes[0] as HTMLElement
+}
+
+/**
+ * Waits until the page index has been built.
+ *
+ * Absence is only evidence once the thing that would have rendered the row has
+ * run. The index is loaded asynchronously on open, so without this the
+ * permission half of the differential below passes on an overlay that has not
+ * searched anything yet — green, and guarding nothing.
+ */
+async function waitForIndex() {
+  await waitFor(() =>
+    expect(document.querySelector('[data-search-index="ready"]')).not.toBeNull(),
+  )
+}
+
 beforeEach(() => {
   permissionState.loaded = true
   permissionState.granted = new Set()
@@ -100,7 +124,7 @@ describe('Cmd+K deep-link page jumps', () => {
 
     typeQuery('webhooks')
 
-    expect(await screen.findByText('adminNav.items.webhooks')).toBeInTheDocument()
+    expect(await findRow('adminNav.items.webhooks')).toBeInTheDocument()
   })
 
   /**
@@ -113,7 +137,7 @@ describe('Cmd+K deep-link page jumps', () => {
     renderOverlay()
 
     typeQuery('webhooks')
-    fireEvent.click(await screen.findByText('adminNav.items.webhooks'))
+    fireEvent.click(await findRow('adminNav.items.webhooks'))
 
     await waitFor(() =>
       expect(screen.getByTestId('location')).toHaveTextContent('/admins#webhooks'),
@@ -135,13 +159,14 @@ describe('Cmd+K deep-link page jumps', () => {
     permissionState.granted = new Set(['webhooks:view'])
     const granted = renderOverlay()
     typeQuery('webhooks')
-    expect(await screen.findByText('adminNav.items.webhooks')).toBeInTheDocument()
+    expect(await findRow('adminNav.items.webhooks')).toBeInTheDocument()
     granted.unmount()
 
     permissionState.granted = new Set()
     renderOverlay()
     typeQuery('webhooks')
-    expect(screen.queryByText('adminNav.items.webhooks')).not.toBeInTheDocument()
+    await waitForIndex()
+    expect(screen.queryAllByTitle('adminNav.items.webhooks')).toHaveLength(0)
   })
 
   /**
@@ -155,7 +180,7 @@ describe('Cmd+K deep-link page jumps', () => {
 
     typeQuery('twofactor')
 
-    expect(await screen.findByText('adminNav.items.twoFactor')).toBeInTheDocument()
+    expect(await findRow('adminNav.items.twoFactor')).toBeInTheDocument()
   })
 
   /** A real route rather than a hash anchor — it must still be offered. */
@@ -165,7 +190,7 @@ describe('Cmd+K deep-link page jumps', () => {
 
     typeQuery('apitokens')
 
-    expect(await screen.findByText('adminNav.items.apiTokens')).toBeInTheDocument()
+    expect(await findRow('adminNav.items.apiTokens')).toBeInTheDocument()
   })
 
   /** Sidebar pages must keep working — the second index is additive. */
@@ -174,6 +199,6 @@ describe('Cmd+K deep-link page jumps', () => {
 
     typeQuery('promocodes')
 
-    expect(await screen.findByText('adminNav.items.promocodes')).toBeInTheDocument()
+    expect(await findRow('adminNav.items.promocodes')).toBeInTheDocument()
   })
 })
