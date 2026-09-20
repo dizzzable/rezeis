@@ -184,6 +184,17 @@ function grant(...permissions: string[]): void {
   usePermissionStore.setState({ loaded: true, role: 'ADMIN', granted: new Set(permissions) })
 }
 
+/**
+ * The tab going away and coming back, as both sides read it: react-query's
+ * focus manager (`visibilitychange` on window, `document.visibilityState`) and
+ * the card's own clock. The real event bubbles from the document, so one
+ * dispatch reaches both.
+ */
+function setVisibility(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: state })
+  document.dispatchEvent(new Event('visibilitychange', { bubbles: true }))
+}
+
 function newClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } })
 }
@@ -259,6 +270,7 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   window.matchMedia = realMatchMedia
+  setVisibility('visible')
   usePermissionStore.getState().reset()
 })
 
@@ -483,12 +495,12 @@ describe('an answer that is no longer current', () => {
     expect(document.querySelector('[data-live-dot]')).toHaveAttribute('data-live-dot', 'live')
   })
 
-  it('says so when nothing has arrived for three refetch intervals, by this browser’s clock', async () => {
+  it('dates the answer — without accusing the panel — when no fresh one has landed', async () => {
     // Later refetches never come back — the kind of silence a sleeping laptop or a hung proxy makes.
     getOverview.mockResolvedValueOnce(overview()).mockReturnValue(new Promise(() => {}))
     renderCard()
     await answered()
-    expect(screen.queryByText(/Cannot refresh/)).toBeNull()
+    expect(screen.queryByText(/Showing what arrived/)).toBeNull()
 
     // Three intervals and a second on, the operator comes back to the tab.
     act(() => {
@@ -496,8 +508,32 @@ describe('an answer that is no longer current', () => {
       window.dispatchEvent(new Event('focus'))
     })
 
-    expect(await screen.findByText(/Cannot refresh/)).toBeInTheDocument()
+    const notice = await screen.findByText(/Showing what arrived/)
     expect(document.querySelector('[data-live-dot]')).toHaveAttribute('data-live-dot', 'stale')
+    // Nothing was tried and failed, so nothing is blamed: this is not the amber line.
+    expect(notice.closest('[data-online-stale]')).toHaveAttribute('data-online-stale', 'waiting')
+    expect(screen.queryByText(/Cannot refresh/)).toBeNull()
+  })
+
+  it('asks again as soon as the tab is looked at, instead of waiting out the interval', async () => {
+    // The poll stops while the tab is hidden (`refetchIntervalInBackground: false`),
+    // so three minutes away leaves an old answer through nobody's fault. Before
+    // this card asked on its own, the operator came back to «Не удаётся
+    // обновить» over numbers that were merely waiting for the next tick.
+    getOverview.mockResolvedValue(overview())
+    renderCard()
+    await answered()
+    expect(getOverview).toHaveBeenCalledTimes(1)
+
+    act(() => setVisibility('hidden'))
+    act(() => {
+      vi.setSystemTime(NOW + ONLINE_ANSWER_STALE_MS + 1_000)
+      setVisibility('visible')
+    })
+
+    await waitFor(() => expect(getOverview).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(document.querySelector('[data-online-stale]')).toBeNull())
+    expect(document.querySelector('[data-live-dot]')).toHaveAttribute('data-live-dot', 'live')
   })
 
   it('says so on the nodes-and-countries side as well', async () => {

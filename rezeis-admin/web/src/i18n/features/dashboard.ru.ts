@@ -237,7 +237,9 @@ export const ru = {
       },
       loadFailed: 'Не удалось загрузить данные об онлайне.',
       retry: 'Повторить',
+      refresh: 'Обновить',
       staleAnswer: 'Не удаётся обновить: показано то, что пришло {{when}}',
+      pausedAnswer: 'Показано то, что пришло {{when}}',
       distribution: {
         byNode: 'По нодам',
         byCountry: 'По странам',

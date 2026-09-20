@@ -233,7 +233,9 @@ export const en = {
       },
       loadFailed: 'Could not load who is online.',
       retry: 'Retry',
+      refresh: 'Refresh',
       staleAnswer: 'Cannot refresh: showing what arrived {{when}}',
+      pausedAnswer: 'Showing what arrived {{when}}',
       distribution: {
         byNode: 'By node',
         byCountry: 'By country',

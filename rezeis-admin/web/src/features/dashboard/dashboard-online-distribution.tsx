@@ -67,6 +67,8 @@ export function DashboardOnlineDistribution({
     enabled: canView,
     refetchInterval: ONLINE_REFETCH_MS,
     refetchIntervalInBackground: false,
+    // Asks again the moment the tab is looked at — see the chart side.
+    refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   })
   const freshness = useAnswerFreshness(query)
@@ -86,13 +88,18 @@ export function DashboardOnlineDistribution({
       <DistributionSkeleton />
     )
   }
-  // The answer on screen has stopped refreshing: said over whatever it shows.
+  // The answer on screen is not the current one: said over whatever it shows,
+  // in the tone of what happened — a failed refresh, or one that has not landed.
   const notCurrent = freshness.stale ? (
     <OnlineStaleNotice
-      message={t('dashboardPage.onlineTrend.staleAnswer', {
-        when: describeMoment(new Date(freshness.receivedAt).toISOString(), freshness.now, t),
-      })}
-      retryLabel={t('dashboardPage.onlineTrend.retry')}
+      tone={freshness.failed ? 'failed' : 'waiting'}
+      message={t(
+        freshness.failed ? 'dashboardPage.onlineTrend.staleAnswer' : 'dashboardPage.onlineTrend.pausedAnswer',
+        { when: describeMoment(new Date(freshness.receivedAt).toISOString(), freshness.now, t) },
+      )}
+      retryLabel={t(
+        freshness.failed ? 'dashboardPage.onlineTrend.retry' : 'dashboardPage.onlineTrend.refresh',
+      )}
       retrying={query.isFetching}
       onRetry={() => void query.refetch()}
     />

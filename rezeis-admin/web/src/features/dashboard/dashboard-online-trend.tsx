@@ -115,6 +115,11 @@ export function DashboardOnlineTrend(): JSX.Element | null {
     enabled: canView,
     refetchInterval: ONLINE_REFETCH_MS,
     refetchIntervalInBackground: false,
+    // The poll stops while the tab is hidden, so coming back finds an answer
+    // minutes old and the next tick can be a whole minute away. This card is
+    // read for what is happening NOW: it asks again the moment it is looked at,
+    // against the client's global `refetchOnWindowFocus: false`.
+    refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   })
   const freshness = useAnswerFreshness(overview)
@@ -150,10 +155,16 @@ export function DashboardOnlineTrend(): JSX.Element | null {
         <Figures query={overview} selectedRange={range} stale={freshness.stale} animate={animate} />
         {freshness.stale ? (
           <OnlineStaleNotice
-            message={t('dashboardPage.onlineTrend.staleAnswer', {
-              when: describeMoment(new Date(freshness.receivedAt).toISOString(), freshness.now, t),
-            })}
-            retryLabel={t('dashboardPage.onlineTrend.retry')}
+            tone={freshness.failed ? 'failed' : 'waiting'}
+            message={t(
+              freshness.failed
+                ? 'dashboardPage.onlineTrend.staleAnswer'
+                : 'dashboardPage.onlineTrend.pausedAnswer',
+              { when: describeMoment(new Date(freshness.receivedAt).toISOString(), freshness.now, t) },
+            )}
+            retryLabel={t(
+              freshness.failed ? 'dashboardPage.onlineTrend.retry' : 'dashboardPage.onlineTrend.refresh',
+            )}
             retrying={overview.isFetching}
             onRetry={() => void overview.refetch()}
           />

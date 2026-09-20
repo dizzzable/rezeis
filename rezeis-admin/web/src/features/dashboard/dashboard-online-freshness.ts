@@ -13,6 +13,13 @@
  * (`dataUpdatedAt`, this browser's clock). Three missed refetches, or a failed
  * one, and the card says the answer is not current and offers a retry.
  *
+ * THOSE TWO ARE NOT THE SAME THING, and the card must not confuse them.
+ * `refetchIntervalInBackground: false` stops the poll while the tab is hidden —
+ * that is the design, not a fault — so ANY return after three minutes away
+ * finds an answer that is old. Only `failed` means a refresh was tried and came
+ * back an error; `stale` alone means no fresh answer has landed yet. The card
+ * accuses the panel of being unreachable only in the first case.
+ *
  * The clock is one for every card on the page: re-read every 15 s, and at once
  * when the tab comes back (`focus`, `visibilitychange`) — a laptop that slept
  * through the afternoon must not show the morning's answer as live while its
@@ -66,6 +73,8 @@ export function useBrowserClock(): number {
 export interface AnswerFreshness {
   /** The answer on screen is not a current one: its last refetch failed, or none has landed for too long. */
   readonly stale: boolean
+  /** A refresh was actually TRIED and came back an error — as opposed to none having landed yet. */
+  readonly failed: boolean
   /** When this browser received the answer on screen. */
   readonly receivedAt: number
   /** This browser's clock, to say how long ago that was. */
@@ -77,9 +86,8 @@ export function useAnswerFreshness(query: UseQueryResult<unknown>): AnswerFreshn
   const receivedAt = query.dataUpdatedAt
   // A previous window's answer standing in for a new one (`isPlaceholderData`)
   // is not "old": its own query is being fetched right now.
-  const stale =
-    query.data !== undefined &&
-    !query.isPlaceholderData &&
-    (query.isRefetchError || (receivedAt > 0 && now - receivedAt > ONLINE_ANSWER_STALE_MS))
-  return { stale, receivedAt, now }
+  const answered = query.data !== undefined && !query.isPlaceholderData
+  const failed = answered && query.isRefetchError
+  const stale = answered && (failed || (receivedAt > 0 && now - receivedAt > ONLINE_ANSWER_STALE_MS))
+  return { stale, failed, receivedAt, now }
 }

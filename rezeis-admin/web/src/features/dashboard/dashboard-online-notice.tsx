@@ -5,40 +5,60 @@
  * or switching the window does not make the card jump.
  */
 import type { JSX, ReactNode } from 'react'
-import { AlertTriangle, Radio, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Clock, Radio, RefreshCw } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 /**
- * One line over the numbers or the lists when they are not current: the last
- * refresh failed, or none has arrived for three intervals. The old answer stays
- * readable — it is the last thing known — but says what it is, with a retry.
+ * One line over the numbers or the lists when they are not current, in the tone
+ * of what actually happened. The old answer stays readable either way — it is
+ * the last thing known — but says what it is, with a refresh.
+ *
+ *   • `failed` — a refresh WAS tried and came back an error: amber, because
+ *     something between this browser and the panel is broken.
+ *   • `waiting` — no fresh answer has landed yet, most often because the poll
+ *     was paused while the tab was hidden. Nothing is broken, so nothing is
+ *     amber: the line only dates what is on screen.
  */
 export function OnlineStaleNotice({
+  tone,
   message,
   retryLabel,
   retrying,
   onRetry,
 }: {
+  readonly tone: 'failed' | 'waiting'
   readonly message: string
   readonly retryLabel: string
   readonly retrying: boolean
   readonly onRetry: () => void
 }): JSX.Element {
+  const failed = tone === 'failed'
+  const Icon = failed ? AlertTriangle : Clock
   return (
     <div
       role="status"
-      data-online-stale=""
-      className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300"
+      data-online-stale={tone}
+      className={cn(
+        'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-2.5 py-1.5 text-xs',
+        failed
+          ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+          : 'bg-muted/40 text-muted-foreground',
+      )}
     >
-      <AlertTriangle aria-hidden="true" className="size-3.5 shrink-0" />
+      <Icon aria-hidden="true" className="size-3.5 shrink-0" />
       <span className="min-w-0 flex-1">{message}</span>
       <Button
         type="button"
         variant="ghost"
         size="sm"
-        className="h-6 gap-1 px-2 text-xs text-amber-800 hover:bg-amber-500/15 dark:text-amber-200"
+        className={cn(
+          'h-6 gap-1 px-2 text-xs',
+          failed
+            ? 'text-amber-800 hover:bg-amber-500/15 dark:text-amber-200'
+            : 'text-foreground/80 hover:bg-muted',
+        )}
         disabled={retrying}
         onClick={onRetry}
       >
