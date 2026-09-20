@@ -6,6 +6,7 @@ import { RawCacheService } from '../../../common/cache/raw-cache.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { panelUserAddress, storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import type { RemnawaveUserAddressing } from '../../remnawave/services/panel-version.util';
@@ -203,6 +204,7 @@ export class ConnectSignalProbeService {
         remnawavePanelId: true,
         remnawavePanelUsername: true,
         configUrl: true,
+        planSnapshot: true,
       },
     });
     if (row === null || row.remnawaveId === null) return 'gone';
@@ -302,6 +304,7 @@ export class ConnectSignalProbeService {
       ...(user?.name ? { userName: user.name } : {}),
       ...(user?.username ? { username: user.username } : {}),
       subscriptionId: candidate.id,
+      ...planNamesMetadata([candidate.planSnapshot]),
       remnawaveId: candidate.remnawaveId,
       connectedAt: connectedAt.toISOString(),
       source: 'PROBE',

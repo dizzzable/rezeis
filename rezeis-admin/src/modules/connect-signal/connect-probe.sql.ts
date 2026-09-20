@@ -31,6 +31,7 @@ export interface ProbeCandidateRow {
   readonly remnawavePanelId: number | null;
   readonly remnawavePanelUsername: string | null;
   readonly configUrl: string | null;
+  readonly planSnapshot: unknown;
   readonly checkedAt: Date | null;
   readonly dueSoon: boolean;
 }
@@ -103,6 +104,7 @@ export function probeCandidatesSql(input: {
            "s"."remnawave_panel_id" AS "remnawavePanelId",
            "s"."remnawave_panel_username" AS "remnawavePanelUsername",
            "s"."config_url" AS "configUrl",
+           "s"."plan_snapshot" AS "planSnapshot",
            "c"."checked_at" AS "checkedAt",
            ${dueSoon} AS "dueSoon"
     ${eligibleSql(input.now)}

@@ -5,6 +5,7 @@ import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
 import { storedIdentityOf } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
 import { SettingsService } from '../settings/services/settings.service';
@@ -293,6 +294,7 @@ export class ExpiredProfileCleanupService {
         userId: true,
         isTrial: true,
         remnawaveId: true,
+        planSnapshot: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
         configUrl: true,
@@ -403,6 +405,7 @@ export class ExpiredProfileCleanupService {
             subscriptionId: subscription.id,
             userId: subscription.userId,
             isTrial: subscription.isTrial,
+            ...planNamesMetadata([subscription.planSnapshot]),
             panelExpiresAt: new Date(panelExpiryMs).toISOString(),
             revived: reviveActive,
             source: 'EXPIRED_PROFILE_CLEANUP',

@@ -10,6 +10,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
@@ -60,6 +61,13 @@ type LockedSubscription = DeletableSubscription & {
    * see {@link orphanRiskOf}.
    */
   readonly configUrl: string | null;
+  /**
+   * Read so the «Подписка удалена» card can say WHICH subscription was
+   * deleted. It comes off the row already being locked, so it costs nothing,
+   * and it has to be read HERE: after the transaction the row is DELETED and
+   * the snapshot is no longer anybody's to fetch.
+   */
+  readonly planSnapshot: unknown;
 };
 
 /**
@@ -136,6 +144,8 @@ interface LifecycleDeleteOutcome {
    * panel-link reconciliation the refusal names.
    */
   readonly stalePanelLinkRefused?: boolean;
+  /** The deleted row's plan snapshot, carried out for the operator's card. */
+  readonly planSnapshot?: unknown;
 }
 
 /**
@@ -330,6 +340,7 @@ export class SubscriptionDeletionService {
           "remnawave_panel_id" AS "remnawavePanelId",
           "remnawave_panel_username" AS "remnawavePanelUsername",
           "config_url" AS "configUrl",
+          "plan_snapshot" AS "planSnapshot",
           "expires_at" AS "expiresAt"
         FROM "subscriptions"
         WHERE "id" = ${subscription.id}
@@ -438,6 +449,7 @@ export class SubscriptionDeletionService {
         syncJobId: createdJobId,
         userId: current.userId,
         orphanedPanelUsername,
+        planSnapshot: current.planSnapshot,
       };
     });
 
@@ -445,7 +457,7 @@ export class SubscriptionDeletionService {
       return outcome;
     }
 
-    this.publishDeletedEvent(subscription.id, outcome.userId, options.source);
+    this.publishDeletedEvent(subscription.id, outcome.userId, options.source, outcome.planSnapshot);
     this.publishOrphanRiskEvent(subscription.id, outcome, options.source);
 
     if (outcome.syncJobId !== null) {
@@ -609,6 +621,7 @@ export class SubscriptionDeletionService {
     subscriptionId: string,
     userId: string | null,
     source: LifecycleDeleteOptions['source'],
+    planSnapshot: unknown,
   ): void {
     if (userId === null || this.systemEventsService === undefined) {
       return;
@@ -618,7 +631,7 @@ export class SubscriptionDeletionService {
         EVENT_TYPES.SUBSCRIPTION_DELETED,
         'SUBSCRIPTION',
         'Subscription deleted',
-        { subscriptionId, userId, source },
+        { subscriptionId, userId, source, ...planNamesMetadata([planSnapshot]) },
       );
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';

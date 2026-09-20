@@ -18,6 +18,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesFromTransactionSnapshot } from '../../../common/utils/plan-snapshot.util';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
@@ -238,6 +239,7 @@ export class PaymentReconciliationService {
             {
               userId: transaction.userId,
               paymentId: transaction.paymentId,
+              ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
               gatewayType: transaction.gatewayType,
               amount: transaction.amount.toString(),
               currency: transaction.currency,
@@ -510,6 +512,13 @@ export class PaymentReconciliationService {
           {
             userId: transaction.userId,
             paymentId: transaction.paymentId,
+            // WHAT the customer was paying for, on every card in this file.
+            // The type and the amount were all an operator got: «Платёж не
+            // прошёл: RENEW, 250 ₽» names neither the plan nor anything they
+            // could act on. The invoice's own snapshot holds the name, and a
+            // combined renewal's marker holds the names its lines were drafted
+            // for — see `planNamesFromTransactionSnapshot`.
+            ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
             gatewayType: transaction.gatewayType,
             amount: transaction.amount.toString(),
             currency: transaction.currency,
@@ -747,6 +756,7 @@ export class PaymentReconciliationService {
         {
           userId: transaction.userId,
           paymentId: transaction.paymentId,
+          ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
           gatewayType: transaction.gatewayType,
           amount: transaction.amount.toString(),
           refundedAmount: String(refundedAmount),
@@ -986,6 +996,7 @@ export class PaymentReconciliationService {
       {
         userId: transaction.userId,
         paymentId: transaction.paymentId,
+        ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
         gatewayType: transaction.gatewayType,
         amount: transaction.amount.toString(),
         currency: transaction.currency,
@@ -1039,6 +1050,7 @@ export class PaymentReconciliationService {
       {
         userId: transaction.userId,
         paymentId: transaction.paymentId,
+        ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
         gatewayType: transaction.gatewayType,
         amount: shortfall.bookedAmount,
         currency: transaction.currency,
@@ -1161,6 +1173,7 @@ export class PaymentReconciliationService {
       {
         userId: transaction.userId,
         paymentId: transaction.paymentId,
+        ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
         gatewayType: transaction.gatewayType,
         amount: transaction.amount.toString(),
         currency: transaction.currency,

@@ -66,6 +66,7 @@ import type { PlanInheritedLimitKey } from '../../subscriptions/services/plan-in
 import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from './subscription-sync-refusals';
 import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detectors';
@@ -1125,6 +1126,7 @@ export class AdminUserSubscriptionsController {
         configUrl: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
+        planSnapshot: true,
         userId: true,
         user: { select: { telegramId: true, username: true, name: true } },
       },
@@ -1174,6 +1176,7 @@ export class AdminUserSubscriptionsController {
         username: sub.user?.username ?? null,
         subscriptionId,
         remnawaveId: sub.remnawaveId,
+        ...planNamesMetadata([sub.planSnapshot]),
         hwid,
         remainingDevices: result.total,
         source: 'ADMIN_PANEL',

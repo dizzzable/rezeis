@@ -6,6 +6,7 @@ import { firstValueFrom } from 'rxjs';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesFromTransactionSnapshot } from '../../../common/utils/plan-snapshot.util';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
@@ -151,6 +152,7 @@ export class PaymentPendingExpiryService {
         {
           userId: tx.userId,
           paymentId: tx.paymentId,
+          ...planNamesFromTransactionSnapshot(tx.planSnapshot),
           gatewayType: tx.gatewayType,
           amount: tx.amount.toString(),
           currency: tx.currency,
@@ -363,6 +365,7 @@ export class PaymentPendingExpiryService {
           ? {}
           : { telegramId: customer.telegramId.toString() }),
         paymentId: tx.paymentId,
+        ...planNamesFromTransactionSnapshot(tx.planSnapshot),
         gatewayType: tx.gatewayType,
         amount: tx.amount.toString(),
         currency: tx.currency,

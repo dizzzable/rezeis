@@ -25,6 +25,7 @@ import { pickBestDiscount } from '../../../common/utils/pending-discount.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
+import { planNameMetadata, planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { resolveAddOnRolloutFlags, resolveResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import {
@@ -513,6 +514,12 @@ export class PaymentSubscriptionMutationService {
       // The same holds for the lines a plan migration keeps on the current
       // plan: announced once, on the completion, and only for a commit.
       const latePlanMigrationRenewals: LatePlanMigrationRenewal[] = [];
+      // What the operator's card calls this renewal. Collected from the plan
+      // each line actually renewed on, not from the line's stored snapshot: an
+      // autopay charge deliberately carries no snapshot so that it renews on
+      // the plan as it is today, and a legacy draft has none either. Both fall
+      // through to the live row, and both still have a name.
+      const paidPlanNames: string[] = [];
       // Lock the transaction items inside the fulfillment transaction and claim
       // each row conditionally. The caller's pre-transaction snapshot is only
       // a candidate list; it is never authoritative under concurrent replay.
@@ -528,7 +535,7 @@ export class PaymentSubscriptionMutationService {
         }
       }
       if (claimedItems.length === 0) {
-        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines, latePlanMigrationRenewals };
+        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames };
       }
       const jobs: ProfileSyncJob[] = [];
       const now = new Date();
@@ -543,6 +550,7 @@ export class PaymentSubscriptionMutationService {
         if (plan === null) {
           throw new NotFoundException(`Renewal plan not found: ${item.planId}`);
         }
+        paidPlanNames.push(displayPlanName(plan));
         const currentSubscription = await this.lockRenewalSubscriptionInTransaction(
           transactionClient,
           item.subscriptionId,
@@ -876,7 +884,7 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return { jobs, dormantAddOnLines, latePlanMigrationRenewals };
+      return { jobs, dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames };
     });
 
     const completedMetadata = {
@@ -884,6 +892,12 @@ export class PaymentSubscriptionMutationService {
       paymentId: transaction.paymentId,
       purchaseType: transaction.purchaseType,
       itemCount: pending.length,
+      // WHICH PLAN WAS RENEWED. Without this the card for a combined renewal
+      // said «Тип покупки: Продление» and «Позиций: 1» and nothing else — an
+      // operator could not tell WHAT the customer had just renewed, which is
+      // the first thing they are asked. The names come off the plans the
+      // fulfilment above actually renewed on, so no extra read and no guess.
+      ...planNameMetadata(committed.paidPlanNames),
       amount: transaction.amount.toString(),
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
@@ -1226,6 +1240,9 @@ export class PaymentSubscriptionMutationService {
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
       subscriptionId: result.subscription.id,
+      // The plan the add-on was bought ONTO. An add-on is «+50 ГБ» to nobody
+      // until the card says to what.
+      ...planNamesMetadata([result.subscription.planSnapshot]),
     });
 
     return result;
@@ -1568,6 +1585,7 @@ export class PaymentSubscriptionMutationService {
         transactionId: input.transaction.id,
         paymentId: input.transaction.paymentId,
         planId: input.purchasedPlan.id,
+        ...planNamesMetadata([result.subscription.planSnapshot]),
         subscriptionId: result.subscription.id,
         usedUnits: result.lateSuccessOverCap.usedUnits,
         maxClaims: result.lateSuccessOverCap.maxClaims,

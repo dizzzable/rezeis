@@ -30,6 +30,7 @@ import { SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
@@ -162,6 +163,7 @@ export class InternalUserDevicesController {
         userName: user?.name ?? user?.username ?? userId,
         username: user?.username ?? null,
         subscriptionId: subscription.id,
+        ...planNamesMetadata([subscription.planSnapshot]),
         remnawaveId: subscription.remnawaveId,
         hwid,
         remainingDevices: result.total,
@@ -420,6 +422,7 @@ export class InternalUserDevicesController {
       {
         userId: subscription.userId,
         subscriptionId: subscription.id,
+        ...planNamesMetadata([subscription.planSnapshot]),
         remnawaveId: subscription.remnawaveId,
         devicesCleared,
       },
@@ -441,7 +444,7 @@ export class InternalUserDevicesController {
    * panel's `subscriptionUrl` and writes it back.
    */
   private reportRegenerateLinkLost(
-    subscription: { id: string; userId: string; remnawaveId: string | null },
+    subscription: { id: string; userId: string; remnawaveId: string | null; planSnapshot: unknown },
     reason: string,
   ): void {
     this.events.error(
@@ -451,6 +454,7 @@ export class InternalUserDevicesController {
       {
         userId: subscription.userId,
         subscriptionId: subscription.id,
+        ...planNamesMetadata([subscription.planSnapshot]),
         remnawaveId: subscription.remnawaveId,
         source: 'INTERNAL_USER_REGENERATE',
         repair: 'POST /admin/users/subscriptions/:id/sync',
@@ -460,7 +464,7 @@ export class InternalUserDevicesController {
 
   /** Emits the user-facing device-revoked event for the notification feed. */
   private async emitDeviceRevoked(
-    subscription: { id: string; userId: string; remnawaveId: string | null },
+    subscription: { id: string; userId: string; remnawaveId: string | null; planSnapshot: unknown },
     hwid: string,
     remainingDevices: number,
   ): Promise<void> {
@@ -478,6 +482,7 @@ export class InternalUserDevicesController {
         userName: user?.name ?? user?.username ?? subscription.userId,
         username: user?.username ?? null,
         subscriptionId: subscription.id,
+        ...planNamesMetadata([subscription.planSnapshot]),
         remnawaveId: subscription.remnawaveId,
         hwid,
         remainingDevices,
@@ -510,6 +515,7 @@ export class InternalUserDevicesController {
         // the difference between finding the profile and refusing to name it.
         remnawavePanelId: true,
         remnawavePanelUsername: true,
+        planSnapshot: true,
       },
     });
     return subscription;
@@ -539,6 +545,7 @@ export class InternalUserDevicesController {
         configUrl: true,
         remnawavePanelId: true,
         remnawavePanelUsername: true,
+        planSnapshot: true,
       },
     });
     return subscription;

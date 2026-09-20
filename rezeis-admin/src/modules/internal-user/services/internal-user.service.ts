@@ -15,6 +15,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { PasswordHashService } from '../../auth/services/password-hash.service';
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import {
@@ -149,6 +150,8 @@ interface CabinetConnectRow {
   readonly remnawaveId: string | null;
   /** The status the payload shows — the panel's overlay wins over the local row. */
   readonly status: SubscriptionStatus;
+  /** For the operator card raised when this read proves a first connection. */
+  readonly planSnapshot: unknown;
 }
 
 /** The person the cabinet read is for, as far as the connection signal is concerned. */
@@ -694,6 +697,7 @@ export class InternalUserService {
         id: sub.id,
         remnawaveId: sub.remnawaveId,
         status: usages[i].overlay?.status ?? sub.status,
+        planSnapshot: sub.planSnapshot,
       })),
       usages.map((usage) => usage.userTraffic),
     );
@@ -763,6 +767,7 @@ export class InternalUserService {
           id: subscription.id,
           remnawaveId: subscription.remnawaveId,
           status: o?.status ?? subscription.status,
+          planSnapshot: subscription.planSnapshot,
         },
       ],
       [usage.userTraffic],
@@ -954,6 +959,7 @@ export class InternalUserService {
       ...(user.name ? { userName: user.name } : {}),
       ...(user.username ? { username: user.username } : {}),
       subscriptionId: row.id,
+      ...planNamesMetadata([row.planSnapshot]),
       ...(row.remnawaveId !== null ? { remnawaveId: row.remnawaveId } : {}),
       status: row.status,
       connectedAt: connectedAt.toISOString(),

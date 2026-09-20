@@ -45,6 +45,7 @@ function candidate(id: string, overrides: Partial<ProbeCandidateRow> = {}): Prob
     remnawavePanelId: null,
     remnawavePanelUsername: null,
     configUrl: null,
+    planSnapshot: { name: 'Базовый' },
     checkedAt: null,
     dueSoon: false,
     ...overrides,

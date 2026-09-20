@@ -21,6 +21,10 @@ import { AccessModeGuard } from '../../settings/services/access-mode-guard.servi
 import { SettingsService } from '../../settings/services/settings.service';
 import { SubscriptionRenewalService } from '../../subscriptions/services/subscription-renewal.service';
 import { PricedRenewalInterface } from '../../subscriptions/interfaces/subscription-renewal.interface';
+import {
+  COMBINED_RENEWAL_PLAN_NAMES_KEY,
+  combinedRenewalPlanNames,
+} from '../../../common/utils/plan-snapshot.util';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
@@ -585,6 +589,14 @@ export class PaymentsRenewalCheckoutService {
               snapshotVersion: 1,
               itemCount: priced.items.length,
               snapshotSource: 'RENEWAL_DRAFT',
+              // The plans this invoice is for, written down once. The marker is
+              // not a plan snapshot and carries no `name`, so every later card
+              // about this payment — failed, expired, refunded — had nothing to
+              // name it by, and «Платёж не прошёл» told an operator the amount
+              // and nothing about what the customer was trying to renew.
+              [COMBINED_RENEWAL_PLAN_NAMES_KEY]: combinedRenewalPlanNames(
+                priced.items.map((item) => item.planSnapshot),
+              ),
               ...(requestFingerprint === null
                 ? {}
                 : { renewalRequestFingerprint: requestFingerprint }),

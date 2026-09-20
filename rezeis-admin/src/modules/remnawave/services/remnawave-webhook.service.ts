@@ -14,6 +14,7 @@ import {
   type SystemEventCategory,
   type SystemEventSeverity,
 } from '../../../common/services/system-events.service';
+import { planNameFromSnapshot } from '../../../common/utils/plan-snapshot.util';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import {
   claimFirstTraffic,
@@ -111,6 +112,8 @@ interface LocalUserContext {
     readonly trafficLimit: number | null;
     readonly deviceLimit: number;
     readonly expiresAt: Date | null;
+    /** For the card's «🏷 План» line — the panel's own payload has no plan of ours. */
+    readonly planSnapshot: unknown;
   } | null;
 }
 
@@ -1050,6 +1053,7 @@ export class RemnawaveWebhookService {
           trafficLimit: true,
           deviceLimit: true,
           expiresAt: true,
+          planSnapshot: true,
           user: { select: { id: true, telegramId: true, name: true, username: true } },
         },
       });
@@ -1155,6 +1159,12 @@ export class RemnawaveWebhookService {
       enriched['subscriptionId'] = context.subscription.id;
       enriched['status'] = context.subscription.status;
       enriched['deviceLimit'] = context.subscription.deviceLimit;
+      // Every card built from a panel webhook comes through here, so this is
+      // the one place that has to know: the panel's payload names ITS profile
+      // and knows nothing of our plans, and without this a card saying a
+      // customer's traffic ran out could not say on which plan.
+      const planName = planNameFromSnapshot(context.subscription.planSnapshot);
+      if (planName !== null) enriched['planName'] = planName;
       if (context.subscription.expiresAt !== null) enriched['expireAt'] = context.subscription.expiresAt.toISOString();
       if (enriched['trafficLimitBytes'] === undefined && context.subscription.trafficLimit !== null) {
         enriched['trafficLimitBytes'] = context.subscription.trafficLimit * 1024 ** 3;
