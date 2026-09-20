@@ -159,6 +159,111 @@ function transliterate(value: string): string {
 }
 
 /**
+ * Cyrillic → Latin, for the half of the panel that is written in Latin.
+ *
+ * «Терминал», «токен», «хост», «логин» are read in Russian and written in the
+ * interface as `terminal_id`, `token`, `host`, `login`. An operator types what
+ * they read, so the query has to be able to cross back.
+ */
+const CYRILLIC_TO_LATIN: ReadonlyArray<readonly [string, string]> = [
+  ['щ', 'shch'],
+  ['ж', 'zh'],
+  ['ч', 'ch'],
+  ['ш', 'sh'],
+  ['ю', 'yu'],
+  ['я', 'ya'],
+  ['ц', 'ts'],
+  ['х', 'h'],
+  ['а', 'a'],
+  ['б', 'b'],
+  ['в', 'v'],
+  ['г', 'g'],
+  ['д', 'd'],
+  ['е', 'e'],
+  ['з', 'z'],
+  ['и', 'i'],
+  ['к', 'k'],
+  ['л', 'l'],
+  ['м', 'm'],
+  ['н', 'n'],
+  ['о', 'o'],
+  ['п', 'p'],
+  ['р', 'r'],
+  ['с', 's'],
+  ['т', 't'],
+  ['у', 'u'],
+  ['ф', 'f'],
+  ['ы', 'y'],
+  ['э', 'e'],
+  ['ъ', ''],
+  ['ь', ''],
+];
+const CYRILLIC_TO_LATIN_MAP = new Map(CYRILLIC_TO_LATIN);
+
+function transliterateToLatin(value: string): string {
+  if (!/[а-я]/.test(value)) return '';
+  let out = '';
+  for (const char of value) {
+    out += CYRILLIC_TO_LATIN_MAP.get(char) ?? char;
+  }
+  return out;
+}
+
+/**
+ * Words that carry no meaning on their own.
+ *
+ * An operator types a phrase, not keywords: «бан по устройству», «оплата за
+ * подписку». Every word has to match for a row to qualify, so «по» — which
+ * appears in a third of the panel's sentences and in none of the labels worth
+ * finding — quietly decides the answer. Dropped from the QUERY only; the index
+ * keeps every word it was written with.
+ *
+ * Never all of them: a query that is nothing but function words is still a
+ * query, and answering it with everything is better than answering it with a
+ * blank.
+ */
+const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
+  'а',
+  'в',
+  'во',
+  'для',
+  'до',
+  'же',
+  'за',
+  'и',
+  'из',
+  'к',
+  'ко',
+  'на',
+  'не',
+  'о',
+  'об',
+  'от',
+  'по',
+  'при',
+  'с',
+  'со',
+  'у',
+  'что',
+  'and',
+  'for',
+  'from',
+  'in',
+  'of',
+  'on',
+  'the',
+  'to',
+  'with',
+]);
+
+function dropStopwords(normalized: string): string {
+  const words = normalized.split(' ');
+  if (words.length < 2) return normalized;
+  const kept = words.filter((word) => !QUERY_STOPWORDS.has(word));
+  return kept.length === 0 ? normalized : kept.join(' ');
+}
+
+/**
  * The query as typed, plus every rewriting worth trying, best first.
  *
  * The engine scores a row against each variant and keeps the best score, with
@@ -167,15 +272,16 @@ function transliterate(value: string): string {
  * «сор» (a real word) starts returning rows that only match `cjh`.
  */
 export function searchQueryVariants(query: string): string[] {
-  const primary = normalizeSearchText(query);
+  const primary = dropStopwords(normalizeSearchText(query));
   if (primary.length === 0) return [];
   const variants = [primary];
   const pushIfNew = (candidate: string): void => {
-    const normalized = normalizeSearchText(candidate);
+    const normalized = dropStopwords(normalizeSearchText(candidate));
     if (normalized.length > 0 && !variants.includes(normalized)) variants.push(normalized);
   };
   pushIfNew(swapLayout(primary));
   pushIfNew(transliterate(primary));
+  pushIfNew(transliterateToLatin(primary));
   return variants;
 }
 

@@ -54,8 +54,26 @@ describe('query variants', () => {
     expect(searchQueryVariants('nastroyki')).toContain(normalizeSearchText('настройки'));
   });
 
+  it('crosses back into latin, which half the panel is written in', () => {
+    // The field is labelled «ID кассы (terminal_id)»; the operator reads
+    // «терминал» and types it in Russian.
+    expect(searchQueryVariants('терминал')).toContain('terminal');
+  });
+
   it('always offers what was actually typed first', () => {
     expect(searchQueryVariants('платежи')[0]).toBe('платежи');
+  });
+
+  it('drops the function words that would otherwise decide the answer', () => {
+    // Every word has to match, so «по» — which is in a third of the panel's
+    // sentences and in none of its labels — picks the rows on its own.
+    expect(searchQueryVariants('бан по устройству')[0]).toBe(
+      normalizeSearchText('бан устройству'),
+    );
+  });
+
+  it('keeps a query that is nothing but function words', () => {
+    expect(searchQueryVariants('по')[0]).toBe('по');
   });
 
   it('has nothing to offer for an empty query', () => {
