@@ -24,11 +24,17 @@ import { en } from '@/i18n/en'
 import { ru } from '@/i18n/ru'
 
 /**
- * The single entry deliberately shipped without `requiredPermission`. Named
- * here so that dropping a permission from any OTHER entry fails loudly instead
- * of quietly widening who sees the row.
+ * The entries deliberately shipped without `requiredPermission`. Named here so
+ * that dropping a permission from any OTHER entry fails loudly instead of
+ * quietly widening who sees the row.
+ *
+ * Both are the operator's own: their two-factor setup, and their own
+ * notification inbox. No permission decides whether they may open them —
+ * permissions decide what gets FILED into the inbox, and that is answered on
+ * the server when the alert is raised. Gating the row would hide an operator's
+ * own notifications from them.
  */
-const INTENTIONALLY_UNGATED = new Set(['twoFactor'])
+const INTENTIONALLY_UNGATED = new Set(['twoFactor', 'notificationCentre'])
 
 const navItemLabels = en.adminNav.items as Record<string, string | undefined>
 const navItemLabelsRu = ru.adminNav.items as Record<string, string | undefined>

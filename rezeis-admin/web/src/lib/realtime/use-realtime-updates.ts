@@ -12,6 +12,9 @@
  *      operator.
  *   3. **Custom subscription callback** — components that need the raw
  *      stream (audit page, activity timeline) pass an `onEvent` handler.
+ *   4. **The notification centre** — a throttled "ask the server again", so
+ *      the bell's number is current without the panel deciding for itself
+ *      which events are alerts (`notification-inbox-live.ts`).
  *
  * Connection model
  *   - One socket per browser tab. Reconnection uses exponential backoff
@@ -32,6 +35,10 @@ import { toast } from 'sonner';
 import { io, type Socket } from 'socket.io-client';
 import { forceEndAdminSession } from '@/lib/admin-session';
 import { authStorage } from '@/lib/auth-storage';
+import {
+  cancelInboxRefresh,
+  scheduleInboxRefresh,
+} from '@/features/notification-centre/notification-inbox-live';
 import { getRealtimeInvalidationKeys } from './realtime-invalidation';
 import { i18n } from '@/i18n/i18n';
 import {
@@ -157,6 +164,10 @@ export function useRealtimeUpdates(options: UseRealtimeUpdatesOptions = {}): voi
       for (const key of getRealtimeInvalidationKeys(event)) {
         scheduleInvalidate(queryClient, pending, key);
       }
+      // Whether THIS event became an alert for THIS operator is the server's
+      // answer, not a table the panel keeps a second copy of — so an event
+      // means only "ask again", throttled to once per window.
+      scheduleInboxRefresh(queryClient);
       if (showToasts) showToastFor(event);
       onEventRef.current?.(event);
     });
@@ -179,6 +190,7 @@ export function useRealtimeUpdates(options: UseRealtimeUpdatesOptions = {}): voi
       stopped = true;
       pending.forEach((handle) => clearTimeout(handle));
       pending.clear();
+      cancelInboxRefresh();
       socket.removeAllListeners();
       socket.disconnect();
     };

@@ -1,12 +1,18 @@
 import { Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
 
 import { CurrentAdmin } from '../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../auth/interfaces/current-admin.interface';
+import {
+  ADMIN_NOTIFICATION_CATEGORIES,
+  type AdminNotificationCategory,
+} from '../push/admin-notification-categories';
 import { AdminNotificationInboxService, type InboxPage } from './services/admin-notification-inbox.service';
+
+const CATEGORY_NAMES: readonly string[] = ADMIN_NOTIFICATION_CATEGORIES.map((def) => def.category);
 
 /**
  * A query string carries text, so `?unreadOnly=false` arrives as the non-empty
@@ -39,6 +45,15 @@ class ListNotificationsQueryDto {
   @Transform(({ value }) => toBoolean(value))
   @IsBoolean()
   public unreadOnly?: boolean;
+
+  /**
+   * One of the five push categories. Validated against the same list the
+   * preferences screen offers, so a typo answers 400 rather than an empty
+   * inbox the operator would read as "nothing happened".
+   */
+  @IsOptional()
+  @IsIn(CATEGORY_NAMES)
+  public category?: AdminNotificationCategory;
 }
 
 class ClearNotificationsQueryDto {
@@ -77,6 +92,7 @@ export class AdminNotificationsController {
       limit: query.limit ?? DEFAULT_PAGE,
       cursor: query.cursor,
       unreadOnly: query.unreadOnly,
+      category: query.category,
     });
   }
 

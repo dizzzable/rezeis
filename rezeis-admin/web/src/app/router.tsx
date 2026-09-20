@@ -69,6 +69,12 @@ const CustomEmojiPage = lazy(() => import('@/features/custom-emoji/custom-emoji-
 const NotificationsPage = lazy(
   withFeatureBundle('notifications', () => import('@/features/notifications/notifications-page')),
 );
+// The operator's own alerts. Its dictionary lives in the core bundle, not a
+// feature one: the bell in the header shows the same strings and is mounted
+// on every page, so they are already loaded by the time this page is.
+const NotificationCentrePage = lazy(
+  () => import('@/features/notification-centre/notification-centre-page'),
+);
 const GatewaySettingsPage = lazy(
   withFeatureBundle('payments', () => import('@/features/payments/gateway-settings-page')),
 );
@@ -183,6 +189,7 @@ export const router = createBrowserRouter([
           { path: 'appearance', element: <Navigate to="/settings/panel#appearance" replace /> },
           { path: 'branding', element: <Navigate to="/settings/panel#branding" replace /> },
           { path: 'notifications', element: withSuspense(<NotificationsPage />) },
+          { path: 'notifications/inbox', element: withSuspense(<NotificationCentrePage />) },
           { path: 'payments/gateways', element: withSuspense(<GatewaySettingsPage />) },
           { path: 'external-auth', element: withSuspense(<ExternalAuthPage />) },
           { path: 'settings/referral', element: withSuspense(<ReferralSettingsPage />) },

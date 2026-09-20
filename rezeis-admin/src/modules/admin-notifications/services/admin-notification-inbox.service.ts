@@ -134,11 +134,20 @@ export class AdminNotificationInboxService implements OnModuleInit {
    */
   public async list(
     adminId: string,
-    options: { readonly limit: number; readonly cursor?: string; readonly unreadOnly?: boolean },
+    options: {
+      readonly limit: number;
+      readonly cursor?: string;
+      readonly unreadOnly?: boolean;
+      readonly category?: AdminNotificationCategory;
+    },
   ): Promise<InboxPage> {
+    // Both filters belong in the WHERE, not in a `.filter()` after reading:
+    // a page is twenty rows, and filtering those would answer "no antifraud
+    // alerts" for an inbox whose antifraud alerts are on page two.
     const where = {
       adminId,
       ...(options.unreadOnly === true ? { readAt: null } : {}),
+      ...(options.category === undefined ? {} : { category: options.category }),
     };
     const rows = await this.prismaService.adminNotification.findMany({
       where,

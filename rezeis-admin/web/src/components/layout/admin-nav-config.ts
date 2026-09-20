@@ -349,6 +349,19 @@ export const deepLinkNavItems: ReadonlyArray<NavItem & { readonly groupKey: stri
   },
   // ── Operations ────────────────────────────────────────────────────────────
   {
+    // Центр уведомлений: личный ящик этого администратора. Открывается
+    // колокольчиком в шапке, здесь он есть ради ⌘K и адреса.
+    //
+    // Без `requiredPermission` намеренно: ящик есть у каждого, и права решают
+    // не доступ к странице, а то, какие категории в неё попадают — это решено
+    // на сервере в момент события. Скрывать страницу от роли, у которой в ней
+    // просто пусто, значит прятать от неё и её собственные уведомления.
+    key: 'notificationCentre',
+    path: '/notifications/inbox',
+    icon: Bell,
+    groupKey: 'operations',
+  },
+  {
     key: 'bulkUsers',
     path: '/users#bulk',
     icon: UsersRound,

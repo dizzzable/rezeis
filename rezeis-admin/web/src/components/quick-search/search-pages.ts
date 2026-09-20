@@ -55,6 +55,7 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   paymentGateways: '/payments/gateways',
   supportTicketsPage: '/support-tickets',
   fraudPage: '/fraud',
+  notificationCentre: '/notifications/inbox',
   automationsPage: '/automations',
   userHints: '/automations#hints',
   analyticsPage: '/analytics',

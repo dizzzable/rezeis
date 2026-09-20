@@ -17,6 +17,7 @@ import { useGlassStore } from '@/lib/theme/glass-store'
 
 import { TelegramIcon } from './brand-icons'
 import { LanguageToggle } from './language-toggle'
+import { NotificationBell } from './notification-bell'
 import { SupportDropdown } from './support-dropdown'
 import { ThemeToggle } from './theme-toggle'
 import { UpdateIndicator } from './update-indicator'
@@ -27,9 +28,10 @@ interface AdminTopbarProps {
 }
 
 /**
- * Top bar — search, version indicator, brand link, theme/language pickers,
- * and the admin avatar dropdown. Renders inside the main column of
- * `<AdminShell>` and never re-renders on route changes (no router state).
+ * Top bar — search, the notification bell, version indicator, brand link,
+ * theme/language pickers, and the admin avatar dropdown. Renders inside the
+ * main column of `<AdminShell>` and never re-renders on route changes (no
+ * router state).
  */
 export function AdminTopbar({ onOpenMobileSidebar, onOpenSearch }: AdminTopbarProps) {
   const { t } = useTranslation()
@@ -93,6 +95,8 @@ export function AdminTopbar({ onOpenMobileSidebar, onOpenSearch }: AdminTopbarPr
         >
           <Search className="h-4 w-4" />
         </Button>
+
+        <NotificationBell />
 
         <UpdateIndicator />
 

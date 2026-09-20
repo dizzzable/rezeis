@@ -252,6 +252,18 @@ describe('AdminNotificationInboxService — whose copy a request may touch', () 
     assert.equal(state.findMany[0]?.skip, 1);
   });
 
+  it('filters by category in the query, not in the page it already read', async () => {
+    // The difference matters at exactly one row: an inbox whose only antifraud
+    // alert is on page two answers «нет уведомлений» if the filter runs over
+    // the twenty rows that came back instead of over the table.
+    const state = createState();
+    const { service } = createService(state);
+
+    await service.list('admin-1', { limit: 20, category: 'fraud' });
+
+    assert.deepStrictEqual(state.findMany[0]?.where, { adminId: 'admin-1', category: 'fraud' });
+  });
+
   it('marks and deletes by admin AND id, so another operator’s copy matches nothing', async () => {
     const state = createState();
     const { service } = createService(state);

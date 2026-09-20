@@ -121,6 +121,9 @@ export const en = {
       subscriptions: 'Subscriptions',
       payments: 'Payments',
       supportTickets: 'Support tickets',
+      // Not the `notifications` row below: that one opens the delivery
+      // settings, this one opens the alerts that already arrived.
+      notificationCentre: 'Notification centre',
       pointsSettings: 'Points & cashback',
       fraudSignals: 'Fraud signals',
       automations: 'Automations',
@@ -2823,6 +2826,38 @@ export const en = {
         },
       },
     },
+  },
+  notificationCentre: {
+    title: 'Notification centre',
+    subtitle:
+      'The alerts the panel raised for you. The copy is personal: what you read and delete is yours alone, and every other admin keeps theirs.',
+    bellAria: 'Notifications, unread: {{unread}}',
+    markAllRead: 'Mark all read',
+    markedAllRead: 'Every notification is marked read',
+    openAll: 'All notifications',
+    empty: 'Nothing has arrived yet',
+    emptyUnread: 'Nothing unread',
+    emptyHint:
+      'This holds what also goes out as a push: support tickets, failed payments, antifraud, withdrawal requests and system errors. Ordinary events — sign-ins, successful payments — live in the audit log.',
+    loadFailed: 'Could not load notifications',
+    loadMore: 'Show more',
+    remove: 'Delete notification',
+    removed: 'Notification deleted',
+    clear: 'Clear',
+    clearRead: 'Delete the read ones',
+    clearEverything: 'Delete everything',
+    cleared: 'The notification centre is empty',
+    confirmClearTitle: 'Clear the notification centre?',
+    confirmClearBody:
+      'Only your own copies go — every other admin keeps theirs. This cannot be undone.',
+    filterAll: 'All',
+    filterUnread: 'Unread',
+    filterCategory: 'Filter by category',
+    allCategories: 'All categories',
+    retention:
+      'Notifications are kept for 30 days and at most 500 per admin — the panel removes the rest itself.',
+    actionFailed: 'That did not go through',
+    justNow: 'just now',
   },
   pushNotifications: {
     title: 'Push notifications',

@@ -34,6 +34,16 @@ export const adminQueryKeys = {
   notifications: {
     all: ['admin', 'notifications'] as const,
     templates: ['admin', 'notifications', 'templates'] as const,
+    /**
+     * The notification centre — this operator's own alerts. `all` is the
+     * prefix both the badge and the list sit under, so one invalidation after
+     * a realtime event refreshes whichever of them is on screen.
+     */
+    inbox: {
+      all: ['admin', 'notifications', 'inbox'] as const,
+      unread: ['admin', 'notifications', 'inbox', 'unread'] as const,
+      list: (filter: string) => ['admin', 'notifications', 'inbox', 'list', filter] as const,
+    },
   },
   payments: {
     all: ['admin', 'payments'] as const,
