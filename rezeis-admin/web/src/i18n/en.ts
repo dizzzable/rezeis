@@ -2877,7 +2877,7 @@ export const en = {
     error: 'Failed to change the push setting.',
     categoriesTitle: 'Notification categories',
     categoriesSubtitle:
-      'Choose what to be pushed about. Only categories your role permits are shown.',
+      'Choose what you are notified about. These switches govern both the notification centre (the bell in the header) and the push sent to subscribed devices. Only categories your role permits are shown.',
     noCategories: 'Your role does not grant access to any notification category.',
     roleLegend:
       'Available categories follow your role permissions: support → support_tickets, payments → payments, anti-fraud → fraud_signals, withdrawals → withdrawals, system → dashboard.',

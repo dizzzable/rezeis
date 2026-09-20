@@ -129,19 +129,24 @@ export default function PanelNotificationsTab() {
     }
   }
 
-  // Hidden entirely when push is disabled server-side (no VAPID key) — no
-  // useful action surface.
+  // No VAPID key server-side: push itself has no action surface left. The
+  // category switches stay, because they are no longer only about push —
+  // they decide what reaches the notification centre too, and the centre
+  // works with no VAPID key and no subscribed device at all.
   if (configured === false) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Bell className="h-5 w-5" />
-            {t('pushNotifications.title')}
-          </CardTitle>
-          <CardDescription>{t('pushNotifications.disabledServer')}</CardDescription>
-        </CardHeader>
-      </Card>
+      <div className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Bell className="h-5 w-5" />
+              {t('pushNotifications.title')}
+            </CardTitle>
+            <CardDescription>{t('pushNotifications.disabledServer')}</CardDescription>
+          </CardHeader>
+        </Card>
+        <CategoryPreferences />
+      </div>
     )
   }
 
@@ -180,7 +185,12 @@ export default function PanelNotificationsTab() {
         </CardContent>
       </Card>
 
-      {enabled && <CategoryPreferences />}
+      {/* Shown whether or not THIS browser is subscribed. The switches used to
+          be about push alone, so hiding them with the subscription made sense;
+          now they also decide what is filed into the notification centre, which
+          every operator has — and an operator who never turns push on could
+          neither see nor change what reaches their own bell. */}
+      <CategoryPreferences />
     </div>
   )
 }
