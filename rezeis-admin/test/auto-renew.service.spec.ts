@@ -27,6 +27,13 @@ interface SubRow {
   planSnapshot: unknown;
 }
 
+/**
+ * Every system event the service under test raised, across all four harnesses
+ * in this file. Module-scoped because each harness builds its own service and
+ * the assertions read it right after the call that filled it.
+ */
+const raisedEvents: Array<{ readonly type: string; readonly metadata: Record<string, unknown> }> = [];
+
 function createHarness(opts: {
   expiring: SubRow[];
   alreadyNotifiedUserIds: string[];
@@ -107,6 +114,7 @@ function createHarness(opts: {
     { build: async () => ({}) } as never,
     // Renewal plan selection. Not reached by the warning emitters.
     { requiresPlanSelection: async () => false } as never,
+    { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
   );
   return { service, createdFor, counters };
 }
@@ -315,6 +323,7 @@ describe('AutoRenewService.processAutopayCharges', () => {
       { build: async () => ({}) } as never,
       // A renewal that needs no plan choice: the case is about the attempt key.
       { requiresPlanSelection: async () => false } as never,
+      { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
     );
 
     const result = await service.processAutopayCharges();
@@ -387,6 +396,7 @@ describe('autopay and a renewal that needs the subscriber’s choice', () => {
           return options.needsChoice.has(subscriptionId);
         },
       } as never,
+      { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
     );
     return { service, checkoutsFor, asked, expiredIds };
   }
@@ -541,6 +551,7 @@ describe('autopay and a renewal refused before any payment exists', () => {
       { build: async () => ({}) } as never,
       // Not a plan-choice case: every plan here still exists.
       { requiresPlanSelection: async () => false } as never,
+      { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
     );
     const statusOf = (id: string): SubscriptionStatus | undefined => rows.find((row) => row.id === id)?.status;
     return { service, checkoutsFor, expiredIds, statusOf };

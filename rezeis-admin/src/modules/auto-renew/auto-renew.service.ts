@@ -7,6 +7,8 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
@@ -86,6 +88,8 @@ export class AutoRenewService {
      * `processAutopayCharges`).
      */
     private readonly subscriptionRenewalService: SubscriptionRenewalService,
+    /** Raises «Подписка истекла» for the operator; see `announceExpired`. */
+    private readonly systemEvents: SystemEventsService,
   ) {}
 
   /**
@@ -412,7 +416,63 @@ export class AutoRenewService {
     });
 
     this.logger.log(`Marked ${result.count} subscriptions as EXPIRED`);
+    if (result.count > 0) await this.announceExpired(uniqueIds);
     return result.count;
+  }
+
+  /**
+   * «⌛ Подписка истекла», one card per subscription, raised HERE because this
+   * is the only place that knows the moment: the row was ACTIVE when it was
+   * read and is EXPIRED now.
+   *
+   * Not from `createExpiredNotices`, which is the customer's message and is
+   * deduplicated PER USER — somebody whose two subscriptions end the same
+   * night gets one notice, and the operator would get one card for two
+   * expiries. Not from the cleanup sweep either: that runs days later, after
+   * the grace window, and answers a different question.
+   *
+   * Read back rather than assumed: `updateMany` reports a count, and its
+   * `where` keeps the ACTIVE condition, so a row somebody else touched in
+   * between is not ours to announce.
+   *
+   * Best-effort by contract. The expiry is already committed; a card that
+   * cannot be built must not turn a completed sweep into a failed one, and
+   * `runCycle` counts on this returning a number.
+   */
+  private async announceExpired(candidateIds: readonly string[]): Promise<void> {
+    try {
+      const expired = await this.prismaService.subscription.findMany({
+        where: { id: { in: [...candidateIds] }, status: SubscriptionStatus.EXPIRED },
+        select: {
+          id: true,
+          userId: true,
+          isTrial: true,
+          expiresAt: true,
+          planSnapshot: true,
+          remnawaveId: true,
+        },
+      });
+      for (const sub of expired) {
+        this.systemEvents.info(
+          EVENT_TYPES.SUBSCRIPTION_EXPIRED,
+          'SUBSCRIPTION',
+          'Срок подписки закончился',
+          {
+            subscriptionId: sub.id,
+            userId: sub.userId,
+            ...planNamesMetadata([sub.planSnapshot]),
+            isTrial: sub.isTrial,
+            ...(sub.expiresAt === null ? {} : { expireAt: sub.expiresAt.toISOString() }),
+            ...(sub.remnawaveId === null ? {} : { remnawaveId: sub.remnawaveId }),
+            source: 'AUTO_RENEW_SWEEP',
+          },
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Expiry cards were not raised: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

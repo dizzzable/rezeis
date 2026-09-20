@@ -24,39 +24,29 @@ const SERVICE = join(PACKAGE_ROOT, 'src/common/services/system-events.service.ts
  * Registered, and nothing in `src/` raises it. Each line is a decision, not a
  * shrug — each one is a card an operator can tick today and never receive.
  *
- * Every one of these describes something the panel does know about, and every
- * one is already announced by a DIFFERENT type that does have a producer:
+ * Every one of these is already answered by something else an operator reads:
  *
- *   subscription.renewed / .upgraded / .expired — `payment.completed` carries
- *       the renewal and the upgrade, with the plan and the purchase type, and
- *       the expiry sweep raises `subscription.synced`. Whether the lifecycle
- *       deserves three cards of its own is a question for the owner, not
- *       something to answer by leaving three dead types registered.
  *   payment.webhook_received — every webhook is persisted and shown on
  *       «Платежи» → «Вебхуки»; a card each would be one per provider ping.
  *   promocode.created / .depleted — creation is an operator action and is in
  *       the audit log already; depletion has no watcher.
  *   user.role_changed — role edits are audited by the RBAC module under its
  *       own action codes.
- *   system.startup — «🚀 Запуск системы» would be a card per container start,
- *       which is a card per deploy and per restart. Nothing raises it and
- *       nothing decided that it should; `smoke:boot` and the health page are
- *       how a start is checked today. This one is worth asking the owner
- *       about — it is the only entry here that announces something no other
- *       type does.
+ *
+ * The owner decided on 20.09.2026 to build the other four rather than excuse
+ * them: `subscription.renewed` / `.upgraded` (payment fulfilment),
+ * `subscription.expired` (the sweep that flips the row) and `system.startup`
+ * (one card per deploy). They left this list by that decision — which is what
+ * the last test below enforces.
  *
  * NOTHING IS ADDED HERE TO MAKE THIS SPEC PASS. If a type belongs to a
  * feature, give it a producer; if it does not, do not register it.
  */
 const DECLARED_WITHOUT_PRODUCER: ReadonlySet<string> = new Set([
-  'SUBSCRIPTION_RENEWED',
-  'SUBSCRIPTION_UPGRADED',
-  'SUBSCRIPTION_EXPIRED',
   'PAYMENT_WEBHOOK_RECEIVED',
   'PROMOCODE_CREATED',
   'PROMOCODE_DEPLETED',
   'USER_ROLE_CHANGED',
-  'SYSTEM_STARTUP',
 ]);
 
 function sourceFiles(directory: string): string[] {

@@ -328,6 +328,20 @@ export class PaymentSubscriptionMutationService {
       );
     }
 
+    // What happened TO THE SUBSCRIPTION, beside what happened to the money.
+    //
+    // «Платёж получен» describes the payment; these two describe the thing the
+    // customer actually has, with its new expiry and its plan, and they are the
+    // types an automation rule or an outbound webhook binds to when it cares
+    // about the subscription rather than the till. An operator who finds two
+    // cards per renewal too many unticks one of them in «Уведомления».
+    this.announceSubscriptionLifecycle(transaction.purchaseType, {
+      subscription: result.subscription,
+      paymentId: transaction.paymentId,
+      planName: displayPlanName(purchasedPlan),
+      durationDays: selectedDurationDays,
+    });
+
     // Consume the one-time "next purchase" discount (PURCHASE_DISCOUNT promo
     // reward) now that a plan purchase has completed. Without this it kept
     // applying to every future purchase. The permanent personalDiscount stays.
@@ -398,6 +412,62 @@ export class PaymentSubscriptionMutationService {
    *
    * The PERSONAL discount is permanent and never touched here.
    */
+  /**
+   * «🔄 Подписка продлена» / «⬆️ Подписка улучшена» — what happened to the
+   * subscription, as opposed to what happened to the money.
+   *
+   * Both types were registered, titled and tick-boxed and never raised. A NEW
+   * purchase is deliberately not announced here: `subscription.created` is
+   * raised by the provisioning step, once the panel profile exists, which is
+   * the moment that subscription starts being real.
+   *
+   * Best-effort: the money is captured and the subscription is written. A card
+   * that cannot be raised must not undo either.
+   */
+  private announceSubscriptionLifecycle(
+    purchaseType: PurchaseType,
+    input: {
+      readonly subscription: Subscription;
+      readonly paymentId: string;
+      readonly planName: string;
+      readonly durationDays: number | null;
+    },
+  ): void {
+    const type =
+      purchaseType === PurchaseType.RENEW
+        ? EVENT_TYPES.SUBSCRIPTION_RENEWED
+        : purchaseType === PurchaseType.UPGRADE
+          ? EVENT_TYPES.SUBSCRIPTION_UPGRADED
+          : null;
+    if (type === null) return;
+    try {
+      this.events.info(
+        type,
+        'SUBSCRIPTION',
+        purchaseType === PurchaseType.RENEW ? 'Подписка продлена' : 'Подписка улучшена',
+        {
+          subscriptionId: input.subscription.id,
+          userId: input.subscription.userId,
+          planName: input.planName,
+          status: input.subscription.status,
+          paymentId: input.paymentId,
+          ...(input.durationDays === null ? {} : { durationDays: input.durationDays }),
+          ...(input.subscription.expiresAt === null
+            ? {}
+            : { expireAt: input.subscription.expiresAt.toISOString() }),
+          ...(input.subscription.remnawaveId === null
+            ? {}
+            : { remnawaveId: input.subscription.remnawaveId }),
+        },
+      );
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Subscription lifecycle card was not raised for ${input.subscription.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private async consumePurchaseDiscount(
     userId: string,
     planId: string | null,
@@ -520,6 +590,14 @@ export class PaymentSubscriptionMutationService {
       // the plan as it is today, and a legacy draft has none either. Both fall
       // through to the live row, and both still have a name.
       const paidPlanNames: string[] = [];
+      // One «Подписка продлена» per line, held for the commit like everything
+      // else here: a combined payment renews several subscriptions at once and
+      // each of them is its own lifecycle fact.
+      const renewedLines: Array<{
+        readonly subscription: Subscription;
+        readonly planName: string;
+        readonly durationDays: number | null;
+      }> = [];
       // Lock the transaction items inside the fulfillment transaction and claim
       // each row conditionally. The caller's pre-transaction snapshot is only
       // a candidate list; it is never authoritative under concurrent replay.
@@ -535,7 +613,7 @@ export class PaymentSubscriptionMutationService {
         }
       }
       if (claimedItems.length === 0) {
-        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames };
+        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames, renewedLines };
       }
       const jobs: ProfileSyncJob[] = [];
       const now = new Date();
@@ -716,6 +794,11 @@ export class PaymentSubscriptionMutationService {
             ...(inheritedLimitRefresh === null ? {} : inheritedLimitRefresh.columns),
           },
         });
+        renewedLines.push({
+          subscription: renewedSubscription,
+          planName: displayPlanName(plan),
+          durationDays: item.durationDays,
+        });
         const syncJob = await transactionClient.profileSyncJob.create({
           data: {
             subscriptionId: renewedSubscription.id,
@@ -884,7 +967,7 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return { jobs, dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames };
+      return { jobs, dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames, renewedLines };
     });
 
     const completedMetadata = {
@@ -920,6 +1003,18 @@ export class PaymentSubscriptionMutationService {
         code: LATE_PLAN_MIGRATION_RENEWAL_CODE,
         planMigrationRenewals: committed.latePlanMigrationRenewals.map((renewal) => ({ ...renewal })),
         note: describeLatePlanMigrationRenewals(committed.latePlanMigrationRenewals),
+      });
+    }
+
+    // What happened to each SUBSCRIPTION the payment renewed — one card per
+    // line, after the commit, for the same reason everything else here waits:
+    // a rolled-back attempt must announce nothing.
+    for (const line of committed.renewedLines) {
+      this.announceSubscriptionLifecycle(PurchaseType.RENEW, {
+        subscription: line.subscription,
+        paymentId: transaction.paymentId,
+        planName: line.planName,
+        durationDays: line.durationDays,
       });
     }
 

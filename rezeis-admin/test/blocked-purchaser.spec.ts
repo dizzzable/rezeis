@@ -119,6 +119,7 @@ describe('autopay never attempts a blocked owner', () => {
       { build: async () => ({}) } as never,
       // Renewal plan selection — never reached: no candidate comes back.
       { requiresPlanSelection: async () => false } as never,
+      { info: () => undefined } as never,
     );
 
     await service.processAutopayCharges();

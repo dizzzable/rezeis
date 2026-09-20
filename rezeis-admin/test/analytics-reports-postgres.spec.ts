@@ -1092,6 +1092,7 @@ run('business analytics on PostgreSQL', () => {
           new SavedPaymentMethodService(tx as never, refuse('systemEvents')),
           refuse('noticePayload'),
           new SubscriptionRenewalService(tx as never, refuse('subscriptionQuoteService'), refuse('addOnEligibilityService')),
+          { info: () => undefined } as never,
         );
         await autoRenew.processAutopayCharges();
         const report = await service.getExpiring();

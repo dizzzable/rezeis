@@ -127,6 +127,7 @@ function buildService(options: {
     noticePayload,
     // Renewal plan selection — not reached by the notice emitters.
     { requiresPlanSelection: async () => false } as never,
+    { info: () => undefined } as never,
   );
   return { service, created, queries };
 }

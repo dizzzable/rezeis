@@ -767,9 +767,12 @@ describe('a single renewal paid after a plan migration moved its subscription', 
 
     await world.fulfil();
 
+    // One completion for the payment, then the subscription's own card. The
+    // assertion is about the first: a second `payment.completed` would be a
+    // second card to reconcile against this one.
     assert.deepEqual(
       world.events.map((event) => `${event.severity} ${event.type}`),
-      [`WARNING ${EVENT_TYPES.PAYMENT_COMPLETED}`],
+      [`WARNING ${EVENT_TYPES.PAYMENT_COMPLETED}`, `INFO ${EVENT_TYPES.SUBSCRIPTION_RENEWED}`],
     );
     const [completion] = world.completions();
     assert.equal(completion!.message, LATE_PLAN_MIGRATION_RENEWAL_MESSAGE);
@@ -1113,9 +1116,18 @@ describe('a combined renewal with a line whose subscription a plan migration mov
 
     await world.fulfil();
 
+    // ONE completion for the payment, and one lifecycle card per LINE — the
+    // two lines this payment renewed. The point of this assertion is the
+    // first: a second `payment.completed` would be a second card to reconcile
+    // against the first. `subscription.renewed` answers a different question
+    // (what happened to each subscription) and is ticked separately.
     assert.deepEqual(
       world.events.map((event) => `${event.severity} ${event.type}`),
-      [`WARNING ${EVENT_TYPES.PAYMENT_COMPLETED}`],
+      [
+        `WARNING ${EVENT_TYPES.PAYMENT_COMPLETED}`,
+        `INFO ${EVENT_TYPES.SUBSCRIPTION_RENEWED}`,
+        `INFO ${EVENT_TYPES.SUBSCRIPTION_RENEWED}`,
+      ],
     );
     const [completion] = world.completions();
     assert.equal(completion!.message, LATE_PLAN_MIGRATION_RENEWAL_MESSAGE);

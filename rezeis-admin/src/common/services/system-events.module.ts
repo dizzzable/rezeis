@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
 import { OutboundHttpModule } from '../http/outbound-http.module';
+import { StartupAnnouncerService } from './startup-announcer.service';
 import { SystemEventsService } from './system-events.service';
 
 /**
@@ -10,7 +11,7 @@ import { SystemEventsService } from './system-events.service';
 @Global()
 @Module({
   imports: [OutboundHttpModule],
-  providers: [SystemEventsService],
+  providers: [SystemEventsService, StartupAnnouncerService],
   exports: [SystemEventsService],
 })
 export class SystemEventsModule {}
