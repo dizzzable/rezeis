@@ -156,3 +156,23 @@ elementProto.hasPointerCapture ??= (): boolean => false;
 elementProto.setPointerCapture ??= (): void => {};
 elementProto.releasePointerCapture ??= (): void => {};
 elementProto.scrollIntoView ??= (): void => {};
+
+// ── The two animation-frame globals, so REMOVING a stub cannot remove them ──
+//
+// jsdom here does not define `requestAnimationFrame`/`cancelAnimationFrame`.
+// A test that stubs them with `vi.stubGlobal` and then calls
+// `vi.unstubAllGlobals()` in its `afterEach` therefore does not restore them —
+// it DELETES them, because there was nothing there before. Anything that
+// cancels a pending frame while unmounting afterwards (Recharts, CountUp, the
+// surface-usage rings) then throws `ReferenceError: cancelAnimationFrame is
+// not defined` out of a cleanup, where no assertion can see it: vitest counts
+// it as an unhandled error and fails the whole run with every test green.
+//
+// Defined here, the stub has something to restore TO. `??=` so an environment
+// that does provide them keeps its own.
+const frameGlobals = globalThis as unknown as Record<string, unknown>;
+frameGlobals['requestAnimationFrame'] ??= (frame: FrameRequestCallback): number =>
+  setTimeout(() => frame(Date.now()), 0) as unknown as number;
+frameGlobals['cancelAnimationFrame'] ??= (handle: number): void => {
+  clearTimeout(handle as unknown as ReturnType<typeof setTimeout>);
+};
