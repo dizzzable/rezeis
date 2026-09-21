@@ -301,6 +301,9 @@ function createService(
   };
   const relayQueue = { enqueue: async () => true };
   const webPush = {
+    // The operator brand a `preRenderedText` title is filled from — the push
+    // banner, the e-mail subject and the cabinet feed row all take it.
+    resolveBrandName: async () => 'Winger VPN',
     sendToUser: async (call: unknown) => {
       state.webPushCalls.push(call);
       return { attempted: 1, delivered: 1, failed: 0, disabled: false };

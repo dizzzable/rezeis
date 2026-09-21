@@ -62,8 +62,14 @@ describe('AdminUserManagementController notify channels', () => {
     await controller.sendNotification('12345', { message: 'Push only', channels: ['webpush'] });
 
     assert.deepStrictEqual(harness.state.relayCalls, []);
+    // AN EMPTY TITLE IS THE BRANDED ONE. `WebPushService.sendToUser` fills it
+    // from `brandingSettings.brandName` — the same value that names the
+    // installed app — and a non-empty title WINS over the brand. This line
+    // used to pin the literal `Reiwa`, which is the stock fallback, so an
+    // operator writing from a cabinet called «Winger VPN» reached the customer
+    // under our name.
     assert.deepStrictEqual(harness.state.webPushSends, [
-      { userId: 'user-1', title: 'Reiwa', body: 'Push only', url: '/dashboard', tag: 'ADMIN_MESSAGE:event-1' },
+      { userId: 'user-1', title: '', body: 'Push only', url: '/dashboard', tag: 'ADMIN_MESSAGE:event-1' },
     ]);
   });
 
@@ -348,6 +354,10 @@ function createHarness(options: HarnessOptions = {}) {
   };
 
   const webPush = {
+    // The operator brand a title is filled from. Named here because the
+    // service really does ask for it: a double that omits it turns a headed
+    // notification into a thrown promise, and the send never happens.
+    resolveBrandName: async () => 'Winger VPN',
     isConfigured: async () => pushConfigured,
     countSubscriptions: async () => subscriptionCount,
     sendToUser: async (input: unknown) => {

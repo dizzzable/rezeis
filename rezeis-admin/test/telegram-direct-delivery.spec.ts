@@ -892,6 +892,7 @@ describe('the operator mirror of a user notification', () => {
       { getByType: async () => null } as never,
       { notifyUser: async () => undefined } as never,
       {
+        resolveBrandName: async () => 'Winger VPN',
         sendToUser: async () => ({ attempted: 0, delivered: 0, failed: 0, disabled: true }),
         isConfigured: async () => false,
         countSubscriptions: async () => 0,

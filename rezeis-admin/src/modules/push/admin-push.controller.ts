@@ -108,7 +108,10 @@ export class AdminPushController {
     }
     await this.webPushService.sendToAdmin({
       adminId: admin.id,
-      title: 'Reiwa',
+      // Empty, so `sendToAdmin` heads it with the operator's own brand. A test
+      // that arrives under a name the operator has never configured answers a
+      // different question than the one they clicked.
+      title: '',
       body: 'Тестовое web-push уведомление. Доставка работает.',
       url: '/',
     });

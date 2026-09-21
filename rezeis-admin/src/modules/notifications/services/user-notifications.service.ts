@@ -1002,7 +1002,16 @@ export class UserNotificationsService {
       const badgeCount = await this.countUnread(userId);
       const result = await this.webPushService.sendToUser({
         userId,
-        title: 'Reiwa',
+        // EMPTY ON PURPOSE — this is how the operator's brand reaches the
+        // notification. `WebPushService.sendToUser` fills an empty title with
+        // `brandingSettings.brandName`, the same value that names the installed
+        // app; it is the only side that reads settings, and the service worker
+        // cannot read them at all. This line used to say `'Reiwa'`, which is
+        // the stock fallback, and a non-empty title WINS over the brand — so
+        // every operator message arrived headed `Reiwa` no matter what the
+        // install was called. Reported from production 2026-09-21 with a
+        // screenshot from a cabinet branded «Winger VPN».
+        title: '',
         body: stripHtml(text),
         url: resolveNotificationPushUrl('ADMIN_MESSAGE'),
         // A person wrote to this person, and a second message is a second
@@ -1120,9 +1129,22 @@ export class UserNotificationsService {
       const locale = coerceNotificationLocale(user.language as string | null | undefined);
       const template =
         input.preRenderedText !== undefined ? null : await this.fetchTemplate(input.type);
+      // THE BRAND, NOT THE STOCK NAME. A `preRenderedText` send carries its
+      // own words and no template, so this title is invented here — and it
+      // was invented as the literal `Reiwa`, which is the fallback for an
+      // install that configured nothing. It headed the push banner, the
+      // e-mail subject and the cabinet feed row, so an operator whose cabinet
+      // is called «Winger VPN» wrote to a customer and the customer was told
+      // `Reiwa` had written. Read from the one place that knows
+      // (`brandingSettings.brandName` — the same value that names the
+      // installed app), and only for the branch that needs it.
       const rendered =
         input.preRenderedText !== undefined
-          ? { title: 'Reiwa', body: input.preRenderedText, html: input.preRenderedText }
+          ? {
+              title: await this.webPushService.resolveBrandName(),
+              body: input.preRenderedText,
+              html: input.preRenderedText,
+            }
           : template === null || !template.isActive
             ? null
             : await this.renderFromTemplate(template, input.payload, user.name, locale);

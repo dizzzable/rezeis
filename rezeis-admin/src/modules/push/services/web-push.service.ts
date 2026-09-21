@@ -399,6 +399,20 @@ export class WebPushService implements OnModuleInit {
    * whatever the operator had uploaded. Reported from production on
    * 2026-08-24 with a screenshot: the notification read `Reiwa`.
    */
+  /**
+   * The operator brand as a NAME, for a sender that must write a real title.
+   *
+   * `sendToUser` fills an EMPTY title from the same value, and that covers a
+   * push and nothing else. A message the operator typed is also an e-mail
+   * subject and a row in the cabinet's own feed, and neither of those passes
+   * through a push payload — they were headed with the literal `Reiwa` for
+   * exactly as long as the push was. One reader, so the three can never again
+   * disagree about what this install is called.
+   */
+  public async resolveBrandName(): Promise<string> {
+    return (await this.resolveNotificationBrand()).brandName;
+  }
+
   private async resolveNotificationBrand(): Promise<{
     readonly brandName: string;
     readonly icon: string | null;

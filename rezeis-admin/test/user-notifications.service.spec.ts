@@ -56,7 +56,12 @@ describe('UserNotificationsService', () => {
       // templated push, so a closed app still learns the number.
       {
         userId: 'user-1',
-        title: 'Reiwa',
+        // THE OPERATOR'S BRAND, read once and used for all three things this
+        // title becomes: the push banner, the e-mail subject and the row in
+        // the cabinet's feed. It was the literal `Reiwa` — the stock fallback
+        // — so a cabinet called «Winger VPN» wrote to its customers under our
+        // name in every one of them.
+        title: 'Winger VPN',
         body: 'Manual message',
         url: '/dashboard',
         // Identity, so an operator's second message cannot erase the first in
@@ -371,6 +376,8 @@ function createService(
     },
   };
   const webPush = {
+    // The operator brand a `preRenderedText` title is filled from.
+    resolveBrandName: async () => 'Winger VPN',
     sendToUser: async (call: unknown) => {
       state.webPushCalls.push(call);
     },
