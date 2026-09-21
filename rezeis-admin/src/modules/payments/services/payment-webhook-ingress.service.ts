@@ -54,9 +54,15 @@ export class PaymentWebhookIngressService {
    * is unsure about, so the naive version is a card per ping. Two rules keep it
    * to one card per FACT:
    *
-   *   * a RE-DELIVERY raises nothing. The inbox recognises a duplicate by the
-   *     provider's own event id, and a repeat of a notification is not a new
-   *     event — that is the retry storm, and it is where the volume lives;
+   *   * a RE-DELIVERY of a PAYMENT notification raises nothing. The inbox
+   *     recognises it by the provider's own event id together with the body
+   *     hash, and a byte-identical repeat is not a new event — that is the
+   *     retry storm, and it is where the volume lives. Be precise about the
+   *     scope: the other three kinds return before the inbox is touched, so
+   *     a re-delivered card binding or subscription callback DOES raise
+   *     another card. They have no row to be recognised by — deduplicating
+   *     them would mean storing one, which is a change to the ingress and
+   *     not to this card;
    *   * a REFUSED webhook raises nothing either: a bad signature or an unknown
    *     gateway throws before this is reached, and each already has its own
    *     alarm. This card means "accepted", not "arrived".

@@ -395,14 +395,24 @@ describe('SystemEventsService card formatting (enriched)', () => {
     // and a zero-amount card binding. Without this line the card says only
     // «Вебхук платёжки» and an operator cannot tell an autopay charge from a
     // card being saved.
+    //
+    // WITH THE METADATA A PRODUCER REALLY SENDS. An earlier version of this
+    // case fed it a `paymentId` as well, which no subscription callback ever
+    // carries — and that one invented field was what made the card render at
+    // all. The payment block is gated on `paymentId || amount ||
+    // webhookKind`, and before the gate learned the third of those, a real
+    // autopay card arrived with the kind line and nothing else on it.
     const { service, getLastText } = buildService();
     service.info('payment.webhook_received', 'PAYMENT', 'accepted', {
-      gatewayType: 'PLATEGA',
+      gatewayType: 'ROLLYPAY',
       webhookKind: 'subscription-charge',
-      paymentId: 'pay-9',
+      providerPaymentId: 'rp-77',
     });
     await flush();
-    assert.ok(getLastText()!.includes('📩 Вид: Списание по подписке'), getLastText()!);
+    const text = getLastText()!;
+    assert.ok(text.includes('📩 Вид: Списание по подписке'), text);
+    assert.ok(text.includes('💳 Способ оплаты: ROLLYPAY'), text);
+    assert.ok(text.includes('🧾 Платёж у провайдера: <code>rp-77</code>'), text);
   });
 
   it('renders a node block for node events', async () => {

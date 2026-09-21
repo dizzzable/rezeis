@@ -125,11 +125,18 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'points.cashback_credited', 'points.cashback_reversed', 'points.cashback_skipped',
   ],
   // `user.role_changed` is grouped HERE, not under its `user.` namespace: it is
-  // about an administrator's authority, and the panel emits it with category
-  // AUTH — which is the topic the card is delivered to. Listing it beside the
+  // about the authority of an ADMIN, and the panel emits it with category AUTH
+  // — which is the topic the card is delivered to. Listing it beside the
   // subscriber events would send an operator looking for it in the wrong
   // place. The tick-box itself is keyed by the type string, so a selection
   // made before this move is unaffected.
+  //
+  // NO SINGLE QUOTES IN THIS LITERAL, not even in a comment and not even as an
+  // apostrophe. `system-event-registry.spec.ts` reads the catalogue by matching
+  // every single-quoted string between these braces, so one stray quote pairs
+  // with the next real entry and swallows everything in between. The spec does
+  // catch it — as a short parse, several tests away from the comment that
+  // caused it.
   AUTH: [
     'auth.web_login', 'auth.password_changed', 'auth.password_recovery',
     'user.role_changed',

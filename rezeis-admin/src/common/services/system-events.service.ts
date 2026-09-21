@@ -1532,13 +1532,31 @@ export class SystemEventsService {
     }
 
     // Payment block
-    if (meta['paymentId'] || meta['amount']) {
+    //
+    // `webhookKind` is in the gate, and it has to be. Three of the four
+    // notifications «Вебхук платёжки» is raised for carry neither a payment
+    // id nor an amount — a card binding moves no money, and the two
+    // provider-subscription callbacks name the provider's own ids, not ours.
+    // Without this they rendered a card whose entire content was the kind
+    // line: an operator could not even tell which gateway it came from.
+    if (meta['paymentId'] || meta['amount'] || meta['webhookKind']) {
       lines.push('');
       lines.push('💰 <b>Платёж:</b>');
       const payLines: string[] = [];
       if (meta['paymentId']) payLines.push(`🆔 ID: <code>${escapeHtml(meta['paymentId'])}</code>`);
       if (meta['gatewayType'])
         payLines.push(`💳 Способ оплаты: ${escapeHtml(meta['gatewayType'])}`);
+      // The provider's own identifiers, carried by the two subscription
+      // callbacks. They are the only handle an operator has on an autopay
+      // charge: it has no payment of ours until the reconciliation finds one.
+      if (isPresent(meta['providerSubscriptionId']))
+        payLines.push(
+          `🔁 Подписка у провайдера: <code>${escapeHtml(meta['providerSubscriptionId'])}</code>`,
+        );
+      if (isPresent(meta['providerPaymentId']))
+        payLines.push(
+          `🧾 Платёж у провайдера: <code>${escapeHtml(meta['providerPaymentId'])}</code>`,
+        );
       if (meta['amount']) payLines.push(`💷 Сумма: ${fmtAmount(meta['amount'], meta['currency'])}`);
       if (meta['purchaseType'])
         payLines.push(`💥 Тип покупки: ${humanizePurchaseType(meta['purchaseType'])}`);

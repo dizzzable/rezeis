@@ -2,7 +2,7 @@
 
 Rezeis Admin — NestJS backend + React/Vite frontend for the admin panel.
 
-- **Version:** `0.9.7.65`
+- **Version:** `0.9.7.66`
 - **Backend:** NestJS 12 · TypeScript 6 · Prisma 7 · PostgreSQL · Redis · BullMQ
 - **Frontend:** React 19 · Vite 8 · TanStack Query 5 · shadcn/ui · Tailwind 4
 
@@ -104,7 +104,7 @@ cd web && npm run build # → dist/
 One unified image (API + worker + SPA) is published to GHCR by `.github/workflows/docker-publish.yml`. Its tags are channels:
 
 - `ghcr.io/dizzzable/rezeis:latest` — the last release; it moves only when a `v*` tag is pushed
-- `ghcr.io/dizzzable/rezeis:v0.9.7.65` — a specific release (the current one)
+- `ghcr.io/dizzzable/rezeis:v0.9.7.66` — a specific release (the current one)
 - `ghcr.io/dizzzable/rezeis:main` — the current `main` branch, not a release
 - `ghcr.io/dizzzable/rezeis:sha-<short>` — every built commit
 
