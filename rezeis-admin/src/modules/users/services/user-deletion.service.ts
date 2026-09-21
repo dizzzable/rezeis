@@ -4,7 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
@@ -17,9 +17,65 @@ import {
 
 export const USER_DELETE_PROTECTED_HISTORY_CODE = 'USER_DELETE_PROTECTED_HISTORY';
 export const USER_DELETE_PROTECTED_HISTORY_MESSAGE =
-  'This user has protected payment, partner-ledger, or reward history and cannot be permanently deleted. Block the account instead; audit records must be preserved.';
+  'This user has protected payment, partner-ledger, or reward history and cannot be permanently deleted. Block the account instead, or delete in full — the money history is kept on an anonymous holder.';
 
 const MAX_TRANSACTION_ATTEMPTS = 3;
+
+/**
+ * Which of the two deletions the operator asked for.
+ *
+ * `protected` is the one that has always existed: it deletes an account that
+ * owes the books nothing and refuses outright otherwise.
+ *
+ * `full` is what «Удалить полностью» does. The account and everything about it
+ * go; the protected rows are MOVED onto a fresh row carrying no identity, so
+ * revenue already reported for a closed month is not silently rewritten. See
+ * `anonymized-user.util.ts` for what such a row is and where it must not be
+ * counted.
+ */
+export type UserDeletionMode = 'protected' | 'full';
+
+/** What a full deletion kept, and what it destroyed. Written to the audit row. */
+export interface UserDeletionSummary {
+  readonly mode: UserDeletionMode;
+  /** The holder that now owns the money history; `null` for a plain deletion. */
+  readonly holderUserId: string | null;
+  readonly preserved: ProtectedHistoryCounts;
+  /** Sum of every transaction moved, per currency — the operator reads this. */
+  readonly preservedTotals: ReadonlyArray<{ readonly currency: string; readonly amount: string }>;
+  /** Destroyed outright, on the owner's decision of 21.09.2026. */
+  readonly purged: { readonly trialClaims: number };
+}
+
+/**
+ * What stands between this account and an ordinary deletion.
+ *
+ * Counted and REPORTED rather than collapsed into one refusal: «нельзя» with
+ * no subject is why the operator could not tell a test account that took a
+ * free trial from one that took real money, and both were equally
+ * undeletable.
+ */
+export interface ProtectedHistoryCounts {
+  readonly transactions: number;
+  readonly promocodeActivations: number;
+  readonly referralPointsExchanges: number;
+  readonly referralRewards: number;
+  readonly partnerTransactions: number;
+  readonly partnerWithdrawals: number;
+  readonly trialClaims: number;
+}
+
+function totalProtected(counts: ProtectedHistoryCounts): number {
+  return (
+    counts.transactions +
+    counts.promocodeActivations +
+    counts.referralPointsExchanges +
+    counts.referralRewards +
+    counts.partnerTransactions +
+    counts.partnerWithdrawals +
+    counts.trialClaims
+  );
+}
 
 interface RemnawaveProfileSnapshot {
   readonly id: string;
@@ -54,8 +110,12 @@ export class UserDeletionService {
     private readonly remnawaveApiService: RemnawaveApiService,
   ) {}
 
-  public async deleteUser(userId: string): Promise<void> {
-    const profileSnapshots = await this.deleteDatabaseUser(userId);
+  public async deleteUser(
+    userId: string,
+    options: { readonly mode?: UserDeletionMode } = {},
+  ): Promise<UserDeletionSummary> {
+    const mode = options.mode ?? 'protected';
+    const { profileSnapshots, summary } = await this.deleteDatabaseUser(userId, mode);
 
     for (const subscription of profileSnapshots) {
       const identity = storedIdentityOf(subscription);
@@ -118,85 +178,54 @@ export class UserDeletionService {
         );
       }
     }
+    return summary;
   }
 
-  private async deleteDatabaseUser(userId: string): Promise<readonly RemnawaveProfileSnapshot[]> {
+  private async deleteDatabaseUser(
+    userId: string,
+    mode: UserDeletionMode,
+  ): Promise<{
+    readonly profileSnapshots: readonly RemnawaveProfileSnapshot[];
+    readonly summary: UserDeletionSummary;
+  }> {
     for (let attempt = 1; attempt <= MAX_TRANSACTION_ATTEMPTS; attempt += 1) {
       try {
         return await this.prismaService.$transaction(
           async (tx) => {
-            const transactionCount = await tx.transaction.count({ where: { userId } });
-            const promocodeActivationCount = await tx.promocodeActivation.count({ where: { userId } });
-            const referralPointsExchangeCount = await tx.referralPointsExchange.count({ where: { userId } });
-            const referralRewardCount = await tx.referralReward.count({ where: { userId } });
-            const partnerTransactionCount = await tx.partnerTransaction.count({
-              where: {
-                OR: [
-                  { referralUserId: userId },
-                  { partner: { userId } },
-                ],
-              },
-            });
-            const partnerWithdrawalCount = await tx.partnerWithdrawal.count({
-              where: { partner: { userId } },
-            });
-            const trialClaimCount = await tx.trialClaim.count({ where: { userId } });
+            const counts = await countProtectedHistory(tx, userId);
 
-            if (
-              transactionCount > 0 ||
-              promocodeActivationCount > 0 ||
-              referralPointsExchangeCount > 0 ||
-              referralRewardCount > 0 ||
-              partnerTransactionCount > 0 ||
-              partnerWithdrawalCount > 0 ||
-              trialClaimCount > 0
-            ) {
-              throw protectedHistoryConflict();
+            if (mode === 'full') {
+              // SNAPSHOT FIRST. The move below hands the subscriptions to the
+              // holder and clears their panel identity, so a snapshot taken
+              // after it finds nothing at all under `userId` — and the customer
+              // would be deleted here while their profile kept serving VPN
+              // upstream, addressed by nobody and billed to no one.
+              const profileSnapshots = await snapshotPanelProfiles(tx, userId);
+              // Counted INSIDE this transaction and at Serializable, so the
+              // summary the operator is shown afterwards describes what was
+              // actually moved rather than what a read a moment earlier saw.
+              const summary = await moveProtectedHistoryToHolder(tx, userId, counts);
+              await tx.user.delete({ where: { id: userId } });
+              return { profileSnapshots, summary };
             }
 
-            // ASKED AS "does this row carry ANY trace of a panel profile", not
-            // as "does it carry an id". `remnawaveId: { not: null }` alone made
-            // the null-identity warn below UNREACHABLE — a row it would fire
-            // for could never enter the snapshot — and the rows it excluded are
-            // exactly the ones the warn exists for.
-            //
-            // Those rows are real and they are the expensive case. The
-            // create/update decoder used to CAST an undecoded panel body into
-            // `RemnawavePanelUser`; on 3.x that produced `uuid === undefined`
-            // and `panelId === undefined`, both of which Prisma reads as "leave
-            // the column alone", while `remnawavePanelUsername` and `configUrl`
-            // came from arguments and DID land. So a live panel profile can be
-            // owned by a row whose only surviving evidence of it is those two
-            // columns — see `PanelLinkReconciliationService`, which selects on
-            // exactly that signature.
-            //
-            // Deleting such a user with the narrow filter destroyed the local
-            // rows and left the panel profile running with nothing pointing at
-            // it: no sweep looks for it, the reconciliation repair can no
-            // longer find it (its row is gone), and nobody is billed for it.
-            // Widening does not make it deletable — there is still no id to
-            // address — but it makes the loss VISIBLE at the one moment an
-            // operator can still act on it.
-            const profileSnapshots = await tx.subscription.findMany({
-              where: {
-                userId,
-                OR: [
-                  { remnawaveId: { not: null } },
-                  { remnawavePanelId: { not: null } },
-                  { remnawavePanelUsername: { not: null } },
-                ],
-              },
-              select: {
-                id: true,
-                remnawaveId: true,
-                remnawavePanelId: true,
-                remnawavePanelUsername: true,
-                configUrl: true,
-              },
-            });
+            if (totalProtected(counts) > 0) {
+              throw protectedHistoryConflict(counts);
+            }
+
+            const profileSnapshots = await snapshotPanelProfiles(tx, userId);
 
             await tx.user.delete({ where: { id: userId } });
-            return profileSnapshots;
+            return {
+              profileSnapshots,
+              summary: {
+                mode,
+                holderUserId: null,
+                preserved: counts,
+                preservedTotals: [],
+                purged: { trialClaims: 0 },
+              } satisfies UserDeletionSummary,
+            };
           },
           {
             isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
@@ -222,10 +251,239 @@ export class UserDeletionService {
   }
 }
 
-function protectedHistoryConflict(): ConflictException {
+function protectedHistoryConflict(blockedBy?: ProtectedHistoryCounts): ConflictException {
   return new ConflictException({
     code: USER_DELETE_PROTECTED_HISTORY_CODE,
     message: USER_DELETE_PROTECTED_HISTORY_MESSAGE,
+    // NAMED, not just refused. «Нельзя» with no subject is why an operator
+    // could not tell a test account that took a free trial from one that took
+    // real money — both were equally undeletable and neither said why. The SPA
+    // prints these, and they are what the second confirmation is about.
+    ...(blockedBy === undefined ? {} : { blockedBy }),
+  });
+}
+
+/**
+ * The seven things that stand between an account and an ordinary deletion.
+ *
+ * Four are enforced by the database (`onDelete: Restrict` on `Transaction`,
+ * `PromocodeActivation`, `ReferralReward` and `TrialClaim`); the partner ones
+ * are policy here, because the ledger they belong to is the operator's rather
+ * than the customer's. Counted together so the refusal can say which.
+ */
+async function countProtectedHistory(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<ProtectedHistoryCounts> {
+  const [
+    transactions,
+    promocodeActivations,
+    referralPointsExchanges,
+    referralRewards,
+    partnerTransactions,
+    partnerWithdrawals,
+    trialClaims,
+  ] = await Promise.all([
+    tx.transaction.count({ where: { userId } }),
+    tx.promocodeActivation.count({ where: { userId } }),
+    tx.referralPointsExchange.count({ where: { userId } }),
+    tx.referralReward.count({ where: { userId } }),
+    tx.partnerTransaction.count({
+      where: { OR: [{ referralUserId: userId }, { partner: { userId } }] },
+    }),
+    tx.partnerWithdrawal.count({ where: { partner: { userId } } }),
+    tx.trialClaim.count({ where: { userId } }),
+  ]);
+  return {
+    transactions,
+    promocodeActivations,
+    referralPointsExchanges,
+    referralRewards,
+    partnerTransactions,
+    partnerWithdrawals,
+    trialClaims,
+  };
+}
+
+/**
+ * THE HALF OF A FULL DELETION THAT IS NOT A DELETION.
+ *
+ * A payment that happened happened. Dropping the rows would silently rewrite
+ * the revenue already reported for a month that is closed — so they are moved
+ * onto a fresh row that is not a person: no Telegram id, no e-mail, no login,
+ * no name, blocked, and marked `anonymizedAt`.
+ *
+ * Three things travel with them, and each is a report that would otherwise
+ * move on its own: `createdAt` (cohorts), the acquisition triple (per-placement
+ * payback) and `registrationChannel`. None of them names anybody.
+ *
+ * SUBSCRIPTIONS MOVE TOO, and that is not an oversight. `TransactionItem`
+ * points at the subscription a line paid for with `onDelete: Restrict`, so a
+ * kept payment forbids deleting what it bought; and this product never hard-
+ * deletes a subscription anyway — the operator's own «удалить подписку» marks
+ * it `DELETED` and removes the panel profile. Moving them keeps both rules.
+ * Their panel identity is cleared here, AFTER the caller snapshotted it, so no
+ * sweep re-addresses a profile that is about to be removed upstream.
+ *
+ * The trial ledger is the one thing destroyed outright, on the owner's
+ * decision of 21.09.2026: a test account that took the free trial could never
+ * be cleared, which is the whole reason this path exists.
+ */
+async function moveProtectedHistoryToHolder(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  counts: ProtectedHistoryCounts,
+): Promise<UserDeletionSummary> {
+  const original = await tx.user.findUnique({
+    where: { id: userId },
+    select: {
+      createdAt: true,
+      language: true,
+      acquisitionPlacementId: true,
+      acquisitionAt: true,
+      acquisitionWindowDays: true,
+      registrationChannel: true,
+    },
+  });
+  if (original === null) {
+    throw new NotFoundException('User not found');
+  }
+
+  const totals = await tx.transaction.groupBy({
+    by: ['currency'],
+    where: { userId },
+    _sum: { amount: true },
+  });
+
+  // A HOLDER ONLY WHEN THERE IS SOMETHING TO HOLD. Most accounts a full
+  // deletion is asked for — the test ones this path exists for — owe the books
+  // nothing at all, and a holder per deletion would grow `users` by a blank
+  // row every time for no reason. Subscriptions count here too: they are what
+  // a kept payment's `TransactionItem` points at, and their own terms forbid
+  // deleting them.
+  const subscriptions = await tx.subscription.count({ where: { userId } });
+  const needsHolder =
+    subscriptions > 0 ||
+    counts.transactions > 0 ||
+    counts.promocodeActivations > 0 ||
+    counts.referralPointsExchanges > 0 ||
+    counts.referralRewards > 0 ||
+    counts.partnerTransactions > 0 ||
+    counts.partnerWithdrawals > 0;
+
+  if (!needsHolder) {
+    const purgedOnly = await tx.trialClaim.deleteMany({ where: { userId } });
+    return {
+      mode: 'full',
+      holderUserId: null,
+      preserved: counts,
+      preservedTotals: [],
+      purged: { trialClaims: purgedOnly.count },
+    };
+  }
+
+  const holder = await tx.user.create({
+    data: {
+      name: '',
+      anonymizedAt: new Date(),
+      // Blocked as well as anonymous: nothing about this row may ever be read
+      // as an account somebody could act through.
+      isBlocked: true,
+      createdAt: original.createdAt,
+      language: original.language,
+      acquisitionPlacementId: original.acquisitionPlacementId,
+      acquisitionAt: original.acquisitionAt,
+      acquisitionWindowDays: original.acquisitionWindowDays,
+      registrationChannel: original.registrationChannel,
+    },
+    select: { id: true },
+  });
+
+  await tx.transaction.updateMany({ where: { userId }, data: { userId: holder.id } });
+  await tx.promocodeActivation.updateMany({ where: { userId }, data: { userId: holder.id } });
+  await tx.referralReward.updateMany({ where: { userId }, data: { userId: holder.id } });
+  await tx.referralPointsExchange.updateMany({ where: { userId }, data: { userId: holder.id } });
+  await tx.partnerTransaction.updateMany({
+    where: { referralUserId: userId },
+    data: { referralUserId: holder.id },
+  });
+  // The partner row carries the ledger and the withdrawals (`PartnerWithdrawal`
+  // is `Restrict` on it), so it moves rather than cascading away — deactivated,
+  // because a holder must never accrue or be paid.
+  await tx.partner.updateMany({
+    where: { userId },
+    data: { userId: holder.id, isActive: false },
+  });
+  await tx.subscription.updateMany({
+    where: { userId },
+    data: {
+      userId: holder.id,
+      status: SubscriptionStatus.DELETED,
+      remnawaveId: null,
+      remnawavePanelId: null,
+      remnawavePanelUsername: null,
+    },
+  });
+
+  const purgedTrialClaims = await tx.trialClaim.deleteMany({ where: { userId } });
+
+  return {
+    mode: 'full',
+    holderUserId: holder.id,
+    preserved: counts,
+    preservedTotals: totals.map((row) => ({
+      currency: String(row.currency),
+      amount: (row._sum.amount ?? new Prisma.Decimal(0)).toString(),
+    })),
+    purged: { trialClaims: purgedTrialClaims.count },
+  };
+}
+
+/**
+ * Every panel profile this account still has a trace of, taken inside the
+ * transaction that removes it.
+ *
+ * ASKED AS "does this row carry ANY trace of a panel profile", not as "does it
+ * carry an id". `remnawaveId: { not: null }` alone made the null-identity warn
+ * in `deleteUser` UNREACHABLE — a row it would fire for could never enter the
+ * snapshot — and the rows it excluded are exactly the ones the warn exists for.
+ *
+ * Those rows are real and they are the expensive case. The create/update
+ * decoder used to CAST an undecoded panel body into `RemnawavePanelUser`; on
+ * 3.x that produced `uuid === undefined` and `panelId === undefined`, both of
+ * which Prisma reads as "leave the column alone", while
+ * `remnawavePanelUsername` and `configUrl` came from arguments and DID land. So
+ * a live panel profile can be owned by a row whose only surviving evidence of
+ * it is those two columns — see `PanelLinkReconciliationService`, which selects
+ * on exactly that signature.
+ *
+ * Deleting such a user with the narrow filter destroyed the local rows and left
+ * the panel profile running with nothing pointing at it: no sweep looks for it,
+ * the reconciliation repair can no longer find it (its row is gone), and nobody
+ * is billed for it. Widening does not make it deletable — there is still no id
+ * to address — but it makes the loss VISIBLE at the one moment an operator can
+ * still act on it.
+ */
+async function snapshotPanelProfiles(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<readonly RemnawaveProfileSnapshot[]> {
+  return tx.subscription.findMany({
+    where: {
+      userId,
+      OR: [
+        { remnawaveId: { not: null } },
+        { remnawavePanelId: { not: null } },
+        { remnawavePanelUsername: { not: null } },
+      ],
+    },
+    select: {
+      id: true,
+      remnawaveId: true,
+      remnawavePanelId: true,
+      remnawavePanelUsername: true,
+      configUrl: true,
+    },
   });
 }
 

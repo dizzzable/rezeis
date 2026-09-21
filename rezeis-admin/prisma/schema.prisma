@@ -1608,6 +1608,22 @@ model User {
   registrationChannel            String?   @map("registration_channel")
   /// Optional pointer to the user's currently selected subscription.
   currentSubscriptionId          String?   @unique @map("current_subscription_id")
+  /// NOT A PERSON — a holder for the money history of a person who was deleted.
+  ///
+  /// «Удалить полностью» removes the account and everything about it, but the
+  /// operator's books are not the account's to take: a payment that happened
+  /// happened, and dropping it would silently rewrite the revenue reported for
+  /// a month that is already closed. So the protected rows (transactions,
+  /// promocode activations, referral rewards and points exchanges, the partner
+  /// ledger) are moved onto a fresh row that carries NO identity — no Telegram
+  /// id, no e-mail, no login, no name — and only the columns the books need:
+  /// when the account was created and which placement acquired it.
+  ///
+  /// Set once, never cleared. Everything user-facing must exclude these rows:
+  /// they are not customers, cannot sign in, hold no subscription and reach no
+  /// channel. `anonymizedUserFilter` in `users/utils` is the one reader, and
+  /// `test/anonymized-users-are-not-customers.spec.ts` holds the call sites.
+  anonymizedAt                   DateTime? @map("anonymized_at") @db.Timestamptz(3)
   createdAt                      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt                      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 

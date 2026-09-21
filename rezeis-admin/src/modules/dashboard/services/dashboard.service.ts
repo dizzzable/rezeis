@@ -13,6 +13,7 @@ import { EVENT_PRESENTATION } from '../../../common/services/system-events.servi
 import { moneyReceivedSql, netAmountSql } from '../../business-analytics/utils/analytics-money-received.util';
 import { chooseMoneyView, type FxSnapshot, moneyFigure, readFxSnapshot } from '../../business-analytics/utils/analytics-money.util';
 import { FxRateService } from '../../fx/fx-rate.service';
+import { NOT_ANONYMIZED_USER } from '../../users/utils/anonymized-user.util';
 import {
   DashboardAttentionItemInterface,
   DashboardAttentionSeverity,
@@ -146,9 +147,16 @@ export class DashboardService {
       withdrawalsPending,
       webhooksFailed,
     ] = await Promise.all([
-      this.prismaService.user.count(),
-      this.prismaService.user.count({ where: { isBlocked: true } }),
-      this.prismaService.user.count({ where: { createdAt: { gte: recentRegistered7dStart } } }),
+      // The three customer counters, and the one place a deleted account
+      // could come back as a number. A full deletion leaves an anonymous
+      // holder behind so the books stay whole (`anonymized-user.util.ts`); it
+      // is not a person, has no channel and holds nothing, and counting it
+      // would raise «Всего пользователей» by one for every deletion.
+      this.prismaService.user.count({ where: { ...NOT_ANONYMIZED_USER } }),
+      this.prismaService.user.count({ where: { ...NOT_ANONYMIZED_USER, isBlocked: true } }),
+      this.prismaService.user.count({
+        where: { ...NOT_ANONYMIZED_USER, createdAt: { gte: recentRegistered7dStart } },
+      }),
       this.prismaService.subscription.count({
         where: { status: SubscriptionStatus.ACTIVE },
       }),

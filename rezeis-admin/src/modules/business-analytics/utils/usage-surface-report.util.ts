@@ -61,6 +61,7 @@ export function usageSurfaceReportSql(activeSince: Date): Prisma.Sql {
                ELSE 'unknown'
              END                                                 AS "install_os"
         FROM "users"
+       WHERE "anonymized_at" IS NULL
     )
     SELECT CASE
              WHEN GROUPING("surface") = 0 THEN 'surface'

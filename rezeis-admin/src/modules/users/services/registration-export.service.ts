@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { NOT_ANONYMIZED_USER } from '../utils/anonymized-user.util';
 import {
   clampExportLimit,
   parseStrictIsoDate,
@@ -35,7 +36,9 @@ export class RegistrationExportService {
     const limit = clampExportLimit(query.limit);
     const { where, from, to } = this.buildWhere(query);
     const rows = await this.prismaService.user.findMany({
-      where,
+      // The holder a full deletion leaves behind carries the registration
+      // moment (cohorts depend on it) but nobody registered it.
+      where: { ...where, ...NOT_ANONYMIZED_USER },
       orderBy: { createdAt: 'desc' },
       take: limit,
       select: {

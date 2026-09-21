@@ -2,6 +2,7 @@ import { Injectable, Optional, NotFoundException } from '@nestjs/common';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { NOT_ANONYMIZED_USER } from '../utils/anonymized-user.util';
 import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { parseTelegramId } from '../../../common/utils/postgres-bigint.util';
 import { InternalUserService } from '../../internal-user/services/internal-user.service';
@@ -204,6 +205,14 @@ export function buildUserListWhere(
   // filters can both want `subscriptions.some` and the second would silently
   // replace the first.
   const and: Prisma.UserWhereInput[] = [];
+
+  // FIRST, AND WITH NO WAY TO SWITCH IT OFF. A full deletion leaves an
+  // anonymous holder in `users` so the books stay whole
+  // (`anonymized-user.util.ts`); it is not a customer — no Telegram id, no
+  // e-mail, no login, no name — and on this screen it would be a blank row
+  // with a live «Удалить» button and a count one too high. Because the export
+  // shares this builder, it is excluded there too.
+  and.push({ ...NOT_ANONYMIZED_USER });
 
   const searchTerm = buildSearchTerm(query.search);
   if (searchTerm !== null) and.push(searchTerm);

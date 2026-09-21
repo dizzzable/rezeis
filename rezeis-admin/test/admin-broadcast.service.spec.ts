@@ -307,7 +307,15 @@ describe('BroadcastService', () => {
       },
       user: {
         count: async (args: unknown) => {
-          countCalls.push(args);
+          // `anonymizedAt: null` rides on every audience count now: a full
+          // deletion keeps the money history of a deleted account on a row
+          // that is nobody, and an estimate that counted it would promise the
+          // operator one more recipient than exists. Stripped here so each
+          // case below stays about its own audience; the term itself is
+          // asserted in `broadcast-connect-filter.spec.ts`.
+          const { anonymizedAt: _holder, ...where } =
+            (args as { readonly where: Record<string, unknown> }).where;
+          countCalls.push({ ...(args as Record<string, unknown>), where });
           return countCalls.length;
         },
       },

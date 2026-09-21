@@ -7,6 +7,34 @@ import { Locale, UserRole } from '@prisma/client';
 
 import { AdminUsersService } from '../src/modules/users/services/admin-users.service';
 
+/**
+ * The list clause with the "not an anonymous holder" term taken off the front.
+ *
+ * Every list and count read now carries it: a full deletion keeps the money
+ * history of a deleted account on a row that is nobody, and this page must
+ * never show it or count it. Leaving it in each expectation below would bury
+ * what each case is about — they are about search branches and paging — so it
+ * is stripped here, and asserted on its own in
+ * `admin-user-list-filters.spec.ts` and against Postgres in
+ * `user-full-deletion-postgres.spec.ts`.
+ */
+function withoutHolderTerm(args: unknown): unknown {
+  const call = args as { where?: Record<string, unknown> };
+  const where = call.where;
+  if (where === undefined) return args;
+  if (Object.keys(where).length === 1 && where['anonymizedAt'] === null) {
+    return { ...call, where: {} };
+  }
+  const and = where['AND'];
+  if (!Array.isArray(and)) return args;
+  const terms = and as Array<Record<string, unknown>>;
+  if (terms.length === 0 || terms[0]?.['anonymizedAt'] !== null) return args;
+  const rest = terms.slice(1);
+  if (rest.length === 0) return { ...call, where: {} };
+  if (rest.length === 1) return { ...call, where: rest[0] };
+  return { ...call, where: { AND: rest } };
+}
+
 describe('AdminUsersService', () => {
   it('delegates single-user search to the current internal-user aggregate', async () => {
     const calls: unknown[] = [];
@@ -70,11 +98,11 @@ describe('AdminUsersService', () => {
         },
         user: {
           findMany: (args: unknown) => {
-            userFindManyCalls.push(args);
+            userFindManyCalls.push(withoutHolderTerm(args));
             return { query: 'findMany' };
           },
           count: (args: unknown) => {
-            userCountCalls.push(args);
+            userCountCalls.push(withoutHolderTerm(args));
             return { query: 'count' };
           },
         },
@@ -162,11 +190,11 @@ describe('AdminUsersService', () => {
         $transaction: async () => [[], 0],
         user: {
           findMany: (args: unknown) => {
-            userFindManyCalls.push(args);
+            userFindManyCalls.push(withoutHolderTerm(args));
             return { query: 'findMany' };
           },
           count: (args: unknown) => {
-            userCountCalls.push(args);
+            userCountCalls.push(withoutHolderTerm(args));
             return { query: 'count' };
           },
         },
@@ -483,8 +511,14 @@ function buildListSearchService(): AdminUsersService {
 function listSearchOrClauses(service: AdminUsersService): ReadonlyArray<Record<string, unknown>> {
   const calls = listSearchCalls.get(service) ?? [];
   assert.equal(calls.length, 1, 'expected exactly one findMany call');
-  const where = (calls[0] as { readonly where: { readonly OR?: ReadonlyArray<Record<string, unknown>> } })
-    .where;
+  // This helper has its own recorder, so the holder term is still on the
+  // clause here — see `withoutHolderTerm` above for what it is and why the
+  // other expectations in this file no longer carry it.
+  const where = (
+    withoutHolderTerm(calls[0]) as {
+      readonly where: { readonly OR?: ReadonlyArray<Record<string, unknown>> };
+    }
+  ).where;
   assert.ok(where.OR, 'expected a search where-clause with an OR array');
   return where.OR;
 }

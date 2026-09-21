@@ -13,6 +13,7 @@ import {
   type UserExportDevice,
   type UserExportRow,
 } from '../utils/user-export.util';
+import { NOT_ANONYMIZED_USER } from '../utils/anonymized-user.util';
 
 /**
  * user-export.service
@@ -194,7 +195,10 @@ export class UserExportService {
     const wantsDevices = needsPanelDevices(query.columns);
 
     const users = await this.prismaService.user.findMany({
-      where: query.where,
+      // An export is a list of customers, and the anonymous holder a full
+      // deletion leaves behind is not one — every identifying column on it is
+      // empty, so it would export as a blank line.
+      where: { ...query.where, ...NOT_ANONYMIZED_USER },
       // Oldest first, so an export taken twice a week apart shares a prefix and
       // can be diffed. Newest-first would shift every row by the week's signups.
       orderBy: { createdAt: 'asc' },

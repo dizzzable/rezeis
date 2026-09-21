@@ -52,6 +52,7 @@ import {
   evaluateBroadcastPromocode,
   isBroadcastPromocodeUsable,
 } from '../utils/broadcast-promo.util';
+import { NOT_ANONYMIZED_USER } from '../../users/utils/anonymized-user.util';
 
 /**
  * What staging hears back about «Подключение VPN»: the people, or why there
@@ -717,7 +718,10 @@ export class BroadcastService {
         input.connectUserIds ?? (await this.connectAudience.userIds(connectQuery(connect, input.now))),
       input.now,
     );
-    return this.prismaService.user.count({ where });
+    // The audience SIZE the operator is shown before sending. Delivery would
+    // skip a holder anyway — no chat id, no browser subscribed — so without
+    // this the estimate promises more recipients than exist.
+    return this.prismaService.user.count({ where: { ...where, ...NOT_ANONYMIZED_USER } });
   }
 
   private async previewConnect(

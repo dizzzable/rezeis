@@ -112,7 +112,7 @@ export function overviewNewUsersSql(window: AnalyticsWindowInterface): Prisma.Sq
   return Prisma.sql`
     SELECT ${isPreviousSql(at, window)}::int AS "previous", ${bucketIndexSql(at, window)} AS "bucket", COUNT(*)::int AS "users"
       FROM "users" u
-     WHERE ${bothWindowsSql(at, window)}
+     WHERE ${bothWindowsSql(at, window)} AND u."anonymized_at" IS NULL
      GROUP BY 1, 2`;
 }
 

@@ -5559,13 +5559,79 @@ function BlockButton({ telegramId, isBlocked, queryKey }: { telegramId: string; 
   )
 }
 
+/**
+ * What the refusal names, in the order the dialog lists it.
+ *
+ * Every key is a counter the panel refuses on. Kept as a list rather than as
+ * `Object.entries` so the order is a decision and a counter added on the
+ * server without a word here is simply not printed, instead of printing a raw
+ * identifier at a customer's operator.
+ */
+const DELETE_BLOCKER_KEYS = [
+  'transactions',
+  'trialClaims',
+  'promocodeActivations',
+  'referralRewards',
+  'referralPointsExchanges',
+  'partnerTransactions',
+  'partnerWithdrawals',
+] as const
+
+type DeleteBlockers = Partial<Record<(typeof DELETE_BLOCKER_KEYS)[number], number>>
+
+/** The `blockedBy` a 409 carries, when it carries one. */
+function readDeleteBlockers(error: unknown): DeleteBlockers | null {
+  const body = (error as { response?: { data?: unknown } } | null)?.response?.data
+  if (body === null || typeof body !== 'object') return null
+  const record = body as { code?: unknown; blockedBy?: unknown }
+  if (record.code !== 'USER_DELETE_PROTECTED_HISTORY') return null
+  // AN EMPTY LIST IS STILL A REFUSAL. A nested foreign key is raised by the
+  // database, outside the transaction that counted, so that refusal carries no
+  // counters at all — and reading it as "not blocked" would put the operator
+  // back on the red toast with no way forward.
+  if (record.blockedBy === null || typeof record.blockedBy !== 'object') return {}
+  const counts = record.blockedBy as Record<string, unknown>
+  const blockers: DeleteBlockers = {}
+  for (const key of DELETE_BLOCKER_KEYS) {
+    const value = counts[key]
+    if (typeof value === 'number' && value > 0) blockers[key] = value
+  }
+  return blockers
+}
+
 function DeleteButton({ telegramId }: { telegramId: string }) {
   const { t } = useTranslation()
   const [confirmText, setConfirmText] = useState('')
+  // WHAT THE ORDINARY DELETE REFUSED ON. Held in state rather than read off
+  // the mutation error each render, because the second, wider delete is
+  // offered against THESE numbers — the ones the operator was shown and
+  // agreed to.
+  const [blockers, setBlockers] = useState<DeleteBlockers | null>(null)
+  // CONTROLLED, because the refusal has to be readable. An `AlertDialogAction`
+  // closes the dialog on click, and a dialog that closes takes the answer with
+  // it — which is how a refusal could only ever be a red toast saying «нельзя»
+  // with no room to say what about.
+  const [open, setOpen] = useState(false)
   const mutation = useMutation({
-    mutationFn: () => api.delete(`/admin/users/${telegramId}`),
-    onSuccess: () => toast.success(t('userDetailPanel.toasts.userDeleted')),
-    onError: (error) => toast.error(getErrorMessage(error, t('userDetailPanel.toasts.deleteFailed'))),
+    mutationFn: (mode?: 'full') =>
+      api.delete(`/admin/users/${telegramId}${mode === 'full' ? '?mode=full' : ''}`),
+    onSuccess: () => {
+      setBlockers(null)
+      setOpen(false)
+      toast.success(t('userDetailPanel.toasts.userDeleted'))
+    },
+    onError: (error) => {
+      const refused = readDeleteBlockers(error)
+      if (refused !== null) {
+        // NOT A TOAST. «Нельзя» with no subject is the whole defect: an
+        // operator could not tell a test account that took a free trial from
+        // one that took real money, and neither could be deleted. The dialog
+        // stays open and says which.
+        setBlockers(refused)
+        return
+      }
+      toast.error(getErrorMessage(error, t('userDetailPanel.toasts.deleteFailed')))
+    },
   })
 
   // Gate the irreversible delete (also wipes the Remnawave panel profile)
@@ -5573,7 +5639,16 @@ function DeleteButton({ telegramId }: { telegramId: string }) {
   const confirmed = confirmText.trim().toUpperCase() === 'DELETE'
 
   return (
-    <AlertDialog onOpenChange={(open) => { if (!open) setConfirmText('') }}>
+    <AlertDialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (!next) {
+          setConfirmText('')
+          setBlockers(null)
+        }
+      }}
+    >
       <AlertDialogTrigger asChild>
         <Button size="sm" variant="ghost" className="text-destructive" aria-label={t('userDetailPanel.actions.deleteTitle')}>
           <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -5588,6 +5663,26 @@ function DeleteButton({ telegramId }: { telegramId: string }) {
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <span>{t('userDetailPanel.actions.deleteWarning')}</span>
         </div>
+        {blockers !== null && (
+          <div
+            className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+            data-testid="delete-blocked"
+          >
+            <p className="font-medium">{t('userDetailPanel.actions.deleteBlockedTitle')}</p>
+            {DELETE_BLOCKER_KEYS.some((key) => blockers[key] !== undefined) && (
+              <ul className="list-disc space-y-0.5 pl-5 text-xs">
+                {DELETE_BLOCKER_KEYS.filter((key) => blockers[key] !== undefined).map((key) => (
+                  <li key={key}>
+                    {t(`userDetailPanel.actions.deleteBlockedBy.${key}`, { count: blockers[key] })}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-xs text-muted-foreground">
+              {t('userDetailPanel.actions.deleteFullExplain')}
+            </p>
+          </div>
+        )}
         <div className="space-y-2">
           <Label htmlFor="delete-confirm-input">{t('userDetailPanel.actions.deleteConfirmLabel')}</Label>
           <Input
@@ -5601,19 +5696,38 @@ function DeleteButton({ telegramId }: { telegramId: string }) {
         </div>
         <AlertDialogFooter>
           <AlertDialogCancel>{t('userDetailPanel.actions.cancel')}</AlertDialogCancel>
-          <AlertDialogAction
-            disabled={!confirmed || mutation.isPending}
-            onClick={(e) => {
-              if (!confirmed) {
+          {blockers === null ? (
+            <AlertDialogAction
+              disabled={!confirmed || mutation.isPending}
+              onClick={(e) => {
+                // Never let Radix close it for us: a refusal arrives after the
+                // click and has to land in a dialog that is still open.
                 e.preventDefault()
-                return
-              }
-              mutation.mutate()
-            }}
-            className="bg-destructive text-destructive-foreground"
-          >
-            {t('userDetailPanel.actions.deleteForever')}
-          </AlertDialogAction>
+                if (!confirmed) return
+                mutation.mutate(undefined)
+              }}
+              className="bg-destructive text-destructive-foreground"
+            >
+              {t('userDetailPanel.actions.deleteForever')}
+            </AlertDialogAction>
+          ) : (
+            // THE WIDER DELETE IS ITS OWN BUTTON, never the same one retried.
+            // The operator has now read what the refusal named, and this one is
+            // labelled for what it does rather than for what they first asked.
+            // `e.preventDefault()` keeps the dialog open while it runs, so a
+            // second refusal is still visible.
+            <AlertDialogAction
+              disabled={!confirmed || mutation.isPending}
+              onClick={(e) => {
+                e.preventDefault()
+                if (!confirmed) return
+                mutation.mutate('full')
+              }}
+              className="bg-destructive text-destructive-foreground"
+            >
+              {t('userDetailPanel.actions.deleteFullAction')}
+            </AlertDialogAction>
+          )}
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

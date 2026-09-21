@@ -335,7 +335,14 @@ describe('the audience preview with connect', () => {
     const preview = await service.previewAudience('bc-1');
     assert.equal(asked.length, 0);
     assert.equal(preview.connect?.refusal, 'unreadable');
-    assert.deepStrictEqual((counted[0] as { where: unknown }).where, { isBlocked: false, AND: [{ id: { in: [] } }] });
+    // `anonymizedAt: null` rides on every audience count: a full deletion keeps
+    // the money history on a row that is nobody, and promising the operator one
+    // more recipient than exists is the whole reason a preview is shown.
+    assert.deepStrictEqual((counted[0] as { where: unknown }).where, {
+      isBlocked: false,
+      AND: [{ id: { in: [] } }],
+      anonymizedAt: null,
+    });
   });
 
   it('without connect the preview is what it was: no connect block, the audience untouched', async () => {

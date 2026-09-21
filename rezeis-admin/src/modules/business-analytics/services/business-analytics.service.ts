@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { NOT_ANONYMIZED_USER } from '../../users/utils/anonymized-user.util';
 import { FxRateService } from '../../fx/fx-rate.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import {
@@ -186,7 +187,9 @@ export class BusinessAnalyticsService {
         prisma.$queryRaw<FunnelRow[]>(funnelSql(window)),
         prisma.$queryRaw<ProviderRow[]>(providersSql(window)),
         prisma.$queryRaw<PartnerBalanceRow[]>(partnerBalanceSql(window)),
-        prisma.user.count(),
+        // «Всего пользователей» is a head-count of customers, and the
+        // anonymous holder a full deletion leaves behind is not one.
+        prisma.user.count({ where: { ...NOT_ANONYMIZED_USER } }),
         this.readFx(),
       ]);
     return assembleOverview(

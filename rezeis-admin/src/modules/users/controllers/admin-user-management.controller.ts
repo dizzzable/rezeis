@@ -798,19 +798,62 @@ export class AdminUserManagementController {
 
   // ── Delete User ─────────────────────────────────────────────────────────────
 
+  /**
+   * `?mode=full` is «Удалить полностью», and it is a SECOND decision.
+   *
+   * The ordinary delete refuses an account that owes the books anything and
+   * now says what — the 409 carries `blockedBy`, so the SPA can offer the full
+   * one against real numbers instead of a flat «нельзя». Anything that is not
+   * exactly `full` is the ordinary delete: an unreadable value must never
+   * widen a destructive act (see the `?flag=false` trap this codebase has been
+   * bitten by — a string compared, never coerced).
+   */
   @Delete(':telegramId')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('users', 'delete')
-  public async deleteUser(@Param('telegramId') telegramId: string, @CurrentAdmin() admin: CurrentAdminInterface, @Req() req: Request) {
+  public async deleteUser(
+    @Param('telegramId') telegramId: string,
+    @Query('mode') mode: string | undefined,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
     const user = await this.findUserByTelegramId(telegramId);
-    await this.userDeletionService.deleteUser(user.id);
+    const summary = await this.userDeletionService.deleteUser(user.id, {
+      mode: mode === 'full' ? 'full' : 'protected',
+    });
     await this.auditLog(admin, req, 'user.deleted', {
       userId: user.id,
       telegramId: user.telegramId?.toString() ?? null,
       source: 'user_detail',
+      // WHAT WAS DESTROYED AND WHAT SURVIVED, in the one row that outlives the
+      // account. The holder carries no identity, so after this commit the audit
+      // row is the only thing that can answer "whose money is this" — and
+      // «сколько» is the question an operator asks first.
+      mode: summary.mode,
+      ...(summary.mode === 'full'
+        ? {
+            holderUserId: summary.holderUserId,
+            preserved: summary.preserved,
+            preservedTotals: summary.preservedTotals,
+            purged: summary.purged,
+          }
+        : {}),
     });
-    this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', 'User account deleted', { userId: user.id, telegramId, adminId: admin.id });
-    return { deleted: true };
+    this.events.warn(EVENT_TYPES.USER_DELETED, 'USER', 'User account deleted', {
+      userId: user.id,
+      telegramId,
+      adminId: admin.id,
+      mode: summary.mode,
+      ...(summary.mode === 'full'
+        ? {
+            holderUserId: summary.holderUserId,
+            preservedTransactions: summary.preserved.transactions,
+            preservedTotals: summary.preservedTotals,
+            purgedTrialClaims: summary.purged.trialClaims,
+          }
+        : {}),
+    });
+    return { deleted: true, mode: summary.mode };
   }
 
   // ── Partner Lifecycle ───────────────────────────────────────────────────────

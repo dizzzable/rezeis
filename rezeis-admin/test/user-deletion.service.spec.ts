@@ -212,13 +212,45 @@ function prismaError(code: string): { readonly name: string; readonly code: stri
   return { name: 'PrismaClientKnownRequestError', code };
 }
 
-async function assertProtectedHistoryConflict(operation: () => Promise<unknown>): Promise<void> {
+/**
+ * `blockedBy` is asserted as a WHOLE object, zeros included.
+ *
+ * The refusal used to be a bare code, and the SPA could only turn it into a
+ * red toast reading «нельзя» — an operator could not tell a test account that
+ * took a free trial from one that took real money, and neither could be
+ * deleted. Naming the expected counter here, rather than checking that one of
+ * them is non-zero, is what holds the dialog to a truthful list: a counter
+ * that silently stopped being reported would still pass a "greater than zero"
+ * check on its neighbour.
+ */
+async function assertProtectedHistoryConflict(
+  operation: () => Promise<unknown>,
+  blockedBy: Partial<Record<string, number>> | null = { transactions: 1 },
+): Promise<void> {
   await assert.rejects(operation, (error: unknown) => {
     assert.equal(error instanceof ConflictException, true);
     assert.deepStrictEqual((error as ConflictException).getResponse(), {
       code: USER_DELETE_PROTECTED_HISTORY_CODE,
       message:
-        'This user has protected payment, partner-ledger, or reward history and cannot be permanently deleted. Block the account instead; audit records must be preserved.',
+        'This user has protected payment, partner-ledger, or reward history and cannot be permanently deleted. Block the account instead, or delete in full — the money history is kept on an anonymous holder.',
+      // `null` is the refusal the DATABASE raised rather than the counters —
+      // a nested foreign key, from outside the transaction that counted — so
+      // there is nothing truthful to itemise. The dialog still offers the full
+      // deletion; it simply cannot list what it is about.
+      ...(blockedBy === null
+        ? {}
+        : {
+            blockedBy: {
+              transactions: 0,
+              promocodeActivations: 0,
+              referralPointsExchanges: 0,
+              referralRewards: 0,
+              partnerTransactions: 0,
+              partnerWithdrawals: 0,
+              trialClaims: 0,
+              ...blockedBy,
+            },
+          }),
     });
     return true;
   });
@@ -244,32 +276,48 @@ describe('UserDeletionService', () => {
 
   it('preserves promocode and referral reward audit records too', async () => {
     const promocode = buildService({ promocodeActivationCount: 1 });
-    await assertProtectedHistoryConflict(() => promocode.service.deleteUser('user-1'));
+    await assertProtectedHistoryConflict(() => promocode.service.deleteUser('user-1'), {
+      promocodeActivations: 1,
+    });
     assert.equal(promocode.state.order.includes('delete:user'), false);
 
     const reward = buildService({ referralRewardCount: 1 });
-    await assertProtectedHistoryConflict(() => reward.service.deleteUser('user-1'));
+    await assertProtectedHistoryConflict(() => reward.service.deleteUser('user-1'), {
+      referralRewards: 1,
+    });
     assert.equal(reward.state.order.includes('delete:user'), false);
   });
 
   it('preserves referral point exchanges and both sides of the partner money ledger', async () => {
     const exchange = buildService({ referralPointsExchangeCount: 1 });
-    await assertProtectedHistoryConflict(() => exchange.service.deleteUser('user-1'));
+    await assertProtectedHistoryConflict(() => exchange.service.deleteUser('user-1'), {
+      referralPointsExchanges: 1,
+    });
     assert.equal(exchange.state.order.includes('delete:user'), false);
 
     const earning = buildService({ partnerTransactionCount: 1 });
-    await assertProtectedHistoryConflict(() => earning.service.deleteUser('user-1'));
+    await assertProtectedHistoryConflict(() => earning.service.deleteUser('user-1'), {
+      partnerTransactions: 1,
+    });
     assert.equal(earning.state.order.includes('delete:user'), false);
 
     const withdrawal = buildService({ partnerWithdrawalCount: 1 });
-    await assertProtectedHistoryConflict(() => withdrawal.service.deleteUser('user-1'));
+    await assertProtectedHistoryConflict(() => withdrawal.service.deleteUser('user-1'), {
+      partnerWithdrawals: 1,
+    });
     assert.equal(withdrawal.state.order.includes('delete:user'), false);
   });
 
   it('preserves durable trial-claim history', async () => {
     const { service, state } = buildService({ trialClaimCount: 1 });
 
-    await assertProtectedHistoryConflict(() => service.deleteUser('user-1'));
+    // THE ONE THAT MADE A TEST ACCOUNT IMMORTAL. Take the free trial once and
+    // the row can never be removed — so an operator who creates accounts to
+    // check their own product accumulates them for ever. The plain path still
+    // refuses, and now says so by name; «Удалить полностью» is the way out.
+    await assertProtectedHistoryConflict(() => service.deleteUser('user-1'), {
+      trialClaims: 1,
+    });
 
     assert.equal(state.order.includes('delete:user'), false);
   });
@@ -439,7 +487,11 @@ describe('UserDeletionService', () => {
   it('maps a nested foreign-key restriction to the same safe conflict and leaves Remnawave intact', async () => {
     const { service, state } = buildService({ deleteError: prismaError('P2003') });
 
-    await assertProtectedHistoryConflict(() => service.deleteUser('user-1'));
+    // NOTHING TO ITEMISE, and that is honest. This refusal comes from the
+    // database, outside the transaction that counted, so the counters are not
+    // in hand. The dialog still offers «Удалить полностью»; it just cannot say
+    // what is holding the account.
+    await assertProtectedHistoryConflict(() => service.deleteUser('user-1'), null);
 
     assert.equal(state.order.includes('delete:panel:rw-1'), false);
   });

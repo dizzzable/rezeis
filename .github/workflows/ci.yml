@@ -220,3 +220,4 @@ jobs:
           test/connect-help-postgres.spec.ts
           test/yookassa-autopay-approved-migration-postgres.spec.ts
           test/provider-subscriptions-postgres.spec.ts
+          test/user-full-deletion-postgres.spec.ts

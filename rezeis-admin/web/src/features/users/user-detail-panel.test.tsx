@@ -60,12 +60,12 @@ describe('UserDetailPanel accessibility', () => {
 
     expect(
       screen.getByText(
-        'This action is irreversible. Accounts with payments or other protected history cannot be deleted.',
+        'This action is irreversible. If the account is tied to payments or other protected history, the panel will say so and offer to delete it in full.',
       ),
     ).toBeInTheDocument()
     expect(
       screen.getByText(
-        "Financial and reward history is never deleted—block that user instead. A clean local account is deleted before best-effort Remnawave cleanup.",
+        'The Remnawave profile goes too: VPN access stops. This cannot be undone.',
       ),
     ).toBeInTheDocument()
 
@@ -79,6 +79,48 @@ describe('UserDetailPanel accessibility', () => {
 
     await user.click(confirmAction)
     expect(deleteSpy).toHaveBeenCalledWith('/admin/users/12345')
+  })
+
+  it('names what the refusal refused on, and offers the wider delete against it', async () => {
+    // THE REPORTED DEFECT. An operator creates test accounts to check their own
+    // product, takes the free trial through one, and can never remove it: the
+    // refusal was a red toast reading «нельзя», with no way to tell a free
+    // trial from real money and nothing to do about either.
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { ...BASE_USER } })
+    const deleteSpy = vi.spyOn(api, 'delete').mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'USER_DELETE_PROTECTED_HISTORY',
+          message: 'refused',
+          blockedBy: {
+            transactions: 0,
+            promocodeActivations: 0,
+            referralPointsExchanges: 0,
+            referralRewards: 0,
+            partnerTransactions: 0,
+            partnerWithdrawals: 0,
+            trialClaims: 1,
+          },
+        },
+      },
+    })
+
+    renderWithProviders(<UserDetailPanel telegramId="12345" />)
+    await user.click(await screen.findByRole('button', { name: 'Delete user?' }))
+    await user.type(screen.getByPlaceholderText('DELETE'), 'DELETE')
+    await user.click(await screen.findByRole('button', { name: 'Delete forever' }))
+
+    // The dialog STAYS OPEN and says which. A counter at zero is not printed —
+    // «0 payments» would bury the one line that matters.
+    expect(await screen.findByText('Trial claims: 1')).toBeInTheDocument()
+    expect(screen.queryByText('Payments: 0')).not.toBeInTheDocument()
+
+    deleteSpy.mockResolvedValue({ data: { deleted: true, mode: 'full' } })
+    await user.click(screen.getByRole('button', { name: 'Delete in full' }))
+
+    expect(deleteSpy).toHaveBeenLastCalledWith('/admin/users/12345?mode=full')
   })
 
   it('names compact profile action controls', async () => {

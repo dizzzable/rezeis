@@ -93,6 +93,9 @@ is_auto_recoverable_migration() {
     20260920130000_admin_notification_inbox)
       return 0
       ;;
+    20260921170000_user_full_deletion_anonymised_holder)
+      return 0
+      ;;
     *)
       return 1
       ;;

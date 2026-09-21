@@ -45,7 +45,29 @@ function whereFor(raw: Record<string, unknown>): Record<string, unknown> {
   const query = plainToInstance(AdminUserListQueryDto, raw);
   void service.listUsers(query);
   assert.equal(captured.length, 1, 'expected exactly one list query');
-  return captured[0];
+  return withoutHolderTerm(captured[0]);
+}
+
+/**
+ * Takes the "not an anonymous holder" term off the front, and asserts it was
+ * there.
+ *
+ * Every clause in this file now carries it — a full deletion leaves a row in
+ * `users` that is nobody, and the list must never show it. Leaving it in each
+ * expectation below would bury what each case is actually about; dropping it
+ * without checking would let it disappear unnoticed. `holderTermIsAlwaysFirst`
+ * is the case that holds it on its own.
+ */
+function withoutHolderTerm(where: Record<string, unknown>): Record<string, unknown> {
+  if (Object.keys(where).length === 1 && where['anonymizedAt'] === null) return {};
+  const and = where['AND'];
+  assert.ok(Array.isArray(and), 'every list clause must carry the holder term');
+  const terms = and as Array<Record<string, unknown>>;
+  assert.deepStrictEqual(terms[0], { anonymizedAt: null }, 'the holder term must come first');
+  const rest = terms.slice(1);
+  if (rest.length === 0) return {};
+  if (rest.length === 1) return rest[0];
+  return { AND: rest };
 }
 
 function andTerms(where: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -57,6 +79,29 @@ function andTerms(where: Record<string, unknown>): Array<Record<string, unknown>
 describe('no filters', () => {
   it('asks for everybody', async () => {
     assert.deepStrictEqual(whereFor({}), {});
+  });
+
+  it('never asks for an anonymous holder, whatever else is set', async () => {
+    // THE TERM `whereFor` STRIPS, asserted here where it is the subject. A
+    // full deletion keeps the money history on a row with no Telegram id, no
+    // e-mail and no name; on this page it would be a blank line with a live
+    // «Удалить» button, and one too many in the count beside it.
+    const service = new AdminUsersService(
+      {
+        $transaction: async (queries: readonly unknown[]) => [[], 0].slice(0, queries.length),
+        user: {
+          findMany: (args: { where: Record<string, unknown> }) => {
+            raw.push(args.where);
+            return { query: 'findMany' };
+          },
+          count: () => ({ query: 'count' }),
+        },
+      } as never,
+      {} as never,
+    );
+    const raw: Array<Record<string, unknown>> = [];
+    void service.listUsers(plainToInstance(AdminUserListQueryDto, { roles: 'USER' }));
+    assert.deepStrictEqual(raw[0]?.['AND']?.[0 as never], { anonymizedAt: null });
   });
 
   it('treats an empty multi-value filter as absent, not as "match nothing"', async () => {

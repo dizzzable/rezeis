@@ -165,13 +165,32 @@ function makeDb(seed: UserRow[]) {
   };
 
   const userDeletion = {
-    deleteUser: async (userId: string) => {
+    deleteUser: async (userId: string, options?: { readonly mode?: 'protected' | 'full' }) => {
       deletionAttempts.push(userId);
       if (undeletable.has(userId)) {
         throw new Error(`deletion refused for ${userId}`);
       }
       const index = users.findIndex((u) => u.id === userId);
       if (index >= 0) users.splice(index, 1);
+      // A SUMMARY, because the card route writes it into the audit row: what
+      // was kept on the anonymous holder and what was destroyed. A double that
+      // answered `undefined` made the caller throw before it logged anything,
+      // and the row this file exists to assert on never appeared.
+      return {
+        mode: options?.mode ?? 'protected',
+        holderUserId: null,
+        preserved: {
+          transactions: 0,
+          promocodeActivations: 0,
+          referralPointsExchanges: 0,
+          referralRewards: 0,
+          partnerTransactions: 0,
+          partnerWithdrawals: 0,
+          trialClaims: 0,
+        },
+        preservedTotals: [],
+        purged: { trialClaims: 0 },
+      };
     },
   };
 
@@ -284,7 +303,7 @@ describe('bulk audit — the fake records audit rows (control)', () => {
   it('a single-user delete from the user card DOES produce an audit row through this fake', async () => {
     const db = seedThree();
 
-    await buildUserCard(db).deleteUser('101', ADMIN, REQ);
+    await buildUserCard(db).deleteUser('101', undefined, ADMIN, REQ);
 
     assert.equal(db.state.auditLogs.length, 1);
     assert.equal(auditRows(db)[0]['action'], 'user.deleted');
@@ -332,7 +351,7 @@ describe('a bulk delete answers "who deleted user X" for each user', () => {
     // One action name for one act, the origin in `metadata.source`. A reader
     // that has to union a second action name is a reader that will forget.
     const viaCard = seedThree();
-    await buildUserCard(viaCard).deleteUser('101', ADMIN, REQ);
+    await buildUserCard(viaCard).deleteUser('101', undefined, ADMIN, REQ);
 
     const viaBulk = seedThree();
     await runBulk(viaBulk, 'delete', ['u-1']);
