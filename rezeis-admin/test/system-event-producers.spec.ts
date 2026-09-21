@@ -21,33 +21,28 @@ const SERVICE = join(PACKAGE_ROOT, 'src/common/services/system-events.service.ts
  */
 
 /**
- * Registered, and nothing in `src/` raises it. Each line is a decision, not a
- * shrug — each one is a card an operator can tick today and never receive.
+ * Registered, and nothing in `src/` raises it. EMPTY, and it should stay that
+ * way.
  *
- * Every one of these is already answered by something else an operator reads:
+ * It held four names until 21.09.2026, each with a reason that read
+ * plausibly — the audit log already records it, the webhooks page already
+ * shows it, nothing watches for it. The owner's answer was that a card an
+ * operator can tick and never receive is worse than any of those reasons is
+ * good, so all four were built:
  *
- *   payment.webhook_received — every webhook is persisted and shown on
- *       «Платежи» → «Вебхуки»; a card each would be one per provider ping.
- *   promocode.created / .depleted — creation is an operator action and is in
- *       the audit log already; depletion has no watcher.
- *   user.role_changed — role edits are audited by the RBAC module under its
- *       own action codes.
- *
- * The owner decided on 20.09.2026 to build the other four rather than excuse
- * them: `subscription.renewed` / `.upgraded` (payment fulfilment),
- * `subscription.expired` (the sweep that flips the row) and `system.startup`
- * (one card per deploy). They left this list by that decision — which is what
- * the last test below enforces.
+ *   payment.webhook_received — `payment-webhook-ingress.service.ts`, once per
+ *       ACCEPTED, non-duplicate notification;
+ *   promocode.created — `promocode-lifecycle.service.ts`, after the row exists;
+ *   promocode.depleted — the same file, at the crossing, under the row lock;
+ *   user.role_changed — `admin-admins.controller.ts`, only when authority
+ *       actually moved.
  *
  * NOTHING IS ADDED HERE TO MAKE THIS SPEC PASS. If a type belongs to a
- * feature, give it a producer; if it does not, do not register it.
+ * feature, give it a producer; if it does not, do not register it. A name put
+ * back on this list needs its reason written beside it, and the test below
+ * will delete it again the moment somebody gives it a producer.
  */
-const DECLARED_WITHOUT_PRODUCER: ReadonlySet<string> = new Set([
-  'PAYMENT_WEBHOOK_RECEIVED',
-  'PROMOCODE_CREATED',
-  'PROMOCODE_DEPLETED',
-  'USER_ROLE_CHANGED',
-]);
+const DECLARED_WITHOUT_PRODUCER: ReadonlySet<string> = new Set<string>([]);
 
 function sourceFiles(directory: string): string[] {
   const files: string[] = [];
@@ -108,6 +103,9 @@ describe('every registered system event has a producer', () => {
     assert.deepStrictEqual(orphans, []);
   });
 
+  // The two tests below hold the LIST, and pass trivially while it is empty.
+  // They are kept deliberately: the list is one line away from being used
+  // again, and the day it is, these are what stop it rotting.
   it('keeps the exception list honest: every name on it is still registered', () => {
     // A type that was deleted must leave this list with it, or the list becomes
     // a graveyard that quietly excuses the next orphan that reuses the name.

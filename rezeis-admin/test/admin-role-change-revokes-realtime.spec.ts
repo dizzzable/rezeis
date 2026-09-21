@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import type { ModuleRef } from '@nestjs/core';
 import { UserRole } from '@prisma/client';
 
+import type { SystemEventPayload } from '../src/common/services/system-events.service';
 import type { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
 import { BlockedIpService } from '../src/modules/blocked-ips/services/blocked-ip.service';
 import { AdminAdminsController } from '../src/modules/rbac/controllers/admin-admins.controller';
@@ -256,6 +257,8 @@ interface Harness {
   readonly gateway: RealtimeGateway;
   readonly controller: AdminAdminsController;
   readonly actor: CurrentAdminInterface;
+  /** Every system event the controller raised, in order. */
+  readonly cards: SystemEventPayload[];
 }
 
 function buildHarness(options?: { withGateway?: boolean }): Harness {
@@ -289,10 +292,12 @@ function buildHarness(options?: { withGateway?: boolean }): Harness {
     },
   } as unknown as ModuleRef;
 
+  const cards: SystemEventPayload[] = [];
   const controller = new AdminAdminsController(
     prisma as never,
     { hashPassword: async () => 'new-hash' } as never,
     rbacService,
+    { emit: (event: SystemEventPayload) => cards.push(event) } as never,
     controllerModuleRef,
   );
 
@@ -312,7 +317,7 @@ function buildHarness(options?: { withGateway?: boolean }): Harness {
     mustChangePassword: false,
   };
 
-  return { store, gateway, controller, actor };
+  return { store, gateway, controller, actor, cards };
 }
 
 const REQUEST = {
@@ -391,6 +396,54 @@ function assertRevoked(
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('demoting an admin ends the realtime stream that outranks them', () => {
+  it('raises «Изменена роль администратора», naming the operator and the account', async () => {
+    // Registered since the catalogue was written and raised by nothing: an
+    // operator could tick it, hand somebody DEV, and hear nothing. The card's
+    // renderer has printed `oldRole → newRole` the whole time, waiting.
+    const harness = buildHarness();
+    const targetLogin = harness.store.admins.find((a) => a.id === 'target-1')?.login;
+
+    await harness.controller.update(
+      'target-1',
+      { role: UserRole.DEV } as never,
+      harness.actor,
+      REQUEST as never,
+    );
+
+    const card = harness.cards.find((c) => c.type === 'user.role_changed');
+    assert.ok(card !== undefined, 'the role change raised no card at all');
+    // WHO: the actor, not the account that changed.
+    assert.equal(card.adminId, harness.actor.id);
+    // WHOSE: the card would otherwise read «Роль: ADMIN → DEV» about nobody.
+    assert.equal(card.metadata?.['targetAdminLogin'], targetLogin);
+    // BOTH halves of the authority, which is the whole reason
+    // `describeAuthority` exists: this admin keeps the RBAC role «Wide» and
+    // only the legacy enum moved. A card naming one of the two would report
+    // «ADMIN → ADMIN» for the change that makes somebody a superadmin.
+    assert.equal(card.metadata?.['newRole'], 'DEV (Wide)');
+    assert.equal(card.metadata?.['oldRole'], 'ADMIN (Wide)');
+    assert.notEqual(card.metadata?.['oldRole'], card.metadata?.['newRole']);
+  });
+
+  it('raises no role card for a rename through the same endpoint', async () => {
+    // Anti-vacuity, and the rule itself: this endpoint also renames, resets a
+    // password and deactivates. A card for any of those would have made the
+    // one that matters unreadable within a week.
+    const harness = buildHarness();
+
+    await harness.controller.update(
+      'target-1',
+      { name: 'Renamed' } as never,
+      harness.actor,
+      REQUEST as never,
+    );
+
+    assert.deepStrictEqual(
+      harness.cards.filter((c) => c.type === 'user.role_changed'),
+      [],
+    );
+  });
+
   it('drops the socket on an rbacRoleId change, and the reconnect narrows the topics', async () => {
     const harness = buildHarness();
     const { target, bystander } = await connectBoth(harness);

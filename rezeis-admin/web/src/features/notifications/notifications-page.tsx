@@ -116,7 +116,7 @@ const EVENT_CATEGORIES = ['USER', 'AUTH', 'SUBSCRIPTION', 'DEVICE', 'PAYMENT', '
 const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
   USER: [
     'user.registered', 'user.web_registered', 'user.blocked', 'user.unblocked',
-    'user.deleted', 'user.role_changed', 'user.telegram_linked', 'user.email_linked',
+    'user.deleted', 'user.telegram_linked', 'user.email_linked',
     'user.first_traffic', 'user.accounts_merged', 'user.points_adjusted',
     'user.pwa_installed',
     // Points cashback for a paid purchase: credited, taken back on a refund,
@@ -124,7 +124,16 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // currency, a catalogue row that is gone).
     'points.cashback_credited', 'points.cashback_reversed', 'points.cashback_skipped',
   ],
-  AUTH: ['auth.web_login', 'auth.password_changed', 'auth.password_recovery'],
+  // `user.role_changed` is grouped HERE, not under its `user.` namespace: it is
+  // about an administrator's authority, and the panel emits it with category
+  // AUTH — which is the topic the card is delivered to. Listing it beside the
+  // subscriber events would send an operator looking for it in the wrong
+  // place. The tick-box itself is keyed by the type string, so a selection
+  // made before this move is unaffected.
+  AUTH: [
+    'auth.web_login', 'auth.password_changed', 'auth.password_recovery',
+    'user.role_changed',
+  ],
   SUBSCRIPTION: [
     'subscription.created', 'subscription.renewed', 'subscription.upgraded',
     'subscription.expired', 'subscription.deleted', 'subscription.synced',

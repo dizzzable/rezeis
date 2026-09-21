@@ -19,7 +19,13 @@ import { ReiwaRelayQueueService } from '../src/modules/notifications/services/re
  * rendered card, so the stub captures it off either one.
  */
 
-function buildService(options: { readonly platformPolicy?: unknown } = {}): {
+function buildService(
+  options: {
+    readonly platformPolicy?: unknown;
+    /** Admin id → login, for the `🛠 Админ` line. Absent means no admin table. */
+    readonly admins?: Readonly<Record<string, string>>;
+  } = {},
+): {
   service: SystemEventsService;
   getLastText: () => string | null;
 } {
@@ -62,6 +68,19 @@ function buildService(options: { readonly platformPolicy?: unknown } = {}): {
       }),
     },
     adminAuditLog: { create: async () => ({}) },
+    // Present ONLY when a case asks for it. `enrichAdminIdentity` swallows a
+    // missing table, which is what every other case in this file relies on —
+    // and is also why the absence has to be deliberate rather than incidental.
+    ...(options.admins === undefined
+      ? {}
+      : {
+          adminUser: {
+            findUnique: async ({ where }: { where: { id: string } }) => {
+              const login = options.admins?.[where.id];
+              return login === undefined ? null : { login };
+            },
+          },
+        }),
   };
 
   const httpService = {
@@ -297,6 +316,93 @@ describe('SystemEventsService card formatting (enriched)', () => {
     assert.ok(text.includes('🌐 <b>Профиль Remnawave:</b>'));
     assert.ok(text.includes('anna_vpn'));
     assert.ok(text.includes('0194f4b6-7cc7-7ecb-9f62-123456789abc'));
+  });
+
+  it('names the operator on a card an operator caused', async () => {
+    // THE COMPLAINT THIS EXISTS FOR. «Подписка удалена!» arrived naming the
+    // source — «Rezeis Админ-панель» — and stopping there, so on a panel with
+    // more than one operator nobody could tell who had done it without going
+    // to the audit log and matching timestamps.
+    const { service, getLastText } = buildService({ admins: { 'adm-1': 'dizzable' } });
+    service.emit({
+      type: 'subscription.deleted',
+      category: 'SUBSCRIPTION',
+      severity: 'INFO',
+      message: 'Subscription deleted',
+      adminId: 'adm-1',
+      metadata: { subscriptionId: 'sub-1', userId: 'usr-1', source: 'ADMIN_PANEL' },
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('🛠 Админ: <code>dizzable</code>'), text);
+    // …and the source line it used to carry alone is still there: the two
+    // answer different questions (WHERE from, WHO).
+    assert.ok(text.includes('Rezeis Админ-панель'), text);
+  });
+
+  it('prints no operator line for an event no operator caused', async () => {
+    // Anti-vacuity for the case above: if the line appeared unconditionally,
+    // the assertion there would pass on a card that learned nothing. The
+    // expiry sweep has no actor, and inventing one would be a lie.
+    const { service, getLastText } = buildService({ admins: { 'adm-1': 'dizzable' } });
+    service.info('subscription.deleted', 'SUBSCRIPTION', 'Subscription deleted', {
+      subscriptionId: 'sub-1',
+      userId: 'usr-1',
+      source: 'EXPIRED_PROFILE_CLEANUP',
+    });
+    await flush();
+    assert.ok(!getLastText()!.includes('🛠 Админ:'), getLastText()!);
+  });
+
+  it('keeps the card when the admin row is gone rather than printing an id', async () => {
+    // A revoked account still has its id in the audit log. On the card that id
+    // would be a cuid pointed at a person, which is worse than nothing.
+    const { service, getLastText } = buildService({ admins: {} });
+    service.emit({
+      type: 'subscription.deleted',
+      category: 'SUBSCRIPTION',
+      severity: 'INFO',
+      message: 'Subscription deleted',
+      adminId: 'adm-gone',
+      metadata: { subscriptionId: 'sub-1', userId: 'usr-1' },
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(!text.includes('🛠 Админ:'), text);
+    assert.ok(text.includes('🌀 <b>Контекст:</b>'), text);
+  });
+
+  it('says how much of a promocode is left on the promocode card', async () => {
+    // «Промокод создан» and «Промокод исчерпан» are about these two numbers,
+    // and `promocode.archived` has carried the first since it was written with
+    // nothing printing it.
+    const { service, getLastText } = buildService();
+    service.info('promocode.created', 'PROMOCODE', 'created', {
+      promocodeId: 'promo-1',
+      code: 'SUMMER',
+      activationsCount: 0,
+      maxActivations: 50,
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('🧮 Активаций: 0'), text);
+    assert.ok(text.includes('🎚 Лимит активаций: 50'), text);
+  });
+
+  it('says which kind of notification a payment webhook card is about', async () => {
+    // Four very different things arrive on the same address: an ordinary
+    // payment notification, a provider-subscription status, an autopay charge
+    // and a zero-amount card binding. Without this line the card says only
+    // «Вебхук платёжки» and an operator cannot tell an autopay charge from a
+    // card being saved.
+    const { service, getLastText } = buildService();
+    service.info('payment.webhook_received', 'PAYMENT', 'accepted', {
+      gatewayType: 'PLATEGA',
+      webhookKind: 'subscription-charge',
+      paymentId: 'pay-9',
+    });
+    await flush();
+    assert.ok(getLastText()!.includes('📩 Вид: Списание по подписке'), getLastText()!);
   });
 
   it('renders a node block for node events', async () => {

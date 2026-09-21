@@ -13,7 +13,9 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
+import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
+import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { CreatePromocodeDto } from '../dto/create-promocode.dto';
@@ -53,8 +55,11 @@ export class AdminPromocodesController {
   @Post()
   @RequirePermission('promocodes', 'create')
   @ApiOperation({ summary: 'Create a promocode' })
-  public create(@Body() dto: CreatePromocodeDto): Promise<PromocodeInterface> {
-    return this.lifecycleService.create(dto);
+  public create(
+    @Body() dto: CreatePromocodeDto,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+  ): Promise<PromocodeInterface> {
+    return this.lifecycleService.create(dto, admin.id);
   }
 
   @Patch(':promocodeId')

@@ -100,7 +100,11 @@ export class PromocodeLifecycleService {
     return record === null ? null : mapPromocode(record);
   }
 
-  public async create(dto: CreatePromocodeDto): Promise<PromocodeInterface> {
+  public async create(
+    dto: CreatePromocodeDto,
+    /** The operator who created it, for the card. `null` from imports and scripts. */
+    adminId?: string | null,
+  ): Promise<PromocodeInterface> {
     const normalizedCode = normalizeCode(dto.code);
     if (!isValidCode(normalizedCode)) {
       throw new BadRequestException('Promocode code is invalid');
@@ -145,6 +149,32 @@ export class PromocodeLifecycleService {
           allowedPlanIds: dto.allowedPlanIds ?? [],
         },
         include: PROMOCODE_INCLUDE_ACTIVATIONS_COUNT,
+      });
+      // ── «ПРОМОКОД СОЗДАН» — the card that was registered and never sent ──
+      //
+      // `promocode.created` had an emoji, a title, a line in the outbound
+      // webhook list and a tick-box in «Доставка в Telegram», and nothing in
+      // the panel raised it. An operator could tick it, create a code, and
+      // conclude the panel was broken.
+      //
+      // Raised AFTER the row exists, so a card can never announce a code that
+      // a unique-constraint collision rolled back, and it carries the two
+      // numbers the card is about — the limit and the expiry — because a
+      // campaign nobody can spend is the thing worth seeing early.
+      this.events.emit({
+        type: EVENT_TYPES.PROMOCODE_CREATED,
+        category: 'PROMOCODE',
+        severity: 'INFO',
+        message: `Promocode ${record.code} created`,
+        adminId: adminId ?? null,
+        metadata: {
+          promocodeId: record.id,
+          code: record.code,
+          rewardType: record.rewardType,
+          maxActivations: record.maxActivations,
+          activationsCount: 0,
+          source: 'ADMIN_PANEL',
+        },
       });
       return mapPromocode(record);
     } catch (err: unknown) {
@@ -354,10 +384,15 @@ export class PromocodeLifecycleService {
     return { entries: records.map(mapPromocodeActivation), total };
   }
 
+  /**
+   * Returns the quota as it stood under the lock — the activations already
+   * recorded and the ceiling — so the caller can tell whether ITS activation
+   * is the one that exhausts the code without a second, racy count.
+   */
   private async assertActivatableUnderLock(
     transactionClient: Prisma.TransactionClient,
     promocode: PromocodeInterface,
-  ): Promise<void> {
+  ): Promise<{ readonly activations: number; readonly maxActivations: number | null }> {
     const locked = await transactionClient.$queryRaw<Array<{ readonly id: string }>>(
       Prisma.sql`SELECT "id" FROM "promocodes" WHERE "id" = ${promocode.id} FOR UPDATE`,
     );
@@ -396,6 +431,7 @@ export class PromocodeLifecycleService {
     if (isPromocodeDepleted(activations, current.maxActivations)) {
       throw new PromocodeRevalidationError('DEPLETED', 'ntf-promocode-depleted');
     }
+    return { activations, maxActivations: current.maxActivations };
   }
 
   /**
@@ -433,7 +469,7 @@ export class PromocodeLifecycleService {
     const rewardValue = this.rewardsService.resolveActivationRewardValue(promocode);
     try {
       const completed = await this.prismaService.$transaction(async (transactionClient) => {
-        await this.assertActivatableUnderLock(transactionClient, promocode);
+        const quota = await this.assertActivatableUnderLock(transactionClient, promocode);
         const activation = await transactionClient.promocodeActivation.create({
           data: {
             promocodeId: promocode.id,
@@ -486,10 +522,14 @@ export class PromocodeLifecycleService {
           // same profile to Remnawave three times.
           syncJobId ??= application.syncJobId;
         }
+        const activationsCount = quota.activations + 1;
         return {
           activation,
           rewardValue: firstEffect?.rewardValue ?? 0,
           syncJobId,
+          activationsCount,
+          maxActivations: quota.maxActivations,
+          depleted: isPromocodeDepleted(activationsCount, quota.maxActivations),
         };
       });
       // Push the Remnawave sync to BullMQ immediately (the job row was
@@ -522,6 +562,32 @@ export class PromocodeLifecycleService {
           rewardValue: completed.rewardValue,
         },
       );
+      // ── «ПРОМОКОД ИСЧЕРПАН» — raised at the crossing, once ───────────────
+      //
+      // The quota is read under the row lock `assertActivatableUnderLock`
+      // takes (`SELECT … FOR UPDATE`), so two people redeeming the last two
+      // uses at the same moment are serialised by Postgres and exactly one of
+      // them sees the count cross the limit. Deriving it from a count taken
+      // after the commit would have given both of them the same answer, or
+      // neither.
+      //
+      // Unlimited codes (`maxActivations` null or 0) never deplete, which is
+      // `isPromocodeDepleted`'s own rule — the one this reuses rather than
+      // restates.
+      if (completed.depleted) {
+        this.events.info(
+          EVENT_TYPES.PROMOCODE_DEPLETED,
+          'PROMOCODE',
+          `Promocode ${promocode.code} is depleted`,
+          {
+            userId: input.userId,
+            promocodeId: promocode.id,
+            code: promocode.code,
+            activationsCount: completed.activationsCount,
+            maxActivations: completed.maxActivations,
+          },
+        );
+      }
       return {
         step: 'ACTIVATED',
         messageKey: this.rewardsService.getSuccessMessageKey(promocode.rewardType),

@@ -5,6 +5,10 @@ import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
+  EVENT_TYPES,
+  SystemEventsService,
+} from '../../../common/services/system-events.service';
+import {
   PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
   PAYMENT_RECONCILIATION_JOB,
   PAYMENT_RECONCILIATION_QUEUE,
@@ -37,7 +41,43 @@ export class PaymentWebhookIngressService {
     @InjectQueue(PAYMENT_RECONCILIATION_QUEUE)
     private readonly paymentReconciliationQueue: Queue,
     private readonly providerSubscriptionService: ProviderSubscriptionService,
+    private readonly systemEventsService: SystemEventsService,
   ) {}
+
+  /**
+   * «ВЕБХУК ПЛАТЁЖКИ» — one card per notification this panel ACCEPTED.
+   *
+   * The type was registered with the rest of the catalogue and raised by
+   * nothing, so an operator could tick it in «Доставка в Telegram» and never
+   * hear from it. The reason it stayed unbuilt is real and worth writing down:
+   * a provider sends several notifications per payment and retries the ones it
+   * is unsure about, so the naive version is a card per ping. Two rules keep it
+   * to one card per FACT:
+   *
+   *   * a RE-DELIVERY raises nothing. The inbox recognises a duplicate by the
+   *     provider's own event id, and a repeat of a notification is not a new
+   *     event — that is the retry storm, and it is where the volume lives;
+   *   * a REFUSED webhook raises nothing either: a bad signature or an unknown
+   *     gateway throws before this is reached, and each already has its own
+   *     alarm. This card means "accepted", not "arrived".
+   *
+   * It is still the noisiest card in the catalogue by some way — roughly one
+   * per payment — which is why it is INFO and why it has to be ticked
+   * deliberately under «Только выбранные события».
+   */
+  private announceWebhook(
+    gatewayType: PaymentGatewayType,
+    kind: 'payment' | 'subscription-status' | 'subscription-charge' | 'card-binding',
+    metadata: Record<string, unknown> = {},
+  ): void {
+    this.systemEventsService.info(
+      EVENT_TYPES.PAYMENT_WEBHOOK_RECEIVED,
+      'PAYMENT',
+      `Payment webhook accepted from ${gatewayType} (${kind})`,
+      { gatewayType, webhookKind: kind, ...metadata },
+    );
+  }
+
 
   public async verifyWebhookSignature(input: {
     readonly gatewayType: PaymentGatewayType;
@@ -88,6 +128,7 @@ export class PaymentWebhookIngressService {
       await this.paymentMethodSetupService.handleYookassaPaymentMethodEvent(
         paymentMethodEvent.object,
       );
+      this.announceWebhook(input.gatewayType, 'card-binding');
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
@@ -108,6 +149,9 @@ export class PaymentWebhookIngressService {
           gatewaySettings: gateway.settings,
         });
       }
+      this.announceWebhook(input.gatewayType, 'subscription-status', {
+        providerSubscriptionId: plategaSubscriptionId,
+      });
       await this.providerSubscriptionService.enqueueSync(input.gatewayType, plategaSubscriptionId);
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
@@ -128,6 +172,9 @@ export class PaymentWebhookIngressService {
           gatewaySettings: gateway.settings,
         });
       }
+      this.announceWebhook(input.gatewayType, 'subscription-charge', {
+        providerPaymentId: rollypayForeignPaymentId,
+      });
       await this.providerSubscriptionService.enqueuePaymentLookup(input.gatewayType, rollypayForeignPaymentId);
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
@@ -143,6 +190,12 @@ export class PaymentWebhookIngressService {
 
     const receivedEvent = await this.paymentWebhookInboxService.recordReceived({ envelope });
     if (!receivedEvent.duplicate) {
+      // Inside the not-a-duplicate branch on purpose: see `announceWebhook`.
+      this.announceWebhook(input.gatewayType, 'payment', {
+        paymentId: envelope.paymentId,
+        providerStatus: envelope.eventStatus,
+        providerEventId: envelope.providerEventId,
+      });
       await this.paymentWebhookInboxService.markEnqueued(receivedEvent.event.id);
       try {
         await runPaymentReconciliationEnqueueWithTimeout(() =>

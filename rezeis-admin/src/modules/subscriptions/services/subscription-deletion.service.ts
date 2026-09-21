@@ -123,6 +123,12 @@ export interface ExpiredSubscriptionDeleteResult {
 interface LifecycleDeleteOptions {
   readonly source: 'SELF_SERVICE_DELETE' | 'ADMIN_PANEL' | 'EXPIRED_PROFILE_CLEANUP';
   readonly correlationId: string;
+  /**
+   * The operator who ordered it, for the card. Only `ADMIN_PANEL` has one:
+   * a self-service delete is the customer's own act and the expiry sweep is
+   * nobody's, and naming a person on either would be a lie.
+   */
+  readonly adminId?: string | null;
 }
 
 interface LifecycleDeleteOutcome {
@@ -221,10 +227,21 @@ export class SubscriptionDeletionService {
     return { deleted: true };
   }
 
-  public async deleteByOperator(subscriptionId: string): Promise<OperatorSubscriptionDeleteResult> {
+  /**
+   * `adminId` is optional so the nine test call sites and any future caller
+   * without an actor still compile — but the ONE production caller
+   * (`admin-user-subscriptions.controller.ts`) passes it, and the card is
+   * the poorer without it: «Подписка удалена!» named the panel as the
+   * source and nobody as the cause.
+   */
+  public async deleteByOperator(
+    subscriptionId: string,
+    adminId?: string | null,
+  ): Promise<OperatorSubscriptionDeleteResult> {
     const subscription = await this.findSubscription(subscriptionId);
     await this.deleteSubscription(subscription, {
       source: 'ADMIN_PANEL',
+      adminId: adminId ?? null,
       correlationId: `subscription-delete:${subscription.id}`,
     });
     return {
@@ -457,7 +474,13 @@ export class SubscriptionDeletionService {
       return outcome;
     }
 
-    this.publishDeletedEvent(subscription.id, outcome.userId, options.source, outcome.planSnapshot);
+    this.publishDeletedEvent(
+      subscription.id,
+      outcome.userId,
+      options.source,
+      outcome.planSnapshot,
+      options.adminId ?? null,
+    );
     this.publishOrphanRiskEvent(subscription.id, outcome, options.source);
 
     if (outcome.syncJobId !== null) {
@@ -622,17 +645,22 @@ export class SubscriptionDeletionService {
     userId: string | null,
     source: LifecycleDeleteOptions['source'],
     planSnapshot: unknown,
+    adminId: string | null,
   ): void {
     if (userId === null || this.systemEventsService === undefined) {
       return;
     }
     try {
-      this.systemEventsService.info(
-        EVENT_TYPES.SUBSCRIPTION_DELETED,
-        'SUBSCRIPTION',
-        'Subscription deleted',
-        { subscriptionId, userId, source, ...planNamesMetadata([planSnapshot]) },
-      );
+      // `emit` rather than `info`, for one field: `info` cannot carry an
+      // `adminId`, and without it the card has no way to name the operator.
+      this.systemEventsService.emit({
+        type: EVENT_TYPES.SUBSCRIPTION_DELETED,
+        category: 'SUBSCRIPTION',
+        severity: 'INFO',
+        message: 'Subscription deleted',
+        adminId,
+        metadata: { subscriptionId, userId, source, ...planNamesMetadata([planSnapshot]) },
+      });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(

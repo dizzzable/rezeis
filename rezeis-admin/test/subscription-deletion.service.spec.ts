@@ -66,6 +66,8 @@ interface FakeState {
     category: string;
     message: string;
     metadata: Readonly<Record<string, unknown>>;
+    /** The operator who ordered it, or `null` for the customer and the sweep. */
+    adminId: string | null;
   }>;
   loggedErrors: string[];
   loggedWarnings: string[];
@@ -151,7 +153,25 @@ function buildService(state: FakeState) {
       message: string,
       metadata: Readonly<Record<string, unknown>>,
     ) => {
-      state.emittedEvents.push({ type, category, message, metadata });
+      state.emittedEvents.push({ type, category, message, metadata, adminId: null });
+    },
+    // `publishDeletedEvent` uses `emit` rather than `info`, for one field:
+    // `info` has no `adminId` parameter, and without one the operator card
+    // named the panel as the source and nobody as the cause.
+    emit: (event: {
+      readonly type: string;
+      readonly category: string;
+      readonly message: string;
+      readonly metadata?: Readonly<Record<string, unknown>>;
+      readonly adminId?: string | null;
+    }) => {
+      state.emittedEvents.push({
+        type: event.type,
+        category: event.category,
+        message: event.message,
+        metadata: event.metadata ?? {},
+        adminId: event.adminId ?? null,
+      });
     },
     warn: (
       type: string,
@@ -265,6 +285,9 @@ describe('SubscriptionDeletionService', () => {
           userId: 'user-1',
           source: 'SELF_SERVICE_DELETE',
         },
+        // The customer deleted their own subscription. Naming an operator
+        // here would be a lie, which is why only `deleteByOperator` carries one.
+        adminId: null,
       },
     ]);
     assert.deepEqual(
@@ -488,6 +511,29 @@ describe('SubscriptionDeletionService', () => {
     assert.equal(state.emittedEvents.length, 1);
     assert.equal(state.loggedErrors.length, 1);
     assert.match(state.loggedErrors[0] ?? '', /pending-job sweep will retry it: Redis unavailable/);
+  });
+
+  it('names the operator on a deletion ordered from the panel', async () => {
+    // THE COMPLAINT. «Подписка удалена!» arrived naming its source — «Rezeis
+    // Админ-панель» — and nobody else, so on a panel with more than one
+    // operator the card could not answer who had done it. The id has to reach
+    // the event for `enrichAdminIdentity` to have anything to resolve.
+    const state = freshState({
+      id: 'sub-1',
+      userId: 'user-1',
+      status: SubscriptionStatus.ACTIVE,
+      remnawaveId: 'rw-1',
+    });
+    const service = buildService(state);
+
+    await service.deleteByOperator('sub-1', 'adm-1');
+
+    assert.equal(state.emittedEvents.length, 1);
+    assert.equal(state.emittedEvents[0]?.adminId, 'adm-1');
+    assert.equal(state.emittedEvents[0]?.metadata['source'], 'ADMIN_PANEL');
+    // The other direction — a deletion with no operator behind it carries no
+    // actor — is asserted by the self-service case above, which compares the
+    // whole event and expects `adminId: null`.
   });
 
   it('projects subscription.deleted to its owner with subscriptionId only', () => {

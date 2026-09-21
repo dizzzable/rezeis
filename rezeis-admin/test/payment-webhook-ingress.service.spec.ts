@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { beforeEach, describe, it } from 'node:test';
 
 import { PaymentGatewayType } from '@prisma/client';
 
@@ -7,9 +7,30 @@ import {
   PaymentReconciliationEnqueueError,
   runPaymentReconciliationEnqueueWithTimeout,
 } from '../src/modules/payments/constants/payment-reconciliation.constant';
+import type { SystemEventsService } from '../src/common/services/system-events.service';
 import { PaymentWebhookIngressService } from '../src/modules/payments/services/payment-webhook-ingress.service';
 
+/**
+ * The ingress now raises «Вебхук платёжки». Every test here asserts on a
+ * `calls` array it owns, so the card must not land in that — each gets its
+ * own sink, and the two tests at the end pass one they read.
+ */
+/** Cards raised by whichever service a test built; cleared before each one. */
+const CARDS: unknown[] = [];
+
+function cardSink(cards: unknown[] = CARDS): SystemEventsService {
+  return {
+    info: (type: string, _category: string, _message: string, metadata: unknown) => {
+      cards.push([type, metadata]);
+    },
+  } as unknown as SystemEventsService;
+}
+
 describe('PaymentWebhookIngressService', () => {
+  beforeEach(() => {
+    CARDS.length = 0;
+  });
+
   it('marks new webhook deliveries as enqueued', async () => {
     const calls: unknown[] = [];
     const service = new PaymentWebhookIngressService(
@@ -46,6 +67,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: 'job-1' };
         },
       } as never, { enqueueSync: async () => undefined } as never,
+      cardSink(),
     );
 
     const result = await service.ingestWebhook({
@@ -67,6 +89,17 @@ describe('PaymentWebhookIngressService', () => {
         { removeOnComplete: 100, removeOnFail: 100 },
       ],
     ]);
+    // ── ONE CARD, AND IT SAYS WHAT ARRIVED ────────────────────────────
+    //
+    // `payment.webhook_received` was registered with a title, an emoji, a
+    // webhook line and a tick-box, and nothing raised it: an operator could
+    // tick «Вебхук платёжки» and never hear from it.
+    assert.equal(CARDS.length, 1, `expected one card, got ${JSON.stringify(CARDS)}`);
+    const [type, metadata] = CARDS[0] as [string, Record<string, unknown>];
+    assert.equal(type, 'payment.webhook_received');
+    assert.equal(metadata['webhookKind'], 'payment');
+    assert.equal(metadata['paymentId'], 'payment-1');
+    assert.equal(metadata['providerStatus'], 'succeeded');
   });
 
   it('does not re-enqueue duplicate deliveries', async () => {
@@ -105,6 +138,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: 'job-1' };
         },
       } as never, { enqueueSync: async () => undefined } as never,
+      cardSink(),
     );
 
     const result = await service.ingestWebhook({
@@ -118,6 +152,13 @@ describe('PaymentWebhookIngressService', () => {
     assert.equal(result.duplicate, true);
     assert.equal(result.lifecycleStatus, 'ENQUEUED');
     assert.deepStrictEqual(calls, []);
+    // ── A RE-DELIVERY IS NOT A NEW FACT ───────────────────────────────
+    //
+    // This is the whole reason the type stayed unbuilt for so long: a
+    // provider retries the notifications it is unsure about, and a card per
+    // ping would bury every other card the operator ticked. The inbox
+    // already recognises the repeat — the card simply rides that answer.
+    assert.deepStrictEqual(CARDS, []);
   });
 
   it('does not echo normalized raw webhook payload in the ingress response', async () => {
@@ -158,6 +199,7 @@ describe('PaymentWebhookIngressService', () => {
       {
         add: async () => ({ id: 'job-1' }),
       } as never, { enqueueSync: async () => undefined } as never,
+      cardSink(),
     );
 
     const result = await service.ingestWebhook({
@@ -273,6 +315,7 @@ describe('PaymentWebhookIngressService', () => {
           throw new Error(rawError);
         },
       } as never, { enqueueSync: async () => undefined } as never,
+      cardSink(),
     );
 
     await assert.rejects(
@@ -336,6 +379,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: 'job-1' };
         },
       } as never, { enqueueSync: async () => undefined } as never,
+      cardSink(),
     );
 
     const result = await service.ingestWebhook({
@@ -395,6 +439,7 @@ describe('PaymentWebhookIngressService', () => {
           return { id: 'job' };
         },
       } as never, { enqueueSync: async () => undefined } as never,
+      cardSink(),
     );
 
     const body = Buffer.from(
@@ -466,6 +511,7 @@ describe('PaymentWebhookIngressService on RollyPay subscription charges', () => 
           calls.push(['lookup', gatewayType, paymentId]);
         },
       } as never,
+      cardSink(),
     );
     const ingest = (body: Record<string, unknown>) =>
       ingress.ingestWebhook({

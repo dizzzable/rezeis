@@ -951,7 +951,10 @@ export class AdminUserSubscriptionsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
-    const result = await this.subscriptionDeletionService.deleteByOperator(subscriptionId);
+    const result = await this.subscriptionDeletionService.deleteByOperator(
+      subscriptionId,
+      admin.id,
+    );
 
     await this.auditLog(admin, req, 'user.subscription.deleted', {
       userId: result.userId,

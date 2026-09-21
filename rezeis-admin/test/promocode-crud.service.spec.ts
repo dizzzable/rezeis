@@ -28,7 +28,7 @@ function createRecord(overrides: Record<string, unknown> = {}) {
 
 function createService(
   prismaService: object,
-  events: object = { info: () => undefined, error: () => undefined },
+  events: object = { info: () => undefined, error: () => undefined, emit: () => undefined },
 ): PromocodeLifecycleService {
   return new PromocodeLifecycleService(
     prismaService as never,
@@ -40,6 +40,83 @@ function createService(
 }
 
 describe('PromocodeLifecycleService', () => {
+  it('raises «Промокод создан», naming the operator who created it', async () => {
+    // The type was registered with a title, an emoji, a webhook line and a
+    // tick-box, and nothing raised it: an operator could tick it, make a code
+    // and conclude the panel was broken.
+    const cards: unknown[] = [];
+    const service = createService(
+      {
+        promocode: {
+          create: async () => createRecord({ code: 'SUMMER', maxActivations: 50 }),
+        },
+      },
+      {
+        info: () => undefined,
+        error: () => undefined,
+        emit: (event: unknown) => cards.push(event),
+      },
+    );
+
+    await service.create(
+      {
+        code: 'summer',
+        availability: PromocodeAvailability.ALL,
+        rewardType: PromocodeRewardType.DURATION,
+        reward: 7,
+      } as never,
+      'adm-1',
+    );
+
+    assert.equal(cards.length, 1);
+    const card = cards[0] as {
+      type: string;
+      adminId: string | null;
+      metadata: Record<string, unknown>;
+    };
+    assert.equal(card.type, 'promocode.created');
+    // The whole point of threading the id through the controller: without it
+    // the card cannot name who created the code.
+    assert.equal(card.adminId, 'adm-1');
+    assert.equal(card.metadata['code'], 'SUMMER');
+    assert.equal(card.metadata['maxActivations'], 50);
+  });
+
+  it('raises no card when the create fails', async () => {
+    // Anti-vacuity, and the reason the emit sits AFTER the write: a unique
+    // collision rolls the row back, and a card would announce a code that does
+    // not exist.
+    const cards: unknown[] = [];
+    const service = createService(
+      {
+        promocode: {
+          create: async () => {
+            throw new Prisma.PrismaClientKnownRequestError('dup', {
+              code: 'P2002',
+              clientVersion: 'test',
+            });
+          },
+        },
+      },
+      { info: () => undefined, error: () => undefined, emit: (e: unknown) => cards.push(e) },
+    );
+
+    await assert.rejects(
+      () =>
+        service.create(
+          {
+            code: 'summer',
+            availability: PromocodeAvailability.ALL,
+            rewardType: PromocodeRewardType.DURATION,
+            reward: 7,
+          } as never,
+          'adm-1',
+        ),
+      ConflictException,
+    );
+    assert.deepStrictEqual(cards, []);
+  });
+
   it('creates promocodes with normalized codes and wire-safe BigInt allow lists', async () => {
     let createArgs: unknown;
     const service = createService({

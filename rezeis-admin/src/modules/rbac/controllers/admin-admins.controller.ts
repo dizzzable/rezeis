@@ -33,6 +33,10 @@ import {
 } from 'class-validator';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  EVENT_TYPES,
+  SystemEventsService,
+} from '../../../common/services/system-events.service';
 import { CurrentAdmin } from '../../auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
@@ -185,6 +189,20 @@ const adminProjection = Prisma.validator<Prisma.AdminUserSelect>()({
 
 type AdminProjection = Prisma.AdminUserGetPayload<{ select: typeof adminProjection }>;
 
+/**
+ * What an admin's authority reads as on a card: the legacy enum, plus the
+ * custom RBAC role when one is attached.
+ *
+ * Both fields reach the same place — pointing `rbacRoleId` at `superadmin`
+ * grants what `role: DEV` grants — so a card that named only the enum would
+ * report «ADMIN → ADMIN» for the change that made somebody a superadmin, which
+ * is the one change anybody wants the card for.
+ */
+function describeAuthority(role: UserRole, rbacRoleName: string | null | undefined): string {
+  const name = typeof rbacRoleName === 'string' && rbacRoleName.length > 0 ? rbacRoleName : null;
+  return name === null ? String(role) : `${String(role)} (${name})`;
+}
+
 function toApi(admin: AdminProjection): AdminListItem {
   return {
     id: admin.id,
@@ -213,8 +231,10 @@ export class AdminAdminsController {
     private readonly prismaService: PrismaService,
     private readonly passwordHashService: PasswordHashService,
     private readonly rbacService: RbacService,
-    // @Optional() and trailing so this controller keeps constructing with three
-    // arguments, and so a container without the realtime module still boots.
+    private readonly events: SystemEventsService,
+    // @Optional() and trailing so this controller keeps constructing without a
+    // realtime container, and so a container without the realtime module still
+    // boots.
     @Optional()
     private readonly moduleRef?: ModuleRef,
   ) {}
@@ -369,7 +389,15 @@ export class AdminAdminsController {
   ): Promise<AdminListItem> {
     const target = await this.prismaService.adminUser.findUnique({
       where: { id: adminId },
-      select: { id: true, role: true, isActive: true, rbacRoleId: true },
+      select: {
+        id: true,
+        role: true,
+        isActive: true,
+        rbacRoleId: true,
+        // The name of the role as it was BEFORE the write — the card has to
+        // say what the authority was, and after the update it is gone.
+        rbacRole: { select: { displayName: true } },
+      },
     });
     if (target === null) {
       throw new NotFoundException('Admin not found');
@@ -490,6 +518,39 @@ export class AdminAdminsController {
       login: updated.login,
       changed: Object.keys(data),
     });
+    // ── «ИЗМЕНЕНА РОЛЬ АДМИНИСТРАТОРА» — registered, and raised by nobody ──
+    //
+    // The type has had a title, an emoji, a line in the outbound webhook list
+    // and a tick-box in «Доставка в Telegram» since the catalogue was written,
+    // and nothing in the panel emitted it. An operator could tick it, grant
+    // somebody DEV, and hear nothing — and the card's renderer has printed
+    // `oldRole → newRole` the whole time, waiting for a producer that never
+    // came.
+    //
+    // ONLY when authority actually moved. This endpoint also renames an admin,
+    // resets a password and deactivates an account; raising the card for those
+    // would have made it noise inside a week, and `roleChanged` /
+    // `rbacRoleChanged` are already computed above for the socket revocation,
+    // against the row as it was BEFORE the write.
+    //
+    // WARNING, not INFO: this is the one action on this controller that can
+    // hand somebody the whole panel.
+    if (roleChanged || rbacRoleChanged) {
+      this.events.emit({
+        type: EVENT_TYPES.USER_ROLE_CHANGED,
+        category: 'AUTH',
+        severity: 'WARNING',
+        message: `Admin ${updated.login} authority changed by ${currentAdmin.login}`,
+        adminId: currentAdmin.id,
+        metadata: {
+          targetAdminId: updated.id,
+          targetAdminLogin: updated.login,
+          oldRole: describeAuthority(target.role, target.rbacRole?.displayName),
+          newRole: describeAuthority(updated.role, updated.rbacRole?.displayName),
+          source: 'ADMIN_PANEL',
+        },
+      });
+    }
     return toApi(updated);
   }
 

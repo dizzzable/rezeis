@@ -149,12 +149,20 @@ function prismaDouble(store: Store): unknown {
   };
 }
 
+/**
+ * The controller now raises «Изменена роль администратора». This spec is about
+ * privilege escalation, so the card goes nowhere — but it goes nowhere
+ * DELIBERATELY: `admin-role-change-revokes-realtime.spec.ts` is what holds the card.
+ */
+const SILENT_EVENTS = { emit: () => {} } as never;
+
 function build(store: Store): AdminAdminsController {
   const prisma = prismaDouble(store);
   return new AdminAdminsController(
     prisma as never,
     { hashPassword: async () => 'new-hash' } as never,
     new RbacService(prisma as never),
+    SILENT_EVENTS,
   );
 }
 

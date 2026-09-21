@@ -86,8 +86,8 @@ describe('Promocode controllers', () => {
     const calls: unknown[] = [];
     const controller = new AdminPromocodesController({
       list: async () => [promo()],
-      create: async (dto: unknown) => {
-        calls.push(['create', dto]);
+      create: async (dto: unknown, adminId: unknown) => {
+        calls.push(['create', dto, adminId]);
         return promo();
       },
       update: async (id: string, dto: unknown) => {
@@ -105,13 +105,18 @@ describe('Promocode controllers', () => {
     } as never);
 
     assert.equal((await controller.list())[0]?.code, 'PROMO');
-    assert.equal((await controller.create({ code: 'promo' } as never)).id, 'promo-1');
+    assert.equal(
+      (await controller.create({ code: 'promo' } as never, { id: 'admin-7' } as never)).id,
+      'promo-1',
+    );
     assert.equal((await controller.update('promo-1', { reward: 10 } as never)).id, 'promo-1');
     await controller.delete('promo-1');
     assert.deepStrictEqual(await controller.generateCode(), { code: 'PROMO-123' });
     assert.deepStrictEqual(await controller.listUserActivations({ userId: 'user-1' }), { entries: [], total: 0 });
     assert.deepStrictEqual(calls, [
-      ['create', { code: 'promo' }],
+      // The operator reaches the service, not just the DTO: the card the
+      // service raises has no other way to name who created the code.
+      ['create', { code: 'promo' }, 'admin-7'],
       ['update', 'promo-1', { reward: 10 }],
       ['delete', 'promo-1'],
       ['listUserActivations', { userId: 'user-1', limit: 25, offset: 0 }],

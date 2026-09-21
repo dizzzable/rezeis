@@ -946,7 +946,7 @@ export class SystemEventsService {
     // when the emitter didn't include them, so EVERY event card shows a clear
     // "👤 Пользователь" block (payments, referrals, partner, promocode, …).
     // Centralised here so individual emit sites stay lean. Best-effort.
-    const enriched = await this.enrichUserIdentity(event);
+    const enriched = await this.enrichAdminIdentity(await this.enrichUserIdentity(event));
 
     const reportEvent = this.toErrorReportEvent(enriched);
     const errorEvent = isErrorEvent(reportEvent);
@@ -1876,6 +1876,15 @@ export class SystemEventsService {
       if (meta['code']) promoLines.push(`🎫 Код: <code>${escapeHtml(meta['code'])}</code>`);
       if (meta['rewardType']) promoLines.push(`💥 Тип награды: ${escapeHtml(meta['rewardType'])}`);
       if (meta['rewardValue']) promoLines.push(`🎊 Значение: ${escapeHtml(meta['rewardValue'])}`);
+      // How much of the code is left. `promocode.archived` has carried
+      // `activationsCount` since it was written and nothing printed it, so the
+      // card said a code was archived and not whether anybody had used it;
+      // «Промокод создан» and «Промокод исчерпан» are about these two numbers
+      // and almost nothing else.
+      if (isPresent(meta['activationsCount']))
+        promoLines.push(`🧮 Активаций: ${escapeHtml(meta['activationsCount'])}`);
+      if (isPresent(meta['maxActivations']))
+        promoLines.push(`🎚 Лимит активаций: ${escapeHtml(meta['maxActivations'])}`);
       lines.push(`<blockquote>${promoLines.join('\n')}</blockquote>`);
     }
 
@@ -1938,6 +1947,12 @@ export class SystemEventsService {
     if (meta['ticketId'])
       extraLines.push(`🚓 Тикет: <code>${escapeHtml(String(meta['ticketId']).slice(0, 12))}</code>`);
     if (meta['subject']) extraLines.push(`📨 Тема: ${escapeHtml(meta['subject'])}`);
+    // WHOSE authority moved. The role pair below has been rendered since the
+    // block was written and had no producer to feed it; the account it
+    // belongs to still had no line at all, so a card would have read «Роль:
+    // ADMIN → DEV» without saying whose.
+    if (typeof meta['targetAdminLogin'] === 'string' && meta['targetAdminLogin'].length > 0)
+      extraLines.push(`👮 Учётная запись: <code>${escapeHtml(meta['targetAdminLogin'])}</code>`);
     if (meta['oldRole'] && meta['newRole'])
       extraLines.push(`🥢 Роль: ${escapeHtml(meta['oldRole'])} → ${escapeHtml(meta['newRole'])}`);
     // The evidence a failure card is about. Each of these was carried by a
@@ -1945,6 +1960,8 @@ export class SystemEventsService {
     // Telegram refused, a broadcast that reached some of its audience and a
     // rule that raised a notification arrived without the status, the chat,
     // the counts or the rule's name.
+    if (typeof meta['webhookKind'] === 'string' && meta['webhookKind'].length > 0)
+      extraLines.push(`📩 Вид: ${humanizeWebhookKind(meta['webhookKind'])}`);
     if (typeof meta['relayStatus'] === 'string' && !backupDeliveryShown)
       extraLines.push(`📡 Статус доставки: <code>${escapeHtml(meta['relayStatus'])}</code>`);
     if (typeof meta['relayEvent'] === 'string')
@@ -2019,6 +2036,11 @@ export class SystemEventsService {
     const origin = meta['source'] ?? meta['origin'];
     if (origin) ctxLines.push(`🔎 Источник: ${humanizeSource(origin)}`);
     if (meta['surface']) ctxLines.push(`🌫 Поверхность: ${escapeHtml(meta['surface'])}`);
+    // WHO, when a person did it rather than a sweep. Filled by
+    // `enrichAdminIdentity` from the `adminId` producers already carry — the
+    // card used to name the source («Rezeis Админ-панель») and stop there.
+    if (typeof meta['adminLogin'] === 'string' && meta['adminLogin'].length > 0)
+      ctxLines.push(`🛠 Админ: <code>${escapeHtml(meta['adminLogin'])}</code>`);
     if (meta['operation'])
       ctxLines.push(`❄️ Операция: <code>${escapeHtml(meta['operation'])}</code>`);
     ctxLines.push(`🧮 Уровень: ${event.severity}`);
@@ -2066,6 +2088,55 @@ export class SystemEventsService {
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * WHO DID IT — the admin's login, for the card.
+   *
+   * `adminId` has been on `SystemEventPayload` since it was written and two
+   * dozen producers fill it, but it only ever reached the audit row. The
+   * Telegram card named the subscriber an action was ABOUT and never the
+   * person who took it, so on a panel with more than one operator «Подписка
+   * удалена!» answered half the question — and the half it withheld is the one
+   * another operator needs.
+   *
+   * An id is not an answer, so it is resolved here to the login they sign in
+   * with. Best-effort and bounded exactly like `enrichUserIdentity`: one
+   * lookup by primary key, never throws, and an event whose admin row is gone
+   * (a revoked account) keeps its id in the audit log and simply prints no
+   * line rather than printing a cuid at a person.
+   *
+   * `metadata.adminId` is read as well as the payload field, because both are
+   * in use: `sendTelegramTest` and the device-revoke card carry the actor in
+   * metadata, and they would otherwise be the admin-triggered cards still
+   * anonymous.
+   */
+  private async enrichAdminIdentity(
+    event: SystemEventPayload & { timestamp: string },
+  ): Promise<SystemEventPayload & { timestamp: string }> {
+    const meta = event.metadata ?? {};
+    // A producer that already knows the login is believed: an event relayed
+    // from reiwa names an actor this panel cannot resolve.
+    if (typeof meta['adminLogin'] === 'string' && meta['adminLogin'].length > 0) return event;
+    const fromPayload =
+      typeof event.adminId === 'string' && event.adminId.length > 0 ? event.adminId : null;
+    const fromMeta =
+      typeof meta['adminId'] === 'string' && meta['adminId'].length > 0
+        ? (meta['adminId'] as string)
+        : null;
+    const adminId = fromPayload ?? fromMeta;
+    if (adminId === null) return event;
+
+    try {
+      const admin = await this.prismaService.adminUser.findUnique({
+        where: { id: adminId },
+        select: { login: true },
+      });
+      if (admin === null) return event;
+      return { ...event, metadata: { ...meta, adminLogin: admin.login } };
+    } catch {
+      return event;
+    }
   }
 
   /**
@@ -3343,7 +3414,11 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'user.blocked': { emoji: '🔴', title: 'Пользователь заблокирован' },
   'user.unblocked': { emoji: '🟢', title: 'Пользователь разблокирован' },
   'user.deleted': { emoji: '🗑', title: 'Пользователь удалён' },
-  'user.role_changed': { emoji: '🛡', title: 'Изменена роль пользователя' },
+  // Об АДМИНЕ, не о подписчике: `User.role` не меняется нигде в панели, а
+  // единственный производитель этого типа — редактирование учётной записи
+  // администратора (`admin-admins.controller.ts`). Прежнее название сказало
+  // бы оператору, что кто-то тронул клиента.
+  'user.role_changed': { emoji: '🛡', title: 'Изменена роль администратора' },
   'user.telegram_linked': { emoji: '🔗', title: 'Привязан Telegram' },
   'user.email_linked': { emoji: '📧', title: 'Привязан Email' },
   'user.accounts_merged': { emoji: '🧬', title: 'Аккаунты объединены' },
@@ -3678,6 +3753,28 @@ function humanizeRewardType(value: unknown): string {
       return 'Баллы';
     case 'EXTRA_DAYS':
       return 'Доп. дни';
+    default:
+      return escapeHtml(value);
+  }
+}
+
+/**
+ * Which notification a payment gateway sent — the one thing «Вебхук
+ * платёжки» has to say, because the four kinds mean very different things
+ * to an operator: a payment notification is the ordinary case, a
+ * subscription callback is an autopay charge, and a card binding is a
+ * zero-amount setup that moves no money at all.
+ */
+function humanizeWebhookKind(value: unknown): string {
+  switch (String(value)) {
+    case 'payment':
+      return 'Уведомление об оплате';
+    case 'subscription-status':
+      return 'Статус подписки у провайдера';
+    case 'subscription-charge':
+      return 'Списание по подписке';
+    case 'card-binding':
+      return 'Привязка карты';
     default:
       return escapeHtml(value);
   }

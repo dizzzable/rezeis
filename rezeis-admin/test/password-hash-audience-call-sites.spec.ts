@@ -110,6 +110,9 @@ describe('ADMIN mint sites write the admin parameter block', () => {
       prisma as never,
       new PasswordHashService(),
       { getEffectivePermissionTokens: async () => new Set<string>() } as never,
+      // This spec is about which hash audience the controller asks for; the
+      // role card it now raises is held by `admin-role-change-revokes-realtime.spec.ts`.
+      { emit: () => {} } as never,
     );
 
     await controller.create(
