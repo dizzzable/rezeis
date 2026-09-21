@@ -402,12 +402,12 @@ export class WebPushService implements OnModuleInit {
   /**
    * The operator brand as a NAME, for a sender that must write a real title.
    *
-   * `sendToUser` fills an EMPTY title from the same value, and that covers a
-   * push and nothing else. A message the operator typed is also an e-mail
-   * subject and a row in the cabinet's own feed, and neither of those passes
-   * through a push payload — they were headed with the literal `Reiwa` for
-   * exactly as long as the push was. One reader, so the three can never again
-   * disagree about what this install is called.
+   * `sendToUser` fills an EMPTY title from this same value, so a push alone
+   * would need nothing here. This exists for a sender that invents a title
+   * which is then handed on as data — `UserNotificationsService` builds one
+   * for every `preRenderedText` send — where an empty string would travel as
+   * a blank heading rather than being filled in. One reader of the brand, so
+   * the senders can never disagree about what this install is called.
    */
   public async resolveBrandName(): Promise<string> {
     return (await this.resolveNotificationBrand()).brandName;

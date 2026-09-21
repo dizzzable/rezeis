@@ -12,9 +12,7 @@ import { describe, it } from 'node:test';
  * which is the fallback for an install that configured nothing:
  *
  *   • the operator's own message to one subscriber (push banner);
- *   • every `preRenderedText` send — support, hints, operator sends — where
- *     that same literal became the push title, the E-MAIL SUBJECT and the row
- *     in the cabinet's own feed;
+ *   • every `preRenderedText` send — support, hints, operator sends;
  *   • the panel's "send a test push" button.
  *
  * So an operator whose cabinet is called «Winger VPN» wrote to a customer and
@@ -69,8 +67,8 @@ describe('a notification is headed by the operator brand, never by the stock nam
       [],
       `These senders head a notification with the stock product name instead of the operator's brand. ` +
         `Send an EMPTY title (a push payload is filled from the brand by WebPushService) or read the ` +
-        `brand with WebPushService.resolveBrandName() where the title also becomes an e-mail subject ` +
-        `or a feed row:\n  ${offenders.join('\n  ')}`,
+        `brand with WebPushService.resolveBrandName() where the title is built and handed on as ` +
+        `data rather than sent straight to a push:\n  ${offenders.join('\n  ')}`,
     );
   });
 
@@ -90,10 +88,11 @@ describe('a notification is headed by the operator brand, never by the stock nam
     );
   });
 
-  it('exposes the brand to senders whose title is not only a push', () => {
-    // The `preRenderedText` title is ALSO the e-mail subject and the cabinet
-    // feed row, and neither passes through a push payload — so "send an empty
-    // title" does not cover it and a reader has to exist.
+  it('exposes the brand to a sender that invents a title as data', () => {
+    // A push can be sent with an empty title and filled here. A sender that
+    // BUILDS a title and hands it on — `UserNotificationsService` does, for
+    // every `preRenderedText` send — needs a real string, so a reader has to
+    // exist.
     const service = readFileSync(
       join(SRC, 'modules', 'push', 'services', 'web-push.service.ts'),
       'utf8',

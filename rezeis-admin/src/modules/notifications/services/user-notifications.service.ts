@@ -1132,12 +1132,19 @@ export class UserNotificationsService {
       // THE BRAND, NOT THE STOCK NAME. A `preRenderedText` send carries its
       // own words and no template, so this title is invented here — and it
       // was invented as the literal `Reiwa`, which is the fallback for an
-      // install that configured nothing. It headed the push banner, the
-      // e-mail subject and the cabinet feed row, so an operator whose cabinet
-      // is called «Winger VPN» wrote to a customer and the customer was told
-      // `Reiwa` had written. Read from the one place that knows
+      // install that configured nothing. An operator whose cabinet is called
+      // «Winger VPN» wrote to a customer, and the customer was told `Reiwa`
+      // had written. Read from the one place that knows
       // (`brandingSettings.brandName` — the same value that names the
       // installed app), and only for the branch that needs it.
+      //
+      // WHERE THIS TITLE GOES, precisely: the push banner, and today nothing
+      // else. Both other readers of `rendered.title` — the e-mail subject
+      // (`deliverEmail`) and the cabinet feed row (`persistRenderedCopy`) —
+      // are gated on `template !== null`, which a `preRenderedText` send
+      // never has. Naming a real brand rather than passing an empty string is
+      // still the right shape: the next reader of this field gets a title
+      // instead of a blank.
       const rendered =
         input.preRenderedText !== undefined
           ? {
