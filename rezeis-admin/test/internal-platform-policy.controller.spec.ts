@@ -16,6 +16,8 @@ const EXPECTED_POLICY_KEYS: readonly string[] = [
   'accessMode',
   'channelId',
   'channelLink',
+  // «Проверять только новых»: reiwa's channel gate reads it (0.9.7.67).
+  'channelNewUsersSince',
   'channelRecheck',
   'channelRequired',
   'channelUsername',
