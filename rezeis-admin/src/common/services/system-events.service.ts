@@ -988,7 +988,12 @@ export class SystemEventsService {
         // chat/topic. This is what makes category routing + the test message
         // actually work without a token on rezeis.
         const html = errorEvent
-          ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), attachTxt)
+          ? formatErrorEventCardHtml(
+              reportEvent,
+              getRezeisBuildInfo(),
+              attachTxt,
+              errorCardHeader(enriched),
+            )
           : this.formatTelegramMessage(enriched, timeZone);
         await this.deliverViaReiwaBroadcast(enriched, {
           html,
@@ -1006,7 +1011,12 @@ export class SystemEventsService {
     // ERROR events get the richly-sectioned card; everything else keeps the
     // generic event formatter.
     const html = errorEvent
-      ? formatErrorEventCardHtml(reportEvent, getRezeisBuildInfo(), attachTxt)
+      ? formatErrorEventCardHtml(
+          reportEvent,
+          getRezeisBuildInfo(),
+          attachTxt,
+          errorCardHeader(enriched),
+        )
       : this.formatTelegramMessage(enriched, timeZone);
 
     // ── Durable, or inline? ────────────────────────────────────────────────
@@ -1280,7 +1290,12 @@ export class SystemEventsService {
     },
   ): Promise<void> {
     const html = opts.errorEvent
-      ? formatErrorEventCardHtml(opts.reportEvent, getRezeisBuildInfo(), opts.attachTxt)
+      ? formatErrorEventCardHtml(
+          opts.reportEvent,
+          getRezeisBuildInfo(),
+          opts.attachTxt,
+          errorCardHeader(event),
+        )
       : this.formatTelegramMessage(event, opts.timeZone);
     try {
       if (opts.attachTxt) {
@@ -2933,6 +2948,26 @@ function headerFor(
   return presentation;
 }
 
+/**
+ * The header the INCIDENT card wears.
+ *
+ * `isErrorEvent` sends every ERROR to `formatErrorEventCardHtml`, whose header
+ * was a constant — so a broadcast refused for a caption over the Telegram
+ * limit announced itself as «Произошла ошибка!», the wording for an unhandled
+ * exception, and an operator had to read four blocks to learn it was not one.
+ *
+ * The registry already holds the right title for these types — that is what
+ * the note beside `import.failed` is about. The card simply never asked. A
+ * type nobody registered still gets the old wording, which is honest: nobody
+ * has said what it is.
+ */
+function errorCardHeader(
+  event: SystemEventPayload,
+): { readonly emoji: string; readonly title: string } | undefined {
+  const present = EVENT_PRESENTATION[event.type];
+  return present === undefined ? undefined : headerFor(event, present);
+}
+
 /** A metadata value worth a line: not absent, not null, not blank. */
 function isPresent(value: unknown): boolean {
   if (value === undefined || value === null) return false;
@@ -3671,11 +3706,13 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
     title: 'Автоматизация: своё событие',
     showMessage: 'always',
   },
-  // These three never reach `formatTelegramMessage` today: `isErrorEvent`
-  // matches ERROR severity OR a kind ending in `.error`, and error events are
-  // rendered by `formatErrorEventCardHtml`, which has its own fixed header.
-  // Registered anyway so the card follows if the severity or the routing ever
-  // changes, and so no type is registered in two lists out of three.
+  // These three never reach `formatTelegramMessage`: `isErrorEvent` matches
+  // ERROR severity OR a kind ending in `.error`, and error events are rendered
+  // by `formatErrorEventCardHtml`. Their titles are NOT unused, though —
+  // `errorCardHeader` hands them to that card, which used to open every error
+  // with one constant sentence. Registered here so the rest of the card
+  // follows if the severity or the routing ever changes, and so no type is
+  // registered in two lists out of three.
   'import.failed': { emoji: '🚨', title: 'Импорт не удался' },
   'client.error': { emoji: '🖥', title: 'Ошибка в админ-панели' },
   'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },

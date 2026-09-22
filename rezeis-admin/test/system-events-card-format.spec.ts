@@ -1556,6 +1556,16 @@ describe('a broadcast the panel refused to send', () => {
     assert.ok(card.includes('а в этой рассылке их 1180'), card);
     assert.ok(card.includes('Откройте черновик на странице «Рассылки»'), card);
     assert.ok(!card.includes('Необработанная ошибка'), card);
+    // The FIRST line too: the header of this card was one constant sentence
+    // for everything `isErrorEvent` matched, and the registry has held the
+    // right title for these types all along.
+    assert.ok(card.includes('<b>Событие: Проблема с рассылкой</b>'), card);
+    assert.ok(!card.includes('Произошла ошибка!'), card);
+    // And the two lines that only ever said «nothing here»: a refusal has no
+    // exception type and no operation, and an em dash is not worth a line of a
+    // phone screen.
+    assert.ok(!card.includes('🧊 Тип'), card);
+    assert.ok(!card.includes('❄️ Операция'), card);
   });
 
   it('falls back to the unhandled-error wording when a producer wrote neither', async () => {
@@ -1568,6 +1578,33 @@ describe('a broadcast the panel refused to send', () => {
     const card = getLastText()!;
     assert.ok(card.includes('Необработанная ошибка'), card);
     assert.ok(!card.includes('Откройте черновик'), card);
+  });
+
+  it('keeps the old wording for a type nobody registered', async () => {
+    // ANTI-VACUITY for the header fallback. «Произошла ошибка!» is honest for
+    // a type nobody has said anything about — it is the one case where the
+    // card genuinely does not know what happened.
+    const { service, getLastText } = buildService();
+    service.error('nobody.registered_this', 'SYSTEM', 'boom', {});
+    await flush();
+    assert.ok(getLastText()!.includes('<b>Событие: Произошла ошибка!</b>'), getLastText()!);
+  });
+
+  it('keeps the exception type on a card that really has one', async () => {
+    // ANTI-VACUITY for the two dropped lines: they are dropped when EMPTY, not
+    // always. A real fault is why this card exists, and its own words are the
+    // first thing to read on it.
+    const { service, getLastText } = buildService();
+    service.error('system.error', 'SYSTEM', 'sync failed', {
+      errorName: 'TypeError',
+      scope: 'remnawave.sync',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('🧊 Тип: <code>TypeError</code>'), card);
+    assert.ok(card.includes('❄️ Операция: <code>remnawave.sync</code>'), card);
+    // …and it is titled as the registry titles it, not as a generic incident.
+    assert.ok(card.includes('<b>Событие: Системная ошибка</b>'), card);
   });
 });
 

@@ -155,6 +155,16 @@ function defaultNextSteps(hasStack: boolean, txtAttached: boolean): string {
   return 'Проверьте логи сервиса по указанному источнику и операции.';
 }
 
+/**
+ * What a field reads when the event did not carry it.
+ *
+ * Named because the card now asks: an em dash is a placeholder, and a line
+ * whose whole content is a placeholder is worth less than the space it takes
+ * on a phone. `deriveError` still fills every field, so the .txt report and
+ * the panel's own reader keep a value for each.
+ */
+const ABSENT = '—';
+
 export function deriveError(
   event: ErrorReportEvent,
   fallbackBuild: BuildInfo,
@@ -164,9 +174,9 @@ export function deriveError(
   const source = readStr(meta, 'source') ?? (event.kind.includes('reiwa') ? UNKNOWN : 'panel');
   const surface = SURFACE_LABELS[source.toLowerCase()] ?? capitalize(source);
   const operation =
-    readStr(meta, 'scope') ?? readStr(meta, 'operation') ?? readStr(meta, 'path') ?? '—';
-  const errorType = readStr(meta, 'errorName') ?? readStr(meta, 'errorType') ?? '—';
-  const errorMessage = stripOriginPrefix(event.message) || '—';
+    readStr(meta, 'scope') ?? readStr(meta, 'operation') ?? readStr(meta, 'path') ?? ABSENT;
+  const errorType = readStr(meta, 'errorName') ?? readStr(meta, 'errorType') ?? ABSENT;
+  const errorMessage = stripOriginPrefix(event.message) || ABSENT;
   const filename = readStr(meta, 'filename');
   const lineno = readPositiveInteger(meta, 'lineno');
   const colno = readPositiveInteger(meta, 'colno');
@@ -215,6 +225,15 @@ export function formatErrorEventCardHtml(
   event: ErrorReportEvent,
   fallbackBuild: BuildInfo,
   txtAttached = false,
+  /**
+   * The event type's own header, when the registry has one.
+   *
+   * Passed in rather than looked up here: the registry lives in
+   * `system-events.service.ts`, which imports this file. Absent — an
+   * unregistered type, or a caller that has no registry — and the card keeps
+   * the wording it always had.
+   */
+  header?: { readonly emoji: string; readonly title: string },
 ): string {
   const d = deriveError(event, fallbackBuild, txtAttached);
   const code = (value: string): string => `<code>${escapeHtml(value)}</code>`;
@@ -222,7 +241,11 @@ export function formatErrorEventCardHtml(
   const lines: string[] = [
     '#EventError',
     '',
-    '⚙️ <b>Событие: Произошла ошибка!</b>',
+    // EVERY error-severity event arrives here, including the ones that are a
+    // refusal rather than a fault — six of the broadcast ones are — and
+    // «Произошла ошибка!» over a caption 156 characters too long is the wrong
+    // first line to read on a phone.
+    `${header?.emoji ?? '⚙️'} <b>Событие: ${escapeHtml(header?.title ?? 'Произошла ошибка!')}</b>`,
     '',
     '❗ <b>Почему это важно:</b>',
     `<blockquote>${escapeHtml(d.why)}</blockquote>`,
@@ -230,7 +253,7 @@ export function formatErrorEventCardHtml(
     '🌀 <b>Контекст:</b>',
     `<blockquote>🔎 Источник: ${code(d.source)}\n` +
       `🌫 Поверхность: ${escapeHtml(d.surface)}\n` +
-      `❄️ Операция: ${code(d.operation)}\n` +
+      (d.operation !== ABSENT ? `❄️ Операция: ${code(d.operation)}\n` : '') +
       (d.filename !== null ? `📄 Файл: ${code(d.filename)}\n` : '') +
       (d.lineno !== null
         ? `📍 Место: ${code(`строка ${d.lineno}${d.colno !== null ? `, столбец ${d.colno}` : ''}`)}\n`
@@ -244,7 +267,7 @@ export function formatErrorEventCardHtml(
       `⚙️ Ветка: ${code(d.build.branch)}</blockquote>`,
     '',
     '⚠️ <b>Ошибка:</b>',
-    `<blockquote>🧊 Тип: ${code(d.errorType)}\n` +
+    `<blockquote>${d.errorType !== ABSENT ? `🧊 Тип: ${code(d.errorType)}\n` : ''}` +
       `💬 Сообщение: ${escapeHtml(d.errorMessage)}</blockquote>`,
     '',
     '🧭 <b>Что проверить дальше:</b>',
