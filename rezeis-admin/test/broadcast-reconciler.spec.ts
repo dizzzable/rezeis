@@ -216,6 +216,27 @@ describe('the reconciler rescues what is genuinely stranded', () => {
     assert.equal(enqueued.length, 3, 'the revival cap did not hold');
     assert.equal(events[events.length - 1]?.severity, 'error');
   });
+
+  it('gives up ONCE — not again on every pass after', async () => {
+    // The give-up card says «Автоматически её больше не перезапустят» and the
+    // broadcast keeps its status, so every later pass finds it stranded again.
+    // The counter just kept counting, and the card went out again every ten
+    // minutes for as long as nobody touched the broadcast. Both rescues.
+    const stranded = [
+      build({ scheduled: [{ id: 'b-12', scheduledAt: longAgo }] }),
+      build({ processing: [{ id: 'b-13' }], pendingCount: 12, totalCount: 400 }),
+    ];
+    for (const { service, enqueued, events } of stranded) {
+      for (let i = 0; i < 6; i += 1) await service.reconcile();
+
+      assert.equal(
+        events.filter((event) => event.severity === 'error').length,
+        1,
+        `the give-up card was repeated: ${events.map((event) => event.severity).join(', ')}`,
+      );
+      assert.equal(enqueued.length, 3, 'revived again after giving up');
+    }
+  });
 });
 
 describe('the reconciler does not speak in the finaliser voice', () => {

@@ -48,6 +48,23 @@ export class BroadcastReconcilerService {
 
   private readonly revivals = new Map<string, number>();
 
+  /**
+   * Broadcasts this process has already given up on, and said so.
+   *
+   * The give-up card tells the operator «Автоматически её больше не
+   * перезапустят», and the broadcast stays SCHEDULED or PROCESSING — on
+   * purpose, so «Рассылки» still offers the same cancel and rebuild. Which
+   * means every later pass finds it stranded again: with only the counter,
+   * `attempts` went 5, 6, … and the card went out again every ten minutes.
+   *
+   * In memory, like `revivals`. A restart forgets both, so a broadcast still
+   * stranded then gets up to MAX_REVIVALS more attempts and one more card — at
+   * most once per process start. Persisting it would need a column the
+   * broadcast does not have, and marking it FAILED instead would change what
+   * the operator can do with it.
+   */
+  private readonly givenUp = new Set<string>();
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly queueService: BroadcastQueueService,
@@ -176,10 +193,14 @@ export class BroadcastReconcilerService {
    * account of it.
    */
   private async revive(broadcastId: string, why: string, kind: 'schedule' | 'stalled'): Promise<void> {
+    // Said once already (`givenUp`): the promise on that card is kept by
+    // leaving the broadcast alone, not by repeating the card.
+    if (this.givenUp.has(broadcastId)) return;
     const attempts = (this.revivals.get(broadcastId) ?? 0) + 1;
     this.revivals.set(broadcastId, attempts);
 
     if (attempts > BroadcastReconcilerService.MAX_REVIVALS) {
+      this.givenUp.add(broadcastId);
       // Putting it back is not working. Say so once, plainly, and stop — an
       // endless revival loop is how a broken broadcast becomes background noise.
       // NOT `SYSTEM_BROADCAST_SENT`: that type renders as 📢 «Рассылка
