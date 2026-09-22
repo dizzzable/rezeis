@@ -3194,13 +3194,14 @@ export function syncFailedForGoodCopy(
   attempts: number,
   errorMessage: string,
 ): { readonly why: string; readonly nextSteps: string } {
+  // Short on purpose. Sent as a document caption the card is clipped to 1024
+  // characters, and after this block comes «💬 Сообщение» — the reason these
+  // texts point at. Every sentence here is one the message does not get.
   const failed = `Задача «${SYNC_ACTION_LABELS[action] ?? action}» не прошла ${attempts} раз подряд, и панель больше не повторяет её сама. `;
-  const cause =
-    'Причина — в «💬 Сообщение» ниже: чаще всего это отказ Remnawave, и повтор тех же данных его не изменит. ';
+  const cause = 'Причина — в «💬 Сообщение» ниже (обычно отказ Remnawave). ';
   const pushAgain =
-    `${cause}Устраните её, затем откройте «Пользователи» → этого пользователя → вкладку «Подписки» и нажмите ` +
-    '«Синхронизировать все»: панель заново отправит подписки в Remnawave. Значок ↻ у отдельной подписки для ' +
-    'этого не подходит — он забирает данные из Remnawave, в том числе прежний срок.';
+    `${cause}Устраните её и нажмите «Синхронизировать все» на вкладке «Подписки» у пользователя. ` +
+    'Не значок ↻ у подписки: он забирает данные из Remnawave, включая старый срок.';
   switch (action) {
     case SyncAction.CREATE:
       return {
@@ -3208,14 +3209,27 @@ export function syncFailedForGoodCopy(
         nextSteps: pushAgain,
       };
     case SyncAction.DELETE:
+      // The processor's own guards refuse before Remnawave is asked. Two say
+      // the profile is another subscription's; one, that a 2.x uuid would now
+      // resolve to whoever is live at that address.
+      if (errorMessage.startsWith(`${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE}:`)) {
+        return {
+          why:
+            `${failed}Панель не стала удалять профиль: у подписки сохранён идентификатор Remnawave 2.x, и ` +
+            'по нему панель 3.x нашла бы чужой профиль.',
+          nextSteps:
+            'Запустите «Подписки» → «Починка привязки к панели». Если профиль этого пользователя после ' +
+            'этого остался в Remnawave, удалите его вручную: подписка в панели уже удалена.',
+        };
+      }
       return /^Refusing to delete Remnawave profile/.test(errorMessage)
         ? {
             why:
               `${failed}Панель не стала удалять профиль в Remnawave: им пользуется другая подписка, живая или ` +
               'только что заведённая, и удаление отключило бы её.',
             nextSteps:
-              'Не удаляйте этот профиль в Remnawave: он нужен другой подписке. Подробности — в «💬 Сообщение» ' +
-              'ниже. Если у этого пользователя в Remnawave остался ещё и лишний профиль, его можно удалить вручную.',
+              'Не удаляйте этот профиль в Remnawave: он нужен другой подписке. Если у этого пользователя ' +
+              'остался ещё и лишний профиль, его можно удалить вручную.',
           }
         : {
             why: `${failed}Профиль в Remnawave не удалён и продолжает работать.`,
@@ -3227,8 +3241,7 @@ export function syncFailedForGoodCopy(
       return {
         why: `${failed}Трафик в Remnawave не сброшен.`,
         nextSteps:
-          `${cause}Устраните её, затем откройте «Пользователи» → этого пользователя → вкладку «Подписки» → у ` +
-          'подписки «Быстрые действия» → «Сброс трафика» → «Сбросить».',
+          `${cause}Устраните её, затем на вкладке «Подписки» у пользователя: «Быстрые действия» → «Сброс трафика» → «Сбросить».`,
       };
     default:
       return {
