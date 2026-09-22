@@ -841,12 +841,17 @@ export class InternalUserEdgeService {
    * yet) or returning. Used by the platform `INVITED` / `REG_BLOCKED`
    * gate so the bot can show a mode banner instead of creating a User.
    */
-  public async userExists(reference: string): Promise<{ exists: boolean }> {
+  public async userExists(
+    reference: string,
+  ): Promise<{ exists: boolean; createdAt: string | null }> {
     const user = await this.prismaService.user.findUnique({
       where: buildUserReferenceWhere(reference),
-      select: { id: true },
+      select: { id: true, createdAt: true },
     });
-    return { exists: user !== null };
+    // `createdAt` is what «Проверять только новых» compares: an account that
+    // existed before the switch passes the channel gate. Additive — a reiwa
+    // that predates the field reads `exists` and nothing else.
+    return { exists: user !== null, createdAt: user === null ? null : user.createdAt.toISOString() };
   }
 
   /**

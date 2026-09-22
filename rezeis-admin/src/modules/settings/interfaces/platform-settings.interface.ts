@@ -9,6 +9,8 @@ export interface PlatformSettingsInterface {
   readonly channelRequired: boolean;
   readonly channelId: string | null;
   readonly channelLink: string | null;
+  /** «Проверять только новых»: ISO instant, or `null` to ask everyone. */
+  readonly channelNewUsersSince: string | null;
   readonly accessMode: AccessMode;
   readonly inviteModeStartedAt: string | null;
   readonly defaultCurrency: Currency;

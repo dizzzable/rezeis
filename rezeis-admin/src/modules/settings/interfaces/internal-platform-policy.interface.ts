@@ -15,6 +15,13 @@ export interface InternalPlatformPolicyInterface {
   /** When true, re-check membership on each gated entry (default true). */
   readonly channelRecheck: boolean;
   /**
+   * «Проверять только новых». `null`: the gate asks everyone. An ISO
+   * instant: it asks only accounts created at or after it — reiwa learns the
+   * account's age from `internal/user/exists`, and an account it cannot
+   * date is asked as before (the switch only ever relaxes the gate).
+   */
+  readonly channelNewUsersSince: string | null;
+  /**
    * When true (default), Telegram users without web login/password must set
    * them (claim / finish-setup) before entering the cabinet. When false,
    * Telegram alone is accepted and such users go straight in.

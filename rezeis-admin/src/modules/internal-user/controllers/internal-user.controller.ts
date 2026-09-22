@@ -237,7 +237,7 @@ export class InternalUserController {
   @Get('exists')
   public async userExists(
     @Query() query: InternalByTelegramQueryDto,
-  ): Promise<{ exists: boolean }> {
+  ): Promise<{ exists: boolean; createdAt: string | null }> {
     return this.internalUserEdgeService.userExists(requireUserReference(query));
   }
 

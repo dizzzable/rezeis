@@ -96,6 +96,9 @@ is_auto_recoverable_migration() {
     20260921170000_user_full_deletion_anonymised_holder)
       return 0
       ;;
+    20260922120000_settings_channel_new_users_since)
+      return 0
+      ;;
     *)
       return 1
       ;;

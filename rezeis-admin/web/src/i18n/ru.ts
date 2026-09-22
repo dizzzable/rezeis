@@ -1036,6 +1036,12 @@ export const ru = {
       channelLink: 'Ссылка на канал',
       channelLinkPlaceholder: 'https://t.me/yourchannel',
       channelId: 'ID канала',
+      channelNewUsersOnly: 'Проверять только новых',
+      channelNewUsersOnlyHint:
+        'Подписку спросят только у тех, кто зарегистрировался после даты ниже — в боте или на сайте. Кто был раньше, входит как до включения проверки.',
+      channelNewUsersSince: 'Проверять зарегистрированных с',
+      channelNewUsersSinceHint:
+        'При включении подставляется текущий момент — его можно поправить. Время указано по часам этого устройства.',
       saved: 'Настройки платформы сохранены',
       saveFailed: 'Не удалось сохранить',
       saveButton: 'Сохранить настройки платформы',

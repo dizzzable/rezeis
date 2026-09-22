@@ -169,6 +169,20 @@ export class PlatformBrandingDto {
   @IsUrl({ require_tld: false }, { message: 'channelLink must be a valid URL' })
   public channelLink?: string | null;
 
+  /**
+   * «Проверять только новых». `null` asks everyone; a moment asks only
+   * accounts created at or after it. The same wire format as
+   * `inviteModeStartedAt`, because the panel fills it the same way.
+   */
+  @IsOptional()
+  @ValidateIf((_object: object, value: unknown): boolean => value !== null)
+  @IsString()
+  @MaxLength(128)
+  @Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/, {
+    message: 'channelNewUsersSince must be a valid ISO-8601 UTC string',
+  })
+  public channelNewUsersSince?: string | null;
+
   @IsOptional()
   @IsEnum(AccessMode)
   public accessMode?: AccessMode;

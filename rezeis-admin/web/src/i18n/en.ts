@@ -964,6 +964,12 @@ export const en = {
       channelLink: 'Channel Link',
       channelLinkPlaceholder: 'https://t.me/yourchannel',
       channelId: 'Channel ID',
+      channelNewUsersOnly: 'Check new users only',
+      channelNewUsersOnlyHint:
+        'Only people who registered after the date below, in the bot or on the website, are asked to subscribe. Everyone registered earlier gets in as before the check was on.',
+      channelNewUsersSince: 'Check accounts registered from',
+      channelNewUsersSinceHint:
+        'Turning this on fills in the current moment, and you can change it. Times follow the clock of this device.',
       saved: 'Platform settings saved',
       saveFailed: 'Failed to save',
       saveButton: 'Save Platform Settings',

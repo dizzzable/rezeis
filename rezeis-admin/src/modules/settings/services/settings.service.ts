@@ -247,6 +247,7 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
   channelId: null,
   channelUsername: null,
   channelRecheck: true,
+  channelNewUsersSince: null,
   requireTelegramWebCredentials: false,
   subscriptionLinkRecovery: true,
   accessMode: 'PUBLIC',
@@ -610,6 +611,11 @@ export class SettingsService {
           'rulesLink',
           'channelRequired',
           'channelLink',
+          // Both read by reiwa's gate. `channelId` was missing from this list,
+          // so a new «ID канала» waited out the 60 s edge cache while the other
+          // two channel fields reached the bot at once.
+          'channelId',
+          'channelNewUsersSince',
           'defaultCurrency',
           'platformBranding',
         ].includes(f),
@@ -655,6 +661,7 @@ export class SettingsService {
     readonly channelRequired: boolean;
     readonly channelLink: string | null;
     readonly channelId: string | null;
+    readonly channelNewUsersSince: string | null;
     readonly userNotifications: Record<string, unknown>;
     readonly systemNotifications: Record<string, unknown>;
     readonly platform: PlatformSettingsInterface;
@@ -685,6 +692,7 @@ export class SettingsService {
       channelRequired: platform.channelRequired,
       channelLink: platform.channelLink,
       channelId: platform.channelId,
+      channelNewUsersSince: platform.channelNewUsersSince,
       userNotifications: readJsonObject(settings.userNotifications),
       systemNotifications: maskSystemNotifications(settings.systemNotifications),
       platform,
@@ -1738,6 +1746,12 @@ function buildSettingsUpdateChanges(
     data.channelLink = updatePlatformSettingsDto.channelLink ?? '';
     updatedFields.push('channelLink');
   }
+  if (hasOwnField(updatePlatformSettingsDto, 'channelNewUsersSince')) {
+    data.channelNewUsersSince = parseNullableInstant(
+      updatePlatformSettingsDto.channelNewUsersSince,
+    );
+    updatedFields.push('channelNewUsersSince');
+  }
   if (hasOwnField(updatePlatformSettingsDto, 'accessMode')) {
     data.accessMode = updatePlatformSettingsDto.accessMode;
     updatedFields.push('accessMode');
@@ -1797,6 +1811,7 @@ function mapPlatformSettings(settings: Settings): PlatformSettingsInterface {
     channelRequired: settings.channelRequired,
     channelId: settings.channelId === null ? null : settings.channelId.toString(),
     channelLink: settings.channelLink,
+    channelNewUsersSince: isoOrNull(settings.channelNewUsersSince),
     accessMode: settings.accessMode,
     inviteModeStartedAt:
       settings.inviteModeStartedAt === null ? null : settings.inviteModeStartedAt.toISOString(),
@@ -1815,6 +1830,7 @@ function mapInternalPlatformPolicy(settings: Settings): InternalPlatformPolicyIn
     channelId: settings.channelId === null ? null : settings.channelId.toString(),
     channelUsername: branding.channelUsername,
     channelRecheck: branding.channelRecheck,
+    channelNewUsersSince: isoOrNull(settings.channelNewUsersSince),
     requireTelegramWebCredentials: branding.requireTelegramWebCredentials,
     subscriptionLinkRecovery: branding.subscriptionLinkRecovery,
     accessMode: settings.accessMode,
@@ -1835,6 +1851,19 @@ function parseChannelId(channelId: string | null | undefined): bigint | null {
     return null;
   }
   return BigInt(channelId);
+}
+
+function parseNullableInstant(value: string | null | undefined): Date | null {
+  return value === null || value === undefined ? null : new Date(value);
+}
+
+/**
+ * A nullable timestamp column as the wire's ISO string. A row that does not
+ * carry the column at all reads as `null` — for «Проверять только новых» that
+ * is OFF, the direction that asks everyone, which is the safe one to fall to.
+ */
+function isoOrNull(value: Date | null | undefined): string | null {
+  return value === null || value === undefined ? null : value.toISOString();
 }
 
 function parseInviteModeStartedAt(inviteModeStartedAt: string | null | undefined): Date | null {

@@ -3086,6 +3086,10 @@ model Settings {
   rulesLink                 String     @default("") @map("rules_link")
   channelId                 BigInt?    @map("channel_id") @db.BigInt
   channelLink               String     @default("") @map("channel_link")
+  /// «Проверять только новых»: when set, «Канал обязателен» asks only accounts
+  /// created at or after this moment; older ones pass every door. NULL asks
+  /// everyone, as before the column existed.
+  channelNewUsersSince      DateTime?  @map("channel_new_users_since") @db.Timestamptz(3)
   accessMode                AccessMode @default(PUBLIC) @map("access_mode")
   inviteModeStartedAt       DateTime?  @map("invite_mode_started_at") @db.Timestamptz(3)
   defaultCurrency           Currency   @default(RUB) @map("default_currency")

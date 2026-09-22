@@ -18,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
 
+import { instantToLocalInput, localInputToInstant } from './channel-new-users'
 import { readPlatformTimezoneRefusal } from './platform-timezone'
 import { PlatformTimezoneField } from './platform-timezone-field'
 
@@ -62,6 +63,8 @@ interface AdminSettings {
   readonly rulesLink?: string
   readonly channelLink?: string
   readonly channelId?: string | number | bigint | null
+  /** «Проверять только новых»: ISO instant, or `null` when every account is asked. */
+  readonly channelNewUsersSince?: string | null
   readonly userNotifications?: Record<string, unknown>
   readonly systemNotifications?: Record<string, unknown>
   readonly brandingSettings?: BrandingSettings
@@ -151,6 +154,11 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
   const [rulesLink, setRulesLink] = useState(settings?.rulesLink ?? '')
   const [channelLink, setChannelLink] = useState(settings?.channelLink ?? '')
   const [channelId, setChannelId] = useState(settings?.channelId?.toString() ?? '')
+  // Empty is OFF: the switch and the date are one value, so the card cannot
+  // save «ON with no date», a state the column cannot hold either.
+  const [channelNewUsersSince, setChannelNewUsersSince] = useState(
+    instantToLocalInput(settings?.channelNewUsersSince),
+  )
   // «Часовой пояс» lives in `platformBranding` on the server, and is sent only
   // when the operator changed it: an older value an import stored that the
   // save would now refuse must not block saving the rest of this card.
@@ -166,6 +174,7 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       readonly rulesLink: string | null
       readonly channelLink: string | null
       readonly channelId: string | null
+      readonly channelNewUsersSince: string | null
       readonly platformBranding?: { readonly timezone: string | null }
     }) => api.patch('/admin/settings/platform', data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.platform.saved')) },
@@ -199,6 +208,7 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       rulesLink: normalize(rulesLink),
       channelLink: normalize(channelLink),
       channelId: normalize(channelId),
+      channelNewUsersSince: localInputToInstant(channelNewUsersSince),
       ...(timezone === savedTimezone ? {} : { platformBranding: { timezone: normalize(timezone) } }),
     })
   }
@@ -299,6 +309,38 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
                   onChange={(e) => setChannelId(e.target.value)}
                   placeholder="-1001234567890"
                 />
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <Label>{t('settingsPage.platform.channelNewUsersOnly')}</Label>
+                    <p className="text-xs text-muted-foreground">{t('settingsPage.platform.channelNewUsersOnlyHint')}</p>
+                  </div>
+                  <Switch
+                    checked={channelNewUsersSince !== ''}
+                    onCheckedChange={(on) =>
+                      // ON starts from now: everyone who is here already stays in.
+                      setChannelNewUsersSince(on ? instantToLocalInput(new Date().toISOString()) : '')
+                    }
+                    aria-label={t('settingsPage.platform.channelNewUsersOnly')}
+                  />
+                </div>
+                {channelNewUsersSince !== '' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="platform-channel-new-users-since">
+                      {t('settingsPage.platform.channelNewUsersSince')}
+                    </Label>
+                    <Input
+                      id="platform-channel-new-users-since"
+                      type="datetime-local"
+                      value={channelNewUsersSince}
+                      onChange={(e) => setChannelNewUsersSince(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t('settingsPage.platform.channelNewUsersSinceHint')}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}

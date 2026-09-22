@@ -40,6 +40,7 @@ function buildSettingsRecord(overrides: Record<string, unknown> = {}): Record<st
     channelRequired: false,
     channelId: null,
     channelLink: null,
+    channelNewUsersSince: null,
     accessMode: AccessMode.PUBLIC,
     inviteModeStartedAt: null,
     defaultCurrency: Currency.USD,
@@ -96,6 +97,7 @@ describe('SettingsService', () => {
       channelRequired: false,
       channelId: null,
       channelLink: '',
+      channelNewUsersSince: null,
       accessMode: AccessMode.PUBLIC,
       inviteModeStartedAt: null,
       defaultCurrency: Currency.USD,
@@ -123,6 +125,8 @@ describe('SettingsService', () => {
       channelId: null,
       channelUsername: null,
       channelRecheck: true,
+      // «Проверять только новых» starts OFF: the gate asks everyone, as before.
+      channelNewUsersSince: null,
       requireTelegramWebCredentials: false,
       // «Восстановление пароля по ссылке подписки» is ON until an operator
       // switches it off — a fresh install included.
@@ -226,6 +230,7 @@ describe('SettingsService', () => {
       channelRequired: false,
       channelId: '-1009876543210',
       channelLink: null,
+      channelNewUsersSince: null,
       accessMode: AccessMode.PUBLIC,
       inviteModeStartedAt: null,
       defaultCurrency: Currency.USD,
@@ -510,5 +515,72 @@ describe('SettingsService', () => {
       ],
     );
     assert.deepStrictEqual(removedUrls, ['/uploads/icons/removed.svg']);
+  });
+
+  /** One update of the singleton through the transactional path, returning what was written. */
+  async function updateChannelNewUsersSince(
+    value: string | null,
+    stored: Date | null,
+  ): Promise<{ readonly written: unknown; readonly returned: unknown }> {
+    const updateCalls: Array<{ readonly data: Record<string, unknown> }> = [];
+    const existingSettings = buildSettingsRecord({ id: 'settings-1' });
+    const updatedSettings = buildSettingsRecord({ id: 'settings-1', channelNewUsersSince: stored });
+    const transactionClient = {
+      $queryRaw: async () => [{ id: existingSettings.id }],
+      settings: {
+        findFirst: async () => existingSettings,
+        create: async () => {
+          throw new Error('settings.create must not be called when the row exists');
+        },
+        update: async (args: { readonly data: Record<string, unknown> }) => {
+          updateCalls.push(args);
+          return updatedSettings;
+        },
+      },
+      adminAuditLog: { create: async () => undefined },
+    };
+    const service = createService({
+      settings: { findFirst: async () => existingSettings, create: async () => existingSettings },
+      $transaction: async (callback: (client: typeof transactionClient) => Promise<unknown>) =>
+        callback(transactionClient),
+    });
+    const returned = await service.updatePlatformSettings({
+      currentAdmin: CURRENT_ADMIN,
+      requestMetadata: REQUEST_METADATA,
+      updatePlatformSettingsDto: { channelNewUsersSince: value },
+    });
+    return { written: updateCalls[0]?.data['channelNewUsersSince'], returned };
+  }
+
+  it('stores «Проверять только новых» as a moment and hands it to BOTH readers', async () => {
+    // The whole feature is this one column: NULL asks everyone, a moment asks
+    // only accounts created at or after it. It has two readers — the panel form
+    // (platform settings) and reiwa's gate (internal policy). Reaching only the
+    // first is the failure worth a test: the switch reads ON in the panel while
+    // the bot keeps asking every old customer to subscribe.
+    const since = '2026-09-22T09:00:00.000Z';
+    const { written, returned } = await updateChannelNewUsersSince(since, new Date(since));
+    assert.ok(written instanceof Date, `stored as a moment, not as text: ${String(written)}`);
+    assert.equal(written.toISOString(), since);
+    assert.equal((returned as { channelNewUsersSince: unknown }).channelNewUsersSince, since);
+
+    const reader = createService({
+      settings: {
+        findFirst: async () => buildSettingsRecord({ channelRequired: true, channelNewUsersSince: new Date(since) }),
+        create: async () => {
+          throw new Error('the internal policy is read-only');
+        },
+      },
+    });
+    assert.equal((await reader.getInternalPlatformPolicy()).channelNewUsersSince, since);
+  });
+
+  it('clears «Проверять только новых» back to asking everyone', async () => {
+    // ANTI-VACUITY for the one above: `null` must be written as NULL, not
+    // skipped. A skipped field would leave the old moment in place and the
+    // switch would be impossible to turn off.
+    const { written, returned } = await updateChannelNewUsersSince(null, null);
+    assert.equal(written, null);
+    assert.equal((returned as { channelNewUsersSince: unknown }).channelNewUsersSince, null);
   });
 });

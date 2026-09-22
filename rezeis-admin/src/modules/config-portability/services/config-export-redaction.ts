@@ -127,6 +127,7 @@ export const SECTION_FIELD_ALLOWLIST: Readonly<
     'rulesLink',
     'channelId',
     'channelLink',
+    'channelNewUsersSince',
     'accessMode',
     'inviteModeStartedAt',
     'defaultCurrency',
