@@ -238,6 +238,16 @@ export function formatErrorEventCardHtml(
   const d = deriveError(event, fallbackBuild, txtAttached);
   const code = (value: string): string => `<code>${escapeHtml(value)}</code>`;
 
+  // «💬 Сообщение», unless it only repeats «Почему это важно». The «Подключение
+  // VPN» refusals log «Рассылка не отправлена. <reason>» and explain themselves
+  // with that same <reason>, so one phone screen printed it twice. A block
+  // left with nothing in it goes together with its heading.
+  const repeatsWhy = d.why.length > 0 && d.errorMessage.includes(d.why);
+  const errorLines = [
+    ...(d.errorType !== ABSENT ? [`🧊 Тип: ${code(d.errorType)}`] : []),
+    ...(repeatsWhy ? [] : [`💬 Сообщение: ${escapeHtml(d.errorMessage)}`]),
+  ];
+
   const lines: string[] = [
     '#EventError',
     '',
@@ -266,10 +276,9 @@ export function formatErrorEventCardHtml(
       `🔩 Коммит: ${code(d.build.commit)}\n` +
       `⚙️ Ветка: ${code(d.build.branch)}</blockquote>`,
     '',
-    '⚠️ <b>Ошибка:</b>',
-    `<blockquote>${d.errorType !== ABSENT ? `🧊 Тип: ${code(d.errorType)}\n` : ''}` +
-      `💬 Сообщение: ${escapeHtml(d.errorMessage)}</blockquote>`,
-    '',
+    ...(errorLines.length > 0
+      ? ['⚠️ <b>Ошибка:</b>', `<blockquote>${errorLines.join('\n')}</blockquote>`, '']
+      : []),
     '🧭 <b>Что проверить дальше:</b>',
     `<blockquote>${escapeHtml(d.nextSteps)}</blockquote>`,
   ];

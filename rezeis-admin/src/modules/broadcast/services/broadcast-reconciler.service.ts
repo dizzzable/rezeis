@@ -78,7 +78,7 @@ export class BroadcastReconcilerService {
       // The job may simply be late — a worker that was down comes back and
       // BullMQ promotes it. Only a schedule with NO job behind it is lost.
       if (await this.queueService.hasPendingStart(broadcast.id)) continue;
-      await this.revive(broadcast.id, `schedule was due ${broadcast.scheduledAt?.toISOString()}`);
+      await this.revive(broadcast.id, `schedule was due ${broadcast.scheduledAt?.toISOString()}`, 'schedule');
     }
   }
 
@@ -129,7 +129,7 @@ export class BroadcastReconcilerService {
       }
 
       if (await this.queueService.hasPendingStart(broadcast.id)) continue;
-      await this.revive(broadcast.id, `${pending} recipients still undispatched`);
+      await this.revive(broadcast.id, `${pending} recipients still undispatched`, 'stalled');
     }
   }
 
@@ -169,7 +169,13 @@ export class BroadcastReconcilerService {
     );
   }
 
-  private async revive(broadcastId: string, why: string): Promise<void> {
+  /**
+   * `kind` is which of the two rescues this is, and the operator's card says
+   * different things for them: a schedule whose job was lost never started, and
+   * «остановилась на полпути» — true of a stalled delivery — was a false
+   * account of it.
+   */
+  private async revive(broadcastId: string, why: string, kind: 'schedule' | 'stalled'): Promise<void> {
     const attempts = (this.revivals.get(broadcastId) ?? 0) + 1;
     this.revivals.set(broadcastId, attempts);
 
@@ -194,9 +200,13 @@ export class BroadcastReconcilerService {
           attempts,
           detail: why,
           why:
-            'Рассылку уже несколько раз возвращали в очередь, и она снова останавливалась. ' +
-            'Автоматически её больше не перезапустят: кому она ещё не отправлена, те её не ' +
-            'получат, пока вы не разберётесь с рассылкой.',
+            kind === 'schedule'
+              ? 'Запланированную рассылку уже несколько раз ставили в очередь заново, но она так ' +
+                'и не стартовала. Автоматически её больше не перезапустят: пока вы не разберётесь ' +
+                'с рассылкой, её не получит никто.'
+              : 'Рассылку уже несколько раз возвращали в очередь, и она снова останавливалась. ' +
+                'Автоматически её больше не перезапустят: кому она ещё не отправлена, те её не ' +
+                'получат, пока вы не разберётесь с рассылкой.',
           // Same card, same default to displace: without this it advised opening
           // a .txt with a stack trace, and a queue that stalled has no stack.
           nextSteps:
@@ -224,8 +234,12 @@ export class BroadcastReconcilerService {
         // «Проблема с рассылкой» and an attempt number, with nothing saying
         // whether the operator has to do anything. They do not.
         why:
-          'Рассылка остановилась на полпути, и её вернули в очередь — доставка продолжится ' +
-          'сама. Вмешиваться не нужно; если она остановится снова, придёт отдельная карточка.',
+          kind === 'schedule'
+            ? 'Запланированная рассылка не стартовала в срок: её задача пропала из очереди. Её ' +
+              'поставили в очередь заново — отправка начнётся сама. Вмешиваться не нужно; если ' +
+              'не получится снова, придёт отдельная карточка.'
+            : 'Рассылка остановилась на полпути, и её вернули в очередь — доставка продолжится ' +
+              'сама. Вмешиваться не нужно; если она остановится снова, придёт отдельная карточка.',
       },
     );
   }

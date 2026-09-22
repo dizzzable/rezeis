@@ -26,7 +26,7 @@ function build(options: {
 }) {
   const messageUpdates: Update[] = [];
   const broadcastUpdates: Update[] = [];
-  const events: Array<{ severity: string; message: string }> = [];
+  const events: Array<{ severity: string; message: string; metadata?: Record<string, unknown> }> = [];
   const payload: Record<string, unknown> = {
     text: 'hi',
     mediaType: 'none',
@@ -71,7 +71,8 @@ function build(options: {
     {
       info: (_t: string, _s: string, message: string) => events.push({ severity: 'info', message }),
       warn: (_t: string, _s: string, message: string) => events.push({ severity: 'warn', message }),
-      error: (_t: string, _s: string, message: string) => events.push({ severity: 'error', message }),
+      error: (_t: string, _s: string, message: string, metadata?: Record<string, unknown>) =>
+        events.push({ severity: 'error', message, metadata }),
     } as never,
     // 4 user notifications, 5 settings (the bot token lives here), 6 bot
     // notifier, 7 relay queue.
@@ -236,6 +237,13 @@ describe('a recall that removes nothing says so', () => {
 
     const reported = fake.events.find((event) => event.severity === 'error');
     assert.ok(reported && /removed nothing in this batch/.test(reported.message));
+    // Not «nothing can be done»: a failed delete is also a dropped connection
+    // or a 429, the row stays SENT, and inside 48 hours pressing the recall
+    // button again is the fix. The card used to rule that out.
+    const nextSteps = String(reported.metadata?.['nextSteps']);
+    assert.match(nextSteps, /«Отозвать у получателей» ещё раз/);
+    assert.doesNotMatch(nextSteps, /сделать нельзя ничего/);
+    assert.match(String(reported.metadata?.['why']), /сбой/);
   });
 
   it('stays quiet when every deletion succeeded', async () => {

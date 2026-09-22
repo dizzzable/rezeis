@@ -1784,7 +1784,7 @@ export class BroadcastDeliveryService {
       // this fires per job. Worded as a whole-broadcast claim it would report
       // that nothing was removed while other batches were succeeding.
       const message = nothingRemoved
-        ? `Recall removed nothing in this batch: Telegram refused all ${failed} deletions (a message older than 48 hours cannot be deleted)`
+        ? `Recall removed nothing in this batch: all ${failed} deletions failed (a message older than 48 hours cannot be deleted; a network error or a rate limit fails the same way)`
         : `Recall removed ${deleted} of ${deleted + failed} messages in this batch; ${failed} could not be deleted`;
       if (nothingRemoved) {
         this.systemEventsService.error(EVENT_TYPES.BROADCAST_STARTED, 'SYSTEM', message, {
@@ -1794,12 +1794,19 @@ export class BroadcastDeliveryService {
           reason: 'recall_all_rejected',
           // Bounded to THIS batch, like the message above: a recall is fanned out
           // fifty at a time, and a whole-broadcast claim would be wrong.
+          //
+          // And not «nothing can be done»: `failed` also counts a thrown fetch,
+          // a 429 or a 5xx, and a recipient with no Telegram id. Those rows stay
+          // SENT, so the recall button still reaches them, and inside 48 hours
+          // pressing it again is exactly the fix.
           why:
-            `Telegram отклонил все ${failed} удалений в этой партии: сообщение старше 48 часов ` +
-            'удалить нельзя. Другие партии этого отзыва могут пройти успешно.',
+            `Ни одно из ${failed} удалений в этой партии не прошло. Чаще всего это сообщения ` +
+            'старше 48 часов — их Telegram удалять не даёт; но так же выглядит и временный сбой ' +
+            'связи с Telegram. Другие партии этого отзыва могут пройти успешно.',
           nextSteps:
-            'С этими сообщениями сделать нельзя ничего: Telegram не даёт удалять ' +
-            'сообщения старше 48 часов. Остальные партии проверьте на «Рассылках».',
+            'Если рассылке меньше 48 часов, нажмите у неё на «Рассылках» «Отозвать у ' +
+            'получателей» ещё раз: неудалённые сообщения там по-прежнему числятся ' +
+            'отправленными. Если больше — удалить их уже нельзя.',
         });
       } else {
         this.systemEventsService.warn(EVENT_TYPES.BROADCAST_STARTED, 'SYSTEM', message, {
@@ -1932,7 +1939,7 @@ export class BroadcastDeliveryService {
           nextSteps:
             'Откройте её на странице «Рассылки»: тем, кто «заблокировал бота», повтор не ' +
             'поможет. Когда не проходит ни одна отправка, причина обычно общая — проверьте ' +
-            'текст, кнопки и вложение рассылки и нажмите у неё кнопку ↻ «Повторить для … ' +
+            'текст, кнопки и вложение рассылки и нажмите у неё кнопку ↺ «Повторить для … ' +
             'недоставленных».',
         },
       );

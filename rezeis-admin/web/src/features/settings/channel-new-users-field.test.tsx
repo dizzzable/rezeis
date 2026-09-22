@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { renderWithProviders } from '@/test/test-utils'
@@ -101,6 +101,32 @@ describe('«Проверять только новых»', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Save Platform Settings' }))
     expect(savedPayload()['channelNewUsersSince']).toBe('2026-09-01T09:30:00.000Z')
+  })
+
+  it('keeps the field while the date is retyped, and will not save half a date', async () => {
+    // A `datetime-local` input reports '' the moment one part of it is cleared.
+    // With the switch read off that value, Backspace in the day turned the
+    // check off and took the field away mid-edit, and a save then stored NULL —
+    // «ask everyone» — under a switch the operator had left on.
+    const user = userEvent.setup()
+    renderWithProviders(
+      <PlatformTab settings={{ ...PLATFORM, channelNewUsersSince: '2026-09-01T09:30:00.000Z' }} />,
+    )
+    fireEvent.change(screen.getByLabelText('Check accounts registered from'), { target: { value: '' } })
+
+    expect(screen.getByRole('switch', { name: 'Check new users only' })).toBeChecked()
+    expect(screen.getByLabelText('Check accounts registered from')).toBeInTheDocument()
+    expect(screen.getByText(/Enter the full date and time/)).toBeInTheDocument()
+    const save = screen.getByRole('button', { name: 'Save Platform Settings' })
+    expect(save).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText('Check accounts registered from'), {
+      target: { value: '2026-10-01T12:00' },
+    })
+    expect(save).toBeEnabled()
+    expect(screen.queryByText(/Enter the full date and time/)).toBeNull()
+    await user.click(save)
+    expect(savedPayload()['channelNewUsersSince']).toBe(localInputToInstant('2026-10-01T12:00'))
   })
 
   it('is not offered while «Канал обязателен» is off', () => {

@@ -970,6 +970,8 @@ export const en = {
       channelNewUsersSince: 'Check accounts registered from',
       channelNewUsersSinceHint:
         'Turning this on fills in the current moment, and you can change it. Times follow the clock of this device.',
+      channelNewUsersSinceMissing:
+        'Enter the full date and time, or turn off “Check new users only”. Until then the card cannot be saved.',
       saved: 'Platform settings saved',
       saveFailed: 'Failed to save',
       saveButton: 'Save Platform Settings',
@@ -5893,7 +5895,7 @@ export const en = {
       mediaHint: 'Click to upload a screen banner (image or video)',
       placeholders: {
         invite:
-          'Available placeholders: {{link}} — user referral link. System buttons «📤 Share» / «📋 Copy» / «◀️ Back to menu» are appended automatically.',
+          'Available placeholders: {{link}} — user referral link, {{web_link}} — the same link to the cabinet website (empty when the cabinet has no https address). System buttons «📤 Share» / «📋 Copy» / «🌐 Copy website link» / «◀️ Back to menu» are appended automatically.',
         rules:
           'Available placeholder: {{rulesLink}} — service rules URL. The «📜 Open rules» button points at the legal documents when at least one is enabled on the «Legal documents» page, and at the Platform Policy URL otherwise. With neither set there is no button. «◀️ Back to menu» is always appended. Add your own buttons via «Add button».',
         help: 'Available placeholder: {{supportHandle}} — support @username. The main-menu «🆘 Help» button opens the support chat directly; this screen is shown only when no support handle is configured.',
@@ -6044,7 +6046,7 @@ export const en = {
           'Off — the invite screen is hidden in the bot, and inline mode shares a plain link with no referral code.',
         miniApp: 'Mini App button',
         miniAppHint:
-          'Off — the cabinet button is not shown in the menu or on /start.',
+          'Off — “Open app” is not shown in the menu or on /start, and “Cabinet” opens the website as a plain link rather than in the phone browser.',
         profileTitle: 'Telegram bot profile',
         englishVariant: 'English',
         englishVariantHint:
@@ -6147,7 +6149,7 @@ export const en = {
           hint: {
             CALLBACK:
               'Plain inline button. Reiwa handles the press internally — useful when the button id matches a screen shortId or you intercept the callback in code.',
-            URL: 'Opens an external URL in the in-app Telegram browser. Only https:// is accepted.',
+            URL: 'Opens an external URL in the in-app Telegram browser. Only https:// is accepted. The exception is “Cabinet” with an empty target: it opens the cabinet in the phone browser, already signed in (through the Mini App).',
             WEBAPP:
               'Opens a Telegram Mini App. URL must be https:// and the domain must be linked in @BotFather.',
             SCREEN:

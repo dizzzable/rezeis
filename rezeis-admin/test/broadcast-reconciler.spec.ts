@@ -295,4 +295,29 @@ describe('what the reconciler’s cards say', () => {
       `the reason is printed twice:\n${revival}`,
     );
   });
+
+  it('tells a lost schedule it never started — not that it stopped halfway', async () => {
+    // `revive` serves two rescues. A schedule whose job vanished never sent a
+    // thing, and «остановилась на полпути» — true of a stalled delivery, the
+    // case above — told the operator about messages that were never sent.
+    const { events, cards } = cardCapturingEvents();
+    const { service } = build({
+      scheduled: [{ id: 'b-10', scheduledAt: longAgo }],
+      systemEvents: events,
+    });
+
+    for (let i = 0; i < 4; i += 1) await service.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const revival = cards.find((card) => card.includes('🔁 Попытка возобновления: 1'));
+    assert.ok(revival !== undefined, `no revival card among ${cards.length}`);
+    const revivalWhy = revival.split(NEWLINE).find((line) => line.startsWith(WHY_LINE)) ?? '';
+    assert.ok(revivalWhy.includes('не стартовала в срок'), revival);
+    assert.ok(!revival.includes('на полпути'), revival);
+
+    const incident = cards.find((card) => card.includes('<b>Почему это важно:</b>'));
+    assert.ok(incident !== undefined, `no incident card among ${cards.length}`);
+    assert.ok(incident.includes('так и не стартовала'), incident);
+    assert.ok(!incident.includes('снова останавливалась'), incident);
+  });
 });

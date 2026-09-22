@@ -154,11 +154,20 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
   const [rulesLink, setRulesLink] = useState(settings?.rulesLink ?? '')
   const [channelLink, setChannelLink] = useState(settings?.channelLink ?? '')
   const [channelId, setChannelId] = useState(settings?.channelId?.toString() ?? '')
-  // Empty is OFF: the switch and the date are one value, so the card cannot
-  // save «ON with no date», a state the column cannot hold either.
+  // The switch and the date are two states, not one. A `datetime-local` input
+  // reports '' the moment ONE part of it is cleared, so with the switch read
+  // off the value, Backspace in the day turned «Проверять только новых» off and
+  // took the field away mid-edit. «ON with no readable date» is still never
+  // saved — the column holds a moment or NULL, and NULL means «ask everyone»,
+  // the opposite of what the switch shows — the save button waits instead.
+  const [channelNewUsersOnly, setChannelNewUsersOnly] = useState(
+    instantToLocalInput(settings?.channelNewUsersSince) !== '',
+  )
   const [channelNewUsersSince, setChannelNewUsersSince] = useState(
     instantToLocalInput(settings?.channelNewUsersSince),
   )
+  const channelNewUsersInstant = localInputToInstant(channelNewUsersSince)
+  const channelNewUsersDateMissing = channelRequired && channelNewUsersOnly && channelNewUsersInstant === null
   // «Часовой пояс» lives in `platformBranding` on the server, and is sent only
   // when the operator changed it: an older value an import stored that the
   // save would now refuse must not block saving the rest of this card.
@@ -208,7 +217,7 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       rulesLink: normalize(rulesLink),
       channelLink: normalize(channelLink),
       channelId: normalize(channelId),
-      channelNewUsersSince: localInputToInstant(channelNewUsersSince),
+      channelNewUsersSince: channelNewUsersOnly ? channelNewUsersInstant : null,
       ...(timezone === savedTimezone ? {} : { platformBranding: { timezone: normalize(timezone) } }),
     })
   }
@@ -317,15 +326,19 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
                     <p className="text-xs text-muted-foreground">{t('settingsPage.platform.channelNewUsersOnlyHint')}</p>
                   </div>
                   <Switch
-                    checked={channelNewUsersSince !== ''}
-                    onCheckedChange={(on) =>
-                      // ON starts from now: everyone who is here already stays in.
-                      setChannelNewUsersSince(on ? instantToLocalInput(new Date().toISOString()) : '')
-                    }
+                    checked={channelNewUsersOnly}
+                    onCheckedChange={(on) => {
+                      setChannelNewUsersOnly(on)
+                      // ON starts from now — everyone who is here already stays
+                      // in — unless a readable date is already in the field.
+                      if (on && channelNewUsersInstant === null) {
+                        setChannelNewUsersSince(instantToLocalInput(new Date().toISOString()))
+                      }
+                    }}
                     aria-label={t('settingsPage.platform.channelNewUsersOnly')}
                   />
                 </div>
-                {channelNewUsersSince !== '' && (
+                {channelNewUsersOnly && (
                   <div className="space-y-2">
                     <Label htmlFor="platform-channel-new-users-since">
                       {t('settingsPage.platform.channelNewUsersSince')}
@@ -339,6 +352,11 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
                     <p className="text-xs text-muted-foreground">
                       {t('settingsPage.platform.channelNewUsersSinceHint')}
                     </p>
+                    {channelNewUsersDateMissing && (
+                      <p role="alert" className="text-xs text-destructive">
+                        {t('settingsPage.platform.channelNewUsersSinceMissing')}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -348,7 +366,7 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
 
         <Separator />
 
-        <Button onClick={handleSave} disabled={mutation.isPending}>
+        <Button onClick={handleSave} disabled={mutation.isPending || channelNewUsersDateMissing}>
           {mutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
           {t('settingsPage.platform.saveButton')}
         </Button>

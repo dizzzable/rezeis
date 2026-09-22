@@ -2960,13 +2960,32 @@ function headerFor(
  * the note beside `import.failed` is about. The card simply never asked. A
  * type nobody registered still gets the old wording, which is honest: nobody
  * has said what it is.
+ *
+ * ONLY A FAILURE HEADER. A type's own title is often a success — ERROR is
+ * raised under `promocode.activated` («Промокод активирован») when the reward
+ * sync fails, and under `subscription.synced` when a regenerated link was not
+ * stored — and over «Необработанная ошибка» that title is worse than the
+ * constant it replaced. So: a producer's own variant, else the type's failure
+ * header, else its title only when the TYPE names a failure
+ * (`FAILURE_NAMED_TYPE`); anything else keeps «Произошла ошибка!».
  */
 function errorCardHeader(
   event: SystemEventPayload,
 ): { readonly emoji: string; readonly title: string } | undefined {
   const present = EVENT_PRESENTATION[event.type];
-  return present === undefined ? undefined : headerFor(event, present);
+  if (present === undefined) return undefined;
+  const meta = event.metadata ?? {};
+  const variant = present.variants?.find((candidate) => candidate.when(meta));
+  if (variant !== undefined) return variant;
+  if (present.warning !== undefined) return present.warning;
+  return FAILURE_NAMED_TYPE.test(event.type) ? present : undefined;
 }
+
+/**
+ * A type whose own name says it failed — `system.error`, `import.failed`,
+ * `partner.balance_refund_failed` — and whose title, accordingly, says so too.
+ */
+const FAILURE_NAMED_TYPE = /(?:\.error|[._]failed)$/;
 
 /** A metadata value worth a line: not absent, not null, not blank. */
 function isPresent(value: unknown): boolean {

@@ -1566,6 +1566,28 @@ describe('a broadcast the panel refused to send', () => {
     // phone screen.
     assert.ok(!card.includes('🧊 Тип'), card);
     assert.ok(!card.includes('❄️ Операция'), card);
+    // A message that says something the explanation does not stays on.
+    assert.ok(card.includes('💬 Сообщение: Broadcast not sent'), card);
+  });
+
+  it('prints a reason once when the log sentence is the explanation', async () => {
+    // The «Подключение VPN» refusals log «Рассылка не отправлена. <reason>» and
+    // explain themselves with <reason>: the card printed it under «Почему это
+    // важно» and again under «Сообщение». With no exception type either, the
+    // «Ошибка» block has nothing left, and its heading goes with it.
+    const reason = 'Получателей больше предела: 12 000 из 10 000.';
+    const { service, getLastText } = buildService();
+    service.error('broadcast.started', 'SYSTEM', `Рассылка не отправлена. ${reason}`, {
+      broadcastId: 'bc-5',
+      reason: 'connect_too_many',
+      why: reason,
+      nextSteps: 'Черновик цел и лежит на странице «Рассылки».',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.equal(card.split(reason).length - 1, 1, card);
+    assert.ok(!card.includes('⚠️ <b>Ошибка:</b>'), card);
+    assert.ok(card.includes('🧭 <b>Что проверить дальше:</b>'), card);
   });
 
   it('falls back to the unhandled-error wording when a producer wrote neither', async () => {
@@ -1601,6 +1623,30 @@ describe('a broadcast the panel refused to send', () => {
     assert.ok(!card.includes('доставлена не всем'), card);
     assert.ok(card.includes('ни один из 400 получателей'), card);
     assert.ok(!card.includes('Необработанная ошибка'), card);
+  });
+
+  it('never puts a success title over an error', async () => {
+    // The regression the header change first shipped with: ERROR is raised
+    // under `promocode.activated` when the reward sync fails, and the card
+    // announced «Промокод активирован» over «Необработанная ошибка». A type
+    // with no failure header and no failure in its name keeps the old words.
+    const { service, getLastText } = buildService();
+    service.error('promocode.activated', 'SYSTEM', 'reward sync failed', { code: 'SPRING' });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('<b>Событие: Произошла ошибка!</b>'), card);
+    assert.ok(!card.includes('Промокод активирован'), card);
+  });
+
+  it('wears the title of a type named for a failure', async () => {
+    // ANTI-VACUITY for the one above: the rule lets a failure's own title
+    // through, it does not fall back for everything without a warning header.
+    const { service, getLastText } = buildService();
+    service.error('partner.balance_refund_failed', 'SYSTEM', 'refund failed', {});
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('🚨 <b>Событие: Партнёру не вернулся списанный баланс!</b>'), card);
+    assert.ok(!card.includes('Произошла ошибка!'), card);
   });
 
   it('keeps the old wording for a type nobody registered', async () => {
