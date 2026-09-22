@@ -633,7 +633,7 @@ describe('a partner-balance debit whose fulfillment failed', () => {
     assert.equal(alert.metadata.reason, undefined, 'not the «панель повторит сама» header');
     assert.match(alert.message, /требуется ручной возврат/);
     assert.match(String(alert.metadata.why), /панель этот возврат не повторит/);
-    assert.match(String(alert.metadata.nextSteps), /«Корректировка баланса», сумма \+5,/);
+    assert.match(String(alert.metadata.nextSteps), /«Корректировка баланса»: сумма \+5, .*«Применить»/s);
   });
 
   it('never reaches the refund when the draft row is missing — the debit has not happened yet', async () => {

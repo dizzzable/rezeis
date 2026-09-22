@@ -2294,6 +2294,8 @@ export class PaymentSubscriptionMutationService {
         `UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS subscription=${deferral.subscriptionId} ` +
           `scheduledTerms=${deferral.scheduledTermIds.length} entitlements=${deferral.boundEntitlements}`,
       );
+      // `system.error` is drawn as an incident card whatever the severity, and
+      // that card prints only `why` and `nextSteps` of what a human wrote.
       this.events.warn(
         EVENT_TYPES.SYSTEM_ERROR,
         'SYSTEM',
@@ -2301,9 +2303,18 @@ export class PaymentSubscriptionMutationService {
         {
           code: 'UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS',
           subscriptionId: deferral.subscriptionId,
+          userId: input.transaction.userId,
           planId: deferral.planId,
           scheduledTermIds: [...deferral.scheduledTermIds],
           boundEntitlements: deferral.boundEntitlements,
+          reason: 'upgrade_baseline_kept',
+          why:
+            'Подписку перевели на другой тариф, но у неё уже оплачен следующий период с дополнениями. ' +
+            'Отменить такой период панель не может — дополнения оплачены, — поэтому оставила прежнюю ' +
+            'основу периода. Когда он начнётся, у подписки могут снова оказаться лимиты прежнего тарифа.',
+          nextSteps:
+            'Откройте «Пользователи» → этого пользователя → вкладку «Подписки» и, когда начнётся следующий ' +
+            'период, проверьте лимиты подписки. Если они вернулись к прежнему тарифу, поправьте их вручную.',
         },
       );
     }

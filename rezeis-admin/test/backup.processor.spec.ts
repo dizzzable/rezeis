@@ -157,6 +157,25 @@ describe('BackupProcessor restore failure', () => {
     assert.match(String(event!.metadata?.['why']), /База осталась как была/);
     assert.match(String(event!.metadata?.['nextSteps']), /«Бэкапы»/);
   });
+
+  it('does not say the data is untouched once the restore itself went through', () => {
+    // Past `restoring` only a progress write can still throw — and by then the
+    // archive is in the database.
+    const emitted: Array<{ metadata?: Record<string, unknown> }> = [];
+    const processor = new BackupProcessor(
+      {} as never,
+      { emit: (event: { metadata?: Record<string, unknown> }) => emitted.push(event) } as never,
+      {} as never,
+    );
+    processor.onFailed(
+      { ...(failedRestoreJob() as object), progress: { stage: 'migrating', percent: 70 } } as never,
+      new Error('Connection is closed.'),
+    );
+    assert.equal(emitted.length, 1);
+    assert.match(String(emitted[0]!.metadata?.['why']), /уже восстановлены/);
+    assert.doesNotMatch(String(emitted[0]!.metadata?.['why']), /База осталась как была/);
+    assert.match(String(emitted[0]!.metadata?.['nextSteps']), /Перезапустите контейнер API панели/);
+  });
 });
 
 describe('BackupProcessor backup failure — one card per backup, not per attempt', () => {

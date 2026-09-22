@@ -158,9 +158,9 @@ function defaultNextSteps(hasStack: boolean, txtAttached: boolean): string {
   if (hasStack) {
     return (
       'Полный stack trace есть в выгрузке: «Журнал аудита» → «Системные события» → «Скачать .txt» ' +
-      '(в файле все события подряд, это ищите по времени). Чтобы отчёт приходил сюда файлом, на странице ' +
-      '«Уведомления» в «Отчёты об ошибках» включите «Прикреплять .txt-отчёт к сообщениям об ошибках ' +
-      'в Telegram» — при «Формирование отчётов» не «Выключено».'
+      '(в файле все события подряд, это ищите по времени). Чтобы отчёт приходил сюда файлом: ' +
+      '«Уведомления» → вкладка «Настройки доставки» → «Отчёты об ошибках» → «Прикреплять .txt-отчёт ' +
+      'к сообщениям об ошибках в Telegram», при «Формирование отчётов» не «Выключено».'
     );
   }
   return 'Проверьте логи сервиса по указанному источнику и операции.';
@@ -298,6 +298,17 @@ export function formatErrorEventCardHtml(
     '❗ <b>Почему это важно:</b>',
     `<blockquote>${escapeHtml(d.why)}</blockquote>`,
     ...(userBlock !== null ? ['', ...userBlock] : []),
+    // What to do comes before the technical blocks, not last. Sent as a
+    // document caption (the .txt attached, on the relay and dev routes) the
+    // card is clipped to 1024 characters FROM THE END — and the end used to be
+    // this block, the one the operator acts on. Now the clip takes the build
+    // and the context, which the attached .txt carries in full anyway.
+    '',
+    '🧭 <b>Что проверить дальше:</b>',
+    `<blockquote>${escapeHtml(d.nextSteps)}</blockquote>`,
+    ...(errorLines.length > 0
+      ? ['', '⚠️ <b>Ошибка:</b>', `<blockquote>${errorLines.join('\n')}</blockquote>`]
+      : []),
     '',
     '🌀 <b>Контекст:</b>',
     `<blockquote>🔎 Источник: ${code(d.source)}\n` +
@@ -314,12 +325,6 @@ export function formatErrorEventCardHtml(
       `🎯 Версия: ${code(d.build.version)}\n` +
       `🔩 Коммит: ${code(d.build.commit)}\n` +
       `⚙️ Ветка: ${code(d.build.branch)}</blockquote>`,
-    '',
-    ...(errorLines.length > 0
-      ? ['⚠️ <b>Ошибка:</b>', `<blockquote>${errorLines.join('\n')}</blockquote>`, '']
-      : []),
-    '🧭 <b>Что проверить дальше:</b>',
-    `<blockquote>${escapeHtml(d.nextSteps)}</blockquote>`,
   ];
   return lines.join('\n');
 }

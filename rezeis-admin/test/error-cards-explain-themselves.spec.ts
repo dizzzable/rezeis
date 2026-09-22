@@ -5,6 +5,8 @@ import { describe, it } from 'node:test';
 
 import ts from 'typescript';
 
+import { EVENT_TYPES } from '../src/common/services/system-events.service';
+
 /**
  * Every ERROR a panel producer raises is drawn as an incident card
  * (`formatErrorEventCardHtml`), and that card prints exactly two things a
@@ -14,7 +16,11 @@ import ts from 'typescript';
  * over a Remnawave refusal, money owed to a partner, a backup that did not
  * happen. Until 0.9.7.68 fifteen producers did.
  *
- * So every ERROR emission under `src/` spells out both keys at the call site.
+ * So every emission that becomes that card spells out both keys at the call
+ * site: an ERROR of any type, AND a type whose name ends in `.error` at any
+ * severity — `isErrorEvent` draws `system.error` raised through `warn()` as the
+ * same incident card, and the first version of this guard, which looked at
+ * `.error()` and `severity: 'ERROR'` only, missed exactly such a producer.
  * Found through the TypeScript AST: the copy is prose full of parentheses and
  * quotes, which a regex cannot count its way through.
  */
@@ -22,11 +28,22 @@ import ts from 'typescript';
 const SRC = join(__dirname, '..', 'src');
 const RECEIVERS = new Set(['events', 'systemEvents', 'systemEventsService']);
 
-/** Files whose ERROR emissions are not a producer's own, each with the reason. */
+/** `EVENT_TYPES.X` spellings of every type drawn as an incident card at any severity. */
+const INCIDENT_TYPES = new Set(
+  Object.entries(EVENT_TYPES)
+    .filter(([, value]) => value.endsWith('.error'))
+    .map(([key]) => `EVENT_TYPES.${key}`),
+);
+
+/** Files whose incident emissions are not a producer's own, each with the reason. */
 const EXEMPT = new Map<string, string>([
   [
     'modules/system-events-ingest/internal-system-events.controller.ts',
     "relays the cabinet's own errors; the surface defaults and `scopeWhy` are written for those",
+  ],
+  [
+    'modules/client-errors/client-errors.controller.ts',
+    "relays the admin SPA's own crash reports, which the stack-trace defaults are written for",
   ],
 ]);
 
@@ -68,14 +85,20 @@ function errorEmissions(file: string): Emission[] {
       if (receiver !== null && RECEIVERS.has(receiver)) {
         const line = source.getLineAndCharacterOfPosition(node.getStart()).line + 1;
         const method = node.expression.name.text;
+        const [first] = node.arguments;
         if (method === 'error') {
           found.push({ file, line, metadata: node.arguments[3] });
+        } else if ((method === 'warn' || method === 'info') && first !== undefined && INCIDENT_TYPES.has(first.getText())) {
+          found.push({ file, line, metadata: node.arguments[3] });
         } else if (method === 'emit') {
-          const [payload] = node.arguments;
-          if (payload !== undefined && ts.isObjectLiteralExpression(payload)) {
-            const severity = property(payload, 'severity');
-            if (severity !== undefined && severity.getText().includes("'ERROR'")) {
-              found.push({ file, line, metadata: property(payload, 'metadata') });
+          if (first !== undefined && ts.isObjectLiteralExpression(first)) {
+            const severity = property(first, 'severity');
+            const type = property(first, 'type');
+            if (
+              (severity !== undefined && severity.getText().includes("'ERROR'")) ||
+              (type !== undefined && INCIDENT_TYPES.has(type.getText()))
+            ) {
+              found.push({ file, line, metadata: property(first, 'metadata') });
             }
           }
         }
@@ -118,6 +141,8 @@ describe('every ERROR card says why it matters and what to check next', () => {
     assert.equal(perFile('modules/backup/backup.processor.ts'), 3);
     // `this.systemEvents?.emit({ severity: cond ? 'ERROR' : 'WARNING' })`
     assert.equal(perFile('modules/push/services/web-push.service.ts'), 1);
+    // `this.events.warn(EVENT_TYPES.SYSTEM_ERROR, …)` — an incident card at WARNING.
+    assert.equal(perFile('modules/payments/services/payment-subscription-mutation.service.ts'), 1);
     assert.ok(GUARDED.length >= 20, `only ${GUARDED.length} ERROR emissions found — the scan has gone blind`);
   });
 

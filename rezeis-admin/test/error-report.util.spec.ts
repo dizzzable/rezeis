@@ -6,6 +6,7 @@ import {
   formatErrorReportTxt,
   type ErrorReportEvent,
 } from '../src/common/services/error-report.util';
+import { clipHtmlCard } from '../src/common/services/system-events.service';
 
 const build = { version: '0.9.6.63', commit: '517e1906cf8d', branch: 'main' };
 
@@ -170,5 +171,48 @@ describe('the incident card says whose it is', () => {
   it('prints nothing about a user when the event names none', () => {
     const card = formatErrorEventCardHtml(panelError({ why: 'Бэкап не создан.' }), build, false);
     assert.ok(!card.includes('Пользователь'), card);
+  });
+});
+
+describe('the incident card puts what to do before the technical blocks', () => {
+  // Sent as a document caption the card is clipped to 1024 characters from the
+  // END — and «Что проверить дальше» used to be the end.
+  const event: ErrorReportEvent = {
+    kind: 'event.system.error',
+    severity: 'ERROR',
+    category: 'SYSTEM',
+    message: `Profile sync failed: ${'x'.repeat(600)}`,
+    timestamp: '2026-09-23T10:00:00.000Z',
+    metadata: {
+      userId: 'cuid-user-1',
+      telegramId: '4242',
+      userName: 'Анна',
+      login: 'anna_web',
+      why: 'Задача «обновление профиля» не прошла 5 раз подряд, и панель больше не повторяет её сама. '.repeat(2),
+      nextSteps: 'Нажмите «Синхронизировать все» на вкладке «Подписки».',
+    },
+  };
+
+  it('in this order: why, whose, what to do, then the error, the context and the build', () => {
+    const card = formatErrorEventCardHtml(event, build, false);
+    const at = (heading: string): number => card.indexOf(heading);
+    const order = [
+      '❗ <b>Почему это важно:</b>',
+      '👤 <b>Пользователь:</b>',
+      '🧭 <b>Что проверить дальше:</b>',
+      '⚠️ <b>Ошибка:</b>',
+      '🌀 <b>Контекст:</b>',
+      '🏗 <b>Сборка:</b>',
+    ].map(at);
+    assert.ok(order.every((position) => position >= 0), card);
+    assert.deepEqual([...order].sort((a, b) => a - b), order, card);
+  });
+
+  it('so a caption clipped to 1024 still carries «Что проверить дальше»', () => {
+    const card = formatErrorEventCardHtml(event, build, true);
+    assert.ok(card.length > 1024, 'the premise: this card needs clipping');
+    const caption = clipHtmlCard(card, 1024);
+    assert.ok(caption.length <= 1024);
+    assert.ok(caption.includes('Нажмите «Синхронизировать все»'), caption);
   });
 });

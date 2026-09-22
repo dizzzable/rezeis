@@ -271,7 +271,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       // the FAILED pass of `sweepAndRecover`, which re-enqueues with `force` and
       // therefore gets past BullMQ's retained-job deduplication.
       if (attempt >= PROFILE_SYNC_MAX_ATTEMPTS && classification === 'TERMINAL') {
-        const copy = syncFailedForGoodCopy(anchor.action, attempt);
+        const copy = syncFailedForGoodCopy(anchor.action, attempt, errorMessage);
         const userId = await this.ownerOfForCard(anchor.subscriptionId);
         this.events.error(
           EVENT_TYPES.SYSTEM_ERROR,
@@ -405,7 +405,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     // alert decision would make the failure both permanent and silent.
     const isFinalAttempt = attempt >= PROFILE_SYNC_MAX_ATTEMPTS;
     if (isFinalAttempt && outcome.classification === 'TERMINAL') {
-      const copy = syncFailedForGoodCopy(syncJob.action, attempt);
+      const copy = syncFailedForGoodCopy(syncJob.action, attempt, errorMessage);
       this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', `Profile sync failed: ${errorMessage}`, {
         syncJobId: syncJob.id,
         action: syncJob.action,
@@ -2420,9 +2420,9 @@ export class ProfileSyncProcessor extends WorkerHost {
             'него: пока шло удаление, её кто-то изменил. Подписчик видит действующую подписку, но ' +
             'подключиться не может.',
           nextSteps:
-            'Откройте «Пользователи» → этого пользователя → «Подписки». Если подписка должна жить, ' +
-            'нажмите у неё «Синхронизировать»: панель увидит, что профиля нет, и создаст его заново. ' +
-            'Если она должна была удалиться, нажмите «Удалить» ещё раз.',
+            'Откройте «Пользователи» → этого пользователя → вкладку «Подписки». Если подписка должна жить, ' +
+            'нажмите «Синхронизировать все»: панель увидит, что профиля нет, и создаст его заново (значок ↻ у ' +
+            'отдельной подписки его не создаёт). Если она должна была удалиться, нажмите у неё «Удалить» ещё раз.',
         });
       } else {
         this.logger.warn(
@@ -3178,41 +3178,62 @@ function classifyRecovery(
  *
  * The incident card prints nothing else a human wrote, and without these it
  * read «Необработанная ошибка в панели администратора» over a Remnawave
- * refusal. What is lost depends on the action, and so does the remedy: a
- * DELETE that never ran leaves a working profile behind, and «Синхронизировать»
- * would push it again rather than remove it.
+ * refusal. What is lost depends on the action, and so does the remedy — and
+ * the remedy has to be a button that PUSHES:
+ *   - «Синхронизировать все» on the user's «Подписки» tab queues a CREATE or
+ *     UPDATE for each subscription (and an UPDATE re-creates a missing profile);
+ *   - the ↻ on a single subscription does the opposite: it reads the profile
+ *     back and writes Remnawave's expiry INTO the row, so after a failed
+ *     UPDATE it would roll a paid term back to the old date. Never name it here.
+ *   - A DELETE's subscription is already DELETED — «Удалить» again is a no-op —
+ *     and one refusal («Refusing to delete…») means the profile is another live
+ *     subscription's, which no one may delete by hand.
  */
-function syncFailedForGoodCopy(
+export function syncFailedForGoodCopy(
   action: SyncAction | string,
   attempts: number,
+  errorMessage: string,
 ): { readonly why: string; readonly nextSteps: string } {
   const failed = `Задача «${SYNC_ACTION_LABELS[action] ?? action}» не прошла ${attempts} раз подряд, и панель больше не повторяет её сама. `;
-  const retry =
-    'Причина — в «💬 Сообщение» выше: чаще всего это отказ Remnawave, и повтор тех же данных его не изменит. ' +
-    'Устраните причину, затем откройте «Пользователи» → этого пользователя → «Подписки» и нажмите у подписки ';
+  const cause =
+    'Причина — в «💬 Сообщение» ниже: чаще всего это отказ Remnawave, и повтор тех же данных его не изменит. ';
+  const pushAgain =
+    `${cause}Устраните её, затем откройте «Пользователи» → этого пользователя → вкладку «Подписки» и нажмите ` +
+    '«Синхронизировать все»: панель заново отправит подписки в Remnawave. Значок ↻ у отдельной подписки для ' +
+    'этого не подходит — он забирает данные из Remnawave, в том числе прежний срок.';
   switch (action) {
     case SyncAction.CREATE:
       return {
         why: `${failed}Профиля в Remnawave нет — подписчик не может подключиться.`,
-        nextSteps: `${retry}«Синхронизировать».`,
+        nextSteps: pushAgain,
       };
     case SyncAction.DELETE:
-      return {
-        why: `${failed}Профиль в Remnawave не удалён и продолжает работать.`,
-        nextSteps:
-          'Причина — в «💬 Сообщение» выше: чаще всего это отказ Remnawave. Устраните её и удалите ' +
-          'подписку ещё раз («Пользователи» → этот пользователь → «Подписки» → «Удалить») или удалите ' +
-          'профиль в Remnawave вручную.',
-      };
+      return /^Refusing to delete Remnawave profile/.test(errorMessage)
+        ? {
+            why:
+              `${failed}Панель не стала удалять профиль в Remnawave: им пользуется другая подписка, живая или ` +
+              'только что заведённая, и удаление отключило бы её.',
+            nextSteps:
+              'Не удаляйте этот профиль в Remnawave: он нужен другой подписке. Подробности — в «💬 Сообщение» ' +
+              'ниже. Если у этого пользователя в Remnawave остался ещё и лишний профиль, его можно удалить вручную.',
+          }
+        : {
+            why: `${failed}Профиль в Remnawave не удалён и продолжает работать.`,
+            nextSteps:
+              `${cause}Удалите профиль этого пользователя в Remnawave вручную: подписка в панели уже удалена, ` +
+              'и повторное «Удалить» ничего не сделает.',
+          };
     case SyncAction.TRAFFIC_RESET:
       return {
         why: `${failed}Трафик в Remnawave не сброшен.`,
-        nextSteps: `${retry}«Сброс трафика».`,
+        nextSteps:
+          `${cause}Устраните её, затем откройте «Пользователи» → этого пользователя → вкладку «Подписки» → у ` +
+          'подписки «Быстрые действия» → «Сброс трафика» → «Сбросить».',
       };
     default:
       return {
         why: `${failed}В Remnawave у подписчика прежние срок, лимиты и сквады — изменения из панели до него не дошли.`,
-        nextSteps: `${retry}«Синхронизировать».`,
+        nextSteps: pushAgain,
       };
   }
 }

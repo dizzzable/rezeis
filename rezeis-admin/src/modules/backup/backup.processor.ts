@@ -258,6 +258,14 @@ export class BackupProcessor extends WorkerHost {
       // used to leave only the log line above, after the operator had been
       // told "restore started". Attributed like the completion event.
       const { filename, initiatedBy } = (job.data ?? {}) as Partial<BackupRestoreJobData>;
+      const archive = filename ?? 'неизвестного архива';
+      // Where it failed decides what the operator may assume. `runRestore` is
+      // `psql --single-transaction` with ON_ERROR_STOP: it commits whole or not
+      // at all, so a failure while `restoring` (or before any progress) left
+      // the data as it was. Past it — `migrating` onwards, where only a
+      // progress write can still throw — the archive is already in.
+      const stage = (job.progress as { readonly stage?: unknown } | null | undefined)?.stage;
+      const restored = stage !== undefined && stage !== 'restoring';
       this.systemEventsService.emit({
         type: EVENT_TYPES.SYSTEM_ERROR,
         category: 'SYSTEM',
@@ -270,15 +278,15 @@ export class BackupProcessor extends WorkerHost {
           initiatedBy,
           error: error.message,
           reason: 'restore_failed',
-          // `psql --single-transaction` with ON_ERROR_STOP (`runRestore`): the
-          // restore commits whole or not at all, and what follows it here does
-          // not throw. So a thrown restore left the data as it was.
-          why:
-            `Восстановление базы из «${filename ?? 'неизвестного архива'}» не удалось. База осталась ` +
-            'как была: восстановление идёт одной транзакцией и при ошибке откатывается целиком.',
-          nextSteps:
-            'Причина — в «💬 Сообщение» выше. Устраните её и запустите восстановление ещё раз или ' +
-            'выберите другой бэкап на странице «Бэкапы» («Восстановить»).',
+          why: restored
+            ? `Данные из «${archive}» уже восстановлены, но шаг после восстановления не завершился.`
+            : `Восстановление базы из «${archive}» не удалось. База осталась как была: восстановление ` +
+              'идёт одной транзакцией и при ошибке откатывается целиком.',
+          nextSteps: restored
+            ? 'Перезапустите контейнер API панели: при запуске он применит недостающие миграции сам. ' +
+              'Причина — в «💬 Сообщение» ниже.'
+            : 'Причина — в «💬 Сообщение» ниже. Устраните её и запустите восстановление ещё раз или ' +
+              'выберите другой бэкап на странице «Бэкапы» («Восстановить»).',
         },
         adminId: initiatedBy ?? null,
       });
@@ -305,8 +313,8 @@ export class BackupProcessor extends WorkerHost {
             `Бэкап «${filename ?? 'без имени'}» не создан ни с первой попытки, ни с повтора. Свежей ` +
             'копии базы нет — последняя удачная осталась в списке на странице «Бэкапы».',
           nextSteps:
-            'Причина — в «💬 Сообщение» выше и в строке этого бэкапа на странице «Бэкапы». Проверьте ' +
-            'место на диске сервера и доступ к базе, затем нажмите «Создать бэкап».',
+            'Причина — в «💬 Сообщение» ниже; на странице «Бэкапы» у этой записи только отметка «Ошибка». ' +
+            'Проверьте место на диске сервера и доступ к базе, затем нажмите «Создать бэкап».',
         },
       );
       return;
@@ -327,7 +335,7 @@ export class BackupProcessor extends WorkerHost {
             `Бэкап «${filename ?? 'без имени'}» создан, но отправить его файлом в Telegram не удалось. ` +
             'Сам бэкап цел и лежит на сервере.',
           nextSteps:
-            'Бэкап есть в списке на странице «Бэкапы». Причина недоставки — в «💬 Сообщение» выше.',
+            'Бэкап есть в списке на странице «Бэкапы». Причина недоставки — в «💬 Сообщение» ниже.',
         },
       );
     }

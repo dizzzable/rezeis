@@ -3494,6 +3494,9 @@ const SYSTEM_ERROR_HEADERS = {
   backup_delivery_failed: { emoji: '📤', title: 'Бэкап не доставлен в Telegram' },
   // `BackupProcessor` — a restore threw.
   restore_failed: { emoji: '🧯', title: 'Восстановление базы не удалось' },
+  // `PaymentSubscriptionMutationService` — raised at WARNING, still an incident
+  // card: an upgrade kept a paid scheduled term, and with it the old baseline.
+  upgrade_baseline_kept: { emoji: '⏭', title: 'Тариф сменён, но следующий период остался прежним' },
 } as const;
 
 /**
