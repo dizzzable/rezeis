@@ -594,6 +594,20 @@ export class WebPushService implements OnModuleInit {
         legacyEnvKeysStranded: stranded,
         adoption: adoption.outcome,
         ...(adoption.outcome === 'failed' ? { reason: adoption.reason } : {}),
+        // The ERROR branch is an incident card, which prints only these two.
+        ...(stranded
+          ? {
+              why:
+                'Web-push выключен: VAPID-ключи заданы в переменных окружения, но перенести их в панель ' +
+                'не удалось, а переменные при отправке больше не читаются. Ни одно push-уведомление не ' +
+                'уходит — ни подписчикам, ни администраторам.',
+              nextSteps:
+                'Причина — в «💬 Сообщение» выше; после её исправления перезапустите панель, и ключи ' +
+                'перенесутся сами. Или сгенерируйте новые на странице «Платформа», в карточке «Web-push ' +
+                '(браузерные уведомления)» → «Сгенерировать ключи» — но тогда все уже подписанные браузеры ' +
+                'придётся подписать заново.',
+            }
+          : {}),
       },
     });
   }

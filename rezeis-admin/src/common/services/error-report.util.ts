@@ -145,14 +145,51 @@ function scopeWhy(scope: string | null, meta: Record<string, unknown>): string |
   return null;
 }
 
+/**
+ * There is no page called «События», and no per-event download: this used to
+ * send the operator to both. The stack is in the payload of the bulk export on
+ * the «Системные события» tab, and the attachment switch lives on
+ * «Уведомления» (it does nothing while report generation is «Выключено»).
+ */
 function defaultNextSteps(hasStack: boolean, txtAttached: boolean): string {
   if (txtAttached) {
     return 'Откройте приложенный .txt со stack trace и проверьте операцию, в которой возникла ошибка.';
   }
   if (hasStack) {
-    return 'Полный stack trace доступен в .txt — скачайте его на странице «События» (вложение .txt в Telegram можно включить в настройках доставки).';
+    return (
+      'Полный stack trace есть в выгрузке: «Журнал аудита» → «Системные события» → «Скачать .txt» ' +
+      '(в файле все события подряд, это ищите по времени). Чтобы отчёт приходил сюда файлом, на странице ' +
+      '«Уведомления» в «Отчёты об ошибках» включите «Прикреплять .txt-отчёт к сообщениям об ошибках ' +
+      'в Telegram» — при «Формирование отчётов» не «Выключено».'
+    );
   }
   return 'Проверьте логи сервиса по указанному источнику и операции.';
+}
+
+/**
+ * «👤 Пользователь» — whom the event is about, from the keys
+ * `enrichUserIdentity` fills in before either card is formatted.
+ *
+ * Shared by both cards. The incident card used to print no metadata at all, so
+ * a sync that failed for good or a refund owed to a partner reached the
+ * operator without saying whose it was. `null` when the event names nobody.
+ */
+export function formatUserBlockLines(meta: Record<string, unknown>): readonly string[] | null {
+  if (!meta['userId'] && !meta['telegramId']) return null;
+  const text = (value: unknown): string => escapeHtml(String(value));
+  const userLines: string[] = [];
+  if (meta['telegramId']) userLines.push(`🪪 Telegram ID: <code>${text(meta['telegramId'])}</code>`);
+  if (meta['userId']) userLines.push(`👾 Reiwa ID: <code>${text(meta['userId'])}</code>`);
+  const displayName = meta['userName'] ?? meta['firstName'];
+  if (displayName) {
+    const handle = meta['username'] ? ` (@${text(meta['username'])})` : '';
+    userLines.push(`👤 Имя: ${text(displayName)}${handle}`);
+  } else if (meta['username']) {
+    userLines.push(`👤 Username: @${text(meta['username'])}`);
+  }
+  if (meta['login']) userLines.push(`🔑 Login: <code>${text(meta['login'])}</code>`);
+  if (meta['email'] && !meta['fraudUserEmail']) userLines.push(`📧 Email: ${text(meta['email'])}`);
+  return ['👤 <b>Пользователь:</b>', `<blockquote>${userLines.join('\n')}</blockquote>`];
 }
 
 /**
@@ -237,6 +274,7 @@ export function formatErrorEventCardHtml(
 ): string {
   const d = deriveError(event, fallbackBuild, txtAttached);
   const code = (value: string): string => `<code>${escapeHtml(value)}</code>`;
+  const userBlock = formatUserBlockLines(event.metadata);
 
   // «💬 Сообщение», unless it only repeats «Почему это важно». The «Подключение
   // VPN» refusals log «Рассылка не отправлена. <reason>» and explain themselves
@@ -259,6 +297,7 @@ export function formatErrorEventCardHtml(
     '',
     '❗ <b>Почему это важно:</b>',
     `<blockquote>${escapeHtml(d.why)}</blockquote>`,
+    ...(userBlock !== null ? ['', ...userBlock] : []),
     '',
     '🌀 <b>Контекст:</b>',
     `<blockquote>🔎 Источник: ${code(d.source)}\n` +

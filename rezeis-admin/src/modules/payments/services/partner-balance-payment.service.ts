@@ -18,6 +18,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
+import { formatMinorUnits } from '../../../common/utils/money.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGuard, AccessModeGate } from '../../settings/services/access-mode-guard.service';
 import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
@@ -475,11 +476,20 @@ export class PartnerBalancePaymentService {
 
     // Emitted whether or not the row write landed — if it did not, the audit
     // log entry this produces is the only record that the money is owed.
+    //
+    // And it says WHICH of the two happened. With the debt written down, the
+    // sweep below retries every five minutes: «требуется ручной возврат» on
+    // that card sent the operator to refund by hand what the sweep refunds
+    // anyway — twice the money.
+    const amount = `${formatMinorUnits(context.amountMinor)} ${context.currency}`;
     this.events.error(
       EVENT_TYPES.PARTNER_BALANCE_REFUND_FAILED,
       'PARTNER',
-      `Не удалось вернуть ${context.amountMinor} (мин. ед.) ${context.currency} на баланс ` +
-        `партнёра ${context.partnerId} после сбоя выдачи — требуется ручной возврат`,
+      durablyRecorded
+        ? `Не удалось сразу вернуть ${context.amountMinor} (мин. ед.) ${context.currency} на баланс ` +
+            `партнёра ${context.partnerId} после сбоя выдачи — долг записан, возврат повторяется автоматически`
+        : `Не удалось вернуть ${context.amountMinor} (мин. ед.) ${context.currency} на баланс ` +
+            `партнёра ${context.partnerId} после сбоя выдачи — требуется ручной возврат`,
       {
         userId: context.userId,
         partnerId: context.partnerId,
@@ -491,6 +501,19 @@ export class PartnerBalancePaymentService {
         cause: context.cause,
         failure,
         durablyRecorded,
+        ...(durablyRecorded ? { reason: 'refund_owed_retrying' } : {}),
+        why: durablyRecorded
+          ? `Партнёр оплатил покупку своим партнёрским балансом, выдача не удалась, и вернуть ${amount} ` +
+            'на баланс сразу не получилось. Долг записан: панель повторяет возврат сама каждые 5 минут.'
+          : `Партнёр оплатил покупку своим партнёрским балансом, выдача не удалась, и вернуть ${amount} ` +
+            'на баланс не получилось. Записать долг тоже не вышло, поэтому панель этот возврат не ' +
+            'повторит: кроме этой карточки и записи в «Журнале аудита», о нём нигде нет.',
+        nextSteps: durablyRecorded
+          ? 'Обычно делать ничего не нужно. Не корректируйте баланс вручную, пока долг записан: ' +
+            'партнёр получит деньги дважды. Если баланс не вырос и через несколько часов, значит, ' +
+            'возврат каждый раз падает: ищите в логах панели строку «Partner-balance refund recovery».'
+          : `Верните деньги вручную: «Пользователи» → этот пользователь → «Партнёр» → «Корректировка ` +
+            `баланса», сумма +${formatMinorUnits(context.amountMinor)}, в причине укажите платёж ${context.paymentId}.`,
       },
     );
     this.logger.error(
@@ -679,6 +702,13 @@ export class PartnerBalancePaymentService {
           transactionId: row.id,
           reason: 'PARTNER_BALANCE_REFUND_MARKER_UNUSABLE',
           durablyRecorded: true,
+          why:
+            'Панель должна партнёру возврат на партнёрский баланс, но запись о долге испорчена: в ней ' +
+            'нет партнёра или суммы, которую можно вернуть. Повторять его панель перестала, деньги ' +
+            'партнёру не вернулись.',
+          nextSteps:
+            `Сумма — это оплата платежа ${row.paymentId} балансом (страница «Платежи»). Верните её ` +
+            'вручную: «Пользователи» → этот пользователь → «Партнёр» → «Корректировка баланса».',
         },
       );
       this.logger.error(

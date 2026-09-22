@@ -248,15 +248,17 @@ function runDump(service: BackupService, filename: string): Promise<{ sizeBytes:
   return service.runDump('backup-1', filename, 'DB', 'admin-1', false);
 }
 
-/** The job's own account of the failure: the record and the event the operator reads. */
+/**
+ * The job's own account of the failure: the record the «Бэкапы» page shows.
+ *
+ * And no card. `BackupProcessor.onFailed` sends the one card, on the last
+ * attempt; this path used to send one on every attempt as well — three cards
+ * for one backup that did not happen. Not even a «completed» one, of course.
+ */
 function assertFailureRecorded(record: JobRecord, pattern: RegExp): void {
   assert.equal(record.updates.length, 1, `one update of the backup record: ${JSON.stringify(record.updates)}`);
   assert.match(String(record.updates[0]!.data['errorMessage']), pattern);
-  const errors = record.events.filter(([kind]) => kind === 'error').map(([, message]) => message);
-  assert.equal(errors.length, 1, `one failure event: ${JSON.stringify(record.events)}`);
-  assert.match(errors[0]!, /^Backup failed: /);
-  assert.match(errors[0]!, pattern);
-  assert.ok(!record.events.some(([kind]) => kind === 'emit'), 'a failed backup must not be announced as completed');
+  assert.deepEqual(record.events, [], `runDump sends no card of its own: ${JSON.stringify(record.events)}`);
 }
 
 describe('BackupService.runDump — a backup file that cannot be written ends pg_dump too', () => {

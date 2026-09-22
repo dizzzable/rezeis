@@ -458,6 +458,15 @@ export class InternalUserDevicesController {
         remnawaveId: subscription.remnawaveId,
         source: 'INTERNAL_USER_REGENERATE',
         repair: 'POST /admin/users/subscriptions/:id/sync',
+        reason: 'regenerated_link_lost',
+        why:
+          'Подписчик сбросил ссылку подписки в кабинете: Remnawave выдал новую, но панель её не ' +
+          'сохранила. Пока это не исправлено, кабинет и бот показывают старую ссылку, а она уже не ' +
+          'подключается.',
+        nextSteps:
+          'Откройте «Пользователи» → этого пользователя → «Подписки» и нажмите у подписки ' +
+          '«Синхронизировать»: панель перечитает ссылку из Remnawave. После этого подписчику нужно ' +
+          'заново добавить ссылку в приложение.',
       },
     );
   }

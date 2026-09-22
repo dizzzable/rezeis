@@ -263,17 +263,72 @@ export class BackupProcessor extends WorkerHost {
         category: 'SYSTEM',
         severity: 'ERROR',
         message: `Database restore from ${filename ?? 'an unknown archive'} failed: ${error.message}`,
-        metadata: { jobId: job.id, jobName: job.name, filename, initiatedBy, error: error.message },
+        metadata: {
+          jobId: job.id,
+          jobName: job.name,
+          filename,
+          initiatedBy,
+          error: error.message,
+          reason: 'restore_failed',
+          // `psql --single-transaction` with ON_ERROR_STOP (`runRestore`): the
+          // restore commits whole or not at all, and what follows it here does
+          // not throw. So a thrown restore left the data as it was.
+          why:
+            `Восстановление базы из «${filename ?? 'неизвестного архива'}» не удалось. База осталась ` +
+            'как была: восстановление идёт одной транзакцией и при ошибке откатывается целиком.',
+          nextSteps:
+            'Причина — в «💬 Сообщение» выше. Устраните её и запустите восстановление ещё раз или ' +
+            'выберите другой бэкап на странице «Бэкапы» («Восстановить»).',
+        },
         adminId: initiatedBy ?? null,
       });
       return;
     }
-    if (job.name === BACKUP_JOBS.CREATE || job.name === BACKUP_JOBS.DELIVER_TELEGRAM) {
+    if (job.name === BACKUP_JOBS.CREATE) {
+      // The ONE card for a backup that failed: `runDump` no longer speaks on
+      // each attempt (see there).
+      const { recordId, filename, scope, initiatedBy } = (job.data ?? {}) as Partial<BackupCreateJobData>;
       this.systemEventsService.error(
         EVENT_TYPES.SYSTEM_ERROR,
         'SYSTEM',
         `Backup job failed: ${error.message}`,
-        { jobId: job.id, jobName: job.name, error: error.message },
+        {
+          jobId: job.id,
+          jobName: job.name,
+          backupId: recordId,
+          filename,
+          scope,
+          initiatedBy,
+          error: error.message,
+          reason: 'backup_failed',
+          why:
+            `Бэкап «${filename ?? 'без имени'}» не создан ни с первой попытки, ни с повтора. Свежей ` +
+            'копии базы нет — последняя удачная осталась в списке на странице «Бэкапы».',
+          nextSteps:
+            'Причина — в «💬 Сообщение» выше и в строке этого бэкапа на странице «Бэкапы». Проверьте ' +
+            'место на диске сервера и доступ к базе, затем нажмите «Создать бэкап».',
+        },
+      );
+      return;
+    }
+    if (job.name === BACKUP_JOBS.DELIVER_TELEGRAM) {
+      const { filename } = (job.data ?? {}) as Partial<BackupDeliverTelegramJobData>;
+      this.systemEventsService.error(
+        EVENT_TYPES.SYSTEM_ERROR,
+        'SYSTEM',
+        `Backup job failed: ${error.message}`,
+        {
+          jobId: job.id,
+          jobName: job.name,
+          filename,
+          error: error.message,
+          reason: 'backup_delivery_failed',
+          why:
+            `Бэкап «${filename ?? 'без имени'}» создан, но отправить его файлом в Telegram не удалось. ` +
+            'Сам бэкап цел и лежит на сервере.',
+          nextSteps:
+            'Бэкап есть в списке на странице «Бэкапы». Причина недоставки — в «💬 Сообщение» выше.',
+        },
       );
     }
   }

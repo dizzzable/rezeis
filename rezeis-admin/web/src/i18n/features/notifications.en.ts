@@ -297,7 +297,7 @@ export const en = {
         manual: 'On demand',
         auto: 'Automatic',
       },
-      errorReportModeHint: 'Off — only the bulk export on the Events page exists. On demand — every error can be downloaded as a .txt from the Events page. Automatic — the server additionally writes a .txt for each new ERROR into the on-disk archive.',
+      errorReportModeHint: 'Off — no report is attached to Telegram error messages; the bulk «Download .txt» export in Audit log → System events remains. On demand — the report is attached when the switch below is on. Automatic — the server additionally writes a .txt for each new ERROR into the on-disk archive.',
       errorReportTxtLabel: 'Attach the .txt report to Telegram error messages',
       errorReportTxtDescription: 'ERROR events delivered to Telegram carry the full report as an attached document. Turn off to send the short card only. Has no effect while report generation is off.',
       validation: {

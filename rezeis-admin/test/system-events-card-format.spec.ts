@@ -1675,6 +1675,73 @@ describe('a broadcast the panel refused to send', () => {
     // …and it is titled as the registry titles it, not as a generic incident.
     assert.ok(card.includes('<b>Событие: Системная ошибка</b>'), card);
   });
+
+  it('titles each known situation raised as system.error for what it is', async () => {
+    // `system.error` carries crashes and seven known situations alike. Each of
+    // those producers now sets its `reason`, and the header follows it; the
+    // test above is the anti-vacuity — no reason, «Системная ошибка».
+    const cases = [
+      ['profile_sync_failed', '🔄 <b>Событие: Подписка не обновилась в Remnawave</b>'],
+      ['profile_shared', '👯 <b>Событие: Две подписки на одном профиле Remnawave</b>'],
+      ['profile_left_live', '🧟 <b>Событие: Профиль в Remnawave, скорее всего, не удалён</b>'],
+      ['subscription_without_profile', '🕳 <b>Событие: Подписка осталась без профиля в Remnawave</b>'],
+      ['backup_failed', '💾 <b>Событие: Бэкап не создан</b>'],
+      ['backup_delivery_failed', '📤 <b>Событие: Бэкап не доставлен в Telegram</b>'],
+      ['restore_failed', '🧯 <b>Событие: Восстановление базы не удалось</b>'],
+    ] as const;
+    for (const [reason, header] of cases) {
+      const { service, getLastText } = buildService();
+      service.error('system.error', 'SYSTEM', 'x', { reason, why: 'w', nextSteps: 'n' });
+      await flush();
+      assert.ok(getLastText()!.includes(header), `${reason}: ${getLastText()}`);
+    }
+  });
+
+  it('says a late reward and a late refund are late, not lost', async () => {
+    const promo = buildService();
+    promo.service.error('promocode.activated', 'SYSTEM', 'x', {
+      code: 'SPRING',
+      reason: 'sync_enqueue_failed',
+      why: 'w',
+      nextSteps: 'n',
+    });
+    await flush();
+    assert.ok(
+      promo.getLastText()!.includes('⏳ <b>Событие: Промокод активирован, в Remnawave награда придёт позже</b>'),
+      promo.getLastText()!,
+    );
+
+    const refund = buildService();
+    refund.service.error('partner.balance_refund_failed', 'SYSTEM', 'x', {
+      reason: 'refund_owed_retrying',
+      why: 'w',
+      nextSteps: 'n',
+    });
+    await flush();
+    assert.ok(
+      refund.getLastText()!.includes('⏳ <b>Событие: Возврат партнёру задержался — панель повторит сама</b>'),
+      refund.getLastText()!,
+    );
+  });
+
+  it('titles the rest by their producers’ marks', async () => {
+    const cases = [
+      ['subscription.synced', { reason: 'regenerated_link_lost' }, '🔗 <b>Событие: Новая ссылка подписки не сохранилась</b>'],
+      ['system.remnawave_sync', { reason: 'merge_stopped' }, '⏸ <b>Событие: Слияние подписок-дубликатов остановилось</b>'],
+      // Its `reason` is the adoption failure's own text, so the flag decides.
+      [
+        'system.web_push_unconfigured',
+        { legacyEnvKeysStranded: true, reason: 'cannot decrypt the stored key' },
+        '🔕 <b>Событие: Web-push выключен: ключи не перенесены в панель</b>',
+      ],
+    ] as const;
+    for (const [type, metadata, header] of cases) {
+      const { service, getLastText } = buildService();
+      service.error(type, 'SYSTEM', 'x', { ...metadata, why: 'w', nextSteps: 'n' });
+      await flush();
+      assert.ok(getLastText()!.includes(header), `${type}: ${getLastText()}`);
+    }
+  });
 });
 
 describe('the «Причина» line on the cards that do render metadata', () => {

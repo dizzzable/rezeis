@@ -271,6 +271,8 @@ export class ProfileSyncProcessor extends WorkerHost {
       // the FAILED pass of `sweepAndRecover`, which re-enqueues with `force` and
       // therefore gets past BullMQ's retained-job deduplication.
       if (attempt >= PROFILE_SYNC_MAX_ATTEMPTS && classification === 'TERMINAL') {
+        const copy = syncFailedForGoodCopy(anchor.action, attempt);
+        const userId = await this.ownerOfForCard(anchor.subscriptionId);
         this.events.error(
           EVENT_TYPES.SYSTEM_ERROR,
           'SYSTEM',
@@ -279,7 +281,11 @@ export class ProfileSyncProcessor extends WorkerHost {
             syncJobId,
             action: anchor.action,
             subscriptionId: anchor.subscriptionId,
+            ...(userId !== null ? { userId } : {}),
             attempt,
+            reason: 'profile_sync_failed',
+            why: copy.why,
+            nextSteps: copy.nextSteps,
           },
         );
       }
@@ -288,6 +294,26 @@ export class ProfileSyncProcessor extends WorkerHost {
         `Sync job ${syncJobId} failed before the claim AND its failure could not be recorded: ` +
           `${recoveryError instanceof Error ? recoveryError.message : 'Unknown error'}`,
       );
+    }
+  }
+
+  /**
+   * Whose subscription it is, for the «👤 Пользователь» block of the card —
+   * or `null`, and the card goes without it.
+   *
+   * A read of its own, after the failure is recorded, rather than a join on
+   * the recovery re-read: that projection stays on columns older than every
+   * migration in flight, because a drift is often why we are here at all.
+   */
+  private async ownerOfForCard(subscriptionId: string): Promise<string | null> {
+    try {
+      const owner = await this.prismaService.subscription.findUnique({
+        where: { id: subscriptionId },
+        select: { userId: true },
+      });
+      return owner?.userId ?? null;
+    } catch {
+      return null;
     }
   }
 
@@ -379,11 +405,16 @@ export class ProfileSyncProcessor extends WorkerHost {
     // alert decision would make the failure both permanent and silent.
     const isFinalAttempt = attempt >= PROFILE_SYNC_MAX_ATTEMPTS;
     if (isFinalAttempt && outcome.classification === 'TERMINAL') {
+      const copy = syncFailedForGoodCopy(syncJob.action, attempt);
       this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', `Profile sync failed: ${errorMessage}`, {
         syncJobId: syncJob.id,
         action: syncJob.action,
         subscriptionId: syncJob.subscription.id,
+        userId: syncJob.subscription.userId,
         attempt,
+        reason: 'profile_sync_failed',
+        why: copy.why,
+        nextSteps: copy.nextSteps,
       });
     }
   }
@@ -2015,6 +2046,14 @@ export class ProfileSyncProcessor extends WorkerHost {
         userId: subscription.userId,
         remnawaveId: subscription.remnawaveId,
         conflictingSubscriptionId: other.id,
+        reason: 'profile_shared',
+        why:
+          'Две живые подписки записаны на один профиль Remnawave. Они перезаписывают друг другу срок ' +
+          'и лимиты, а удаление любой из них панель теперь не выполняет — оно снесло бы профиль второй.',
+        nextSteps:
+          'Откройте «Подписки» → «Слияние подписок-дубликатов» и начните с предпросмотра — он ничего ' +
+          'не меняет. Слияние оставляет СТАРШУЮ подписку (с историей и платежами) и переносит на неё ' +
+          'профиль. Не удаляйте ни одну из пары вручную.',
       });
     } catch (err: unknown) {
       // The identity was already recorded, which is the part that matters.
@@ -2115,6 +2154,12 @@ export class ProfileSyncProcessor extends WorkerHost {
         userId: subscription.userId,
         syncJobId: syncJob.id,
         panelUsername: strandedUsername,
+        reason: 'profile_left_live',
+        why:
+          'Задача удаления подписки не смогла назвать профиль в Remnawave: у подписки потеряна связь ' +
+          `с панелью. Но имя профиля у неё осталось — «${strandedUsername}», — так что профиль, скорее ` +
+          'всего, жив и продолжает работать, а панель к нему больше не вернётся.',
+        nextSteps: `Найдите в Remnawave пользователя «${strandedUsername}» и удалите его вручную.`,
       });
       return;
     }
@@ -2369,6 +2414,15 @@ export class ProfileSyncProcessor extends WorkerHost {
           subscriptionId: subscription.id,
           userId: subscription.userId,
           remnawaveId: targetRemnawaveId,
+          reason: 'subscription_without_profile',
+          why:
+            'Профиль в Remnawave удалён, а подписка в панели осталась живой и всё ещё указывает на ' +
+            'него: пока шло удаление, её кто-то изменил. Подписчик видит действующую подписку, но ' +
+            'подключиться не может.',
+          nextSteps:
+            'Откройте «Пользователи» → этого пользователя → «Подписки». Если подписка должна жить, ' +
+            'нажмите у неё «Синхронизировать»: панель увидит, что профиля нет, и создаст его заново. ' +
+            'Если она должна была удалиться, нажмите «Удалить» ещё раз.',
         });
       } else {
         this.logger.warn(
@@ -3117,6 +3171,58 @@ function classifyRecovery(
     ? 'TRANSIENT'
     : 'TERMINAL';
 }
+
+/**
+ * «Почему это важно» and «Что проверить дальше» for a sync job that failed for
+ * good — raised from both failure paths, before and after the claim.
+ *
+ * The incident card prints nothing else a human wrote, and without these it
+ * read «Необработанная ошибка в панели администратора» over a Remnawave
+ * refusal. What is lost depends on the action, and so does the remedy: a
+ * DELETE that never ran leaves a working profile behind, and «Синхронизировать»
+ * would push it again rather than remove it.
+ */
+function syncFailedForGoodCopy(
+  action: SyncAction | string,
+  attempts: number,
+): { readonly why: string; readonly nextSteps: string } {
+  const failed = `Задача «${SYNC_ACTION_LABELS[action] ?? action}» не прошла ${attempts} раз подряд, и панель больше не повторяет её сама. `;
+  const retry =
+    'Причина — в «💬 Сообщение» выше: чаще всего это отказ Remnawave, и повтор тех же данных его не изменит. ' +
+    'Устраните причину, затем откройте «Пользователи» → этого пользователя → «Подписки» и нажмите у подписки ';
+  switch (action) {
+    case SyncAction.CREATE:
+      return {
+        why: `${failed}Профиля в Remnawave нет — подписчик не может подключиться.`,
+        nextSteps: `${retry}«Синхронизировать».`,
+      };
+    case SyncAction.DELETE:
+      return {
+        why: `${failed}Профиль в Remnawave не удалён и продолжает работать.`,
+        nextSteps:
+          'Причина — в «💬 Сообщение» выше: чаще всего это отказ Remnawave. Устраните её и удалите ' +
+          'подписку ещё раз («Пользователи» → этот пользователь → «Подписки» → «Удалить») или удалите ' +
+          'профиль в Remnawave вручную.',
+      };
+    case SyncAction.TRAFFIC_RESET:
+      return {
+        why: `${failed}Трафик в Remnawave не сброшен.`,
+        nextSteps: `${retry}«Сброс трафика».`,
+      };
+    default:
+      return {
+        why: `${failed}В Remnawave у подписчика прежние срок, лимиты и сквады — изменения из панели до него не дошли.`,
+        nextSteps: `${retry}«Синхронизировать».`,
+      };
+  }
+}
+
+const SYNC_ACTION_LABELS: Readonly<Record<string, string>> = {
+  [SyncAction.CREATE]: 'создание профиля',
+  [SyncAction.UPDATE]: 'обновление профиля',
+  [SyncAction.DELETE]: 'удаление профиля',
+  [SyncAction.TRAFFIC_RESET]: 'сброс трафика',
+};
 
 function readRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

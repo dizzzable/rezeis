@@ -268,7 +268,20 @@ export class ImportProcessor extends WorkerHost {
         EVENT_TYPES.IMPORT_FAILED,
         'SYSTEM',
         `Import failed: ${sourceType} — ${message}`,
-        { importRecordId, sourceType, mode, error: message },
+        {
+          importRecordId,
+          sourceType,
+          mode,
+          error: message,
+          // Importers write client by client, so a run that dies half-way has
+          // already committed the half before it. Nobody may re-run it blind.
+          why:
+            `Импорт из ${sourceType} остановился с ошибкой и помечен на странице «Импорты» как «Ошибка». ` +
+            'Клиенты переносятся по одному, поэтому те, кого импорт успел перенести до сбоя, уже в панели.',
+          nextSteps:
+            'Причина — в «💬 Сообщение» выше и в записи импорта на странице «Импорты». Прежде чем ' +
+            'запускать импорт заново, проверьте на странице «Пользователи», кто уже перенесён.',
+        },
       );
 
       throw err;

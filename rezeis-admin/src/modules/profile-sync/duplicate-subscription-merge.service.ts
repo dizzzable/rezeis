@@ -672,7 +672,22 @@ export class DuplicateSubscriptionMergeService {
             `${stoppedEarly.duplicateSubscriptionId} (${describeStopError(stoppedEarly)}). ` +
             `The ${stoppedEarly.pairsCompleted} pair(s) before it are committed and audited; ` +
             'that pair and everything after it were not. Re-run to continue.',
-          { ...metadata, stop: { ...stoppedEarly } },
+          {
+            ...metadata,
+            stop: { ...stoppedEarly },
+            reason: 'merge_stopped',
+            // A preview commits nothing, so «слиты и записаны» is only ever
+            // said about a real run.
+            why: dryRun
+              ? `Предпросмотр слияния подписок-дубликатов остановился на паре ${stoppedEarly.survivorSubscriptionId} / ` +
+                `${stoppedEarly.duplicateSubscriptionId}: пары после неё не просмотрены. Предпросмотр ничего не меняет.`
+              : `Слияние подписок-дубликатов остановилось на паре ${stoppedEarly.survivorSubscriptionId} / ` +
+                `${stoppedEarly.duplicateSubscriptionId}. Пары до неё (${stoppedEarly.pairsCompleted}) слиты и ` +
+                'записаны, эта пара и всё после неё не тронуты.',
+            nextSteps:
+              'Откройте «Подписки» → «Слияние подписок-дубликатов» и запустите ещё раз. Если остановится ' +
+              'на той же паре, причина в ней самой — она в «💬 Сообщение» выше.',
+          },
         );
       }
     }

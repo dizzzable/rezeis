@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { formatMinorUnits } from '../../../common/utils/money.util';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 
 /**
@@ -151,21 +152,4 @@ export class PartnerNotificationsService {
       );
     }
   }
-}
-
-/**
- * Minor units to a major-unit string, by integer arithmetic.
- *
- * Every balance in the product is stored ×100 (`toMinorUnits`), whatever the
- * currency. Whole amounts print without a fraction, the way the cabinet shows
- * them; anything else prints exactly two digits. No float division, so no
- * `0.1 + 0.2` in a partner's payout notice.
- */
-function formatMinorUnits(amountMinor: number): string {
-  const sign = amountMinor < 0 ? '-' : '';
-  const absolute = Math.abs(Math.trunc(amountMinor));
-  const cents = absolute % 100;
-  // A multiple of 100 divides exactly, so this is integer arithmetic too.
-  const major = (absolute - cents) / 100;
-  return cents === 0 ? `${sign}${major}` : `${sign}${major}.${String(cents).padStart(2, '0')}`;
 }

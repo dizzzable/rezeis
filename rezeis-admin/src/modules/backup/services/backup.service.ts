@@ -744,12 +744,10 @@ export class BackupService implements OnModuleInit {
         .catch((): void => undefined);
       await fsp.unlink(fullPath).catch((): void => undefined);
 
-      this.systemEventsService.error(
-        EVENT_TYPES.SYSTEM_ERROR,
-        'SYSTEM',
-        `Backup failed: ${message}`,
-        { backupId: recordId, filename, scope, error: message, initiatedBy },
-      );
+      // No card from here. The job has two attempts, and this line used to
+      // speak on each of them while `BackupProcessor.onFailed` spoke once more
+      // after the last: three cards for one backup that did not happen. The
+      // processor alone knows the attempt was the last, so it alone reports.
       throw err;
     }
   }

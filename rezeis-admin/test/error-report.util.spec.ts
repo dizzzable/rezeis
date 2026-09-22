@@ -119,4 +119,56 @@ describe('error report formatter', () => {
     assert.ok(card.includes('Версия: <code>0.9.6.54</code>'));
     assert.ok(card.includes('Коммит: <code>reiwa-commit-123456</code>'));
   });
+
+  it('sends the operator for the stack to a page that exists, not to «События»', () => {
+    // No such page, and no per-event download either: the stack is in the
+    // payload of the bulk export on the «Системные события» tab.
+    const card = formatErrorEventCardHtml(browserError({ stack: 'TypeError: x\n    at y (z.js:1:1)' }), build, false);
+    assert.ok(!card.includes('«События»'), card);
+    assert.ok(card.includes('«Журнал аудита» → «Системные события» → «Скачать .txt»'), card);
+    assert.ok(card.includes('«Прикреплять .txt-отчёт к сообщениям об ошибках в Telegram»'), card);
+  });
+});
+
+describe('the incident card says whose it is', () => {
+  // It printed no metadata at all, so a sync that failed for good, or a
+  // refund owed to a partner, reached the operator without a name on it.
+  function panelError(metadata: Record<string, unknown>): ErrorReportEvent {
+    return {
+      kind: 'event.system.error',
+      severity: 'ERROR',
+      category: 'SYSTEM',
+      message: 'Profile sync failed: 400 Bad Request',
+      timestamp: '2026-09-23T10:00:00.000Z',
+      metadata,
+    };
+  }
+
+  it('prints «👤 Пользователь» from what enrichment filled in, under «Почему это важно»', () => {
+    const card = formatErrorEventCardHtml(
+      panelError({
+        userId: 'cuid-user-1',
+        telegramId: '4242',
+        userName: 'Анна <b>',
+        username: 'anna',
+        login: 'anna_web',
+        why: 'Подписка не обновилась.',
+      }),
+      build,
+      false,
+    );
+    const lines = card.split('\n');
+    const block = lines.indexOf('👤 <b>Пользователь:</b>');
+    assert.ok(block > lines.indexOf('❗ <b>Почему это важно:</b>'), card);
+    assert.ok(block < lines.indexOf('🌀 <b>Контекст:</b>'), card);
+    assert.equal(lines[block + 1], '<blockquote>🪪 Telegram ID: <code>4242</code>');
+    assert.ok(card.includes('👾 Reiwa ID: <code>cuid-user-1</code>'));
+    assert.ok(card.includes('👤 Имя: Анна &lt;b&gt; (@anna)'), 'escaped, with the handle');
+    assert.ok(card.includes('🔑 Login: <code>anna_web</code>'));
+  });
+
+  it('prints nothing about a user when the event names none', () => {
+    const card = formatErrorEventCardHtml(panelError({ why: 'Бэкап не создан.' }), build, false);
+    assert.ok(!card.includes('Пользователь'), card);
+  });
 });

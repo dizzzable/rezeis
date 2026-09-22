@@ -599,6 +599,12 @@ describe('a partner-balance debit whose fulfillment failed', () => {
       /provisioning refused/,
       'the alert must carry the original fulfillment failure',
     );
+    // 3. And it says the sweep has it. «Требуется ручной возврат» here sent
+    //    the operator to refund by hand what the sweep refunds anyway.
+    assert.equal(alert.metadata.reason, 'refund_owed_retrying');
+    assert.doesNotMatch(alert.message, /ручной возврат/);
+    assert.match(String(alert.metadata.why), /5 RUB.*повторяет возврат сама/s);
+    assert.match(String(alert.metadata.nextSteps), /Не корректируйте баланс вручную/);
   });
 
   it('still alerts when the debt itself cannot be written down', async () => {
@@ -623,6 +629,11 @@ describe('a partner-balance debit whose fulfillment failed', () => {
       false,
       'the alert must say the debt is NOT recorded, so an operator knows nothing will retry',
     );
+    // Only here is the refund the operator's: the card says so, and how.
+    assert.equal(alert.metadata.reason, undefined, 'not the «панель повторит сама» header');
+    assert.match(alert.message, /требуется ручной возврат/);
+    assert.match(String(alert.metadata.why), /панель этот возврат не повторит/);
+    assert.match(String(alert.metadata.nextSteps), /«Корректировка баланса», сумма \+5,/);
   });
 
   it('never reaches the refund when the draft row is missing — the debit has not happened yet', async () => {

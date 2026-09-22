@@ -49,6 +49,7 @@ import {
   buildErrorReportFilename,
   formatErrorEventCardHtml,
   formatErrorReportTxt,
+  formatUserBlockLines,
   getRezeisBuildInfo,
   isErrorEvent,
   type ErrorReportEvent,
@@ -1525,26 +1526,9 @@ export class SystemEventsService {
       lines.push(`<blockquote>${signalLines.join('\n')}</blockquote>`);
     }
 
-    // User block
-    if (meta['userId'] || meta['telegramId']) {
-      lines.push('');
-      lines.push('👤 <b>Пользователь:</b>');
-      const userLines: string[] = [];
-      if (meta['telegramId'])
-        userLines.push(`🪪 Telegram ID: <code>${escapeHtml(meta['telegramId'])}</code>`);
-      if (meta['userId']) userLines.push(`👾 Reiwa ID: <code>${escapeHtml(meta['userId'])}</code>`);
-      const displayName = meta['userName'] ?? meta['firstName'];
-      if (displayName) {
-        const handle = meta['username'] ? ` (@${escapeHtml(meta['username'])})` : '';
-        userLines.push(`👤 Имя: ${escapeHtml(displayName)}${handle}`);
-      } else if (meta['username']) {
-        userLines.push(`👤 Username: @${escapeHtml(meta['username'])}`);
-      }
-      if (meta['login']) userLines.push(`🔑 Login: <code>${escapeHtml(meta['login'])}</code>`);
-      if (meta['email'] && !meta['fraudUserEmail'])
-        userLines.push(`📧 Email: ${escapeHtml(meta['email'])}`);
-      lines.push(`<blockquote>${userLines.join('\n')}</blockquote>`);
-    }
+    // User block — the same one the incident card prints.
+    const userBlock = formatUserBlockLines(meta);
+    if (userBlock !== null) lines.push('', ...userBlock);
 
     // Payment block
     //
@@ -3480,6 +3464,38 @@ export interface EventHeaderVariant {
   readonly when: (metadata: Readonly<Record<string, unknown>>) => boolean;
 }
 
+/** One variant per `metadata.reason` value — only the producer named in the table sets it. */
+function variantsByReason(
+  headers: Readonly<Record<string, { readonly emoji: string; readonly title: string }>>,
+): readonly EventHeaderVariant[] {
+  return Object.entries(headers).map(([reason, header]) => ({
+    ...header,
+    when: (metadata) => metadata['reason'] === reason,
+  }));
+}
+
+/**
+ * `system.error` is raised for known situations as well as for crashes. Each
+ * of these producers names its own, so the card says what happened instead of
+ * «Системная ошибка» over every one of them.
+ */
+const SYSTEM_ERROR_HEADERS = {
+  // `ProfileSyncProcessor` — a sync job failed for good (both failure paths).
+  profile_sync_failed: { emoji: '🔄', title: 'Подписка не обновилась в Remnawave' },
+  // `ProfileSyncProcessor` — two live subscriptions record one panel profile.
+  profile_shared: { emoji: '👯', title: 'Две подписки на одном профиле Remnawave' },
+  // `ProfileSyncProcessor` — a DELETE named no profile, the row still names one.
+  profile_left_live: { emoji: '🧟', title: 'Профиль в Remnawave, скорее всего, не удалён' },
+  // `ProfileSyncProcessor` — the profile was deleted, the row still points at it.
+  subscription_without_profile: { emoji: '🕳', title: 'Подписка осталась без профиля в Remnawave' },
+  // `BackupProcessor` — the create job failed on its last attempt.
+  backup_failed: { emoji: '💾', title: 'Бэкап не создан' },
+  // `BackupProcessor` — the Telegram delivery job failed on its last attempt.
+  backup_delivery_failed: { emoji: '📤', title: 'Бэкап не доставлен в Telegram' },
+  // `BackupProcessor` — a restore threw.
+  restore_failed: { emoji: '🧯', title: 'Восстановление базы не удалось' },
+} as const;
+
 /**
  * Per-event-type presentation: a distinctive emoji and a human Russian title
  * for the card header. Keeps the firehose readable at a glance — every event
@@ -3518,7 +3534,15 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'subscription.upgraded': { emoji: '⬆️', title: 'Подписка улучшена' },
   'subscription.expired': { emoji: '⌛', title: 'Подписка истекла' },
   'subscription.deleted': { emoji: '🗑', title: 'Подписка удалена' },
-  'subscription.synced': { emoji: '🔄', title: 'Синхронизация подписки' },
+  'subscription.synced': {
+    emoji: '🔄',
+    title: 'Синхронизация подписки',
+    // `InternalUserDevicesController`: the panel issued a new link and the row
+    // kept the dead one.
+    variants: variantsByReason({
+      regenerated_link_lost: { emoji: '🔗', title: 'Новая ссылка подписки не сохранилась' },
+    }),
+  },
   'subscription.trial_granted': { emoji: '🎁', title: 'Выдан триал' },
   // INFO, not a warning: a customer to help at leisure, one card per
   // subscription. How long it has been and which road reached the customer are
@@ -3624,10 +3648,23 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'partner.balance_refund_failed': {
     emoji: '🚨',
     title: 'Партнёру не вернулся списанный баланс!',
+    // `PartnerBalancePaymentService`: the debt is recorded, so the recovery
+    // sweep retries it every five minutes — the money is late, not lost.
+    variants: variantsByReason({
+      refund_owed_retrying: { emoji: '⏳', title: 'Возврат партнёру задержался — панель повторит сама' },
+    }),
   },
 
   // Promocode
-  'promocode.activated': { emoji: '🎟', title: 'Промокод активирован' },
+  'promocode.activated': {
+    emoji: '🎟',
+    title: 'Промокод активирован',
+    // `PromocodeLifecycleService`, the ERROR branch: the reward's sync job was
+    // written but not queued; the sweep queues it within five minutes.
+    variants: variantsByReason({
+      sync_enqueue_failed: { emoji: '⏳', title: 'Промокод активирован, в Remnawave награда придёт позже' },
+    }),
+  },
   'promocode.created': { emoji: '🎟', title: 'Промокод создан' },
   'promocode.depleted': { emoji: '🚫', title: 'Промокод исчерпан' },
   'promocode.archived': { emoji: '📦', title: 'Промокод архивирован' },
@@ -3684,8 +3721,25 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
     ],
   },
   'system.bulk_users_executed': { emoji: '👥', title: 'Массовая операция над пользователями' },
-  'system.error': { emoji: '🚨', title: 'Системная ошибка' },
-  'system.web_push_unconfigured': { emoji: '🔕', title: 'Web-push не настроен' },
+  'system.error': {
+    emoji: '🚨',
+    title: 'Системная ошибка',
+    variants: variantsByReason(SYSTEM_ERROR_HEADERS),
+  },
+  'system.web_push_unconfigured': {
+    emoji: '🔕',
+    title: 'Web-push не настроен',
+    variants: [
+      {
+        // `WebPushService`, the ERROR branch: keys exist in the environment
+        // but could not be moved into the panel, so every push is dropped.
+        // Its `reason` is the adoption failure's own text, hence this flag.
+        emoji: '🔕',
+        title: 'Web-push выключен: ключи не перенесены в панель',
+        when: (metadata) => metadata['legacyEnvKeysStranded'] === true,
+      },
+    ],
+  },
   // WARNING is a recall that removed only part of a batch, or a stalled or lost
   // broadcast the reconciler put back in the queue. Every count, the channel
   // copy's fate and the revival attempt are in the «Рассылка» block.
@@ -3758,7 +3812,14 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   // Ten producers, all of whose sentences are English paragraphs. Their counts
   // and identifiers are in the «Синхронизация» block; the instructions several
   // of them exist to give are their producers' `note`s to write, in Russian.
-  'system.remnawave_sync': { emoji: '🔄', title: 'Синхронизация с Remnawave' },
+  'system.remnawave_sync': {
+    emoji: '🔄',
+    title: 'Синхронизация с Remnawave',
+    // `DuplicateSubscriptionMergeService`: a run stopped part-way.
+    variants: variantsByReason({
+      merge_stopped: { emoji: '⏸', title: 'Слияние подписок-дубликатов остановилось' },
+    }),
+  },
   'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
   'notification.template.created': { emoji: '📝', title: 'Создан шаблон уведомления' },
   'notification.template.updated': { emoji: '📝', title: 'Обновлён шаблон уведомления' },

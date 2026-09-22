@@ -151,5 +151,70 @@ describe('BackupProcessor restore failure', () => {
     assert.match(event!.message, /rezeis-2026-08-01\.sql\.gz/);
     assert.match(event!.message, /other objects depend on it/);
     assert.equal(event!.adminId, 'admin-1');
+    // The card says the data is untouched — `--single-transaction` — and
+    // where to go next, not «Необработанная ошибка в панели».
+    assert.equal(event!.metadata?.['reason'], 'restore_failed');
+    assert.match(String(event!.metadata?.['why']), /База осталась как была/);
+    assert.match(String(event!.metadata?.['nextSteps']), /«Бэкапы»/);
+  });
+});
+
+describe('BackupProcessor backup failure — one card per backup, not per attempt', () => {
+  // `runDump` used to send a card on each of the create job's two attempts,
+  // and `onFailed` one more after the last: three cards for one backup.
+  function processorRecording(): { processor: BackupProcessor; cards: Array<Record<string, unknown>> } {
+    const cards: Array<Record<string, unknown>> = [];
+    const processor = new BackupProcessor(
+      {} as never,
+      {
+        emit: (event: { metadata?: Record<string, unknown> }) => cards.push(event.metadata ?? {}),
+        error: (_type: string, _category: string, _message: string, metadata?: Record<string, unknown>) =>
+          cards.push(metadata ?? {}),
+      } as never,
+      {} as never,
+    );
+    return { processor, cards };
+  }
+
+  function createJob(attemptsMade: number): unknown {
+    return {
+      id: 'job-create-1',
+      name: BACKUP_JOBS.CREATE,
+      attemptsMade,
+      opts: { attempts: 2 },
+      data: { recordId: 'backup-1', filename: 'rezeis-2026-09-23.sql.gz', scope: 'DB', initiatedBy: null },
+    };
+  }
+
+  it('says nothing after the first attempt — the second may still succeed', () => {
+    const { processor, cards } = processorRecording();
+    processor.onFailed(createJob(1) as never, new Error('pg_dump: No space left on device'));
+    assert.deepEqual(cards, []);
+  });
+
+  it('sends one card after the last, naming the file and what to press', () => {
+    const { processor, cards } = processorRecording();
+    processor.onFailed(createJob(2) as never, new Error('pg_dump: No space left on device'));
+    assert.equal(cards.length, 1);
+    assert.equal(cards[0]!['reason'], 'backup_failed');
+    assert.match(String(cards[0]!['why']), /rezeis-2026-09-23\.sql\.gz/);
+    assert.match(String(cards[0]!['nextSteps']), /«Создать бэкап»/);
+  });
+
+  it('a delivery that failed for good is its own card: the backup itself exists', () => {
+    const { processor, cards } = processorRecording();
+    processor.onFailed(
+      {
+        id: 'job-deliver-1',
+        name: BACKUP_JOBS.DELIVER_TELEGRAM,
+        attemptsMade: 3,
+        opts: { attempts: 3 },
+        data: { recordId: 'backup-1', filename: 'rezeis-2026-09-23.sql.gz' },
+      } as never,
+      new Error('relay unreachable'),
+    );
+    assert.equal(cards.length, 1);
+    assert.equal(cards[0]!['reason'], 'backup_delivery_failed');
+    assert.match(String(cards[0]!['why']), /цел и лежит на сервере/);
   });
 });

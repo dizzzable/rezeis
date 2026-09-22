@@ -545,7 +545,20 @@ export class PromocodeLifecycleService {
             EVENT_TYPES.PROMOCODE_ACTIVATED,
             'PROMOCODE',
             `Promocode ${promocode.code} reward synced with delay (enqueue failed: ${message})`,
-            { userId: input.userId, promocodeId: promocode.id, code: promocode.code },
+            {
+              userId: input.userId,
+              promocodeId: promocode.id,
+              code: promocode.code,
+              reason: 'sync_enqueue_failed',
+              why:
+                `Промокод ${promocode.code} активирован и награда записана, но задачу, которая переносит ` +
+                'её в Remnawave, не удалось поставить в очередь. Панель подберёт её сама в течение 5 минут: ' +
+                'награда не потеряется, просто придёт в Remnawave позже.',
+              nextSteps:
+                'Обычно делать ничего не нужно. Если такие карточки идут одна за другой, проверьте Redis: ' +
+                'без него в очередь не ставится ничего. Если и через 10 минут награды в Remnawave нет, ' +
+                'откройте «Пользователи» → этого пользователя → «Подписки» и нажмите у подписки «Синхронизировать».',
+            },
           );
         }
       }
