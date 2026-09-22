@@ -245,6 +245,9 @@ describe('the reconciler does not speak in the finaliser voice', () => {
   });
 });
 
+const NEWLINE = String.fromCharCode(10);
+const WHY_LINE = '💡 Почему:';
+
 describe('what the reconciler’s cards say', () => {
   it('gives the stuck count as a detail, not as the explanation the incident card prints', async () => {
     // The give-up event used to carry the reason as `why`, and the incident
@@ -274,7 +277,18 @@ describe('what the reconciler’s cards say', () => {
 
     const revival = cards.find((card) => card.includes('🔁 Попытка возобновления: 1'));
     assert.ok(revival !== undefined, `no revival card among ${cards.length}`);
-    assert.ok(!revival.includes('Почему'), `a reason printed as an explanation:\n${revival}`);
+    // The invariant is that the COUNT is not the explanation, not that the card
+    // has none: «Проблема с рассылкой» over an attempt number left an operator
+    // unable to tell whether this one was theirs to fix. It is not.
+    const revivalWhy = revival.split(NEWLINE).find((line) => line.startsWith(WHY_LINE)) ?? '';
+    assert.ok(
+      !revivalWhy.includes('recipients still undispatched'),
+      `a count as the explanation: ${revivalWhy}`,
+    );
+    assert.ok(
+      revivalWhy.includes('доставка продолжится'),
+      `no explanation on a revival card: ${revival}`,
+    );
     assert.equal(
       revival.split('12 recipients still undispatched').length - 1,
       1,

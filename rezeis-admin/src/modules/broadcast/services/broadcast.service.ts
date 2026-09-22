@@ -520,7 +520,7 @@ export class BroadcastService {
    */
   public async checkPromoCodeDispatchable(
     broadcastId: string,
-  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  ): Promise<{ ok: true } | { ok: false; reason: string; why: string }> {
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
       select: { promoCode: true },
@@ -528,11 +528,27 @@ export class BroadcastService {
     const code = broadcast?.promoCode ?? null;
     if (code === null || code.length === 0) return { ok: true };
     const evaluation = await this.evaluatePromoCode(code);
+    // TWO READERS, TWO FIELDS. `reason` is the English audit sentence and the
+    // body of the 400 the controller throws at the operator pressing send.
+    // `why` is the Russian one the event card prints - the reader who is not
+    // in the panel at all, reading Telegram hours later about a SCHEDULED send
+    // that refused itself.
     if (evaluation === null) {
-      return { ok: false, reason: `Promocode "${code}" no longer exists` };
+      return {
+        ok: false,
+        reason: `Promocode "${code}" no longer exists`,
+        why:
+          `Промокода «${code}», прикреплённого к рассылке, больше не существует. ` +
+          'Рассылка возвращена в черновики: уберите метку промокода или выберите другой код ' +
+          'и отправьте снова.',
+      };
     }
     if (!isBroadcastPromocodeUsable(evaluation.status)) {
-      return { ok: false, reason: promoStatusMessage(code, evaluation.status) };
+      return {
+        ok: false,
+        reason: promoStatusMessage(code, evaluation.status),
+        why: promoStatusWhy(code, evaluation.status),
+      };
     }
     return { ok: true };
   }
@@ -913,6 +929,29 @@ function promoStatusMessage(code: string, status: BroadcastPromoStatus): string 
       return `Promocode "${code}" has no activations left`;
     case 'OK':
       return `Promocode "${code}" is usable`;
+  }
+}
+
+/**
+ * The same verdict for the operator's card, in Russian and with the way out.
+ *
+ * `promoStatusMessage` is the audit log's English and the body of the 400.
+ * This is what «Почему» prints, and on a card whose title says no more than
+ * «Проблема с рассылкой» it is the only text an operator can act on.
+ */
+function promoStatusWhy(code: string, status: BroadcastPromoStatus): string {
+  const tail =
+    'Рассылка возвращена в черновики: уберите метку промокода или выберите другой код ' +
+    'и отправьте снова.';
+  switch (status) {
+    case 'INACTIVE':
+      return `Промокод «${code}», прикреплённый к рассылке, выключен. ${tail}`;
+    case 'EXPIRED':
+      return `Срок действия промокода «${code}», прикреплённого к рассылке, истёк. ${tail}`;
+    case 'DEPLETED':
+      return `У промокода «${code}», прикреплённого к рассылке, не осталось активаций. ${tail}`;
+    case 'OK':
+      return `Промокод «${code}» можно отправлять.`;
   }
 }
 

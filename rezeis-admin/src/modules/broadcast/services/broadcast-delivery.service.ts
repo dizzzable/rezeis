@@ -339,7 +339,23 @@ export class BroadcastDeliveryService {
         EVENT_TYPES.BROADCAST_STARTED,
         'SYSTEM',
         `Broadcast not sent: a photo/video caption may be at most ${TELEGRAM_CAPTION_LIMIT} characters, this one is ${captionOverflow}. Shorten it and send again.`,
-        { broadcastId, captionLength: captionOverflow, limit: TELEGRAM_CAPTION_LIMIT },
+        {
+          broadcastId,
+          captionLength: captionOverflow,
+          limit: TELEGRAM_CAPTION_LIMIT,
+          reason: 'caption_too_long',
+          // The card prints `why`, never `message`: `broadcast.started` does not
+          // opt into `showMessage`, and the sentence above is the audit log's
+          // English. Until this line the whole card was a title and an id, and
+          // the broadcast had silently gone back to черновики.
+          why:
+            `Подпись к фото или видео не может быть длиннее ${TELEGRAM_CAPTION_LIMIT} символов, ` +
+            `а в этой рассылке их ${captionOverflow}. Рассылка возвращена в черновики — ` +
+            'она никому не отправлена.',
+          nextSteps:
+            'Откройте черновик на странице «Рассылки», укоротите подпись к фото или ' +
+            'видео и отправьте снова.',
+        },
       );
       return [];
     }
@@ -366,7 +382,17 @@ export class BroadcastDeliveryService {
         EVENT_TYPES.BROADCAST_STARTED,
         'SYSTEM',
         `Broadcast not sent: ${promoVerdict.reason}. Clear or replace the promo tag and send again.`,
-        { broadcastId, reason: promoVerdict.reason },
+        // `reason` is a stable code for the feed and the Telegram card's
+        // «Причина» line; the English sentence it used to carry is already in
+        // the message above, and printed raw it put English on a Russian card.
+        {
+          broadcastId,
+          reason: 'promo_unusable',
+          why: promoVerdict.why,
+          nextSteps:
+            'Откройте черновик на странице «Рассылки», уберите или замените промокод ' +
+            'и отправьте снова.',
+        },
       );
       return [];
     }
@@ -397,7 +423,18 @@ export class BroadcastDeliveryService {
           EVENT_TYPES.BROADCAST_STARTED,
           'SYSTEM',
           `Рассылка не отправлена. ${verdict.reason}`,
-          { broadcastId, reason: `connect_${verdict.refusal}`, ...verdict.metadata },
+          {
+            broadcastId,
+            ...verdict.metadata,
+            reason: `connect_${verdict.refusal}`,
+            // The sentence this verdict has carried since it was written - «A whole
+            // sentence for the operator's event» - reaching the operator at last.
+            // As `message` it only ever reached «Журнал аудита».
+            why: verdict.reason,
+            nextSteps:
+              'Черновик цел и лежит на странице «Рассылки» — отправьте его снова, ' +
+              'когда причина выше устранена.',
+          },
         );
         return [];
       }
@@ -1633,7 +1670,17 @@ export class BroadcastDeliveryService {
         EVENT_TYPES.BROADCAST_STARTED,
         'SYSTEM',
         `Recall removed nothing: no bot token is configured, so these ${messageIds.length} messages cannot be deleted from Telegram`,
-        { broadcastId, deleted: 0, failed: messageIds.length },
+        {
+          broadcastId,
+          deleted: 0,
+          failed: messageIds.length,
+          reason: 'recall_no_bot_token',
+          why:
+            `В панели не задан токен бота, поэтому удалить эти ${messageIds.length} сообщений ` +
+            'из Telegram невозможно — они останутся у получателей.',
+          nextSteps:
+            'Задайте токен бота в «Настройках» и отзовите рассылку снова.',
+        },
       );
       return { deleted: 0, failed: messageIds.length };
     }
@@ -1743,6 +1790,15 @@ export class BroadcastDeliveryService {
           broadcastId,
           deleted,
           failed,
+          reason: 'recall_all_rejected',
+          // Bounded to THIS batch, like the message above: a recall is fanned out
+          // fifty at a time, and a whole-broadcast claim would be wrong.
+          why:
+            `Telegram отклонил все ${failed} удалений в этой партии: сообщение старше 48 часов ` +
+            'удалить нельзя. Другие партии этого отзыва могут пройти успешно.',
+          nextSteps:
+            'С этими сообщениями сделать нельзя ничего: Telegram не даёт удалять ' +
+            'сообщения старше 48 часов. Остальные партии проверьте на «Рассылках».',
         });
       } else {
         this.systemEventsService.warn(EVENT_TYPES.BROADCAST_STARTED, 'SYSTEM', message, {

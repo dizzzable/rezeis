@@ -153,7 +153,19 @@ export class BroadcastReconcilerService {
       'SYSTEM',
       `Broadcast ${broadcastId} reached NOBODY: it was claimed for sending but no recipients were ever staged. ` +
         'Compose it again — and check the operator channel, which may already carry the announcement.',
-      { broadcastId },
+      {
+        broadcastId,
+        reason: 'staging_never_ran',
+        // The sentence above is the audit log's English. This is the one the
+        // card prints, and on a card titled «Проблема с рассылкой» it is the only
+        // text an operator can act on.
+        why:
+          'Рассылку взяли в работу, но ни один получатель в неё так и не попал — она помечена ' +
+          'неудачной.',
+        nextSteps:
+          'Соберите рассылку заново на странице «Рассылки» и проверьте канал ' +
+          'оператора: объявление могло уже выйти.',
+      },
     );
   }
 
@@ -185,6 +197,11 @@ export class BroadcastReconcilerService {
             'Рассылку уже несколько раз возвращали в очередь, и она снова останавливалась. ' +
             'Автоматически её больше не перезапустят: кому она ещё не отправлена, те её не ' +
             'получат, пока вы не разберётесь с рассылкой.',
+          // Same card, same default to displace: without this it advised opening
+          // a .txt with a stack trace, and a queue that stalled has no stack.
+          nextSteps:
+            'Откройте рассылку на странице «Рассылки» и решите, отменить её или ' +
+            'собрать заново; проверьте очередь и связь с ботом.',
         },
       );
       return;
@@ -196,7 +213,20 @@ export class BroadcastReconcilerService {
       EVENT_TYPES.BROADCAST_STARTED,
       'SYSTEM',
       `Broadcast ${broadcastId} was picked up again: ${why}`,
-      { broadcastId, attempts, detail: why },
+      {
+        broadcastId,
+        attempts,
+        detail: why,
+        reason: 'revived',
+        // Two different things with one name: the local `why` is the English
+        // detail («12 recipients still undispatched») and travels as `detail`;
+        // the metadata `why` is what the card prints. Without it the card was
+        // «Проблема с рассылкой» and an attempt number, with nothing saying
+        // whether the operator has to do anything. They do not.
+        why:
+          'Рассылка остановилась на полпути, и её вернули в очередь — доставка продолжится ' +
+          'сама. Вмешиваться не нужно; если она остановится снова, придёт отдельная карточка.',
+      },
     );
   }
 }

@@ -1535,3 +1535,79 @@ describe('times on a card', () => {
     }
   });
 });
+
+describe('a broadcast the panel refused to send', () => {
+  it('says what happened, instead of «Необработанная ошибка»', async () => {
+    // ERROR NEVER REACHES THE GENERIC FORMATTER. `isErrorEvent` routes it to
+    // the incident card, which renders none of the metadata blocks and exactly
+    // two operator-written keys. Without them a caption 156 characters too long
+    // was announced as «Произошла ошибка!» over «Необработанная ошибка в панели
+    // администратора», with advice to open a stack trace that does not exist —
+    // for a refusal with no exception behind it.
+    const { service, getLastText } = buildService();
+    service.error('broadcast.started', 'SYSTEM', 'Broadcast not sent: caption is 1180 chars', {
+      broadcastId: 'bc-1',
+      reason: 'caption_too_long',
+      why: 'Подпись не может быть длиннее 1024 символов, а в этой рассылке их 1180.',
+      nextSteps: 'Откройте черновик на странице «Рассылки» и укоротите подпись.',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('а в этой рассылке их 1180'), card);
+    assert.ok(card.includes('Откройте черновик на странице «Рассылки»'), card);
+    assert.ok(!card.includes('Необработанная ошибка'), card);
+  });
+
+  it('falls back to the unhandled-error wording when a producer wrote neither', async () => {
+    // ANTI-VACUITY, and the card every broadcast refusal wore until its
+    // producer was given those two keys. If this one ever goes green on the
+    // custom text instead, the test above is passing for free.
+    const { service, getLastText } = buildService();
+    service.error('broadcast.started', 'SYSTEM', 'refused', { broadcastId: 'bc-2' });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('Необработанная ошибка'), card);
+    assert.ok(!card.includes('Откройте черновик'), card);
+  });
+});
+
+describe('the «Причина» line on the cards that do render metadata', () => {
+  it('reads a broadcast refusal code in Russian', async () => {
+    // WARNING and below take the generic formatter, which is where `reason` is
+    // rendered. It went through `humanizeSource` — a map of SOURCES — and an
+    // unknown value comes back from it unchanged, so `revived` printed as
+    // `revived`: Latin, snake_case, on a Russian card.
+    const { service, getLastText } = buildService();
+    service.warn('broadcast.started', 'SYSTEM', 'picked up again', {
+      broadcastId: 'bc-3',
+      attempts: 1,
+      reason: 'revived',
+      why: 'Рассылка остановилась на полпути, и её вернули в очередь.',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('🆔 ID: <code>bc-3</code>'), card);
+    assert.ok(card.includes('📌 Причина: рассылка возвращена в очередь'), card);
+    assert.ok(card.includes('💡 Почему: Рассылка остановилась'), card);
+  });
+
+  it('leaves a source, and a code nobody mapped, in their own words', async () => {
+    // ANTI-VACUITY both ways: the source map still answers for the values it
+    // owns, and a code nobody taught it is shown untranslated rather than
+    // guessed at — it is what an operator quotes when asking about the card.
+    const a = buildService();
+    a.service.info('subscription.deleted', 'SUBSCRIPTION', 'gone', {
+      reason: 'EXPIRED_PROFILE_CLEANUP',
+    });
+    await flush();
+    assert.ok(a.getLastText()!.includes('📌 Причина: Очистка истёкших профилей'), a.getLastText()!);
+
+    const b = buildService();
+    b.service.warn('broadcast.started', 'SYSTEM', 'odd', {
+      broadcastId: 'bc-4',
+      reason: 'nobody_mapped_this',
+    });
+    await flush();
+    assert.ok(b.getLastText()!.includes('📌 Причина: nobody_mapped_this'), b.getLastText()!);
+  });
+});

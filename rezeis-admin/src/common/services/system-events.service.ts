@@ -1938,19 +1938,26 @@ export class SystemEventsService {
     // Telegram refused to deliver. As `<code>`, like every raw diagnostic on
     // the card: it is the library's words, untranslated, not the card's.
     if (meta['error'] || event.severity === 'ERROR') {
-      lines.push('');
-      lines.push('⚠️ <b>Ошибка:</b>');
       const errLines: string[] = [];
       if (meta['error']) errLines.push(`💬 Сообщение: <code>${escapeHtml(meta['error'])}</code>`);
       if (meta['action']) errLines.push(`🧷 Действие: <code>${escapeHtml(meta['action'])}</code>`);
       if (meta['attempt']) errLines.push(`🔁 Попытка: ${escapeHtml(meta['attempt'])}`);
-      lines.push(`<blockquote>${errLines.join('\n')}</blockquote>`);
+      // THROUGH `factBlock`, like every other block on this card: the heading
+      // used to be pushed BEFORE the lines were collected, so a producer with
+      // none of these three keys would have sent it over an empty quote.
+      //
+      // A GUARD, not a repair. `severity === 'ERROR'` cannot be true here at
+      // all — `isErrorEvent` routes every ERROR to `formatErrorEventCardHtml`
+      // before this formatter is reached — so the only way in is `meta.error`,
+      // and that fills the block by itself. The clause is kept because it
+      // states the intent, and `factBlock` is what makes it safe to keep.
+      lines.push(...factBlock('⚠️ <b>Ошибка:</b>', errLines));
     }
 
     // Extra block — curated leftover keys that carry useful context but don't
     // belong to any dedicated block above. Each is optional and escaped.
     const extraLines: string[] = [];
-    if (meta['reason']) extraLines.push(`📌 Причина: ${humanizeSource(meta['reason'])}`);
+    if (meta['reason']) extraLines.push(`📌 Причина: ${humanizeReason(meta['reason'])}`);
     if (meta['note']) extraLines.push(`📝 Заметка: ${escapeHtml(meta['note'])}`);
     if (meta['addOnType']) {
       const val = meta['addOnValue'] !== undefined ? ` ${escapeHtml(meta['addOnValue'])}` : '';
@@ -3830,6 +3837,39 @@ function humanizeSource(value: unknown): string {
     default:
       return escapeHtml(value);
   }
+}
+
+/**
+ * The broadcast refusals' own `reason` codes, in the operator's words.
+ *
+ * They are not sources, and `humanizeSource` - the map every `reason` went
+ * through - hands an unknown value back unchanged. So `connect_signal_down`
+ * was printed exactly like that: Latin, snake_case, on a Russian card.
+ *
+ * Short on purpose. What to DO about it is `why`, printed on the line below
+ * this one; this is the handle, not the explanation.
+ */
+const BROADCAST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
+  caption_too_long: 'подпись длиннее предела Telegram',
+  promo_unusable: 'промокод нельзя отправить',
+  connect_unreadable: 'фильтр «Подключение VPN» не читается',
+  connect_signal_down: 'проверка подключений не отличает подключившихся',
+  connect_too_many: 'получателей больше предела',
+  connect_timeout: 'получателей не удалось посчитать за 10 секунд',
+  connect_failed: 'получателей не удалось посчитать',
+  recall_no_bot_token: 'не задан токен бота',
+  recall_all_rejected: 'Telegram отклонил все удаления',
+  staging_never_ran: 'ни одного получателя не набралось',
+  revived: 'рассылка возвращена в очередь',
+};
+
+/**
+ * A `reason` in the operator's words: a broadcast refusal code first, then the
+ * source map, then - deliberately - the raw value. An untranslated truth beats
+ * a translated guess, and the raw code is what an operator quotes when asking.
+ */
+function humanizeReason(value: unknown): string {
+  return BROADCAST_REFUSAL_REASONS[String(value)] ?? humanizeSource(value);
 }
 
 /**

@@ -474,6 +474,10 @@ interface StagingRecord {
 function stagingHarness(input: {
   readonly audienceFilter: unknown;
   readonly verdict?: unknown;
+  /** The stored draft. Default: a text broadcast that refuses nothing. */
+  readonly payload?: unknown;
+  /** What the promo gate answers. Default: dispatchable. */
+  readonly promoVerdict?: unknown;
   readonly recipients?: readonly string[];
   /** Who `stageConnectRecipients` finds still reachable; default: every recipient it is handed. */
   readonly reachable?: readonly string[];
@@ -502,7 +506,7 @@ function stagingHarness(input: {
         status: BroadcastStatus.DRAFT,
         audience: BroadcastAudience.ACTIVE_SUBSCRIBERS,
         audienceFilter: input.audienceFilter,
-        payload: { text: 'Не получилось подключиться?' },
+        payload: input.payload ?? { text: 'Не получилось подключиться?' },
         promoCode: null,
       }),
       updateMany: async (args: unknown) => {
@@ -535,7 +539,7 @@ function stagingHarness(input: {
     },
   };
   const broadcastService = {
-    checkPromoCodeDispatchable: async () => ({ ok: true }),
+    checkPromoCodeDispatchable: async () => input.promoVerdict ?? { ok: true },
     checkConnectAudience: async (connect: unknown, now: Date) => {
       record.checks.push({ connect, now });
       if (input.verdict === undefined) throw new Error('checkConnectAudience was not expected');
@@ -591,7 +595,20 @@ describe('staging a broadcast with connect', () => {
       assert.equal(event?.severity, 'error');
       assert.equal(event?.type, EVENT_TYPES.BROADCAST_STARTED);
       assert.equal(event?.message, `Рассылка не отправлена. ${reason}`);
-      assert.deepStrictEqual(event?.metadata, { broadcastId: 'bc-1', reason: `connect_${refusal}`, verified: 20_001 });
+      assert.deepStrictEqual(event?.metadata, {
+        broadcastId: 'bc-1',
+        verified: 20_001,
+        reason: `connect_${refusal}`,
+        // The sentence the verdict has always carried, now where the card can
+        // print it: `broadcast.started` does not print `message`, so as the
+        // message alone it reached «Журнал аудита» and nothing else.
+        why: reason,
+        // And the step, because the incident card's default for it is «откройте
+        // приложенный .txt со stack trace» — written for an unhandled exception,
+        // shown to an operator whose filter simply could not be counted.
+        nextSteps:
+          'Черновик цел и лежит на странице «Рассылки» — отправьте его снова, когда причина выше устранена.',
+      });
       assert.equal(record.findManyUsers.length, 0);
       assert.equal(record.createMany.length, 0);
       assert.equal(record.marks.length, 0);
@@ -709,5 +726,58 @@ describe('staging a broadcast with connect', () => {
 
   it('keeps the design’s refusal sentence word for word', () => {
     assert.equal(CONNECT_AUDIENCE_TOO_LARGE_MESSAGE, 'Слишком много получателей для фильтра «не подключился» — уменьшите срок');
+  });
+});
+
+describe('the two staging refusals whose card is the incident card', () => {
+  // ERROR severity never reaches the generic event formatter — `isErrorEvent`
+  // routes it to `formatErrorEventCardHtml`, which renders NO metadata block
+  // and exactly two operator-written keys, `why` and `nextSteps`. Without them
+  // both of these refusals were announced as «Произошла ошибка!» over
+  // «Необработанная ошибка в панели администратора», with advice to open a
+  // stack trace that does not exist. So they are asserted at the producer:
+  // the keys are the whole of what the operator gets to read.
+
+  it('refuses a caption over the Telegram limit, in Russian and with the way out', async () => {
+    const { service, record } = stagingHarness({
+      audienceFilter: null,
+      // A media TYPE and a media FILE: `isMediaPayload` wants both, and without
+      // the file this payload is a plain message measured against 4096.
+      payload: { mediaType: 'photo', mediaFileId: 'file-1', text: 'x'.repeat(1180) },
+    });
+    assert.deepStrictEqual(await service.stageRecipients('bc-1'), []);
+    assert.equal(CLAIMED(record), false, 'never claimed: no channel post, nothing sent');
+    assert.equal(record.events.length, 1);
+    const [event] = record.events;
+    assert.equal(event?.severity, 'error');
+    const meta = event?.metadata as Record<string, unknown>;
+    assert.equal(meta['reason'], 'caption_too_long');
+    assert.equal(meta['captionLength'], 1180);
+    // The number is IN the sentence: «слишком длинная» without it leaves the
+    // operator trimming blind, and the card shows no metadata beside it.
+    assert.ok(String(meta['why']).includes('1180'), String(meta['why']));
+    assert.ok(String(meta['nextSteps']).includes('«Рассылки»'), String(meta['nextSteps']));
+  });
+
+  it('refuses an undispatchable promo with the gate\'s own Russian sentence', async () => {
+    const { service, record } = stagingHarness({
+      audienceFilter: null,
+      promoVerdict: {
+        ok: false,
+        reason: 'Promocode "SALE" has expired',
+        why: 'Срок действия промокода «SALE», прикреплённого к рассылке, истёк.',
+      },
+    });
+    assert.deepStrictEqual(await service.stageRecipients('bc-1'), []);
+    assert.equal(CLAIMED(record), false);
+    assert.equal(record.events.length, 1);
+    const [event] = record.events;
+    const meta = event?.metadata as Record<string, unknown>;
+    assert.equal(meta['reason'], 'promo_unusable');
+    assert.equal(meta['why'], 'Срок действия промокода «SALE», прикреплённого к рассылке, истёк.');
+    assert.ok(String(meta['nextSteps']).includes('промокод'), String(meta['nextSteps']));
+    // The English half stays where it belongs — the audit log's message, and
+    // the body of the 400 the controller throws at an immediate send.
+    assert.ok(String(event?.message).includes('Promocode "SALE" has expired'), String(event?.message));
   });
 });
