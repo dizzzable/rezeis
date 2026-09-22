@@ -1679,7 +1679,8 @@ export class BroadcastDeliveryService {
             `В панели не задан токен бота, поэтому удалить эти ${messageIds.length} сообщений ` +
             'из Telegram невозможно — они останутся у получателей.',
           nextSteps:
-            'Задайте токен бота в «Настройках» и отзовите рассылку снова.',
+            'Задайте токен на странице «Платформа», в карточке «Токен бота», и отзовите ' +
+            'рассылку снова.',
         },
       );
       return { deleted: 0, failed: messageIds.length };
@@ -1914,7 +1915,26 @@ export class BroadcastDeliveryService {
         EVENT_TYPES.SYSTEM_BROADCAST_SENT,
         'SYSTEM',
         `Broadcast delivered to NOBODY: ${failedCount} recipients failed`,
-        { broadcastId, sentCount: reachedCount, failedCount },
+        {
+          broadcastId,
+          sentCount: reachedCount,
+          failedCount,
+          // Only this producer sets it: the card's own header
+          // («Рассылка не дошла ни до кого») keys on it, where the warning
+          // header would have said «доставлена не всем» about nobody at all.
+          reason: 'nobody_reached',
+          // The incident card prints these two and none of the counts above.
+          // Without them the broadcast that reached no one was explained as
+          // «Необработанная ошибка в панели администратора».
+          why:
+            `Рассылку не получил ни один из ${failedCount} получателей: не прошла ни одна ` +
+            'отправка. Рассылка помечена статусом «Ошибка».',
+          nextSteps:
+            'Откройте её на странице «Рассылки»: тем, кто «заблокировал бота», повтор не ' +
+            'поможет. Когда не проходит ни одна отправка, причина обычно общая — проверьте ' +
+            'текст, кнопки и вложение рассылки и нажмите у неё кнопку ↻ «Повторить для … ' +
+            'недоставленных».',
+        },
       );
     } else if (failedCount > 0) {
       this.systemEventsService.warn(

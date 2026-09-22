@@ -3653,6 +3653,16 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
     emoji: '📢',
     title: 'Рассылка отправлена',
     warning: { emoji: '⚠️', title: 'Рассылка доставлена не всем' },
+    variants: [
+      {
+        // `BroadcastDeliveryService.checkAndFinalize`, the ERROR branch: not one
+        // send went through. «Доставлена не всем» reads as «part of it arrived»
+        // about a broadcast none of which did. Only that producer sets the key.
+        emoji: '🚫',
+        title: 'Рассылка не дошла ни до кого',
+        when: (metadata) => metadata['reason'] === 'nobody_reached',
+      },
+    ],
   },
   'system.bulk_users_executed': { emoji: '👥', title: 'Массовая операция над пользователями' },
   'system.error': { emoji: '🚨', title: 'Системная ошибка' },
@@ -3898,6 +3908,7 @@ const BROADCAST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   recall_all_rejected: 'Telegram отклонил все удаления',
   staging_never_ran: 'ни одного получателя не набралось',
   revived: 'рассылка возвращена в очередь',
+  nobody_reached: 'не прошла ни одна отправка',
 };
 
 /**

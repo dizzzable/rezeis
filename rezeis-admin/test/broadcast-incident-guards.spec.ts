@@ -59,16 +59,21 @@ function prismaFake(options: {
 const lastOf = <T>(items: readonly T[]): T | undefined => items[items.length - 1];
 
 const noop = () => undefined;
-const events: Array<{ severity: string; type: string; message: string }> = [];
+const events: Array<{
+  severity: string;
+  type: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+}> = [];
 const systemEvents = {
-  info: (type: string, _s: string, message: string) => {
-    events.push({ severity: 'info', type, message });
+  info: (type: string, _s: string, message: string, metadata?: Record<string, unknown>) => {
+    events.push({ severity: 'info', type, message, metadata });
   },
-  warn: (type: string, _s: string, message: string) => {
-    events.push({ severity: 'warn', type, message });
+  warn: (type: string, _s: string, message: string, metadata?: Record<string, unknown>) => {
+    events.push({ severity: 'warn', type, message, metadata });
   },
-  error: (type: string, _s: string, message: string) => {
-    events.push({ severity: 'error', type, message });
+  error: (type: string, _s: string, message: string, metadata?: Record<string, unknown>) => {
+    events.push({ severity: 'error', type, message, metadata });
   },
 };
 
@@ -132,6 +137,29 @@ describe('the finished status follows the outcome', () => {
     const status = lastOf(prisma.updates)?.status;
     assert.equal(status, BroadcastStatus.FAILED, '0 of 400 was recorded as completed');
     assert.equal(lastOf(events)?.severity, 'error', 'total failure announced as news, not as an alarm');
+  });
+
+  it('tells the operator what reaching nobody means, in the two keys the card prints', async () => {
+    // An ERROR goes to the incident card, which prints `why` and `nextSteps`
+    // and none of the counts. Without them this card explained a broadcast
+    // that reached no one as «Необработанная ошибка в панели администратора».
+    events.length = 0;
+    await service(prismaFake({ sent: 0, failed: 400 }).client).checkAndFinalize('b-1');
+
+    const metadata = lastOf(events)?.metadata ?? {};
+    assert.equal(metadata['reason'], 'nobody_reached', 'the card header keys on this');
+    assert.match(String(metadata['why']), /ни один из 400 получателей/);
+    assert.match(String(metadata['nextSteps']), /«Рассылки»/);
+  });
+
+  it('leaves the key off a partial delivery, whose card must not say «ни до кого»', async () => {
+    // ANTI-VACUITY for the header variant: it fires on `reason` alone, so the
+    // key has to be absent everywhere but the branch where nothing arrived.
+    events.length = 0;
+    await service(prismaFake({ sent: 40, failed: 360 }).client).checkAndFinalize('b-1');
+
+    assert.equal(lastOf(events)?.severity, 'warn');
+    assert.equal(lastOf(events)?.metadata?.['reason'], undefined);
   });
 
   it('warns on a partial delivery instead of calling it a success', async () => {

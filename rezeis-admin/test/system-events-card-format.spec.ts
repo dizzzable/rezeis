@@ -1580,6 +1580,29 @@ describe('a broadcast the panel refused to send', () => {
     assert.ok(!card.includes('Откройте черновик'), card);
   });
 
+  it('titles a broadcast that reached nobody as exactly that', async () => {
+    // The finaliser's ERROR is filed under `system.broadcast_sent`, whose
+    // failure header says «доставлена не всем» — accurate for 40 of 400, and
+    // an understatement for 0 of 400. Its producer marks it, and the header
+    // follows the mark. (The partial card keeps its own header: see «reports a
+    // partial broadcast as partial», which sends no `reason`.)
+    const { service, getLastText } = buildService();
+    service.error('system.broadcast_sent', 'SYSTEM', 'Broadcast delivered to NOBODY: 400 recipients failed', {
+      broadcastId: 'bc-4',
+      sentCount: 0,
+      failedCount: 400,
+      reason: 'nobody_reached',
+      why: 'Рассылку не получил ни один из 400 получателей: не прошла ни одна отправка.',
+      nextSteps: 'Откройте её на странице «Рассылки».',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.ok(card.includes('🚫 <b>Событие: Рассылка не дошла ни до кого</b>'), card);
+    assert.ok(!card.includes('доставлена не всем'), card);
+    assert.ok(card.includes('ни один из 400 получателей'), card);
+    assert.ok(!card.includes('Необработанная ошибка'), card);
+  });
+
   it('keeps the old wording for a type nobody registered', async () => {
     // ANTI-VACUITY for the header fallback. «Произошла ошибка!» is honest for
     // a type nobody has said anything about — it is the one case where the
