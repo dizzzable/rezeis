@@ -183,7 +183,8 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       readonly rulesLink: string | null
       readonly channelLink: string | null
       readonly channelId: string | null
-      readonly channelNewUsersSince: string | null
+      /** Absent: leave the stored moment as it is (see `handleSave`). */
+      readonly channelNewUsersSince?: string | null
       readonly platformBranding?: { readonly timezone: string | null }
     }) => api.patch('/admin/settings/platform', data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] }); toast.success(t('settingsPage.platform.saved')) },
