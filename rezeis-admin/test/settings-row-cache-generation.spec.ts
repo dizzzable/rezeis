@@ -73,6 +73,7 @@ function settingsRow(brandName: string): Settings {
     rulesLink: '',
     channelId: null,
     channelLink: '',
+    channelNewUsersSince: null,
     accessMode: AccessMode.PUBLIC,
     inviteModeStartedAt: null,
     defaultCurrency: Currency.RUB,

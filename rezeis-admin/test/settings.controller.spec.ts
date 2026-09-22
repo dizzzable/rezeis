@@ -92,6 +92,7 @@ function buildPlatformSettings(): PlatformSettingsInterface {
     channelRequired: true,
     channelId: '-1001234567890',
     channelLink: 'https://t.me/example',
+    channelNewUsersSince: null,
     accessMode: AccessMode.INVITED,
     inviteModeStartedAt: '2026-04-01T00:00:00.000Z',
     defaultCurrency: Currency.USD,

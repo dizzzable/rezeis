@@ -667,6 +667,7 @@ function platformPolicy(overrides: Partial<InternalPlatformPolicyInterface> = {}
     channelId: null,
     channelUsername: null,
     channelRecheck: true,
+    channelNewUsersSince: null,
     requireTelegramWebCredentials: false,
     subscriptionLinkRecovery: true,
     accessMode: 'PUBLIC',
