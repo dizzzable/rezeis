@@ -129,6 +129,20 @@ describe('«Проверять только новых»', () => {
     expect(savedPayload()['channelNewUsersSince']).toBe(localInputToInstant('2026-10-01T12:00'))
   })
 
+  it('leaves the stored moment alone when half a date is hidden by «Канал обязателен» off', async () => {
+    // The one way to save with the date incomplete: switch the channel off and
+    // the field goes out of sight. Saving then must not wipe a moment the
+    // operator can no longer see — the key stays out of the request.
+    const user = userEvent.setup()
+    renderWithProviders(
+      <PlatformTab settings={{ ...PLATFORM, channelNewUsersSince: '2026-09-01T09:30:00.000Z' }} />,
+    )
+    fireEvent.change(screen.getByLabelText('Check accounts registered from'), { target: { value: '' } })
+    await user.click(screen.getByRole('switch', { name: 'Channel Required' }))
+    await user.click(screen.getByRole('button', { name: 'Save Platform Settings' }))
+    expect(savedPayload()).not.toHaveProperty('channelNewUsersSince')
+  })
+
   it('is not offered while «Канал обязателен» is off', () => {
     renderWithProviders(<PlatformTab settings={{ ...PLATFORM, channelRequired: false }} />)
     expect(screen.queryByRole('switch', { name: 'Check new users only' })).toBeNull()

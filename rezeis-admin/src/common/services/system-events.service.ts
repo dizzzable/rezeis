@@ -3924,7 +3924,7 @@ const BROADCAST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   connect_timeout: 'получателей не удалось посчитать за 10 секунд',
   connect_failed: 'получателей не удалось посчитать',
   recall_no_bot_token: 'не задан токен бота',
-  recall_all_rejected: 'Telegram отклонил все удаления',
+  recall_all_rejected: 'не прошло ни одно удаление',
   staging_never_ran: 'ни одного получателя не набралось',
   revived: 'рассылка возвращена в очередь',
   nobody_reached: 'не прошла ни одна отправка',

@@ -217,7 +217,12 @@ export function PlatformTab({ settings }: { settings: AdminSettings | undefined 
       rulesLink: normalize(rulesLink),
       channelLink: normalize(channelLink),
       channelId: normalize(channelId),
-      channelNewUsersSince: channelNewUsersOnly ? channelNewUsersInstant : null,
+      // Half a date under the switch can only be saved while «Канал
+      // обязателен» is off and the field is out of sight (otherwise the button
+      // waits): leave the stored moment alone rather than wipe it unseen.
+      ...(channelNewUsersOnly && channelNewUsersInstant === null
+        ? {}
+        : { channelNewUsersSince: channelNewUsersOnly ? channelNewUsersInstant : null }),
       ...(timezone === savedTimezone ? {} : { platformBranding: { timezone: normalize(timezone) } }),
     })
   }
