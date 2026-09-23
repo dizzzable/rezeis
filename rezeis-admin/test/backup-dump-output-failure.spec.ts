@@ -24,6 +24,8 @@ const zlibModule: typeof import('node:zlib') = require('node:zlib');
 /** Taken before any case replaces them: some doubles are real processes, some destinations real files. */
 const realSpawn = childProcess.spawn;
 const realCreateWriteStream = fsModule.createWriteStream;
+const realOpen = fsModule.open;
+const realUnlink = fsModule.promises.unlink;
 
 /**
  * A backup whose file cannot be written must not leave pg_dump running
@@ -244,6 +246,64 @@ function afterStragglers(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 100));
 }
 
+/**
+ * The job's output file, and the write stream that creates it. `closed()`
+ * settles once that stream has closed — opened, written to or not, closed
+ * again — which, not a fixed pause, is the moment after which the file can no
+ * longer appear.
+ */
+function watchOutputFile(filename: string): { readonly file: string; readonly closed: () => Promise<void> } {
+  const file = path.join(directory, filename);
+  let closed: Promise<void> | undefined;
+  mock.method(fsModule, 'createWriteStream', (destination: string, options?: unknown) => {
+    const stream = realCreateWriteStream(destination, options as never);
+    if (path.resolve(destination) === path.resolve(file)) {
+      closed = new Promise<void>((resolve) => {
+        stream.once('close', () => resolve());
+      });
+    }
+    return stream;
+  });
+  return {
+    file,
+    closed: async () => {
+      assert.ok(closed !== undefined, 'the job never created its output file');
+      await closed;
+    },
+  };
+}
+
+/** Settles once the job has tried to remove `file`, whatever the attempt found there. */
+function whenRemovalTried(file: string): Promise<void> {
+  return new Promise<void>((tried) => {
+    mock.method(fsModule.promises, 'unlink', async (target: Parameters<typeof realUnlink>[0]) => {
+      try {
+        return await realUnlink(target);
+      } finally {
+        if (typeof target === 'string' && path.resolve(target) === path.resolve(file)) tried();
+      }
+    });
+  });
+}
+
+/**
+ * Holds the open that creates `file` back until `release` settles, or 250 ms
+ * pass. A real `fs.WriteStream` opens through this very `fs` object, and
+ * asynchronously: this is the window a loaded machine opens by accident, held
+ * open on purpose. The 250 ms bound is what a job that waits for its file gets.
+ */
+function holdOpenOf(file: string, release: Promise<unknown>): void {
+  const opening = realOpen as unknown as (...args: unknown[]) => void;
+  mock.method(fsModule, 'open', ((...args: unknown[]) => {
+    const target = args[0];
+    if (typeof target !== 'string' || path.resolve(target) !== path.resolve(file)) {
+      opening(...args);
+      return;
+    }
+    void Promise.race([release, new Promise<void>((resolve) => setTimeout(resolve, 250))]).then(() => opening(...args));
+  }) as unknown as typeof fsModule.open);
+}
+
 function runDump(service: BackupService, filename: string): Promise<{ sizeBytes: number; checksum: string }> {
   return service.runDump('backup-1', filename, 'DB', 'admin-1', false);
 }
@@ -436,11 +496,15 @@ describe('BackupService.runDump — what a finished dump needs (controls)', () =
     await assert.rejects(fsp.access(path.join(directory, 'refused.sql.gz')), 'the partial file is removed');
   });
 
-  it('fails the job, and throws nothing past it, when there is no pg_dump to start', async () => {
-    // A real spawn of a binary that does not exist: Node emits 'error' and then
-    // 'close' with no 'exit', and the child's stdout ends on its own.
+  /** A real spawn of a binary that does not exist: Node emits 'error' and then 'close' with no 'exit'. */
+  function installMissingPgDump(): void {
     mock.method(childProcess, 'spawn', (_command: string, args: readonly string[], options?: SpawnOptions) =>
       realSpawn(`pg_dump-not-in-this-image-${process.pid}`, [...args], { ...(options ?? {}) }));
+  }
+
+  it('fails the job, and throws nothing past it, when there is no pg_dump to start', async () => {
+    installMissingPgDump();
+    const output = watchOutputFile('no-binary.sql.gz');
     const record = newRecord();
 
     const uncaught = recordUncaughtExceptions();
@@ -449,13 +513,40 @@ describe('BackupService.runDump — what a finished dump needs (controls)', () =
         () => runDump(createService(record), 'no-binary.sql.gz'),
         /^Error: pg_dump spawn failed: spawn pg_dump-not-in-this-image-\d+ ENOENT$/,
       );
+      // Gone by the time the job reports its failure…
+      await assert.rejects(fsp.access(output.file), 'the empty file is removed');
       await afterStragglers();
       assert.deepStrictEqual(uncaught.errors.map(String), [], 'an unhandled stream error takes the API or worker process down');
     } finally {
       uncaught.stop();
     }
     assertFailureRecorded(record, /pg_dump spawn failed/);
-    await assert.rejects(fsp.access(path.join(directory, 'no-binary.sql.gz')), 'the empty file is removed');
+    // …and still gone once the stream that creates it has closed: nothing can bring it back after that.
+    await output.closed();
+    await assert.rejects(fsp.access(output.file), 'the empty file is not created again after the job reported');
+  });
+
+  it('leaves no empty file behind when the file is created only after pg_dump failed to start', async () => {
+    // The output file is created by the write stream's open, which is
+    // asynchronous, and a pg_dump that cannot start fails before it. The job's
+    // clean-up then removed a file that was not there yet, and the open created
+    // it afterwards: a zero-byte file in the backups directory that no record
+    // points at. An idle machine's open usually won; on 23.09.2026, with the
+    // suite running beside other test runs, it lost. Here the open waits for the
+    // clean-up — so it loses every time the job does not wait for its file.
+    installMissingPgDump();
+    const output = watchOutputFile('late-open.sql.gz');
+    holdOpenOf(output.file, whenRemovalTried(output.file));
+    const record = newRecord();
+
+    await assert.rejects(
+      () => runDump(createService(record), 'late-open.sql.gz'),
+      /^Error: pg_dump spawn failed: spawn pg_dump-not-in-this-image-\d+ ENOENT$/,
+    );
+    // What the job reports is the same.
+    assertFailureRecorded(record, /pg_dump spawn failed/);
+    await output.closed();
+    await assert.rejects(fsp.access(output.file), 'the empty file is removed, and not created again after');
   });
 
   it('does not call a dump finished because its output is: pg_dump’s exit status still decides', async () => {

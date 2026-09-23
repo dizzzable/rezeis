@@ -1419,7 +1419,14 @@ export class BackupService implements OnModuleInit {
         out.destroy();
         if (settled) return;
         settled = true;
-        reject(error);
+        // Not before the file stream has closed. Its open is asynchronous, and a
+        // pg_dump that cannot start fails before it: settled then, the job's
+        // clean-up unlinked a file that was not there yet, and the open created
+        // it afterwards — an empty file in the backups directory that no record
+        // points at. A destroyed stream still finishes its open, then closes; after
+        // 'close' the file exists or never will.
+        if (out.closed) reject(error);
+        else out.once('close', () => reject(error));
       };
       const finish = async (): Promise<void> => {
         try {
