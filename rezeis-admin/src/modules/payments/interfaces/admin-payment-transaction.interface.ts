@@ -6,6 +6,8 @@ import {
   TransactionStatus,
 } from '@prisma/client';
 
+import type { WithheldConversionMark } from '../utils/trial-conversion.util';
+
 export interface AdminPaymentTransactionInterface {
   readonly id: string;
   readonly paymentId: string;
@@ -42,4 +44,12 @@ export interface AdminPaymentTransactionListItemInterface extends AdminPaymentTr
    * Empty for every single-subscription payment.
    */
   readonly lineItemSubscriptionIds: readonly string[];
+  /**
+   * Set for a trial's conversion that was received after another payment had
+   * converted the trial, and so applied to nothing: it is COMPLETED and
+   * `fulfilledAt` is stamped, yet nothing was delivered, and its money is for
+   * the operator to return (`payment.withheld`, «Отметить возврат»). Null for
+   * every other payment.
+   */
+  readonly conversionWithheld: WithheldConversionMark | null;
 }

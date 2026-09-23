@@ -41,6 +41,7 @@ import { useHasPermission } from '@/features/rbac'
 import { PermissionRequiredNotice } from './permission-required-notice'
 import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
 import { WebhookReplayControl } from './webhook-replay-control'
+import { WithheldBadge, WithheldConversionSection } from './withheld-conversion'
 import { clientPaymentsHref, subscriptionPaymentsHref } from './payments-filters'
 import {
   describeDelivery,
@@ -102,6 +103,7 @@ export function PaymentDetailsSheet({ reference, seed, onClose, onShowMatches }:
                 {String(t(`paymentsPage.statuses.${transaction.status}`, transaction.status))}
               </Badge>
             )}
+            {transaction?.conversionWithheld ? <WithheldBadge mark={transaction.conversionWithheld} /> : null}
           </SheetTitle>
           <SheetDescription className="break-all font-mono text-xs">
             {transaction !== undefined ? formatAmount(transaction) : (reference ?? '')}
@@ -156,6 +158,9 @@ function PaymentDetailsBody({ transaction }: { readonly transaction: Transaction
 
   return (
     <div className="space-y-5 text-sm">
+      {transaction.conversionWithheld ? (
+        <WithheldConversionSection transaction={transaction} mark={transaction.conversionWithheld} />
+      ) : null}
       <section aria-labelledby="payment-details-ids" className="space-y-3">
         <h3 id="payment-details-ids" className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {t('paymentsPage.details.idsTitle')}
@@ -464,6 +469,8 @@ function DeliveryText({ transaction }: { readonly transaction: TransactionRow })
   switch (delivery.kind) {
     case 'delivered':
       return <>{formatInstant(delivery.at)}</>
+    case 'withheld':
+      return <span className="text-muted-foreground">{t('paymentsPage.details.delivery.withheld')}</span>
     case 'notDelivered':
       return <span className="text-muted-foreground">{t('paymentsPage.details.delivery.notDelivered')}</span>
     case 'noStampImported':

@@ -178,11 +178,17 @@ function paidTermSql(): Prisma.Sql {
   // Joined, not correlated: every non-trial subscription is read, and a hash
   // join of the (few) former trials beats an index probe per subscription.
   // MATERIALIZED, so the CASE below runs once per row however many figures read it.
+  //
+  // A conversion withheld for refund (`conversionWithheldAt`, see
+  // `payments/utils/trial-conversion.util.ts`) is COMPLETED and converted
+  // nothing — another payment did — so it never dates the conversion: its
+  // draft can be days older than the payment that converted the trial.
   return Prisma.sql`"former_trial" AS (
       SELECT c."subscription_id", MIN(u."created_at") AS "converted_at"
         FROM "trial_claims" c
         LEFT JOIN "transactions" u
           ON u."subscription_id" = c."subscription_id" AND u."status" = 'COMPLETED' AND u."purchase_type" = 'UPGRADE'
+         AND u."gateway_data"->>'conversionWithheldAt' IS NULL
        WHERE c."status" = 'CONSUMED' AND c."subscription_id" IS NOT NULL
          AND NOT ${boughtSubscriptionSql(Prisma.sql`c."subscription_id"`)}
        GROUP BY c."subscription_id"

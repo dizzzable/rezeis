@@ -15,6 +15,7 @@ import {
   PaymentRefundService,
   RefundEligibilityInterface,
   RefundResultInterface,
+  WithheldRefundRecordResultInterface,
 } from '../services/payment-refund.service';
 import { PaymentsTransactionsService } from '../services/payments-transactions.service';
 
@@ -72,6 +73,26 @@ export class AdminPaymentTransactionsController {
       transactionId,
       amount: input.amount ?? null,
       reason: input.reason ?? null,
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+    });
+  }
+
+  /**
+   * «Отметить возврат»: records that a withheld payment's money was returned at
+   * the provider, and runs the reversal a provider's refund notification runs.
+   * Withheld payments only, any gateway; nothing is sent to the provider.
+   * The same `payments:refund` as the refund above: it books money as returned.
+   */
+  @Post(':transactionId/withheld-refund')
+  @RequirePermission('payments', 'refund')
+  public async recordWithheldRefund(
+    @Param('transactionId') transactionId: string,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<WithheldRefundRecordResultInterface> {
+    return this.paymentRefundService.recordWithheldRefund({
+      transactionId,
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
     });

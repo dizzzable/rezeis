@@ -30,6 +30,23 @@ export interface TransactionRow {
   readonly createdAt: string
   readonly updatedAt?: string | null
   readonly fulfilledAt?: string | null
+  /**
+   * Set for a trial's conversion received after another payment had converted
+   * the trial: COMPLETED and stamped delivered, yet applied to nothing, and its
+   * money due back to the payer (`payment.withheld`). Null for every other
+   * payment; absent from a server older than the mark.
+   */
+  readonly conversionWithheld?: WithheldConversion | null
+}
+
+/** `WithheldConversionMark` on the server. */
+export interface WithheldConversion {
+  /** When fulfilment withheld it. */
+  readonly withheldAt: string
+  /** The payment that converted the trial first. */
+  readonly convertedByPaymentId: string | null
+  /** When its refund was recorded, by an operator or by the provider; null while the money is still held. */
+  readonly refundedAt: string | null
 }
 
 export interface TransactionsList {
@@ -232,14 +249,18 @@ export function importSourceName(source: string): string {
  */
 export type DeliveryState =
   | { readonly kind: 'delivered'; readonly at: string }
+  | { readonly kind: 'withheld' }
   | { readonly kind: 'notDelivered' }
   | { readonly kind: 'noStampImported'; readonly source: string }
   | { readonly kind: 'awaitingPayment' }
   | { readonly kind: 'noStamp' }
 
 export function describeDelivery(
-  transaction: Pick<TransactionRow, 'fulfilledAt' | 'status' | 'planSnapshot'>,
+  transaction: Pick<TransactionRow, 'fulfilledAt' | 'status' | 'planSnapshot' | 'conversionWithheld'>,
 ): DeliveryState {
+  // Stamped like a delivery so the payment counts as settled, yet nothing was
+  // delivered: the trial it paid to convert had been converted already.
+  if (transaction.conversionWithheld) return { kind: 'withheld' }
   if (transaction.fulfilledAt) return { kind: 'delivered', at: transaction.fulfilledAt }
   if (transaction.status === 'FAILED' || transaction.status === 'CANCELED') return { kind: 'notDelivered' }
   const source = importedFrom(transaction.planSnapshot)

@@ -71,6 +71,37 @@ export async function lockTransactionRefundLedger(
   return locked?.gatewayData ?? null;
 }
 
+/**
+ * Stamped under the row lock by the one run of the refund reversal
+ * (`PaymentReconciliationService.reverseFulfilledPayment`) before it starts,
+ * and removed by the write that ends it, which stamps `refundReversedAt`.
+ *
+ * `refundReversedAt` alone could not keep the reversal to one run: it is
+ * written at the END of the reversal, after the lock is released, so two doors
+ * into it — «Отметить возврат» and a provider's refund notice, the panel's
+ * ЮKassa refund and its own `refund.succeeded`, two notices — each found it
+ * unset and each ran the whole reversal: the partner debit and the subscription
+ * revocation twice (the second one overwriting the revoked subscription's
+ * original expiry, the one breadcrumb for undoing a mistaken refund), two
+ * refund events, and the provider's status written back to an older word.
+ */
+export const REFUND_REVERSAL_CLAIMED_AT_KEY = 'refundReversalClaimedAt';
+
+/**
+ * How long a reversal's claim turns every other run away. Far longer than a
+ * reversal takes (its steps are database writes and one queue job) so a slow
+ * one is never run twice; a claim older than this belongs to a run that died
+ * before it finished, and the next door in completes it.
+ */
+export const REFUND_REVERSAL_CLAIM_MS = 5 * 60 * 1000;
+
+/** Whether `gatewayData` carries a reversal claim still inside {@link REFUND_REVERSAL_CLAIM_MS}. */
+export function isRefundReversalClaimHeld(gatewayData: unknown, now: number = Date.now()): boolean {
+  const claimedAt = (asRecord(gatewayData) ?? {})[REFUND_REVERSAL_CLAIMED_AT_KEY];
+  const claimedMs = typeof claimedAt === 'string' ? Date.parse(claimedAt) : Number.NaN;
+  return Number.isFinite(claimedMs) && now - claimedMs < REFUND_REVERSAL_CLAIM_MS;
+}
+
 /** One issued refund, keyed by the provider's own refund id. */
 export interface RefundLedgerEntry {
   readonly refundId: string;

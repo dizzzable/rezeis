@@ -40,6 +40,7 @@ import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayConfigured } from '../utils/payment-gateway-settings.util';
 import { buildAddOnCheckoutFingerprint } from '../utils/checkout-fingerprint.util';
+import { describeAddOn, readPayerLocale } from '../utils/payer-facing-text.util';
 import {
   InternalPaymentCheckoutInterface,
 } from '../interfaces/internal-payment-checkout.interface';
@@ -496,12 +497,21 @@ export class AddOnPurchaseService {
     // replays the same draft (no second checkout) and the webhook reconciler /
     // recovery sweeper resolve the money. Deterministic config errors
     // (BadRequest) mean the draft is unusable and propagate unchanged.
+    //
+    // The payer's line — «Доп. опция: +50 ГБ», in their language — is read
+    // before the call and never throws (`readPayerLocale`), so it cannot land
+    // in that catch.
+    const payerText = describeAddOn({
+      name: addOn.name,
+      locale: await readPayerLocale(this.prismaService, userId),
+    });
     let providerCheckout;
     try {
       providerCheckout = await this.paymentProviderExecutionService.createCheckout({
         gateway,
         transaction,
-        description: buildAddOnDescription(addOn.name),
+        description: payerText.description,
+        title: payerText.title,
         successUrl: input.successUrl ?? null,
         failUrl: input.failUrl ?? null,
       });
@@ -638,10 +648,6 @@ interface ExistingDraft {
   readonly checkoutUrl: string | null;
   readonly createdAt: Date;
   readonly checkoutFingerprint: string | null;
-}
-
-function buildAddOnDescription(name: string): string {
-  return `Add-on: ${name}`.slice(0, 128);
 }
 
 function readPlanId(planSnapshot: unknown): string | null {

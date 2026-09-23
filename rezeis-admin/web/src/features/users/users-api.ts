@@ -76,6 +76,17 @@ const userOperationSchema = z.discriminatedUnion('kind', [
       gatewayType: z.string().nullable(),
       currency: z.string(),
       amount: z.string(),
+      // A trial's conversion received after another payment had converted
+      // the trial: COMPLETED, applied to nothing, its money due back. Null for
+      // every other payment, and from a server older than the mark.
+      conversionWithheld: z
+        .object({
+          withheldAt: z.string(),
+          convertedByPaymentId: z.string().nullable(),
+          refundedAt: z.string().nullable(),
+        })
+        .nullable()
+        .default(null),
     }),
   }),
   z.object({

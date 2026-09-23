@@ -5,6 +5,7 @@ import {
   AddOnEntitlementActorType,
   AddOnEntitlementState,
   DeviceType,
+  PaymentGatewayType,
   Plan,
   PlanAvailability,
   ProfileSyncJob,
@@ -53,6 +54,15 @@ import {
   consumePaidTrialClaim,
   countCommittedTrialClaimUnits,
 } from '../../subscriptions/services/trial-claim-ledger.util';
+import { readProviderSubscriptionTerms } from '../utils/provider-subscription-terms.util';
+import {
+  CONVERSION_WITHHELD_AT_KEY,
+  isTrialConversionSnapshot,
+  isWithheldConversion,
+  TRIAL_CONVERTED_BY_KEY,
+  WITHHELD_REFUND_UI_PATH,
+} from '../utils/trial-conversion.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import {
   describeLatePlanMigrationRenewal,
   describeLatePlanMigrationRenewals,
@@ -123,6 +133,51 @@ interface UpgradeTermDeferral {
   readonly planId: string;
   readonly scheduledTermIds: readonly string[];
   readonly boundEntitlements: number;
+}
+
+/**
+ * What an UPGRADE payment did: applied to its subscription, or — a trial's
+ * conversion paid after another payment converted it — received and withheld
+ * (see "A TRIAL CONVERTS ONCE"). `announce` is false when an earlier run
+ * already withheld it, so the operator's notice goes out once per payment.
+ */
+type UpgradeOutcome =
+  | {
+      readonly kind: 'APPLIED';
+      readonly subscription: Subscription;
+      readonly syncJob: ProfileSyncJob;
+    }
+  | {
+      readonly kind: 'WITHHELD';
+      readonly subscriptionId: string;
+      readonly convertedByPaymentId: string;
+      readonly announce: boolean;
+    };
+
+/**
+ * The payment that converted a trial, when a payment did: another UPGRADE on
+ * the same subscription that was received and applied — COMPLETED, fulfilled,
+ * and not itself withheld. `null` when the trial stopped being one without a
+ * payment (a plan migration, an operator's edit), or when the only other
+ * conversion was itself withheld and so converted nothing.
+ */
+async function findTrialConvertingPayment(
+  client: Pick<Prisma.TransactionClient, 'transaction'>,
+  input: { readonly subscriptionId: string; readonly transactionId: string },
+): Promise<{ readonly paymentId: string } | null> {
+  const upgrades = await client.transaction.findMany({
+    where: {
+      subscriptionId: input.subscriptionId,
+      purchaseType: PurchaseType.UPGRADE,
+      status: TransactionStatus.COMPLETED,
+      fulfilledAt: { not: null },
+      id: { not: input.transactionId },
+    },
+    select: { paymentId: true, gatewayData: true },
+    orderBy: { fulfilledAt: 'asc' },
+  });
+  const converter = upgrades.find((upgrade) => !isWithheldConversion(upgrade.gatewayData));
+  return converter === undefined ? null : { paymentId: converter.paymentId };
 }
 
 /** The durable term a fulfilled renewal appended, as its add-on lines read it. */
@@ -221,13 +276,30 @@ export class PaymentSubscriptionMutationService {
           selectedDurationDays,
         });
         break;
-      case PurchaseType.UPGRADE:
-        result = await this.upgradeSubscriptionFromPayment({
+      case PurchaseType.UPGRADE: {
+        const upgraded = await this.upgradeSubscriptionFromPayment({
           transaction,
           purchasedPlan,
           selectedDurationDays,
         });
+        if (upgraded.kind === 'WITHHELD') {
+          // Settled and not applied: no «Платёж получен» for a sale, no
+          // lifecycle card, and the one-time discount stays unspent. The
+          // operator's notice replaces all three, once per payment.
+          if (upgraded.announce) {
+            this.announceWithheldConversion({
+              transaction,
+              purchasedPlan,
+              selectedDurationDays,
+              subscriptionId: upgraded.subscriptionId,
+              convertedByPaymentId: upgraded.convertedByPaymentId,
+            });
+          }
+          return { syncJobs: [] };
+        }
+        result = upgraded;
         break;
+      }
       default:
         throw new NotFoundException('Unsupported purchase type');
     }
@@ -393,25 +465,62 @@ export class PaymentSubscriptionMutationService {
   }
 
   /**
-   * Spends the one-time purchase discount now that a plan purchase completed.
+   * «⚠️ Платёж получен, но не применён» for a conversion that was withheld:
+   * the money arrived, and the trial it was to convert had been converted by
+   * another payment first, so nothing was applied.
    *
-   * TWO PLACES hold one, and both have to be settled or the customer keeps it:
-   *
-   *  - `user.purchaseDiscount`, the original bare percentage. Donor imports and
-   *    an older half of the system still write it, so it is still reset.
-   *  - a `UserPendingDiscount` GRANT, which carries the restrictions the
-   *    promocode attached — which plans it may be spent on, and until when.
-   *    Only the grant the catalog actually quoted is marked spent: a customer
-   *    holding a general 10% and a six-month-only 20% who buys one month must
-   *    keep the 20%, because it was never applied.
-   *
-   * The choice is made by the SAME function the catalog priced with. Two
-   * different rules would mean a price on screen that differs from the amount
-   * charged — and here the difference would be permanent, because the wrong
-   * grant would be burned.
-   *
-   * The PERSONAL discount is permanent and never touched here.
+   * Its own type, `payment.withheld`, and never `payment.completed`: that one
+   * is a receipt to the payer, a completed sale to automation rules and
+   * outbound webhooks, and "Payment received" pushed to the payer's open
+   * cabinet — all wrong for money that is to go back. `payment.withheld` is operator-only
+   * (`OPERATOR_ONLY_EVENT_TYPES`): the audit log and the operator's card. It
+   * is the only trace a default install gives them (payment webhook alerts are
+   * off by default, and the notification is processed, not failed), so it
+   * names both payments, the amount and the gateway, and says what to do and
+   * where to record it. Raised after the commit that withheld the payment,
+   * once: a replay finds the payment settled and never reaches here, a retry of
+   * a run that rolled back never raised it.
    */
+  private announceWithheldConversion(input: {
+    readonly transaction: Transaction;
+    readonly purchasedPlan: Plan;
+    readonly selectedDurationDays: number | null;
+    readonly subscriptionId: string;
+    readonly convertedByPaymentId: string;
+  }): void {
+    const { transaction } = input;
+    const charged = Number(transaction.amount.toString()) > 0;
+    const note =
+      `Пробную подписку уже перевёл на тариф платёж ${input.convertedByPaymentId}. ` +
+      'Этот платёж не применён: подписка и её срок не изменились. ' +
+      (charged
+        ? `Верните деньги у платёжного провайдера (${transaction.gatewayType}), затем отметьте это в панели: ` +
+          `${WITHHELD_REFUND_UI_PATH}.`
+        : 'Денег по нему не списано — возвращать нечего.');
+    this.events.warn(
+      EVENT_TYPES.PAYMENT_WITHHELD,
+      'PAYMENT',
+      'Платёж получен, но не применён: пробная подписка уже переведена',
+      {
+        userId: transaction.userId,
+        paymentId: transaction.paymentId,
+        purchaseType: transaction.purchaseType,
+        planName: input.purchasedPlan.name,
+        planType: input.purchasedPlan.type,
+        durationDays: input.selectedDurationDays ?? undefined,
+        amount: transaction.amount.toString(),
+        currency: transaction.currency,
+        gatewayType: transaction.gatewayType,
+        channel: transaction.channel,
+        subscriptionId: input.subscriptionId,
+        [TRIAL_CONVERTED_BY_KEY]: input.convertedByPaymentId,
+        conversionWithheld: true,
+        needsManualReview: charged,
+        note,
+      },
+    );
+  }
+
   /**
    * «🔄 Подписка продлена» / «⬆️ Подписка улучшена» — what happened to the
    * subscription, as opposed to what happened to the money.
@@ -468,6 +577,26 @@ export class PaymentSubscriptionMutationService {
     }
   }
 
+  /**
+   * Spends the one-time purchase discount now that a plan purchase completed.
+   *
+   * TWO PLACES hold one, and both have to be settled or the customer keeps it:
+   *
+   *  - `user.purchaseDiscount`, the original bare percentage. Donor imports and
+   *    an older half of the system still write it, so it is still reset.
+   *  - a `UserPendingDiscount` GRANT, which carries the restrictions the
+   *    promocode attached — which plans it may be spent on, and until when.
+   *    Only the grant the catalog actually quoted is marked spent: a customer
+   *    holding a general 10% and a six-month-only 20% who buys one month must
+   *    keep the 20%, because it was never applied.
+   *
+   * The choice is made by the SAME function the catalog priced with. Two
+   * different rules would mean a price on screen that differs from the amount
+   * charged — and here the difference would be permanent, because the wrong
+   * grant would be burned.
+   *
+   * The PERSONAL discount is permanent and never touched here.
+   */
   private async consumePurchaseDiscount(
     userId: string,
     planId: string | null,
@@ -1658,6 +1787,20 @@ export class PaymentSubscriptionMutationService {
           status: TransactionStatus.COMPLETED,
         },
       });
+      // A provider subscription (Platega, RollyPay) this payment signed up for
+      // renews the subscription it has just created, and is named in this very
+      // write: nothing reads the row without it. The checkout guard refuses a
+      // second autopay on the new subscription from the moment it exists, and
+      // the sweep can check it from its next tick — where before the row waited
+      // for the next look at the provider, up to a day, to be bound
+      // (`ProviderSubscriptionService.resolveSubscriptionId`, still the fallback
+      // for a row recorded after this). Only a row still unbound is touched.
+      if (readProviderSubscriptionTerms(input.transaction.planSnapshot) !== null) {
+        await transactionClient.providerSubscription.updateMany({
+          where: { firstTransactionId: input.transaction.id, subscriptionId: null },
+          data: { subscriptionId: createdSubscription.id },
+        });
+      }
       // Backfill the user's "current subscription" pointer when they don't
       // have one yet, so referral EXTRA_DAYS rewards and points-exchange
       // (days / traffic) have a target. `currentSubscriptionId` was previously
@@ -2183,17 +2326,86 @@ export class PaymentSubscriptionMutationService {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
-  }): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+  }): Promise<UpgradeOutcome> {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
     const deferrals: UpgradeTermDeferral[] = [];
-    const committed = await this.prismaService.$transaction(async (transactionClient) => {
-      const currentSubscription = await transactionClient.subscription.findUnique({
-        where: { id: input.transaction.subscriptionId! },
-      });
+    const convertsTrial = isTrialConversionSnapshot(input.transaction.planSnapshot);
+    const committed = await this.prismaService.$transaction(async (transactionClient): Promise<UpgradeOutcome> => {
+      // A conversion reads its trial under the row lock: two conversions paid
+      // together otherwise both read it as a trial, and the second restarts the
+      // term the first one paid for.
+      const currentSubscription = convertsTrial
+        ? await this.lockRenewalSubscriptionInTransaction(transactionClient, input.transaction.subscriptionId!)
+        : await transactionClient.subscription.findUnique({
+            where: { id: input.transaction.subscriptionId! },
+          });
       if (currentSubscription === null) {
         throw new NotFoundException('Source subscription not found');
+      }
+      // ── A TRIAL CONVERTS ONCE ──────────────────────────────────────────────
+      //
+      // This payment was drafted as the conversion of a trial, and another
+      // PAYMENT has converted it since — two tabs, a card beside «для
+      // автоматического списания», two sign-ups confirmed together. Applied as
+      // an UPGRADE it would restart the term that payment bought (`expiresAt =
+      // now + days` below): one term for two payments. Extending instead would
+      // have to guess the plan when the two chose different ones, and would keep
+      // a second provider subscription renewing it.
+      //
+      // So it is withheld: received, settled, not applied. The subscription is
+      // not touched; the row is COMPLETED and fulfilled like any payment, so its
+      // notification is processed, not failed, and nothing keeps it unsettled
+      // — marked (`CONVERSION_WITHHELD_AT_KEY`) so no hook pays out on it, a
+      // refund revokes nothing and the sweep stops the provider subscription it
+      // signed up (`trialConversionOf`: LOST). The operator is told once, in
+      // the event feed and the operator group, to refund it at the provider
+      // (`announceWithheldConversion`). A partner-balance payment is refused
+      // instead: no provider holds that money, and its path puts the balance
+      // back when fulfilment throws.
+      //
+      // A trial that stopped being one WITHOUT a payment — a plan migration, an
+      // operator's edit — is not this: nobody paid for its current term, and
+      // the conversion is applied below as it always was.
+      if (convertsTrial && !currentSubscription.isTrial) {
+        const convertedBy = await findTrialConvertingPayment(transactionClient, {
+          subscriptionId: currentSubscription.id,
+          transactionId: input.transaction.id,
+        });
+        if (convertedBy !== null) {
+          this.logger.warn(
+            `TRIAL_ALREADY_CONVERTED transaction=${input.transaction.id} payment=${input.transaction.paymentId} ` +
+              `subscription=${currentSubscription.id} convertedBy=${convertedBy.paymentId}: not applied — refund it`,
+          );
+          if (input.transaction.gatewayType === PaymentGatewayType.PARTNER_BALANCE) {
+            throw new ConflictException('TRIAL_ALREADY_CONVERTED');
+          }
+          const held = await transactionClient.transaction.findUnique({
+            where: { id: input.transaction.id },
+            select: { gatewayData: true },
+          });
+          const announce = !isWithheldConversion(held?.gatewayData);
+          const withheldAt = new Date();
+          if (announce) {
+            await writeTransactionGatewayData(transactionClient, input.transaction.id, {
+              merge: {
+                [CONVERSION_WITHHELD_AT_KEY]: withheldAt.toISOString(),
+                [TRIAL_CONVERTED_BY_KEY]: convertedBy.paymentId,
+              },
+            });
+          }
+          await transactionClient.transaction.update({
+            where: { id: input.transaction.id },
+            data: { fulfilledAt: withheldAt, status: TransactionStatus.COMPLETED },
+          });
+          return {
+            kind: 'WITHHELD',
+            subscriptionId: currentSubscription.id,
+            convertedByPaymentId: convertedBy.paymentId,
+            announce,
+          };
+        }
       }
       const now = new Date();
       const expiresAt = calculateExpiry(now, input.selectedDurationDays);
@@ -2284,6 +2496,7 @@ export class PaymentSubscriptionMutationService {
         data: { fulfilledAt: now, status: TransactionStatus.COMPLETED },
       });
       return {
+        kind: 'APPLIED',
         subscription: upgradedSubscription,
         syncJob,
       };

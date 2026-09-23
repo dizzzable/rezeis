@@ -46,6 +46,7 @@ const BASE_PATH = 'admin/payments/transactions';
  * answered here instead of being silently dropped.
  */
 type RefundInput = Parameters<PaymentRefundService['refundTransaction']>[0];
+type WithheldRefundInput = Parameters<PaymentRefundService['recordWithheldRefund']>[0];
 
 const CURRENT_ADMIN: CurrentAdminInterface = {
   id: 'admin-1',
@@ -91,6 +92,7 @@ describe('AdminPaymentTransactionsController', () => {
       'createDraft',
       'getRefundEligibility',
       'refundTransaction',
+      'recordWithheldRefund',
     ]);
 
     const listRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, '/')} (list transactions)`;
@@ -147,6 +149,24 @@ describe('AdminPaymentTransactionsController', () => {
       { resource: 'payments', action: 'refund' },
       refundRoute,
     );
+
+    // «Отметить возврат» books a withheld payment's money as returned: the same
+    // permission as issuing a refund, not `view` or `edit`.
+    const withheldRefundRoute = `${routeLabel(
+      BASE_PATH,
+      RequestMethod.POST,
+      ':transactionId/withheld-refund',
+    )} (record a withheld payment's refund)`;
+    assertRoute(
+      AdminPaymentTransactionsController.prototype.recordWithheldRefund,
+      { method: RequestMethod.POST, path: ':transactionId/withheld-refund' },
+      withheldRefundRoute,
+    );
+    assertRoutePermission(
+      AdminPaymentTransactionsController.prototype.recordWithheldRefund,
+      { resource: 'payments', action: 'refund' },
+      withheldRefundRoute,
+    );
     // The rows above say what each LISTED route costs; this says no route
     // escaped having a cost at all. The two are not the same check: the
     // enumeration forces a new route to be noticed, but it is satisfied by
@@ -192,7 +212,7 @@ describe('AdminPaymentTransactionsController', () => {
         };
       },
     };
-    const refundService: Pick<PaymentRefundService, 'getEligibility' | 'refundTransaction'> = {
+    const refundService: Pick<PaymentRefundService, 'getEligibility' | 'refundTransaction' | 'recordWithheldRefund'> = {
       getEligibility: async (transactionId: string) => {
         calls.push(['refundEligibility', transactionId]);
         return {
@@ -217,6 +237,10 @@ describe('AdminPaymentTransactionsController', () => {
           currency: 'USD',
           providerStatus: 'succeeded',
         };
+      },
+      recordWithheldRefund: async (input: WithheldRefundInput) => {
+        calls.push(['withheldRefund', input]);
+        return { transactionId: input.transactionId, recorded: true, refundedAt: '2026-09-23T12:00:00.000Z' };
       },
     };
     // Both services are classes with private members, so no structural stub can
@@ -258,6 +282,10 @@ describe('AdminPaymentTransactionsController', () => {
       ).refundId,
       'refund-1',
     );
+    assert.equal(
+      (await controller.recordWithheldRefund('transaction-2', CURRENT_ADMIN, buildRefundRequest())).recorded,
+      true,
+    );
 
     // Refunds move real money, so the audit trail is asserted on its own and
     // BEFORE the delegation array below: a controller that stops forwarding one
@@ -290,6 +318,16 @@ describe('AdminPaymentTransactionsController', () => {
           transactionId: 'transaction-1',
           amount: '5.00',
           reason: 'duplicate charge',
+          currentAdmin: CURRENT_ADMIN,
+          requestMetadata: EXPECTED_REQUEST_METADATA,
+        },
+      ],
+      // Who recorded it, and from where: the audit row the service writes is
+      // built from exactly these two.
+      [
+        'withheldRefund',
+        {
+          transactionId: 'transaction-2',
           currentAdmin: CURRENT_ADMIN,
           requestMetadata: EXPECTED_REQUEST_METADATA,
         },

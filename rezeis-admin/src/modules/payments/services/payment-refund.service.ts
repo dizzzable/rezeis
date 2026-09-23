@@ -1,6 +1,7 @@
 import { HttpService } from '@nestjs/axios';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -17,11 +18,17 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
+  isRefundReversalClaimHeld,
   lockTransactionRefundLedger,
   readRefundLedger,
   readRefundedTotal,
 } from '../utils/payment-refund-ledger.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
+import {
+  isWithheldConversion,
+  MANUAL_REFUND_RECORDED_AT_KEY,
+  MANUAL_REFUND_RECORDED_BY_KEY,
+} from '../utils/trial-conversion.util';
 import {
   readOptionalString,
   readRecord,
@@ -49,6 +56,32 @@ export interface RefundResultInterface {
   readonly amount: string;
   readonly currency: string;
   readonly providerStatus: string | null;
+}
+
+/** What «Отметить возврат» did for a withheld payment. */
+export interface WithheldRefundRecordResultInterface {
+  readonly transactionId: string;
+  /**
+   * False when its refund had already been reversed — recorded by an operator
+   * earlier, or reported by the provider — and nothing was done this time.
+   */
+  readonly recorded: boolean;
+  /** When the reversal ran. */
+  readonly refundedAt: string | null;
+}
+
+/**
+ * How long one «Отметить возврат» holds a withheld payment before another may
+ * run the reversal. The claim is what keeps two clicks, or two operators, from
+ * running it twice; the reversal takes well under a second, and a claim older
+ * than this belongs to a run that died, which a later click finishes.
+ */
+export const WITHHELD_REFUND_CLAIM_MS = 60_000;
+
+function asGatewayRecord(gatewayData: unknown): Record<string, unknown> {
+  return typeof gatewayData === 'object' && gatewayData !== null && !Array.isArray(gatewayData)
+    ? (gatewayData as Record<string, unknown>)
+    : {};
 }
 
 /**
@@ -273,12 +306,14 @@ export class PaymentRefundService {
     // no-op, and best-effort, so the refund itself is never reported as failed
     // after the money has already gone back.
     //
-    // Decided from the total computed UNDER the lock, but run outside it. The
-    // fenced write means exactly one of the two writers can be the one whose
-    // entry takes the cumulative total to the captured amount, so the reversal
-    // still fires exactly once — while the partner debit, referral
-    // un-qualification, МойНалог cancellation and Remnawave revoke job (seconds
-    // of network work) stay out of the critical section.
+    // Decided from the total computed UNDER the lock, but run outside it, so
+    // the partner debit, referral un-qualification, МойНалог cancellation and
+    // Remnawave revoke job (seconds of network work) stay out of the critical
+    // section. The fenced write alone did NOT make it run once: the webhook for
+    // this very refund finds it ledgered already, reads the total as full too,
+    // and reversed as well while this run was still going. The reversal takes
+    // its own claim under the same lock, and that is what runs it once
+    // (`reverseFulfilledPayment`).
     const paidAmount = Number(transaction.amount.toString());
     const fullyRefunded =
       countsTowardsBalance &&
@@ -308,6 +343,119 @@ export class PaymentRefundService {
       amount: amountValue,
       currency: transaction.currency,
       providerStatus,
+    };
+  }
+
+  /**
+   * «Отметить возврат»: the operator returned a withheld payment's money at the
+   * provider, and says so here.
+   *
+   * A withheld payment is a trial's conversion that arrived after another
+   * payment had converted the trial: received, applied to nothing, announced
+   * to the operator as `payment.withheld` for a refund. A refund closes it by
+   * itself only where the gateway reports one — YooKassa (and the panel's own
+   * refund), Cryptomus and Heleket, WATA, Telegram Stars; Platega is known to
+   * report only a chargeback, RollyPay only `payment.paid`, most others
+   * nothing — so without this it stayed a received sale in every report.
+   *
+   * Runs the reversal a provider's refund notification runs
+   * (`reverseFulfilledPayment`): the payment becomes CANCELED and stamped
+   * `refundReversedAt`, and the operator is told (`payment.withheld_refunded`,
+   * operator-only: no sale was ever announced for it). The subscription is
+   * not touched — the payment never changed it, and the reversal skips a
+   * withheld one (`CONVERSION_NOT_APPLIED`). Only a withheld payment: any other
+   * is refused with `PAYMENT_NOT_WITHHELD`, because recording a refund without
+   * the provider would revoke access and commission on a sale that stands.
+   *
+   * Idempotent. A payment already reversed — by an earlier click, or by the
+   * provider's notification — answers `recorded: false` and changes nothing.
+   * Two clicks at once are serialised on the row lock the refund writers share
+   * (`lockTransactionRefundLedger`), and the first one's claim
+   * (`manualRefundRecordedAt`) turns the second away for
+   * {@link WITHHELD_REFUND_CLAIM_MS}; a claim older than that belongs to a run
+   * that died before its reversal, and the next click finishes it. A click that
+   * meets the reversal under way through another door — a provider's refund
+   * notice — is turned away the same way. Whichever door comes second, the
+   * reversal runs once (`reverseFulfilledPayment`).
+   */
+  public async recordWithheldRefund(input: {
+    readonly transactionId: string;
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+  }): Promise<WithheldRefundRecordResultInterface> {
+    const transaction = await this.loadTransaction(input.transactionId);
+    if (!isWithheldConversion(transaction.gatewayData)) {
+      throw new ConflictException('PAYMENT_NOT_WITHHELD');
+    }
+
+    const claim = await this.prismaService.$transaction(async (tx) => {
+      const live = asGatewayRecord(await lockTransactionRefundLedger(tx, transaction.id));
+      const reversedAt = live['refundReversedAt'];
+      if (typeof reversedAt === 'string') {
+        return { kind: 'ALREADY_REVERSED' as const, reversedAt };
+      }
+      const claimedAt = live[MANUAL_REFUND_RECORDED_AT_KEY];
+      const claimedMs = typeof claimedAt === 'string' ? Date.parse(claimedAt) : Number.NaN;
+      if (Number.isFinite(claimedMs) && Date.now() - claimedMs < WITHHELD_REFUND_CLAIM_MS) {
+        return { kind: 'IN_PROGRESS' as const };
+      }
+      // The reversal is under way through another door — a provider's refund
+      // notice, most likely. It ends the same way, so this click writes nothing.
+      if (isRefundReversalClaimHeld(live)) {
+        return { kind: 'IN_PROGRESS' as const };
+      }
+      await writeTransactionGatewayData(tx, transaction.id, {
+        merge: {
+          [MANUAL_REFUND_RECORDED_AT_KEY]: new Date().toISOString(),
+          [MANUAL_REFUND_RECORDED_BY_KEY]: input.currentAdmin.id,
+        },
+      });
+      return { kind: 'CLAIMED' as const };
+    });
+    if (claim.kind === 'ALREADY_REVERSED') {
+      return { transactionId: transaction.id, recorded: false, refundedAt: claim.reversedAt };
+    }
+    if (claim.kind === 'IN_PROGRESS') {
+      throw new ConflictException('PAYMENT_WITHHELD_REFUND_IN_PROGRESS');
+    }
+
+    // The operator's statement, attributed, before the reversal it sets off:
+    // it is what they asserted, whatever becomes of the run.
+    await this.prismaService.adminAuditLog.create({
+      data: buildAdminAuditLogData({
+        action: 'payments.transaction.withheld_refund_recorded',
+        actorId: input.currentAdmin.id,
+        requestMetadata: input.requestMetadata,
+        metadata: {
+          requestId: input.requestMetadata.requestId,
+          transactionId: transaction.id,
+          paymentId: transaction.paymentId,
+          userId: transaction.userId,
+          gatewayType: transaction.gatewayType,
+          amount: transaction.amount.toString(),
+          currency: transaction.currency,
+        },
+      }),
+    });
+
+    // Read after the claim: the reversal takes its `refundReversedAt` guard from
+    // the row it is handed, and its own write merges in the statement.
+    const fresh = await this.loadTransaction(transaction.id);
+    await this.paymentReconciliationService.reverseFulfilledPayment(fresh, null, {
+      // An operator's record is not a word from the provider: whatever the
+      // provider said last stays on the row.
+      recordProviderStatus: false,
+    });
+    this.logger.warn(
+      `Refund of withheld payment ${transaction.id} recorded by admin ${input.currentAdmin.id}`,
+    );
+
+    const reversed = await this.loadTransaction(transaction.id);
+    const refundedAt = asGatewayRecord(reversed.gatewayData)['refundReversedAt'];
+    return {
+      transactionId: transaction.id,
+      recorded: true,
+      refundedAt: typeof refundedAt === 'string' ? refundedAt : null,
     };
   }
 

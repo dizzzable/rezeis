@@ -73,7 +73,9 @@ export class InternalPaymentCheckoutDto {
   /**
    * URL the payment provider redirects the customer to on a successful payment.
    * Reiwa supplies a context-aware URL (web origin for browser, Telegram deep link for Mini App).
-   * Falls back to `${REZEIS_DOMAIN}/payments/result?paymentId=...` when not provided.
+   * When not provided: the cabinet's `<cabinet>/payment-return?paymentId=...` if the panel
+   * knows the cabinet's address (`ReiwaPublicLinksModule`), otherwise the panel's own
+   * `${REZEIS_DOMAIN}/payments/result?paymentId=...` as before (logged once at warn).
    */
   @IsOptional()
   @IsString()

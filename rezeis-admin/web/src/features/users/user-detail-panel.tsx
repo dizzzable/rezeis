@@ -108,6 +108,7 @@ import { usersApi, type AccountMergePreview, type AccountMergeChoices, type User
 import { PointsLedgerSheet } from './points-ledger-sheet'
 import { CopyableId, copyTextToClipboard } from '@/components/ui/copyable-id'
 import { clientPaymentsHref, paymentHref } from '@/features/payments/payments-filters'
+import { WithheldBadge } from '@/features/payments/withheld-conversion'
 
 /** The reason codes the backend accepts for a manual points adjustment; the subscriber sees the label. */
 const POINTS_ADJUSTMENT_REASONS = ['COMPENSATION', 'PROMOTION', 'CORRECTION', 'VIOLATION', 'OTHER'] as const
@@ -4731,6 +4732,9 @@ function OperationCard({
                 defaultValue: operation.payload.status,
               })}
             </Badge>
+            {/* COMPLETED yet applied to nothing — the money is due back. The
+                button to record its refund is in the payment's details. */}
+            {operation.payload.conversionWithheld ? <WithheldBadge mark={operation.payload.conversionWithheld} /> : null}
             {operation.payload.gatewayType && <Badge variant="outline">{operation.payload.gatewayType}</Badge>}
             {operation.payload.purchaseType && (
               <Badge variant="outline">

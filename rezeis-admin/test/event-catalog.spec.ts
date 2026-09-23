@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { EVENT_TYPES } from '../src/common/services/system-events.service';
+import { EVENT_TYPES, OPERATOR_ONLY_EVENT_TYPES } from '../src/common/services/system-events.service';
 import { POPUP_CAPABLE_EVENTS } from '../src/modules/automations/popup-capable-events';
 import {
   EVENT_CATALOG_WINDOW_DAYS,
@@ -66,9 +66,20 @@ describe('the event catalogue', () => {
 
     const events = await service.listEvents(NOW);
 
-    assert.equal(events.length, Object.values(EVENT_TYPES).length);
+    assert.equal(events.length, Object.values(EVENT_TYPES).length - OPERATOR_ONLY_EVENT_TYPES.size);
     assert.ok(events.length >= 100, `catalogue holds ${events.length} types`);
     assert.ok(events.every((event) => event.seen === 0 && event.lastSeenAt === null));
+  });
+
+  it('never offers an operator-only type, which no rule is ever dispatched', async () => {
+    // Fired or not: it is in the audit log like any event, but offering it as
+    // a trigger would be offering a rule that cannot fire.
+    const { service } = buildService([{ action: 'event.payment.withheld', count: 3, last: '2026-09-08T00:00:00.000Z' }]);
+
+    const events = await service.listEvents(NOW);
+
+    assert.ok(OPERATOR_ONLY_EVENT_TYPES.has('payment.withheld'));
+    assert.equal(events.some((event) => OPERATOR_ONLY_EVENT_TYPES.has(event.type)), false);
   });
 
   it('counts what actually fired, from the audit log', async () => {

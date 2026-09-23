@@ -235,6 +235,31 @@ export const EVENT_TYPES = {
    * one is a note" without opening it stops opening either.
    */
   PAYMENT_NOTIFIED_AMOUNT_SHORT: 'payment.notified_amount_short',
+  /**
+   * A trial's conversion was paid after ANOTHER payment had converted the
+   * trial, so it was received and not applied: the operator is to refund it
+   * at the provider and record that («Отметить возврат» in the payment's
+   * details). Operator-only (`OPERATOR_ONLY_EVENT_TYPES`): not a receipt, not a
+   * completed sale — no automation rule, outbound webhook, email or customer
+   * toast ever sees it. It used to be raised as `payment.completed`, which
+   * every one of those treats as money in and an order fulfilled.
+   * Metadata: `{ userId, paymentId, amount, currency, gatewayType, planName,
+   * subscriptionId, trialConvertedByPaymentId, note }`. Raised once more, with
+   * `paidAfterRefund: true`, when the provider says such a payment is paid again
+   * after its refund — the same news as `payment.amount_mismatch` for any other.
+   */
+  PAYMENT_WITHHELD: 'payment.withheld',
+  /**
+   * A withheld payment's money went back — recorded by an operator
+   * («Отметить возврат») or reported by the provider (a refund notification,
+   * in full or in part). Raised INSTEAD of `payment.refunded` /
+   * `payment.refund_partial` for such a payment, and operator-only like
+   * `payment.withheld`: no sale was ever announced for it, so an integration, a
+   * rule or a refund email would hear of a refund of a sale it never saw.
+   * Metadata: `payment.refunded`'s, plus `conversionWithheld: true`, and for a
+   * partial refund `partial`, `refundedAmount` and `refundedAmountTotal`.
+   */
+  PAYMENT_WITHHELD_REFUNDED: 'payment.withheld_refunded',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
@@ -497,6 +522,30 @@ export const REGISTERED_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
   Object.values(EVENT_TYPES),
 );
 
+/**
+ * Types the panel tells its OPERATOR about and nobody else.
+ *
+ * Such an event is written to the audit log («Журнал аудита» → «Системные
+ * события») and sent as the operator's Telegram card, and that is all: it is
+ * not pushed to the realtime stream (automation rules ride on it), not handed
+ * to the out-of-band hooks (outbound webhooks, the email bridge, quests) and
+ * not posted to the environment's webhook URLs. The automation event
+ * catalogue does not offer it as a trigger either.
+ *
+ * For money a human has to settle that must not read as anything else to a
+ * machine: a withheld payment announced as `payment.completed` went to the
+ * payer's receipt template, to every rule and integration bound to a sale, and
+ * as "Payment received" to the payer's open cabinet — for a plan never applied.
+ *
+ * The admin notification centre and its push are hooks too. Neither has a
+ * route for this type (nor had one for `payment.completed`); one that wants it
+ * must be let through here first.
+ */
+export const OPERATOR_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
+  EVENT_TYPES.PAYMENT_WITHHELD,
+  EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED,
+]);
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
 export type SystemEventHook = (
@@ -587,6 +636,9 @@ export class SystemEventsService {
       ...event,
       timestamp: event.timestamp ?? new Date().toISOString(),
     };
+    // The audit log and the operator's card, and nothing any customer-facing
+    // or integration consumer acts on — see `OPERATOR_ONLY_EVENT_TYPES`.
+    const operatorOnly = OPERATOR_ONLY_EVENT_TYPES.has(event.type);
 
     // 1. Log to stdout
     this.logEvent(enrichedEvent);
@@ -597,7 +649,7 @@ export class SystemEventsService {
     });
 
     // 3. Deliver via webhook (async, non-blocking)
-    if (this.webhookConfiguration.enabled && this.webhookConfiguration.urls.length > 0) {
+    if (!operatorOnly && this.webhookConfiguration.enabled && this.webhookConfiguration.urls.length > 0) {
       this.deliverWebhook(enrichedEvent).catch((err) => {
         this.logger.error(`Webhook delivery failed for ${event.type}: ${(err as Error).message}`);
       });
@@ -616,13 +668,16 @@ export class SystemEventsService {
       this.logger.warn(`Error-report archive failed for ${event.type}: ${(err as Error).message}`);
     });
 
-    // 5. Push over WebSocket to connected admin clients (sync — no I/O)
-    this.deliverRealtime(enrichedEvent);
+    // 5. Push over WebSocket to connected admin clients (sync — no I/O).
+    //    Not for an operator-only type: automation rules are dispatched from
+    //    this broadcast (`AutomationEventBridgeService`).
+    if (!operatorOnly) this.deliverRealtime(enrichedEvent);
 
     // 6. Out-of-band hooks (Phase 6 webhook dispatcher, future plugins).
     //    Each hook runs in its own microtask so a slow/buggy receiver
-    //    never blocks the primary pipeline.
-    if (this.hooks.length > 0) {
+    //    never blocks the primary pipeline. Not for an operator-only type:
+    //    outbound webhooks and the email bridge are hooks.
+    if (!operatorOnly && this.hooks.length > 0) {
       const hooksSnapshot = [...this.hooks];
       setImmediate(() => {
         for (const hook of hooksSnapshot) {
@@ -3611,6 +3666,14 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
     emoji: 'ℹ️',
     title: 'Платёж проведён, но сумма в уведомлении меньше',
   },
+  // Money that arrived and was not applied: a task, like the mismatch above.
+  // The note says what happened and where the operator records the refund.
+  'payment.withheld': {
+    emoji: '⚠️',
+    title: 'Платёж получен, но не применён',
+  },
+  // Its refund, told to the operator alone; the message says in full or in part.
+  'payment.withheld_refunded': { emoji: '↩️', title: 'Возврат неприменённого платежа' },
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
   'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },

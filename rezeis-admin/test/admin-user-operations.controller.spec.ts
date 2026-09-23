@@ -85,4 +85,58 @@ describe('AdminUserManagementController operations history', () => {
     assert.equal((result.items[1].payload as { codeMasked: string }).codeMasked, 'SE••••ET');
     assert.equal((result.items[2].payload as { amount: string }).amount, '199');
   });
+
+  it('marks a trial conversion withheld for refund in the payment history, and only that one', async () => {
+    const queries: Array<{ select?: Record<string, boolean> }> = [];
+    const payment = (id: string, gatewayData: unknown, at: string) => ({
+      id, paymentId: `pay-${id}`, status: 'COMPLETED', purchaseType: 'UPGRADE',
+      gatewayType: 'PLATEGA', currency: 'RUB', amount: 299, createdAt: new Date(at), gatewayData,
+    });
+    const controller = new AdminUserManagementController(
+      {
+        user: { findFirst: async () => ({ id: 'user-1' }) },
+        transaction: {
+          findMany: async (query: { select?: Record<string, boolean> }) => {
+            queries.push(query);
+            return [
+              payment('withheld', { conversionWithheldAt: '2026-09-01T10:00:05.000Z', trialConvertedByPaymentId: 'pay-first' }, '2026-09-01T10:00:00.000Z'),
+              payment('first', { providerStatus: 'CONFIRMED' }, '2026-08-31T10:00:00.000Z'),
+            ];
+          },
+          count: async () => 2,
+        },
+        promocodeActivation: { findMany: async () => [], count: async () => 0 },
+        referralPointsExchange: { findMany: async () => [], count: async () => 0 },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never, // PlansAdminService
+      undefined as never, // UserBlockService
+      { listForUser: async () => [], clear: async () => undefined } as never, // DeviceIntelligenceService
+      new PointsWalletService(),
+      { listForUser: async () => ({ items: [], nextCursor: null }) } as never,
+    );
+
+    const result = await controller.listUserOperations('123', '1', '25');
+
+    assert.equal(queries[0]?.select?.gatewayData, true, 'the mark is read from the payment, so it has to be selected');
+    const [withheld, first] = result.items.map((item) => item.payload as Record<string, unknown>);
+    assert.deepStrictEqual(withheld?.conversionWithheld, {
+      withheldAt: '2026-09-01T10:00:05.000Z',
+      convertedByPaymentId: 'pay-first',
+      refundedAt: null,
+    });
+    assert.equal(first?.conversionWithheld, null);
+    // Only the mark leaves the server, never the provider payloads beside it.
+    assert.equal(result.items.some((item) => 'gatewayData' in (item.payload as object)), false);
+  });
 });

@@ -42,6 +42,12 @@ import {
   PROVIDER_SUBSCRIPTION_GATEWAY_TYPES,
   readProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
+import {
+  describePlanPurchase,
+  type PayerFacingText,
+  type PayerLocale,
+  readPayerLocale,
+} from '../utils/payer-facing-text.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { ProviderSubscriptionService } from './provider-subscription.service';
 import {
@@ -187,6 +193,9 @@ export class PaymentsCheckoutService {
     if (providerSubscription) {
       await this.providerSubscriptionService.assertNoLiveSubscriptionFor(
         readProviderSubscriptionTerms(transaction.planSnapshot)?.subscriptionId ?? null,
+        // A trial converts once: while another sign-up converting it waits for
+        // its payer, this one would convert it a second time.
+        transaction.purchaseType === PurchaseType.UPGRADE ? { pendingOtherThan: transaction.id } : {},
       );
     }
 
@@ -291,16 +300,21 @@ export class PaymentsCheckoutService {
       });
     }
 
+    // Read only now that a provider checkout is really being made (not on the
+    // reuse paths above), and it never throws: see `readPayerLocale`.
+    const payerText = describeCheckout({
+      purchaseType: input.purchaseType,
+      planSnapshot,
+      locale: await readPayerLocale(this.prismaService, userId),
+    });
     const createProviderCheckout = async (
       chargedMethod: { readonly id: string; readonly providerMethodId: string } | null,
     ) =>
       this.paymentProviderExecutionService.createCheckout({
         gateway,
         transaction,
-        description: buildCheckoutDescription({
-          purchaseType: input.purchaseType,
-          planSnapshot,
-        }),
+        description: payerText.description,
+        title: payerText.title,
         successUrl: input.successUrl ?? null,
         failUrl: input.failUrl ?? null,
         paymentMethodId: chargedMethod?.providerMethodId ?? null,
@@ -743,19 +757,23 @@ function isPopulatedString(value: string | null): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function buildCheckoutDescription(input: {
+/**
+ * The payer's line for a plan checkout: the plan's name and the term bought, in
+ * the payer's language — «Премиум, 30 дней». It was `NEW Премиум 30d`: the
+ * purchase type and a unit only this code reads.
+ */
+function describeCheckout(input: {
   readonly purchaseType: PurchaseType;
   readonly planSnapshot: Record<string, unknown>;
-}): string {
-  const planName = readOptionalString(input.planSnapshot, ['name']) ?? 'Plan';
-  const selectedDurationDays = readOptionalString(input.planSnapshot, ['selectedDurationDays']);
-  const durationLabel =
-    selectedDurationDays === null
-      ? ''
-      : selectedDurationDays === '-1'
-        ? ' unlimited'
-        : ` ${selectedDurationDays}d`;
-  return `${input.purchaseType} ${planName}${durationLabel}`.trim();
+  readonly locale: PayerLocale;
+}): PayerFacingText {
+  const durationDays = Number(readOptionalString(input.planSnapshot, ['selectedDurationDays']) ?? Number.NaN);
+  return describePlanPurchase({
+    purchaseType: input.purchaseType,
+    planName: readOptionalString(input.planSnapshot, ['name']),
+    durationDays: Number.isInteger(durationDays) ? durationDays : null,
+    locale: input.locale,
+  });
 }
 
 

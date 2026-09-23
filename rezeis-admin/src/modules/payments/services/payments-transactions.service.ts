@@ -4,6 +4,7 @@ import {
   Prisma,
   PurchaseChannel,
   PurchaseType,
+  Subscription,
   Transaction,
   TransactionStatus,
   TrialClaimStatus,
@@ -12,6 +13,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readTrialSettings, TrialSettings } from '../../plans/utils/trial-settings.util';
 import {
+  isConvertibleTrial,
   isPlanAvailabilityRefusal,
   SubscriptionQuoteService,
 } from '../../subscriptions/services/subscription-quote.service';
@@ -31,8 +33,10 @@ import {
   autopayNotAvailable,
   PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
   ProviderSubscriptionTerms,
+  renewsOntoAnotherPlan,
   resolveProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
+import { readWithheldConversion, TRIAL_CONVERSION_SNAPSHOT_KEY } from '../utils/trial-conversion.util';
 
 /**
  * The namespaces the importers put in front of a donor platform's payment id,
@@ -193,6 +197,7 @@ export class PaymentsTransactionsService {
         ...mapAdminPaymentTransaction(tx, tx.user),
         fulfilledAt: tx.fulfilledAt?.toISOString() ?? null,
         lineItemSubscriptionIds: [...new Set(tx.items.map((item) => item.subscriptionId))],
+        conversionWithheld: readWithheldConversion(tx.gatewayData),
       })),
       total,
     };
@@ -326,21 +331,65 @@ export class PaymentsTransactionsService {
     if (selectedPlan.availability === PlanAvailability.TRIAL && !allowPaidTrialReservation) {
       throw trialDraftRequiresCheckout();
     }
+    // The subscription a RENEW or an UPGRADE acts on. The quote selects the
+    // buyer's latest one when the request names none, and it does so for every
+    // purchase type — which is why a purchase that CREATES a subscription (NEW,
+    // ADDITIONAL) records none: its subscription does not exist until fulfilment
+    // writes it. Recording the selected one pointed everything that reads the
+    // payment before then at somebody else's subscription: a provider
+    // subscription made from it renewed the OLD one while the new one lapsed,
+    // or the sweep cancelled it as "moved to another plan".
+    const sourceSubscriptionId = input.sourceSubscriptionId ?? quote.selectedSubscriptionId ?? null;
+    const draftSubscriptionId = createsSubscription(input.purchaseType) ? null : sourceSubscriptionId;
+    // Read for every UPGRADE: whether it converts the buyer's trial is marked on
+    // the draft, and fulfilment refuses a second conversion of one trial
+    // (`isTrialConversionSnapshot`). A RENEW needs it only to be a provider
+    // subscription.
+    const source =
+      input.purchaseType === PurchaseType.UPGRADE ||
+      (providerSubscription && input.purchaseType === PurchaseType.RENEW)
+        ? await this.readSourceSubscription(input.userId, sourceSubscriptionId)
+        : null;
+    const convertsTrial =
+      input.purchaseType === PurchaseType.UPGRADE && source !== null && isConvertibleTrial(source);
     let providerSubscriptionTerms: ProviderSubscriptionTerms | null = null;
     if (providerSubscription) {
-      // A plan upgrade or change is priced for the difference, once; a paid
-      // trial is a one-off by definition. Neither is a sum to repeat. A second
-      // subscription (ADDITIONAL) is created by its first charge like a first
-      // one, and renewed by the later charges the same way.
+      // The provider repeats the first charge's sum every period, and each
+      // later charge is delivered as a RENEW of one subscription. So a purchase
+      // may become one when its first charge buys what every later charge
+      // will: the plan's full price for one whole term of it.
+      //
+      // A new subscription (NEW, ADDITIONAL) is created by its first charge and
+      // renewed by the later ones; a RENEW renews the one it names. So is the
+      // UPGRADE of a trial the buyer holds — what buying beside a trial is
+      // (`isConvertibleTrial`). It is priced like a new purchase, the target
+      // plan's full price with nothing credited for the trial, and its term
+      // starts at payment (`UPGRADE_RESETS_EXPIRY`); the subscription it
+      // converts is the one the later charges renew. Any other UPGRADE stays
+      // refused: a change of a plan somebody already pays for was never
+      // offered this way. A paid trial is a one-off by definition.
       if (
         input.purchaseType !== PurchaseType.NEW &&
         input.purchaseType !== PurchaseType.ADDITIONAL &&
-        input.purchaseType !== PurchaseType.RENEW
+        input.purchaseType !== PurchaseType.RENEW &&
+        !convertsTrial
       ) {
         throw autopayNotAvailable('PURCHASE_TYPE');
       }
       if (selectedPlan.availability === PlanAvailability.TRIAL) {
         throw autopayNotAvailable('TRIAL');
+      }
+      // A renewal onto another plan — an archived plan's replacement, a plan
+      // chosen at renewal — leaves the subscription on its old plan until the
+      // new plan's term begins, which is the end of the current one when terms
+      // are durable. The sweep would read that as a move and cancel the
+      // sign-up, silently. Refused here instead, where the buyer is told.
+      if (
+        input.purchaseType === PurchaseType.RENEW &&
+        source !== null &&
+        renewsOntoAnotherPlan(source.planSnapshot, selectedPlan.id)
+      ) {
+        throw autopayNotAvailable('PLAN_CHANGE');
       }
       const resolved = resolveProviderSubscriptionTerms({
         gatewayType: input.gatewayType,
@@ -349,10 +398,12 @@ export class PaymentsTransactionsService {
         durationDays: quote.selectedDuration.days,
         discountSource: price.discountSource,
         planId: selectedPlan.id,
+        // The trial is named from the start: it is the subscription the later
+        // charges renew, and the checkout refuses a second live provider
+        // subscription on it. Until its first charge lands the trial is still
+        // on the trial's plan — `strandedReason` knows (`trialConversion`).
         subscriptionId:
-          input.purchaseType === PurchaseType.RENEW
-            ? (input.sourceSubscriptionId ?? quote.selectedSubscriptionId ?? null)
-            : null,
+          input.purchaseType === PurchaseType.RENEW || convertsTrial ? sourceSubscriptionId : null,
       });
       if ('refusal' in resolved) {
         throw autopayNotAvailable(resolved.refusal);
@@ -367,10 +418,11 @@ export class PaymentsTransactionsService {
       selectedPlan,
       selectedDurationDays: quote.selectedDuration.days,
       providerSubscription: providerSubscriptionTerms,
+      convertsTrial,
     });
     const draftMatch = {
       userId: input.userId,
-      subscriptionId: input.sourceSubscriptionId ?? quote.selectedSubscriptionId ?? null,
+      subscriptionId: draftSubscriptionId,
       purchaseType: input.purchaseType,
       channel,
       gatewayType: input.gatewayType,
@@ -424,7 +476,7 @@ export class PaymentsTransactionsService {
         const created = await tx.transaction.create({
           data: {
             userId: input.userId,
-            subscriptionId: input.sourceSubscriptionId ?? quote.selectedSubscriptionId ?? null,
+            subscriptionId: draftSubscriptionId,
             status: TransactionStatus.PENDING,
             purchaseType: input.purchaseType,
             channel,
@@ -452,7 +504,7 @@ export class PaymentsTransactionsService {
     const createdTransaction = await this.prismaService.transaction.create({
       data: {
         userId: input.userId,
-        subscriptionId: input.sourceSubscriptionId ?? quote.selectedSubscriptionId ?? null,
+        subscriptionId: draftSubscriptionId,
         status: TransactionStatus.PENDING,
         purchaseType: input.purchaseType,
         channel,
@@ -519,6 +571,23 @@ export class PaymentsTransactionsService {
         );
       }) ?? null
     );
+  }
+
+  /**
+   * The subscription a RENEW or an UPGRADE names: whether it is a trial of this
+   * buyer's the purchase converts — the rule the draft guard above and the
+   * action policy use (`isConvertibleTrial`) — and which plan it is on now.
+   * Read by id and owner.
+   */
+  private async readSourceSubscription(
+    userId: string,
+    subscriptionId: string | null,
+  ): Promise<Pick<Subscription, 'isTrial' | 'status' | 'planSnapshot'> | null> {
+    if (subscriptionId === null) return null;
+    return this.prismaService.subscription.findFirst({
+      where: { id: subscriptionId, userId },
+      select: { isTrial: true, status: true, planSnapshot: true },
+    });
   }
 
   private async ensureExistingTrialReservation(
@@ -589,6 +658,11 @@ function paymentIdCandidates(reference: string): string[] {
     : [reference, ...IMPORTED_PAYMENT_ID_PREFIXES.map((prefix) => `${prefix}:${reference}`)];
 }
 
+/** A purchase whose fulfilment creates its subscription, rather than acting on one. */
+function createsSubscription(purchaseType: PurchaseType): boolean {
+  return purchaseType === PurchaseType.NEW || purchaseType === PurchaseType.ADDITIONAL;
+}
+
 function buildTransactionDraftSnapshot(input: {
   readonly purchaseType: PurchaseType;
   readonly selectedPlan: {
@@ -604,11 +678,14 @@ function buildTransactionDraftSnapshot(input: {
   };
   readonly selectedDurationDays: number;
   readonly providerSubscription?: ProviderSubscriptionTerms | null;
+  /** The UPGRADE converts the buyer's trial — see `isTrialConversionSnapshot`. */
+  readonly convertsTrial?: boolean;
 }): Record<string, unknown> {
   return {
     ...(input.providerSubscription
       ? { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: input.providerSubscription }
       : {}),
+    ...(input.convertsTrial === true ? { [TRIAL_CONVERSION_SNAPSHOT_KEY]: true } : {}),
     id: input.selectedPlan.id,
     name: input.selectedPlan.name,
     availability: input.selectedPlan.availability,

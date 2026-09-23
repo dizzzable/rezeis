@@ -34,6 +34,48 @@ describe('PaymentsCheckoutService', () => {
   })
 
   /**
+   * The provider's page, the bank statement and the Stars invoice showed the
+   * checkout's internals — `NEW Премиум 30d` — to whoever paid. They now read
+   * the plan and the term in the payer's language (`payer-facing-text.util.ts`).
+   */
+  it("sends the provider the plan and the term in the payer's language", async () => {
+    const line = async (
+      payer: { readonly language: string; readonly telegramId: bigint | null },
+      purchaseType: PurchaseType,
+      name: string,
+    ) => {
+      const { service, state } = createService({
+        payer,
+        purchaseType,
+        transactionPlanSnapshot: { id: 'plan-1', name, selectedDurationDays: 30 },
+      })
+      await service.checkout({
+        userId: 'user-1',
+        purchaseType,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        channel: PurchaseChannel.WEB,
+      })
+      const [sent] = state.providerCreateInputs
+      return { description: sent?.['description'], title: sent?.['title'] }
+    }
+
+    assert.deepEqual(await line({ language: 'RU', telegramId: 7n }, PurchaseType.NEW, 'Премиум'), {
+      description: 'Премиум, 30 дней',
+      title: 'Премиум, 30 дней',
+    })
+    assert.deepEqual(await line({ language: 'EN', telegramId: 7n }, PurchaseType.NEW, 'Premium'), {
+      description: 'Premium, 30 days',
+      title: 'Premium, 30 days',
+    })
+    assert.deepEqual(await line({ language: 'RU', telegramId: 7n }, PurchaseType.RENEW, 'Премиум'), {
+      description: 'Продление: Премиум, 30 дней',
+      title: 'Премиум, 30 дней',
+    })
+  })
+
+  /**
    * «Создан счёт на оплату» had a title, an emoji, an outbound-webhook entry
    * and a tick-box in the operator's Telegram settings — and no producer at
    * all. An operator could tick it and wait forever.
@@ -214,6 +256,7 @@ describe('PaymentsCheckoutService', () => {
     // The review's case: a RENEW with no `subscriptionId` renews the customer's
     // latest subscription, which the draft resolves; the guard used to see null.
     const checked: Array<string | null> = []
+    const guardOptions: Array<Record<string, unknown> | undefined> = []
     const { service, state } = createService({
       gatewayType: PaymentGatewayType.PLATEGA,
       gatewayCurrency: Currency.RUB,
@@ -231,8 +274,9 @@ describe('PaymentsCheckoutService', () => {
       },
       providerSubscriptionService: {
         recordCheckout: async () => undefined,
-        assertNoLiveSubscriptionFor: async (id: string | null) => {
+        assertNoLiveSubscriptionFor: async (id: string | null, options?: Record<string, unknown>) => {
           checked.push(id)
+          guardOptions.push(options)
           if (id === 'sub-latest') {
             throw new BadRequestException({ code: 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', reason: 'ALREADY_ACTIVE' })
           }
@@ -253,7 +297,66 @@ describe('PaymentsCheckoutService', () => {
       BadRequestException,
     )
     assert.deepEqual(checked, ['sub-latest'])
+    // A renewal is held back by a LIVE one only, as before.
+    assert.deepEqual(guardOptions, [{}])
     assert.equal(state.providerCreateCalls, 0)
+  })
+
+  it("makes a trial's conversion a provider subscription on the trial, guarded and recorded like any", async () => {
+    // Buying beside a trial is its UPGRADE; «для автоматического списания» on
+    // it asks the draft for a provider subscription, and the guard and the
+    // record see the trial the later charges renew.
+    const checked: Array<string | null> = []
+    const guardOptions: Array<Record<string, unknown> | undefined> = []
+    const recorded: Array<string | null> = []
+    const { service, state } = createService({
+      gatewayType: PaymentGatewayType.PLATEGA,
+      gatewayCurrency: Currency.RUB,
+      gatewaySettings: { merchantId: 'merchant-1', secret: 'secret-1', savePaymentMethod: true },
+      purchaseType: PurchaseType.UPGRADE,
+      subscriptionId: 'trial-sub',
+      transactionPlanSnapshot: {
+        providerSubscription: {
+          unit: 'month',
+          count: 1,
+          amount: 299,
+          durationDays: 30,
+          planId: 'plan-1',
+          subscriptionId: 'trial-sub',
+        },
+      },
+      providerSubscriptionService: {
+        recordCheckout: async (transaction: { subscriptionId: string | null; gatewayId: string | null }) => {
+          recorded.push(transaction.gatewayId)
+        },
+        assertNoLiveSubscriptionFor: async (id: string | null, options?: Record<string, unknown>) => {
+          checked.push(id)
+          guardOptions.push(options)
+        },
+      },
+    })
+
+    await service.checkout({
+      userId: 'user-1',
+      purchaseType: PurchaseType.UPGRADE,
+      subscriptionId: 'trial-sub',
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.PLATEGA,
+      channel: PurchaseChannel.WEB,
+      savePaymentMethodConsent: true,
+    })
+
+    assert.deepEqual(
+      state.draftCalls.map((call) => [call.input.purchaseType, call.input.sourceSubscriptionId, call.options.providerSubscription]),
+      [[PurchaseType.UPGRADE, 'trial-sub', true]],
+    )
+    assert.deepEqual(checked, ['trial-sub'])
+    // A trial converts once: another sign-up still waiting for its payer holds
+    // this one back — though never its own row, when the same link is opened again.
+    assert.deepEqual(guardOptions, [{ pendingOtherThan: 'transaction-1' }])
+    assert.deepEqual(recorded, ['provider-1'])
+    assert.equal(state.providerCreateCalls, 1)
   })
 
   it('completes a zero-total checkout without calling the payment provider', async () => {
@@ -783,6 +886,8 @@ function createService(input: {
   readonly gatewaySettings?: Record<string, unknown>
   readonly transactionGatewayData?: Record<string, unknown>
   readonly transactionPlanSnapshot?: Record<string, unknown>
+  /** The payer's row as the payer-facing line reads it; none by default. */
+  readonly payer?: { readonly language: string; readonly telegramId: bigint | null } | null
   readonly draftError?: Error
   readonly providerError?: Error
   readonly accessMode?: 'PUBLIC' | 'INVITED' | 'PURCHASE_BLOCKED' | 'REG_BLOCKED' | 'RESTRICTED'
@@ -823,6 +928,8 @@ function createService(input: {
       readonly data: Record<string, unknown>
     }>,
     providerCreateCalls: 0,
+    /** What each provider checkout was asked for, in order. */
+    providerCreateInputs: [] as Array<Record<string, unknown>>,
     applyCompletedCalls: 0,
     enqueueCalls: 0,
     postFulfillmentHookCalls: [] as string[],
@@ -830,6 +937,11 @@ function createService(input: {
     cashbackLedgerQueries: [] as unknown[],
     /** Every system event the checkout raised, in order. */
     events: [] as Array<{ readonly type: string; readonly metadata: Record<string, unknown> }>,
+    /** What the checkout asked the draft for, in order. */
+    draftCalls: [] as Array<{
+      readonly input: Record<string, unknown>
+      readonly options: { readonly providerSubscription?: boolean }
+    }>,
   }
   const paymentId = 'payment-1'
   const gatewayType = input.gatewayType ?? PaymentGatewayType.YOOKASSA
@@ -862,7 +974,7 @@ function createService(input: {
     // The purchaser block check every checkout path now runs. `null` reads as
     // "no such user", which the guard deliberately stays quiet about — the
     // caller's own resolution raises the better error a few lines later.
-    user: { findFirst: async () => null },
+    user: { findFirst: async () => null, findUnique: async () => input.payer ?? null },
     paymentGateway: {
       findUnique: async () => ({
         id: 'gateway-1',
@@ -935,7 +1047,11 @@ function createService(input: {
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(prismaService),
   })
   const paymentsTransactionsService = {
-    createCheckoutDraft: async () => {
+    createCheckoutDraft: async (
+      draftInput: Record<string, unknown>,
+      options: { readonly providerSubscription?: boolean } = {},
+    ) => {
+      state.draftCalls.push({ input: draftInput, options })
       if (input.draftError !== undefined) {
         throw input.draftError
       }
@@ -952,8 +1068,9 @@ function createService(input: {
     },
   }
   const paymentProviderExecutionService = {
-    createCheckout: async () => {
+    createCheckout: async (providerInput: Record<string, unknown>) => {
       state.providerCreateCalls += 1
+      state.providerCreateInputs.push(providerInput)
       if (input.providerError !== undefined) {
         throw input.providerError
       }

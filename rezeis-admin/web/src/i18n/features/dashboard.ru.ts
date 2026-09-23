@@ -393,6 +393,7 @@ export const ru = {
         subscriptions_duplicate_pair_merged: 'Сведены дубли подписок',
         subscriptions_panel_link_reconciled: 'Сверка связей с панелью',
         payments_transaction_refund: 'Возврат платежа',
+        payments_transaction_withheld_refund_recorded: 'Отмечен возврат неприменённого платежа',
         payments_webhook_replay_requested: 'Повторно обработан вебхук платежа',
         payments_webhook_payload_revealed: 'Просмотрено содержимое вебхука',
         payments_alert_test_sent: 'Отправлено тестовое оповещение о платежах',

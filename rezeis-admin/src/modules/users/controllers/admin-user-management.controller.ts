@@ -68,6 +68,7 @@ import {
 } from '../../notifications/services/user-notifications.service';
 import { PartnerEarningsService } from '../../partners/services/partner-earnings.service';
 import { PartnersService } from '../../partners/services/partners.service';
+import { readWithheldConversion } from '../../payments/utils/trial-conversion.util';
 import { PlansAdminService } from '../../plans/services/plans-admin.service';
 import { ReferralInviteLimitsService } from '../../referrals/services/referral-invite-limits.service';
 import { ReferralManualAttachService } from '../../referrals/services/referral-manual-attach.service';
@@ -223,6 +224,8 @@ export class AdminUserManagementController {
           currency: true,
           amount: true,
           createdAt: true,
+          // Only for the withheld mark below; the column itself is not sent.
+          gatewayData: true,
         },
       }),
       this.prismaService.promocodeActivation.findMany({
@@ -275,6 +278,9 @@ export class AdminUserManagementController {
           gatewayType: transaction.gatewayType,
           currency: transaction.currency,
           amount: transaction.amount.toString(),
+          // A trial's conversion received after another payment converted the
+          // trial: COMPLETED, yet applied to nothing and due back to the payer.
+          conversionWithheld: readWithheldConversion(transaction.gatewayData),
         },
       })),
       ...promocodes.map((activation) => ({

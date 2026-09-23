@@ -52,21 +52,33 @@ export interface ProviderSubscriptionTerms {
   readonly subscriptionId: string | null;
 }
 
-export type ProviderSubscriptionRefusal =
-  | 'NOT_APPROVED'
-  | 'GATEWAY'
-  | 'PURCHASE_TYPE'
-  | 'TRIAL'
-  | 'CURRENCY'
-  | 'DISCOUNT'
-  | 'DURATION'
-  | 'AMOUNT'
-  | 'ITEMS'
-  | 'ADD_ONS'
-  /** This VPN subscription already renews itself: a second one would charge twice a period. */
-  | 'ALREADY_ACTIVE'
-  /** RollyPay: none of the operator's tariffs charges this sum every this period. */
-  | 'PLAN';
+/**
+ * Every reason `AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE` is refused with. The reason
+ * reaches the cabinet (`CODES_CARRYING_REASON` in the panel's exception filter,
+ * which restates this list and whose spec checks it against this one).
+ */
+export const PROVIDER_SUBSCRIPTION_REFUSALS = [
+  'NOT_APPROVED',
+  'GATEWAY',
+  'PURCHASE_TYPE',
+  'TRIAL',
+  'CURRENCY',
+  'DISCOUNT',
+  'DURATION',
+  'AMOUNT',
+  'ITEMS',
+  'ADD_ONS',
+  // This VPN subscription already renews itself: a second one would charge twice a period.
+  'ALREADY_ACTIVE',
+  // Another sign-up converting the same trial still waits to be confirmed (see `assertNoLiveSubscriptionFor`).
+  'PENDING_SIGN_UP',
+  // RollyPay: none of the operator's tariffs charges this sum every this period.
+  'PLAN',
+  // A renewal onto a plan the subscription is not on (see `renewsOntoAnotherPlan`).
+  'PLAN_CHANGE',
+] as const;
+
+export type ProviderSubscriptionRefusal = (typeof PROVIDER_SUBSCRIPTION_REFUSALS)[number];
 
 export type ProviderSubscriptionTermsResult =
   | { readonly terms: ProviderSubscriptionTerms }
@@ -109,6 +121,30 @@ export function resolveProviderSubscriptionTerms(input: {
       subscriptionId: input.subscriptionId,
     },
   };
+}
+
+/**
+ * Whether a renewal is onto a plan other than the one its subscription is on:
+ * an archived plan's replacement, or a plan chosen at renewal.
+ *
+ * Such a renewal is not refused a provider subscription for its price, which
+ * is the new plan's own, but because of what the sweep reads. It compares the
+ * plan of each charge with the plan in the subscription's snapshot, and that
+ * snapshot keeps the OLD plan until the new plan's term begins: at fulfilment
+ * without durable terms, at the end of the current term with them. The sign-up
+ * was cancelled as "moved to another plan" in between, nobody told. So it is
+ * refused upfront, where the refusal reaches the buyer; once the subscription
+ * is on the new plan, its next renewal may be one.
+ *
+ * A snapshot that names no plan (an imported subscription) is not a change:
+ * the sweep has nothing to compare it with either.
+ */
+export function renewsOntoAnotherPlan(currentPlanSnapshot: unknown, planId: string): boolean {
+  if (typeof currentPlanSnapshot !== 'object' || currentPlanSnapshot === null || Array.isArray(currentPlanSnapshot)) {
+    return false;
+  }
+  const current = (currentPlanSnapshot as Record<string, unknown>)['id'];
+  return typeof current === 'string' && current.length > 0 && current !== planId;
 }
 
 export function autopayNotAvailable(refusal: ProviderSubscriptionRefusal): BadRequestException {

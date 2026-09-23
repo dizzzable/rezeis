@@ -28,6 +28,7 @@ import { WebhookReplayControl } from './webhook-replay-control'
 import { PermissionRequiredNotice } from './permission-required-notice'
 import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
 import { PaymentDetailsSheet } from './payment-details-sheet'
+import { WithheldBadge } from './withheld-conversion'
 import {
   GATEWAY_LABELS,
   PARTNER_BALANCE_GATEWAY,
@@ -554,7 +555,14 @@ function TransactionsTab({
                           indistinguishable from a rendering bug. */}
                       <div className="text-muted-foreground">{tx.userTelegramId ?? truncate(tx.userId, 8)}</div>
                     </TableCell>
-                    <TableCell><Badge variant={statusVariant(tx.status)}>{String(t(`paymentsPage.statuses.${tx.status}`, tx.status))}</Badge></TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge variant={statusVariant(tx.status)}>{String(t(`paymentsPage.statuses.${tx.status}`, tx.status))}</Badge>
+                        {/* COMPLETED yet applied to nothing: without the mark
+                            this row reads as an ordinary sale. */}
+                        {tx.conversionWithheld ? <WithheldBadge mark={tx.conversionWithheld} /> : null}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-xs">{gatewayLabel(tx.gatewayType, t)}</TableCell>
                     <TableCell className="whitespace-nowrap text-sm tabular-nums">
                       {formatPaymentAmount(tx.amount, tx.currency, activeLocale())}

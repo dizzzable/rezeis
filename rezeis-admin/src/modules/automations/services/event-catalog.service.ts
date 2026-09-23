@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { EVENT_TYPES } from '../../../common/services/system-events.service';
+import { EVENT_TYPES, OPERATOR_ONLY_EVENT_TYPES } from '../../../common/services/system-events.service';
 import { POPUP_CAPABLE_EVENTS } from '../popup-capable-events';
 
 /**
@@ -116,7 +116,13 @@ export class EventCatalogService {
     // the bridge matches those verbatim, so rules bound to them fire. Keeping
     // only the declared half made this catalogue warn hardest about exactly the
     // triggers that work.
-    const types = new Set<string>([...Object.values(EVENT_TYPES), ...observed.keys()]);
+    //
+    // Except an operator-only type (`OPERATOR_ONLY_EVENT_TYPES`): it is never
+    // dispatched to a rule, so offering it would be offering a trigger that
+    // cannot fire. It is still in the audit log, so it is dropped from both.
+    const types = new Set<string>(
+      [...Object.values(EVENT_TYPES), ...observed.keys()].filter((type) => !OPERATOR_ONLY_EVENT_TYPES.has(type)),
+    );
     const declared = new Set<string>(Object.values(EVENT_TYPES));
 
     return [...types]

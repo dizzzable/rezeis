@@ -114,50 +114,61 @@ export function sha1(value: string): string {
 // ── URL builders ───────────────────────────────────────────────────────
 
 /**
- * Resolves the URL the payment provider must redirect to on success.
- *
- * Order of precedence:
- *  1. Explicit `successUrl` provided by the caller (e.g. reiwa supplies
- *     a Telegram deep link for Mini App context, or a web origin for
- *     browser context).
- *  2. Default web fallback `${RUID_DOMAIN}/payments/result?paymentId=...`.
+ * The site a payer-facing address is built on when the caller named none: the
+ * operator's cabinet when its address is known, otherwise — exactly as before
+ * the cabinet was used — the panel's own domain (`REZEIS_DOMAIN`). The panel is
+ * the worse answer (the payer is shown the admin panel's address), never a
+ * reason to refuse a payment.
  */
-export function resolveSuccessUrl(
-  domain: string | null,
-  paymentId: string,
-  override?: string | null,
-): string {
-  const trimmed = override?.trim();
-  if (trimmed && trimmed.length > 0) {
-    return trimmed;
-  }
-  return buildResultUrl(domain, paymentId);
+export type PayerFacingSite =
+  | { readonly kind: 'CABINET'; readonly baseUrl: string }
+  | { readonly kind: 'PANEL'; readonly domain: string | null };
+
+/**
+ * The page the caller named for the provider to send the payer back to (reiwa
+ * supplies a Telegram deep link in the Mini App, its own web origin in a
+ * browser), or `null` when it named none and {@link buildResultUrl} decides.
+ */
+export function explicitUrl(value?: string | null): string | null {
+  const trimmed = value?.trim();
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : null;
 }
 
 /**
- * Resolves the URL the payment provider must redirect to on failure /
- * cancellation. Falls back to the resolved success URL when no explicit
- * failure URL is given.
+ * The page a payer returns to from the provider when the caller named none.
+ *
+ * On the cabinet: its `/payment-return`, which polls the payment and keeps its
+ * link. Without the cabinet's address: `${REZEIS_DOMAIN}/payments/result`, the
+ * panel's address this always was — unchanged, including its 503 when even
+ * the panel's domain is missing.
  */
-export function resolveFailUrl(
-  domain: string | null,
-  paymentId: string,
-  failOverride?: string | null,
-  successOverride?: string | null,
-): string {
-  const trimmed = failOverride?.trim();
-  if (trimmed && trimmed.length > 0) {
-    return trimmed;
+export function buildResultUrl(site: PayerFacingSite, paymentId: string): string {
+  if (site.kind === 'CABINET') {
+    return `${site.baseUrl.replace(/\/+$/, '')}/payment-return?paymentId=${encodeURIComponent(paymentId)}`;
   }
-  return resolveSuccessUrl(domain, paymentId, successOverride);
-}
-
-export function buildResultUrl(domain: string | null, paymentId: string): string {
-  if (domain === null) {
+  if (site.domain === null) {
     throw new ServiceUnavailableException('RUID public web URL is not configured');
   }
-  const normalizedBaseUrl = domain.replace(/\/$/, '');
+  const normalizedBaseUrl = site.domain.replace(/\/$/, '');
   return `${normalizedBaseUrl}/payments/result?paymentId=${encodeURIComponent(paymentId)}`;
+}
+
+/**
+ * The bare host a per-payment buyer address goes under: the cabinet's, or
+ * without it the panel's, stripped exactly as before (scheme, path and port
+ * off), with the same 503 when there is none at all.
+ */
+export function payerMailHost(site: PayerFacingSite): string {
+  const host =
+    site.kind === 'CABINET'
+      ? new URL(site.baseUrl).hostname.toLowerCase()
+      : site.domain === null
+        ? ''
+        : site.domain.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0].split(':')[0].trim().toLowerCase();
+  if (host.length === 0) {
+    throw new ServiceUnavailableException('Admin public base URL is not configured');
+  }
+  return host;
 }
 
 export function buildWebhookUrl(domain: string | null, gatewayType: PaymentGatewayType): string {

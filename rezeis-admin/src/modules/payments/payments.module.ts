@@ -7,6 +7,7 @@ import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitleme
 import { AuthModule } from '../auth/auth.module';
 import { PartnersModule } from '../partners/partners.module';
 import { AdvertisingModule } from '../advertising/advertising.module';
+import { ReiwaPublicLinksModule } from '../advertising/reiwa-public-links.module';
 import { PlansModule } from '../plans/plans.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -69,6 +70,11 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     PlansModule,
     PartnersModule,
     AdvertisingModule,
+    // For the cabinet's address a payer is sent back to, and the host of the
+    // buyer address on an invoice (`PaymentProviderExecutionService`). The
+    // resolver the ads and the letters use; `AdvertisingModule` imports it
+    // but does not export it.
+    ReiwaPublicLinksModule,
     ReferralsModule,
     // For `PointsCashbackService`: the post-fulfilment cashback hook and its
     // refund reversal in `PaymentReconciliationService`.

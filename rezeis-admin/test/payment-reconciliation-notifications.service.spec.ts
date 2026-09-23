@@ -482,12 +482,17 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.partnerEarningCalls, []);
     assert.deepStrictEqual(state.referralQualificationCalls, []);
     // Transaction marked CANCELED + stamped, webhook processed.
-    assert.equal(state.transactionUpdateCalls.length, 1);
-    assert.equal(state.transactionUpdateCalls[0].data.status, TransactionStatus.CANCELED);
+    // Two writes: the reversal's claim, taken under the row lock, and the
+    // write that ends the reversal and takes the claim away with it.
+    assert.equal(state.transactionUpdateCalls.length, 2);
+    assert.equal(typeof state.transactionUpdateCalls[0].data.gatewayData.refundReversalClaimedAt, 'string');
+    assert.equal(reversalWrites(state).length, 1);
+    assert.equal(reversalWrites(state)[0].data.status, TransactionStatus.CANCELED);
     assert.equal(
-      typeof (state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>).refundReversedAt,
+      typeof (reversalWrites(state)[0].data.gatewayData as Record<string, unknown>).refundReversedAt,
       'string',
     );
+    assert.equal('refundReversalClaimedAt' in (state.gatewayDataOverride ?? {}), false);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 
@@ -513,7 +518,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     // processor refuses to push derived states upstream — access is cut by the
     // `expireAt` written on the subscription instead.
     assert.deepStrictEqual(state.syncJobCreateCalls[0].payload, { source: 'PAYMENT_REFUND' });
-    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    const gatewayData = reversalWrites(state)[0].data.gatewayData as Record<string, unknown>;
     assert.equal(gatewayData.subscriptionRevoked, true);
     assert.equal(gatewayData.refundRevokedFromStatus, 'ACTIVE');
   });
@@ -556,7 +561,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.syncJobCreateCalls, []);
 
     // The audit now says so, and names the profile still running.
-    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    const gatewayData = reversalWrites(state)[0].data.gatewayData as Record<string, unknown>;
     assert.equal(gatewayData.subscriptionRevoked, true);
     assert.equal(gatewayData.refundRevocationPanelPushSkipped, true);
     assert.equal(
@@ -586,7 +591,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
 
     assert.deepStrictEqual(state.subscriptionUpdateCalls, []);
     assert.deepStrictEqual(state.syncJobCreateCalls, []);
-    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    const gatewayData = reversalWrites(state)[0].data.gatewayData as Record<string, unknown>;
     assert.equal(gatewayData.subscriptionRevoked, false);
     assert.equal(gatewayData.refundNeedsManualReview, true);
     assert.equal(gatewayData.refundRevocationSkippedReason, 'SUBSCRIPTION_HAS_OTHER_PAYMENTS');
@@ -612,7 +617,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     await service.reconcileWebhookEvent('event-1');
 
     assert.deepStrictEqual(state.subscriptionUpdateCalls, []);
-    const gatewayData = state.transactionUpdateCalls[0].data.gatewayData as Record<string, unknown>;
+    const gatewayData = reversalWrites(state)[0].data.gatewayData as Record<string, unknown>;
     assert.equal(gatewayData.refundRevocationSkippedReason, 'SUBSCRIPTION_DISABLED');
   });
 
@@ -786,7 +791,9 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     await service.reconcileWebhookEvent('event-1');
     await state.drain();
 
-    assert.deepStrictEqual(state.commitOrder, ['panel:refund-2', 'webhook', 'webhook']);
+    // The webhook's writes: its ledger entry, the reversal's claim, and the
+    // write that ends the reversal.
+    assert.deepStrictEqual(state.commitOrder, ['panel:refund-2', 'webhook', 'webhook', 'webhook']);
     assert.deepStrictEqual(ledgerIds(state), ['refund-2', 'refund-1']);
     assert.equal(state.gatewayDataOverride?.refundedAmountTotal, '8.00');
     // Exactly one writer reverses, and it is the one whose entry crossed.
@@ -928,7 +935,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.deepStrictEqual(state.referralReversalCalls, ['tx-1']);
     assert.deepStrictEqual(state.moyNalogCancelCalls, ['tx-1']);
     assert.deepStrictEqual(state.adRevertCalls, ['tx-1']);
-    assert.equal(state.transactionUpdateCalls[0].data.status, TransactionStatus.CANCELED);
+    assert.equal(reversalWrites(state)[0]?.data.status, TransactionStatus.CANCELED);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
   });
 

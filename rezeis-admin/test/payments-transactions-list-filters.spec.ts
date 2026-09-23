@@ -47,6 +47,7 @@ interface StoredRow {
   readonly amount: { toString(): string };
   readonly paymentAsset: string | null;
   readonly planSnapshot: Prisma.JsonValue;
+  readonly gatewayData?: Prisma.JsonValue;
   readonly fulfilledAt: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -374,5 +375,48 @@ describe('PaymentsTransactionsService.listTransactions filters', () => {
       user: { select: { id: true, telegramId: true, username: true, name: true, email: true } },
       items: { select: { subscriptionId: true } },
     });
+  });
+
+  it('marks a trial conversion withheld for refund, with its refund once it is recorded, and nothing else', async () => {
+    // COMPLETED and fulfilled, yet applied to nothing: without the mark the
+    // list shows it as an ordinary delivered sale.
+    const withheld = row({
+      id: 'cmfk2x9pq0010abcd1234efgh',
+      purchaseType: PurchaseType.UPGRADE,
+      gatewayData: {
+        providerStatus: 'CONFIRMED',
+        conversionWithheldAt: '2026-09-01T10:00:05.000Z',
+        trialConvertedByPaymentId: 'payment-first',
+      },
+    });
+    const refunded = row({
+      id: 'cmfk2x9pq0011abcd1234efgh',
+      status: TransactionStatus.CANCELED,
+      purchaseType: PurchaseType.UPGRADE,
+      gatewayData: {
+        conversionWithheldAt: '2026-09-01T10:00:05.000Z',
+        trialConvertedByPaymentId: 'payment-first',
+        refundReversedAt: '2026-09-02T09:00:00.000Z',
+      },
+    });
+    const ordinary = row({ gatewayData: { providerStatus: 'succeeded', refundReversedAt: '2026-09-03T09:00:00.000Z' } });
+    const { service } = harness({ rows: [ordinary, withheld, refunded, row({ gatewayData: null })] });
+
+    const { items } = await service.listTransactions({});
+
+    assert.equal(items[0]?.conversionWithheld, null);
+    assert.deepStrictEqual(items[1]?.conversionWithheld, {
+      withheldAt: '2026-09-01T10:00:05.000Z',
+      convertedByPaymentId: 'payment-first',
+      refundedAt: null,
+    });
+    assert.deepStrictEqual(items[2]?.conversionWithheld, {
+      withheldAt: '2026-09-01T10:00:05.000Z',
+      convertedByPaymentId: 'payment-first',
+      refundedAt: '2026-09-02T09:00:00.000Z',
+    });
+    assert.equal(items[3]?.conversionWithheld, null);
+    // The column itself stays on the server: provider payloads live in it.
+    assert.equal(items.some((item) => 'gatewayData' in item), false);
   });
 });

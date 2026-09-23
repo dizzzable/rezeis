@@ -20,6 +20,7 @@ import { firstValueFrom } from 'rxjs';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
+import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import {
   PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
   PAYMENT_RECONCILIATION_JOB,
@@ -29,6 +30,7 @@ import {
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { isWithheldConversion } from '../utils/trial-conversion.util';
 import {
   autopayNotAvailable,
   PROVIDER_SUBSCRIPTION_CONSENT_VERSION,
@@ -66,6 +68,12 @@ const LIVE_STATUSES: readonly ProviderSubscriptionStatus[] = [
   ProviderSubscriptionStatus.ACTIVE,
   ProviderSubscriptionStatus.PAST_DUE,
 ];
+
+/** Live rows `cancelStranded` reads at a time; it reads every one of them. */
+export const STRANDED_SWEEP_PAGE = 500;
+
+/** A live row as `cancelStranded` reads it: with its customer's block. */
+type StrandedCandidate = ProviderSubscription & { readonly user: { readonly isBlocked: boolean } | null };
 
 export type ProviderSubscriptionCancelledBy = 'CUSTOMER' | 'OPERATOR' | 'SYSTEM';
 
@@ -343,8 +351,19 @@ export class ProviderSubscriptionService {
    * Refuses a second live provider subscription for one VPN subscription: both
    * would charge every period for the same access. A failed one (PAST_DUE) does
    * not block signing up again.
+   *
+   * `pendingOtherThan` — the checkout asking, when it converts a trial — also
+   * refuses while another sign-up for the same subscription is still waiting to
+   * be confirmed. A trial converts once: two sign-ups confirmed together both
+   * converted it, and both kept renewing it. Only a sign-up inside its
+   * checkout's lifetime counts, so one the payer walked away from stops
+   * blocking when its checkout expires; the asking checkout's own row (a
+   * re-tap of the same link) never does.
    */
-  public async assertNoLiveSubscriptionFor(subscriptionId: string | null): Promise<void> {
+  public async assertNoLiveSubscriptionFor(
+    subscriptionId: string | null,
+    options: { readonly pendingOtherThan?: string } = {},
+  ): Promise<void> {
     if (subscriptionId === null) return;
     const live = await this.prismaService.providerSubscription.findFirst({
       where: { subscriptionId, status: ProviderSubscriptionStatus.ACTIVE },
@@ -352,6 +371,19 @@ export class ProviderSubscriptionService {
     });
     if (live !== null) {
       throw autopayNotAvailable('ALREADY_ACTIVE');
+    }
+    if (options.pendingOtherThan === undefined) return;
+    const pending = await this.prismaService.providerSubscription.findFirst({
+      where: {
+        subscriptionId,
+        status: ProviderSubscriptionStatus.PENDING,
+        firstTransactionId: { not: options.pendingOtherThan },
+        createdAt: { gt: new Date(Date.now() - CHECKOUT_LIFETIME_MS) },
+      },
+      select: { id: true },
+    });
+    if (pending !== null) {
+      throw autopayNotAvailable('PENDING_SIGN_UP');
     }
   }
 
@@ -452,16 +484,44 @@ export class ProviderSubscriptionService {
    * account merge, plan deletion, the admin screens), and the one that was
    * missed would keep charging a customer forever. The cost is up to one sweep
    * interval, ten minutes, against a period of at least a day.
+   *
+   * EVERY live row, a page at a time. It read the oldest 500 once, and the
+   * oldest are exactly the rows that stay: the healthy ones, which the sweep
+   * leaves alone, and the stranded ones the provider will not cancel. Once 500
+   * of those piled up, no row behind them was ever looked at again, and a
+   * blocked customer's autopay went on charging. The pages walk
+   * (`createdAt`, `id`) forward, so a row the pass cancels, or one that stays,
+   * is read once and never holds up the next.
    */
   public async cancelStranded(): Promise<number> {
-    const rows = await this.prismaService.providerSubscription.findMany({
-      where: {
-        status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] },
-      },
-      include: { user: { select: { isBlocked: true } } },
-      orderBy: { createdAt: 'asc' },
-      take: 500,
-    });
+    let cancelled = 0;
+    let after: { readonly createdAt: Date; readonly id: string } | null = null;
+    for (;;) {
+      const rows: StrandedCandidate[] = await this.prismaService.providerSubscription.findMany({
+        where: {
+          status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] },
+          ...(after === null
+            ? {}
+            : {
+                OR: [
+                  { createdAt: { gt: after.createdAt } },
+                  { createdAt: after.createdAt, id: { gt: after.id } },
+                ],
+              }),
+        },
+        include: { user: { select: { isBlocked: true } } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: STRANDED_SWEEP_PAGE,
+      });
+      cancelled += await this.cancelStrandedPage(rows);
+      const last = rows[rows.length - 1];
+      if (rows.length < STRANDED_SWEEP_PAGE || last === undefined) return cancelled;
+      after = { createdAt: last.createdAt, id: last.id };
+    }
+  }
+
+  /** {@link cancelStranded} for one page of live rows. */
+  private async cancelStrandedPage(rows: readonly StrandedCandidate[]): Promise<number> {
     if (rows.length === 0) return 0;
     const subscriptionIds = [
       ...new Set(rows.flatMap((row) => (row.subscriptionId === null ? [] : [row.subscriptionId]))),
@@ -471,9 +531,14 @@ export class ProviderSubscriptionService {
         ? []
         : await this.prismaService.subscription.findMany({
             where: { id: { in: subscriptionIds } },
-            select: { id: true, status: true, planSnapshot: true },
+            select: { id: true, status: true, planSnapshot: true, isTrial: true },
           });
     const byId = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
+    // Read AFTER the subscriptions, and the order is what makes `LOST` safe: a
+    // conversion this row's own charge made has its payment COMPLETED before
+    // fulfilment converts anything, so a subscription seen converted is never
+    // paired with that payment still unpaid.
+    const conversions = await this.readTrialConversions(rows);
     let cancelled = 0;
     for (const row of rows) {
       const subscription = row.subscriptionId === null ? undefined : byId.get(row.subscriptionId);
@@ -485,7 +550,11 @@ export class ProviderSubscriptionService {
             ? 'NOT_YET'
             : subscription === undefined
               ? 'MISSING'
-              : { status: subscription.status, planId: readSnapshotPlanId(subscription.planSnapshot) },
+              : {
+                  status: subscription.status,
+                  planId: readSnapshotPlanId(subscription.planSnapshot),
+                  ...trialConversionOf(conversions.get(row.firstTransactionId), row.subscriptionId, subscription.isTrial),
+                },
         planId: row.planId,
       });
       if (reason === null) continue;
@@ -501,6 +570,24 @@ export class ProviderSubscriptionService {
       }
     }
     return cancelled;
+  }
+
+  /**
+   * The checkouts of the rows whose first charge converts a trial (an
+   * UPGRADE), by id. Every other row's first charge creates or renews a
+   * subscription and is left out, so this reads only what `trialConversionOf`
+   * needs.
+   */
+  private async readTrialConversions(
+    rows: readonly Pick<ProviderSubscription, 'subscriptionId' | 'firstTransactionId'>[],
+  ): Promise<Map<string, TrialConversionCheckout>> {
+    const ids = rows.flatMap((row) => (row.subscriptionId === null ? [] : [row.firstTransactionId]));
+    if (ids.length === 0) return new Map();
+    const checkouts = await this.prismaService.transaction.findMany({
+      where: { id: { in: ids }, purchaseType: PurchaseType.UPGRADE },
+      select: { id: true, subscriptionId: true, status: true, fulfilledAt: true, gatewayData: true },
+    });
+    return new Map(checkouts.map((checkout) => [checkout.id, checkout]));
   }
 
   private async cancel(row: ProviderSubscription, by: ProviderSubscriptionCancelledBy): Promise<void> {
@@ -595,7 +682,14 @@ export class ProviderSubscriptionService {
         gatewayType: transaction.gatewayType,
         providerSubscriptionId,
         status: ProviderSubscriptionStatus.PENDING,
-        subscriptionId: terms.subscriptionId ?? transaction.subscriptionId,
+        // Only the subscription the terms name: the one a RENEW renews, or the
+        // trial an UPGRADE converts. A new purchase names none — its charges
+        // renew the subscription the first one creates, which
+        // `resolveSubscriptionId` reads once fulfilment has made it. The
+        // checkout's own `subscriptionId` is not a fallback: older drafts
+        // carried the buyer's LATEST subscription there, and a row bound to it
+        // renewed that one while the new one lapsed, or was cancelled as moved.
+        subscriptionId: terms.subscriptionId,
         planId: terms.planId,
         durationDays: terms.durationDays,
         amount: new Prisma.Decimal(terms.amount),
@@ -933,7 +1027,20 @@ export function strandedReason(input: {
   readonly subscription:
     | 'NOT_YET'
     | 'MISSING'
-    | { readonly status: SubscriptionStatus; readonly planId: string | null };
+    | {
+        readonly status: SubscriptionStatus;
+        readonly planId: string | null;
+        /**
+         * Only for a row whose first charge converts this subscription's trial
+         * (see `trialConversionOf`). PENDING: it is still the trial, on the
+         * trial's plan until that charge lands, and that is not a move. LOST:
+         * it was converted while that charge did not stand — unpaid, refunded,
+         * or paid and refused because another payment converted it first — so
+         * there is nothing left for this sign-up to convert, and its later
+         * charges would renew a subscription it never bought.
+         */
+        readonly trialConversion?: 'PENDING' | 'LOST';
+      };
   readonly planId: string;
 }): string | null {
   if (input.userDeleted) return 'account deleted';
@@ -941,10 +1048,54 @@ export function strandedReason(input: {
   if (input.subscription === 'NOT_YET') return null;
   if (input.subscription === 'MISSING') return 'subscription deleted';
   if (input.subscription.status === SubscriptionStatus.DELETED) return 'subscription deleted';
+  if (input.subscription.trialConversion === 'LOST') return 'trial converted without its first charge';
+  if (input.subscription.trialConversion === 'PENDING') return null;
   if (input.subscription.planId !== null && input.subscription.planId !== input.planId) {
     return 'subscription moved to another plan';
   }
   return null;
+}
+
+/** The checkout of a row whose first charge is a trial's UPGRADE, as the sweep reads it. */
+interface TrialConversionCheckout {
+  readonly subscriptionId: string | null;
+  readonly status: TransactionStatus;
+  readonly fulfilledAt: Date | null;
+  /** Carries the withheld mark (`isWithheldConversion`) when the conversion was received and not applied. */
+  readonly gatewayData?: unknown;
+}
+
+/**
+ * Where the trial conversion a row's first charge pays for stands, for
+ * `strandedReason`; nothing for a row whose first charge creates or renews a
+ * subscription. The checkout (`firstTransactionId`) says whether that charge
+ * converts THIS subscription and whether it stands; `isTrial` says whether
+ * the conversion has landed — fulfilment clears the flag in the same write
+ * that moves the plan, so "still a trial" also covers a fulfilment in flight
+ * or one that failed and waits for its retry.
+ *
+ * Once the trial is converted, this sign-up's conversion stands only if its
+ * checkout was paid AND applied. Unpaid, refunded, or paid and withheld
+ * because another payment converted the trial first (fulfilled, but carrying
+ * the withheld mark — `isWithheldConversion`), or paid and not yet fulfilled —
+ * all are LOST. Fulfilment claims `fulfilledAt` before it clears the flag, so a
+ * trial this sign-up converted itself is never read as converted with the
+ * stamp still empty.
+ */
+export function trialConversionOf(
+  checkout: TrialConversionCheckout | undefined,
+  subscriptionId: string | null,
+  subscriptionIsTrial: boolean,
+): { readonly trialConversion?: 'PENDING' | 'LOST' } {
+  if (checkout === undefined || subscriptionId === null || checkout.subscriptionId !== subscriptionId) {
+    return {};
+  }
+  if (subscriptionIsTrial) return { trialConversion: 'PENDING' };
+  return checkout.status === TransactionStatus.COMPLETED &&
+    checkout.fulfilledAt !== null &&
+    !isWithheldConversion(checkout.gatewayData)
+    ? {}
+    : { trialConversion: 'LOST' };
 }
 
 function readSnapshotPlanId(snapshot: Prisma.JsonValue): string | null {

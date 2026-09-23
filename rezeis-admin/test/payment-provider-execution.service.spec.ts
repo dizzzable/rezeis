@@ -7,7 +7,7 @@ import {
   createVerify,
   generateKeyPairSync,
 } from 'node:crypto';
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 
 import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import {
@@ -23,6 +23,29 @@ import { CHECKOUT_LIFETIME_SECONDS } from '../src/modules/payments/constants/che
 import { PaymentProviderExecutionService } from '../src/modules/payments/services/payment-provider-execution.service';
 import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
 import { encryptGatewaySettingsForStorage } from '../src/modules/payments/utils/payment-gateway-settings.util';
+
+// With no cabinet address in the environment, a payer-facing address the
+// caller did not supply — the return page, a buyer email — is built on the
+// panel's `domain` (`createService`), as these cases expect. The two variables
+// are cleared so a developer's own environment cannot move them onto the
+// cabinet; `payments-payer-facing-addresses.spec.ts` covers both branches.
+const savedCabinetEnvironment = {
+  web: process.env.REIWA_WEB_BASE_URL,
+  miniApp: process.env.MINIAPP_CUSTOM_URL,
+};
+before(() => {
+  delete process.env.REIWA_WEB_BASE_URL;
+  delete process.env.MINIAPP_CUSTOM_URL;
+});
+after(() => {
+  for (const [name, value] of [
+    ['REIWA_WEB_BASE_URL', savedCabinetEnvironment.web],
+    ['MINIAPP_CUSTOM_URL', savedCabinetEnvironment.miniApp],
+  ] as const) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 describe('PaymentProviderExecutionService checkout execution', () => {
   it('creates YooKassa checkout requests with idempotence key and bounded result', async () => {

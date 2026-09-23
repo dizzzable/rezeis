@@ -37,8 +37,10 @@ import {
   PROVIDER_SUBSCRIPTION_GATEWAY_TYPES,
   PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
   ProviderSubscriptionTerms,
+  renewsOntoAnotherPlan,
   resolveProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
+import { describeRenewal, readPayerLocale } from '../utils/payer-facing-text.util';
 import { PaymentProviderExecutionService } from './payment-provider-execution.service';
 import { ProviderSubscriptionService } from './provider-subscription.service';
 import {
@@ -200,6 +202,7 @@ export class PaymentsRenewalCheckoutService {
     });
     const providerSubscriptionTerms = resolveRenewalProviderSubscription(input, gateway, priced);
     if (providerSubscriptionTerms !== null) {
+      await this.assertRenewsCurrentPlan(providerSubscriptionTerms);
       await this.providerSubscriptionService.assertNoLiveSubscriptionFor(
         providerSubscriptionTerms.subscriptionId,
       );
@@ -388,6 +391,13 @@ export class PaymentsRenewalCheckoutService {
       });
     }
 
+    // «Продление: Премиум, 30 дней», or a count for several — it was
+    // `RENEW x2`. Never throws (`readPayerLocale`), so it stays outside the
+    // submission window below.
+    const payerText = describeRenewal({
+      items: priced.items,
+      locale: await readPayerLocale(this.prismaService, priced.userId),
+    });
     let providerCheckout: Awaited<
       ReturnType<PaymentProviderExecutionService['createCheckout']>
     >;
@@ -400,7 +410,8 @@ export class PaymentsRenewalCheckoutService {
         return this.paymentProviderExecutionService.createCheckout({
           gateway,
           transaction,
-          description: `RENEW x${priced.items.length}`,
+          description: payerText.description,
+          title: payerText.title,
           successUrl: input.successUrl ?? null,
           failUrl: input.failUrl ?? null,
           paymentMethodId: chargedMethod?.providerMethodId ?? null,
@@ -710,6 +721,22 @@ export class PaymentsRenewalCheckoutService {
         },
       },
     });
+  }
+
+  /**
+   * Refuses a provider subscription on a renewal onto another plan — an
+   * archived plan's replacement, a plan chosen at renewal — before anything is
+   * created. See `renewsOntoAnotherPlan` for why the sweep would cancel it.
+   */
+  private async assertRenewsCurrentPlan(terms: ProviderSubscriptionTerms): Promise<void> {
+    if (terms.subscriptionId === null) return;
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: terms.subscriptionId },
+      select: { planSnapshot: true },
+    });
+    if (subscription !== null && renewsOntoAnotherPlan(subscription.planSnapshot, terms.planId)) {
+      throw autopayNotAvailable('PLAN_CHANGE');
+    }
   }
 
   private async assertPersistedRenewalPolicy(

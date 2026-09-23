@@ -386,6 +386,7 @@ export const en = {
         subscriptions_duplicate_pair_merged: 'Duplicate subscriptions merged',
         subscriptions_panel_link_reconciled: 'Panel links reconciled',
         payments_transaction_refund: 'Payment refunded',
+        payments_transaction_withheld_refund_recorded: 'Refund of an unapplied payment recorded',
         payments_webhook_replay_requested: 'Payment webhook replayed',
         payments_webhook_payload_revealed: 'Webhook payload revealed',
         payments_alert_test_sent: 'Test payment alert sent',

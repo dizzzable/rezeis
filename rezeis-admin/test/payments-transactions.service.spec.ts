@@ -8,6 +8,7 @@ import {
   PlanAvailability,
   PurchaseChannel,
   PurchaseType,
+  SubscriptionStatus,
   TransactionStatus,
 } from '@prisma/client';
 
@@ -373,6 +374,106 @@ describe('PaymentsTransactionsService', () => {
     assert.equal(state.transactionCreateCalls.length, 1);
   });
 
+  // «для автоматического списания» on Platega/RollyPay: the provider repeats
+  // the first charge's sum every period, and every later charge renews one
+  // subscription. A trial's conversion is priced like a new purchase — the
+  // plan's full price, the term from payment — so the provider may repeat it,
+  // and the later charges renew the converted trial. A change of a paid plan
+  // is still refused.
+  describe('a provider subscription on an UPGRADE', () => {
+    const upgradeToPlanOne = (sourceSubscriptionId: string) =>
+      ({
+        userId: 'user-1',
+        purchaseType: PurchaseType.UPGRADE,
+        sourceSubscriptionId,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.PLATEGA,
+        channel: PurchaseChannel.WEB,
+      }) satisfies CreateTransactionDraftDto;
+
+    it("is made on a trial's conversion, for the trial it converts", async () => {
+      const { service, state } = createService({
+        quoteResult: createProviderSubscriptionQuote('trial-sub'),
+        convertibleTrialId: 'trial-sub',
+        subscriptions: [{ id: 'trial-sub', userId: 'user-1', isTrial: true, status: SubscriptionStatus.EXPIRED }],
+      });
+
+      const draft = await service.createCheckoutDraft(upgradeToPlanOne('trial-sub'), { providerSubscription: true });
+
+      assert.equal(draft.purchaseType, PurchaseType.UPGRADE);
+      assert.equal(state.transactionCreateCalls.length, 1);
+      const created = state.transactionCreateCalls[0]!;
+      assert.equal(created.subscriptionId, 'trial-sub');
+      assert.equal(created.amount, '299');
+      // What the provider will repeat: the whole price for the whole term, and
+      // the subscription each later charge renews — the trial, from the start.
+      assert.deepStrictEqual((created.planSnapshot as Record<string, unknown>)['providerSubscription'], {
+        unit: 'month',
+        count: 1,
+        amount: 299,
+        durationDays: 30,
+        planId: 'plan-1',
+        subscriptionId: 'trial-sub',
+      });
+    });
+
+    const refused: ReadonlyArray<{
+      readonly name: string;
+      readonly subscriptions: ReadonlyArray<{ id: string; userId: string; isTrial: boolean; status: SubscriptionStatus }>;
+    }> = [
+      {
+        name: 'a change of a paid plan',
+        subscriptions: [{ id: 'source-sub', userId: 'user-1', isTrial: false, status: SubscriptionStatus.ACTIVE }],
+      },
+      {
+        name: 'a trial the operator froze, which the upgrade would lift',
+        subscriptions: [{ id: 'source-sub', userId: 'user-1', isTrial: true, status: SubscriptionStatus.DISABLED }],
+      },
+      {
+        name: "somebody else's trial",
+        subscriptions: [{ id: 'source-sub', userId: 'user-2', isTrial: true, status: SubscriptionStatus.ACTIVE }],
+      },
+    ];
+    for (const scenario of refused) {
+      it(`is refused on ${scenario.name}, before anything is written`, async () => {
+        const { service, state } = createService({
+          quoteResult: createProviderSubscriptionQuote('source-sub'),
+          subscriptions: scenario.subscriptions,
+        });
+
+        const error = await captureRejection(() =>
+          service.createCheckoutDraft(upgradeToPlanOne('source-sub'), { providerSubscription: true }),
+        );
+
+        assert.ok(error instanceof BadRequestException);
+        assert.deepStrictEqual(
+          [
+            (error.getResponse() as { code?: unknown }).code,
+            (error.getResponse() as { reason?: unknown }).reason,
+          ],
+          ['AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', 'PURCHASE_TYPE'],
+        );
+        assert.equal(state.transactionCreateCalls.length, 0);
+      });
+    }
+
+    it('leaves the ordinary payment of a paid plan change as it was', async () => {
+      const { service, state } = createService({
+        quoteResult: createProviderSubscriptionQuote('source-sub'),
+        subscriptions: [{ id: 'source-sub', userId: 'user-1', isTrial: false, status: SubscriptionStatus.ACTIVE }],
+      });
+
+      await service.createCheckoutDraft(upgradeToPlanOne('source-sub'));
+
+      assert.equal(state.transactionCreateCalls.length, 1);
+      assert.equal(
+        (state.transactionCreateCalls[0]!.planSnapshot as Record<string, unknown>)['providerSubscription'],
+        undefined,
+      );
+    });
+  });
+
   it('allows an ADDITIONAL draft when capacity remains', async () => {
     const { service, state } = createService({
       quoteResult: createEligibleQuote(),
@@ -478,6 +579,13 @@ function createService(input: {
   readonly capacityMax?: number;
   /** The trial a purchase must convert; none by default. */
   readonly convertibleTrialId?: string;
+  /** Subscription rows, as `subscription.findFirst` finds them by id and owner. */
+  readonly subscriptions?: ReadonlyArray<{
+    readonly id: string;
+    readonly userId: string;
+    readonly isTrial: boolean;
+    readonly status: SubscriptionStatus;
+  }>;
 }): {
   readonly service: PaymentsTransactionsService;
   readonly state: {
@@ -541,6 +649,14 @@ function createService(input: {
         return input.matchingUsers ?? [];
       },
     },
+    subscription: {
+      findFirst: async (args: { readonly where: { readonly id?: string; readonly userId?: string } }) =>
+        (input.subscriptions ?? []).find(
+          (subscription) =>
+            subscription.id === args.where.id &&
+            (args.where.userId === undefined || subscription.userId === args.where.userId),
+        ) ?? null,
+    },
   };
   const quoteService = {
     getQuote: async () => {
@@ -595,6 +711,29 @@ function createEligibleQuote(): QuoteResult {
       discountSource: 'PURCHASE',
     },
     warnings: [],
+  };
+}
+
+/**
+ * An UPGRADE of `subscriptionId` onto plan-1 for 30 days through Platega:
+ * 299 RUB, the plan's own price with no one-time promo — a sum the provider
+ * can repeat.
+ */
+function createProviderSubscriptionQuote(subscriptionId: string): QuoteResult {
+  const quote = createEligibleQuote();
+  return {
+    ...quote,
+    purchaseType: PurchaseType.UPGRADE,
+    selectedSubscriptionId: subscriptionId,
+    price: {
+      gatewayType: PaymentGatewayType.PLATEGA,
+      currency: Currency.RUB,
+      originalPrice: '299',
+      price: '299',
+      discountPercent: 0,
+      discountSource: 'NONE',
+    },
+    warnings: [{ code: 'UPGRADE_RESETS_EXPIRY', message: 'Upgrade starts immediately and resets the expiration date.' }],
   };
 }
 

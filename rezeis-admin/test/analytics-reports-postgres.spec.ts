@@ -779,6 +779,40 @@ run('business analytics on PostgreSQL', () => {
     assert.equal(observed.seriesEnd, 3);
   });
 
+  it('dates a converted trial from the payment that converted it, never from a conversion withheld for refund', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      await customer(tx, 'twice', { createdAt: daysAgo(40) });
+      const trial = await tx.subscription.create({
+        data: { userId: 'twice', planSnapshot: PRO, createdAt: daysAgo(40), startedAt: daysAgo(10), expiresAt: daysAhead(20) },
+      });
+      await trialClaim(tx, 'twice', trial.id, daysAgo(40));
+      const converter = await pay(tx, {
+        userId: 'twice',
+        subscriptionId: trial.id,
+        purchaseType: 'UPGRADE',
+        amount: '300',
+        createdAt: daysAgo(10),
+        fulfilledAt: daysAgo(10),
+        planSnapshot: PRO,
+      });
+      // Drafted in a tab left open since before the window, paid after the payment above had converted the trial:
+      // COMPLETED, applied to nothing, due back to the payer (`PaymentSubscriptionMutationService`, withheld).
+      await pay(tx, {
+        userId: 'twice',
+        subscriptionId: trial.id,
+        purchaseType: 'UPGRADE',
+        amount: '300',
+        createdAt: daysAgo(35),
+        fulfilledAt: daysAgo(9),
+        planSnapshot: PRO,
+        gatewayData: { conversionWithheldAt: daysAgo(9).toISOString(), trialConvertedByPaymentId: converter.paymentId },
+      });
+      return (await service.getAdvancedReport(30)).metrics.activeSubscriptions;
+    });
+    // Paid from its conversion ten days ago: in force now, and not yet when the window opened.
+    assert.deepEqual(observed, { current: 1, previous: 0 });
+  });
+
   it('files a trial turned paid as a new subscription, and only a change of a subscription that was already paid for as a change', async () => {
     const observed = await onCleanSlate(async (tx, service) => {
       // The panel converts a trial by upgrading the trial row: a customer with an active trial cannot buy NEW.
@@ -829,6 +863,52 @@ run('business analytics on PostgreSQL', () => {
       ['new', 600, 2],
       ['renewal', 0, 0],
       ['change', 350, 2],
+      ['addon', 0, 0],
+    ]);
+  });
+
+  it('files the payment that converted a trial as the new subscription, never a conversion withheld for refund', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      await customer(tx, 'twice', { createdAt: daysAgo(40) });
+      const trial = await tx.subscription.create({
+        data: { userId: 'twice', planSnapshot: PRO, createdAt: daysAgo(40), startedAt: daysAgo(5), expiresAt: daysAhead(25) },
+      });
+      await trialClaim(tx, 'twice', trial.id, daysAgo(40));
+      const converter = await pay(tx, {
+        userId: 'twice',
+        subscriptionId: trial.id,
+        purchaseType: 'UPGRADE',
+        amount: '300',
+        createdAt: daysAgo(5),
+        fulfilledAt: daysAgo(5),
+        planSnapshot: PRO,
+      });
+      // Drafted in the previous window, paid after the payment above had converted the trial: withheld —
+      // money held until it is refunded, and the subscription's first money all the same by `created_at`.
+      await pay(tx, {
+        userId: 'twice',
+        subscriptionId: trial.id,
+        purchaseType: 'UPGRADE',
+        amount: '250',
+        createdAt: daysAgo(35),
+        fulfilledAt: daysAgo(4),
+        planSnapshot: PRO,
+        gatewayData: { conversionWithheldAt: daysAgo(4).toISOString(), trialConvertedByPaymentId: converter.paymentId },
+      });
+      const overview = await service.getAdvancedReport(30);
+      const revenue = await service.getRevenueReport(30);
+      return {
+        newSubscriptions: overview.metrics.newSubscriptions,
+        kinds: revenue.byKind.map((kind) => [kind.kind, kind.figure.value, kind.payments]),
+      };
+    });
+    // The conversion five days ago is the new subscription; the withheld draft made none in its own window.
+    assert.equal(observed.newSubscriptions.current, 1);
+    assert.equal(observed.newSubscriptions.previous, 0);
+    assert.deepEqual(observed.kinds, [
+      ['new', 300, 1],
+      ['renewal', 0, 0],
+      ['change', 0, 0],
       ['addon', 0, 0],
     ]);
   });

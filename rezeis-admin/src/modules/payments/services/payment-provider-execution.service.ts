@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { isIP } from 'node:net';
-import { BadRequestException, Inject, Injectable, NotFoundException, ServiceUnavailableException, Optional } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException, ServiceUnavailableException, Optional } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { Currency, PaymentGateway, PaymentGatewayType, Transaction } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
@@ -34,17 +34,19 @@ import {
   rollypayKopecks,
   rollypayPayerId,
 } from '../utils/rollypay-subscription.util';
+import { ReiwaAdvertisingLinkConfigService } from '../../advertising/services/reiwa-advertising-link-config.service';
 import {
   buildResultUrl,
   buildWebhookUrl,
+  explicitUrl,
   md5,
+  payerMailHost,
+  type PayerFacingSite,
   sha1,
   readOptionalString,
   readRecord,
   requireSetting,
   requireYookassaSecretKey,
-  resolveFailUrl,
-  resolveSuccessUrl,
   truncate,
 } from './payment-provider-execution.helpers';
 import { PaymentWebhookPayloadRedactionService } from './payment-webhook-payload-redaction.service';
@@ -115,6 +117,10 @@ interface ProviderCheckoutResult {
 
 @Injectable()
 export class PaymentProviderExecutionService {
+  private readonly logger = new Logger(PaymentProviderExecutionService.name);
+  /** The panel-domain fallback of {@link payerFacingSite} has been announced. */
+  private panelFallbackAnnounced = false;
+
   public constructor(
     private readonly httpService: HttpService,
     @Inject(paymentsConfig.KEY)
@@ -130,6 +136,14 @@ export class PaymentProviderExecutionService {
     @Optional()
     @Inject(appConfig.KEY)
     private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
+    /**
+     * The one resolver of the cabinet's address (`ReiwaPublicLinksModule`),
+     * which the ad links and the letters use too. Not `@Optional()`: without
+     * it the app fails to boot, where an optional one would quietly send
+     * every payer to the panel. Absent only in specs built with `new`, where
+     * no cabinet address is known.
+     */
+    private readonly cabinetLinks?: ReiwaAdvertisingLinkConfigService,
   ) {}
 
   /**
@@ -160,7 +174,13 @@ export class PaymentProviderExecutionService {
   public async createCheckout(input: {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
+    /** What the payer reads on the provider's side (`payer-facing-text.util.ts`); each gateway cuts it to its field. */
     readonly description: string;
+    /**
+     * A shorter line for a provider that shows a title of its own — Telegram
+     * Stars, 1–32 characters. Without it the description is cut to fit.
+     */
+    readonly title?: string | null;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
     /**
@@ -303,7 +323,7 @@ export class PaymentProviderExecutionService {
       // Merchant-initiated charge with a previously saved instrument.
       payload.payment_method_id = paymentMethodId;
     } else {
-      const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+      const resultUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
       payload.confirmation = {
         type: 'redirect',
         return_url: resultUrl,
@@ -387,8 +407,8 @@ export class PaymentProviderExecutionService {
     const secret = requireSetting(settings, 'secret');
     const methodChoice = resolvePlategaPaymentMethod(settings);
     const isProviderChoice = methodChoice.kind === 'PROVIDER_CHOICE';
-    const successResultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failResultUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successResultUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failResultUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const subscriptionTerms = readProviderSubscriptionTerms(input.transaction.planSnapshot);
     if (subscriptionTerms !== null) {
       // Re-checked here, not only when the draft was made: a draft outlives the
@@ -516,7 +536,7 @@ export class PaymentProviderExecutionService {
     const settings = readGatewaySettings(input.gateway.settings);
     const merchantId = requireSetting(settings, 'merchantId');
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const resultUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const payload = {
       amount: input.transaction.amount.toString(),
       currency: input.transaction.currency === Currency.XTR ? Currency.USD : input.transaction.currency,
@@ -571,7 +591,7 @@ export class PaymentProviderExecutionService {
     const settings = readGatewaySettings(input.gateway.settings);
     const merchantId = requireSetting(settings, 'merchantId');
     const apiKey = requireSetting(settings, 'apiKey');
-    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const resultUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(input.gateway.type);
     const payload = {
       amount: input.transaction.amount.toString(),
@@ -627,7 +647,7 @@ export class PaymentProviderExecutionService {
     const apiToken = requireSetting(settings, 'apiToken');
     const isTestnet = settings['isTestnet'] === true;
     const baseUrl = isTestnet ? 'https://testnet-pay.crypt.bot/api' : 'https://pay.crypt.bot/api';
-    const resultUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const resultUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     // Our gateway currency is already a CryptoPay-supported crypto asset (the
     // supported-currencies catalog enforces this). USD is mapped to USDT
     // defensively in case an operator left a stale fiat currency on the row.
@@ -763,6 +783,7 @@ export class PaymentProviderExecutionService {
     readonly gateway: PaymentGateway;
     readonly transaction: Transaction;
     readonly description: string;
+    readonly title?: string | null;
     readonly successUrl?: string | null;
     readonly failUrl?: string | null;
   }): Promise<ProviderCheckoutResult> {
@@ -796,7 +817,9 @@ export class PaymentProviderExecutionService {
       // Refused BEFORE the call, naming the actual number. Rounding would be
       // the wrong kindness: it silently charges something other than the price
       // on the plan, in either direction.
-      title: truncate(input.description, 32),
+      // 1–32 characters. The caller's title is fitted to that already; the
+      // description cut to it is the fallback for a caller that sends none.
+      title: truncate(input.title?.trim() || input.description, 32),
       description: truncate(input.description, 255),
       payload: input.transaction.paymentId,
       currency: 'XTR',
@@ -853,8 +876,8 @@ export class PaymentProviderExecutionService {
     const vat = this.readAntilopayVat(settings);
     const customerIp = this.readAntilopayCustomerIp(input.customerIp);
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
 
     const payload = {
       project_identificator: projectIdentificator,
@@ -876,7 +899,7 @@ export class PaymentProviderExecutionService {
         // is also the only handle tying a payer to a dispute; the single shared
         // literal that stood here («customer@rezeis.local») threw that away and
         // was a plausible error 12 («Данные Покупателя содержат ошибку») besides.
-        email: this.resolveCustomerEmail(input),
+        email: await this.resolveCustomerEmail(input),
         // Documented as optional, yet error 32 («Данные Покупателя должны
         // содержать ip») exists — some project configurations reject a buyer
         // block without it. Sent when the caller knows the address; never
@@ -995,8 +1018,8 @@ export class PaymentProviderExecutionService {
     const shopId = requireSetting(settings, 'shopId');
     const secretKey = requireSetting(settings, 'secretKey');
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.OVERPAY);
 
     const payload = {
@@ -1064,8 +1087,8 @@ export class PaymentProviderExecutionService {
     const shopId = requireSetting(settings, 'shopId');
     const apiKey = requireSetting(settings, 'apiKey');
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.PAYPALYCH);
 
     const payload = {
@@ -1123,8 +1146,8 @@ export class PaymentProviderExecutionService {
     const apiToken = requireSetting(settings, 'apiToken');
     const serviceId = this.readRiopayEngineServiceId(settings);
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.RIOPAY);
 
     const payload = {
@@ -1170,8 +1193,8 @@ export class PaymentProviderExecutionService {
     const apiToken = requireSetting(settings, 'apiToken');
     const serviceId = this.readRiopayEngineServiceId(settings);
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const webhookUrl = this.buildWebhookUrl(PaymentGatewayType.VALUTIX);
 
     const payload = {
@@ -1235,8 +1258,8 @@ export class PaymentProviderExecutionService {
     const settings = readGatewaySettings(input.gateway.settings);
     const apiKey = requireSetting(settings, 'apiKey');
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
 
     const payload = {
       amount: Number(input.transaction.amount),
@@ -1284,8 +1307,8 @@ export class PaymentProviderExecutionService {
     const apiKey = requireSetting(settings, 'apiKey');
     const shopId = requireSetting(settings, 'shopId');
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const callbackUrl = this.buildWebhookUrl(PaymentGatewayType.AURAPAY);
 
     const payload = {
@@ -1339,8 +1362,8 @@ export class PaymentProviderExecutionService {
       return this.createRollypaySubscription(input.transaction, settings, apiKey, subscriptionTerms);
     }
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
-    const failUrl = this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
 
     const payload = {
       amount: input.transaction.amount.toString(),
@@ -1492,14 +1515,14 @@ export class PaymentProviderExecutionService {
     const mid = requireSetting(settings, 'mid');
     const secretToken = requireSetting(settings, 'secretToken');
 
-    const successUrl = this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
+    const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     // `client_email` is required and is covered by the signature, so it cannot
     // simply be dropped. SeverPay itself sanctions a synthetic address — the
     // docs tell Telegram-authenticated services to derive one from the Telegram
     // identity — but the domain still has to exist, and `${userId}@rezeis.local`
     // did not. What the provider does with the address beyond identifying the
     // buyer is not documented either way, so this stays routable on principle.
-    const customerEmail = this.resolveCustomerEmail(input);
+    const customerEmail = await this.resolveCustomerEmail(input);
     const salt = crypto.randomBytes(8).toString('hex');
 
     const baseBody: Record<string, unknown> = {
@@ -1567,10 +1590,11 @@ export class PaymentProviderExecutionService {
     // it as the buyer's own, and it is the invoice recipient. Sending
     // `${userId}@rezeis.local` therefore did not merely look wrong — `.local`
     // is non-routable, so no Lava buyer could ever receive their invoice, for
-    // every payment, silently. Failing on an unconfigured public domain (the
-    // fallback's only new failure mode on this gateway) is the better answer
-    // than posting another address that provably goes nowhere.
-    const customerEmail = this.resolveCustomerEmail(input);
+    // every payment, silently. Failing when there is no domain at all, neither
+    // the cabinet's nor the panel's (the fallback's only failure mode on this
+    // gateway), is the better answer than posting another address that
+    // provably goes nowhere.
+    const customerEmail = await this.resolveCustomerEmail(input);
 
     const payload = {
       email: customerEmail,
@@ -1609,7 +1633,8 @@ export class PaymentProviderExecutionService {
 
   /**
    * The payer address to put on the invoice: the caller's when it has one,
-   * otherwise a per-payment address under the operator's own public domain.
+   * otherwise a per-payment address under the payer-facing site's host
+   * ({@link payerFacingSite}: the cabinet's, or the panel's without it).
    *
    * The real account address does not reach this layer yet (see
    * `createCheckout`), so the fallback carries the whole burden, and the one
@@ -1620,59 +1645,73 @@ export class PaymentProviderExecutionService {
    * than the user because a provider that echoes the buyer block back to us
    * (Antilopay's callback does) then names one payment, not just an account.
    */
-  private resolveCustomerEmail(input: {
+  private async resolveCustomerEmail(input: {
     readonly transaction: Transaction;
     readonly customerEmail?: string | null;
-  }): string {
+  }): Promise<string> {
     const providedEmail = input.customerEmail?.trim();
     if (providedEmail !== undefined && providedEmail.length > 0) {
       return providedEmail;
     }
-    return `${input.transaction.paymentId}@${this.resolvePublicMailDomain()}`;
+    return `${input.transaction.paymentId}@${payerMailHost(await this.payerFacingSite())}`;
   }
 
   /**
-   * Bare host of the operator's configured public domain — the one routable
-   * name this service is sure of. Scheme, port and path are stripped so the
-   * setting can be the same `https://host` URL the URL builders take. Missing
-   * gives the same 503 those builders give, rather than a made-up address.
+   * Where a payer-facing address the caller did not supply is built — the
+   * return page, the buyer address on an invoice. Asked only when one is
+   * needed, so a checkout whose caller named its page asks nothing.
+   *
+   * The cabinet, when its address is known — from the one resolver the ad
+   * links and the letters use (`ReiwaPublicLinksModule`: what the cabinet
+   * publishes, then `REIWA_WEB_BASE_URL`, then `MINIAPP_CUSTOM_URL`). The
+   * panel's own domain there handed every payer the address of the admin
+   * panel.
+   *
+   * Without it, exactly what these addresses always were: the panel's
+   * `REZEIS_DOMAIN`. The address is optional — both variables ship commented
+   * out — and refusing instead would stop every Antilopay, SeverPay and Lava
+   * payment on such an install; a resolver that fails counts as not knowing.
+   * The fallback is said once, at warn level, the first time it is taken; the
+   * service is a singleton, so once per process.
    */
-  private resolvePublicMailDomain(): string {
-    const domain = this.configuration.domain;
-    const host =
-      domain === null
-        ? ''
-        : domain.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0].split(':')[0].trim().toLowerCase();
-    if (host.length === 0) {
-      throw new ServiceUnavailableException('Admin public base URL is not configured');
+  private async payerFacingSite(): Promise<PayerFacingSite> {
+    const cabinet = this.cabinetLinks === undefined
+      ? null
+      : await this.cabinetLinks.resolveCabinetWebBaseUrl().catch(() => null);
+    if (cabinet !== null) {
+      return { kind: 'CABINET', baseUrl: cabinet };
     }
-    return host;
+    if (!this.panelFallbackAnnounced) {
+      this.panelFallbackAnnounced = true;
+      this.logger.warn(
+        "The cabinet's address is not known (the cabinet publishes none; REIWA_WEB_BASE_URL and " +
+          "MINIAPP_CUSTOM_URL are unset): payer-facing payment addresses use the panel's domain (REZEIS_DOMAIN) — " +
+          'the return page when the cabinet names none, and the payment-…@<host> buyer address on Antilopay, ' +
+          "SeverPay and Lava invoices. Set REIWA_WEB_BASE_URL to the cabinet's address so payers are not shown " +
+          "the admin panel's.",
+      );
+    }
+    return { kind: 'PANEL', domain: this.configuration.domain };
   }
 
   // ── URL-resolution thin wrappers ────────────────────────────────────────
   // These delegate to the helpers in `payment-provider-execution.helpers.ts`
   // while keeping the call sites inside the per-gateway methods readable
-  // (`this.resolveSuccessUrl(...)`).
+  // (`await this.resolveSuccessUrl(...)`). Where the payer RETURNS is the
+  // payer-facing site; where the provider calls BACK stays the panel
+  // (`buildWebhookUrl`).
 
-  private resolveSuccessUrl(paymentId: string, override?: string | null): string {
-    return resolveSuccessUrl(this.configuration.domain, paymentId, override);
+  private async resolveSuccessUrl(paymentId: string, override?: string | null): Promise<string> {
+    return explicitUrl(override) ?? buildResultUrl(await this.payerFacingSite(), paymentId);
   }
 
-  private resolveFailUrl(
+  /** The failure page: the caller's, else the success page as it resolves. */
+  private async resolveFailUrl(
     paymentId: string,
     failOverride?: string | null,
     successOverride?: string | null,
-  ): string {
-    return resolveFailUrl(
-      this.configuration.domain,
-      paymentId,
-      failOverride,
-      successOverride,
-    );
-  }
-
-  private buildResultUrl(paymentId: string): string {
-    return buildResultUrl(this.configuration.domain, paymentId);
+  ): Promise<string> {
+    return explicitUrl(failOverride) ?? (await this.resolveSuccessUrl(paymentId, successOverride));
   }
 
   private buildWebhookUrl(gatewayType: PaymentGatewayType): string {

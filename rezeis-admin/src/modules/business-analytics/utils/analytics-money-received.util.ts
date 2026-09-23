@@ -157,6 +157,14 @@ function earlierSql(): Prisma.Sql {
  * first plan change in the panel stays a change: their money arrived before
  * the panel could say for what. An UPGRADE with no subscription recorded, or
  * one itself imported, keeps the donor's word for it: a change.
+ *
+ * A trial's conversion withheld for refund (`gateway_data.conversionWithheldAt`,
+ * `payments/utils/trial-conversion.util.ts`) converted nothing: another
+ * payment did. So it is never a subscription's earlier money — its draft can
+ * be days older than the payment that converted the trial, which it would turn
+ * into a "change" — and never a new subscription itself. Until its refund
+ * takes it out of money received it is filed as a change, so every breakdown
+ * still adds up to the total.
  */
 export function purchaseKindSql(): Prisma.Sql {
   return Prisma.sql`(CASE
@@ -165,11 +173,13 @@ export function purchaseKindSql(): Prisma.Sql {
     WHEN t."purchase_type" = 'UPGRADE' THEN (CASE
       WHEN t."subscription_id" IS NOT NULL
        AND t."plan_snapshot"->>'importedFrom' IS NULL
+       AND t."gateway_data"->>'conversionWithheldAt' IS NULL
        AND NOT EXISTS (
          SELECT 1
            FROM "transactions" e
           WHERE e."user_id" = t."user_id"
             AND ${moneyReceivedSql('e')}
+            AND e."gateway_data"->>'conversionWithheldAt' IS NULL
             AND ${earlierSql()}
             AND (e."subscription_id" = t."subscription_id"
                  OR EXISTS (SELECT 1 FROM "transaction_items" i WHERE i."transaction_id" = e."id" AND i."subscription_id" = t."subscription_id")

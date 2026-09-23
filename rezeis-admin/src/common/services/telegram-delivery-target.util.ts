@@ -88,6 +88,9 @@ export interface TelegramEventFilterShape {
  * before — the catch-all cannot widen it, because the operator was offered a
  * tick-box for it and did not tick it. Only a type outside `knownTypes` can
  * fall through to `UNREGISTERED_EVENTS_SENTINEL`.
+ *
+ * The one exception is {@link DELIVERED_WITH}: a type split out of another is
+ * also delivered to whoever ticked the one it came from.
  */
 export function isEventTelegramAllowed(
   eventType: string,
@@ -96,9 +99,26 @@ export function isEventTelegramAllowed(
   if (eventType === 'settings.telegram.test') return true;
   if (filter.eventsMode !== 'selected') return true;
   if (filter.events.includes(eventType)) return true;
+  if ((DELIVERED_WITH.get(eventType) ?? []).some((origin) => filter.events.includes(origin))) return true;
   if (filter.knownTypes.has(eventType)) return false;
   return filter.events.includes(UNREGISTERED_EVENTS_SENTINEL);
 }
+
+/**
+ * Types split out of another, delivered in `selected` mode to an operator who
+ * ticked either. A saved selection never ticks a new type, so without this the
+ * split would silence the operators who asked for the cards it used to be.
+ *
+ * `payment.withheld` was raised as a WARNING `payment.completed` («Платёж
+ * получен, нужна проверка») until it got a type of its own, so everyone who
+ * ticked `payment.completed` keeps getting it. Its refund was raised as
+ * `payment.refunded` or `payment.refund_partial`, so those two keep reaching
+ * it too — and whoever follows `payment.withheld` hears how it ended.
+ */
+export const DELIVERED_WITH: ReadonlyMap<string, readonly string[]> = new Map([
+  ['payment.withheld', ['payment.completed']],
+  ['payment.withheld_refunded', ['payment.refunded', 'payment.refund_partial', 'payment.withheld']],
+]);
 
 /**
  * The forum topic an event's category is mapped to.

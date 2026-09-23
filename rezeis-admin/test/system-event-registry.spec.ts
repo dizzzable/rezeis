@@ -99,6 +99,8 @@ const NEWLY_CATALOGUED: readonly string[] = [
   'payment.method_saved',
   'payment.method_unbound',
   'payment.notified_amount_short',
+  'payment.withheld',
+  'payment.withheld_refunded',
   'payment.refund_partial',
   'payment.refunded',
   'promocode.archived',

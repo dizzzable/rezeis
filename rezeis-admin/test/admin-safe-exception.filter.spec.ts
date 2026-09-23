@@ -12,9 +12,15 @@ import {
 
 import {
   AdminSafeExceptionFilter,
+  CODES_CARRYING_REASON,
   CODES_CARRYING_REAUTH_FACTOR,
   SAFE_PRODUCT_CODES,
+  SAFE_REFUSAL_REASONS,
 } from '../src/common/filters/admin-safe-exception.filter';
+import {
+  autopayNotAvailable,
+  PROVIDER_SUBSCRIPTION_REFUSALS,
+} from '../src/modules/payments/utils/provider-subscription-terms.util';
 import {
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
@@ -506,6 +512,70 @@ describe('AdminSafeExceptionFilter', () => {
     const body = assertResponseBody(captured.body);
     assert.equal(body.message, 'Request failed');
     assert.equal(JSON.stringify(body).includes('evil.example'), false);
+  });
+
+  /**
+   * «для автоматического списания» refused: one code, many reasons, and one
+   * reason — a sign-up for the same trial still waiting for the bank — asks the
+   * buyer for the opposite of the rest. The reason was dropped here, so the
+   * cabinet could only offer the ordinary payment, which converts the trial a
+   * second time. The panel's own throw, through the filter.
+   */
+  it('forwards the reason of an autopay refusal beside its unchanged code', () => {
+    const captured = runFilter(autopayNotAvailable('PENDING_SIGN_UP'), {
+      originalUrl: '/api/internal/payments/checkout',
+      headers: {},
+    });
+
+    assert.equal(captured.statusCode, 400);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', 'an older cabinet still branches on the code');
+    assert.equal(body.errorCode, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE');
+    assert.equal(body.reason, 'PENDING_SIGN_UP');
+  });
+
+  it('drops a reason outside the allowlist, and a reason on a code that declares none', () => {
+    const outside = assertResponseBody(
+      runFilter(
+        new BadRequestException({
+          code: 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE',
+          reason: 'postgres://admin:secret@db.internal/rezeis',
+          message: 'Automatic charging is not available for this purchase.',
+        }),
+        { originalUrl: '/api/internal/payments/checkout', headers: {} },
+      ).body,
+    );
+    assert.equal(outside.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE');
+    assert.equal('reason' in outside, false);
+    assert.equal(JSON.stringify(outside).includes('secret'), false);
+
+    const undeclared = assertResponseBody(
+      runFilter(
+        new BadRequestException({
+          code: 'SUBSCRIPTION_LIMIT_REACHED',
+          reason: 'PENDING_SIGN_UP',
+          message: 'The user has reached the maximum number of active subscriptions.',
+        }),
+        { originalUrl: '/api/internal/payments/checkout', headers: {} },
+      ).body,
+    );
+    assert.equal(undeclared.code, 'SUBSCRIPTION_LIMIT_REACHED');
+    assert.equal('reason' in undeclared, false);
+  });
+
+  it('allowlists exactly the reasons the panel refuses autopay with, on an allowlisted code', () => {
+    assert.deepEqual([...SAFE_REFUSAL_REASONS].sort(), [...PROVIDER_SUBSCRIPTION_REFUSALS].sort());
+    assert.deepEqual(
+      [...CODES_CARRYING_REASON].filter((code) => !SAFE_PRODUCT_CODES.has(code)),
+      [],
+      'a code listed only in CODES_CARRYING_REASON forwards neither its code nor its reason',
+    );
+    for (const reason of PROVIDER_SUBSCRIPTION_REFUSALS) {
+      const body = assertResponseBody(
+        runFilter(autopayNotAvailable(reason), { originalUrl: '/api/internal/payments/checkout', headers: {} }).body,
+      );
+      assert.equal(body.reason, reason);
+    }
   });
 
   it('forwards RENEWAL_ITEM_NOT_PRICEABLE, the renewal refusal the cabinet answered with a 500', () => {

@@ -221,3 +221,4 @@ jobs:
           test/yookassa-autopay-approved-migration-postgres.spec.ts
           test/provider-subscriptions-postgres.spec.ts
           test/user-full-deletion-postgres.spec.ts
+          test/payments-withheld-conversion-postgres.spec.ts

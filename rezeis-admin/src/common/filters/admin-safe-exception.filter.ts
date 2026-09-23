@@ -40,6 +40,12 @@ interface SafeErrorResponse {
    * `extractSafeMinWithdrawalAmount`.
    */
   minWithdrawalAmount?: number;
+  /**
+   * Why a refusal was made, where the client answers the reasons differently.
+   * Carried only by the codes in `CODES_CARRYING_REASON`, and only with one of
+   * the values in `SAFE_REFUSAL_REASONS` — see `extractSafeReason`.
+   */
+  reason?: string;
   error?: string;
 }
 
@@ -100,7 +106,9 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // «для автоматического списания» refused for this purchase (a promo price,
   // kopecks, a term the provider has no period for, add-ons, several
   // subscriptions, or approval switched off since the list loaded). The cabinet
-  // answers it by offering the ordinary payment. `provider-subscription-terms.util.ts`.
+  // answers it by offering the ordinary payment — except for the one reason
+  // that asks the opposite, which is why its reason rides along
+  // (`CODES_CARRYING_REASON`). `provider-subscription-terms.util.ts`.
   'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE',
   'PARTNER_BALANCE_DISABLED',
   'PARTNER_BALANCE_NOT_AVAILABLE',
@@ -449,6 +457,45 @@ export const CODES_CARRYING_MIN_WITHDRAWAL_AMOUNT: ReadonlySet<string> = new Set
   'WITHDRAWAL_BELOW_MINIMUM',
 ]);
 /**
+ * Codes whose refusal names its reason. Same subset rule as the sets above, on
+ * a fifth field: a code listed only here forwards nothing.
+ *
+ * «для автоматического списания» refused for a purchase is ONE code for many
+ * reasons, and one of them asks the buyer for the opposite of the rest: with
+ * `PENDING_SIGN_UP` another sign-up converting the same trial still waits for
+ * the bank, and the ordinary payment the other reasons point to would convert
+ * the trial twice. The cabinet can only tell them apart by the reason. The code
+ * itself is unchanged, so a cabinet that reads no reason answers as it did.
+ */
+export const CODES_CARRYING_REASON: ReadonlySet<string> = new Set<string>([
+  'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE',
+]);
+/**
+ * And the values that field may hold: every reason the panel refuses
+ * `AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE` with (`ProviderSubscriptionRefusal`,
+ * `payments/utils/provider-subscription-terms.util.ts`). Restated as literals,
+ * for the reason stated on the `PLAN_*` block: an allowlist that imports the set
+ * it gates admits every future member automatically.
+ * `admin-safe-exception.filter.spec.ts` checks the correspondence by value. A
+ * reason outside this list leaves nothing behind.
+ */
+export const SAFE_REFUSAL_REASONS: ReadonlySet<string> = new Set<string>([
+  'NOT_APPROVED',
+  'GATEWAY',
+  'PURCHASE_TYPE',
+  'TRIAL',
+  'CURRENCY',
+  'DISCOUNT',
+  'DURATION',
+  'AMOUNT',
+  'ITEMS',
+  'ADD_ONS',
+  'ALREADY_ACTIVE',
+  'PENDING_SIGN_UP',
+  'PLAN',
+  'PLAN_CHANGE',
+]);
+/**
  * Caps on the list, so a refusal cannot become a payload.
  *
  * Twenty matches `MAX_REPORTED_ISSUES` in `connect-page.service.ts`, which is
@@ -600,6 +647,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       const issues = extractSafeIssues(payload);
       const holdUntil = extractSafeHoldUntil(payload);
       const minWithdrawalAmount = extractSafeMinWithdrawalAmount(payload);
+      const reason = extractSafeReason(payload);
       return {
         timestamp,
         path,
@@ -614,6 +662,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
         ...(issues ? { issues } : {}),
         ...(holdUntil ? { holdUntil } : {}),
         ...(minWithdrawalAmount !== undefined ? { minWithdrawalAmount } : {}),
+        ...(reason ? { reason } : {}),
         ...(error ? { error } : {}),
       };
     }
@@ -756,6 +805,19 @@ function extractSafeHoldUntil(
   if (Number.isNaN(instant.getTime())) return undefined;
   const serialised = instant.toISOString();
   return serialised === candidate ? serialised : undefined;
+}
+
+/**
+ * The `reason` passthrough, gated twice like `factor`: the code must be one that
+ * declares it carries a reason, and the value must be one of the allowlisted
+ * reasons. What is written is the allowlisted value the body matched.
+ */
+function extractSafeReason(
+  payload: { readonly code: string; readonly body: Record<string, unknown> } | undefined,
+): string | undefined {
+  if (!payload || !CODES_CARRYING_REASON.has(payload.code)) return undefined;
+  const candidate = payload.body.reason;
+  return typeof candidate === 'string' && SAFE_REFUSAL_REASONS.has(candidate) ? candidate : undefined;
 }
 
 /**

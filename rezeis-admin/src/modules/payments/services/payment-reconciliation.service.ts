@@ -38,11 +38,14 @@ import {
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import {
+  isRefundReversalClaimHeld,
   lockTransactionRefundLedger,
   readRefundLedger,
   readRefundedTotal,
+  REFUND_REVERSAL_CLAIMED_AT_KEY,
 } from '../utils/payment-refund-ledger.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
+import { isTrialConversionSnapshot, isWithheldConversion } from '../utils/trial-conversion.util';
 import { enqueueSyncJobsDeferringFailure } from './payment-fulfillment-claim.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
@@ -150,18 +153,25 @@ export class PaymentReconciliationService {
         transaction.status === TransactionStatus.COMPLETED &&
         transaction.fulfilledAt !== null
       ) {
-        // Crash recovery only: NEW payments claim fulfilledAt before
-        // applyCompleted stamps subscriptionId. A *stale* claim (lease expired)
-        // with no subscription means provision never finished — release and
-        // fall through. A *fresh* claim means checkout is still provisioning;
-        // do NOT clear it or we race double-fulfill with the live path.
+        // Crash recovery only: a payment that CREATES its subscription — NEW,
+        // and ADDITIONAL (a second subscription, or an add-on) — claims
+        // fulfilledAt before applyCompleted stamps subscriptionId, and its draft
+        // records none, so a claim without one never finished. A *stale* claim
+        // (lease expired) is released and falls through. A *fresh* claim means
+        // checkout is still provisioning; do NOT clear it or we race
+        // double-fulfill with the live path. ADDITIONAL joined NEW once its
+        // draft stopped recording the buyer's latest subscription: before, the
+        // claim carried that id and read as finished, and a crash between claim
+        // and commit left the payment acknowledged and undelivered for good.
         const claimAgeMs =
           transaction.fulfilledAt instanceof Date
             ? Date.now() - transaction.fulfilledAt.getTime()
             : Number.POSITIVE_INFINITY;
         const STALE_CLAIM_MS = 2 * 60 * 1000;
+        const createsItsSubscription =
+          transaction.purchaseType === 'NEW' || transaction.purchaseType === 'ADDITIONAL';
         if (
-          transaction.purchaseType === 'NEW' &&
+          createsItsSubscription &&
           transaction.subscriptionId === null &&
           claimAgeMs >= STALE_CLAIM_MS
         ) {
@@ -175,7 +185,7 @@ export class PaymentReconciliationService {
             data: { fulfilledAt: null },
           });
         } else if (
-          transaction.purchaseType === 'NEW' &&
+          createsItsSubscription &&
           transaction.subscriptionId === null &&
           claimAgeMs < STALE_CLAIM_MS
         ) {
@@ -229,8 +239,13 @@ export class PaymentReconciliationService {
             `not revived (${paidAgain ? 'the provider reports it paid after the refund' : 'no new claim of payment from the provider'})`,
         );
         if (paidAgain) {
+          // A withheld payment's money is the operator's business alone — no
+          // sale or refund of it was ever announced — so it is told as one more
+          // `payment.withheld` (operator-only), not as a mismatch every rule and
+          // integration bound to one would hear.
+          const withheld = isWithheldConversion(transaction.gatewayData);
           this.systemEvents.warn(
-            EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
+            withheld ? EVENT_TYPES.PAYMENT_WITHHELD : EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
             'PAYMENT',
             // Operator-facing detail lives in the metadata, not the message: an
             // event type can be bound to a customer email template, whose
@@ -246,6 +261,7 @@ export class PaymentReconciliationService {
               providerStatus: event.eventStatus,
               paidAfterRefund: true,
               needsManualReview: true,
+              ...(withheld ? { conversionWithheld: true } : {}),
             },
           );
         }
@@ -560,6 +576,19 @@ export class PaymentReconciliationService {
       );
       return;
     }
+    // Nor for a trial's conversion that was withheld — received after another
+    // payment converted the trial, applied to nothing, waiting for the
+    // operator's refund (`PaymentSubscriptionMutationService`, "A TRIAL
+    // CONVERTS ONCE"). Nothing was sold: no commission, no referral reward, no
+    // cashback, no «Мой налог» income, no ad conversion, no card saved for
+    // autopay. Read from the row as it is now: every caller holds a copy from
+    // before the fulfilment that withheld it.
+    if (await this.isWithheldConversionNow(transaction)) {
+      this.logger.warn(
+        `Post-fulfilment hooks not run for transaction ${transaction.id}: a trial conversion withheld for refund`,
+      );
+      return;
+    }
     if (rawPayload !== undefined) {
       await this.persistSavedPaymentMethodBestEffort(transaction, rawPayload);
     }
@@ -570,6 +599,24 @@ export class PaymentReconciliationService {
     await this.creditCashbackAndTellTheBuyer(transaction);
     await this.enqueueMoyNalogIncomeBestEffort(transaction);
     await this.recordAdConversionBestEffort(transaction);
+  }
+
+  /**
+   * Whether `transaction` is a trial's conversion withheld for refund, read
+   * from the row as it is now. Only a conversion's draft can be one, so no
+   * other payment costs a read. A read that fails counts as not withheld: the
+   * hooks it would skip are never run again, while a withheld payment's are
+   * reversed by the refund that settles it.
+   */
+  private async isWithheldConversionNow(transaction: Transaction): Promise<boolean> {
+    if (transaction.purchaseType !== 'UPGRADE' || !isTrialConversionSnapshot(transaction.planSnapshot)) {
+      return false;
+    }
+    if (isWithheldConversion(transaction.gatewayData)) return true;
+    const current = await this.prismaService.transaction
+      .findUnique({ where: { id: transaction.id }, select: { gatewayData: true } })
+      .catch(() => null);
+    return isWithheldConversion(current?.gatewayData);
   }
 
   /**
@@ -663,10 +710,11 @@ export class PaymentReconciliationService {
     // The lock spans a read and a write. Everything expensive — the partial
     // WARNING, and the whole reversal (partner debit, referral
     // un-qualification, МойНалог cancellation, Remnawave revoke job,
-    // subscription expiry) — runs after this transaction has committed. Because
-    // the write is fenced, exactly one writer's entry can be the one that takes
-    // the cumulative total to the captured amount, so the reversal still fires
-    // exactly once.
+    // subscription expiry) — runs after this transaction has committed. The
+    // fenced write keeps the total right; it does not by itself keep the
+    // reversal to one run — the panel's refund and this notice for it both see
+    // the total full. The reversal's own claim, under the same lock, does
+    // (`reverseFulfilledPayment`).
     const commit = await this.prismaService.$transaction(async (tx) => {
       const liveGatewayData = await lockTransactionRefundLedger(tx, transaction.id);
       if (typeof asRecord(liveGatewayData)?.['refundReversedAt'] === 'string') {
@@ -746,13 +794,18 @@ export class PaymentReconciliationService {
         `Partial refund on transaction ${transaction.id} (${cumulativeRefunded} of ${paidAmount} ` +
           `after this ${refundedAmount}) — side-effects left intact; operator review required`,
       );
+      // A withheld payment's refund is the operator's alone, in part as in
+      // full — see `reverseFulfilledPayment`.
+      const withheld = isWithheldConversion(commit.gatewayData);
       this.systemEvents.warn(
-        EVENT_TYPES.PAYMENT_REFUND_PARTIAL,
+        withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUND_PARTIAL,
         'PAYMENT',
         // Operator-facing detail lives in the metadata, not the message: an
         // event type can be bound to a customer email template, whose subject
         // is the message itself.
-        `Частичный возврат платежа: ${transaction.purchaseType}`,
+        withheld
+          ? `Частичный возврат неприменённого платежа: ${transaction.purchaseType}`
+          : `Частичный возврат платежа: ${transaction.purchaseType}`,
         {
           userId: transaction.userId,
           paymentId: transaction.paymentId,
@@ -766,6 +819,7 @@ export class PaymentReconciliationService {
           refund: true,
           partial: true,
           needsManualReview: true,
+          ...(withheld ? { conversionWithheld: true } : {}),
         },
       );
       return;
@@ -1074,15 +1128,35 @@ export class PaymentReconciliationService {
    * the provider's own dashboard — left commission paid, income declared and the
    * advertising revenue standing forever.
    *
-   * Idempotent: the `refundReversedAt` stamp written at the end short-circuits a
-   * second run, and every downstream reversal is itself idempotent.
+   * Runs ONCE, whichever door comes second. The run is claimed under the row
+   * lock the refund writers share (`claimRefundReversal`), and a door that
+   * finds it reversed, or claimed by a run still under way, runs nothing — it
+   * only records what the provider said. `refundReversedAt`, written at the
+   * end, could not do this alone: it is unset for the whole of a run.
+   *
+   * `providerStatus` is the provider's word, recorded under that lock in the
+   * order the doors reach it, and never by the write that ends the reversal —
+   * that write comes last whatever the order, and put an older word back over
+   * a newer one. «Отметить возврат» has no word from the provider and passes
+   * `recordProviderStatus: false`.
    */
   public async reverseFulfilledPayment(
     transaction: Transaction,
     providerStatus: string | null,
+    options: { readonly recordProviderStatus?: boolean } = {},
   ): Promise<void> {
     const stamped = asRecord(transaction.gatewayData);
     if (typeof stamped?.['refundReversedAt'] === 'string') {
+      return;
+    }
+    const claimed = await this.claimRefundReversal(
+      transaction.id,
+      options.recordProviderStatus === false ? undefined : providerStatus,
+    );
+    if (!claimed) {
+      this.logger.log(
+        `Refund reversal of transaction ${transaction.id} is done or under way — not run again (providerStatus=${providerStatus})`,
+      );
       return;
     }
 
@@ -1155,21 +1229,34 @@ export class PaymentReconciliationService {
     // between — the old copy erased it, and the income stayed declared with no
     // receipt id left to cancel. With the receipt kept, the registration sees
     // the refund and hands the receipt to a cancellation job.
+    //
+    // No `providerStatus` here: it was recorded under the lock by the claim,
+    // and by any door that came while this ran. The claim goes with this write.
     await writeTransactionGatewayData(this.prismaService, transaction.id, {
       status: TransactionStatus.CANCELED,
       merge: {
-        providerStatus,
         refundReversedAt: new Date().toISOString(),
         subscriptionRevoked: revocation.revoked,
         ...revocation.audit,
         ...(revocation.needsManualReview ? { refundNeedsManualReview: true } : {}),
       },
+      remove: [REFUND_REVERSAL_CLAIMED_AT_KEY],
     });
 
+    // A trial's conversion withheld for refund (`isWithheldConversion`) was
+    // never announced as a sale — `payment.withheld` went to the operator,
+    // `payment.completed` to nobody — so its refund is the operator's alone as
+    // well: `payment.withheld_refunded`, operator-only. As `payment.refunded` it
+    // reached every rule, outbound webhook and refund email bound to one, with a
+    // refund of a sale none of them had seen. The same for every door here:
+    // «Отметить возврат», the panel's refund, a provider's notification.
+    const withheld = isWithheldConversion(transaction.gatewayData);
     this.systemEvents.warn(
-      EVENT_TYPES.PAYMENT_REFUNDED,
+      withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUNDED,
       'PAYMENT',
-      `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
+      withheld
+        ? `Возврат неприменённого платежа: ${transaction.purchaseType}`
+        : `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
       {
         userId: transaction.userId,
         paymentId: transaction.paymentId,
@@ -1181,8 +1268,38 @@ export class PaymentReconciliationService {
         refund: true,
         subscriptionRevoked: revocation.revoked,
         needsManualReview: revocation.needsManualReview,
+        ...(withheld ? { conversionWithheld: true } : {}),
       },
     );
+  }
+
+  /**
+   * Takes the one run of {@link reverseFulfilledPayment} for `transactionId`,
+   * under the row lock the refund writers share (`lockTransactionRefundLedger`).
+   * False when the payment is reversed already, or another run holds a claim
+   * younger than `REFUND_REVERSAL_CLAIM_MS`; a claim older than that belongs to
+   * a run that died before its end, and this one takes it over.
+   *
+   * `providerStatus`, unless `undefined`, is recorded in the same statement
+   * either way: the lock admits the doors one at a time, so the row ends with
+   * the provider's latest word, and a run under way never writes it at all.
+   */
+  private async claimRefundReversal(transactionId: string, providerStatus: string | null | undefined): Promise<boolean> {
+    return this.prismaService.$transaction(async (tx) => {
+      const live = await lockTransactionRefundLedger(tx, transactionId);
+      if (typeof asRecord(live)?.['refundReversedAt'] === 'string') {
+        return false;
+      }
+      const held = isRefundReversalClaimHeld(live);
+      const merge: Record<string, unknown> = {
+        ...(providerStatus === undefined ? {} : { providerStatus }),
+        ...(held ? {} : { [REFUND_REVERSAL_CLAIMED_AT_KEY]: new Date().toISOString() }),
+      };
+      if (Object.keys(merge).length > 0) {
+        await writeTransactionGatewayData(tx, transactionId, { merge });
+      }
+      return !held;
+    });
   }
 
   /**
@@ -1200,6 +1317,16 @@ export class PaymentReconciliationService {
     needsManualReview: boolean;
     audit: Record<string, unknown>;
   }> {
+    // A trial's conversion withheld for refund was applied to nothing: the
+    // subscription it names is the one ANOTHER payment converted, and the
+    // refund that settles this one has nothing of it to take back.
+    if (isWithheldConversion(transaction.gatewayData)) {
+      return {
+        revoked: false,
+        needsManualReview: false,
+        audit: { refundRevocationSkippedReason: 'CONVERSION_NOT_APPLIED' },
+      };
+    }
     if (transaction.purchaseType !== 'NEW' || transaction.subscriptionId === null) {
       return { revoked: false, needsManualReview: true, audit: {} };
     }
