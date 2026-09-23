@@ -164,6 +164,10 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // payment.withheld_refunded, also delivered to whoever ticked
     // payment.refunded, payment.refund_partial or payment.withheld.
     'payment.withheld', 'payment.withheld_refunded',
+    // A chargeback on an autopay charged several times, which names no payment
+    // of ours: the autopay ended, the charge to find by hand. Also delivered to
+    // whoever ticked payment.refunded or payment.refund_partial.
+    'payment.chargeback_unmatched',
     'payment.method_saved', 'payment.method_unbound', 'payment.method_autopay_updated',
     'payment.autopay_confirmation_required',
     // A paid renewal add-on line whose capture-time baseline absorbs it, so it

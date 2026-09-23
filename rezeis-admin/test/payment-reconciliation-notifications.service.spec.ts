@@ -93,6 +93,8 @@ type ReconciliationPrismaDouble = {
   transaction: {
     findUnique: (args: TransactionFindUniqueArgs) => Promise<ReconciliationTransactionRecord | null>;
     findFirst: (args: TransactionFindFirstArgs) => Promise<ReconciliationTransactionRecord | null>;
+    /** The refund card's look for the customer's ЮKassa autopay charges: none here. */
+    findMany: (args: unknown) => Promise<ReconciliationTransactionRecord[]>;
     count: (args: unknown) => Promise<number>;
     update: (args: TransactionUpdateArgs) => Promise<ReconciliationTransactionRecord>;
     updateMany: (args: {
@@ -1084,6 +1086,7 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
       findUnique: async (_args: PaymentWebhookFindUniqueArgs) => state.event,
     },
     transaction: {
+      findMany: async () => [],
       findUnique: async (args: TransactionFindUniqueArgs) => {
         if ('id' in args.where && args.where.id === 'tx-1') {
           return createTransaction({
@@ -1250,7 +1253,11 @@ function createService(state: ReturnType<typeof createState>): PaymentReconcilia
         state.callOrder.push('ad-revert');
       },
     } as never,
-    { upsertFromYookassaPayment: async () => undefined } as never,
+    // No saved card: a refund has nothing to switch off (`disableAutopayForRefund`).
+    {
+      upsertFromYookassaPayment: async () => undefined,
+      disableAutopayForRefund: async () => ({ switched: 0, busy: 0 }),
+    } as never,
     // YooKassa completions are verified against the provider before they are
     // applied; this suite is about what happens once they are confirmed.
     {

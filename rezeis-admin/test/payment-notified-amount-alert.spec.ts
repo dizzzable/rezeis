@@ -409,6 +409,8 @@ function createReconciliation(input: {
     transaction: {
       findUnique: async () => transaction,
       findFirst: async () => null,
+      // The refund card's look for the customer's ЮKassa autopay charges: none here.
+      findMany: async () => [],
       count: async () => 0,
       update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
         updates.push(args);
@@ -476,7 +478,11 @@ function createReconciliation(input: {
       enqueueCancelIncome: async () => undefined,
     } as never,
     { recordFirstPurchase: async () => undefined, revertConversion: async () => undefined } as never,
-    { upsertFromYookassaPayment: async () => undefined } as never,
+    // No saved card: a refund has nothing to switch off (`disableAutopayForRefund`).
+    {
+      upsertFromYookassaPayment: async () => undefined,
+      disableAutopayForRefund: async () => ({ switched: 0, busy: 0 }),
+    } as never,
     // No gateway here is YooKassa, so the provider round-trip must never fire.
     {
       verifyCompletion: async () => {

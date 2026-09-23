@@ -24,6 +24,7 @@ import {
   readRefundedTotal,
 } from '../utils/payment-refund-ledger.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
+import { refundEndsAutopay } from '../utils/refund-autopay.util';
 import {
   isWithheldConversion,
   MANUAL_REFUND_RECORDED_AT_KEY,
@@ -326,7 +327,12 @@ export class PaymentRefundService {
           where: { id: transaction.id },
         });
         if (fresh !== null) {
-          await this.paymentReconciliationService.reverseFulfilledPayment(fresh, providerStatus);
+          // The provider's cancel of the autopay comes after this answer, and
+          // the card with it (`deferAutopay`): the operator is not kept waiting
+          // on Platega or RollyPay past the request's 30 s.
+          await this.paymentReconciliationService.reverseFulfilledPayment(fresh, providerStatus, {
+            deferAutopay: true,
+          });
         }
       } catch (error: unknown) {
         this.logger.error(
@@ -335,6 +341,14 @@ export class PaymentRefundService {
           }`,
         );
       }
+    }
+    // Every refund ends the autopay (`refundEndsAutopay`); a full one did in the
+    // reversal above. A partial one ends it here rather than waiting for the
+    // provider's notice of it, whose card then reports the cancel. Only once the
+    // refund counts: one the provider holds as pending is not money back yet.
+    // The provider is asked after this answer, as for a full one.
+    if (!fullyRefunded && countsTowardsBalance && refundEndsAutopay({ full: false })) {
+      await this.paymentReconciliationService.endAutopayAfterResponse(transaction);
     }
 
     return {
@@ -445,6 +459,9 @@ export class PaymentRefundService {
       // An operator's record is not a word from the provider: whatever the
       // provider said last stays on the row.
       recordProviderStatus: false,
+      // Nor does the answer wait on the provider: its own sign-up is cancelled
+      // after it, and the card comes then.
+      deferAutopay: true,
     });
     this.logger.warn(
       `Refund of withheld payment ${transaction.id} recorded by admin ${input.currentAdmin.id}`,

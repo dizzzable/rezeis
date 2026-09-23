@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { HttpService } from '@nestjs/axios';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   PaymentGatewayType,
@@ -20,6 +20,7 @@ import { firstValueFrom } from 'rxjs';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import {
   PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
@@ -30,6 +31,16 @@ import {
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import {
+  type AutopayRefundOutcome,
+  type AutopayRow,
+  describeAutopayOutcome,
+  NO_AUTOPAY,
+  readProviderChargeMarker,
+  REFUND_CANCELLED_BY,
+  refundEndsAutopay,
+  UNKNOWN_AUTOPAY_GATEWAY,
+} from '../utils/refund-autopay.util';
 import { isWithheldConversion } from '../utils/trial-conversion.util';
 import {
   autopayNotAvailable,
@@ -49,6 +60,7 @@ import {
 } from '../utils/rollypay-subscription.util';
 import { requireSetting } from './payment-provider-execution.helpers';
 import { PaymentWebhookInboxService } from './payment-webhook-inbox.service';
+import { SavedPaymentMethodService } from './saved-payment-method.service';
 
 const PLATEGA_API = 'https://app.platega.io';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -69,13 +81,39 @@ const LIVE_STATUSES: readonly ProviderSubscriptionStatus[] = [
   ProviderSubscriptionStatus.PAST_DUE,
 ];
 
+/**
+ * How recently a refund's cancel still counts as this refund's, for its card:
+ * the panel's own refund ends the autopay, and the provider's notice of that
+ * same refund arrives seconds later with nothing left to cancel.
+ */
+const RECENT_REFUND_CANCEL_MS = 60 * 60 * 1000;
+
+/** How many told unmatched disputes a process remembers. */
+const UNMATCHED_DISPUTES_REMEMBERED = 1000;
+
+/** `rawPayload.source` of a Platega subscription dispute in the inbox (`recordDispute`). */
+export const PROVIDER_SUBSCRIPTION_DISPUTE = 'PROVIDER_SUBSCRIPTION_DISPUTE';
+
 /** Live rows `cancelStranded` reads at a time; it reads every one of them. */
 export const STRANDED_SWEEP_PAGE = 500;
 
 /** A live row as `cancelStranded` reads it: with its customer's block. */
 type StrandedCandidate = ProviderSubscription & { readonly user: { readonly isBlocked: boolean } | null };
 
-export type ProviderSubscriptionCancelledBy = 'CUSTOMER' | 'OPERATOR' | 'SYSTEM';
+/**
+ * Who asked for a cancel. `REFUND` (`REFUND_CANCELLED_BY`): a full refund of a
+ * payment of the subscription — which a charge taken afterwards honours, and
+ * the sweep retries until the provider takes it.
+ */
+export type ProviderSubscriptionCancelledBy = 'CUSTOMER' | 'OPERATOR' | 'SYSTEM' | typeof REFUND_CANCELLED_BY;
+
+/** A Platega callback that disputes a subscription charge (`isRefundProviderStatus`). */
+export interface ProviderSubscriptionChargeback {
+  /** The provider's id of the disputed payment, when the callback names one. */
+  readonly providerPaymentId: string | null;
+  /** The provider's word for it: `CHARGEBACKED`, `REFUNDED`… */
+  readonly providerStatus: string;
+}
 
 /** What the provider says about one subscription, read with our own keys. */
 export interface ProviderSubscriptionState {
@@ -127,6 +165,8 @@ export interface CustomerProviderSubscriptionInterface {
 @Injectable()
 export class ProviderSubscriptionService {
   private readonly logger = new Logger(ProviderSubscriptionService.name);
+  /** Unmatched disputes this process has told the operator about; see {@link handleChargeback}. */
+  private readonly unmatchedDisputesTold = new Set<string>();
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -134,6 +174,16 @@ export class ProviderSubscriptionService {
     private readonly paymentWebhookInboxService: PaymentWebhookInboxService,
     @InjectQueue(PAYMENT_RECONCILIATION_QUEUE)
     private readonly paymentReconciliationQueue: Queue,
+    /** The operator's card for a chargeback that matches no payment. Last and optional: specs build this positionally. */
+    @Optional()
+    private readonly systemEvents?: SystemEventsService,
+    /**
+     * Switches off the user's ЮKassa saved-card autopay for a chargeback that
+     * matches no payment (a matched one goes through the reversal, which does
+     * it). Optional for the same reason.
+     */
+    @Optional()
+    private readonly savedPaymentMethods?: SavedPaymentMethodService,
   ) {}
 
   /**
@@ -312,11 +362,53 @@ export class ProviderSubscriptionService {
         lastChargeAt: state.lastChargeAt,
         lastSyncedAt: new Date(),
         ...(subscriptionId !== null && row.subscriptionId === null ? { subscriptionId } : {}),
-        // Cancelled without the panel asking: the payer used the link in the
-        // provider's email. The provider does not say who cancelled.
-        ...(providerCancelled ? { cancelledAt: new Date(), cancelledBy: 'PROVIDER' } : {}),
+        ...(providerCancelled ? { cancelledAt: new Date() } : {}),
       },
     });
+    if (providerCancelled) {
+      // Cancelled without the panel asking — the payer used the link in the
+      // provider's email — and the provider does not say who. Or a refund's
+      // cancel the provider could not be reached for, which the operator then
+      // finished in the provider's dashboard as the card told them to: that
+      // row keeps the refund's mark (`recordCancelledBy`).
+      await this.recordCancelledBy(row, 'PROVIDER');
+    }
+  }
+
+  /**
+   * Says who cancelled a row — never over a refund's mark (`REFUND_CANCELLED_BY`).
+   *
+   * A refund marks its rows before it asks the provider, and the mark outlives
+   * whoever finishes the cancel: the provider reporting one the operator made
+   * in its dashboard, the customer's «Отключить автосписание», a plan change,
+   * the sweep. The mark is what withholds a charge the provider took before
+   * that cancel (`autopayEndedByRefund`). Written over, the charge renewed the
+   * refunded subscription and paid its commission, and nobody was told.
+   * Conditional in the statement as well, so a mark written after the row was
+   * read is kept too.
+   *
+   * Best effort: the cancel itself is written by then, and a customer told
+   * their autopay failed to stop, when it stopped, would be told wrong.
+   */
+  private async recordCancelledBy(
+    row: Pick<ProviderSubscription, 'id' | 'cancelledBy'>,
+    by: string,
+  ): Promise<void> {
+    if (row.cancelledBy === REFUND_CANCELLED_BY) return;
+    try {
+      await this.prismaService.providerSubscription.updateMany({
+        where: {
+          id: row.id,
+          OR: [{ cancelledBy: null }, { cancelledBy: { not: REFUND_CANCELLED_BY } }],
+        },
+        data: { cancelledBy: by },
+      });
+    } catch (error: unknown) {
+      this.logger.error(
+        `Provider subscription ${row.id} is cancelled, but who cancelled it (${by}) could not be recorded: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /** The customer's live subscriptions, for «Способы оплаты». */
@@ -404,28 +496,396 @@ export class ProviderSubscriptionService {
    * provider being reachable.
    */
   public async cancelLive(
-    where: { readonly userId: string } | { readonly subscriptionId: string },
+    where:
+      | { readonly userId: string }
+      | { readonly subscriptionId: string }
+      | { readonly ids: readonly string[] },
     by: ProviderSubscriptionCancelledBy,
-  ): Promise<number> {
+  ): Promise<AutopayRefundOutcome> {
+    const selector = 'ids' in where ? { id: { in: [...where.ids] } } : where;
+    if ('ids' in where && where.ids.length === 0) return NO_AUTOPAY;
     const rows = await this.prismaService.providerSubscription.findMany({
       where: {
-        ...where,
+        ...selector,
         status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] },
       },
     });
-    let cancelled = 0;
+    if (rows.length === 0) return NO_AUTOPAY;
+    if (by === REFUND_CANCELLED_BY) {
+      // Said on the rows BEFORE the provider is asked, and left there if it
+      // cannot be reached: a charge landing while the cancel is under way, or
+      // after one that failed, then renews nothing, and the sweep retries.
+      await this.prismaService.providerSubscription.updateMany({
+        where: {
+          id: { in: rows.map((row) => row.id) },
+          status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] },
+        },
+        data: { cancelledBy: REFUND_CANCELLED_BY },
+      });
+    }
+    const cancelled: AutopayRow[] = [];
+    const failed: AutopayRow[] = [];
     for (const row of rows) {
+      const named = { gatewayType: row.gatewayType, providerSubscriptionId: row.providerSubscriptionId };
       try {
         await this.cancel(row, by);
-        cancelled += 1;
+        cancelled.push(named);
       } catch (error: unknown) {
+        failed.push(named);
         this.logger.error(
           `Could not cancel provider subscription ${row.id} (${row.gatewayType} ${row.providerSubscriptionId}): ` +
             `${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
-    return cancelled;
+    return { cancelled, failed };
+  }
+
+  /**
+   * Ends the autopay a fully refunded payment belongs to (`refundEndsAutopay`),
+   * whichever door the refund came through: the panel's ЮKassa refund, a
+   * provider's refund notice or chargeback, «Отметить возврат».
+   *
+   * Every live provider subscription of every subscription the payment paid
+   * for — the one it created or renewed, the lines of a combined renewal or an
+   * autopay charge, an add-on's target — and the sign-up the payment itself
+   * started, which a new purchase has not bound to its subscription yet.
+   *
+   * A WITHHELD payment paid for nothing: the subscription it names is the one
+   * another payment converted, and that payment's autopay stands. Only its
+   * own sign-up ends.
+   *
+   * Never throws. A cancel the provider refuses, or one it cannot be asked,
+   * is reported in the outcome and left for the sweep: the refund must not
+   * depend on the provider being reachable.
+   */
+  public async cancelForRefund(
+    transaction: Pick<Transaction, 'id' | 'subscriptionId' | 'gatewayType' | 'gatewayData' | 'planSnapshot'>,
+  ): Promise<AutopayRefundOutcome> {
+    try {
+      const selection = await this.refundRowsWhere(transaction);
+      const live = await this.prismaService.providerSubscription.findMany({
+        where: { OR: selection, status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] } },
+        select: { id: true },
+      });
+      // ONE request per row, however many ways the payment reaches it — its
+      // own sign-up is usually also bound to the subscription it paid for. Two
+      // passes asked a provider that was not answering twice, doubled the wait
+      // and counted one autopay twice on the card.
+      const outcome = await this.cancelLive({ ids: [...new Set(live.map((row) => row.id))] }, REFUND_CANCELLED_BY);
+      // Ended moments ago by another door into the same refund — the panel's
+      // own refund, whose provider notice comes after — is ended all the same,
+      // and the card of the door that comes second says so.
+      const recent = await this.prismaService.providerSubscription.findMany({
+        where: {
+          OR: selection,
+          status: ProviderSubscriptionStatus.CANCELLED,
+          cancelledBy: REFUND_CANCELLED_BY,
+          cancelledAt: { gte: new Date(Date.now() - RECENT_REFUND_CANCEL_MS) },
+        },
+        select: { gatewayType: true, providerSubscriptionId: true },
+      });
+      const cancelled = new Map<string, AutopayRow>();
+      for (const row of [...outcome.cancelled, ...recent]) {
+        cancelled.set(`${row.gatewayType}:${row.providerSubscriptionId}`, {
+          gatewayType: row.gatewayType,
+          providerSubscriptionId: row.providerSubscriptionId,
+        });
+      }
+      // A row the other door cancelled while this one's request failed is
+      // cancelled all the same: the card says so, and not both.
+      const failed = outcome.failed.filter(
+        (row) => !cancelled.has(`${row.gatewayType}:${row.providerSubscriptionId}`),
+      );
+      return { cancelled: [...cancelled.values()], failed };
+    } catch (error: unknown) {
+      this.logger.error(
+        `Could not end the autopay of refunded transaction ${transaction.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { cancelled: [], failed: [{ gatewayType: UNKNOWN_AUTOPAY_GATEWAY, providerSubscriptionId: '' }] };
+    }
+  }
+
+  /**
+   * Marks, without asking the provider, every live autopay a refunded
+   * payment's refund ends (`REFUND_CANCELLED_BY`) — the part of
+   * {@link cancelForRefund} a request must not wait past: from here the sweep
+   * cancels them even if nothing else does, and a charge taken on them renews
+   * nothing. The provider is asked afterwards, by {@link cancelForRefund},
+   * after the operator's answer. Returns the rows marked.
+   */
+  public async markForRefund(
+    transaction: Pick<Transaction, 'id' | 'subscriptionId' | 'gatewayType' | 'gatewayData' | 'planSnapshot'>,
+  ): Promise<readonly string[]> {
+    const live = await this.prismaService.providerSubscription.findMany({
+      where: {
+        OR: await this.refundRowsWhere(transaction),
+        status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] },
+      },
+      select: { id: true },
+    });
+    const ids = [...new Set(live.map((row) => row.id))];
+    if (ids.length > 0) {
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: { in: ids }, status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] } },
+        data: { cancelledBy: REFUND_CANCELLED_BY },
+      });
+    }
+    return ids;
+  }
+
+  /**
+   * The rows a refunded payment's refund ends: its own sign-up, the row whose
+   * charge it is, and — unless it was withheld — every row of every
+   * subscription it paid for.
+   */
+  private async refundRowsWhere(
+    transaction: Pick<Transaction, 'id' | 'subscriptionId' | 'gatewayType' | 'gatewayData' | 'planSnapshot'>,
+  ): Promise<Prisma.ProviderSubscriptionWhereInput[]> {
+    const marker = readProviderChargeMarker(transaction);
+    const subscriptionIds = isWithheldConversion(transaction.gatewayData)
+      ? []
+      : await this.subscriptionsPaidBy(transaction);
+    return [
+      { firstTransactionId: transaction.id },
+      ...(marker === null
+        ? []
+        : [{ gatewayType: transaction.gatewayType, providerSubscriptionId: marker.providerSubscriptionId }]),
+      ...(subscriptionIds.length === 0 ? [] : [{ subscriptionId: { in: [...subscriptionIds] } }]),
+    ];
+  }
+
+  /** The subscriptions a payment paid for: its own, its lines', an add-on's target. */
+  private async subscriptionsPaidBy(
+    transaction: Pick<Transaction, 'id' | 'subscriptionId' | 'planSnapshot'>,
+  ): Promise<readonly string[]> {
+    const items = await this.prismaService.transactionItem.findMany({
+      where: { transactionId: transaction.id },
+      select: { subscriptionId: true },
+    });
+    const target = asRecord(transaction.planSnapshot)['targetSubscriptionId'];
+    return [
+      ...new Set([
+        ...(transaction.subscriptionId === null ? [] : [transaction.subscriptionId]),
+        ...items.map((item) => item.subscriptionId),
+        ...(typeof target === 'string' && target.length > 0 ? [target] : []),
+      ]),
+    ];
+  }
+
+  /**
+   * Records a Platega callback that disputes a subscription charge in the
+   * payment inbox, and queues its reconciliation, which hands it to
+   * {@link handleChargeback}.
+   *
+   * In the inbox FIRST, before the provider is asked anything: the look at
+   * the subscription that matching starts with is a call to Platega, and a
+   * queue job that lost it for good during an outage dropped the chargeback —
+   * nothing reversed, the autopay not ended, nobody told. As an inbox event it
+   * is FAILED rather than gone: retried automatically, counted on the
+   * dashboard, and replayable from «Платежи» → «Вебхуки». Keyed by the
+   * dispute, so Platega repeating the callback is one event, one card.
+   */
+  public async recordDispute(
+    gatewayType: PaymentGatewayType,
+    providerSubscriptionId: string,
+    chargeback: ProviderSubscriptionChargeback,
+    body: unknown,
+  ): Promise<{ readonly duplicate: boolean }> {
+    const rawPayload = {
+      source: PROVIDER_SUBSCRIPTION_DISPUTE,
+      providerSubscriptionId,
+      providerPaymentId: chargeback.providerPaymentId,
+      status: chargeback.providerStatus,
+      body,
+    };
+    const payloadHash = createHash('sha256').update(JSON.stringify(rawPayload)).digest('hex');
+    const duplicate = await this.enqueueNotice({
+      gatewayType,
+      // The dispute names no payment of ours yet — which one it is, is what
+      // its handling finds out — so the event is filed under the subscription.
+      paymentId: providerSubscriptionId,
+      providerEventId: `subscription:${providerSubscriptionId}:dispute-callback:${disputedChargeId(providerSubscriptionId, chargeback) ?? payloadHash}`,
+      eventStatus: chargeback.providerStatus,
+      receivedAt: new Date().toISOString(),
+      payloadHash,
+      rawPayload,
+    });
+    return { duplicate };
+  }
+
+  /**
+   * A chargeback (or a refund) the provider reports on a subscription charge.
+   * Platega posts it like a charge callback — `Id`, `SubscriptionId`, a status —
+   * so it used to reach only `sync`, which counts charges and never reverses
+   * one: the commission, the cashback and the tax receipt stood, and the
+   * autopay went on charging.
+   *
+   * The charges the provider reports are applied first, then the disputed one
+   * is found and goes through the refund reversal every other refund takes —
+   * a notice in the inbox for its own payment, reconciled like any — which
+   * also ends the autopay (`refundEndsAutopay`).
+   *
+   * Found when the callback names one of our payments by its provider id, or
+   * when the subscription has been charged once. A subscription charged
+   * several times gives no way to tell which charge is disputed — every
+   * charge is the same sum, and Platega's callback names none of ours — so
+   * nothing is guessed: the autopay ends and the operator is told
+   * (`payment.chargeback_unmatched`) what was not reversed.
+   */
+  public async handleChargeback(
+    gatewayType: PaymentGatewayType,
+    providerSubscriptionId: string,
+    chargeback: ProviderSubscriptionChargeback,
+  ): Promise<void> {
+    const found =
+      (await this.prismaService.providerSubscription.findUnique({
+        where: { gatewayType_providerSubscriptionId: { gatewayType, providerSubscriptionId } },
+      })) ?? (await this.adoptFromCheckout(gatewayType, providerSubscriptionId));
+    if (found === null) {
+      this.logger.warn(`Chargeback for unknown ${gatewayType} subscription ${providerSubscriptionId}; ignored`);
+      return;
+    }
+    // The provider's count is the ledger: apply what it charged before asking
+    // which charge is disputed.
+    await this.syncRow(found);
+    const row = (await this.prismaService.providerSubscription.findUnique({ where: { id: found.id } })) ?? found;
+    const chargeId = disputedChargeId(providerSubscriptionId, chargeback);
+    const payment = await this.findDisputedCharge(row, chargeId);
+    if (payment !== null) {
+      await this.enqueueRefundNotice(row, payment, chargeback);
+      return;
+    }
+    // One card per dispute. The inbox keys a repeated callback away
+    // (`recordDispute`); this keys away a second run of the same one — a
+    // retry after the card went out — whose card would contradict the first
+    // («Живых автосписаний у подписки не было»). A dispute that names no charge
+    // of the provider's cannot be told from the next one, so it is not keyed.
+    const disputeKey = chargeId === null ? null : `${gatewayType}:${providerSubscriptionId}:${chargeId}`;
+    if (disputeKey !== null) {
+      if (this.unmatchedDisputesTold.has(disputeKey)) {
+        this.logger.log(`Chargeback ${disputeKey} was told already; not told again`);
+        return;
+      }
+      this.unmatchedDisputesTold.add(disputeKey);
+      if (this.unmatchedDisputesTold.size > UNMATCHED_DISPUTES_REMEMBERED) {
+        const oldest = this.unmatchedDisputesTold.values().next().value;
+        if (oldest !== undefined) this.unmatchedDisputesTold.delete(oldest);
+      }
+    }
+    let outcome: AutopayRefundOutcome;
+    try {
+      outcome = await this.cancelLive(
+        row.subscriptionId === null ? { ids: [row.id] } : { subscriptionId: row.subscriptionId },
+        REFUND_CANCELLED_BY,
+      );
+    } catch (error: unknown) {
+      // Nothing told: the run fails, and the run that retries it tells.
+      if (disputeKey !== null) this.unmatchedDisputesTold.delete(disputeKey);
+      throw error;
+    }
+    // A chargeback is the payer taking the money back: a refund, which ends
+    // the saved-card autopay too (the owner's decision of 23.09.2026).
+    const savedCard = await this.switchOffSavedCardForDispute(row);
+    this.logger.error(
+      `Chargeback on ${gatewayType} subscription ${row.id} (${providerSubscriptionId}) matches none of its ` +
+        `${row.appliedChargeCount} charge(s); not reversed, autopay ended`,
+    );
+    this.systemEvents?.warn(
+      EVENT_TYPES.PAYMENT_CHARGEBACK_UNMATCHED,
+      'PAYMENT',
+      'Оспорено списание по автоплатежу: не понять, какое',
+      {
+        userId: row.userId,
+        gatewayType,
+        providerSubscriptionId,
+        providerPaymentId: chargeback.providerPaymentId,
+        providerStatus: chargeback.providerStatus,
+        amount: row.amount.toString(),
+        currency: row.currency,
+        chargeCount: row.appliedChargeCount,
+        ...(row.subscriptionId === null ? {} : { subscriptionId: row.subscriptionId }),
+        needsManualReview: true,
+        note:
+          `Провайдер сообщил об оспаривании одного из ${row.appliedChargeCount} списаний по автоплатежу, ` +
+          'но не сказал, какого: оно не отменено в панели (комиссия, кешбэк и чек «Мой налог» остались). ' +
+          'Найдите списание в личном кабинете провайдера по его ID. ' +
+          (describeAutopayOutcome({ ...outcome, ...savedCard }) ?? 'Живых автосписаний у подписки не было.'),
+        ...savedCard,
+      },
+    );
+  }
+
+  /**
+   * The user's ЮKassa saved-card autopay, switched off for a chargeback that
+   * matches no payment, by the rule every refund follows (`refundEndsAutopay`).
+   * Never throws: what it did goes on the card.
+   */
+  private async switchOffSavedCardForDispute(
+    row: ProviderSubscription,
+  ): Promise<Pick<AutopayRefundOutcome, 'savedCardAutopayOff' | 'savedCardAutopayFailed'>> {
+    if (row.userId === null || this.savedPaymentMethods === undefined || !refundEndsAutopay({ full: true })) {
+      return {};
+    }
+    try {
+      const result = await this.savedPaymentMethods.disableAutopayForRefund({
+        userId: row.userId,
+        providerSubscriptionId: row.providerSubscriptionId,
+      });
+      return result.switched > 0 ? { savedCardAutopayOff: true } : {};
+    } catch (error: unknown) {
+      this.logger.error(
+        `Could not switch off the saved-card autopay of the user whose ${row.gatewayType} charge was disputed ` +
+          `(${row.providerSubscriptionId}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { savedCardAutopayFailed: true };
+    }
+  }
+
+  /**
+   * The payment a chargeback disputes, when it can be told; see {@link handleChargeback}.
+   * `chargeId` is {@link disputedChargeId}: never the subscription's own id.
+   */
+  private async findDisputedCharge(row: ProviderSubscription, chargeId: string | null): Promise<Transaction | null> {
+    if (chargeId !== null) {
+      const named = await this.prismaService.transaction.findFirst({
+        where: { gatewayType: row.gatewayType, gatewayId: chargeId },
+      });
+      if (named !== null) return named;
+    }
+    if (row.appliedChargeCount !== 1) return null;
+    const first = await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } });
+    return first !== null && first.status === TransactionStatus.COMPLETED && first.fulfilledAt !== null ? first : null;
+  }
+
+  /**
+   * Hands a disputed charge to the reconciliation worker as the provider's
+   * refund notice for its payment, keyed by the dispute so a repeated callback
+   * is one notice.
+   */
+  private async enqueueRefundNotice(
+    row: ProviderSubscription,
+    transaction: Transaction,
+    chargeback: ProviderSubscriptionChargeback,
+  ): Promise<void> {
+    const rawPayload = {
+      source: 'PROVIDER_SUBSCRIPTION',
+      status: chargeback.providerStatus,
+      subscriptionId: row.providerSubscriptionId,
+      providerPaymentId: chargeback.providerPaymentId,
+      paymentId: transaction.paymentId,
+    };
+    const envelope: PaymentWebhookEnvelopeInterface = {
+      gatewayType: row.gatewayType,
+      paymentId: transaction.paymentId,
+      providerEventId: `subscription:${row.providerSubscriptionId}:dispute:${disputedChargeId(row.providerSubscriptionId, chargeback) ?? transaction.paymentId}`,
+      eventStatus: chargeback.providerStatus,
+      receivedAt: new Date().toISOString(),
+      payloadHash: createHash('sha256').update(JSON.stringify(rawPayload)).digest('hex'),
+      rawPayload,
+    };
+    await this.enqueueNotice(envelope);
   }
 
   /**
@@ -543,6 +1003,7 @@ export class ProviderSubscriptionService {
     for (const row of rows) {
       const subscription = row.subscriptionId === null ? undefined : byId.get(row.subscriptionId);
       const reason = strandedReason({
+        refundRequested: row.cancelledBy === REFUND_CANCELLED_BY,
         userDeleted: row.userId === null,
         userBlocked: row.user?.isBlocked === true,
         subscription:
@@ -559,7 +1020,7 @@ export class ProviderSubscriptionService {
       });
       if (reason === null) continue;
       try {
-        await this.cancel(row, 'SYSTEM');
+        await this.cancel(row, reason === STRANDED_BY_REFUND ? REFUND_CANCELLED_BY : 'SYSTEM');
         cancelled += 1;
         this.logger.log(`Cancelled provider subscription ${row.id} at ${row.gatewayType}: ${reason}`);
       } catch (error: unknown) {
@@ -609,9 +1070,12 @@ export class ProviderSubscriptionService {
       data: {
         status: ProviderSubscriptionStatus.CANCELLED,
         cancelledAt: new Date(),
-        cancelledBy: by,
+        ...(by === REFUND_CANCELLED_BY ? { cancelledBy: by } : {}),
       },
     });
+    if (by !== REFUND_CANCELLED_BY) {
+      await this.recordCancelledBy(row, by);
+    }
   }
 
   /**
@@ -854,10 +1318,18 @@ export class ProviderSubscriptionService {
       payloadHash: createHash('sha256').update(JSON.stringify(rawPayload)).digest('hex'),
       rawPayload,
     };
+    await this.enqueueNotice(envelope);
+  }
+
+  /**
+   * Records a notice in the inbox and queues its reconciliation, once per key.
+   * True when the inbox already held it.
+   */
+  private async enqueueNotice(envelope: PaymentWebhookEnvelopeInterface): Promise<boolean> {
     const received = await this.paymentWebhookInboxService.recordReceived({ envelope });
     if (received.duplicate) {
       // Settled, settling, or FAILED to enqueue earlier — the auto-retry owns that one.
-      return;
+      return true;
     }
     await this.paymentWebhookInboxService.markEnqueued(received.event.id);
     try {
@@ -879,6 +1351,7 @@ export class ProviderSubscriptionService {
       );
       throw error;
     }
+    return false;
   }
 
   private async fetchState(
@@ -1017,11 +1490,67 @@ export class ProviderSubscriptionService {
 }
 
 /**
+ * The dispute an inbox event recorded by {@link ProviderSubscriptionService.recordDispute}
+ * holds, or null for every other event. Throws for one that says it is a
+ * dispute and does not hold one: it is kept FAILED rather than read as a
+ * payment of ours.
+ */
+export function readProviderSubscriptionDispute(rawPayload: unknown): {
+  readonly providerSubscriptionId: string;
+  readonly chargeback: ProviderSubscriptionChargeback;
+} | null {
+  const payload = asRecord(rawPayload);
+  if (payload['source'] !== PROVIDER_SUBSCRIPTION_DISPUTE) return null;
+  const providerSubscriptionId = payload['providerSubscriptionId'];
+  const providerStatus = payload['status'];
+  const providerPaymentId = payload['providerPaymentId'];
+  if (
+    typeof providerSubscriptionId !== 'string' ||
+    providerSubscriptionId.length === 0 ||
+    typeof providerStatus !== 'string' ||
+    providerStatus.length === 0
+  ) {
+    throw new Error('Provider subscription dispute event is malformed');
+  }
+  return {
+    providerSubscriptionId,
+    chargeback: {
+      providerPaymentId: typeof providerPaymentId === 'string' && providerPaymentId.length > 0 ? providerPaymentId : null,
+      providerStatus,
+    },
+  };
+}
+
+/**
+ * The provider's id of the charge a dispute names, or null when it names none —
+ * or names the subscription itself. Platega puts the subscription's id in `Id`
+ * of its status callbacks, and a sign-up's checkout carries it as its provider
+ * id: taken for a charge's id, it matched the first payment whichever charge
+ * was disputed, and it keyed two disputes of one subscription as one.
+ */
+export function disputedChargeId(
+  providerSubscriptionId: string,
+  chargeback: ProviderSubscriptionChargeback,
+): string | null {
+  return chargeback.providerPaymentId !== null && chargeback.providerPaymentId !== providerSubscriptionId
+    ? chargeback.providerPaymentId
+    : null;
+}
+
+/** {@link strandedReason} for a row a refund asked to cancel, whose cancel has not landed yet. */
+export const STRANDED_BY_REFUND = 'refunded: the autopay ends with the refund';
+
+/**
  * Why a provider subscription must stop charging, or null while it may go on.
  * A plan is compared by the id in the subscription's snapshot, which is where
  * a subscription keeps its plan.
  */
 export function strandedReason(input: {
+  /**
+   * A refund asked for this cancel (`REFUND_CANCELLED_BY`) and the provider
+   * could not be reached: every pass tries again until it lands.
+   */
+  readonly refundRequested?: boolean;
   readonly userDeleted: boolean;
   readonly userBlocked: boolean;
   readonly subscription:
@@ -1043,6 +1572,7 @@ export function strandedReason(input: {
       };
   readonly planId: string;
 }): string | null {
+  if (input.refundRequested === true) return STRANDED_BY_REFUND;
   if (input.userDeleted) return 'account deleted';
   if (input.userBlocked) return 'account blocked';
   if (input.subscription === 'NOT_YET') return null;

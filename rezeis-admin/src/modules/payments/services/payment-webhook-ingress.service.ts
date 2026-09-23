@@ -21,7 +21,8 @@ import {
 } from './payment-webhook-inbox.service';
 import { PaymentWebhookNormalizerService } from './payment-webhook-normalizer.service';
 import { PaymentMethodSetupService } from './payment-method-setup.service';
-import { ProviderSubscriptionService } from './provider-subscription.service';
+import { isRefundProviderStatus } from './payment-reconciliation.service';
+import { ProviderSubscriptionService, type ProviderSubscriptionChargeback } from './provider-subscription.service';
 
 interface IngestWebhookInput {
   readonly gatewayType: PaymentGatewayType;
@@ -158,6 +159,28 @@ export class PaymentWebhookIngressService {
       this.announceWebhook(input.gatewayType, 'subscription-status', {
         providerSubscriptionId: plategaSubscriptionId,
       });
+      // A chargeback (or a refund) on a subscription charge is the refund of
+      // one of its payments. A sync only counts charges and never reverses one,
+      // so it goes to the refund reversal every other refund takes, which also
+      // ends the autopay (`ProviderSubscriptionService.handleChargeback`).
+      // Recorded in the payment inbox before anything else: its handling asks
+      // Platega first, and an outage then leaves it FAILED — retried and
+      // replayable — rather than dropped (`recordDispute`).
+      const dispute = extractPlategaSubscriptionDispute(input.gatewayType, input.rawBody);
+      if (dispute !== null) {
+        const recorded = await this.providerSubscriptionService.recordDispute(
+          input.gatewayType,
+          plategaSubscriptionId,
+          dispute,
+          // Parsed already by the line above, which found the dispute in it.
+          JSON.parse(input.rawBody.toString('utf8')) as unknown,
+        );
+        return {
+          accepted: true,
+          duplicate: recorded.duplicate,
+          lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED,
+        };
+      }
       await this.providerSubscriptionService.enqueueSync(input.gatewayType, plategaSubscriptionId);
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
@@ -327,6 +350,44 @@ export function extractPlategaSubscriptionId(
     return id.trim();
   }
   return null;
+}
+
+/**
+ * A Platega subscription callback that disputes a charge: a charge callback
+ * (`Id`, `SubscriptionId`) whose status is a refund or chargeback
+ * (`isRefundProviderStatus`, which knows Platega's `CHARGEBACKED`). Null for a
+ * charge, a status callback, and every other gateway.
+ */
+export function extractPlategaSubscriptionDispute(
+  gatewayType: PaymentGatewayType,
+  rawBody: Buffer,
+): ProviderSubscriptionChargeback | null {
+  if (gatewayType !== PaymentGatewayType.PLATEGA) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const read = (name: string): unknown => {
+    const key = Object.keys(root).find((candidate) => candidate.toLowerCase() === name);
+    return key === undefined ? undefined : root[key];
+  };
+  const status = read('status');
+  if (typeof status !== 'string' || !isRefundProviderStatus(status)) {
+    return null;
+  }
+  const id = read('id');
+  return {
+    providerPaymentId: typeof id === 'string' && id.trim().length > 0 ? id.trim() : null,
+    providerStatus: status,
+  };
 }
 
 /**

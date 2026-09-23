@@ -73,6 +73,13 @@ function world(rows: Row[]) {
         Object.assign(row, data);
         return row;
       },
+      // Who cancelled it (`recordCancelledBy`); no row here carries a refund's mark.
+      updateMany: async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
+        const row = rows.find((candidate) => candidate.id === where.id);
+        if (row === undefined) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      },
     },
     subscription: { findMany: async () => [] },
     transaction: { findMany: async () => [] },

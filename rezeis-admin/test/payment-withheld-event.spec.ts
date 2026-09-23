@@ -222,3 +222,50 @@ describe('payment.withheld_refunded', () => {
     );
   });
 });
+
+/**
+ * `payment.chargeback_unmatched` (wave 6b, R5 F4): a chargeback on an autopay
+ * charged several times that names none of our payments, so nothing was
+ * reversed and an operator has to find the charge. Money a human settles, like
+ * `payment.withheld`: operator-only. And a new type, so a saved `selected`
+ * list never ticked it: it reaches whoever ticked the refund cards.
+ */
+describe('payment.chargeback_unmatched', () => {
+  it('is registered and operator-only', () => {
+    assert.equal(EVENT_TYPES.PAYMENT_CHARGEBACK_UNMATCHED, 'payment.chargeback_unmatched');
+    assert.ok(REGISTERED_EVENT_TYPES.has('payment.chargeback_unmatched'));
+    assert.ok(OPERATOR_ONLY_EVENT_TYPES.has('payment.chargeback_unmatched'));
+  });
+
+  it('reaches the audit log and the operator card, and nothing an integration acts on', async () => {
+    const told = await emitThrough('payment.chargeback_unmatched');
+
+    assert.deepEqual(told.persisted, ['event.payment.chargeback_unmatched']);
+    assert.equal(told.cards.length, 1);
+    assert.ok(told.cards[0]?.includes('Оспорено списание по автоплатежу'), told.cards[0]);
+    assert.deepEqual(told.realtime, []);
+    assert.deepEqual(told.hooks, []);
+    assert.deepEqual(told.webhook, []);
+  });
+
+  it('reaches an operator who ticked the refund cards, and not one who ticked neither', async () => {
+    for (const ticked of ['payment.refunded', 'payment.refund_partial', 'payment.chargeback_unmatched']) {
+      const reached = await emitThrough('payment.chargeback_unmatched', { eventsMode: 'selected', events: [ticked] });
+      assert.equal(reached.cards.length, 1, `ticking ${ticked}`);
+    }
+    const neither = await emitThrough('payment.chargeback_unmatched', {
+      eventsMode: 'selected',
+      events: ['payment.completed', 'payment.failed'],
+    });
+    assert.equal(neither.cards.length, 0);
+    assert.equal(
+      isEventTelegramAllowed('payment.refunded', {
+        eventsMode: 'selected',
+        events: ['payment.chargeback_unmatched'],
+        knownTypes: REGISTERED_EVENT_TYPES,
+      }),
+      false,
+      'ticking the unmatched chargeback must not deliver every refund',
+    );
+  });
+});

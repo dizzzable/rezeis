@@ -4,6 +4,8 @@ import { PaymentGatewayType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { planNamesFromTransactionSnapshot } from '../../../common/utils/plan-snapshot.util';
+import { SAVED_CARD_AUTOPAY_OFF_AT_KEY } from '../utils/refund-autopay.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 
 const CHARGE_LOCK_TIMEOUT_MS = 30_000;
 
@@ -216,6 +218,85 @@ export class SavedPaymentMethodService {
     return { id: updated.id, autopayEnabled: false };
   }
 
+  /**
+   * Switches off ЮKassa autopay on every saved method of a user whose payment
+   * was refunded — the owner's decision («Да, выключай при возврате»): a
+   * refund ends the autopay (`refundEndsAutopay`).
+   *
+   * The card stays saved and listed; only `autopayEnabled` goes off, which is
+   * what `findPreferredForCharge` reads, so the next renewal charges nothing.
+   * The switch is the user's, not a subscription's: it stops autopay on all of
+   * their subscriptions, and the owner chose that knowingly. Each method is
+   * switched under the lock the charge decision takes, so a renewal deciding
+   * at the same moment sees one state or the other, never half.
+   *
+   * `waitForCharges: false` — from an operator's request, which must not wait
+   * on a provider — leaves alone a method whose lock is held: a charge of it is
+   * being submitted to ЮKassa right now, holding the lock for as long as
+   * ЮKassa takes. Those are counted `busy`, for the caller to switch off after
+   * its answer, waiting.
+   *
+   * `transactionId`, the refunded payment, is stamped
+   * (`SAVED_CARD_AUTOPAY_OFF_AT_KEY`) in the same database transaction as the
+   * switch: another door into the same refund, waiting on the same lock,
+   * finds nothing left to switch and reads the stamp — committed before the
+   * lock was let go — so its card says the autopay is off too.
+   *
+   * Raises no event of its own. `payment.method_autopay_updated` is the
+   * customer's switch, which rules, outbound webhooks and the email bridge act
+   * on; a refund's is told by the refund's card, which is the operator's
+   * (`payment.chargeback_unmatched` is operator-only for exactly that reason).
+   *
+   * Returns how many methods it switched off, and how many it left busy.
+   */
+  public async disableAutopayForRefund(input: {
+    readonly userId: string;
+    /** The refunded payment; a chargeback that names none of ours has none. */
+    readonly transactionId?: string;
+    /** For such a chargeback: the provider subscription it disputes a charge of. */
+    readonly providerSubscriptionId?: string;
+    readonly waitForCharges?: boolean;
+  }): Promise<{ readonly switched: number; readonly busy: number }> {
+    const candidates = await this.prismaService.savedPaymentMethod.findMany({
+      where: { userId: input.userId, gatewayType: PaymentGatewayType.YOOKASSA, isActive: true, autopayEnabled: true },
+      select: { id: true },
+    });
+    let switched = 0;
+    let busy = 0;
+    for (const candidate of candidates) {
+      const method = await this.prismaService.$transaction(async (tx) => {
+        if (input.waitForCharges === false) {
+          if (!(await this.tryLockForChargeDecision(tx, candidate.id))) return 'BUSY' as const;
+        } else {
+          await this.lockForChargeDecision(tx, candidate.id);
+        }
+        const current = await tx.savedPaymentMethod.findFirst({
+          where: { id: candidate.id, isActive: true, autopayEnabled: true },
+          select: { id: true, gatewayType: true, methodType: true, cardLast4: true, providerMethodId: true },
+        });
+        if (current === null) return null;
+        await tx.savedPaymentMethod.update({ where: { id: current.id }, data: { autopayEnabled: false } });
+        if (input.transactionId !== undefined) {
+          await writeTransactionGatewayData(tx, input.transactionId, {
+            merge: { [SAVED_CARD_AUTOPAY_OFF_AT_KEY]: new Date().toISOString() },
+          });
+        }
+        return current;
+      }, { timeout: CHARGE_LOCK_TIMEOUT_MS });
+      if (method === 'BUSY') {
+        busy += 1;
+        continue;
+      }
+      if (method === null) continue;
+      switched += 1;
+      this.logger.log(
+        `Autopay of saved ${method.gatewayType} method ${method.id} (${method.methodType}) of user ${input.userId} ` +
+          `switched off by a refund (${input.transactionId ?? input.providerSubscriptionId ?? 'unnamed'})`,
+      );
+    }
+    return { switched, busy };
+  }
+
   /** Emits an operator-visible event when an off-session charge needs 3DS. */
   public notifyAutopayConfirmationRequired(input: {
     readonly userId: string;
@@ -367,6 +448,17 @@ export class SavedPaymentMethodService {
     await tx.$queryRaw(
       Prisma.sql`SELECT "id" FROM "saved_payment_methods" WHERE "id" = ${methodId} FOR UPDATE`,
     );
+  }
+
+  /** {@link lockForChargeDecision} without waiting: false when a charge decision holds it. */
+  private async tryLockForChargeDecision(
+    tx: Prisma.TransactionClient,
+    methodId: string,
+  ): Promise<boolean> {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT "id" FROM "saved_payment_methods" WHERE "id" = ${methodId} FOR UPDATE SKIP LOCKED`,
+    );
+    return locked.length > 0;
   }
 
   /**

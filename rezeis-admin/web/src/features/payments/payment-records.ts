@@ -41,6 +41,8 @@ export interface TransactionRow {
 
 /** `WithheldConversionMark` on the server. */
 export interface WithheldConversion {
+  /** Why: a trial's second conversion, or an autopay charge after a refund. Absent from an older server. */
+  readonly reason?: 'TRIAL_ALREADY_CONVERTED' | 'AUTOPAY_AFTER_REFUND'
   /** When fulfilment withheld it. */
   readonly withheldAt: string
   /** The payment that converted the trial first. */

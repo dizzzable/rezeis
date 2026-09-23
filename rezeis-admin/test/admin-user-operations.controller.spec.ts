@@ -131,6 +131,7 @@ describe('AdminUserManagementController operations history', () => {
     assert.equal(queries[0]?.select?.gatewayData, true, 'the mark is read from the payment, so it has to be selected');
     const [withheld, first] = result.items.map((item) => item.payload as Record<string, unknown>);
     assert.deepStrictEqual(withheld?.conversionWithheld, {
+      reason: 'TRIAL_ALREADY_CONVERTED',
       withheldAt: '2026-09-01T10:00:05.000Z',
       convertedByPaymentId: 'pay-first',
       refundedAt: null,

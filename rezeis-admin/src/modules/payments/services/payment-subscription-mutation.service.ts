@@ -56,12 +56,15 @@ import {
 } from '../../subscriptions/services/trial-claim-ledger.util';
 import { readProviderSubscriptionTerms } from '../utils/provider-subscription-terms.util';
 import {
+  AUTOPAY_AFTER_REFUND,
   CONVERSION_WITHHELD_AT_KEY,
   isTrialConversionSnapshot,
   isWithheldConversion,
   TRIAL_CONVERTED_BY_KEY,
+  WITHHELD_REASON_KEY,
   WITHHELD_REFUND_UI_PATH,
 } from '../utils/trial-conversion.util';
+import { autopayEndedByRefund, readProviderChargeMarker } from '../utils/refund-autopay.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import {
   describeLatePlanMigrationRenewal,
@@ -223,6 +226,11 @@ export class PaymentSubscriptionMutationService {
         !isCombinedRenewalTransaction(transaction)
       ) {
         throw new ConflictException('Combined renewal transaction marker is invalid');
+      }
+      // An autopay charge the provider took after a refund ended its autopay
+      // renews nothing: it would revive the subscription the refund took back.
+      if (await autopayEndedByRefund(this.prismaService, transaction)) {
+        return this.withholdAutopayCharge(transaction, items);
       }
       const combined = await this.applyCombinedRenewal(transaction, items);
       // A multi-subscription renewal is a plan purchase — consume the
@@ -519,6 +527,87 @@ export class PaymentSubscriptionMutationService {
         note,
       },
     );
+  }
+
+  /**
+   * An autopay charge (2 and up) the provider took after a full refund ended
+   * its autopay (`autopayEndedByRefund`): in the moment before the cancel
+   * landed, or because the provider did not take the cancel. Applied as usual
+   * it renewed the subscription the refund had taken back, and revived it.
+   *
+   * Withheld instead, as a trial's second conversion is: settled (COMPLETED,
+   * `fulfilledAt`), applied to nothing — its lines claimed, so no later run
+   * applies them — marked (`CONVERSION_WITHHELD_AT_KEY`, with
+   * `withheldReason: AUTOPAY_AFTER_REFUND`) so no hook pays out on it, a
+   * refund revokes nothing and the lists show «Не применён», and told to the
+   * operator once, as `payment.withheld`, to refund it at the provider and
+   * record that with «Отметить возврат». Once per payment: only the run that
+   * writes the mark announces it.
+   */
+  private async withholdAutopayCharge(
+    transaction: Transaction,
+    items: readonly TransactionItem[],
+  ): Promise<{ readonly syncJobs: readonly ProfileSyncJob[] }> {
+    const announce = await this.prismaService.$transaction(async (tx) => {
+      const held = await tx.transaction.findUnique({
+        where: { id: transaction.id },
+        select: { gatewayData: true },
+      });
+      const first = !isWithheldConversion(held?.gatewayData);
+      const withheldAt = new Date();
+      await tx.transactionItem.updateMany({
+        where: { transactionId: transaction.id, appliedAt: null },
+        data: { appliedAt: withheldAt },
+      });
+      if (first) {
+        await writeTransactionGatewayData(tx, transaction.id, {
+          merge: {
+            [CONVERSION_WITHHELD_AT_KEY]: withheldAt.toISOString(),
+            [WITHHELD_REASON_KEY]: AUTOPAY_AFTER_REFUND,
+          },
+        });
+      }
+      await tx.transaction.updateMany({
+        where: { id: transaction.id, fulfilledAt: null },
+        data: { fulfilledAt: withheldAt },
+      });
+      return first;
+    });
+    if (announce) {
+      const marker = readProviderChargeMarker(transaction);
+      const charged = Number(transaction.amount.toString()) > 0;
+      this.logger.warn(
+        `AUTOPAY_AFTER_REFUND transaction=${transaction.id} payment=${transaction.paymentId} ` +
+          `providerSubscription=${marker?.providerSubscriptionId ?? '?'}: not applied — refund it`,
+      );
+      this.events.warn(
+        EVENT_TYPES.PAYMENT_WITHHELD,
+        'PAYMENT',
+        'Платёж получен, но не применён: автосписание закончено возвратом',
+        {
+          userId: transaction.userId,
+          paymentId: transaction.paymentId,
+          purchaseType: transaction.purchaseType,
+          amount: transaction.amount.toString(),
+          currency: transaction.currency,
+          gatewayType: transaction.gatewayType,
+          subscriptionIds: [...new Set(items.map((item) => item.subscriptionId))],
+          providerSubscriptionId: marker?.providerSubscriptionId ?? null,
+          chargeNumber: marker?.chargeNumber ?? null,
+          conversionWithheld: true,
+          [WITHHELD_REASON_KEY]: AUTOPAY_AFTER_REFUND,
+          needsManualReview: charged,
+          note:
+            `Провайдер (${transaction.gatewayType}) провёл списание по автоплатежу, который закончил возврат. ` +
+            'Подписку оно не продлило. ' +
+            (charged
+              ? `Верните деньги у платёжного провайдера (${transaction.gatewayType}), затем отметьте это в панели: ` +
+                `${WITHHELD_REFUND_UI_PATH}.`
+              : 'Денег по нему не списано — возвращать нечего.'),
+        },
+      );
+    }
+    return { syncJobs: [] };
   }
 
   /**

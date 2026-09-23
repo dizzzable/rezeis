@@ -81,6 +81,7 @@ const userOperationSchema = z.discriminatedUnion('kind', [
       // every other payment, and from a server older than the mark.
       conversionWithheld: z
         .object({
+          reason: z.enum(['TRIAL_ALREADY_CONVERTED', 'AUTOPAY_AFTER_REFUND']).optional(),
           withheldAt: z.string(),
           convertedByPaymentId: z.string().nullable(),
           refundedAt: z.string().nullable(),

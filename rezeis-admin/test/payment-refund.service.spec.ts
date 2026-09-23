@@ -146,17 +146,26 @@ function createService(input: {
   // A FULL refund now reverses the side-effects here instead of waiting for a
   // provider webhook that some gateways never send.
   const reversals: string[] = [];
+  /** How each reversal was asked to run. */
+  const reversalOptions: unknown[] = [];
+  // Every refund ends the autopay (`refundEndsAutopay`): a full one in the
+  // reversal, a partial one straight from the refund.
+  const autopayEnds: string[] = [];
   const service = new PaymentRefundService(
     prisma as never,
     httpService as never,
     new PaymentWebhookPayloadRedactionService(),
     {
-      reverseFulfilledPayment: async (transaction: { id: string }) => {
+      reverseFulfilledPayment: async (transaction: { id: string }, _providerStatus: unknown, options: unknown) => {
         reversals.push(transaction.id);
+        reversalOptions.push(options);
+      },
+      endAutopayAfterResponse: async (transaction: { id: string }) => {
+        autopayEnds.push(transaction.id);
       },
     } as never,
   );
-  return { service, state, reversals };
+  return { service, state, reversals, reversalOptions, autopayEnds };
 }
 
 /**
@@ -278,6 +287,7 @@ function createRefundRace(input: {
       reverseFulfilledPayment: async (reversed: { id: string }) => {
         reversals.push(`panel:${reversed.id}`);
       },
+      endAutopayAfterResponse: async () => undefined,
     } as never,
   );
   return {
@@ -344,7 +354,7 @@ describe('PaymentRefundService.refundTransaction', () => {
   // dashboard — left the partner commission paid, the income declared to the tax
   // service and the advertising revenue standing forever.
   it('reverses the side-effects itself on a full refund', async () => {
-    const { service, reversals } = createService();
+    const { service, reversals, reversalOptions } = createService();
     await service.refundTransaction({
       transactionId: 'tx-1',
       amount: null, // null = refund everything
@@ -353,6 +363,9 @@ describe('PaymentRefundService.refundTransaction', () => {
       requestMetadata: REQUEST_META,
     });
     assert.deepEqual(reversals, ['tx-1']);
+    // The operator's answer does not wait on Platega or RollyPay (R5 F3): the
+    // provider is asked after it, and the card follows.
+    assert.deepEqual(reversalOptions, [{ deferAutopay: true }]);
   });
 
   it('leaves the side-effects alone on a partial refund', async () => {
@@ -368,6 +381,48 @@ describe('PaymentRefundService.refundTransaction', () => {
       requestMetadata: REQUEST_META,
     });
     assert.deepEqual(reversals, []);
+  });
+
+  it('ends the autopay on a partial refund as well — every refund does', async () => {
+    // The owner's decision of 23.09.2026 (`refundEndsAutopay`): compensation is
+    // given as days, a refund ends the relationship. The panel's partial refund
+    // ends it at once rather than waiting for the provider's notice of it.
+    const { service, reversals, autopayEnds } = createService();
+
+    await service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '100.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+
+    assert.deepEqual(reversals, [], 'still no all-or-nothing reversal for a partial refund');
+    assert.deepEqual(autopayEnds, ['tx-1']);
+  });
+
+  it('leaves the autopay to the reversal on a full refund, and to the provider on a pending one', async () => {
+    const full = createService();
+    await full.service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: null,
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+    assert.deepEqual(full.reversals, ['tx-1']);
+    assert.deepEqual(full.autopayEnds, [], 'the reversal ends it, once');
+
+    // Not money back yet: the provider's `refund.succeeded` ends it when it is.
+    const pending = createService({ httpData: { id: 'refund-1', status: 'pending' } });
+    await pending.service.refundTransaction({
+      transactionId: 'tx-1',
+      amount: '100.00',
+      reason: null,
+      currentAdmin: ADMIN,
+      requestMetadata: REQUEST_META,
+    });
+    assert.deepEqual(pending.autopayEnds, []);
   });
 
 

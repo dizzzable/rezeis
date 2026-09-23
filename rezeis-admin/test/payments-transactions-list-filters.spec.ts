@@ -406,11 +406,13 @@ describe('PaymentsTransactionsService.listTransactions filters', () => {
 
     assert.equal(items[0]?.conversionWithheld, null);
     assert.deepStrictEqual(items[1]?.conversionWithheld, {
+      reason: 'TRIAL_ALREADY_CONVERTED',
       withheldAt: '2026-09-01T10:00:05.000Z',
       convertedByPaymentId: 'payment-first',
       refundedAt: null,
     });
     assert.deepStrictEqual(items[2]?.conversionWithheld, {
+      reason: 'TRIAL_ALREADY_CONVERTED',
       withheldAt: '2026-09-01T10:00:05.000Z',
       convertedByPaymentId: 'payment-first',
       refundedAt: '2026-09-02T09:00:00.000Z',
@@ -418,5 +420,23 @@ describe('PaymentsTransactionsService.listTransactions filters', () => {
     assert.equal(items[3]?.conversionWithheld, null);
     // The column itself stays on the server: provider payloads live in it.
     assert.equal(items.some((item) => 'gatewayData' in item), false);
+  });
+
+  it('says an autopay charge taken after a refund was withheld for that reason', async () => {
+    // The same mark, another reason: the SPA explains it differently.
+    const charge = row({
+      purchaseType: PurchaseType.RENEW,
+      gatewayData: { conversionWithheldAt: '2026-09-02T10:00:05.000Z', withheldReason: 'AUTOPAY_AFTER_REFUND' },
+    });
+    const { service } = harness({ rows: [charge] });
+
+    const { items } = await service.listTransactions({});
+
+    assert.deepStrictEqual(items[0]?.conversionWithheld, {
+      reason: 'AUTOPAY_AFTER_REFUND',
+      withheldAt: '2026-09-02T10:00:05.000Z',
+      convertedByPaymentId: null,
+      refundedAt: null,
+    });
   });
 });

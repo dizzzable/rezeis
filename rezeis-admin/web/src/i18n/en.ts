@@ -4329,9 +4329,12 @@ export const en = {
       badge: 'Not applied',
       badgeRefunded: 'Not applied · refunded',
       hint: "Another payment had already converted the customer's trial. This one was received but changed nothing, and the money is to be returned.",
+      hintAutopay: 'The provider charged it on an autopay that a refund had ended. It was received but renewed nothing, and the money is to be returned.',
       title: 'Payment received but not applied',
       description:
         "Another payment had already converted the customer's trial to a plan, so this one changed nothing: the subscription and its term stayed as they were. Return the money to the customer at the payment provider.",
+      descriptionAutopay:
+        'The provider took this autopay charge after a refund had ended the autopay. It renewed nothing: the subscription stayed as the refund left it. Return the money to the customer at the payment provider.',
       convertedBy: 'Converted by payment',
       refundedAt: 'Refund recorded {{time}}',
       recordRefund: 'Record refund',

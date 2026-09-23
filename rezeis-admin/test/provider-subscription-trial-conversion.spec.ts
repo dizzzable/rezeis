@@ -246,7 +246,11 @@ function world(options: {
       findFirst: async ({ where }: { where: { id: string; userId: string } }) =>
         where.id === row.id && where.userId === row.userId ? row : null,
       updateMany: async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
-        if (where.id !== row.id || where.appliedChargeCount !== row.appliedChargeCount) return { count: 0 };
+        if (where.id !== row.id) return { count: 0 };
+        // A charge's bump of the applied count.
+        if ('appliedChargeCount' in where && where.appliedChargeCount !== row.appliedChargeCount) return { count: 0 };
+        // Who cancelled it, never over a refund's mark (`recordCancelledBy`).
+        if ('OR' in where && row.cancelledBy === 'REFUND') return { count: 0 };
         row = { ...row, ...data } as ProviderSubscription;
         return { count: 1 };
       },

@@ -3,6 +3,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -44,6 +46,16 @@ import {
   readRefundedTotal,
   REFUND_REVERSAL_CLAIMED_AT_KEY,
 } from '../utils/payment-refund-ledger.util';
+import {
+  AUTO_RENEW_IDEMPOTENCY_PREFIX,
+  type AutopayRefundOutcome,
+  describeAutopayOutcome,
+  NO_AUTOPAY,
+  readProviderChargeMarker,
+  refundEndsAutopay,
+  SAVED_CARD_AUTOPAY_OFF_AT_KEY,
+  UNKNOWN_AUTOPAY_GATEWAY,
+} from '../utils/refund-autopay.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import { isTrialConversionSnapshot, isWithheldConversion } from '../utils/trial-conversion.util';
 import { enqueueSyncJobsDeferringFailure } from './payment-fulfillment-claim.util';
@@ -53,10 +65,16 @@ import { MoyNalogQueueService } from './moy-nalog-queue.service';
 import { AdConversionService } from '../../advertising/services/ad-conversion.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
 import { YookassaPaymentVerificationService } from './yookassa-payment-verification.service';
+import { ProviderSubscriptionService, readProviderSubscriptionDispute } from './provider-subscription.service';
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 @Injectable()
-export class PaymentReconciliationService {
+export class PaymentReconciliationService implements OnModuleDestroy {
   private readonly logger = new Logger(PaymentReconciliationService.name);
+  /**
+   * The ends of refunds' autopays still under way, each with the card it owes
+   * (none for the panel's partial refund); see {@link trackRefundWork}.
+   */
+  private readonly underWay = new Map<Promise<void>, { readonly paymentId: string; readonly card: PendingRefundCard | null }>();
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -74,6 +92,13 @@ export class PaymentReconciliationService {
     private readonly pointsCashbackService: PointsCashbackService,
     /** Composes the "cashback credited" message; see {@link creditCashbackAndTellTheBuyer}. */
     private readonly userNotifications: UserNotificationsService,
+    /**
+     * Ends the autopay a full refund belongs to (`refundEndsAutopay`). Last and
+     * optional because a dozen specs build this service positionally; the
+     * module always provides it.
+     */
+    @Optional()
+    private readonly providerSubscriptions?: ProviderSubscriptionService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -86,6 +111,24 @@ export class PaymentReconciliationService {
     await this.paymentWebhookInboxService.incrementReconciliationAttempts(event.id);
     await this.paymentWebhookInboxService.markProcessing(event.id);
     try {
+      // A Platega dispute of a subscription charge (`recordDispute`) names no
+      // payment of ours: the subscription's charges tell which one it is. Run
+      // here, in the inbox's own run, so a Platega API that does not answer
+      // leaves it FAILED — retried, counted on the dashboard, replayable from
+      // «Платежи» → «Вебхуки» — and never drops it.
+      const dispute = readProviderSubscriptionDispute(event.rawPayload);
+      if (dispute !== null) {
+        if (this.providerSubscriptions === undefined) {
+          throw new ServiceUnavailableException('Provider subscriptions are not available to settle a dispute');
+        }
+        await this.providerSubscriptions.handleChargeback(
+          event.gatewayType,
+          dispute.providerSubscriptionId,
+          dispute.chargeback,
+        );
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
       const transaction = await this.findTransactionForEvent(event.paymentId, event.gatewayType);
       const nextStatus = mapProviderStatusToTransactionStatus(event.eventStatus);
       await this.disablePermissionRevokedAutopayBestEffort(transaction, event.rawPayload, nextStatus);
@@ -609,7 +652,12 @@ export class PaymentReconciliationService {
    * reversed by the refund that settles it.
    */
   private async isWithheldConversionNow(transaction: Transaction): Promise<boolean> {
-    if (transaction.purchaseType !== 'UPGRADE' || !isTrialConversionSnapshot(transaction.planSnapshot)) {
+    // Two payments can be withheld at fulfilment: a trial's conversion, and an
+    // autopay charge that lands after a refund ended the autopay.
+    const mayBeWithheld =
+      (transaction.purchaseType === 'UPGRADE' && isTrialConversionSnapshot(transaction.planSnapshot)) ||
+      readProviderChargeMarker(transaction) !== null;
+    if (!mayBeWithheld) {
       return false;
     }
     if (isWithheldConversion(transaction.gatewayData)) return true;
@@ -794,6 +842,12 @@ export class PaymentReconciliationService {
         `Partial refund on transaction ${transaction.id} (${cumulativeRefunded} of ${paidAmount} ` +
           `after this ${refundedAmount}) — side-effects left intact; operator review required`,
       );
+      // A partial refund keeps the autopay — unless the one policy says
+      // otherwise (`refundEndsAutopay`).
+      const autopay = refundEndsAutopay({ full: false })
+        ? await this.endAutopayForRefund({ ...transaction, gatewayData: commit.gatewayData as Prisma.JsonValue })
+        : NO_AUTOPAY;
+      const autopayNote = describeAutopayOutcome(autopay);
       // A withheld payment's refund is the operator's alone, in part as in
       // full — see `reverseFulfilledPayment`.
       const withheld = isWithheldConversion(commit.gatewayData);
@@ -820,6 +874,7 @@ export class PaymentReconciliationService {
           partial: true,
           needsManualReview: true,
           ...(withheld ? { conversionWithheld: true } : {}),
+          ...(autopayNote === null ? {} : autopayMetadata(autopay, autopayNote)),
         },
       );
       return;
@@ -1139,11 +1194,19 @@ export class PaymentReconciliationService {
    * that write comes last whatever the order, and put an older word back over
    * a newer one. «Отметить возврат» has no word from the provider and passes
    * `recordProviderStatus: false`.
+   *
+   * `deferAutopay` — an operator's request: the panel's «Вернуть», «Отметить
+   * возврат». Its answer does not wait on a provider: the provider
+   * subscriptions are marked and the saved card switched off before it, the
+   * provider is asked after it, and the card, which reports what the provider
+   * did, comes after that ({@link trackRefundWork}). A request is cut at 30 s
+   * (`request-timeout.middleware.ts`), and one provider may take 45 s a call:
+   * the operator was told the refund failed after the money had gone back.
    */
   public async reverseFulfilledPayment(
     transaction: Transaction,
     providerStatus: string | null,
-    options: { readonly recordProviderStatus?: boolean } = {},
+    options: { readonly recordProviderStatus?: boolean; readonly deferAutopay?: boolean } = {},
   ): Promise<void> {
     const stamped = asRecord(transaction.gatewayData);
     if (typeof stamped?.['refundReversedAt'] === 'string') {
@@ -1251,26 +1314,341 @@ export class PaymentReconciliationService {
     // refund of a sale none of them had seen. The same for every door here:
     // «Отметить возврат», the panel's refund, a provider's notification.
     const withheld = isWithheldConversion(transaction.gatewayData);
-    this.systemEvents.warn(
-      withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUNDED,
-      'PAYMENT',
-      withheld
-        ? `Возврат неприменённого платежа: ${transaction.purchaseType}`
-        : `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
-      {
-        userId: transaction.userId,
-        paymentId: transaction.paymentId,
-        ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
-        gatewayType: transaction.gatewayType,
-        amount: transaction.amount.toString(),
-        currency: transaction.currency,
-        providerStatus,
-        refund: true,
-        subscriptionRevoked: revocation.revoked,
-        needsManualReview: revocation.needsManualReview,
-        ...(withheld ? { conversionWithheld: true } : {}),
+    const announce = (autopay: AutopayRefundOutcome): void => {
+      const autopayNote = describeAutopayOutcome(autopay);
+      this.systemEvents.warn(
+        withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUNDED,
+        'PAYMENT',
+        withheld
+          ? `Возврат неприменённого платежа: ${transaction.purchaseType}`
+          : `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
+        {
+          userId: transaction.userId,
+          paymentId: transaction.paymentId,
+          ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
+          gatewayType: transaction.gatewayType,
+          amount: transaction.amount.toString(),
+          currency: transaction.currency,
+          providerStatus,
+          refund: true,
+          subscriptionRevoked: revocation.revoked,
+          needsManualReview: revocation.needsManualReview,
+          ...(withheld ? { conversionWithheld: true } : {}),
+          ...(autopayNote === null ? {} : autopayMetadata(autopay, autopayNote)),
+        },
+      );
+    };
+
+    // The owner's rule: a refund ends the autopay (`refundEndsAutopay` — a full
+    // one does). Every live provider subscription of what this payment paid
+    // for is cancelled, or marked so the sweep keeps trying and a charge taken
+    // anyway renews nothing; and the user's ЮKassa autopay is switched off.
+    // Never throws: the money is already back.
+    if (!refundEndsAutopay({ full: true })) {
+      announce(NO_AUTOPAY);
+      return;
+    }
+    // One card, sent once: when the autopay's end is known, or when the panel
+    // stops before it is (`onModuleDestroy`). Marked first, whichever door:
+    // from here the sweep ends the autopay even if nothing else does, which is
+    // what a card sent before the end can promise.
+    const card = new PendingRefundCard(transaction.paymentId, announce);
+    await this.markAutopayForRefund(transaction);
+    if (options.deferAutopay === true) {
+      const early = await this.switchOffSavedCardAutopayForRefund(transaction, { waitForCharges: false });
+      card.progress.savedCard = early;
+      void this.trackRefundWork(`the autopay of refunded transaction ${transaction.id}`, transaction.paymentId, card, () =>
+        this.finishAutopayForRefund(transaction, early, card.progress),
+      );
+      return;
+    }
+    await this.trackRefundWork(`the autopay of refunded transaction ${transaction.id}`, transaction.paymentId, card, () =>
+      this.finishAutopayForRefund(transaction, null, card.progress),
+    );
+  }
+
+  /**
+   * Ends the autopay a refunded payment belongs to, waiting for the provider:
+   * the user's ЮKassa autopay goes off ({@link switchOffSavedCardAutopayForRefund})
+   * and the provider subscriptions are cancelled
+   * ({@link ProviderSubscriptionService.cancelForRefund}). For a provider's
+   * partial refund notice, whose card follows it. Never throws.
+   */
+  public async endAutopayForRefund(transaction: Transaction): Promise<AutopayRefundOutcome> {
+    return this.finishAutopayForRefund(transaction, null);
+  }
+
+  /**
+   * {@link endAutopayForRefund} from an operator's request — the panel's own
+   * partial refund — without the answer waiting on a provider: what the
+   * database can settle is settled before the answer, the provider is asked
+   * after it. No card: the provider's notice of that refund carries one
+   * (`handleRefundReversal`), and says what was ended — the rows cancelled
+   * moments ago and the stamp on the payment tell it. Never throws.
+   */
+  public async endAutopayAfterResponse(transaction: Transaction): Promise<void> {
+    await this.markAutopayForRefund(transaction);
+    const early = await this.switchOffSavedCardAutopayForRefund(transaction, { waitForCharges: false });
+    void this.trackRefundWork(
+      `the autopay of partially refunded transaction ${transaction.id}`,
+      transaction.paymentId,
+      null,
+      async () => {
+        const autopay = await this.finishAutopayForRefund(transaction, early);
+        if (autopay.cancelled.length > 0 || autopay.failed.length > 0 || autopay.savedCardAutopayOff === true) {
+          this.logger.warn(
+            `Partial refund of transaction ${transaction.id} ended its autopay: ` +
+              `${autopay.cancelled.length} cancelled, ${autopay.failed.length} left for the sweep, ` +
+              `ЮKassa autopay ${autopay.savedCardAutopayOff === true ? 'off' : 'untouched'}`,
+          );
+        }
+        return autopay;
       },
     );
+  }
+
+  /**
+   * The first part of ending a refund's provider autopay, at every door: the
+   * rows are marked (`ProviderSubscriptionService.markForRefund`), so from here
+   * the sweep cancels them whatever happens to the rest, and a charge taken on
+   * them renews nothing. Never throws: the cancel marks them again before it
+   * asks the provider.
+   */
+  private async markAutopayForRefund(transaction: Transaction): Promise<void> {
+    if (this.providerSubscriptions === undefined) return;
+    try {
+      await this.providerSubscriptions.markForRefund(transaction);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Could not mark the autopay of refunded transaction ${transaction.id} before the answer; ` +
+          `the cancel after it marks it: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The rest of ending a refund's autopay, given what a request already did to
+   * the ЮKassa autopay (`early`; null when nothing was — then this does it, the
+   * same way): what a charge held is switched off, waiting for the charge; the
+   * ЮKassa charges that renew anyway are named; then the provider
+   * subscriptions are cancelled. `progress` is what the card says if the panel
+   * stops first. Never throws.
+   */
+  private async finishAutopayForRefund(
+    transaction: Transaction,
+    early: SavedCardRefundOutcome | null,
+    progress: RefundCardProgress = {},
+  ): Promise<AutopayRefundOutcome> {
+    const first = early ?? (await this.switchOffSavedCardAutopayForRefund(transaction, { waitForCharges: false }));
+    progress.savedCard = first;
+    const late = first.busy
+      ? await this.switchOffSavedCardAutopayForRefund(transaction, { waitForCharges: true })
+      : null;
+    const savedCard = late === null ? first : mergeSavedCardOutcomes(first, late);
+    progress.savedCard = savedCard;
+    const charges = await this.yookassaChargesAroundRefund(transaction, first.lockHeldAt);
+    const provider =
+      this.providerSubscriptions === undefined ? NO_AUTOPAY : await this.providerSubscriptions.cancelForRefund(transaction);
+    return { ...provider, ...savedCardFields(savedCard), ...charges };
+  }
+
+  /**
+   * The user's ЮKassa autopay charges a refund's switch could not stop, for
+   * its card: the switch stops the NEXT renewal, not one already started, and
+   * such a charge renews the subscription — nothing withholds it.
+   *
+   * - PENDING (a 3DS confirmation, an answer still awaited): if it goes
+   *   through, it renews, and has to be refunded on its own.
+   * - COMPLETED, when a charge held a saved method as the refund came
+   *   (`lockHeldAt`, from the switch that found it held): it went through
+   *   while the refund waited for it. Created at most
+   *   {@link CHARGE_IN_FLIGHT_WINDOW_MS} before: the charge is written before
+   *   it takes the lock, and a charge holds it for 30 s at most.
+   *
+   * Never for a withheld payment's refund, which leaves the autopay on.
+   * Never throws: a lookup that fails only leaves the line out.
+   */
+  private async yookassaChargesAroundRefund(
+    transaction: Transaction,
+    lockHeldAt: Date | null,
+  ): Promise<Pick<AutopayRefundOutcome, 'yookassaChargesDuringRefund' | 'yookassaChargesPending'>> {
+    if (isWithheldConversion(transaction.gatewayData)) return {};
+    const autopayCharges = {
+      userId: transaction.userId,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      idempotencyKey: { startsWith: AUTO_RENEW_IDEMPOTENCY_PREFIX },
+      id: { not: transaction.id },
+    };
+    try {
+      const pending = await this.prismaService.transaction.findMany({
+        where: { ...autopayCharges, status: TransactionStatus.PENDING },
+        select: { paymentId: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      const during =
+        lockHeldAt === null
+          ? []
+          : await this.prismaService.transaction.findMany({
+              where: {
+                ...autopayCharges,
+                status: TransactionStatus.COMPLETED,
+                createdAt: { gte: new Date(lockHeldAt.getTime() - CHARGE_IN_FLIGHT_WINDOW_MS) },
+              },
+              select: { paymentId: true },
+              orderBy: { createdAt: 'asc' },
+            });
+      return {
+        ...(during.length > 0 ? { yookassaChargesDuringRefund: during.map((row) => row.paymentId) } : {}),
+        ...(pending.length > 0 ? { yookassaChargesPending: pending.map((row) => row.paymentId) } : {}),
+      };
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Could not look for ЮKassa autopay charges around the refund of transaction ${transaction.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {};
+    }
+  }
+
+  /**
+   * The owner's decision of 23.09.2026, «Да, выключай при возврате»: a refund
+   * (`refundEndsAutopay`) also switches off the user's ЮKassa saved-card
+   * autopay — the per-user switch the renewal reads
+   * (`SavedPaymentMethodService.findPreferredForCharge`), so it stops the
+   * autopay of every subscription of theirs. The card itself stays saved.
+   *
+   * Not for a withheld payment's refund: that payment paid for nothing, and
+   * the autopay of what the user did buy stands, as its provider
+   * subscriptions do (`cancelForRefund`).
+   *
+   * `waitForCharges: false` leaves a method a charge is being submitted with
+   * (`busy`, and when: `lockHeldAt`) for the call that waits. The switch stamps
+   * the payment (`SAVED_CARD_AUTOPAY_OFF_AT_KEY`) in its own database
+   * transaction; the stamp is read after it, so a door that finds nothing left
+   * to switch — the other door of the same refund switched first — says the
+   * autopay is off too. Never throws.
+   */
+  private async switchOffSavedCardAutopayForRefund(
+    transaction: Transaction,
+    options: { readonly waitForCharges: boolean },
+  ): Promise<SavedCardRefundOutcome> {
+    if (isWithheldConversion(transaction.gatewayData)) {
+      return { off: false, failed: false, busy: false, lockHeldAt: null };
+    }
+    const startedAt = new Date();
+    let result: { readonly switched: number; readonly busy: number };
+    try {
+      result = await this.savedPaymentMethodService.disableAutopayForRefund({
+        userId: transaction.userId,
+        transactionId: transaction.id,
+        waitForCharges: options.waitForCharges,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!options.waitForCharges) {
+        // Tried again by the call that waits.
+        this.logger.warn(`ЮKassa autopay of refunded transaction ${transaction.id} not switched off yet: ${message}`);
+        return { off: false, failed: false, busy: true, lockHeldAt: null };
+      }
+      this.logger.error(`Could not switch off the ЮKassa autopay of refunded transaction ${transaction.id}: ${message}`);
+      return { off: false, failed: true, busy: false, lockHeldAt: null };
+    }
+    return {
+      off: result.switched > 0 || (await this.readSavedCardStamp(transaction)),
+      failed: false,
+      busy: result.busy > 0,
+      lockHeldAt: result.busy > 0 ? startedAt : null,
+    };
+  }
+
+  /** Whether the payment carries the stamp of a switch its refund made, as the database holds it now. */
+  private async readSavedCardStamp(transaction: Transaction): Promise<boolean> {
+    try {
+      const fresh = await this.prismaService.transaction.findUnique({
+        where: { id: transaction.id },
+        select: { gatewayData: true },
+      });
+      return typeof asRecord(fresh?.gatewayData)?.[SAVED_CARD_AUTOPAY_OFF_AT_KEY] === 'string';
+    } catch {
+      return typeof asRecord(transaction.gatewayData)?.[SAVED_CARD_AUTOPAY_OFF_AT_KEY] === 'string';
+    }
+  }
+
+  /**
+   * Runs the end of a refund's autopay and sends its card (`card`; null for
+   * the panel's partial refund, whose card the provider's notice brings).
+   * Returned, for a door that waits for it (the worker's); left running by
+   * one that does not (an operator's request). Never rejects: a failure is
+   * logged, and the card still goes out, saying what is known. Kept until done,
+   * so a stop ({@link onModuleDestroy}) and a spec ({@link settleAfterResponse})
+   * can find it.
+   */
+  private trackRefundWork(
+    label: string,
+    paymentId: string,
+    card: PendingRefundCard | null,
+    work: () => Promise<AutopayRefundOutcome>,
+  ): Promise<void> {
+    const task: Promise<void> = work()
+      .then((outcome) => {
+        card?.send(outcome);
+      })
+      .catch((error: unknown) => {
+        this.logger.error(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+        card?.send({ cancelled: [], failed: [{ gatewayType: UNKNOWN_AUTOPAY_GATEWAY, providerSubscriptionId: '' }] });
+      })
+      .finally(() => {
+        this.underWay.delete(task);
+      });
+    this.underWay.set(task, { paymentId, card });
+    return task;
+  }
+
+  /** Waits for the ends of refunds' autopays under way ({@link trackRefundWork}). */
+  public async settleAfterResponse(): Promise<void> {
+    while (this.underWay.size > 0) {
+      await Promise.all([...this.underWay.keys()]);
+    }
+  }
+
+  /**
+   * A stop never loses a refund's card. What is under way gets
+   * {@link AFTER_RESPONSE_SHUTDOWN_WAIT_MS} to finish — well inside the 10 s
+   * Docker gives a container before it kills it; the compose files set no
+   * `stop_grace_period`. Then every card still owed goes out at once, saying
+   * the provider's cancel had not finished and that the panel retries it every
+   * 10 minutes — true, because every door marks the rows before anything
+   * else. Each is logged with its payment. Here and not in a later hook: Nest
+   * destroys this module before the global one that disconnects the
+   * database, and the work still writes to it.
+   */
+  public async onModuleDestroy(): Promise<void> {
+    if (this.underWay.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.settleAfterResponse(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, AFTER_RESPONSE_SHUTDOWN_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    for (const { paymentId, card } of this.underWay.values()) {
+      if (card === null) {
+        this.logger.warn(`The autopay's end for refunded payment ${paymentId} was cut by the stop; the sweep finishes it`);
+        continue;
+      }
+      if (card.isSent) continue;
+      this.logger.warn(
+        `Refund card of payment ${paymentId} sent before its autopay's provider cancel finished: the panel is stopping`,
+      );
+      try {
+        card.sendInterrupted();
+      } catch (error: unknown) {
+        this.logger.error(
+          `Refund card of payment ${paymentId} could not be sent: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -2260,6 +2638,122 @@ function parseInstant(value: unknown): Date | null {
   const at = new Date(value);
   return Number.isNaN(at.getTime()) ? null : at;
 }
+
+/**
+ * What the refund card carries about the autopay: how many were cancelled and
+ * how many could not be (for machines), and the line the operator reads as
+ * «📝 Заметка».
+ */
+function autopayMetadata(outcome: AutopayRefundOutcome, note: string): Record<string, unknown> {
+  return {
+    autopayCancelled: outcome.cancelled.length,
+    autopayCancelFailed: outcome.failed.length,
+    ...(outcome.savedCardAutopayFailed === true
+      ? { savedCardAutopayFailed: true }
+      : outcome.savedCardAutopayOff === true
+        ? { savedCardAutopayOff: true }
+        : {}),
+    ...(outcome.yookassaChargesDuringRefund === undefined
+      ? {}
+      : { yookassaChargesDuringRefund: outcome.yookassaChargesDuringRefund }),
+    ...(outcome.yookassaChargesPending === undefined ? {} : { yookassaChargesPending: outcome.yookassaChargesPending }),
+    ...(outcome.providerCancelInterrupted === true ? { providerCancelInterrupted: true } : {}),
+    note,
+  };
+}
+
+/** What a refund did to the user's ЮKassa autopay; see `switchOffSavedCardAutopayForRefund`. */
+interface SavedCardRefundOutcome {
+  /** Off because of this refund: switched now, or by another door of it (the stamp). */
+  readonly off: boolean;
+  /** Switching it off failed. */
+  readonly failed: boolean;
+  /** A charge held a saved method, and it is left for the call that waits. */
+  readonly busy: boolean;
+  /** When a charge was found holding one; null when none was. */
+  readonly lockHeldAt: Date | null;
+}
+
+/** One outcome of a switch that did not wait and the one that then waited. */
+function mergeSavedCardOutcomes(first: SavedCardRefundOutcome, late: SavedCardRefundOutcome): SavedCardRefundOutcome {
+  return { off: first.off || late.off, failed: first.failed || late.failed, busy: false, lockHeldAt: first.lockHeldAt };
+}
+
+/**
+ * The outcome's fields for the ЮKassa autopay, as facts: something was switched
+ * off, something failed — both can be true. Which one the card says is the
+ * card's to decide: a failure wins (`autopayMetadata`, `describeAutopayOutcome`).
+ */
+function savedCardFields(
+  outcome: SavedCardRefundOutcome,
+): Pick<AutopayRefundOutcome, 'savedCardAutopayOff' | 'savedCardAutopayFailed'> {
+  return {
+    ...(outcome.off ? { savedCardAutopayOff: true } : {}),
+    ...(outcome.failed ? { savedCardAutopayFailed: true } : {}),
+  };
+}
+
+/** What a refund's card can say if the panel stops before the autopay's end is known. */
+interface RefundCardProgress {
+  savedCard?: SavedCardRefundOutcome;
+}
+
+/**
+ * A refund's card while its autopay's end is under way: sent once, when the
+ * end is known or when the panel stops, whichever comes first.
+ */
+class PendingRefundCard {
+  public readonly progress: RefundCardProgress = {};
+  private sent = false;
+
+  public constructor(
+    public readonly paymentId: string,
+    private readonly announce: (autopay: AutopayRefundOutcome) => void,
+  ) {}
+
+  public get isSent(): boolean {
+    return this.sent;
+  }
+
+  public send(autopay: AutopayRefundOutcome): void {
+    if (this.sent) return;
+    this.sent = true;
+    this.announce(autopay);
+  }
+
+  /**
+   * The card, before the provider's cancel finished. A ЮKassa method the
+   * refund was still waiting on is said not to be switched off: that is what
+   * asks for something to be done.
+   */
+  public sendInterrupted(): void {
+    const savedCard = this.progress.savedCard;
+    this.send({
+      cancelled: [],
+      failed: [],
+      providerCancelInterrupted: true,
+      ...(savedCard === undefined
+        ? {}
+        : savedCard.busy
+          ? { savedCardAutopayFailed: true }
+          : savedCardFields(savedCard)),
+    });
+  }
+}
+
+/**
+ * How long a stop waits for the ends of refunds' autopays under way before it
+ * sends their cards as they are; see `onModuleDestroy`. Well inside Docker's
+ * 10 s before it kills the container.
+ */
+export const AFTER_RESPONSE_SHUTDOWN_WAIT_MS = 5_000;
+
+/**
+ * How long before a refund found a saved method held by a charge that charge
+ * can have been written: before it takes the lock, which it holds 30 s at most
+ * (`CHARGE_LOCK_TIMEOUT_MS`). See `yookassaChargesAroundRefund`.
+ */
+const CHARGE_IN_FLIGHT_WINDOW_MS = 2 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;

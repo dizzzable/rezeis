@@ -19,12 +19,16 @@ import { of } from 'rxjs';
 import { OPERATOR_ONLY_EVENT_TYPES } from '../src/common/services/system-events.service';
 import { CurrentAdminInterface } from '../src/modules/auth/interfaces/current-admin.interface';
 import { PaymentPendingExpiryService } from '../src/modules/payments/services/payment-pending-expiry.service';
-import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
+import {
+  AFTER_RESPONSE_SHUTDOWN_WAIT_MS,
+  PaymentReconciliationService,
+} from '../src/modules/payments/services/payment-reconciliation.service';
 import {
   PaymentRefundService,
   WITHHELD_REFUND_CLAIM_MS,
 } from '../src/modules/payments/services/payment-refund.service';
 import { REFUND_REVERSAL_CLAIM_MS } from '../src/modules/payments/utils/payment-refund-ledger.util';
+import type { AutopayRefundOutcome } from '../src/modules/payments/utils/refund-autopay.util';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PlanReferenceGuardService } from '../src/modules/plans/services/plan-reference-guard.service';
 import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
@@ -50,6 +54,11 @@ const PLAN_ID = 'plan-p';
 
 type Row = Record<string, unknown> & { readonly id: string };
 
+type SavedCardAnswer =
+  | { readonly switched: number; readonly busy: number }
+  | Error
+  | ((ask: { readonly transactionId?: string }) => { readonly switched: number; readonly busy: number });
+
 interface RaisedEvent {
   readonly severity: string;
   readonly type: string;
@@ -68,7 +77,21 @@ function pick(row: Row, select: Record<string, boolean> | undefined): Record<str
  * A trial, `trial-sub`, converted by `payment-first`; and `payment-second`, a
  * conversion of the same trial drafted before that, paid now.
  */
-function world(options: { readonly gatewayType?: PaymentGatewayType } = {}) {
+function world(
+  options: {
+    readonly gatewayType?: PaymentGatewayType;
+    /** What ending the autopay answers (`ProviderSubscriptionService.cancelForRefund`). */
+    readonly autopay?: AutopayRefundOutcome;
+    /** The provider does not answer the cancel until `releaseCancel()`. */
+    readonly cancelHangs?: boolean;
+    /**
+     * What switching off the ЮKassa autopay answers, call by call; then
+     * `{ switched: 0, busy: 0 }`. A function runs at the call: what happened
+     * meanwhile — another door switching first.
+     */
+    readonly savedCard?: ReadonlyArray<SavedCardAnswer>;
+  } = {},
+) {
   const gatewayType = options.gatewayType ?? PaymentGatewayType.PLATEGA;
   const convertedUntil = new Date(Date.now() + 30 * DAY);
   const subscription = {
@@ -117,9 +140,29 @@ function world(options: { readonly gatewayType?: PaymentGatewayType } = {}) {
   };
   const rows: Row[] = [first, second];
   const byId = (id: unknown): Row | undefined => rows.find((row) => row.id === id);
+  /** What `SavedPaymentMethodService.disableAutopayForRefund` writes with a switch. */
+  const stampSwitch = (transactionId: string | undefined): void => {
+    const row = byId(transactionId);
+    if (row === undefined) return;
+    row.gatewayData = { ...(row.gatewayData as Record<string, unknown>), refundSavedCardAutopayOffAt: new Date().toISOString() };
+  };
   const subscriptionWrites: unknown[] = [];
   const syncJobs: unknown[] = [];
   const audits: Record<string, unknown>[] = [];
+  /** The payments whose refund asked for their autopay to end. */
+  const autopayEnded: string[] = [];
+  /** The payments whose refund marked their autopay in the operator's request. */
+  const autopayMarked: string[] = [];
+  /** Every ask to switch off the user's ЮKassa saved-card autopay. */
+  const savedCardAsks: Array<{ readonly userId: string; readonly transactionId: string; readonly waitForCharges?: boolean }> = [];
+  const savedCardAnswers = [...(options.savedCard ?? [])];
+  let releaseCancel: () => void = () => undefined;
+  const cancelAnswered =
+    options.cancelHangs === true
+      ? new Promise<void>((resolve) => {
+          releaseCancel = resolve;
+        })
+      : Promise.resolve();
   const events: RaisedEvent[] = [];
   const inbox = { processed: [] as string[], failed: [] as string[], failedAlerts: [] as string[] };
   const hooks = { partner: 0, referral: 0, cashback: 0, moyNalog: 0, adConversion: 0, savedMethod: 0 };
@@ -171,6 +214,24 @@ function world(options: { readonly gatewayType?: PaymentGatewayType } = {}) {
       findFirst: async ({ where }: { where: Record<string, unknown> }) =>
         rows.find((row) => row.gatewayId === where.gatewayId) ?? null,
       findMany: async ({ where, select }: { where: Record<string, unknown>; select?: Record<string, boolean> }) => {
+        // The customer's ЮKassa autopay charges around a refund (`yookassaChargesAroundRefund`).
+        if (where.idempotencyKey !== undefined) {
+          const prefix = (where.idempotencyKey as { startsWith: string }).startsWith;
+          const except = (where.id as { not?: string } | undefined)?.not;
+          const since = (where.createdAt as { gte?: Date } | undefined)?.gte;
+          return rows
+            .filter(
+              (row) =>
+                row.userId === where.userId &&
+                row.gatewayType === where.gatewayType &&
+                typeof row.idempotencyKey === 'string' &&
+                row.idempotencyKey.startsWith(prefix) &&
+                row.status === where.status &&
+                row.id !== except &&
+                (since === undefined || (row.createdAt as Date).getTime() >= since.getTime()),
+            )
+            .map((row) => pick(row, select));
+        }
         // The expiry sweep's scan of stale PENDING rows.
         if (where.status === TransactionStatus.PENDING) {
           return rows.filter((row) => row.status === TransactionStatus.PENDING).map((row) => pick(row, select));
@@ -313,6 +374,15 @@ function world(options: { readonly gatewayType?: PaymentGatewayType } = {}) {
         hooks.savedMethod += 1;
       },
       disableAutopayForProviderMethod: async () => undefined,
+      disableAutopayForRefund: async (input: { readonly userId: string; readonly transactionId: string; readonly waitForCharges?: boolean }) => {
+        savedCardAsks.push(input);
+        const next = savedCardAnswers.shift() ?? { switched: 0, busy: 0 };
+        if (next instanceof Error) throw next;
+        const answer = typeof next === 'function' ? next(input) : next;
+        // The real switch stamps the refunded payment in its own transaction.
+        if (answer.switched > 0) stampSwitch(input.transactionId);
+        return answer;
+      },
     } as never,
     { verifyCompletion: async () => ({ outcome: 'CONFIRMED' }) } as never,
     {
@@ -323,6 +393,17 @@ function world(options: { readonly gatewayType?: PaymentGatewayType } = {}) {
       reverseForTransactionBestEffort: async () => undefined,
     } as never,
     { create: async () => 'notification-1' } as never,
+    {
+      cancelForRefund: async (refunded: { readonly id: string }) => {
+        autopayEnded.push(refunded.id);
+        await cancelAnswered;
+        return options.autopay ?? { cancelled: [], failed: [] };
+      },
+      markForRefund: async (refunded: { readonly id: string }) => {
+        autopayMarked.push(refunded.id);
+        return [];
+      },
+    } as never,
   );
   const expiry = new PaymentPendingExpiryService(
     prisma as never,
@@ -365,6 +446,13 @@ function world(options: { readonly gatewayType?: PaymentGatewayType } = {}) {
     subscriptionWrites,
     syncJobs,
     audits,
+    autopayEnded,
+    autopayMarked,
+    savedCardAsks,
+    savedCardAnswers,
+    stampSwitch,
+    rows,
+    releaseCancel: () => releaseCancel(),
     events,
     inbox,
     hookCalls,
@@ -489,8 +577,12 @@ describe('a conversion paid after another payment converted the trial', () => {
 describe('recording the refund of a withheld payment', () => {
   const OPERATOR = { id: 'admin-1' } as CurrentAdminInterface;
   const REQUEST = { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' };
-  const record = (w: ReturnType<typeof world>, transactionId = 'tx-second') =>
-    w.refunds.recordWithheldRefund({ transactionId, currentAdmin: OPERATOR, requestMetadata: REQUEST });
+  /** A click, and what it handed on past its answer: the provider's cancel and the card. */
+  const record = async (w: ReturnType<typeof world>, transactionId = 'tx-second') => {
+    const result = await w.refunds.recordWithheldRefund({ transactionId, currentAdmin: OPERATOR, requestMetadata: REQUEST });
+    await w.reconciliation.settleAfterResponse();
+    return result;
+  };
 
   it('reverses it as refunded, says who recorded it, and leaves the subscription alone', async () => {
     const w = world();
@@ -735,6 +827,7 @@ describe('the refund reversal, from two doors at once', () => {
     assert.equal((w.second.gatewayData as Record<string, unknown>).providerStatus, 'refund_paid');
     held.release();
     const result = await manual;
+    await w.reconciliation.settleAfterResponse();
 
     assert.equal(result.recorded, true);
     assert.equal(held.runs.count, 1, `the reversal ran ${held.runs.count} times`);
@@ -809,6 +902,443 @@ describe('the refund reversal, from two doors at once', () => {
   });
 });
 
+/**
+ * «все возвраты … удаляют автосписания» (wave 6): every refund ends the
+ * autopay of what the payment paid for, through every door, and its card says
+ * how that went. The provider side is `refund-ends-autopay.spec.ts`; here the
+ * doors, against the real reconciliation and refund services.
+ */
+describe('every refund ends the autopay, and its card says so', () => {
+  const PLATEGA_CANCELLED: AutopayRefundOutcome = {
+    cancelled: [{ gatewayType: 'PLATEGA', providerSubscriptionId: 'platega-1' }],
+    failed: [],
+  };
+  const refundCard = (w: ReturnType<typeof world>) =>
+    w.events.find((event) => ['payment.refunded', 'payment.withheld_refunded', 'payment.refund_partial'].includes(event.type));
+
+  it('«Отметить возврат»', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.refunds.recordWithheldRefund({
+      transactionId: 'tx-second',
+      currentAdmin: { id: 'admin-1' } as CurrentAdminInterface,
+      requestMetadata: { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' },
+    });
+    await w.reconciliation.settleAfterResponse();
+
+    assert.deepEqual(w.autopayEnded, ['tx-second']);
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание отменено: Platega.');
+    assert.equal(refundCard(w)?.metadata.autopayCancelled, 1);
+  });
+
+  it('a provider’s refund notice', async () => {
+    const w = world({ gatewayType: PaymentGatewayType.CRYPTOMUS, autopay: PLATEGA_CANCELLED });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.notify('refund-1', { eventStatus: 'refund_paid', rawPayload: { status: 'refund_paid' } });
+
+    assert.deepEqual(w.autopayEnded, ['tx-second']);
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание отменено: Platega.');
+  });
+
+  it('an ordinary payment’s chargeback', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.notify('chargeback-first', {
+      eventStatus: 'CHARGEBACKED',
+      rawPayload: { status: 'CHARGEBACKED' },
+      paymentId: 'payment-first',
+    });
+
+    assert.deepEqual(w.autopayEnded, ['tx-first']);
+    assert.equal(w.first.status, TransactionStatus.CANCELED);
+    assert.equal(refundCard(w)?.type, 'payment.refunded');
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание отменено: Platega.');
+  });
+
+  it('a partial refund too — the owner’s decision of 23.09.2026', async () => {
+    const w = world({ gatewayType: PaymentGatewayType.YOOKASSA, autopay: PLATEGA_CANCELLED });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    Object.assign(w.first, { gatewayType: PaymentGatewayType.YOOKASSA, gatewayId: 'provider-first' });
+
+    await w.notify('refund-first', {
+      eventStatus: 'REFUNDED',
+      paymentId: 'provider-first',
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-first-1', payment_id: 'provider-first', status: 'succeeded', amount: { value: '100.00', currency: 'RUB' } },
+      },
+    });
+
+    assert.deepEqual(w.autopayEnded, ['tx-first'], 'a partial refund ends the autopay as well');
+    assert.equal(w.first.status, TransactionStatus.COMPLETED, 'and still reverses nothing else');
+    assert.equal(refundCard(w)?.type, 'payment.refund_partial');
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание отменено: Platega.');
+  });
+
+  it('a provider that could not be reached: the refund stands, and the card says what to do', async () => {
+    const w = world({
+      autopay: { cancelled: [], failed: [{ gatewayType: 'PLATEGA', providerSubscriptionId: 'platega-1' }] },
+    });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'CHARGEBACKED');
+
+    assert.equal(w.first.status, TransactionStatus.CANCELED, 'the refund is not undone by a provider that cannot be reached');
+    const card = refundCard(w);
+    assert.equal(card?.metadata.autopayCancelFailed, 1);
+    assert.match(String(card?.metadata.note), /Автосписание у Platega отменить не удалось/);
+    assert.match(String(card?.metadata.note), /отмените подписку в личном кабинете провайдера/);
+  });
+
+  it('says nothing about an autopay there was not', async () => {
+    const w = world();
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'CHARGEBACKED');
+
+    assert.deepEqual(w.autopayEnded, ['tx-first'], 'asked all the same');
+    assert.equal(refundCard(w)?.metadata.note, undefined);
+    assert.equal(refundCard(w)?.metadata.autopayCancelled, undefined);
+  });
+
+  it('an operator’s refund is answered before the provider is: the autopay is marked first, and the card follows the provider (R5 F3)', async () => {
+    // A request is cut at 30 s, and Platega or RollyPay may take 45 s a call:
+    // the operator was told «Не удалось оформить возврат» with the money back.
+    const w = world({ autopay: PLATEGA_CANCELLED, cancelHangs: true });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    let timer: NodeJS.Timeout | undefined;
+
+    const answered = await Promise.race([
+      w.refunds
+        .recordWithheldRefund({
+          transactionId: 'tx-second',
+          currentAdmin: { id: 'admin-1' } as CurrentAdminInterface,
+          requestMetadata: { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' },
+        })
+        .then((result) => (result.recorded ? 'answered' : 'not recorded')),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve('waited for the provider'), 1000);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    try {
+      assert.equal(answered, 'answered');
+      assert.deepEqual(w.autopayMarked, ['tx-second'], 'the autopay was not marked before the answer');
+      assert.equal(w.second.status, TransactionStatus.CANCELED);
+      assert.equal(refundCard(w), undefined, 'the card went out before the provider said what it did');
+    } finally {
+      w.releaseCancel();
+      await w.reconciliation.settleAfterResponse();
+    }
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание отменено: Platega.');
+  });
+
+  it('a shutdown waits for a refund’s cancel and card still under way', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED, cancelHangs: true });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    await w.refunds.recordWithheldRefund({
+      transactionId: 'tx-second',
+      currentAdmin: { id: 'admin-1' } as CurrentAdminInterface,
+      requestMetadata: { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' },
+    });
+
+    const shutdown = w.reconciliation.onModuleDestroy();
+    setTimeout(() => w.releaseCancel(), 20);
+    await shutdown;
+
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание отменено: Platega.', 'the shutdown cut the card off');
+  });
+});
+
+/**
+ * «Да, выключай при возврате» (the owner, 23.09.2026): a refund also switches
+ * off the user's ЮKassa saved-card autopay — the per-user switch the renewal
+ * reads — except a withheld payment's, which paid for nothing. The card
+ * itself stays saved. On PostgreSQL, with the renewal that then does not
+ * charge: `provider-subscriptions-postgres.spec.ts`.
+ */
+describe('a refund switches off the saved-card autopay (the owner, 23.09.2026)', () => {
+  const refundCard = (w: ReturnType<typeof world>) =>
+    w.events.find((event) => ['payment.refunded', 'payment.withheld_refunded', 'payment.refund_partial'].includes(event.type));
+
+  it('switches it off, stamps the payment, and the card says so', async () => {
+    const w = world({ savedCard: [{ switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'CHARGEBACKED');
+
+    assert.deepEqual(w.savedCardAsks.map((ask) => [ask.userId, ask.transactionId]), [['user-1', 'tx-first']]);
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание через ЮKassa выключено.');
+    assert.equal(refundCard(w)?.metadata.savedCardAutopayOff, true);
+    assert.equal(typeof (w.first.gatewayData as Record<string, unknown>).refundSavedCardAutopayOffAt, 'string');
+  });
+
+  it('leaves it on for a withheld payment’s refund: that payment paid for nothing', async () => {
+    const w = world({ savedCard: [{ switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.refunds.recordWithheldRefund({
+      transactionId: 'tx-second',
+      currentAdmin: { id: 'admin-1' } as CurrentAdminInterface,
+      requestMetadata: { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' },
+    });
+    await w.reconciliation.settleAfterResponse();
+
+    assert.deepEqual(w.savedCardAsks, [], 'the saved-card autopay was switched off for a payment that bought nothing');
+    assert.equal(refundCard(w)?.metadata.savedCardAutopayOff, undefined);
+  });
+
+  it('a card a charge is being submitted with is switched off after the answer, waiting for the charge', async () => {
+    const w = world({ savedCard: [{ switched: 0, busy: 1 }, { switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'succeeded', { deferAutopay: true });
+    await w.reconciliation.settleAfterResponse();
+
+    // In the request without waiting (the charge holds that card), then after
+    // the answer, waiting for it.
+    assert.deepEqual(w.savedCardAsks.map((ask) => ask.waitForCharges), [false, true]);
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание через ЮKassa выключено.');
+  });
+
+  it('a later door into the same refund still says it: the provider’s notice after the panel’s partial refund', async () => {
+    const w = world({ gatewayType: PaymentGatewayType.YOOKASSA, savedCard: [{ switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    Object.assign(w.first, { gatewayType: PaymentGatewayType.YOOKASSA, gatewayId: 'provider-first' });
+
+    // The panel's partial refund: switched off in the request, no card of its own.
+    await w.reconciliation.endAutopayAfterResponse({ ...w.first } as never);
+    await w.reconciliation.settleAfterResponse();
+    assert.equal(refundCard(w), undefined);
+    // ЮKassa's notice of that refund: nothing left to switch, and its card says it is off.
+    await w.notify('refund-first', {
+      eventStatus: 'REFUNDED',
+      paymentId: 'provider-first',
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-first-1', payment_id: 'provider-first', status: 'succeeded', amount: { value: '100.00', currency: 'RUB' } },
+      },
+    });
+
+    assert.equal(w.savedCardAsks.length, 2);
+    assert.equal(refundCard(w)?.type, 'payment.refund_partial');
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание через ЮKassa выключено.');
+  });
+
+  it('a switch that fails is on the card, with what can be done', async () => {
+    mock.method(Logger.prototype, 'error', () => undefined);
+    mock.method(Logger.prototype, 'warn', () => undefined);
+    // Tried without waiting, then once more waiting: both fail.
+    const w = world({ savedCard: [new Error('the database is not answering'), new Error('still not answering')] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'CHARGEBACKED');
+
+    const card = refundCard(w);
+    assert.equal(card?.metadata.savedCardAutopayFailed, true);
+    assert.match(String(card?.metadata.note), /Автосписание через ЮKassa выключить не удалось/);
+    assert.match(String(card?.metadata.note), /«Способах оплаты»/);
+  });
+
+  it('never says both: a switch in the request, then one that fails after the answer, is a failure (R6 m3)', async () => {
+    mock.method(Logger.prototype, 'error', () => undefined);
+    const w = world({ savedCard: [{ switched: 1, busy: 1 }, new Error('the database is not answering')] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'succeeded', { deferAutopay: true });
+    await w.reconciliation.settleAfterResponse();
+
+    const card = refundCard(w);
+    assert.equal(card?.metadata.savedCardAutopayFailed, true);
+    assert.equal(card?.metadata.savedCardAutopayOff, undefined);
+    assert.match(String(card?.metadata.note), /^Автосписание через ЮKassa выключить не удалось/);
+    assert.doesNotMatch(String(card?.metadata.note), /выключено/, 'the card said both');
+  });
+
+  it('the other door switching first still reaches the card: the stamp is read after the switch (R6 m3)', async () => {
+    // The panel's partial refund and ЮKassa's notice of it wait on the same
+    // card; the panel's switch gets it first. The notice read the payment
+    // before that, finds nothing left to switch — and its card says it is off.
+    const w = world({
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      savedCard: [
+        (ask) => {
+          w.stampSwitch(ask.transactionId);
+          return { switched: 0, busy: 0 };
+        },
+      ],
+    });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    Object.assign(w.first, { gatewayType: PaymentGatewayType.YOOKASSA, gatewayId: 'provider-first' });
+
+    await w.notify('refund-first', {
+      eventStatus: 'REFUNDED',
+      paymentId: 'provider-first',
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-first-1', payment_id: 'provider-first', status: 'succeeded', amount: { value: '100.00', currency: 'RUB' } },
+      },
+    });
+
+    assert.equal(refundCard(w)?.type, 'payment.refund_partial');
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание через ЮKassa выключено.');
+  });
+});
+
+/**
+ * The ЮKassa autopay charges a refund's switch cannot stop (R6 m1). The
+ * switch stops the next renewal; a charge already under way renews all the
+ * same, and nothing withholds it (the orchestrator's decision): the card
+ * names it, so the operator can refund it too.
+ */
+describe('the ЮKassa charges around a refund are on its card (R6 m1)', () => {
+  const refundCard = (w: ReturnType<typeof world>) =>
+    w.events.find((event) => ['payment.refunded', 'payment.withheld_refunded', 'payment.refund_partial'].includes(event.type));
+  const autopayCharge = (status: TransactionStatus): Row => ({
+    id: `tx-auto-${status}`,
+    paymentId: `payment-auto-${status}`,
+    userId: 'user-1',
+    gatewayType: PaymentGatewayType.YOOKASSA,
+    purchaseType: PurchaseType.RENEW,
+    status,
+    idempotencyKey: 'auto-renew:trial-sub:1790000000000:a1',
+    createdAt: new Date(),
+    gatewayData: {},
+  });
+
+  it('a charge that held the saved method when the refund came, and went through', async () => {
+    const w = world({ savedCard: [{ switched: 0, busy: 1 }, { switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    w.rows.push(autopayCharge(TransactionStatus.COMPLETED));
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'succeeded', { deferAutopay: true });
+    await w.reconciliation.settleAfterResponse();
+
+    const card = refundCard(w);
+    assert.deepEqual(card?.metadata.yookassaChargesDuringRefund, ['payment-auto-COMPLETED']);
+    assert.match(
+      String(card?.metadata.note),
+      /Во время возврата уже шло автосписание через ЮKassa \(платёж payment-auto-COMPLETED\) — оно прошло и продлило подписку\. Если его тоже нужно вернуть — «Вернуть» у этого платежа\./,
+    );
+  });
+
+  it('not a charge that went through with nothing holding the saved method: that one is no news', async () => {
+    const w = world({ savedCard: [{ switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    w.rows.push(autopayCharge(TransactionStatus.COMPLETED));
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'succeeded', { deferAutopay: true });
+    await w.reconciliation.settleAfterResponse();
+
+    assert.equal(refundCard(w)?.metadata.yookassaChargesDuringRefund, undefined);
+    assert.equal(refundCard(w)?.metadata.note, 'Автосписание через ЮKassa выключено.');
+  });
+
+  it('a charge started before the refund and still pending', async () => {
+    const w = world({ savedCard: [{ switched: 1, busy: 0 }] });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    w.rows.push(autopayCharge(TransactionStatus.PENDING));
+
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'CHARGEBACKED');
+
+    const card = refundCard(w);
+    assert.deepEqual(card?.metadata.yookassaChargesPending, ['payment-auto-PENDING']);
+    assert.match(
+      String(card?.metadata.note),
+      /Автосписание через ЮKassa \(платёж payment-auto-PENDING\), начатое до возврата, ещё не завершилось: если оно пройдёт, подписка продлится, и этот платёж нужно будет вернуть отдельно\./,
+    );
+  });
+});
+
+/**
+ * A stop never loses a refund's card (R6 m4). What is under way gets a few
+ * seconds — well inside the 10 s Docker gives before it kills the container —
+ * then each card still owed goes out at once, saying the provider's cancel
+ * had not finished and that the panel retries it; nothing is told twice.
+ */
+describe('a stop and the refund cards under way (R6 m4)', () => {
+  const refundCards = (w: ReturnType<typeof world>) =>
+    w.events.filter((event) => ['payment.refunded', 'payment.withheld_refunded', 'payment.refund_partial'].includes(event.type));
+
+  it('waits well inside the 10 s Docker gives', () => {
+    assert.ok(AFTER_RESPONSE_SHUTDOWN_WAIT_MS <= 5_000, `${AFTER_RESPONSE_SHUTDOWN_WAIT_MS} ms`);
+  });
+
+  it('an operator\'s refund whose provider hangs: its card goes out at the stop, once, and is logged', async () => {
+    const warnings: string[] = [];
+    mock.method(Logger.prototype, 'warn', (message: string) => {
+      warnings.push(String(message));
+    });
+    const w = world({ autopay: PLATEGA_CANCELLED_AT_STOP, cancelHangs: true });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+    await w.refunds.recordWithheldRefund({
+      transactionId: 'tx-second',
+      currentAdmin: { id: 'admin-1' } as CurrentAdminInterface,
+      requestMetadata: { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' },
+    });
+    // Only what the stop logs.
+    warnings.length = 0;
+
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const stop = w.reconciliation.onModuleDestroy();
+    await Promise.resolve();
+    mock.timers.tick(AFTER_RESPONSE_SHUTDOWN_WAIT_MS);
+    await stop;
+    mock.timers.reset();
+
+    const [card] = refundCards(w);
+    assert.equal(card?.type, 'payment.withheld_refunded');
+    assert.equal(card?.metadata.providerCancelInterrupted, true);
+    assert.match(String(card?.metadata.note), /не успела завершиться до перезапуска панели: панель повторяет её каждые 10 минут/);
+    assert.ok(
+      warnings.some((message) => message.includes('Refund card of payment payment-second')),
+      `the payment of the card sent at the stop is not in the log: ${JSON.stringify(warnings)}`,
+    );
+
+    w.releaseCancel();
+    await w.reconciliation.settleAfterResponse();
+    assert.equal(refundCards(w).length, 1, 'the card went out twice');
+  });
+
+  it('a provider\'s notice the worker is still handling: its card goes out at the stop, once', async () => {
+    mock.method(Logger.prototype, 'warn', () => undefined);
+    const w = world({ autopay: PLATEGA_CANCELLED_AT_STOP, cancelHangs: true });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    const notice = w.notify('chargeback-first', {
+      eventStatus: 'CHARGEBACKED',
+      rawPayload: { status: 'CHARGEBACKED' },
+      paymentId: 'payment-first',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const stop = w.reconciliation.onModuleDestroy();
+    await Promise.resolve();
+    mock.timers.tick(AFTER_RESPONSE_SHUTDOWN_WAIT_MS);
+    await stop;
+    mock.timers.reset();
+
+    const [card] = refundCards(w);
+    assert.equal(card?.type, 'payment.refunded');
+    assert.equal(card?.metadata.providerCancelInterrupted, true);
+    // What makes «панель повторяет её каждые 10 минут» true: marked before anything else.
+    assert.deepEqual(w.autopayMarked, ['tx-first']);
+
+    w.releaseCancel();
+    await notice;
+    assert.equal(refundCards(w).length, 1, 'the card went out twice');
+  });
+});
+
+const PLATEGA_CANCELLED_AT_STOP: AutopayRefundOutcome = {
+  cancelled: [{ gatewayType: 'PLATEGA', providerSubscriptionId: 'platega-1' }],
+  failed: [],
+};
+
 describe('a withheld payment paid again after its refund', () => {
   it('is told to the operator alone, as the withheld payment it is', async () => {
     const w = world();
@@ -818,6 +1348,7 @@ describe('a withheld payment paid again after its refund', () => {
       currentAdmin: { id: 'admin-1' } as CurrentAdminInterface,
       requestMetadata: { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' },
     });
+    await w.reconciliation.settleAfterResponse();
 
     await w.notify('paid-again', { eventStatus: 'CONFIRMED', rawPayload: { status: 'CONFIRMED' } });
 

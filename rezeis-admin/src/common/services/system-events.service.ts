@@ -260,6 +260,18 @@ export const EVENT_TYPES = {
    * partial refund `partial`, `refundedAmount` and `refundedAmountTotal`.
    */
   PAYMENT_WITHHELD_REFUNDED: 'payment.withheld_refunded',
+  /**
+   * The provider reported a chargeback (or a refund) on an autopay
+   * subscription charged several times, and named none of our payments — every
+   * charge is the same sum — so the panel could not tell which charge to
+   * reverse (`ProviderSubscriptionService.handleChargeback`). Nothing was
+   * guessed: the autopay was ended, and the operator is to find the charge at
+   * the provider. Operator-only (`OPERATOR_ONLY_EVENT_TYPES`), and delivered to
+   * whoever ticked the refund cards (`DELIVERED_WITH`). Metadata: `{ userId,
+   * gatewayType, providerSubscriptionId, providerPaymentId, providerStatus,
+   * amount, currency, chargeCount, subscriptionId?, note }`.
+   */
+  PAYMENT_CHARGEBACK_UNMATCHED: 'payment.chargeback_unmatched',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
@@ -544,6 +556,9 @@ export const REGISTERED_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
 export const OPERATOR_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   EVENT_TYPES.PAYMENT_WITHHELD,
   EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED,
+  // A chargeback the panel could not pin on one payment: the operator finds
+  // the charge by hand, and no integration may read it as a refund of anything.
+  EVENT_TYPES.PAYMENT_CHARGEBACK_UNMATCHED,
 ]);
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -3674,6 +3689,8 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   },
   // Its refund, told to the operator alone; the message says in full or in part.
   'payment.withheld_refunded': { emoji: '↩️', title: 'Возврат неприменённого платежа' },
+  // A dispute the panel could not pin on one charge: a task, with its note.
+  'payment.chargeback_unmatched': { emoji: '⚠️', title: 'Оспорено списание по автоплатежу' },
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
   'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },

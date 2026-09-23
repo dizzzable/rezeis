@@ -44,10 +44,20 @@ import { formatPaymentAmount, gatewayLabel, type TransactionRow, type WithheldCo
 export function WithheldBadge({ mark }: { readonly mark: WithheldConversion }) {
   const { t } = useTranslation()
   return (
-    <Badge variant={mark.refundedAt ? 'secondary' : 'warning'} title={t('paymentsPage.withheld.hint')}>
+    <Badge variant={mark.refundedAt ? 'secondary' : 'warning'} title={t(withheldText(mark, 'hint'))}>
       {mark.refundedAt ? t('paymentsPage.withheld.badgeRefunded') : t('paymentsPage.withheld.badge')}
     </Badge>
   )
+}
+
+/**
+ * The sentence for why the payment was withheld: a trial's second conversion,
+ * or an autopay charge the provider took after a refund ended the autopay. A
+ * server older than the reason sends none, and then it is the first.
+ */
+function withheldText(mark: WithheldConversion, text: 'hint' | 'description'): string {
+  const autopay = mark.reason === 'AUTOPAY_AFTER_REFUND'
+  return `paymentsPage.withheld.${text}${autopay ? 'Autopay' : ''}`
 }
 
 /** `WithheldRefundRecordResultInterface`: what the server did. */
@@ -101,7 +111,7 @@ export function WithheldConversionSection({
         {t('paymentsPage.withheld.title')}
         <WithheldBadge mark={{ ...mark, refundedAt }} />
       </h3>
-      <p className="text-muted-foreground">{t('paymentsPage.withheld.description')}</p>
+      <p className="text-muted-foreground">{t(withheldText(mark, 'description'))}</p>
       {mark.convertedByPaymentId ? (
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-muted-foreground">{t('paymentsPage.withheld.convertedBy')}</span>

@@ -36,6 +36,7 @@ import { DashboardTimelinesSection } from '@/features/dashboard/dashboard-timeli
 import { PaymentDetailsSheet } from './payment-details-sheet'
 import PaymentsPage from './payments-page'
 import type { TransactionRow } from './payment-records'
+import { WithheldBadge } from './withheld-conversion'
 
 const USER_ID = 'cmfk2x9pq0000abcd1234efgh'
 
@@ -129,6 +130,27 @@ describe('a withheld payment in its details', () => {
     expect(within(section).getByText(ORDINARY.paymentId)).toBeInTheDocument()
     // Stamped like a delivery, and said not to be one.
     expect(screen.getByText('Not delivered: the payment was not applied')).toBeInTheDocument()
+  })
+
+  it('explains an autopay charge taken after a refund as what it is, not as a trial’s conversion', async () => {
+    // Wave 6: the same mark, withheld for another reason, and a sentence of its own.
+    grant([VIEW, REFUND])
+
+    renderSheet({
+      ...WITHHELD,
+      purchaseType: 'RENEW',
+      conversionWithheld: {
+        reason: 'AUTOPAY_AFTER_REFUND',
+        withheldAt: '2026-09-02T10:00:05.000Z',
+        convertedByPaymentId: null,
+        refundedAt: null,
+      },
+    })
+
+    const section = await screen.findByRole('region', { name: /Payment received but not applied/ })
+    expect(within(section).getByText(/after a refund had ended the autopay/)).toBeInTheDocument()
+    expect(within(section).queryByText(/converted the customer's trial/)).not.toBeInTheDocument()
+    expect(within(section).getByRole('button', { name: 'Record refund' })).toBeInTheDocument()
   })
 
   it('offers nothing of the kind for an ordinary payment, to the same operator', async () => {
@@ -274,6 +296,27 @@ describe('a withheld payment where payments are listed', () => {
     await screen.findByText(WITHHELD.paymentId)
     expect(within(card(WITHHELD.paymentId)).getByText('Not applied')).toBeInTheDocument()
     expect(within(card(ORDINARY.paymentId)).queryByText('Not applied')).not.toBeInTheDocument()
+  })
+
+  it('says on the «Not applied» mark itself why it was withheld (R5 H2)', () => {
+    // The mark's hover text is all a list row shows of the reason.
+    renderWithProviders(
+      <>
+        <WithheldBadge mark={WITHHELD.conversionWithheld!} />
+        <WithheldBadge
+          mark={{
+            reason: 'AUTOPAY_AFTER_REFUND',
+            withheldAt: '2026-09-02T10:00:05.000Z',
+            convertedByPaymentId: null,
+            refundedAt: null,
+          }}
+        />
+      </>,
+    )
+
+    const [trial, autopay] = screen.getAllByText('Not applied')
+    expect(trial).toHaveAttribute('title', expect.stringMatching(/^Another payment had already converted the customer's trial\./))
+    expect(autopay).toHaveAttribute('title', expect.stringMatching(/^The provider charged it on an autopay that a refund had ended\./))
   })
 })
 

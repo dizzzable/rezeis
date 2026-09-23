@@ -537,3 +537,82 @@ describe('PaymentWebhookIngressService on RollyPay subscription charges', () => 
     assert.deepStrictEqual(calls, [['normalized']]);
   });
 });
+
+describe('PaymentWebhookIngressService on Platega subscription callbacks', () => {
+  // Wave 6: a chargeback on a subscription charge is the refund of one of its
+  // payments. It used to reach `sync` alone, which counts charges and never
+  // reverses one; it now goes to the chargeback handling, which runs the
+  // refund reversal and ends the autopay.
+  function service() {
+    const calls: unknown[] = [];
+    // What the inbox holds already: a callback Platega repeats is a duplicate.
+    const repeated = new Set<string>();
+    const ingress = new PaymentWebhookIngressService(
+      {
+        paymentGateway: {
+          findUnique: async () => ({ type: PaymentGatewayType.PLATEGA, settings: { merchantId: 'm-1', secret: 's-1' } }),
+        },
+      } as never,
+      {
+        verifyWebhookSignature: () => {
+          calls.push(['verified']);
+        },
+        normalizeWebhook: () => {
+          throw new Error('a subscription callback never reaches the payment pipeline');
+        },
+      } as never,
+      {} as never,
+      { handleYookassaPaymentMethodEvent: async () => undefined } as never,
+      { add: async () => ({ id: 'job-1' }) } as never,
+      {
+        enqueueSync: async (gatewayType: PaymentGatewayType, id: string) => {
+          calls.push(['sync', gatewayType, id]);
+        },
+        recordDispute: async (gatewayType: PaymentGatewayType, id: string, dispute: unknown, body: unknown) => {
+          calls.push(['dispute', gatewayType, id, dispute, body]);
+          const key = JSON.stringify(body);
+          const duplicate = repeated.has(key);
+          repeated.add(key);
+          return { duplicate };
+        },
+      } as never,
+      cardSink(),
+    );
+    const ingest = (body: Record<string, unknown>) =>
+      ingress.ingestWebhook({
+        gatewayType: PaymentGatewayType.PLATEGA,
+        rawBody: Buffer.from(JSON.stringify(body), 'utf8'),
+        headers: {},
+        clientIp: '203.0.113.1',
+        verifySignature: true,
+      });
+    return { calls, ingest };
+  }
+
+  it('records a chargeback on a subscription charge in the inbox for the chargeback handling, not a sync', async () => {
+    const { calls, ingest } = service();
+    const body = { Id: 'pl-tx-9', SubscriptionId: 'sub-1', Amount: 299, Status: 'CHARGEBACKED' };
+    const result = await ingest(body);
+    assert.equal(result.accepted, true);
+    assert.equal(result.duplicate, false);
+    assert.deepStrictEqual(calls, [
+      ['verified'],
+      ['dispute', PaymentGatewayType.PLATEGA, 'sub-1', { providerPaymentId: 'pl-tx-9', providerStatus: 'CHARGEBACKED' }, body],
+    ]);
+    // Platega repeating it is answered as the duplicate the inbox found.
+    const again = await ingest(body);
+    assert.equal(again.duplicate, true);
+  });
+
+  it('still sends a charge and a status callback to a sync', async () => {
+    const { calls, ingest } = service();
+    await ingest({ Id: 'pl-tx-10', SubscriptionId: 'sub-1', Amount: 299, Status: 'CONFIRMED' });
+    await ingest({ Id: 'sub-2', Status: 'SUBSCRIPTION_CANCELLED' });
+    assert.deepStrictEqual(calls, [
+      ['verified'],
+      ['sync', PaymentGatewayType.PLATEGA, 'sub-1'],
+      ['verified'],
+      ['sync', PaymentGatewayType.PLATEGA, 'sub-2'],
+    ]);
+  });
+});
