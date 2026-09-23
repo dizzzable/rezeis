@@ -185,6 +185,7 @@ export class BotMapComposerService {
     return {
       nodes,
       edges,
+      miniAppScreens: MINI_APP_TERMINALS,
       meta: {
         flowStatus: input.flow
           ? input.flow.status === BotFlowStatus.PUBLISHED
@@ -324,18 +325,8 @@ function composeGraphButtonEdge(
     }
     case BotFlowButtonAction.WEBAPP: {
       const trimmed = (button.webAppUrl ?? '').trim();
-      const route = relativeRoute(trimmed);
-      if (route !== null && KNOWN_MINI_APP_ROUTES.has(route)) {
-        referencedTerminals.add(route);
-        return {
-          id,
-          source,
-          sourceLabel: label,
-          target: miniAppTerminalNodeId(route),
-          destination: { kind: 'webApp', route },
-          valid: true,
-        };
-      }
+      const mini = miniAppTargetOf(trimmed);
+      if (mini !== null) return miniAppEdge(id, source, label, mini, referencedTerminals);
       // Absolute (operator-supplied) Mini App URL — surface as a url edge.
       const safe = isTelegramSafeUrl(trimmed);
       return {
@@ -408,6 +399,15 @@ function composeReplyButtonEdge(
       };
     }
     case BotButtonAction.URL: {
+      if (isDefaultCabinet(button, target)) {
+        return miniAppEdge(
+          id,
+          source,
+          label,
+          { route: CABINET_BROWSER_ROUTE, shown: CABINET_BROWSER_ROUTE },
+          referencedTerminals,
+        );
+      }
       const safe = isTelegramSafeUrl(target);
       return {
         id,
@@ -420,18 +420,8 @@ function composeReplyButtonEdge(
       };
     }
     case BotButtonAction.WEBAPP: {
-      const route = relativeRoute(target);
-      if (route !== null && KNOWN_MINI_APP_ROUTES.has(route)) {
-        referencedTerminals.add(route);
-        return {
-          id,
-          source,
-          sourceLabel: label,
-          target: miniAppTerminalNodeId(route),
-          destination: { kind: 'webApp', route },
-          valid: true,
-        };
-      }
+      const mini = miniAppTargetOf(target);
+      if (mini !== null) return miniAppEdge(id, source, label, mini, referencedTerminals);
       const safe = isTelegramSafeUrl(target);
       return {
         id,
@@ -477,33 +467,11 @@ function composeNotificationButtonEdge(
   const target = button.target.trim();
   if (button.kind === 'webApp') {
     if (target.length === 0) return invalidEdge(id, source, label, 'empty-webapp');
-    // THE PATH IS THE ROUTE; the query and the fragment are what it is asked.
-    // «📲 Подключить» opens `/dashboard?connect=help&subscriptionId=…` — the
-    // dashboard, told which card to open — and comparing the whole string
-    // marked that working button red on «Карта бота».
-    const route = routePathOf(target);
-    if (KNOWN_MINI_APP_ROUTES.has(route)) {
-      referencedTerminals.add(route);
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: miniAppTerminalNodeId(route),
-        destination: { kind: 'webApp', route: target },
-        valid: true,
-      };
-    }
-    // Relative-but-unknown route — flag as invalid so the operator
-    // sees the typo (`/promoo` vs `/promo`).
-    return {
-      id,
-      source,
-      sourceLabel: label,
-      target: `url:unknown-route`,
-      destination: { kind: 'webApp', route: target },
-      valid: false,
-      reason: 'unknown-mini-app-route',
-    };
+    // A notification's Mini App button is a path and nothing else: the bot
+    // puts whatever it holds after its own address, so an absolute URL here
+    // opens `<miniAppUrl>/https://…` — a page the cabinet does not have.
+    const mini = miniAppTargetOf(target) ?? { route: target, shown: target };
+    return miniAppEdge(id, source, label, mini, referencedTerminals);
   }
   if (button.kind === 'url') {
     const safe = validateStoredButton(button);
@@ -601,15 +569,77 @@ function safeHost(url: string): string {
   }
 }
 
-/** Detect a relative path like `/renew` (no scheme); returns null for absolute URLs. */
-/** A Mini App target without its query string and fragment: `/dashboard?connect=help` → `/dashboard`. */
-function routePathOf(target: string): string {
-  const cut = target.search(/[?#]/);
-  return cut === -1 ? target : target.slice(0, cut);
+interface MiniAppTarget {
+  /** The page: `/dashboard`. */
+  readonly route: string;
+  /** What the button opens, as the operator reads it: `/dashboard?connect=help`. */
+  readonly shown: string;
 }
 
-function relativeRoute(value: string): string | null {
-  if (value.length === 0) return null;
-  if (value.includes('://')) return null;
-  return value.startsWith('/') ? value : null;
+/**
+ * A Mini App button's target read the way the bot opens it. Anything without
+ * `://` is a path on the Mini App's own address, and reiwa supplies a missing
+ * leading slash (`screen-renderer.ts`, `internal-http-listener.ts`,
+ * `main-keyboard.ts`), so `renew` opens the same page as `/renew`. THE PATH IS
+ * THE ROUTE; the query and the fragment are what it is asked: «📲 Подключить»
+ * opens `/dashboard?connect=help&subscriptionId=…` — the dashboard, told which
+ * card to open — and comparing the whole string marked that working button red.
+ * `null` for an empty target or an absolute URL.
+ */
+function miniAppTargetOf(target: string): MiniAppTarget | null {
+  const trimmed = target.trim();
+  if (trimmed.length === 0 || trimmed.includes('://')) return null;
+  const shown = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  const cut = shown.search(/[?#]/);
+  return { route: cut === -1 ? shown : shown.slice(0, cut), shown };
+}
+
+/**
+ * The edge of a button that opens a Mini App page: to that page's terminal
+ * when the cabinet has it, red when it does not — so the operator sees the
+ * typo (`/promoo` vs `/promo`) or the page that is not there.
+ */
+function miniAppEdge(
+  id: string,
+  source: string,
+  label: string,
+  mini: MiniAppTarget,
+  referencedTerminals: Set<string>,
+): BotMapEdge {
+  if (KNOWN_MINI_APP_ROUTES.has(mini.route)) {
+    referencedTerminals.add(mini.route);
+    return {
+      id,
+      source,
+      sourceLabel: label,
+      target: miniAppTerminalNodeId(mini.route),
+      destination: { kind: 'webApp', route: mini.shown },
+      valid: true,
+    };
+  }
+  return {
+    id,
+    source,
+    sourceLabel: label,
+    target: 'url:unknown-route',
+    destination: { kind: 'webApp', route: mini.shown },
+    valid: false,
+    reason: 'unknown-mini-app-route',
+  };
+}
+
+/**
+ * «Кабинет» meaning the cabinet itself: the panel seeds it as a link with no
+ * address. Since 22.09.2026 reiwa opens that one in the Mini App's
+ * `/open-in-browser`, which takes the customer out to the phone's own browser,
+ * signed in (`isDefaultCabinet` and `cabinetBrowserEntryUrl` in reiwa's
+ * `src/bot/widgets/main-keyboard.ts`), while the map went on drawing it as a
+ * link with no address — red. An address the operator typed, or any other
+ * action, is not this and keeps its own edge. Without an HTTPS Mini App (a
+ * dev install) reiwa keeps the old link; the map draws what production does.
+ */
+const CABINET_BROWSER_ROUTE: MiniAppRoute = '/open-in-browser';
+
+function isDefaultCabinet(button: BotButton, target: string): boolean {
+  return button.buttonId === 'cabinet' && target.length === 0;
 }

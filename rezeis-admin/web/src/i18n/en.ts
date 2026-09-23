@@ -5911,6 +5911,7 @@ export const en = {
       invite: {
         share: '📤 Share on Telegram',
         copy: '📋 Copy link',
+        copyWeb: '🌐 Copy the website link',
       },
       rules: {
         open: '📜 Open rules',
@@ -5929,7 +5930,7 @@ export const en = {
       style: 'Style',
       emoji: 'Custom Emoji ID',
       url: 'URL',
-      webAppUrl: 'Mini App URL',
+      webAppUrl: 'Mini App page',
       callbackAction: 'Callback action',
       supportUrlHint:
         'Opens the Telegram support chat (`BOT_SUPPORT_USERNAME` from .env) with a prefilled "Hello! I need help." message. The bot fills in the handle and text automatically.',
@@ -6151,7 +6152,7 @@ export const en = {
               'Plain inline button. Reiwa handles the press internally — useful when the button id matches a screen shortId or you intercept the callback in code.',
             URL: 'Opens an external URL in the in-app Telegram browser. Only https:// is accepted. The exception is “Cabinet” with an empty target: it opens the cabinet in the phone browser, already signed in (through the Mini App).',
             WEBAPP:
-              'Opens a Telegram Mini App. URL must be https:// and the domain must be linked in @BotFather.',
+              'Opens a cabinet page in the Mini App. Pick the page from the list below.',
             SCREEN:
               'Jumps to a bot screen from the navigation graph. Pick the screen from the list below.',
             SUPPORT_URL:
@@ -6162,8 +6163,11 @@ export const en = {
           label: 'Action target',
           urlPlaceholder: 'https://example.com/path',
           urlHint: 'Full URL starting with https:// (Telegram rejects other protocols).',
-          webappPlaceholder: 'https://miniapp.example.com/',
-          webappHint: 'Full https:// Mini App URL. The domain must be linked in @BotFather.',
+          webappPlaceholder: '/referrals or https://…',
+          webappHint:
+            '«Custom path…» is for a page with parameters (/promo?code=…) or a full https:// address. A path the cabinet has no page for opens its home screen.',
+          miniAppChoose: 'Choose a cabinet page',
+          miniAppCustom: 'Custom path…',
           screenPlaceholder: 'Pick a bot screen',
           screenHint: 'Bot screen identifier from the navigation graph (Bot Studio → screens).',
           screenEmpty: 'Create at least one screen in Bot Studio first to link it here.',

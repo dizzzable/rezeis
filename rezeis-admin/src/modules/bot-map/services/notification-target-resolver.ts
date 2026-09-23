@@ -12,14 +12,11 @@
  * create a module dependency cycle through future broadcast features).
  */
 
-export type MiniAppRoute =
-  | '/dashboard'
-  | '/renew'
-  | '/referrals'
-  | '/partner'
-  | '/promo'
-  | '/subscribe'
-  | '/support';
+import type { MiniAppRoute } from '../catalogs/mini-app-terminals.catalog';
+
+// One list of cabinet routes: the catalog's. This file used to keep a copy of
+// the union, which two lists of routes would have let drift apart.
+export type { MiniAppRoute };
 
 /**
  * Resolve a template `type` (e.g. `expires_in_3_days`,

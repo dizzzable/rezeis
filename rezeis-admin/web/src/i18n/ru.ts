@@ -6045,6 +6045,7 @@ export const ru = {
       invite: {
         share: '📤 Поделиться в Telegram',
         copy: '📋 Скопировать ссылку',
+        copyWeb: '🌐 Скопировать ссылку на сайт',
       },
       rules: {
         open: '📜 Открыть правила',
@@ -6063,7 +6064,7 @@ export const ru = {
       style: 'Стиль',
       emoji: 'Custom Emoji ID',
       url: 'URL',
-      webAppUrl: 'Mini App URL',
+      webAppUrl: 'Страница мини-приложения',
       callbackAction: 'Callback действие',
       supportUrlHint:
         'Кнопка ведёт в Telegram-чат поддержки (`BOT_SUPPORT_USERNAME` из .env) с заготовленным текстом «Здравствуйте! Мне нужна помощь.». Хэндл и текст бот подставляет сам.',
@@ -6286,7 +6287,7 @@ export const ru = {
               'Обычная inline-кнопка. Reiwa сам обрабатывает нажатие — пригодится, если ID кнопки совпадает с шортайди экрана или вы перехватываете callback в коде.',
             URL: 'Открывает внешний URL во встроенном браузере Telegram. Поддерживаются только https:// ссылки. Исключение — «Кабинет» с пустой целью: он открывает кабинет в браузере телефона сразу со входом в аккаунт (через мини-приложение).',
             WEBAPP:
-              'Открывает Telegram Mini App. URL должен быть https:// и доменом, добавленным в @BotFather.',
+              'Открывает страницу кабинета в мини-приложении. Выберите страницу из списка ниже.',
             SCREEN: 'Переходит на экран бота из графа навигации. Выберите экран из списка ниже.',
             SUPPORT_URL:
               'Открывает чат с поддержкой через t.me/<username>?text=… . Username берётся из BOT_SUPPORT_USERNAME в .env reiwa.',
@@ -6296,8 +6297,11 @@ export const ru = {
           label: 'Цель действия',
           urlPlaceholder: 'https://example.com/path',
           urlHint: 'Полный URL с https:// (Telegram отбрасывает другие протоколы).',
-          webappPlaceholder: 'https://miniapp.example.com/',
-          webappHint: 'Полный https:// URL Mini App. Домен должен быть привязан в @BotFather.',
+          webappPlaceholder: '/referrals или https://…',
+          webappHint:
+            '«Свой путь…» — для страницы с параметрами (/promo?code=…) или полного адреса https://. Путь, которого нет в кабинете, откроет его главную.',
+          miniAppChoose: 'Выберите страницу кабинета',
+          miniAppCustom: 'Свой путь…',
           screenPlaceholder: 'Выберите экран бота',
           screenHint: 'Идентификатор экрана из графа навигации (Bot Studio → экраны).',
           screenEmpty: 'Сначала создайте экран в Bot Studio, чтобы привязать его сюда.',

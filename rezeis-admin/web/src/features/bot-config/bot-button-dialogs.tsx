@@ -10,10 +10,11 @@
  * operator can attach a URL, Mini App link, or jump to a flow screen
  * directly to any reply-keyboard button — no need to bake every
  * button id into reiwa code. The target field renders conditionally
- * (URL / WEBAPP take a string, SCREEN takes a dropdown of shortIds
- * from the active draft flow, CALLBACK / SUPPORT_URL take nothing).
+ * (URL takes a string, WEBAPP a cabinet page from a list or a typed path,
+ * SCREEN takes a dropdown of shortIds from the active draft flow,
+ * CALLBACK / SUPPORT_URL take nothing).
  */
-import { useEffect, useMemo, useRef, useState, type JSX } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash2 } from 'lucide-react'
@@ -42,6 +43,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { MiniAppScreenField } from '@/features/bot-map/components/MiniAppScreenField'
 
 import {
   BOT_CONFIG_KEYS,
@@ -121,7 +123,7 @@ interface ActionFieldsProps {
 
 /**
  * Renders the action-type select plus the conditional target field
- * (URL / WebApp text input, SCREEN dropdown). CALLBACK and SUPPORT_URL
+ * (URL text input, WebApp page picker, SCREEN dropdown). CALLBACK and SUPPORT_URL
  * don't need a target — their behaviour is fully described by the
  * action kind alone.
  */
@@ -136,7 +138,9 @@ export function ActionFields({
   const { data: flow } = useFlowScreens()
   const screens = useMemo(() => flow?.screens ?? [], [flow])
   const targetCopy = useActionTargetCopy(actionType)
-  const showTextTarget = actionType === 'URL' || actionType === 'WEBAPP'
+  const miniAppLabelId = useId()
+  const showTextTarget = actionType === 'URL'
+  const showMiniAppTarget = actionType === 'WEBAPP'
   const showScreenTarget = actionType === 'SCREEN'
 
   return (
@@ -177,6 +181,27 @@ export function ActionFields({
             placeholder={targetCopy.placeholder}
             maxLength={2_000}
             inputMode="url"
+          />
+          <p className="text-xs text-muted-foreground">{targetCopy.hint}</p>
+        </div>
+      )}
+
+      {showMiniAppTarget && (
+        <div className="space-y-1.5">
+          {/* A page of the cabinet, picked. It was a box asking for «Полный
+              https:// URL Mini App»; a tester set «Пригласить» to the referral
+              program through it and got the Mini App's home screen. An address
+              is still allowed under «Свой путь…»: reiwa opens an https:// one
+              as it is. */}
+          <Label id={miniAppLabelId} htmlFor={`${idPrefix}-action-target`}>
+            {t('botConfigPage.buttons.fields.actionTarget.label')}
+          </Label>
+          <MiniAppScreenField
+            value={actionTarget}
+            onChange={onActionTargetChange}
+            labelId={miniAppLabelId}
+            inputId={`${idPrefix}-action-target`}
+            placeholder={targetCopy.placeholder}
           />
           <p className="text-xs text-muted-foreground">{targetCopy.hint}</p>
         </div>

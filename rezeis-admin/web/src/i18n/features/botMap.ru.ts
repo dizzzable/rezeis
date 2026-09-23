@@ -140,6 +140,7 @@ export const ru = {
       labelRu: 'Подпись (RU)',
       labelEn: 'Подпись (EN)',
       targetWebApp: 'Маршрут Mini App (например, /renew)',
+      screen: 'Экран мини-приложения',
       targetUrl: 'Абсолютный HTTPS URL',
       targetCallback: 'callback_data (например, menu:main)',
       defaultTargetHint:

@@ -7,7 +7,7 @@
  * `PATCH /admin/notifications/templates/:id` endpoint, which Wave 1
  * extended to accept the new locale + buttons fields.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Bell, Plus, RotateCcw, Save as SaveIcon, Trash2 } from 'lucide-react'
@@ -36,6 +36,7 @@ import {
 } from '../../bot-map-api'
 import type { NotificationButtonShape, NotificationMapNode } from '../../types'
 import { BannerField } from '../BannerField'
+import { MiniAppScreenField } from '../MiniAppScreenField'
 import { LocaleTextarea } from './LocaleTextarea'
 
 interface NotificationEditorProps {
@@ -352,6 +353,7 @@ function NotificationButtonRow({
   onRemove,
 }: NotificationButtonRowProps) {
   const { t } = useTranslation()
+  const screenLabelId = useId()
   const labelRuRef = useRef<HTMLInputElement | null>(null)
   const labelEnRef = useRef<HTMLInputElement | null>(null)
 
@@ -440,14 +442,32 @@ function NotificationButtonRow({
           </Select>
         </div>
         <div className="col-span-2 space-y-1">
-          <Label className="text-[11px]">{t(targetLabelKey(button.kind))}</Label>
-          <Input
-            value={button.target}
-            onChange={(e) => onUpdate({ target: e.target.value })}
-            placeholder={t(targetLabelKey(button.kind))}
-            maxLength={2_000}
-            className="font-mono text-xs"
-          />
+          {button.kind === 'webApp' ? (
+            <>
+              <Label id={screenLabelId} className="text-[11px]">
+                {t('botMapPage.notification.screen')}
+              </Label>
+              {/* A path and nothing else: the bot puts it after its own
+                  address, so the placeholder does not offer an https:// one. */}
+              <MiniAppScreenField
+                value={button.target}
+                onChange={(target) => onUpdate({ target })}
+                labelId={screenLabelId}
+                placeholder={t('botMapPage.notification.targetWebApp')}
+              />
+            </>
+          ) : (
+            <>
+              <Label className="text-[11px]">{t(targetLabelKey(button.kind))}</Label>
+              <Input
+                value={button.target}
+                onChange={(e) => onUpdate({ target: e.target.value })}
+                placeholder={t(targetLabelKey(button.kind))}
+                maxLength={2_000}
+                className="font-mono text-xs"
+              />
+            </>
+          )}
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2">

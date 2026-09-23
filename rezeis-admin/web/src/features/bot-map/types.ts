@@ -112,9 +112,25 @@ export interface BotMapEdge {
   readonly reason?: string
 }
 
+/** A cabinet page a Mini App button can open — one row of the server's catalog. */
+export interface MiniAppScreen {
+  readonly route: string
+  readonly nameRu: string
+  readonly nameEn: string
+  readonly descriptionRu: string
+  readonly descriptionEn: string
+}
+
 export interface BotMapPayload {
   readonly nodes: ReadonlyArray<BotMapNode>
   readonly edges: ReadonlyArray<BotMapEdge>
+  /**
+   * Every page a Mini App button can open, whether or not a button reaches it
+   * yet. Optional so a payload without it — one cached by a tab left open
+   * across the upgrade — still renders; the screen field then falls back to a
+   * typed path.
+   */
+  readonly miniAppScreens?: ReadonlyArray<MiniAppScreen>
   readonly meta: {
     readonly flowStatus: 'DRAFT' | 'PUBLISHED' | 'NONE'
     readonly composedAt: string

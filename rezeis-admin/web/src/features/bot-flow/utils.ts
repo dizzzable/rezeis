@@ -37,6 +37,7 @@ export function computeSystemButtons(screen: BotFlow['screens'][number]): System
     return [
       { key: 'invite-share', labelKey: 'botFlow.systemButtons.invite.share', isBack: false },
       { key: 'invite-copy', labelKey: 'botFlow.systemButtons.invite.copy', isBack: false },
+      { key: 'invite-copy-web', labelKey: 'botFlow.systemButtons.invite.copyWeb', isBack: false },
       { key: 'invite-back', labelKey: 'botFlow.systemButtons.back', isBack: true },
     ]
   }

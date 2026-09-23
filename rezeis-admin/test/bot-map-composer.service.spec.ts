@@ -384,3 +384,139 @@ describe('BotMapComposerService.compose', () => {
     );
   });
 });
+
+/**
+ * Where a «Mini App» button goes, read the way the bot opens it, against the
+ * pages the cabinet really has.
+ *
+ * A tester pointed a notification's button at «Покупка подписки» — `/subscribe`
+ * on the map's list of Mini App pages — and the Mini App opened on its home
+ * screen: the cabinet has no such page, and a path it does not have falls
+ * through to the catch-all. The map drew that button green.
+ */
+describe('Mini App pages on «Карта бота»', () => {
+  /**
+   * The cabinet's pages a button can open, as reiwa routes them
+   * (`web/src/App.tsx`). reiwa's `web/test/mini-app-screen-routes.test.tsx`
+   * holds the same list and checks each against those routes. Change one,
+   * change the other.
+   */
+  const CABINET_PAGES = [
+    '/dashboard',
+    '/open-in-browser',
+    '/subscription',
+    '/subscription/devices',
+    '/subscription/connect',
+    '/plans',
+    '/renew',
+    '/upgrade',
+    '/addons',
+    '/referrals',
+    '/referrals/exchange',
+    '/partner',
+    '/promo',
+    '/wheel',
+    '/events',
+    '/activity',
+    '/settings',
+    '/settings/transactions',
+    '/settings/faq',
+    '/support',
+  ];
+
+  const now = new Date();
+  const replyButton = (overrides: Record<string, unknown>) => ({
+    id: `reply-${String(overrides.buttonId)}`,
+    label: String(overrides.buttonId),
+    style: BotButtonStyle.PRIMARY,
+    iconCustomEmojiId: null,
+    visible: true,
+    onePerRow: true,
+    orderIndex: 0,
+    actionTarget: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  });
+  const notification = (buttons: ReadonlyArray<{ target: string }>) => ({
+    id: 'tpl-trial-ended',
+    type: 'trial_ended',
+    title: 'Пробный период закончился',
+    body: 'Оформите подписку',
+    titleEn: null,
+    bodyEn: null,
+    isActive: true,
+    buttons: buttons.map((b, i) => ({ labelRu: `Кнопка ${i}`, labelEn: null, kind: 'webApp', target: b.target })),
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  it('offers exactly the cabinet’s pages, and all of them, whether a button reaches them yet or not', () => {
+    const out = makeComposer().compose({ flow: null, replyButtons: [], templates: [] });
+    assert.deepStrictEqual(out.miniAppScreens.map((s) => s.route), CABINET_PAGES);
+    for (const screen of out.miniAppScreens) {
+      assert.ok(screen.nameRu.length > 0 && screen.nameEn.length > 0, screen.route);
+    }
+  });
+
+  it('draws a button to `/subscribe` red — the cabinet has no such page — and one to «Тарифы» green', () => {
+    const out = makeComposer().compose({
+      flow: null,
+      replyButtons: [],
+      templates: [notification([{ target: '/subscribe' }, { target: '/plans' }])] as never,
+    });
+    const [subscribe, plans] = out.edges.filter((e) => e.source === 'notif:trial_ended');
+    assert.equal(subscribe?.valid, false);
+    assert.equal(subscribe?.reason, 'unknown-mini-app-route');
+    assert.equal(plans?.valid, true);
+    assert.equal(plans?.target, 'mini-app:/plans');
+  });
+
+  it('draws «Кабинет» with no address of its own to «Кабинет в браузере», where the bot sends it', () => {
+    const out = makeComposer().compose({
+      flow: null,
+      replyButtons: [
+        replyButton({ buttonId: 'cabinet', actionType: BotButtonAction.URL, actionTarget: null }),
+        // An address the operator typed is theirs, and stays a link.
+        replyButton({ buttonId: 'site', actionType: BotButtonAction.URL, actionTarget: 'https://example.com/' }),
+      ] as never,
+      templates: [],
+    });
+    const cabinet = out.edges.find((e) => e.id === 'reply-btn:reply-cabinet');
+    assert.equal(cabinet?.valid, true);
+    assert.equal(cabinet?.target, 'mini-app:/open-in-browser');
+    assert.ok(out.nodes.some((n) => n.id === 'mini-app:/open-in-browser'));
+    const site = out.edges.find((e) => e.id === 'reply-btn:reply-site');
+    assert.deepStrictEqual(site?.destination, { kind: 'url', host: 'example.com', safe: true });
+  });
+
+  it('reads a path the way the bot opens it — without its leading slash, with a query — in every kind of button', () => {
+    const screenButton = (id: string, webAppUrl: string) => ({
+      ...(HELP_SCREEN as unknown as { buttons: Array<Record<string, unknown>> }).buttons[0],
+      id,
+      webAppUrl,
+    });
+    const flow = {
+      ...(PUBLISHED_FLOW as unknown as Record<string, unknown>),
+      screens: [
+        {
+          ...(HELP_SCREEN as unknown as Record<string, unknown>),
+          buttons: [screenButton('btn-bare', 'renew'), screenButton('btn-query', '/promo?code=SALE'), screenButton('btn-typo', '/promoo')],
+        },
+      ],
+    };
+    const out = makeComposer().compose({
+      flow: flow as never,
+      replyButtons: [replyButton({ buttonId: 'buy', actionType: BotButtonAction.WEBAPP, actionTarget: 'plans' })] as never,
+      templates: [notification([{ target: 'wheel' }])] as never,
+    });
+    const edge = (id: string) => out.edges.find((e) => e.id === id);
+    assert.equal(edge('flow-btn:btn-bare')?.target, 'mini-app:/renew');
+    assert.equal(edge('flow-btn:btn-query')?.target, 'mini-app:/promo');
+    assert.deepStrictEqual(edge('flow-btn:btn-query')?.destination, { kind: 'webApp', route: '/promo?code=SALE' });
+    assert.equal(edge('flow-btn:btn-typo')?.valid, false);
+    assert.equal(edge('flow-btn:btn-typo')?.reason, 'unknown-mini-app-route');
+    assert.equal(edge('reply-btn:reply-buy')?.target, 'mini-app:/plans');
+    assert.equal(out.edges.find((e) => e.source === 'notif:trial_ended')?.target, 'mini-app:/wheel');
+  });
+});

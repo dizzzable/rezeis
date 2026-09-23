@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Lock, Plus, Trash2 } from 'lucide-react'
@@ -12,6 +12,7 @@ import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
+import { MiniAppScreenField } from '@/features/bot-map/components/MiniAppScreenField'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { CustomEmojiPicker } from './CustomEmojiPicker'
@@ -86,6 +87,10 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
       return [
         { key: 'invite-share', label: t('botFlow.systemButtons.invite.share'), iconKey: 'invite_share', textKey: 'invite.share_button' },
         { key: 'invite-copy', label: t('botFlow.systemButtons.invite.copy'), iconKey: 'invite_copy', textKey: 'invite.copy_button' },
+        // Since 22.09.2026 (reiwa `src/bot/pages/invite.ts`): the website link,
+        // shown only when the cabinet has an https address and the bot a
+        // username — otherwise the one link already is the website's.
+        { key: 'invite-copy-web', label: t('botFlow.systemButtons.invite.copyWeb'), iconKey: 'invite_copy_web', textKey: 'invite.copy_web_button' },
         { key: 'invite-back', label: t('botFlow.systemButtons.back'), iconKey: 'back', textKey: 'back_to_menu' },
       ]
     }
@@ -456,6 +461,7 @@ interface ButtonEditorProps {
 
 function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
   const { t } = useTranslation()
+  const webAppLabelId = useId()
   const [labelRu, setLabelRu] = useState(button.labelRu)
   const [labelEn, setLabelEn] = useState(button.labelEn)
   const labelRuRef = useRef<HTMLInputElement | null>(null)
@@ -624,12 +630,17 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
         />
       )}
       {button.actionType === 'WEBAPP' && (
-        <Input
-          value={button.webAppUrl ?? ''}
-          onChange={(e) => onUpdate({ webAppUrl: e.target.value || null })}
-          placeholder={t('botFlow.button.webAppUrl')}
-          className="h-7 text-[11px]"
-        />
+        <div className="space-y-1">
+          <span id={webAppLabelId} className="sr-only">
+            {t('botFlow.button.webAppUrl')}
+          </span>
+          <MiniAppScreenField
+            value={button.webAppUrl ?? ''}
+            onChange={(target) => onUpdate({ webAppUrl: target || null })}
+            labelId={webAppLabelId}
+            placeholder={t('botConfigPage.buttons.fields.actionTarget.webappPlaceholder')}
+          />
+        </div>
       )}
       {button.actionType === 'CALLBACK' && (
         <Input

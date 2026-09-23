@@ -140,6 +140,7 @@ export const en = {
       labelRu: 'Label (RU)',
       labelEn: 'Label (EN)',
       targetWebApp: 'Mini App route (e.g. /renew)',
+      screen: 'Mini App screen',
       targetUrl: 'Absolute HTTPS URL',
       targetCallback: 'callback_data (e.g. menu:main)',
       defaultTargetHint:

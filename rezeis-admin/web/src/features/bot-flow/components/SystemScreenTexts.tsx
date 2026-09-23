@@ -44,11 +44,17 @@ const SCREEN_TEXT_KEYS: Readonly<Record<string, readonly string[]>> = {
     'referral.hub.stat_pending',
     'referral.hub.stat_points',
     'referral.hub.link_label',
+    // The website link, since 22.09.2026 (reiwa `src/bot/pages/invite.ts`):
+    // its label under the Telegram link, its copy button, and the line that
+    // carries it in the message «Поделиться» sends.
+    'referral.hub.web_link_label',
     'referral.hub.open_cabinet',
     'referral.hub.open_exchange',
     'invite.share_button',
     'invite.copy_button',
+    'invite.copy_web_button',
     'invite.share_prompt',
+    'invite.share_web_line',
     'partner.hub.title',
     'partner.hub.description',
     'partner.hub.stat_balance',
@@ -88,13 +94,13 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
           </p>
         </div>
         {/*
-          `layout` stays at its default here on purpose. Eight of these keys ARE
+          `layout` stays at its default here on purpose. Nine of these keys ARE
           button captions and must be DRAWN as captions — but that is the
           overlay's mode, which `TextKeyEditor` now derives from the key itself,
           not the shape of the card. The compact card is a different decision:
           it caps input at 64 characters and drops the key name, and this
-          section lists eighteen keys for `invite` alone, where the key name is
-          the only thing telling them apart.
+          section lists twenty-one keys for `invite` alone, where the key name
+          is the only thing telling them apart.
         */}
         {keys.map((key) => (
           <TextKeyEditor key={key} textKey={key} />
@@ -130,7 +136,7 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
   // out of it into `icon_custom_emoji_id` and draws it before the label — and
   // that is true of the key wherever it is edited. `layout` stays the caller's
   // choice of card, so the system-screen section keeps the roomy card with the
-  // key name on it and still draws its eight caption keys correctly.
+  // key name on it and still draws its nine caption keys correctly.
   const fieldMode = botTextKeyMode(textKey)
 
   const { data: texts } = useQuery({

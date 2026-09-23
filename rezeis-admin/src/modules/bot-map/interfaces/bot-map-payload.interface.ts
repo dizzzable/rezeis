@@ -7,6 +7,7 @@
  * to reiwa is unchanged; this module is a denormalised admin-only view.
  */
 
+import type { MiniAppTerminal } from '../catalogs/mini-app-terminals.catalog';
 import type {
   NotificationCategory,
   MiniAppRoute,
@@ -116,6 +117,12 @@ export interface BotMapEdge {
 export interface BotMapPayload {
   readonly nodes: ReadonlyArray<BotMapNode>;
   readonly edges: ReadonlyArray<BotMapEdge>;
+  /**
+   * Every cabinet page a Mini App button can open — the whole catalog, where
+   * the terminal nodes are only the pages some button already reaches. A
+   * notification's «Mini App» button picks its screen from this list.
+   */
+  readonly miniAppScreens: ReadonlyArray<MiniAppTerminal>;
   readonly meta: {
     /** Active flow status for the graph screens, when one is published. */
     readonly flowStatus: 'DRAFT' | 'PUBLISHED' | 'NONE';
