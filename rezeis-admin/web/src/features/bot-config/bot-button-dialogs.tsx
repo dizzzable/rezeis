@@ -43,6 +43,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { menuButtonTargetProblem } from '@/features/bot-flow/components/reply-keyboard-utils'
 import { MiniAppScreenField } from '@/features/bot-map/components/MiniAppScreenField'
 
 import {
@@ -54,7 +55,7 @@ import {
   type CreateBotButtonPayload,
   type UpdateBotButtonPayload,
 } from './bot-config-api'
-import { buildActionPayload } from './bot-button-payload'
+import { BUTTON_ID_PATTERN, buildActionPayload } from './bot-button-payload'
 
 const STYLES: BotButtonStyle[] = ['DEFAULT', 'PRIMARY', 'SUCCESS', 'DANGER']
 const ACTION_TYPES: BotButtonAction[] = ['CALLBACK', 'URL', 'WEBAPP', 'SCREEN', 'SUPPORT_URL']
@@ -139,9 +140,20 @@ export function ActionFields({
   const screens = useMemo(() => flow?.screens ?? [], [flow])
   const targetCopy = useActionTargetCopy(actionType)
   const miniAppLabelId = useId()
+  const problemId = useId()
   const showTextTarget = actionType === 'URL'
   const showMiniAppTarget = actionType === 'WEBAPP'
   const showScreenTarget = actionType === 'SCREEN'
+  // What stops the target from being saved: the rule the server refuses with
+  // (`bot-buttons.service.ts`), read here first so the form says why before
+  // the request instead of after it.
+  const problem = menuButtonTargetProblem(actionType, actionTarget)
+  const problemNote =
+    problem === null ? null : (
+      <p id={problemId} role="alert" className="text-xs text-destructive">
+        {t(`botConfigPage.buttons.fields.actionTarget.problems.${problem}`)}
+      </p>
+    )
 
   return (
     <>
@@ -181,7 +193,10 @@ export function ActionFields({
             placeholder={targetCopy.placeholder}
             maxLength={2_000}
             inputMode="url"
+            aria-invalid={problem !== null}
+            aria-describedby={problem !== null ? problemId : undefined}
           />
+          {problemNote}
           <p className="text-xs text-muted-foreground">{targetCopy.hint}</p>
         </div>
       )}
@@ -203,6 +218,7 @@ export function ActionFields({
             inputId={`${idPrefix}-action-target`}
             placeholder={targetCopy.placeholder}
           />
+          {problemNote}
           <p className="text-xs text-muted-foreground">{targetCopy.hint}</p>
         </div>
       )}
@@ -458,7 +474,14 @@ export function BotButtonEditDialog({
             <Button variant="outline" onClick={() => onOpenChange(false)}>
               {t('botConfigPage.buttons.cancel')}
             </Button>
-            <Button onClick={submit} disabled={updateMutation.isPending || label.length === 0}>
+            <Button
+              onClick={submit}
+              disabled={
+                updateMutation.isPending ||
+                label.length === 0 ||
+                menuButtonTargetProblem(actionType, actionTarget) !== null
+              }
+            >
               {t('botConfigPage.buttons.save')}
             </Button>
           </div>
@@ -552,7 +575,8 @@ export function BotButtonCreateDialog({
   const canSubmit =
     buttonId.trim().length > 0 &&
     label.trim().length > 0 &&
-    /^[a-z0-9._-]+$/i.test(buttonId.trim())
+    BUTTON_ID_PATTERN.test(buttonId.trim()) &&
+    menuButtonTargetProblem(actionType, actionTarget) === null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

@@ -54,11 +54,13 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
+import { getErrorMessage } from '@/lib/http-errors'
 import { cn } from '@/lib/utils'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { BannerField } from '@/features/bot-map/components/BannerField'
+import { menuButtonTargetProblem } from '@/features/bot-flow/components/reply-keyboard-utils'
 
 import {
   BOT_CONFIG_KEYS,
@@ -426,7 +428,10 @@ function SortableReplyButtonCard({
       void queryClient.invalidateQueries({ queryKey: BOT_CONFIG_KEYS.buttons })
       toast.success(t('botConfigPage.buttons.toasts.updated'))
     },
-    onError: () => toast.error(t('botConfigPage.buttons.toasts.updateFailed')),
+    // The server's reason, when it gives one: a target it refuses says why
+    // (`bot-buttons.service.ts`), where this said only «не удалось».
+    onError: (error: unknown) =>
+      toast.error(getErrorMessage(error, t('botConfigPage.buttons.toasts.updateFailed'))),
   })
 
   const insertLabelEmoji = (emoji: string) => {
@@ -449,7 +454,12 @@ function SortableReplyButtonCard({
     onePerRow !== button.onePerRow ||
     actionType !== button.actionType ||
     (actionTarget.trim() === '' ? null : actionTarget.trim()) !== (button.actionTarget ?? null)
-  const canSave = label.trim().length > 0 && dirty && !mutation.isPending
+  // A target the server would refuse is not sent: `ActionFields` says why.
+  const canSave =
+    label.trim().length > 0 &&
+    dirty &&
+    !mutation.isPending &&
+    menuButtonTargetProblem(actionType, actionTarget) === null
 
   return (
     <li

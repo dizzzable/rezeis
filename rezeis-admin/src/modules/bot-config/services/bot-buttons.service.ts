@@ -2,6 +2,10 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { BotButton, BotButtonAction, BotButtonStyle, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import {
+  menuButtonTargetProblem,
+  type MenuButtonTargetProblem,
+} from '../../bot-map/services/menu-button-route';
 
 interface CreateButtonInput {
   readonly buttonId: string;
@@ -27,7 +31,25 @@ interface UpdateButtonInput {
   readonly actionTarget?: string | null;
 }
 
-const BUTTON_ID_REGEX = /^[a-z0-9._-]+$/i;
+/** A button ID the bot can send as callback data; the SPA's create form holds the same (`BUTTON_ID_PATTERN`). */
+export const BUTTON_ID_REGEX = /^[a-z0-9._-]+$/i;
+
+/**
+ * Why a target is refused, in words the SPA shows as they come. None repeats
+ * the target: the admin exception filter blanks a message that carries an
+ * address (`admin-safe-exception.filter.ts`), and the operator knows what
+ * they typed.
+ */
+const TARGET_PROBLEM_MESSAGES: Readonly<Record<MenuButtonTargetProblem, string>> = {
+  notAPage:
+    'actionTarget must be a page of the cabinet starting with a single "/" (such as /plans) or an address starting with http:// or https://',
+  badCharacters: 'actionTarget must not contain spaces, backslashes, control or invisible formatting characters',
+  notAnAddress: 'actionTarget must be a whole address: http:// or https:// then a site name, with no spaces',
+  webAppNeedsHttps: 'actionTarget for WEBAPP buttons must use https:// (Telegram refuses non-HTTPS web_app)',
+  upperCaseScheme:
+    'actionTarget for WEBAPP buttons must start with https:// in lower case: the bot leaves out one that starts with Https:// or HTTPS:// instead',
+  localAddress: 'actionTarget must not point at localhost or 127.0.0.1: Telegram refuses such an address',
+};
 
 /**
  * Validate an `actionTarget` against its `actionType`. Returns the
@@ -54,16 +76,12 @@ function validateAction(
         // via REIWA_DOMAIN rather than per-button.
         return null;
       }
-      if (!/^https?:\/\//i.test(trimmed)) {
-        throw new BadRequestException(
-          `actionTarget must start with http:// or https:// (got "${trimmed}")`,
-        );
-      }
-      if (actionType === BotButtonAction.WEBAPP && !/^https:\/\//i.test(trimmed)) {
-        throw new BadRequestException(
-          'actionTarget for WEBAPP buttons must use https:// (Telegram refuses non-HTTPS web_app)',
-        );
-      }
+      // A page of the cabinet (`/referrals`, what the Mini App page picker
+      // saves) or an address — the targets reiwa opens (`addressOn`,
+      // `miniAppButtonUrl` in its `main-keyboard.ts`). The rule is the map's
+      // own, so the forms refuse the same before the request is sent.
+      const problem = menuButtonTargetProblem(actionType, trimmed);
+      if (problem !== null) throw new BadRequestException(TARGET_PROBLEM_MESSAGES[problem]);
       return trimmed;
     }
     case BotButtonAction.SCREEN: {
