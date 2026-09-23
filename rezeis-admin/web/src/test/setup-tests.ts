@@ -1,5 +1,8 @@
 import '@testing-library/jest-dom'
 import { configure } from '@testing-library/react'
+import { afterAll } from 'vitest'
+
+import { outliveChartBatching, watchForCharts } from './chart-batching'
 
 // ── The wait budget every `findBy*` and `waitFor` in this suite races ───────
 //
@@ -159,20 +162,62 @@ elementProto.scrollIntoView ??= (): void => {};
 
 // ── The two animation-frame globals, so REMOVING a stub cannot remove them ──
 //
-// jsdom here does not define `requestAnimationFrame`/`cancelAnimationFrame`.
-// A test that stubs them with `vi.stubGlobal` and then calls
-// `vi.unstubAllGlobals()` in its `afterEach` therefore does not restore them —
-// it DELETES them, because there was nothing there before. Anything that
+// Where jsdom does not define `requestAnimationFrame`/`cancelAnimationFrame`,
+// a test that stubs them with `vi.stubGlobal` and then calls
+// `vi.unstubAllGlobals()` in its `afterEach` does not restore them — it
+// DELETES them, because there was nothing there before. Anything that
 // cancels a pending frame while unmounting afterwards (Recharts, CountUp, the
 // surface-usage rings) then throws `ReferenceError: cancelAnimationFrame is
 // not defined` out of a cleanup, where no assertion can see it: vitest counts
 // it as an unhandled error and fails the whole run with every test green.
 //
 // Defined here, the stub has something to restore TO. `??=` so an environment
-// that does provide them keeps its own.
+// that does provide them keeps its own — and this one does: vitest builds
+// jsdom with `pretendToBeVisual`, here and in CI alike, so both lines below
+// keep jsdom's. The eight CI errors this block was written against (4f05e2cc)
+// came back on 23.09.2026 with it in place; their cause is the next section.
 const frameGlobals = globalThis as unknown as Record<string, unknown>;
 frameGlobals['requestAnimationFrame'] ??= (frame: FrameRequestCallback): number =>
   setTimeout(() => frame(Date.now()), 0) as unknown as number;
 frameGlobals['cancelAnimationFrame'] ??= (handle: number): void => {
   clearTimeout(handle as unknown as ReturnType<typeof setTimeout>);
 };
+
+// ── A chart's last notification has to land before the DOM globals go ───────
+//
+// Recharts 3 keeps each chart's state in its own Redux Toolkit store, built
+// with `autoBatchEnhancer({ type: 'raf' })` — twice over, since RTK's default
+// enhancers already carry one and Recharts appends its own. A pie, a legend
+// row or a layer registering or unregistering is a batched action, and for
+// each batch the enhancer queues its notification on `requestAnimationFrame`
+// AND on a 100 ms `setTimeout`, whichever fires first; the winner calls the
+// bare global `cancelAnimationFrame` on the other (`createRafWithFallbackTimer`
+// in @reduxjs/toolkit 2.12).
+//
+// The frame belongs to jsdom; the fallback is a Node timer. When a file ends,
+// vitest's teardown closes the jsdom window, so the frame never comes, and
+// deletes every global it copied from it, `cancelAnimationFrame` included. A
+// fallback still pending then fires into a process without that global and
+// throws `ReferenceError: cancelAnimationFrame is not defined` outside every
+// test. If another file is still running, vitest counts it against this one
+// and fails the run with every test green.
+//
+// It takes a worker that outlives its teardown by the rest of those 100 ms —
+// a loaded CI runner's does, this machine's does not. «Web quality» failed
+// that way on 21.09.2026 and on 23.09.2026, both times with eight errors from
+// `surface-usage-card.test.tsx`. That file queues frames by hand, so there the
+// fallback is the ONLY way a chart is ever notified, and the cleanup after its
+// last test unmounts four rings: four stores, two enhancers each, eight
+// fallbacks. Reproduced before it was fixed: with a teardown held open 250 ms
+// and a second file keeping the run alive, the file failed with those eight
+// errors three times out of three.
+//
+// So a file that drew a chart waits out the fallback after its last test.
+// Testing Library has unmounted everything by then, so nothing can queue a
+// new one, and every fallback already queued fires while the globals are
+// still there. Files that never drew one do not wait.
+const charts = watchForCharts(document.documentElement)
+afterAll(async () => {
+  charts.stop()
+  if (charts.drewChart()) await outliveChartBatching()
+})
