@@ -222,3 +222,4 @@ jobs:
           test/provider-subscriptions-postgres.spec.ts
           test/user-full-deletion-postgres.spec.ts
           test/payments-withheld-conversion-postgres.spec.ts
+          test/plan-change-keeps-limits-above-plan-postgres.spec.ts

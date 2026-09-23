@@ -574,3 +574,145 @@ export function resolveInheritedPlanLimitUpdate(input: {
 }): PlanInheritedLimitUpdate {
   return resolveInheritedPlanLimitRefresh(input).columns;
 }
+
+/** The two quantity limits, as a `Subscription` row and a `Plan` both carry them. */
+export interface QuantityLimits {
+  readonly trafficLimit: number | null;
+  readonly deviceLimit: number;
+}
+
+/**
+ * What a plan CHANGE writes into the two quantity columns, and how much of it
+ * lies above the new plan.
+ */
+export interface PlanChangeLimitCarry {
+  /** The columns to write, in the columns' own encoding. */
+  readonly columns: QuantityLimits;
+  /**
+   * What the subscription keeps above the NEW plan. Zero when nothing carries,
+   * and always zero for a resource the new plan leaves unlimited — nothing is
+   * added to unlimited.
+   */
+  readonly carried: {
+    readonly trafficLimitGb: number;
+    readonly deviceLimit: number;
+    /**
+     * The column stays unlimited on a finite new plan: an operator set it
+     * unlimited over a finite old plan, and a renewal would leave that alone.
+     */
+    readonly unlimitedTraffic: boolean;
+    readonly unlimitedDevices: boolean;
+  };
+}
+
+/**
+ * The limits a subscription takes onto a NEW plan: the new plan's own values
+ * plus whatever it held ABOVE its old plan.
+ *
+ * ── Why a plan change carries anything at all ─────────────────────────────
+ *
+ * With the durable add-on model off — the shipped default — a paid add-on is
+ * nothing but a raw increment on these two columns, and an operator's raise
+ * from the Users page is the same kind of number. A plan change used to write
+ * the new plan's values over both, so a customer who had paid for "+2 devices
+ * until the end of the term" lost them the moment they paid for an upgrade,
+ * and the push took them off the panel too. Renewal never did that: it reads
+ * the part above the plan as the subscription's own
+ * ({@link resolvePlanLimitOwnership}) and leaves it. This answers the same
+ * question the same way, so renewal and a plan change cannot disagree about
+ * what "above the plan" means.
+ *
+ * ── The rule, per resource ────────────────────────────────────────────────
+ *
+ *   new plan unlimited                 → unlimited; nothing is added to it.
+ *   OVERRIDDEN, above the old plan     → new plan + the difference.
+ *   OVERRIDDEN, below the old plan     → new plan: a lowered limit does not
+ *                                        carry, only a positive difference does.
+ *   OVERRIDDEN, unlimited over a
+ *   finite old plan                    → stays unlimited — what the renewal does
+ *                                        with it (it leaves an override alone).
+ *   INHERITED                          → new plan.
+ *   UNDECIDABLE (the old plan's value
+ *   cannot be read)                    → new plan: nothing can be measured
+ *                                        against a value nobody can read, and a
+ *                                        PAID plan change resolves toward the
+ *                                        plan, as `entitlement-baseline.ts` does.
+ *
+ * and in every finite case the add-on share the projection last RECORDED is
+ * added back on top ({@link withRecordedTraffic} / {@link withRecordedDevices}).
+ * That share is zero wherever no projection row exists, which is every
+ * subscription while the durable model is off; where one does exist the
+ * columns mirror `base + recorded`, so `base` is what gets compared and the
+ * recorded share is carried separately — exactly once.
+ *
+ * ── Where it must NOT be used ─────────────────────────────────────────────
+ *
+ * Only where the COLUMNS are what the panel receives. When a durable term
+ * backs the change, `EffectiveProjectionService` already layers every ACTIVE
+ * entitlement onto the new term's baseline and the columns mirror that;
+ * carrying the recorded share into them as well would count every add-on
+ * twice.
+ */
+export function resolvePlanChangeLimitCarry(input: {
+  /** The subscription's columns as they are now. */
+  readonly current: QuantityLimits;
+  /** The CURRENT stored snapshot — what the OLD plan gave; read it before overwriting it. */
+  readonly planSnapshot: unknown;
+  /** The plan the subscription moves onto. */
+  readonly plan: QuantityLimits;
+  /** Read with `resolveRecordedAddOnContribution`; {@link NO_RECORDED_ADD_ONS} when none. */
+  readonly recorded: RecordedAddOnContribution;
+}): PlanChangeLimitCarry {
+  const { ownership, base } = resolvePlanLimitOwnership({
+    current: {
+      trafficLimit: input.current.trafficLimit,
+      deviceLimit: input.current.deviceLimit,
+      internalSquads: [],
+      externalSquad: null,
+    },
+    planSnapshot: input.planSnapshot,
+    recorded: input.recorded,
+  });
+  const snapshot = readSnapshotObject(input.planSnapshot);
+
+  let trafficLimit: number | null = null;
+  let unlimitedTraffic = false;
+  if (input.plan.trafficLimit !== null) {
+    let above = 0;
+    const own = base.trafficLimit;
+    const old = snapshot === null ? UNDECIDED : readNullableIntBaseline(snapshot, 'trafficLimit');
+    if (ownership.trafficLimit === 'OVERRIDDEN' && old.decided && old.value !== null) {
+      if (own === null) unlimitedTraffic = true;
+      else if (own !== undefined && own > old.value) above = own - old.value;
+    }
+    trafficLimit = unlimitedTraffic
+      ? null
+      : withRecordedTraffic(input.plan.trafficLimit + above, input.recorded.activeTrafficContributionBytes);
+  }
+
+  let deviceLimit = input.plan.deviceLimit;
+  let unlimitedDevices = false;
+  if (input.plan.deviceLimit > 0) {
+    let above = 0;
+    const own = base.deviceLimit;
+    const old = snapshot === null ? UNDECIDED : readIntBaseline(snapshot, 'deviceLimit');
+    if (ownership.deviceLimit === 'OVERRIDDEN' && old.decided && old.value > 0 && own !== undefined) {
+      if (own <= 0) unlimitedDevices = true;
+      else if (own > old.value) above = own - old.value;
+    }
+    deviceLimit = unlimitedDevices
+      ? input.current.deviceLimit
+      : withRecordedDevices(input.plan.deviceLimit + above, input.recorded.activeDeviceContribution);
+  }
+
+  return {
+    columns: { trafficLimit, deviceLimit },
+    carried: {
+      trafficLimitGb:
+        trafficLimit === null || input.plan.trafficLimit === null ? 0 : trafficLimit - input.plan.trafficLimit,
+      deviceLimit: unlimitedDevices || input.plan.deviceLimit <= 0 ? 0 : deviceLimit - input.plan.deviceLimit,
+      unlimitedTraffic,
+      unlimitedDevices,
+    },
+  };
+}

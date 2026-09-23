@@ -229,6 +229,122 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
+  describe('what an UPGRADE keeps above the new plan', () => {
+    /** On plan A (1024 GB, 1 device) with 50 GB and 2 devices above it. */
+    function holderOfExtras(columns = { trafficLimit: 1074, deviceLimit: 3 }): Record<string, unknown> {
+      return {
+        ...createSubscription({ id: 'paid-sub', isTrial: false, planId: 'plan-a' }),
+        planSnapshot: { id: 'plan-a', trafficLimit: 1024, deviceLimit: 1 },
+        ...columns,
+      };
+    }
+    const PLANS = [
+      createPlan({ id: 'plan-a', availability: PlanAvailability.ALL, upgradeToPlanIds: ['plan-b'] }),
+      { ...createPlan({ id: 'plan-b', availability: PlanAvailability.ALL }), trafficLimit: 2048, deviceLimit: 5 },
+    ];
+    const quote = (service: SubscriptionQuoteService, purchaseType: PurchaseType = PurchaseType.UPGRADE) =>
+      service.getQuote({
+        userId: 'user-1',
+        subscriptionId: 'paid-sub',
+        purchaseType,
+        planId: purchaseType === PurchaseType.UPGRADE ? 'plan-b' : 'plan-a',
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+    it('names what carries — beside the warnings, never blocking eligibility', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holderOfExtras()],
+        plans: PLANS,
+      });
+
+      const actualQuote = await quote(service);
+
+      assert.deepStrictEqual(actualQuote.carriedAbovePlan, {
+        deviceLimit: 2,
+        trafficLimitGb: 50,
+        unlimitedDevices: false,
+        unlimitedTraffic: false,
+      });
+      assert.equal(actualQuote.isEligible, true);
+      assert.deepStrictEqual(
+        actualQuote.warnings.map((warning) => warning.code),
+        ['UPGRADE_RESETS_EXPIRY'],
+      );
+    });
+
+    it('reads the recorded add-on share as the fulfilment does, not the column’s raw excess', async () => {
+      // A base cut below the plan with live add-ons on top: only the add-ons
+      // carry. Read without the recorded share, the column's raw excess —
+      // 26 GB and 1 device — would be announced instead of what was paid for.
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [
+          {
+            ...holderOfExtras({ trafficLimit: 1050, deviceLimit: 4 }),
+            planSnapshot: { id: 'plan-a', trafficLimit: 1024, deviceLimit: 3 },
+            effectiveProjection: {
+              activeTrafficContributionBytes: 50n * 1024n * 1024n * 1024n,
+              activeDeviceContribution: 2,
+            },
+          },
+        ],
+        plans: PLANS,
+      });
+
+      assert.deepStrictEqual((await quote(service)).carriedAbovePlan, {
+        deviceLimit: 2,
+        trafficLimitGb: 50,
+        unlimitedDevices: false,
+        unlimitedTraffic: false,
+      });
+    });
+
+    it('says nothing when nothing carries, and nothing on any other action', async () => {
+      const onPlan = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holderOfExtras({ trafficLimit: 1024, deviceLimit: 1 })],
+        plans: PLANS,
+      });
+      assert.equal((await quote(onPlan)).carriedAbovePlan, null);
+
+      const renewing = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holderOfExtras()],
+        plans: PLANS,
+      });
+      const renewal = await quote(renewing, PurchaseType.RENEW);
+      assert.equal(renewal.isEligible, true, 'the renewal quote itself was priced');
+      assert.equal(renewal.carriedAbovePlan, null);
+    });
+
+    it('promises nothing when a durable term backs the subscription — and still does without one', async () => {
+      const previous = process.env.ADDON_ENTITLEMENT_SHADOW;
+      process.env.ADDON_ENTITLEMENT_SHADOW = 'true';
+      try {
+        const durable = createService({
+          user: createUser({ maxSubscriptions: 1 }),
+          subscriptions: [holderOfExtras()],
+          plans: PLANS,
+          activeTerm: { id: 'term-1' },
+        });
+        assert.equal((await quote(durable)).carriedAbovePlan, null);
+
+        const cutOverLater = createService({
+          user: createUser({ maxSubscriptions: 1 }),
+          subscriptions: [holderOfExtras()],
+          plans: PLANS,
+          activeTerm: null,
+        });
+        assert.equal((await quote(cutOverLater)).carriedAbovePlan?.deviceLimit, 2);
+      } finally {
+        if (previous === undefined) delete process.env.ADDON_ENTITLEMENT_SHADOW;
+        else process.env.ADDON_ENTITLEMENT_SHADOW = previous;
+      }
+    });
+  });
+
   it('blocks RENEW for a free trial source and steers the user to upgrade', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
@@ -968,8 +1084,13 @@ function createService(input: {
   readonly resumableTrialTransactionId?: string;
   readonly plans: readonly Record<string, unknown>[];
   readonly multiSubscriptionSettings?: Record<string, unknown> | null;
+  /** The ACTIVE durable term an upgrade quote looks for when the durable model is on. */
+  readonly activeTerm?: { readonly id: string } | null;
 }): SubscriptionQuoteService {
   const prismaService = {
+    subscriptionTerm: {
+      findFirst: async () => input.activeTerm ?? null,
+    },
     settings: {
       findFirst: async () => ({
         multiSubscriptionSettings: input.multiSubscriptionSettings ?? null,

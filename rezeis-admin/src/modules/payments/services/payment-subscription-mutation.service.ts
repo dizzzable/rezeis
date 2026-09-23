@@ -38,6 +38,7 @@ import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-
 import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
+  resolvePlanChangeLimitCarryInTransaction,
   resolveRecordedAddOnContribution,
 } from '../../add-on-entitlements/services/configured-baseline.util';
 import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
@@ -2528,6 +2529,32 @@ export class PaymentSubscriptionMutationService {
               subscriptionId: currentSubscription.id,
               mode: 'ACTIVE',
             });
+      // Without a projection the COLUMNS are what the panel receives, and
+      // writing the new plan's raw values over them took back everything the
+      // subscription held above its old plan: a paid add-on (the legacy path
+      // records it nowhere else), an operator's raise, a bonus — paid for, then
+      // pushed off the panel by the upgrade. They carry instead, by the rule
+      // renewal already uses (`resolvePlanChangeLimitCarry`). That covers a
+      // trial's conversion and the queued-term fallback above as well; both
+      // reach here with no projection. Never on the projection branch: there
+      // the ACTIVE entitlements are already layered onto the new term, and
+      // carrying them into the columns too would count every add-on twice.
+      const limits =
+        projection === null
+          ? (
+              await resolvePlanChangeLimitCarryInTransaction(
+                transactionClient,
+                currentSubscription.id,
+                input.purchasedPlan,
+              )
+            ).columns
+          : {
+              trafficLimit:
+                projection.desiredTrafficLimitBytes === null
+                  ? null
+                  : Number(projection.desiredTrafficLimitBytes / GIB_BYTES),
+              deviceLimit: projection.desiredDeviceLimit === null ? 0 : projection.desiredDeviceLimit,
+            };
       const upgradedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
@@ -2541,18 +2568,8 @@ export class PaymentSubscriptionMutationService {
             purchasedPlan: input.purchasedPlan,
             selectedDurationDays: input.selectedDurationDays,
           }) as Prisma.InputJsonValue,
-          trafficLimit:
-            projection === null
-              ? input.purchasedPlan.trafficLimit
-              : projection.desiredTrafficLimitBytes === null
-                ? null
-                : Number(projection.desiredTrafficLimitBytes / GIB_BYTES),
-          deviceLimit:
-            projection === null
-              ? input.purchasedPlan.deviceLimit
-              : projection.desiredDeviceLimit === null
-                ? 0
-                : projection.desiredDeviceLimit,
+          trafficLimit: limits.trafficLimit,
+          deviceLimit: limits.deviceLimit,
           internalSquads: input.purchasedPlan.internalSquads,
           externalSquad: input.purchasedPlan.externalSquad,
           startedAt: now,

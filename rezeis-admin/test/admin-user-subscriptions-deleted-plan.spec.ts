@@ -71,12 +71,17 @@ function harness() {
       $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
         callback({
           $executeRaw: async () => 1,
+          // A plan assignment re-reads the row under its lock to carry what it
+          // holds above its old plan; this one has no snapshot to measure by.
+          $queryRaw: async () => [{ id: row.id }],
           subscription: {
+            findUnique: async () => row,
             update: async (args: { data: Record<string, unknown> }) => {
               updated.push(args.data);
               return { ...row, ...args.data };
             },
           },
+          subscriptionEffectiveProjection: { findUnique: async () => null },
           profileSyncJob: { create: async () => ({ id: 'sync-2' }) },
         }),
     } as never,

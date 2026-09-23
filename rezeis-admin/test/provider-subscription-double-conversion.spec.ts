@@ -344,6 +344,7 @@ describe('fulfilling a conversion', () => {
           return { ...subscription, ...data };
         },
       },
+      subscriptionEffectiveProjection: { findUnique: async () => null },
       profileSyncJob: {
         create: async ({ data }: { data: Record<string, unknown> }) => {
           writes.push({ syncJob: data });
@@ -560,7 +561,9 @@ describe('fulfilling a conversion', () => {
 
     await f.run();
 
-    assert.deepEqual(f.locks, ['subscriptions']);
+    // The trial is read under the lock first; the second lock is the plan
+    // change reading the limits it carries onto the new plan.
+    assert.deepEqual(f.locks, ['subscriptions', 'subscriptions']);
     const written = f.writes.find((write) => 'subscription' in write)?.subscription as Record<string, unknown>;
     assert.equal(written.isTrial, false);
     assert.equal(
@@ -575,7 +578,9 @@ describe('fulfilling a conversion', () => {
 
     await f.run();
 
-    assert.deepEqual(f.locks, []);
+    // No trial lock and no converter lookup; the one lock is the plan change
+    // reading the limits it carries onto the new plan.
+    assert.deepEqual(f.locks, ['subscriptions']);
     assert.deepEqual(f.converterQueries, []);
     assert.ok(f.writes.some((write) => 'subscription' in write));
   });

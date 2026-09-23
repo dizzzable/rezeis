@@ -91,12 +91,18 @@ function buildEditor(): {
           // `admin-user-subscriptions.controller.spec.ts` is where the call is
           // actually asserted.
           $executeRaw: async () => 1,
+          // A plan assignment reads the row again under its lock, to carry
+          // what it holds above its old plan. This row's snapshot records no
+          // plan limits, so nothing above the plan can be measured.
+          $queryRaw: async () => [{ id: 'sub-1' }],
           subscription: {
+            findUnique: async () => ({ ...STORED_SUBSCRIPTION }),
             update: async ({ data }: { data: Record<string, unknown> }) => {
               updates.push(data);
               return { id: 'sub-1', remnawaveId: null };
             },
           },
+          subscriptionEffectiveProjection: { findUnique: async () => null },
           profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
         }),
       adminAuditLog: { create: async () => ({}) },

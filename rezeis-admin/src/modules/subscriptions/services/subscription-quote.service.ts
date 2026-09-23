@@ -8,11 +8,15 @@ import {
   PurchaseChannel,
   PurchaseType,
   Subscription,
+  SubscriptionEffectiveProjection,
   SubscriptionStatus,
+  SubscriptionTermStatus,
   User,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
+import { recordedAddOnContributionOf } from '../../add-on-entitlements/services/configured-baseline.util';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
@@ -24,6 +28,7 @@ import { SubscriptionActionPolicyDto } from '../dto/subscription-action-policy.d
 import { SubscriptionQuoteAction, SubscriptionQuoteDto } from '../dto/subscription-quote.dto';
 import {
   SubscriptionActionPolicyInterface,
+  SubscriptionQuoteCarriedLimitsInterface,
   SubscriptionQuoteDurationInterface,
   SubscriptionQuoteInterface,
   SubscriptionQuotePlanInterface,
@@ -34,6 +39,7 @@ import {
   pickBestDiscount,
   type PendingDiscountGrant,
 } from '../../../common/utils/pending-discount.util';
+import { resolvePlanChangeLimitCarry } from './plan-inherited-limits.util';
 import { countCommittedTrialClaimUnits, findResumablePaidTrialClaim } from './trial-claim-ledger.util';
 
 type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'personalDiscount'> & {
@@ -55,8 +61,18 @@ type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'p
 };
 type SubscriptionRecord = Pick<
   Subscription,
-  'id' | 'userId' | 'status' | 'isTrial' | 'planSnapshot' | 'createdAt'
->;
+  'id' | 'userId' | 'status' | 'isTrial' | 'planSnapshot' | 'createdAt' | 'trafficLimit' | 'deviceLimit'
+> & {
+  /**
+   * The add-on share the last projection recompute recorded, read beside the
+   * row for the upgrade quote's carry. `null` with no projection row — the
+   * durable model off, which is the shipped default.
+   */
+  readonly effectiveProjection: Pick<
+    SubscriptionEffectiveProjection,
+    'activeTrafficContributionBytes' | 'activeDeviceContribution'
+  > | null;
+};
 
 const SOURCE_SUBSCRIPTION_REQUIRED: SubscriptionQuoteWarningInterface = {
   code: 'SOURCE_SUBSCRIPTION_REQUIRED',
@@ -415,6 +431,12 @@ export class SubscriptionQuoteService {
     ) {
       quoteWarnings.push(GATEWAY_NOT_AVAILABLE);
     }
+    const carriedAbovePlan =
+      input.purchaseType === PurchaseType.UPGRADE &&
+      selectedPlan !== null &&
+      context.sourceSubscription !== null
+        ? await this.resolveCarriedAbovePlan(context.sourceSubscription, selectedPlan)
+        : null;
     return {
       userId,
       purchaseType: input.purchaseType,
@@ -430,7 +452,57 @@ export class SubscriptionQuoteService {
       availablePlans: plans.map(mapQuotePlan),
       price,
       warnings: dedupeWarnings(quoteWarnings),
+      carriedAbovePlan,
     };
+  }
+
+  /**
+   * What an UPGRADE onto `plan` keeps above it, told before the customer pays
+   * — computed by the SAME rule the fulfilment writes with
+   * (`resolvePlanChangeLimitCarry`), from the same three inputs: the columns,
+   * the stored snapshot and the recorded add-on share.
+   *
+   * It is data BESIDE the warnings rather than an informational warning code:
+   * the cabinet's BFF flattens an unpriced quote to its FIRST warning code, and
+   * a code no client knows yet would read there as the reason the upgrade
+   * cannot be bought. Beside them it cannot reach `isEligible` at all.
+   *
+   * `null` when nothing carries — and whenever a durable term backs the
+   * subscription. There the add-ons stay on their own entitlements until their
+   * own end dates, and an operator's value is kept as it stands rather than
+   * carried; neither is "kept on the new plan" in the sense this line promises,
+   * so it promises nothing.
+   */
+  private async resolveCarriedAbovePlan(
+    source: SubscriptionRecord,
+    plan: PlanRecord,
+  ): Promise<SubscriptionQuoteCarriedLimitsInterface | null> {
+    if (resolveAddOnRolloutFlags().entitlementShadow) {
+      const activeTerm = await this.prismaService.subscriptionTerm.findFirst({
+        where: { subscriptionId: source.id, status: SubscriptionTermStatus.ACTIVE },
+        select: { id: true },
+      });
+      if (activeTerm !== null) return null;
+    }
+    const { carried } = resolvePlanChangeLimitCarry({
+      current: { trafficLimit: source.trafficLimit, deviceLimit: source.deviceLimit },
+      planSnapshot: source.planSnapshot,
+      plan: { trafficLimit: plan.trafficLimit, deviceLimit: plan.deviceLimit },
+      recorded: recordedAddOnContributionOf(source.effectiveProjection),
+    });
+    const carriesAnything =
+      carried.deviceLimit > 0 ||
+      carried.trafficLimitGb > 0 ||
+      carried.unlimitedDevices ||
+      carried.unlimitedTraffic;
+    return carriesAnything
+      ? {
+          deviceLimit: carried.deviceLimit,
+          trafficLimitGb: carried.trafficLimitGb,
+          unlimitedDevices: carried.unlimitedDevices,
+          unlimitedTraffic: carried.unlimitedTraffic,
+        }
+      : null;
   }
 
   private async buildContext(input: {
@@ -482,6 +554,11 @@ export class SubscriptionQuoteService {
         isTrial: true,
         planSnapshot: true,
         createdAt: true,
+        trafficLimit: true,
+        deviceLimit: true,
+        effectiveProjection: {
+          select: { activeTrafficContributionBytes: true, activeDeviceContribution: true },
+        },
       },
     });
     const sourceSubscription = input.subscriptionId

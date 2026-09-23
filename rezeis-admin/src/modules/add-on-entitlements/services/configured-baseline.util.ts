@@ -1,6 +1,12 @@
+import { NotFoundException } from '@nestjs/common';
 import { AddOnType, Prisma } from '@prisma/client';
 
-import type { RecordedAddOnContribution } from '../../subscriptions/services/plan-inherited-limits.util';
+import {
+  resolvePlanChangeLimitCarry,
+  type PlanChangeLimitCarry,
+  type QuantityLimits,
+  type RecordedAddOnContribution,
+} from '../../subscriptions/services/plan-inherited-limits.util';
 import {
   resolveEntitlementBaseline,
   type EntitlementBaseline,
@@ -110,10 +116,75 @@ export async function resolveRecordedAddOnContribution(
     where: { subscriptionId },
     select: { activeTrafficContributionBytes: true, activeDeviceContribution: true },
   });
+  return recordedAddOnContributionOf(recorded);
+}
+
+/**
+ * The same number from a projection row a caller already selected — the
+ * upgrade quote reads it beside the subscription instead of in a query of its
+ * own. The `?? 0` lives here once, for both.
+ */
+export function recordedAddOnContributionOf(
+  row:
+    | {
+        readonly activeTrafficContributionBytes?: bigint | null;
+        readonly activeDeviceContribution?: number | null;
+      }
+    | null
+    | undefined,
+): RecordedAddOnContribution {
   return {
-    activeTrafficContributionBytes: recorded?.activeTrafficContributionBytes ?? 0n,
-    activeDeviceContribution: recorded?.activeDeviceContribution ?? 0,
+    activeTrafficContributionBytes: row?.activeTrafficContributionBytes ?? 0n,
+    activeDeviceContribution: row?.activeDeviceContribution ?? 0,
   };
+}
+
+/** The delegates {@link resolvePlanChangeLimitCarryInTransaction} touches. */
+export type PlanChangeCarryReader = Pick<
+  Prisma.TransactionClient,
+  '$queryRaw' | 'subscription' | 'subscriptionEffectiveProjection'
+>;
+
+/**
+ * `resolvePlanChangeLimitCarry` (`plan-inherited-limits.util.ts`) over the
+ * subscription as it is NOW, read under its row lock — for the two writers
+ * whose plan change goes to the panel through the COLUMNS: a paid upgrade with
+ * no durable term behind it, and an operator assigning a plan from the Users
+ * page.
+ *
+ * The lock is the point. A legacy add-on raises the column with a relational
+ * `increment`; one committed between an unlocked read and the absolute write
+ * that follows would be overwritten — lost exactly the way the whole add-on
+ * used to be. Every writer of these columns updates the same row, so they all
+ * serialize behind this `FOR UPDATE`.
+ */
+export async function resolvePlanChangeLimitCarryInTransaction(
+  tx: PlanChangeCarryReader,
+  subscriptionId: string,
+  plan: QuantityLimits,
+): Promise<PlanChangeLimitCarry> {
+  const locked = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "subscriptions"
+    WHERE "id" = ${subscriptionId}
+    FOR UPDATE
+  `);
+  const current =
+    locked.length === 1
+      ? await tx.subscription.findUnique({
+          where: { id: subscriptionId },
+          select: { trafficLimit: true, deviceLimit: true, planSnapshot: true },
+        })
+      : null;
+  if (current === null) {
+    throw new NotFoundException('Subscription not found');
+  }
+  return resolvePlanChangeLimitCarry({
+    current: { trafficLimit: current.trafficLimit, deviceLimit: current.deviceLimit },
+    planSnapshot: current.planSnapshot,
+    plan: { trafficLimit: plan.trafficLimit, deviceLimit: plan.deviceLimit },
+    recorded: await resolveRecordedAddOnContribution(tx, subscriptionId),
+  });
 }
 
 /**

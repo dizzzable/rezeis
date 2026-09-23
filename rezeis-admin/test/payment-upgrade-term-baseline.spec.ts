@@ -43,6 +43,10 @@ interface StoreOptions {
   readonly terms: readonly TermRow[];
   readonly entitlements?: readonly EntitlementRow[];
   readonly subscriptionStatus?: string;
+  /** Overrides on the subscription row — its limit columns and snapshot. */
+  readonly subscription?: Readonly<Record<string, unknown>>;
+  /** Projection rows already on file, by subscription id. */
+  readonly projections?: Readonly<Record<string, Record<string, unknown>>>;
 }
 
 /** Tracks what the fake actually served, so a silently inert fake fails loudly. */
@@ -56,7 +60,7 @@ interface StoreStats {
 function createStore(options: StoreOptions) {
   const terms: TermRow[] = options.terms.map((term) => ({ ...term }));
   const entitlements: EntitlementRow[] = (options.entitlements ?? []).map((row) => ({ ...row }));
-  const projections: Record<string, Record<string, unknown>> = {};
+  const projections: Record<string, Record<string, unknown>> = { ...options.projections };
   const syncJobs: Array<Record<string, unknown>> = [];
   let subscriptionUpdate: Record<string, unknown> | null = null;
   const stats: StoreStats = {
@@ -73,9 +77,10 @@ function createStore(options: StoreOptions) {
     expiresAt: new Date('2026-09-01T00:00:00.000Z'),
     trafficLimit: 100,
     deviceLimit: 3,
-    planSnapshot: { id: 'plan-old' },
+    planSnapshot: { id: 'plan-old' } as Record<string, unknown>,
     internalSquads: ['old-squad'],
     externalSquad: null,
+    ...options.subscription,
   };
 
   const matches = (row: Record<string, unknown>, where: Record<string, unknown>): boolean =>
@@ -518,6 +523,93 @@ describe('PaymentSubscriptionMutationService upgrade term baseline', () => {
       assert.equal(store.stats.termCreates, 0);
       assert.equal(store.syncJobs[0]!.aggregateKey, undefined);
       assert.equal(store.subscriptionUpdate!.trafficLimit, 500);
+    });
+  });
+
+  it('carries the live add-ons into the columns on that fallback — once, not on top of the mirror', async () => {
+    // The fallback writes the COLUMNS, and a projection exists: they mirror
+    // the old plan's 100 GB / 3 plus the live add-ons the last recompute
+    // recorded. The add-on share is carried once — added back to the NEW
+    // plan — rather than read as part of the column and added again.
+    await withShadowFlag('true', async () => {
+      const store = createStore({
+        terms: [
+          activeCutoverTerm(),
+          activeCutoverTerm({ id: 'term-queued', generation: 2, status: 'SCHEDULED' }),
+        ],
+        entitlements: [
+          { id: 'ent-gb', subscriptionId: 'sub-1', termId: 'term-old', type: 'EXTRA_TRAFFIC', state: 'ACTIVE', totalValue: 50n * GIB },
+          { id: 'ent-dev', subscriptionId: 'sub-1', termId: 'term-old', type: 'EXTRA_DEVICES', state: 'ACTIVE', totalValue: 2n },
+          {
+            id: 'ent-queued',
+            subscriptionId: 'sub-1',
+            termId: 'term-queued',
+            type: 'EXTRA_DEVICES',
+            state: 'PENDING_ACTIVATION',
+            totalValue: 2n,
+          },
+        ],
+        subscription: {
+          trafficLimit: 150,
+          deviceLimit: 5,
+          planSnapshot: { id: 'plan-old', trafficLimit: 100, deviceLimit: 3 },
+        },
+        projections: { 'sub-1': { activeTrafficContributionBytes: 50n * GIB, activeDeviceContribution: 2 } },
+      });
+      const service = buildService(store.tx);
+
+      await upgradeOf(service)({
+        transaction: UPGRADE_TRANSACTION,
+        purchasedPlan: plan({ trafficLimit: 500, deviceLimit: 10 }),
+        selectedDurationDays: 30,
+      });
+
+      assert.equal(store.stats.entitlementCountQueries, 1, 'the queued-term guard ran');
+      assert.equal(store.stats.termCreates, 0, 'and kept the column path');
+      assert.equal(store.syncJobs[0]!.aggregateKey, undefined);
+      assert.equal(store.subscriptionUpdate!.trafficLimit, 550, '600 would count the live add-on twice');
+      assert.equal(store.subscriptionUpdate!.deviceLimit, 12, '14 would count the live add-on twice');
+    });
+  });
+
+  it('carries the paid share on that fallback even under an operator’s cut', async () => {
+    // The base was cut to 80 GB / 2 devices under live add-ons of 50 GB / 2,
+    // so the columns hold 130 / 4. What carries is the recorded, paid share —
+    // not the columns' raw excess over the old plan (30 GB, 1 device).
+    await withShadowFlag('true', async () => {
+      const store = createStore({
+        terms: [
+          activeCutoverTerm(),
+          activeCutoverTerm({ id: 'term-queued', generation: 2, status: 'SCHEDULED' }),
+        ],
+        entitlements: [
+          {
+            id: 'ent-queued',
+            subscriptionId: 'sub-1',
+            termId: 'term-queued',
+            type: 'EXTRA_DEVICES',
+            state: 'PENDING_ACTIVATION',
+            totalValue: 2n,
+          },
+        ],
+        subscription: {
+          trafficLimit: 130,
+          deviceLimit: 4,
+          planSnapshot: { id: 'plan-old', trafficLimit: 100, deviceLimit: 3 },
+        },
+        projections: { 'sub-1': { activeTrafficContributionBytes: 50n * GIB, activeDeviceContribution: 2 } },
+      });
+      const service = buildService(store.tx);
+
+      await upgradeOf(service)({
+        transaction: UPGRADE_TRANSACTION,
+        purchasedPlan: plan({ trafficLimit: 500, deviceLimit: 10 }),
+        selectedDurationDays: 30,
+      });
+
+      assert.equal(store.stats.termCreates, 0, 'the column path ran');
+      assert.equal(store.subscriptionUpdate!.trafficLimit, 550);
+      assert.equal(store.subscriptionUpdate!.deviceLimit, 12);
     });
   });
 

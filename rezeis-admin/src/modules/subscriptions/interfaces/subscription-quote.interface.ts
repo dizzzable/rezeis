@@ -87,6 +87,22 @@ export interface SubscriptionActionPolicyInterface {
   readonly warnings: readonly SubscriptionQuoteWarningInterface[];
 }
 
+/**
+ * What an UPGRADE keeps ABOVE the new plan: the part of the subscription's
+ * limits that sat above its old plan — a paid add-on, an operator's raise, a
+ * bonus. Informational: it describes the purchase, it never decides it.
+ */
+export interface SubscriptionQuoteCarriedLimitsInterface {
+  /** Devices kept above the new plan's device limit. */
+  readonly deviceLimit: number;
+  /** Gigabytes kept above the new plan's traffic limit. */
+  readonly trafficLimitGb: number;
+  /** Unlimited devices stay on a finite new plan (an operator's setting). */
+  readonly unlimitedDevices: boolean;
+  /** Unlimited traffic stays on a finite new plan (an operator's setting). */
+  readonly unlimitedTraffic: boolean;
+}
+
 export interface SubscriptionQuoteInterface {
   readonly userId: string;
   readonly purchaseType: SubscriptionQuoteAction;
@@ -98,4 +114,10 @@ export interface SubscriptionQuoteInterface {
   readonly availablePlans: readonly SubscriptionQuotePlanInterface[];
   readonly price: SubscriptionQuotePriceInterface | null;
   readonly warnings: readonly SubscriptionQuoteWarningInterface[];
+  /**
+   * UPGRADE with a plan chosen only; `null` everywhere else and whenever
+   * nothing carries. Beside `warnings`, not one of them: it can never count
+   * towards `isEligible`, and a client that predates it never reads it.
+   */
+  readonly carriedAbovePlan: SubscriptionQuoteCarriedLimitsInterface | null;
 }

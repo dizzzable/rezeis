@@ -62,7 +62,11 @@ import {
 } from '../../remnawave/services/stale-panel-link';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
 import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
-import type { PlanInheritedLimitKey } from '../../subscriptions/services/plan-inherited-limits.util';
+import type {
+  PlanInheritedLimitKey,
+  QuantityLimits,
+} from '../../subscriptions/services/plan-inherited-limits.util';
+import { resolvePlanChangeLimitCarryInTransaction } from '../../add-on-entitlements/services/configured-baseline.util';
 import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
@@ -464,6 +468,9 @@ export class AdminUserSubscriptionsController {
 
     const data: Prisma.SubscriptionUpdateInput = {};
     let assignedPlanId: string | null = null;
+    // The assigned plan's own two quantity limits. What the row WRITES is
+    // resolved inside the transaction below — see the carry there.
+    let assignedPlanLimits: QuantityLimits | null = null;
     // The limit values this request WRITES, collected beside `data` so the
     // audit entry below describes the same numbers that reach the row rather
     // than re-deriving them from the body and drifting.
@@ -498,16 +505,15 @@ export class AdminUserSubscriptionsController {
       const plan = await this.prismaService.plan.findUnique({ where: { id: planId, deletedAt: null } });
       if (!plan) throw new NotFoundException('Plan not found');
       data.planSnapshot = buildPlanSnapshot(plan);
-      // Plans dictate the limits/squads at the moment of assignment.
+      // Plans dictate the squads at the moment of assignment, and the limits
+      // too — plus what the row held above its old plan, which is resolved in
+      // the transaction below, under the row lock.
       const planInternalSquads = Array.isArray(plan.internalSquads) ? [...plan.internalSquads] : [];
-      data.trafficLimit = plan.trafficLimit;
-      data.deviceLimit = plan.deviceLimit;
       data.internalSquads = planInternalSquads;
       data.externalSquad = plan.externalSquad ?? null;
-      writtenLimits.trafficLimit = plan.trafficLimit;
-      writtenLimits.deviceLimit = plan.deviceLimit;
       writtenLimits.internalSquads = planInternalSquads;
       writtenLimits.externalSquad = plan.externalSquad ?? null;
+      assignedPlanLimits = { trafficLimit: plan.trafficLimit, deviceLimit: plan.deviceLimit };
       assignedPlanId = plan.id;
     }
     if (body.trafficLimit !== undefined && assignedPlanId === null) {
@@ -568,7 +574,22 @@ export class AdminUserSubscriptionsController {
       || body.expireDays !== undefined
       || body.expiresAt !== undefined
       || body.status !== undefined;
+    const carryOnto = assignedPlanLimits;
     const outcome = await this.prismaService.$transaction(async (tx) => {
+      if (carryOnto !== null) {
+        // What the subscription holds ABOVE its old plan — a paid add-on (with
+        // the durable model off it lives nowhere but these columns), an
+        // earlier raise, a bonus — carries onto the new plan instead of being
+        // written over and pushed off the panel. The same rule a paid upgrade
+        // and a renewal follow (`resolvePlanChangeLimitCarry`). Read under the
+        // row lock so an add-on increment committed a moment ago is part of it
+        // rather than overwritten.
+        const carry = await resolvePlanChangeLimitCarryInTransaction(tx, subscriptionId, carryOnto);
+        data.trafficLimit = carry.columns.trafficLimit;
+        data.deviceLimit = carry.columns.deviceLimit;
+        writtenLimits.trafficLimit = carry.columns.trafficLimit;
+        writtenLimits.deviceLimit = carry.columns.deviceLimit;
+      }
       if (data.deviceLimit !== undefined) {
         // WHO IS MOVING THE LIMIT, told to the trigger that stamps the
         // reduction, through a setting that is local to this transaction.
@@ -624,8 +645,10 @@ export class AdminUserSubscriptionsController {
     // and BEFORE the panel push so the evidence exists even if the push path
     // throws. `assignedPlanId` is the discriminator rather than a guess from
     // the shape of the change set: a plan assignment sets all four limits AND
-    // rewrites `plan_snapshot` with them, so it leaves the row inherited, while
-    // an individual edit moves a column away from its snapshot on purpose.
+    // rewrites `plan_snapshot` with the plan's own, so it leaves the row
+    // inherited — apart from whatever it held above its old plan, which stays
+    // the row's own on the new one — while an individual edit moves a column
+    // away from its snapshot on purpose.
     // Read backwards they are opposites, and only the controller knows which
     // one happened.
     await this.auditLimitChange({

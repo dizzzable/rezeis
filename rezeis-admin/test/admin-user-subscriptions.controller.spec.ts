@@ -1697,7 +1697,14 @@ function editorHarness(options: {
             settings.push({ sql: strings.join('?'), values });
             return 1;
           },
-          subscription: { update: async (input: unknown) => applyUpdate(input, txUpdates) },
+          // A plan assignment re-reads the row under its lock to carry what it
+          // holds above its old plan (`resolvePlanChangeLimitCarryInTransaction`).
+          $queryRaw: async () => [{ id: row.id }],
+          subscription: {
+            findUnique: async () => row,
+            update: async (input: unknown) => applyUpdate(input, txUpdates),
+          },
+          subscriptionEffectiveProjection: { findUnique: async () => null },
           profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
           adminAuditLog: {
             create: async (input: unknown) => {
