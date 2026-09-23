@@ -57,9 +57,16 @@ export const SUBPAGE_CONFIG_KEYS = {
 } as const;
 
 export const subpageConfigApi = {
-  async get(): Promise<{ config: SubpageConfig; stored: boolean }> {
+  /**
+   * The editor's copy. `config.brandingSettings.title` is the title SAVED
+   * (`''` when none); `titleFallback` is what heads the page while it stays
+   * empty — the brand, followed on rename — for the field's placeholder.
+   */
+  async get(): Promise<{ config: SubpageConfig; stored: boolean; titleFallback?: string }> {
     const response = await api.get('/admin/subpage-config');
-    return z.object({ config: subpageConfigSchema, stored: z.boolean() }).parse(response.data);
+    return z
+      .object({ config: subpageConfigSchema, stored: z.boolean(), titleFallback: z.string().optional() })
+      .parse(response.data);
   },
 
   async replace(config: SubpageConfig): Promise<SubpageConfig> {

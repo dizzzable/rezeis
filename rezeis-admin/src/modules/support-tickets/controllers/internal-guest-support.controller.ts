@@ -129,14 +129,22 @@ export class InternalGuestSupportController {
     };
   }
 
+  /**
+   * The conversation bound to the token. When the token was a reply letter's
+   * link, the answer also carries `deviceToken`: the conversation's durable
+   * credential, which reiwa stores as the device cookie INSTEAD of the link's
+   * token — that one dies at the operator's next reply. reiwa never passes the
+   * field on to the browser.
+   */
   @Get()
   @ApiOperation({ summary: 'Fetch the conversation bound to the guest token' })
   public async get(
     @Headers(GUEST_TOKEN_HEADER) token: string | undefined,
-  ): Promise<SerializedGuestTicket> {
-    const ticket = await this.guestService.getConversation(token ?? '');
-    if (ticket === null) throw new NotFoundException('Conversation not found');
-    return serializeGuestTicket(ticket);
+  ): Promise<SerializedGuestTicket & { readonly deviceToken?: string }> {
+    const found = await this.guestService.getConversationForDevice(token ?? '');
+    if (found === null) throw new NotFoundException('Conversation not found');
+    const ticket = serializeGuestTicket(found.ticket);
+    return found.deviceToken === null ? ticket : { ...ticket, deviceToken: found.deviceToken };
   }
 
   @Post('reply')

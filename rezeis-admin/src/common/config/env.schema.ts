@@ -180,7 +180,13 @@ const environmentSchema = z
     EMAIL_USERNAME: z.preprocess(normalizeOptionalString, z.string().optional()),
     EMAIL_PASSWORD: z.preprocess(normalizeOptionalString, z.string().optional()),
     EMAIL_FROM_ADDRESS: z.string().default('no-reply@rezeis.local'),
-    EMAIL_FROM_NAME: z.string().default('Rezeis'),
+    // NO default, and that is load-bearing. `ConfigModule.forRoot({ validate })`
+    // writes every validated value that is missing from `process.env` back into
+    // it, so a default here is indistinguishable from an operator's choice by
+    // the time the email resolver asks. The old `'Rezeis'` default therefore
+    // put the panel's name in the sender of every customer letter and made the
+    // brand fallback (`EmailDeliveryService.resolveSmtpConfig`) unreachable.
+    EMAIL_FROM_NAME: z.preprocess(normalizeOptionalString, z.string().optional()),
     EMAIL_USE_TLS: envBoolean(true),
     EMAIL_USE_SSL: envBoolean(false),
 

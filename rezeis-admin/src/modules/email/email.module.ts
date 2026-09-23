@@ -6,6 +6,7 @@ import { Global, Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule } from '@nestjs/config';
 
+import { ReiwaPublicLinksModule } from '../advertising/reiwa-public-links.module';
 import { AuthModule } from '../auth/auth.module';
 import { ReiwaCacheInvalidatorService } from '../bot-config/services/reiwa-cache-invalidator.service';
 import { ReiwaRelayModule } from '../notifications/reiwa-relay.module';
@@ -38,6 +39,9 @@ import { EmailTemplateRendererService } from './services/email-template-renderer
     ConfigModule,
     BullModule.registerQueue({ name: EMAIL_QUEUE }),
     ReiwaRelayModule,
+    // The cabinet's address for the footer link and the logo, from the same
+    // resolver the ad links use.
+    ReiwaPublicLinksModule,
   ],
   controllers: [AdminEmailController],
   providers: [

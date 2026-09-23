@@ -26,6 +26,21 @@ export interface SmtpSettingsInterface {
 }
 
 /**
+ * What the SMTP card is given: the effective settings, except the sender name.
+ *
+ * `fromName` is the name SAVED in the panel — `''` when none — and never the
+ * name letters would go out under, which is `fromNameFallback` and is shown
+ * only as a placeholder. Filled with the effective name, the card saved it
+ * back as a stored choice on its first save and froze it there.
+ */
+export interface SmtpEditorSettingsInterface extends SmtpSettingsInterface {
+  /** Who the letters are from while `fromName` is empty. */
+  readonly fromNameFallback: string;
+  /** Where that comes from: `EMAIL_FROM_NAME` in the environment, or the brand. */
+  readonly fromNameFallbackSource: 'env' | 'brand';
+}
+
+/**
  * Branding data injected into email templates.
  * Pulled from Settings.brandingSettings + reiwa config.
  */
@@ -110,6 +125,15 @@ export interface SendEmailPayload {
    * reader whose client refuses HTML currently receives nothing at all.
    */
   readonly text?: string;
+  /**
+   * Optional `Date` header, for a direct send (`sendImmediate`); absent, the
+   * mail composer dates the letter when it builds it.
+   *
+   * The guest reply letter pins it to the moment its link was minted, so an
+   * inbox that sorts by `Date` puts the letters in the order of their links
+   * (`SupportNotificationsService.notifyGuestReply`).
+   */
+  readonly date?: Date;
   /**
    * Optional stable key that makes this send happen at most once.
    *

@@ -39,8 +39,9 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
     supportTicket: {
       findUnique: async () => ({
         subject: 'Оплата',
+        status: 'WAITING_REPLY',
         guestId: 'g-1',
-        guest: { id: 'g-1', email: opts?.guestEmail ?? null },
+        guest: { id: 'g-1', email: opts?.guestEmail ?? null, expiresAt: new Date(Date.now() + 3_600_000) },
       }),
     },
     settings: {
@@ -48,15 +49,25 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
     },
   };
   const emailDelivery = {
-    send: async (payload: { to: string; subject: string; rawHtml?: string }) => {
+    getSmtpSettings: async () => ({ enabled: true, host: 'smtp.example.com' }),
+    // The guest reply carries a live link and is sent directly
+    // (`support-guest-reply-opens-the-cabinet.spec.ts`); the queue is not used.
+    send: async () => {
+      throw new Error('the guest reply went to the mail queue');
+    },
+    sendImmediate: async (payload: { to: string; subject: string; rawHtml?: string }) => {
       if (opts?.sendThrows) throw new Error('smtp down');
       emails.push(payload);
+      return { success: true };
     },
   };
   const guestService = {
-    issueEmailResumeToken: async (guestId: string) => {
+    newEmailResumeToken: () => 'resume-tok',
+    letterTokenIssuedAt: () => null,
+    // Recorded when the link is made THE letter link, after the letter went out.
+    activateEmailResumeToken: async (guestId: string) => {
       tokensIssued.push(guestId);
-      return 'resume-tok';
+      return 'activated' as const;
     },
   };
   const templatesService = {
@@ -75,6 +86,8 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
     guestService as never,
     templatesService as never,
   );
+  // The guest letter's retries, without their wall-clock pauses.
+  (service as unknown as { guestLetterRetryDelaysMs: readonly number[] }).guestLetterRetryDelaysMs = [0, 0];
   return { service, calls, emails, tokensIssued, templateTypes };
 }
 
@@ -164,13 +177,22 @@ describe('SupportNotificationsService.notifyAdminReply', () => {
 
 describe('SupportNotificationsService.notifyGuestReply', () => {
   it('emails a guest with a resume link when an email is on file', async () => {
-    const { service, emails, tokensIssued } = build({ guestEmail: 'visitor@example.com' });
-    await service.notifyGuestReply('t-1');
-    assert.equal(emails.length, 1);
-    assert.equal(emails[0].to, 'visitor@example.com');
-    assert.deepEqual(tokensIssued, ['g-1']);
-    // Link uses the branding website base + the issued resume token.
-    assert.match(emails[0].rawHtml ?? '', /https:\/\/app\.example\.com\/support\/guest\?resume=resume-tok/);
+    // The base is the cabinet's address (`support-guest-reply-opens-the-cabinet.spec.ts`);
+    // the `websiteUrl` the harness puts in the branding row is not read any more.
+    const saved = process.env.REIWA_WEB_BASE_URL;
+    process.env.REIWA_WEB_BASE_URL = 'https://app.example.com/';
+    try {
+      const { service, emails, tokensIssued } = build({ guestEmail: 'visitor@example.com' });
+      await service.notifyGuestReply('t-1');
+      assert.equal(emails.length, 1);
+      assert.equal(emails[0].to, 'visitor@example.com');
+      assert.deepEqual(tokensIssued, ['g-1']);
+      // Link uses the cabinet base + the issued resume token.
+      assert.match(emails[0].rawHtml ?? '', /https:\/\/app\.example\.com\/support\/guest\?resume=resume-tok/);
+    } finally {
+      if (saved === undefined) delete process.env.REIWA_WEB_BASE_URL;
+      else process.env.REIWA_WEB_BASE_URL = saved;
+    }
   });
 
   it('skips the email when the guest left no contact', async () => {

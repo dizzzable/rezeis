@@ -12,7 +12,11 @@ import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-ca
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
 import { mutateExistingSettingsRow } from '../../settings/utils/settings-row-write.util';
 import { EMAIL_QUEUE, EMAIL_JOBS } from '../email.constants';
-import type { SendEmailPayload, SmtpSettingsInterface } from '../interfaces/email.interface';
+import type {
+  SendEmailPayload,
+  SmtpEditorSettingsInterface,
+  SmtpSettingsInterface,
+} from '../interfaces/email.interface';
 import { EmailTemplateRendererService } from './email-template-renderer.service';
 
 /**
@@ -116,7 +120,12 @@ export class EmailDeliveryService {
 
     try {
       await transporter.sendMail({
-        from: `"${config.fromName}" <${config.fromAddress}>`,
+        // An address OBJECT, so nodemailer writes the RFC 5322 quoted string
+        // (or an encoded word) itself. The name is operator-typed — a saved
+        // name or the brand — and pasted between quotes it broke out of them:
+        // «Winger "Pro" VPN» arrived as «WingerPro VPN», and a name holding
+        // `" <…>, "` added a second sender to the header.
+        from: { name: config.fromName, address: config.fromAddress },
         to: payload.to,
         subject: rendered.subject,
         html: rendered.html,
@@ -124,6 +133,9 @@ export class EmailDeliveryService {
         // text part from the HTML, and its derivation of a branded layout is
         // worse than the caller's own rendering of the body.
         ...(payload.text === undefined ? {} : { text: payload.text }),
+        // A pinned `Date`, when the caller orders its letters by it; otherwise
+        // nodemailer's own, taken as it builds the message.
+        ...(payload.date === undefined ? {} : { date: payload.date }),
       });
       this.logger.log(`Email sent: to=${payload.to} template=${payload.templateType}`);
       return { success: true };
@@ -279,6 +291,26 @@ export class EmailDeliveryService {
   }
 
   /**
+   * The SMTP card's view: the same settings, except the sender name.
+   *
+   * `fromName` is the name SAVED in the panel (`''` when none), and
+   * `fromNameFallback` the name letters go out under while it stays empty —
+   * `EMAIL_FROM_NAME`, else the brand — which the card shows as a placeholder.
+   * The card used to be filled with the EFFECTIVE name and refused an empty
+   * one, so its first save froze whatever was showing into the database:
+   * "Rezeis" for years, then today's brand, which no later rename would reach.
+   */
+  public async getSmtpSettingsForEditor(): Promise<SmtpEditorSettingsInterface> {
+    const { effective, sender } = await this.readSmtpSettings();
+    return {
+      ...effective,
+      fromName: sender.saved ?? '',
+      fromNameFallback: sender.fallback,
+      fromNameFallbackSource: sender.fallbackSource,
+    };
+  }
+
+  /**
    * Save SMTP settings to the database (Settings.systemNotifications.email).
    *
    * This read the column and wrote it back with no transaction and no lock,
@@ -296,10 +328,10 @@ export class EmailDeliveryService {
 
         const updated = {
           ...existing,
-          email: {
+          email: withSavedSenderName({
             ...currentEmail,
             ...input,
-          },
+          }),
         };
 
         await write({ systemNotifications: updated });
@@ -334,6 +366,13 @@ export class EmailDeliveryService {
   // ── Private ────────────────────────────────────────────────────────────
 
   private async resolveSmtpConfig(): Promise<SmtpSettingsInterface> {
+    return (await this.readSmtpSettings()).effective;
+  }
+
+  private async readSmtpSettings(): Promise<{
+    readonly effective: SmtpSettingsInterface;
+    readonly sender: SenderName;
+  }> {
     // Priority 1: DB settings
     const settings = await this.prismaService.settings.findFirst({
       select: { systemNotifications: true, brandingSettings: true },
@@ -345,17 +384,22 @@ export class EmailDeliveryService {
     // NEVER the hidden admin-panel name. Chain: DB value → explicit
     // EMAIL_FROM_NAME env → brand. So out of the box users see the project,
     // not "Rezeis".
+    //
+    // The env step is the config's own `null`, not a second look at
+    // `process.env`: that look is what the schema's old `'Rezeis'` default
+    // defeated, because Nest had already copied the default INTO `process.env`
+    // — every install was "explicitly" named Rezeis and the brand step never ran.
     const brandName = readBrandingSettings(settings?.brandingSettings ?? null).brandName;
-    const dbFromName =
-      typeof dbEmail.fromName === 'string' && dbEmail.fromName.trim().length > 0
-        ? dbEmail.fromName
-        : null;
-    const envFromNameSet =
-      typeof process.env.EMAIL_FROM_NAME === 'string' && process.env.EMAIL_FROM_NAME.trim().length > 0;
-    const fromName = dbFromName ?? (envFromNameSet ? this.emailConfiguration.fromName : brandName);
+    const savedName = typeof dbEmail.fromName === 'string' ? dbEmail.fromName.trim() : '';
+    const envName = this.emailConfiguration.fromName;
+    const sender: SenderName = {
+      saved: savedName.length > 0 ? savedName : null,
+      fallback: envName ?? brandName,
+      fallbackSource: envName !== null ? 'env' : 'brand',
+    };
 
     // Merge: DB overrides env
-    return {
+    const effective: SmtpSettingsInterface = {
       enabled: typeof dbEmail.enabled === 'boolean' ? dbEmail.enabled : this.emailConfiguration.enabled,
       // No environment fallback and no default-on: an install that upgrades
       // into this feature must not start mailing its customers because a
@@ -366,10 +410,11 @@ export class EmailDeliveryService {
       username: typeof dbEmail.username === 'string' ? dbEmail.username : this.emailConfiguration.username,
       password: typeof dbEmail.password === 'string' ? dbEmail.password : this.emailConfiguration.password,
       fromAddress: typeof dbEmail.fromAddress === 'string' ? dbEmail.fromAddress : this.emailConfiguration.fromAddress,
-      fromName,
+      fromName: sender.saved ?? sender.fallback,
       useTls: typeof dbEmail.useTls === 'boolean' ? dbEmail.useTls : this.emailConfiguration.useTls,
       useSsl: typeof dbEmail.useSsl === 'boolean' ? dbEmail.useSsl : this.emailConfiguration.useSsl,
     };
+    return { effective, sender };
   }
 
   private async getTransporter(config: SmtpSettingsInterface): Promise<Transporter> {
@@ -422,6 +467,29 @@ export function deriveSmtpSecurity(config: SmtpSettingsInterface): {
   // Custom port: honour the explicit implicit-TLS flag; otherwise STARTTLS
   // when the operator enabled TLS.
   return { secure: config.useSsl, requireTls: !config.useSsl && config.useTls };
+}
+
+/** The sender name, in the parts the SMTP card needs apart. */
+interface SenderName {
+  /** Saved in the panel, trimmed; `null` when none. Wins when present. */
+  readonly saved: string | null;
+  /** Used while nothing is saved: `EMAIL_FROM_NAME`, else the brand. */
+  readonly fallback: string;
+  readonly fallbackSource: 'env' | 'brand';
+}
+
+/**
+ * The stored SMTP block with its sender name as the card means it: trimmed,
+ * and a blank one — the card sends `''` for "use the brand" — removed rather
+ * than kept as a name that merely reads as empty. With no name stored the
+ * letters follow `EMAIL_FROM_NAME` or the brand, including a later rename.
+ */
+function withSavedSenderName<T extends Record<string, unknown>>(email: T): T {
+  if (!('fromName' in email)) return email;
+  const { fromName, ...rest } = email;
+  const name = typeof fromName === 'string' ? fromName.trim() : '';
+  // The same stored block, minus a blank name — its type does not change.
+  return (name.length > 0 ? { ...rest, fromName: name } : rest) as T;
 }
 
 /** Minimal HTML escaping for values interpolated into a rawHtml email block. */

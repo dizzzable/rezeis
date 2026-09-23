@@ -1,6 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
+import {
+  resolveCabinetSiteUrl,
+  resolveEmailImageUrl,
+} from '../../../common/config/public-site-url.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ReiwaAdvertisingLinkConfigService } from '../../advertising/services/reiwa-advertising-link-config.service';
 import { wrapInBrandedEmailLayout } from '../utils/email-branded-layout.util';
 import { emailThemeFromBranding } from '../utils/email-theme.util';
 import { readBrandingSettings } from '../../settings/utils/branding-settings.util';
@@ -26,7 +31,15 @@ import {
 export class EmailTemplateRendererService {
   private readonly logger = new Logger(EmailTemplateRendererService.name);
 
-  public constructor(private readonly prismaService: PrismaService) {}
+  public constructor(
+    private readonly prismaService: PrismaService,
+    // THE resolver of the cabinet's address — the one the ad links use — so a
+    // letter and an ad cannot send a customer to two different places.
+    // `@Optional()` only for a unit test that builds this with `new`; the
+    // module always provides it (`ReiwaPublicLinksModule`), and without it the
+    // letter falls back to the .env part of the same chain.
+    @Optional() private readonly cabinetLinks?: ReiwaAdvertisingLinkConfigService,
+  ) {}
 
   /**
    * Render a notification template into a full HTML email.
@@ -129,8 +142,8 @@ export class EmailTemplateRendererService {
    * So we resolve the brand through the canonical `readBrandingSettings`
    * reader (same source the cabinet uses), which defaults to the project brand
    * ("Reiwa") and the project's primary color — not a "Rezeis" placeholder.
-   * `websiteUrl` is derived from `REZEIS_DOMAIN`; `supportEmail` from the
-   * operator's email support contact / From address.
+   * `websiteUrl` is the cabinet, resolved as the ad links resolve it;
+   * `supportEmail` the operator's email support contact / From address.
    */
   private async loadBranding(): Promise<EmailBrandingInterface> {
     const settings = await this.prismaService.settings.findFirst({
@@ -144,19 +157,27 @@ export class EmailTemplateRendererService {
     const str = (v: unknown): string | null =>
       typeof v === 'string' && v.trim().length > 0 ? v.trim() : null;
 
-    // Website: the deployment domain (operator's public service URL).
-    const domain = str(process.env.REZEIS_DOMAIN);
-    const websiteUrl =
-      domain !== null && domain !== 'localhost'
-        ? `${domain.includes('.') ? 'https' : 'http'}://${domain}`
-        : null;
+    // Website: the CABINET, or no link. This was `REZEIS_DOMAIN` — the admin
+    // panel's domain — so the footer of every customer letter advertised the
+    // operator's admin panel as "the website". The address the cabinet
+    // publishes comes first, then REIWA_WEB_BASE_URL → MINIAPP_CUSTOM_URL —
+    // the ad links' chain, from the same service. `null` when none of them
+    // knows: the footer then carries no link rather than the panel's.
+    const websiteUrl = this.cabinetLinks
+      ? await this.cabinetLinks.resolveCabinetWebBaseUrl()
+      : resolveCabinetSiteUrl();
 
     // Support address: operator-configured contact, else the From address.
     const supportEmail = str(emailCfg.supportEmail) ?? str(emailCfg.fromAddress);
 
     return {
       serviceName: branding.brandName,
-      logoUrl: branding.logoUrl,
+      // An uploaded logo is `/uploads/branding/<file>`, which an inbox cannot
+      // resolve: every letter of such an install opened with a broken image.
+      // Fetched from the cabinet, which serves the same file, whenever its
+      // address is known — so no letter carries the admin domain; from the
+      // panel's public site only when it is not; no logo when neither is.
+      logoUrl: resolveEmailImageUrl(branding.logoUrl, websiteUrl),
       primaryColor: branding.primary,
       supportEmail,
       websiteUrl,

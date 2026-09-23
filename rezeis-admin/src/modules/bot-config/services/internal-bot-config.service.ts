@@ -205,6 +205,7 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       // and operator-edited values are never overwritten.
       await this.seedDefaultEmojis();
       await this.seedDefaultTexts();
+      await this.upgradeRetiredDefaultTexts();
 
       const existingButtonCount = await this.prismaService.botButton.count();
       if (existingButtonCount === 0) {
@@ -289,6 +290,37 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
       } catch (err: unknown) {
         this.logger.warn(
           `Failed to seed bot text "${seed.key}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Replaces a text row that still holds, BYTE FOR BYTE, a default this panel
+   * no longer ships ({@link RETIRED_DEFAULT_TEXTS}) with the current one.
+   *
+   * The seed never rewrites a row, which is right for everything an operator
+   * may have edited and wrong for a default nobody touched: the old greeting
+   * named the panel, and every install that predates the neutral one kept
+   * sending it. The single conditional UPDATE only ever matches the exact old
+   * text under its own key, so an operator's text — even one character away —
+   * is never touched, and a second boot matches nothing and writes nothing.
+   */
+  private async upgradeRetiredDefaultTexts(): Promise<void> {
+    for (const retired of RETIRED_DEFAULT_TEXTS) {
+      try {
+        const { count } = await this.prismaService.botText.updateMany({
+          where: { key: retired.key, value: retired.value },
+          data: { value: retired.replacement },
+        });
+        if (count > 0) {
+          this.logger.log(`Replaced the previous default text of "${retired.key}" with the current default.`);
+        }
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Failed to upgrade the default text of "${retired.key}": ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -767,15 +799,51 @@ const DEFAULT_VISUAL: Omit<
   InternalBotConfigVisualInterface,
   'bannerUrl' | 'bannerApplyAll'
 > = {
-  welcomeMessage: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
+  // No service name in either greeting. "Rezeis" is the panel the operator
+  // runs, not the brand their customers bought, and the bot copy has no brand
+  // placeholder to put the operator's own name in its place — so the default
+  // says nothing, and the operator writes their name in «Карта бота» →
+  // «Схема» → «Тексты» (`bot.welcome_message`, and its English version).
+  welcomeMessage: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать!',
   // The first message every Telegram customer ever sees. The English slot
   // has existed since the field was added and shipped empty, so an English
   // customer's first contact with the product was in Russian — and the
   // operator had no way to know a second field was waiting to be filled.
-  welcomeMessageEn: 'Hi, {{firstName}}! 👋\n\nWelcome to Rezeis VPN.',
+  welcomeMessageEn: 'Hi, {{firstName}}! 👋\n\nWelcome!',
   supportUsername: '',
   subscriptionInfoFormat: 'full',
 };
+
+/** A default text this panel shipped once and no longer does. */
+interface RetiredDefaultText {
+  /** The row key; an English text is its `@en` sibling. */
+  readonly key: string;
+  /** The retired default, exactly as it was seeded — compared byte for byte. */
+  readonly value: string;
+  readonly replacement: string;
+}
+
+/**
+ * Defaults that named the panel, and what an install still holding them word
+ * for word gets instead (`upgradeRetiredDefaultTexts`). Only ever ADD an
+ * entry, and only with the exact string a release seeded or served: an entry
+ * that matched text an operator could have typed would overwrite their words.
+ */
+const RETIRED_DEFAULT_TEXTS: readonly RetiredDefaultText[] = [
+  // Seeded into `bot.welcome_message` until 23.09.2026.
+  {
+    key: WELCOME_MESSAGE_KEY,
+    value: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
+    replacement: DEFAULT_VISUAL.welcomeMessage,
+  },
+  // Never seeded — the built-in English greeting until 23.09.2026 — but the
+  // texts editor shows it, and saving the English field unchanged stores it.
+  {
+    key: `${WELCOME_MESSAGE_KEY}${EN_KEY_SUFFIX}`,
+    value: 'Hi, {{firstName}}! 👋\n\nWelcome to Rezeis VPN.',
+    replacement: DEFAULT_VISUAL.welcomeMessageEn ?? '',
+  },
+];
 
 const DEFAULT_FEATURES: InternalBotConfigFeaturesInterface = {
   referralsEnabled: true,
@@ -847,9 +915,13 @@ interface DefaultTextSeed {
  */
 const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
   // Greeting (admin-editable). `{{firstName}}` is substituted by reiwa.
+  // The same text `resolveWelcomeMessage` serves while the row is absent: it
+  // was typed out twice, and a second copy is the one that gets missed. A
+  // seed never rewrites a row; a row still holding the OLD default word for
+  // word is upgraded separately (`RETIRED_DEFAULT_TEXTS`).
   {
     key: WELCOME_MESSAGE_KEY,
-    value: 'Привет, {{firstName}}! 👋\n\nДобро пожаловать в Rezeis VPN.',
+    value: DEFAULT_VISUAL.welcomeMessage,
   },
   // Layout of the per-subscription summary appended to the welcome:
   //   `full`    — profile / devices / traffic bar / expiry (default)

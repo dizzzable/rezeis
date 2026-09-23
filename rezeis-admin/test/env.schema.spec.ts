@@ -31,7 +31,10 @@ describe('validateEnvironment', () => {
     assert.equal(actualEnvironment.EMAIL_ENABLED, false);
     assert.equal(actualEnvironment.EMAIL_PORT, 587);
     assert.equal(actualEnvironment.EMAIL_FROM_ADDRESS, 'no-reply@rezeis.local');
-    assert.equal(actualEnvironment.EMAIL_FROM_NAME, 'Rezeis');
+    // Absent, not defaulted: Nest copies a validated default into
+    // `process.env`, where it reads as the operator's own choice
+    // (`email-sender-name-is-the-brand.spec.ts`).
+    assert.equal(actualEnvironment.EMAIL_FROM_NAME, undefined);
     assert.equal(actualEnvironment.EMAIL_USE_TLS, true);
     assert.equal(actualEnvironment.EMAIL_USE_SSL, false);
     assert.equal(actualEnvironment.REIWA_URL, 'http://reiwa:5000');

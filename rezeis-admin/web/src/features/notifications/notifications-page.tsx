@@ -158,6 +158,12 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // reached this list, so in `selected` mode none of them was deliverable.
     'payment.refunded', 'payment.refund_partial', 'payment.amount_mismatch',
     'payment.notified_amount_short', 'payment.fulfillment_recovered',
+    // A trial conversion paid after another payment converted the trial:
+    // received, not applied, to be refunded. Also delivered to whoever ticked
+    // payment.completed, which it used to be raised as. Its refund comes as
+    // payment.withheld_refunded, also delivered to whoever ticked
+    // payment.refunded, payment.refund_partial or payment.withheld.
+    'payment.withheld', 'payment.withheld_refunded',
     'payment.method_saved', 'payment.method_unbound', 'payment.method_autopay_updated',
     'payment.autopay_confirmation_required',
     // A paid renewal add-on line whose capture-time baseline absorbs it, so it
@@ -1533,7 +1539,12 @@ interface SmtpSettings {
   username: string | null
   password: string | null
   fromAddress: string
+  /** The name SAVED in the panel; `''` when none — never the effective one. */
   fromName: string
+  /** Who the letters are from while `fromName` is empty. */
+  fromNameFallback?: string | null
+  /** `env` — `EMAIL_FROM_NAME`; `brand` — the brand name, followed on rename. */
+  fromNameFallbackSource?: 'env' | 'brand' | null
   useTls: boolean
   useSsl: boolean
   passwordSet?: boolean
@@ -1573,10 +1584,10 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
         .trim()
         .min(1, t('notificationsPage.email.validation.fromAddressRequired'))
         .email(t('notificationsPage.email.validation.fromAddressInvalid')),
-      fromName: z
-        .string()
-        .trim()
-        .min(1, t('notificationsPage.email.validation.fromNameRequired')),
+      // Optional: empty is "use the brand" (or EMAIL_FROM_NAME), and the server
+      // stores it as not set. Required, the field froze its first value — the
+      // effective name it was pre-filled with — into the database for good.
+      fromName: z.string().trim(),
       useTls: z.boolean(),
       useSsl: z.boolean(),
     })
@@ -1605,11 +1616,13 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
       username: initial.username ?? '',
       password: '', // never pre-fill password
       fromAddress: initial.fromAddress,
-      fromName: initial.fromName,
+      fromName: initial.fromName ?? '',
       useTls: initial.useTls,
       useSsl: initial.useSsl,
     },
   })
+  // What an empty «Имя отправителя» sends, shown as its placeholder and hint.
+  const fromNameFallback = initial.fromNameFallback?.trim() ?? ''
 
   const testEmailSchema = z
     .string()
@@ -1817,10 +1830,17 @@ function EmailDeliveryForm({ initial }: EmailDeliveryFormProps) {
                     <FormControl>
                       <Input
                         {...field}
-                        placeholder="Reiwa"
+                        placeholder={fromNameFallback}
                         className="h-8 text-xs"
                       />
                     </FormControl>
+                    {fromNameFallback.length > 0 && (
+                      <FormDescription className="text-[10px]">
+                        {initial.fromNameFallbackSource === 'env'
+                          ? t('notificationsPage.email.fromNameEmptyEnv', { name: fromNameFallback })
+                          : t('notificationsPage.email.fromNameEmptyBrand', { name: fromNameFallback })}
+                      </FormDescription>
+                    )}
                     <FormMessage className="text-[10px]" />
                   </FormItem>
                 )}

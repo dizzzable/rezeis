@@ -40,6 +40,13 @@ function build() {
       calls.getConversation.push(token);
       return token === 'tok-abc' ? TICKET_ENTITY : null;
     },
+    // What `GET` asks since a letter's link is exchanged for the device
+    // credential (`support-guest-device-credential.spec.ts`); logged with the
+    // other conversation reads.
+    getConversationForDevice: async (token: string) => {
+      calls.getConversation.push(token);
+      return token === 'tok-abc' ? { ticket: TICKET_ENTITY, deviceToken: null } : null;
+    },
     reply: async (token: string, content: string) => {
       calls.reply.push({ token, content });
       return token === 'tok-abc' ? TICKET_ENTITY : null;

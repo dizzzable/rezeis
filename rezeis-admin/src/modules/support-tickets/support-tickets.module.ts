@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { ReiwaPublicLinksModule } from '../advertising/reiwa-public-links.module';
 import { AuthModule } from '../auth/auth.module';
 import { BlockedIdentitiesModule } from '../blocked-identities/blocked-identities.module';
 import { DeviceIntelligenceModule } from '../device-intelligence/device-intelligence.module';
@@ -18,7 +19,16 @@ import { SupportTicketsService } from './services/support-tickets.service';
   // For `BlockedIdentityService`: silencing a guest device is a MANUAL
   // blocklist entry, and manual is what separates a refusal from the
   // cascade rows every block writes automatically.
-  imports: [AuthModule, BlockedIdentitiesModule, DeviceIntelligenceModule, NotificationsModule, SettingsModule],
+  // `ReiwaPublicLinksModule`: the cabinet's address for a guest reply's
+  // «Открыть переписку», from the resolver the ad links and letters share.
+  imports: [
+    AuthModule,
+    BlockedIdentitiesModule,
+    DeviceIntelligenceModule,
+    NotificationsModule,
+    SettingsModule,
+    ReiwaPublicLinksModule,
+  ],
   controllers: [
     AdminSupportTicketsController,
     InternalUserSupportController,

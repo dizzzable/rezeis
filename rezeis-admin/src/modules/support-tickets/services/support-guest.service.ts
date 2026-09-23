@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
-import { createHash, randomBytes } from 'node:crypto';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ConfigType } from '@nestjs/config';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Prisma, SupportTicketStatus } from '@prisma/client';
 
+import { appConfig } from '../../../common/config/app.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -11,11 +13,23 @@ import { SupportTicketsService } from './support-tickets.service';
 
 const TOKEN_BYTES = 32;
 
+/**
+ * A device credential: `gdv1.<guestId>.<mac>`, the MAC keyed from the panel's
+ * crypt key. Neither of the random tokens (base64url, no dot) can look like one.
+ */
+const DEVICE_TOKEN_PREFIX = 'gdv1.';
+
 export interface GuestResolution {
   readonly guestId: string;
   readonly ticketId: string;
   readonly status: SupportTicketStatus;
 }
+
+/**
+ * How a token got in. `email` is the one way in that does not last: a reply
+ * letter's token, overwritten by the next letter (`activateEmailResumeToken`).
+ */
+type ResolvedVia = 'secret' | 'email' | 'device';
 
 /**
  * SupportGuestService
@@ -39,6 +53,10 @@ export class SupportGuestService {
     private readonly supportTicketsService: SupportTicketsService,
     private readonly supportAttachmentService: SupportAttachmentService,
     private readonly settingsService: SettingsService,
+    /** For the device-credential key; last and optional for positional construction in specs. */
+    @Optional()
+    @Inject(appConfig.KEY)
+    private readonly applicationConfiguration?: ConfigType<typeof appConfig>,
   ) {}
 
   /**
@@ -89,6 +107,30 @@ export class SupportGuestService {
     const resolution = await this.resolve(token);
     if (resolution === null) return null;
     return this.supportTicketsService.getById(resolution.ticketId);
+  }
+
+  /**
+   * The thread for a token, plus — when the token was a reply letter's link —
+   * the conversation's durable device credential to keep in its place.
+   *
+   * A letter's token is a way IN, not a key: the next operator reply
+   * overwrites it (`activateEmailResumeToken`), and a device that kept it as its
+   * cookie fell out of the conversation at that very reply, into the "new
+   * conversation" form — the device that started the thread included, once it
+   * had followed a link. The credential does not rotate: it lives exactly as
+   * long as the guest (`expiresAt`), an open ticket, and no attachment to an
+   * account, because `resolve` checks all three for it like for any token.
+   * The guest's own secret and a credential are durable already, so they are
+   * not exchanged (`deviceToken: null`).
+   */
+  public async getConversationForDevice(
+    token: string,
+  ): Promise<{ readonly ticket: unknown; readonly deviceToken: string | null } | null> {
+    const resolution = await this.resolve(token);
+    if (resolution === null) return null;
+    const ticket = await this.supportTicketsService.getById(resolution.ticketId);
+    const deviceToken = resolution.via === 'email' ? this.deviceTokenFor(resolution.guestId) : null;
+    return { ticket, deviceToken };
   }
 
   /** Append a guest reply to the bound, still-open conversation. */
@@ -144,16 +186,72 @@ export class SupportGuestService {
     ]);
     return true;
   }
-  public async issueEmailResumeToken(guestId: string): Promise<string | null> {
-    const token = generateToken();
+  /**
+   * A fresh way in for a reply letter's «Открыть переписку». Nothing is written:
+   * the token opens nothing until {@link activateEmailResumeToken}, and the
+   * previous letter's link keeps working until then.
+   *
+   * The token carries its letter's place in line (`<stamp>.<random>`, see
+   * {@link nextLetterStamp}), decided here — before the letter is sent — so
+   * the order in which letters happen to leave cannot reorder them.
+   */
+  public newEmailResumeToken(): string {
+    return `${nextLetterStamp()}.${generateToken()}`;
+  }
+
+  /**
+   * The moment a letter token was minted — its place in line as a date, to the
+   * millisecond — or `null` for a token without a stamp. The letter carrying
+   * the token is dated with it, so the order an inbox sorts letters in by
+   * `Date` is the order of their links.
+   */
+  public letterTokenIssuedAt(token: string): Date | null {
+    const stamp = LETTER_TOKEN_PATTERN.exec(token)?.[1];
+    return stamp === undefined ? null : new Date(Math.floor(Number(stamp) / 1000));
+  }
+
+  /**
+   * Makes `token` THE letter link of this guest — call it only once the letter
+   * carrying it has gone out. There is one letter link per guest, so this is
+   * also the moment the previous letter's link stops working: a letter that
+   * never arrived must not retire the one the guest still has.
+   *
+   * MONOTONIC: it becomes the link only if no NEWER letter's link is live
+   * already. Two replies close together send in parallel, and the first
+   * reply's letter can be the slower one; activated last, it used to take the
+   * link back, leaving the guest's newest letter dead. The stored value carries
+   * the stamp, and the write is a compare-and-set on the value it replaces, so
+   * a concurrent activation cannot slip in between the check and the write.
+   *
+   * `activated` — this letter's link is the live one; `superseded` — a newer
+   * letter's already is, which is no failure; `failed` — the write failed, and
+   * the previous link stays the live one.
+   */
+  public async activateEmailResumeToken(
+    guestId: string,
+    token: string,
+  ): Promise<'activated' | 'superseded' | 'failed'> {
+    const stored = storedLetterHash(token);
+    const stamp = stampOfStoredLetterHash(stored);
     try {
-      await this.prismaService.supportGuest.update({
-        where: { id: guestId },
-        data: { emailResumeHash: hashToken(token) },
-      });
-      return token;
+      for (let attempt = 0; attempt < LETTER_ACTIVATION_ATTEMPTS; attempt += 1) {
+        const guest = await this.prismaService.supportGuest.findUnique({
+          where: { id: guestId },
+          select: { emailResumeHash: true },
+        });
+        if (guest === null) return 'failed';
+        const live = guest.emailResumeHash;
+        if (live !== null && stampOfStoredLetterHash(live) >= stamp) return 'superseded';
+        const { count } = await this.prismaService.supportGuest.updateMany({
+          where: { id: guestId, emailResumeHash: live },
+          data: { emailResumeHash: stored },
+        });
+        if (count === 1) return 'activated';
+        // Another letter was activated between the read and the write: look again.
+      }
+      return 'failed';
     } catch {
-      return null;
+      return 'failed';
     }
   }
 
@@ -205,17 +303,31 @@ export class SupportGuestService {
    * conversation — the single uniform negative (Property 2 & 3 & 6).
    * Touches `lastSeenAt` best-effort on a hit.
    */
-  private async resolve(token: string): Promise<GuestResolution | null> {
+  private async resolve(token: string): Promise<(GuestResolution & { readonly via: ResolvedVia }) | null> {
     if (typeof token !== 'string' || token.length === 0) return null;
-    const hashed = hashToken(token);
-    const guest = await this.prismaService.supportGuest.findFirst({
-      where: { OR: [{ secretHash: hashed }, { emailResumeHash: hashed }] },
-      select: {
-        id: true,
-        expiresAt: true,
-        ticket: { select: { id: true, status: true } },
-      },
-    });
+    const select = {
+      id: true,
+      secretHash: true,
+      expiresAt: true,
+      ticket: { select: { id: true, status: true } },
+    } as const;
+    let guest;
+    let via: ResolvedVia;
+    if (token.startsWith(DEVICE_TOKEN_PREFIX)) {
+      // A device credential names its guest and proves it with the MAC; the
+      // rest of the checks below are the same as for any token.
+      const guestId = this.guestIdOfDeviceToken(token);
+      if (guestId === null) return null;
+      guest = await this.prismaService.supportGuest.findUnique({ where: { id: guestId }, select });
+      via = 'device';
+    } else {
+      const hashed = hashToken(token);
+      guest = await this.prismaService.supportGuest.findFirst({
+        where: { OR: [{ secretHash: hashed }, { emailResumeHash: storedLetterHash(token) }] },
+        select,
+      });
+      via = guest?.secretHash === hashed ? 'secret' : 'email';
+    }
     if (guest === null) return null;
     if (guest.expiresAt.getTime() < Date.now()) return null;
     if (guest.ticket === null) return null;
@@ -226,12 +338,84 @@ export class SupportGuestService {
       .update({ where: { id: guest.id }, data: { lastSeenAt: new Date() } })
       .catch(() => undefined);
 
-    return { guestId: guest.id, ticketId: guest.ticket.id, status: guest.ticket.status };
+    return { guestId: guest.id, ticketId: guest.ticket.id, status: guest.ticket.status, via };
   }
+
+  /**
+   * The conversation's durable device credential. Derived, never stored: a
+   * MAC over the guest id with a key taken from `REZEIS_CRYPT_KEY`, so every
+   * device that came in through a letter holds the same key to the same
+   * conversation, and there is nothing to rotate. `null` without a crypt key
+   * (the panel does not boot without one).
+   */
+  private deviceTokenFor(guestId: string): string | null {
+    const key = this.deviceKey();
+    if (key === null) return null;
+    return `${DEVICE_TOKEN_PREFIX}${guestId}.${deviceMac(key, guestId)}`;
+  }
+
+  /** The guest a well-formed, genuine device credential names; otherwise `null`. */
+  private guestIdOfDeviceToken(token: string): string | null {
+    const key = this.deviceKey();
+    if (key === null) return null;
+    const body = token.slice(DEVICE_TOKEN_PREFIX.length);
+    const dot = body.lastIndexOf('.');
+    if (dot <= 0) return null;
+    const guestId = body.slice(0, dot);
+    const presented = Buffer.from(body.slice(dot + 1));
+    const expected = Buffer.from(deviceMac(key, guestId));
+    if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) return null;
+    return guestId;
+  }
+
+  private deviceKey(): Buffer | null {
+    const cryptKey = this.applicationConfiguration?.cryptKey ?? process.env.REZEIS_CRYPT_KEY ?? '';
+    if (cryptKey.length === 0) return null;
+    return createHash('sha256').update(`rezeis-admin:support-guest-device:${cryptKey}`).digest();
+  }
+}
+
+function deviceMac(key: Buffer, guestId: string): string {
+  return createHmac('sha256', key).update(`support-guest-device:v1:${guestId}`).digest('base64url');
 }
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/** How many times an activation looks again after losing a race to another. */
+const LETTER_ACTIVATION_ATTEMPTS = 5;
+
+/** A letter token: `<16-digit stamp>.<random base64url>`. */
+const LETTER_TOKEN_PATTERN = /^(\d{16})\.[A-Za-z0-9_-]+$/;
+
+let lastLetterStamp = 0;
+
+/**
+ * The next letter's place in line: microseconds since the epoch, strictly
+ * increasing within the process (two letters minted in one millisecond still
+ * get two stamps), as 16 digits — a safe integer until the 23rd century.
+ */
+function nextLetterStamp(): string {
+  lastLetterStamp = Math.max(Date.now() * 1000, lastLetterStamp + 1);
+  return String(lastLetterStamp).padStart(16, '0');
+}
+
+/**
+ * What `emailResumeHash` holds for a letter token: `<stamp>:<sha256>`, so a
+ * later activation can tell which letter is newer. A token without a stamp —
+ * one minted before stamps existed — is stored, and looked up, as its bare
+ * hash, exactly as before.
+ */
+function storedLetterHash(token: string): string {
+  const stamp = LETTER_TOKEN_PATTERN.exec(token)?.[1];
+  return stamp === undefined ? hashToken(token) : `${stamp}:${hashToken(token)}`;
+}
+
+/** The stamp of a stored letter hash; `-1` for a bare, unstamped one (the oldest). */
+function stampOfStoredLetterHash(stored: string): number {
+  const match = /^(\d{16}):/.exec(stored);
+  return match === null ? -1 : Number(match[1]);
 }
 
 /** Resolve a user reference to a Prisma where, or null when malformed. */

@@ -1,5 +1,7 @@
 import { registerAs } from '@nestjs/config';
 
+import { resolveCabinetSiteUrl } from './public-site-url.util';
+
 /**
  * Advertising-cabinet deep-link configuration. Reiwa owns the public bot
  * username and web URL at runtime; this module only defines the Reiwa endpoint
@@ -43,7 +45,10 @@ export const advertisingConfig = registerAs(
     miniAppShortName: normalizeOptional(process.env.MINIAPP_SHORT_NAME),
     // Do not fall back to REZEIS_DOMAIN: it is the admin origin, while every
     // advertising deep link must target the user-facing Reiwa application.
-    webBaseUrl: normalizeHttpUrl(process.env.REIWA_WEB_BASE_URL) ?? normalizeHttpUrl(process.env.MINIAPP_CUSTOM_URL),
+    // The .env tail of `ReiwaAdvertisingLinkConfigService`'s chain — after the
+    // address the cabinet publishes — and that service is what the ad links
+    // AND the letters (footer, guest reply button, logo) ask, so they agree.
+    webBaseUrl: resolveCabinetSiteUrl(),
     reiwaApiBaseUrl: normalizeHttpUrl(process.env.REIWA_URL) ?? 'http://reiwa:5000',
   }),
 );

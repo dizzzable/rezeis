@@ -17,7 +17,7 @@ import { AdMetricsService } from './services/ad-metrics.service';
 import { AdPlacementRequestService } from './services/ad-placement-request.service';
 import { AdSignupBonusService } from './services/ad-signup-bonus.service';
 import { AdvertisingCampaignService } from './services/advertising-campaign.service';
-import { ReiwaAdvertisingLinkConfigService } from './services/reiwa-advertising-link-config.service';
+import { ReiwaPublicLinksModule } from './reiwa-public-links.module';
 
 /**
  * Advertising cabinet — marketing attribution layered beside the referral
@@ -33,6 +33,8 @@ import { ReiwaAdvertisingLinkConfigService } from './services/reiwa-advertising-
     NotificationsModule,
     PartnersModule,
     SubscriptionsModule,
+    // The cabinet-links resolver the letters share; see that module.
+    ReiwaPublicLinksModule,
   ],
   controllers: [
     AdminAdvertisingController,
@@ -47,7 +49,6 @@ import { ReiwaAdvertisingLinkConfigService } from './services/reiwa-advertising-
     AdConversionService,
     AdMetricsService,
     AdSignupBonusService,
-    ReiwaAdvertisingLinkConfigService,
   ],
   exports: [AdConversionService, AdPlacementRequestService],
 })

@@ -66,6 +66,8 @@ export const en = {
       title: 'Branding',
       description: 'Name, logo and support link shown on the page.',
       name: 'Name',
+      nameEmptyBrand:
+        'Leave empty to head the page with your brand (currently “{{name}}”) — renaming the brand renames it here too.',
       logoUrl: 'Logo URL',
       supportUrl: 'Support URL',
     },

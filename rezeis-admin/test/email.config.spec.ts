@@ -47,7 +47,9 @@ describe('emailConfig', () => {
       username: null,
       password: null,
       fromAddress: 'no-reply@rezeis.local',
-      fromName: 'Rezeis',
+      // No name of our own: the sender becomes the operator's brand
+      // (`email-sender-name-is-the-brand.spec.ts`), never the panel's.
+      fromName: null,
       useTls: true,
       useSsl: false,
     });

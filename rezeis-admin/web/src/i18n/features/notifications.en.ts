@@ -352,6 +352,10 @@ export const en = {
       password: 'Password',
       fromAddress: 'From address',
       fromName: 'From name',
+      // The hint under an empty field: who the letters are from until a name is set.
+      fromNameEmptyBrand:
+        'Leave empty to send under your brand (currently “{{name}}”) — renaming the brand renames the sender too.',
+      fromNameEmptyEnv: 'Leave empty to send as “{{name}}”, set by EMAIL_FROM_NAME in .env.',
       save: 'Save',
       verify: 'Verify connection',
       sendTest: 'Send test',

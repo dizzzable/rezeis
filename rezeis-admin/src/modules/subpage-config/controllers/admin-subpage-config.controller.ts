@@ -26,17 +26,21 @@ import { SubpageConfigService } from '../services/subpage-config.service';
 export class AdminSubpageConfigController {
   public constructor(private readonly subpageConfigService: SubpageConfigService) {}
 
+  /**
+   * The editor's copy: the title as SAVED (`''` when none), and apart from it
+   * `titleFallback` — the brand an empty title shows on the page — for the
+   * field's placeholder. Not the served config: that one carries the brand in
+   * the title, and an editor loaded with it saves the brand as a choice.
+   */
   @Get()
   @ApiOperation({ summary: 'Read the current subscription-page config' })
   public async get(): Promise<{
     config: Record<string, unknown>;
     stored: boolean;
+    titleFallback: string;
   }> {
-    const [config, stored] = await Promise.all([
-      this.subpageConfigService.getEffectiveConfig(),
-      this.subpageConfigService.hasStoredConfig(),
-    ]);
-    return { config, stored };
+    const { config, stored, titleFallback } = await this.subpageConfigService.getEditorView();
+    return { config, stored, titleFallback };
   }
 
   @Put()

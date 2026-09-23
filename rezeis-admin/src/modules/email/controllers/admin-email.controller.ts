@@ -13,7 +13,7 @@ import { IsBoolean, IsEmail, IsInt, IsOptional, IsString, Max, Min } from 'class
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
-import type { SmtpSettingsInterface } from '../interfaces/email.interface';
+import type { SmtpEditorSettingsInterface } from '../interfaces/email.interface';
 import { EmailDeliveryService } from '../services/email-delivery.service';
 
 // ── DTOs ────────────────────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ class UpdateSmtpSettingsDto {
   @IsString()
   fromAddress?: string;
 
+  /** `''` means "not set": letters then go out under `EMAIL_FROM_NAME` or the brand. */
   @IsOptional()
   @IsString()
   fromName?: string;
@@ -66,6 +67,13 @@ class UpdateSmtpSettingsDto {
 class SendTestEmailDto {
   @IsEmail()
   to!: string;
+}
+
+type MaskedSmtpEditorSettings = SmtpEditorSettingsInterface & { passwordSet: boolean };
+
+/** The password never leaves the panel; the card only learns whether one is set. */
+function maskPassword(settings: SmtpEditorSettingsInterface): MaskedSmtpEditorSettings {
+  return { ...settings, password: null, passwordSet: !!settings.password };
 }
 
 // ── Controller ──────────────────────────────────────────────────────────────
@@ -89,15 +97,13 @@ export class AdminEmailController {
     private readonly emailDeliveryService: EmailDeliveryService,
   ) {}
 
+  // Both routes answer with the CARD's view (`getSmtpSettingsForEditor`): the
+  // sender name as saved, `''` when none, never the effective one — the card
+  // would put that into its field and save it back as a fixed name.
   @Get('settings')
   @ApiOperation({ summary: 'Get current SMTP settings (password masked)' })
-  public async getSettings(): Promise<SmtpSettingsInterface & { passwordSet: boolean }> {
-    const settings = await this.emailDeliveryService.getSmtpSettings();
-    return {
-      ...settings,
-      password: null, // Never expose password
-      passwordSet: !!settings.password,
-    };
+  public async getSettings(): Promise<MaskedSmtpEditorSettings> {
+    return maskPassword(await this.emailDeliveryService.getSmtpSettingsForEditor());
   }
 
   @Post('settings')
@@ -106,13 +112,9 @@ export class AdminEmailController {
   @ApiOperation({ summary: 'Update SMTP settings' })
   public async updateSettings(
     @Body() dto: UpdateSmtpSettingsDto,
-  ): Promise<SmtpSettingsInterface & { passwordSet: boolean }> {
-    const settings = await this.emailDeliveryService.saveSmtpSettings(dto);
-    return {
-      ...settings,
-      password: null,
-      passwordSet: !!settings.password,
-    };
+  ): Promise<MaskedSmtpEditorSettings> {
+    await this.emailDeliveryService.saveSmtpSettings(dto);
+    return maskPassword(await this.emailDeliveryService.getSmtpSettingsForEditor());
   }
 
   @Post('verify')

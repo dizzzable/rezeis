@@ -44,6 +44,8 @@ export default function SubpageConfigPage() {
   });
 
   const [config, setConfig] = useState<SubpageConfig | null>(null);
+  // What heads the page while «Название» is empty: the brand.
+  const titleFallback = data?.titleFallback?.trim() ?? '';
   const [rawText, setRawText] = useState('');
   const [jsonError, setJsonError] = useState<string | null>(null);
   // Controlled rather than `defaultValue`, because the header actions belong to
@@ -240,9 +242,14 @@ export default function SubpageConfigPage() {
               <CardDescription>{t('subpageConfigPage.branding.description')}</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 sm:grid-cols-2">
-              <Field label={t('subpageConfigPage.branding.name')}>
+              {/* Only a title somebody SAVED. Empty heads the page with the
+                  brand, followed on rename — offered here as the placeholder,
+                  never as a value the next «Сохранить» would freeze. */}
+              <Field label={t('subpageConfigPage.branding.name')} htmlFor="subpage-branding-title">
                 <Input
+                  id="subpage-branding-title"
                   value={config.brandingSettings.title}
+                  placeholder={titleFallback}
                   onChange={(e) =>
                     patchConfig({
                       ...config,
@@ -250,6 +257,11 @@ export default function SubpageConfigPage() {
                     })
                   }
                 />
+                {titleFallback.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('subpageConfigPage.branding.nameEmptyBrand', { name: titleFallback })}
+                  </p>
+                )}
               </Field>
               <Field label={t('subpageConfigPage.branding.supportUrl')}>
                 <Input
@@ -424,16 +436,19 @@ export default function SubpageConfigPage() {
 
 function Field({
   label,
+  htmlFor,
   className,
   children,
 }: {
   label: string;
+  /** The control's `id`, so the label names it. */
+  htmlFor?: string;
   className?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className={`space-y-2 ${className ?? ''}`}>
-      <Label>{label}</Label>
+      <Label htmlFor={htmlFor}>{label}</Label>
       {children}
     </div>
   );

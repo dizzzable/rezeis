@@ -1,6 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { SupportTicketStatus } from '@prisma/client';
 
+import { resolveCabinetSiteUrl } from '../../../common/config/public-site-url.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ReiwaAdvertisingLinkConfigService } from '../../advertising/services/reiwa-advertising-link-config.service';
+import type { SendEmailPayload } from '../../email/interfaces/email.interface';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { NotificationTemplatesService } from '../../notifications/services/notification-templates.service';
@@ -31,12 +35,28 @@ import { SupportGuestService } from './support-guest.service';
 export class SupportNotificationsService {
   private readonly logger = new Logger(SupportNotificationsService.name);
 
+  /**
+   * Pauses between the guest letter's attempts: three attempts over about half
+   * a minute, standing in for the mail queue's retries. The letter carries a
+   * live link and is never queued, so the retries happen here, in memory.
+   */
+  private readonly guestLetterRetryDelaysMs: readonly number[] = [5_000, 30_000];
+
   public constructor(
     private readonly userNotifications: UserNotificationsService,
     private readonly prismaService: PrismaService,
     private readonly emailDelivery: EmailDeliveryService,
     private readonly guestService: SupportGuestService,
     private readonly templatesService: NotificationTemplatesService,
+    /**
+     * THE resolver of the cabinet's address — the ad links' and the letter
+     * footer's — for the guest reply's «Открыть переписку». Last and
+     * `@Optional()` so positional construction in the specs keeps working;
+     * `ReiwaPublicLinksModule` provides it, and without it the address falls
+     * back to the .env part of the same chain.
+     */
+    @Optional()
+    private readonly cabinetLinks?: ReiwaAdvertisingLinkConfigService,
   ) {}
 
   /**
@@ -146,9 +166,20 @@ export class SupportNotificationsService {
 
   /**
    * Email-continuity for a GUEST ticket: when an operator replies and the
-   * visitor left an email, send a localized "you have a reply" email with a
-   * one-time resume link so they can return from any device. Best-effort —
-   * a missing email, missing SMTP, or send failure never blocks the reply.
+   * visitor left an email, send a "you have a reply" email with a resume link
+   * so they can return from any device. Best-effort — a missing email, missing
+   * SMTP, or send failure never blocks the reply.
+   *
+   * Sent directly, never through the mail queue: the link is a way into the
+   * conversation, and a BullMQ job would keep it readable in Redis for a day
+   * (a week when it fails) — the reason `sendPasswordResetLink` is direct too.
+   * What the queue gave besides — retries — is done here, in-process
+   * ({@link deliverGuestLetter}). The caller does not wait for it (`void` in
+   * the reply handler).
+   *
+   * The new link becomes THE letter link only after its letter went out
+   * (`activateEmailResumeToken`): there is one letter link per guest, and a
+   * letter that never arrived must not retire the one the guest still has.
    */
   public async notifyGuestReply(ticketId: string): Promise<void> {
     try {
@@ -156,26 +187,81 @@ export class SupportNotificationsService {
         where: { id: ticketId },
         select: {
           subject: true,
+          status: true,
           guestId: true,
-          guest: { select: { id: true, email: true } },
+          guest: { select: { id: true, email: true, expiresAt: true } },
         },
       });
       const email = ticket?.guest?.email?.trim();
       if (!ticket || !ticket.guest || !email) return; // no contact → polling only
 
-      const token = await this.guestService.issueEmailResumeToken(ticket.guest.id);
-      const base = await this.resolvePublicBase();
-      const link = token && base ? `${base}/support/guest?resume=${encodeURIComponent(token)}` : base;
+      // SMTP off — the default install: there is no letter to send, so there is
+      // nothing to mint a link for, nothing to write and nothing to warn about
+      // on every reply. `sendImmediate` refuses on exactly this condition.
+      const smtp = await this.emailDelivery.getSmtpSettings();
+      if (!smtp.enabled || !smtp.host) return;
 
-      const copy = GUEST_REPLY_EMAIL;
-      const html = buildGuestReplyEmail(copy.body(ticket.subject), link, copy.button);
-      await this.emailDelivery.send({
-        to: email,
-        subject: copy.subject,
-        templateType: '__support_guest_reply__',
-        variables: {},
-        rawHtml: html,
-      });
+      // Past the guest's access (`expiresAt`, fixed at the conversation's
+      // start) or on a CLOSED conversation, every way in opens nothing — this
+      // letter's link, a device credential, the guest's own code. The letter
+      // then says so instead of offering a button into a dead end.
+      const reachable =
+        ticket.guest.expiresAt.getTime() >= Date.now() && ticket.status !== SupportTicketStatus.CLOSED;
+
+      // The cabinet: its `/support/guest?resume=<token>` page restores this
+      // conversation from the token on any device. The address used to come
+      // from `brandingSettings.websiteUrl`, which nothing writes, so no guest
+      // ever got the button; it is now the one the ad links use (what the
+      // cabinet publishes, then .env). No cabinet address → no button; never
+      // the panel's.
+      const base = !reachable
+        ? null
+        : this.cabinetLinks
+          ? await this.cabinetLinks.resolveCabinetWebBaseUrl()
+          : resolveCabinetSiteUrl();
+      // Each ATTEMPT gets its own link, minted as it starts, and its letter is
+      // dated with that link's stamp. A guest's inbox then orders the letters
+      // the way the links are ordered, by `Date` and by arrival alike: a
+      // retried older reply that goes out after a newer reply's letter is the
+      // newer link as well. Minted once per reply, its retry — the last
+      // letter to arrive, and dated last — lost to the newer reply's link and
+      // opened nothing, while the page sends the guest to «самое новое письмо».
+      // Minting writes nothing; a link opens anything only once activated.
+      const compose = (): GuestLetterAttempt => {
+        const token = base === null ? null : this.guestService.newEmailResumeToken();
+        const link = token === null ? null : `${base}/support/guest?resume=${encodeURIComponent(token)}`;
+        const way: GuestLetterWay = !reachable
+          ? { kind: 'none' }
+          : link === null
+            ? { kind: 'chat' }
+            : { kind: 'button', href: link };
+        const date = token === null ? null : this.guestService.letterTokenIssuedAt(token);
+        return {
+          token,
+          payload: {
+            to: email,
+            subject: GUEST_REPLY_EMAIL.subject,
+            templateType: '__support_guest_reply__',
+            variables: {},
+            rawHtml: buildGuestReplyEmail(ticket.subject, way),
+            ...(date === null ? {} : { date }),
+          },
+        };
+      };
+      const sent = await this.deliverGuestLetter(ticketId, compose);
+      if (sent === null || sent.token === null) return;
+      const token = sent.token;
+
+      // Only now, with the letter out, does its link replace the previous one —
+      // and never a NEWER letter's, which a slower send of this one would.
+      // `superseded` is that ordinary case; only a failed write is news.
+      const activation = await this.guestService.activateEmailResumeToken(ticket.guest.id, token);
+      if (activation === 'failed') {
+        this.logger.warn(
+          `Guest reply email for ticket ${ticketId} went out, but its link could not be stored: it opens ` +
+            "nothing, and the guest's previous letter link stays the valid one.",
+        );
+      }
     } catch (err: unknown) {
       this.logger.warn(
         `Guest reply email failed for ticket ${ticketId}: ${
@@ -185,16 +271,43 @@ export class SupportNotificationsService {
     }
   }
 
-  /** Public base URL for guest resume links (branding website → null). */
-  private async resolvePublicBase(): Promise<string | null> {
-    const settings = await this.prismaService.settings.findFirst({
-      select: { brandingSettings: true },
-    });
-    const json = (settings?.brandingSettings ?? {}) as Record<string, unknown>;
-    const website = typeof json.websiteUrl === 'string' ? json.websiteUrl.trim() : '';
-    if (website.length === 0) return null;
-    return website.replace(/\/+$/, '');
+  /**
+   * Send the guest letter, retrying a failed or thrown attempt; every attempt
+   * is composed afresh by `compose` (its own link and date). The attempt that
+   * went out, or `null`, with ONE warning, when none did.
+   */
+  private async deliverGuestLetter(
+    ticketId: string,
+    compose: () => GuestLetterAttempt,
+  ): Promise<GuestLetterAttempt | null> {
+    let lastError = 'unknown error';
+    for (let attempt = 0; attempt <= this.guestLetterRetryDelaysMs.length; attempt += 1) {
+      if (attempt > 0) await pause(this.guestLetterRetryDelaysMs[attempt - 1]);
+      const letter = compose();
+      try {
+        const result = await this.emailDelivery.sendImmediate(letter.payload);
+        if (result.success) return letter;
+        lastError = result.error ?? lastError;
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    this.logger.warn(
+      `Guest reply email not sent for ticket ${ticketId} after ${this.guestLetterRetryDelaysMs.length + 1} ` +
+        `attempts: ${lastError}. The guest's previous letter link still works.`,
+    );
+    return null;
   }
+}
+
+/** One attempt at the guest letter: the link minted for it (if any), and the letter. */
+interface GuestLetterAttempt {
+  readonly token: string | null;
+  readonly payload: SendEmailPayload;
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 type SupportLang = 'ru' | 'en';
@@ -302,19 +415,57 @@ function escapeHtml(input: string): string {
 
 // ── Guest email continuity ─────────────────────────────────────────────────
 
+// Russian only: a guest has no language on record (the conversation is opened
+// without an account, and the cabinet sends none), so there is nothing to pick
+// an English letter by.
 const GUEST_REPLY_EMAIL = {
   subject: 'Поддержка ответила на ваше обращение',
   button: 'Открыть переписку',
   body: (subject: string): string =>
     `По вашему обращению «${subject}» есть новый ответ от поддержки. ` +
     `Нажмите кнопку ниже, чтобы вернуться к переписке.`,
+  /** No cabinet address, so no button: the letter says where the reply is instead. */
+  bodyWithoutButton: (subject: string): string =>
+    `По вашему обращению «${subject}» есть новый ответ от поддержки. ` +
+    `Он ждёт вас в чате поддержки на сайте.`,
+  /**
+   * The guest's access has ended (`expiresAt`) or the conversation is closed:
+   * no link, code or credential opens it any more. The letter does not carry
+   * the reply itself, so all it can honestly do is say so.
+   */
+  bodyUnreachable: (subject: string): string =>
+    `По вашему обращению «${subject}» есть новый ответ от поддержки, ` +
+    `но открыть переписку на сайте больше нельзя. ` +
+    `Чтобы продолжить, напишите в поддержку на сайте ещё раз.`,
 };
 
-/** Compose the guest reply email body (optionally with a resume button). */
-function buildGuestReplyEmail(body: string, link: string | null, buttonLabel: string): string {
+/**
+ * What a guest reply letter can offer: the button into the conversation, the
+ * chat on the site (no cabinet address to build a link on), or nothing — the
+ * guest can no longer open the conversation at all.
+ */
+type GuestLetterWay =
+  | { readonly kind: 'button'; readonly href: string }
+  | { readonly kind: 'chat' }
+  | { readonly kind: 'none' };
+
+/**
+ * Compose the guest reply email body, with the resume button when there is a
+ * link. The text is chosen HERE, next to the button, so the two cannot part:
+ * the letter used to say «Нажмите кнопку ниже» on every install while no
+ * install ever had the button.
+ */
+function buildGuestReplyEmail(subject: string, way: GuestLetterWay): string {
+  const copy = GUEST_REPLY_EMAIL;
+  const body =
+    way.kind === 'button'
+      ? copy.body(subject)
+      : way.kind === 'chat'
+        ? copy.bodyWithoutButton(subject)
+        : copy.bodyUnreachable(subject);
   const button =
-    link === null
+    way.kind !== 'button'
       ? ''
-      : `<p style="margin:24px 0;text-align:center;"><a href="${link}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;">${escapeHtml(buttonLabel)}</a></p>`;
+      : `<p style="margin:24px 0;text-align:center;"><a href="${way.href}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;">${escapeHtml(copy.button)}</a></p>`;
   return `<p style="margin:0 0 8px 0;">${escapeHtml(body)}</p>${button}`;
 }

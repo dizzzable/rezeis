@@ -18,23 +18,66 @@ const TELEGRAM_USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/;
  * The admin domain is deliberately never used as a substitute: a stale or
  * unavailable Reiwa response hides ready-made links instead of issuing links
  * that lead users to the admin panel.
+ *
+ * It is also THE resolver of the cabinet's address for everything else that
+ * sends a customer there — a letter's footer link, the guest reply's
+ * «Открыть переписку», the logo a letter loads, a payer's return page — so a
+ * letter and an ad cannot disagree. Provided once, by `ReiwaPublicLinksModule`,
+ * with one cache.
+ *
+ * ── Under load, and when the cabinet does not answer ──────────────────────
+ *
+ * One request at a time: concurrent callers on a cold or expired cache share
+ * the request in flight instead of each waiting up to 2.5 s for their own —
+ * a broadcast's letters and a burst of checkouts arrive together. A failed
+ * request is remembered for {@link FAILURE_CACHE_TTL_MS}, so the callers after
+ * it do not wait again, and it keeps the address the cabinet LAST published
+ * rather than falling back to .env: on a default install the fallback is no
+ * address at all, and a payer sent there lands on the panel's 404.
  */
 @Injectable()
 export class ReiwaAdvertisingLinkConfigService {
   private readonly logger = new Logger(ReiwaAdvertisingLinkConfigService.name);
   private cached: AdvertisingDeepLinkConfiguration | null = null;
   private cacheUntil = 0;
+  /** The request in flight, which every concurrent caller awaits. */
+  private inFlight: Promise<AdvertisingDeepLinkConfiguration> | null = null;
+  /** What the last SUCCESSFUL request resolved to — kept through failures. */
+  private lastPublished: AdvertisingDeepLinkConfiguration | null = null;
 
   public constructor(
     @Inject(advertisingConfig.KEY)
     private readonly config: ConfigType<typeof advertisingConfig>,
   ) {}
 
+  /**
+   * The cabinet's public address: what the cabinet publishes
+   * (`/api/v1/public-config` → `webBaseUrl`, from its own REIWA_DOMAIN) first,
+   * then `REIWA_WEB_BASE_URL` → `MINIAPP_CUSTOM_URL`; `null` when neither
+   * knows. Never the panel's domain.
+   */
+  public async resolveCabinetWebBaseUrl(): Promise<string | null> {
+    return (await this.resolve()).webBaseUrl;
+  }
+
   public async resolve(): Promise<AdvertisingDeepLinkConfiguration> {
     if (this.cached !== null && Date.now() < this.cacheUntil) {
       return this.cached;
     }
+    if (this.inFlight !== null) {
+      return this.inFlight;
+    }
+    const request = this.askTheCabinet();
+    this.inFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (this.inFlight === request) this.inFlight = null;
+    }
+  }
 
+  /** One request to the cabinet; never rejects. */
+  private async askTheCabinet(): Promise<AdvertisingDeepLinkConfiguration> {
     const fallback = this.staticFallback();
     const baseUrl = this.config.reiwaApiBaseUrl;
     if (baseUrl === null) {
@@ -50,22 +93,22 @@ export class ReiwaAdvertisingLinkConfigService {
       });
       if (!response.ok) {
         this.logger.warn(`Reiwa public config returned HTTP ${response.status}`);
-        return this.cache(fallback, FAILURE_CACHE_TTL_MS);
+        return this.cache(this.lastPublished ?? fallback, FAILURE_CACHE_TTL_MS);
       }
       const payload = (await response.json()) as unknown;
       const remote = readReiwaDeepLinkConfiguration(payload);
-      return this.cache(
-        {
-          adminReiwaBotUsername: remote.adminReiwaBotUsername ?? fallback.adminReiwaBotUsername,
-          miniAppShortName: fallback.miniAppShortName,
-          webBaseUrl: remote.webBaseUrl ?? fallback.webBaseUrl,
-        },
-        SUCCESS_CACHE_TTL_MS,
-      );
+      const resolved: AdvertisingDeepLinkConfiguration = {
+        adminReiwaBotUsername: remote.adminReiwaBotUsername ?? fallback.adminReiwaBotUsername,
+        miniAppShortName: fallback.miniAppShortName,
+        webBaseUrl: remote.webBaseUrl ?? fallback.webBaseUrl,
+      };
+      this.lastPublished = resolved;
+      return this.cache(resolved, SUCCESS_CACHE_TTL_MS);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`Unable to load Reiwa public deep-link config: ${message}`);
-      return this.cache(fallback, FAILURE_CACHE_TTL_MS);
+      // Stale-if-error: the address the cabinet last published beats .env.
+      return this.cache(this.lastPublished ?? fallback, FAILURE_CACHE_TTL_MS);
     } finally {
       clearTimeout(timeout);
     }

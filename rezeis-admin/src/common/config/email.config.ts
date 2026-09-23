@@ -7,7 +7,12 @@ interface EmailConfiguration {
   readonly username: string | null;
   readonly password: string | null;
   readonly fromAddress: string;
-  readonly fromName: string;
+  /**
+   * `null` when the environment names no sender, and the brand is used — see
+   * `EmailDeliveryService.resolveSmtpConfig`. There is no product name to fall
+   * back to here: the one this used to carry was the panel's own.
+   */
+  readonly fromName: string | null;
   readonly useTls: boolean;
   readonly useSsl: boolean;
 }
@@ -24,7 +29,7 @@ export const emailConfig = registerAs(
     username: normalizeOptional(process.env.EMAIL_USERNAME),
     password: normalizeOptional(process.env.EMAIL_PASSWORD),
     fromAddress: process.env.EMAIL_FROM_ADDRESS ?? 'no-reply@rezeis.local',
-    fromName: process.env.EMAIL_FROM_NAME ?? 'Rezeis',
+    fromName: normalizeOptional(process.env.EMAIL_FROM_NAME),
     useTls: process.env.EMAIL_USE_TLS !== 'false',
     useSsl: process.env.EMAIL_USE_SSL === 'true',
   }),
