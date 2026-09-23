@@ -55,6 +55,22 @@ const SCREEN_TEXT_KEYS: Readonly<Record<string, readonly string[]>> = {
     'invite.copy_web_button',
     'invite.share_prompt',
     'invite.share_web_line',
+    // «Поделиться» on the cabinet's referral page (reiwa
+    // `src/bot/pages/inline-share.ts`): it opens Telegram's inline composer and
+    // the bot answers with one result — `title` and `description` are what the
+    // sender picks in the composer, `message` is what is sent (the bot adds the
+    // link under it), `open` is the button under the message. The `_plain`
+    // three stand in when the sender has no referral link to share (a stranger,
+    // invite-only admission, the program paused), and `start` is the composer's
+    // button offering such a sender the bot.
+    'inline.share.message',
+    'inline.share.title',
+    'inline.share.description',
+    'inline.share.open',
+    'inline.share.message_plain',
+    'inline.share.title_plain',
+    'inline.share.description_plain',
+    'inline.share.start',
     'partner.hub.title',
     'partner.hub.description',
     'partner.hub.stat_balance',
@@ -71,6 +87,31 @@ const SCREEN_TEXT_KEYS: Readonly<Record<string, readonly string[]>> = {
     'help.contact_prefill',
     'help.contact_support',
   ],
+}
+
+/**
+ * A plain-language name above the key, for the keys an operator looks for by
+ * what the customer receives rather than by name: the two «Поделиться»
+ * messages, which is how they were asked about («the text people send from
+ * the bot»). A key without one shows its name alone, as every key did.
+ *
+ * `sharePrompt` and `shareWebLine` say what the owner could not see from the
+ * key: Telegram puts the bot link above the prompt by itself, and the website
+ * line has to keep its `{{link}}` — passed in as `token` so i18next does not
+ * read it as a variable of its own.
+ */
+const KEY_CAPTIONS: Readonly<Record<string, string>> = {
+  'invite.share_button': 'botFlow.screenTexts.captions.shareButton',
+  'invite.share_prompt': 'botFlow.screenTexts.captions.sharePrompt',
+  'invite.share_web_line': 'botFlow.screenTexts.captions.shareWebLine',
+  'inline.share.message': 'botFlow.screenTexts.captions.inlineMessage',
+  'inline.share.title': 'botFlow.screenTexts.captions.inlineTitle',
+  'inline.share.description': 'botFlow.screenTexts.captions.inlineDescription',
+  'inline.share.open': 'botFlow.screenTexts.captions.inlineOpen',
+  'inline.share.message_plain': 'botFlow.screenTexts.captions.inlineMessagePlain',
+  'inline.share.title_plain': 'botFlow.screenTexts.captions.inlineTitlePlain',
+  'inline.share.description_plain': 'botFlow.screenTexts.captions.inlineDescriptionPlain',
+  'inline.share.start': 'botFlow.screenTexts.captions.inlineStart',
 }
 
 interface SystemScreenTextsProps {
@@ -99,8 +140,9 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
           overlay's mode, which `TextKeyEditor` now derives from the key itself,
           not the shape of the card. The compact card is a different decision:
           it caps input at 64 characters and drops the key name, and this
-          section lists twenty-one keys for `invite` alone, where the key name
-          is the only thing telling them apart.
+          section lists twenty-nine keys for `invite` alone, where the key name
+          (with a caption above it on the share texts, `KEY_CAPTIONS`) is what
+          tells them apart.
         */}
         {keys.map((key) => (
           <TextKeyEditor key={key} textKey={key} />
@@ -271,8 +313,13 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
     )
   }
 
+  const caption = KEY_CAPTIONS[textKey]
+
   return (
     <div className="space-y-1.5 rounded-md border bg-muted/20 p-2">
+      {caption !== undefined && (
+        <p className="text-[11px] font-medium leading-snug">{t(caption, { token: '{{link}}' })}</p>
+      )}
       <code className="block truncate text-[10px] text-muted-foreground">{textKey}</code>
 
       <div className="space-y-1">
