@@ -118,9 +118,35 @@ async function loadDictionaries(locale: SearchLocale): Promise<Record<string, un
   for (const module of modules) {
     const dictionary = (module[locale] ?? module['default']) as Record<string, unknown> | undefined;
     if (!dictionary || typeof dictionary !== 'object') continue;
-    Object.assign(merged, dictionary);
+    mergeDictionary(merged, dictionary);
   }
   return merged;
+}
+
+function isDictionaryNode(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Merges `source` into `target` the way i18next's `addResourceBundle(…, deep)`
+ * does, without writing into either module object.
+ *
+ * One namespace can live in two files: part of `botFlow` is in the core
+ * dictionary, part in the lazy `botMap` bundle, where it waits until the page
+ * that shows it is opened. `Object.assign` kept whichever file came last and
+ * dropped the other half of the namespace from the index.
+ */
+export function mergeDictionary(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(source)) {
+    const existing = target[key];
+    if (isDictionaryNode(existing) && isDictionaryNode(value)) {
+      const copy: Record<string, unknown> = { ...existing };
+      mergeDictionary(copy, value);
+      target[key] = copy;
+    } else {
+      target[key] = value;
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

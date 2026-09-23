@@ -13,6 +13,7 @@ export type NodeKind =
   | 'reply-keyboard'
   | 'notification'
   | 'mini-app-terminal'
+  | 'system-screen'
 
 export type NodeStatus = 'DRAFT' | 'PUBLISHED' | 'ACTIVE' | 'DISABLED'
 
@@ -87,17 +88,39 @@ export interface MiniAppTerminalMapNode extends BotMapBaseNode {
   readonly descriptionEn: string
 }
 
+/**
+ * A bot screen with no flow block — the language picker, the channel gate's
+ * prompt, the error message… (`SYSTEM_SCREENS` in
+ * `features/bot-flow/system-screens.ts`). Never sent by the server: the SPA
+ * adds these to the payload's nodes (`withBuiltInNodes`), so «Схема» and
+ * «Список» list the same screens from one catalog. The id is the canvas
+ * node's (`system:<id>`).
+ */
+export interface SystemScreenMapNode extends BotMapBaseNode {
+  readonly kind: 'system-screen'
+  /** `SystemScreen.id` of the catalog entry. */
+  readonly screenId: string
+}
+
 export type BotMapNode =
   | GraphScreenMapNode
   | ReplyKeyboardMapNode
   | NotificationMapNode
   | MiniAppTerminalMapNode
+  | SystemScreenMapNode
 
 export type EdgeDestination =
   | { readonly kind: 'screen'; readonly shortId: string }
   | { readonly kind: 'webApp'; readonly route: string }
   | { readonly kind: 'url'; readonly host: string; readonly safe: boolean }
-  | { readonly kind: 'chat' }
+  /** A page of the cabinet website — a main-menu link typed as a path, or with none (reiwa `addressOn`). */
+  | { readonly kind: 'site'; readonly path: string }
+  /**
+   * The support chat; `fallbackScreen` is the screen the tap opens instead
+   * without a public support @username, set while the panel cannot tell
+   * whether there is one (the composer's `routeEdge`).
+   */
+  | { readonly kind: 'chat'; readonly fallbackScreen?: string }
   | { readonly kind: 'callback'; readonly id: string }
   | { readonly kind: 'back' }
   | { readonly kind: 'mainMenu' }

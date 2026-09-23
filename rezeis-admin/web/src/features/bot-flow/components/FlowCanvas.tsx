@@ -16,12 +16,15 @@ import '@xyflow/react/dist/style.css'
 import { BotScreenNode } from './BotScreenNode'
 import { ReplyKeyboardNode } from './ReplyKeyboardNode'
 import { MapInfoNode } from './MapInfoNode'
+import { SystemScreenNode } from './SystemScreenNode'
 import type { BotScreenNodeData } from '../types'
 
 const nodeTypes = {
   botScreen: BotScreenNode,
   replyKeyboard: ReplyKeyboardNode,
   mapInfo: MapInfoNode,
+  // `SYSTEM_SCREEN_NODE_TYPE` — the bot's screens with no flow block.
+  systemScreen: SystemScreenNode,
 }
 
 interface FlowCanvasProps {
@@ -125,6 +128,7 @@ export function FlowCanvas({
         <MiniMap
           nodeColor={(node) => {
             if (node.type === 'replyKeyboard') return '#f59e0b'
+            if (node.type === 'systemScreen') return '#8b5cf6'
             if (node.type === 'mapInfo') {
               const md = node.data as unknown as { kind?: string }
               return md.kind === 'notification' ? '#f43f5e' : '#0ea5e9'

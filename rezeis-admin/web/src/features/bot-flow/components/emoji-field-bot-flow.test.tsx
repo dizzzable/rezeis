@@ -22,11 +22,12 @@
  *     is the important one: it is what stops a rendering from leaking into the
  *     data.
  */
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { api } from '@/lib/api'
+import { loadFeatureBundle } from '@/i18n/i18n'
 import {
   EMOJI_TIMESTAMP,
   LIVE_EMOJI,
@@ -39,6 +40,11 @@ import { renderWithProviders } from '@/test/test-utils'
 import { ScreenEditorPanel } from './ScreenEditorPanel'
 import { SystemScreenTexts, TextKeyEditor } from './SystemScreenTexts'
 import type { BotFlowScreen } from '../types'
+
+// What the route loads with the page: part of these editors' words live in it.
+beforeAll(async () => {
+  await loadFeatureBundle('botMap')
+})
 
 const TIMESTAMP = EMOJI_TIMESTAMP
 const IMAGE = emojiImageUrl(LIVE_EMOJI.slug)

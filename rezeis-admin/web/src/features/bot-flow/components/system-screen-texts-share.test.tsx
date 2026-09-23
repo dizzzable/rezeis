@@ -6,15 +6,15 @@
  * share sheet — `invite.share_prompt` + `invite.share_web_line`), and the
  * cabinet's referral page, which goes through the bot's inline mode
  * (`inline.share.*`, reiwa `src/bot/pages/inline-share.ts`). The second set was
- * editable nowhere but by typing its key into «Тексты бота». And among
+ * editable nowhere but by typing its key into «Тексты». And among
  * twenty-nine keys named only by key, the owner could not find the first — so
  * the share texts carry a caption saying what the customer receives.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { screen, within } from '@testing-library/react'
 
 import { api } from '@/lib/api'
-import { i18n } from '@/i18n/i18n'
+import { i18n, loadFeatureBundle } from '@/i18n/i18n'
 import {
   EMOJI_TIMESTAMP,
   LIVE_EMOJI,
@@ -60,6 +60,11 @@ function mockTextsApi(
     return { data: [] }
   })
 }
+
+// What the route loads with the page: part of these words live in it.
+beforeAll(async () => {
+  await loadFeatureBundle('botMap')
+})
 
 afterEach(() => {
   vi.restoreAllMocks()

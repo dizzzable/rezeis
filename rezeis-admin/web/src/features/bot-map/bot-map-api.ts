@@ -60,12 +60,16 @@ export async function patchGraphScreen(
   await api.put(`/admin/bot-flows/screens/${encodeURIComponent(screenId)}`, patch)
 }
 
-/** Update a reply-keyboard button (label + flags). */
+/**
+ * Update a main-menu button (label + flags) — with PATCH, the one method the
+ * server routes for it (`AdminBotConfigController.updateButton`). This sent
+ * PUT, which nothing answers: «Список»'s main-menu editor never saved.
+ */
 export async function patchReplyButton(
   buttonId: string,
   patch: { label?: string; visible?: boolean; actionTarget?: string | null },
 ): Promise<void> {
-  await api.put(`/admin/bot-config/buttons/${encodeURIComponent(buttonId)}`, patch)
+  await api.patch(`/admin/bot-config/buttons/${encodeURIComponent(buttonId)}`, patch)
 }
 
 /**

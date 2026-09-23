@@ -6,6 +6,7 @@
  * stays in the legacy graph editor for now (deep link below); the map
  * page is RU/EN copy + structure overview, not a full structural editor.
  */
+import { useId } from 'react'
 import { Workflow } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
@@ -14,8 +15,11 @@ import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import { SystemButtonCard } from '@/features/bot-flow/components/SystemButtonCard'
+import { SystemScreenTexts } from '@/features/bot-flow/components/SystemScreenTexts'
 
 import { BOT_MAP_QUERY_KEY, patchGraphScreen } from '../../bot-map-api'
+import { systemButtonsOfNode } from '../../utils/built-in-nodes'
 import type { GraphScreenMapNode } from '../../types'
 import { BannerField } from '../BannerField'
 import { LocaleTextarea } from './LocaleTextarea'
@@ -27,6 +31,9 @@ interface GraphScreenEditorProps {
 export function GraphScreenEditor({ node }: GraphScreenEditorProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const systemButtonsTitleId = useId()
+  // The buttons the bot adds to this screen — the «Схема» inspector's list.
+  const systemButtons = systemButtonsOfNode(node)
 
   const mutation = useMutation({
     mutationFn: (patch: Record<string, unknown>) => patchGraphScreen(node.id, patch),
@@ -119,6 +126,29 @@ export function GraphScreenEditor({ node }: GraphScreenEditorProps) {
           {t('botMapPage.graphScreen.bannerHint')}
         </p>
       </div>
+
+      {/* The buttons the bot adds to this screen and the texts it shows on it:
+          the sections of the «Схема» inspector, built from the same list and
+          the same components, so either tab configures the same bot. */}
+      {systemButtons.length > 0 ? (
+        <section aria-labelledby={systemButtonsTitleId} className="space-y-2">
+          <Label id={systemButtonsTitleId} className="text-xs font-medium">
+            {t('botFlow.systemButtons.title')}
+          </Label>
+          <div className="space-y-2">
+            {systemButtons.map((button) => (
+              <SystemButtonCard
+                key={button.key}
+                label={t(button.labelKey)}
+                condition={button.conditionKey !== undefined ? t(button.conditionKey) : null}
+                iconKey={button.iconKey}
+                textKey={button.textKey}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+      <SystemScreenTexts screenName={node.title} />
 
       <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
         <p className="mb-2">{t('botMapPage.graphScreen.tooltipFullEditor')}</p>

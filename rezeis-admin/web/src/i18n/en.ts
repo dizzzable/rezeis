@@ -4287,6 +4287,7 @@ export const en = {
       updatedAt: 'Last changed',
       fulfilledAt: 'Purchase delivery',
       delivery: {
+        withheld: 'Not delivered: the payment was not applied',
         notDelivered: 'Not delivered: the payment did not go through',
         noStampImported: 'No record: the payment was imported from {{source}}',
         awaitingPayment: 'Not yet: it is delivered once the payment goes through',
@@ -4323,6 +4324,32 @@ export const en = {
       webhookProcessed: 'processed {{time}}',
       webhookProviderEvent: 'Event ID',
       webhookLastError: 'Last error: {{message}}',
+    },
+    withheld: {
+      badge: 'Not applied',
+      badgeRefunded: 'Not applied · refunded',
+      hint: "Another payment had already converted the customer's trial. This one was received but changed nothing, and the money is to be returned.",
+      title: 'Payment received but not applied',
+      description:
+        "Another payment had already converted the customer's trial to a plan, so this one changed nothing: the subscription and its term stayed as they were. Return the money to the customer at the payment provider.",
+      convertedBy: 'Converted by payment',
+      refundedAt: 'Refund recorded {{time}}',
+      recordRefund: 'Record refund',
+      recordRefundHint:
+        'Press it once you have returned the money at the payment provider. The payment becomes CANCELED and counts as refunded. The subscription is not changed.',
+      noPermission: 'Recording the refund needs the payments:refund permission.',
+      confirmTitle: 'Record the refund?',
+      confirmDescription:
+        'Confirm that {{amount}} has already been returned to the customer at the payment provider ({{gateway}}). The panel sends nothing to the provider: it only records the refund. The payment becomes CANCELED, and the subscription does not change.',
+      confirm: 'Yes, the money is returned',
+      submitting: 'Recording…',
+      recorded: 'Refund recorded',
+      alreadyRecorded: 'The refund of this payment was already recorded',
+      failed: 'Could not record the refund',
+      errors: {
+        PAYMENT_NOT_WITHHELD: 'This payment was applied; its refund cannot be recorded here.',
+        PAYMENT_WITHHELD_REFUND_IN_PROGRESS: 'The refund of this payment is being recorded. Refresh the page in a minute.',
+      },
     },
   },
   subscriptionsPage: {
@@ -5843,30 +5870,6 @@ export const en = {
     subtitle: 'Visual editor for Telegram bot screens and buttons',
     systemBackEdge: '◀️ To menu',
     systemButtonsCanvasLabel: 'System buttons',
-    screenTexts: {
-      title: 'Bot texts for this screen',
-      hint: 'The real copy the bot shows on this screen (title, description, stats, button labels). Applies immediately — reiwa picks it up on the next refresh.',
-      ru: 'RU',
-      en: 'EN',
-      enToggle: 'English version',
-      placeholder: 'Text…',
-      save: 'Save',
-      saved: 'Text saved',
-      saveFailed: 'Failed to save text',
-      captions: {
-        shareButton: 'The «Share» button in the bot',
-        sharePrompt: '«Share» from the bot — the text under the bot link (Telegram puts the link there itself)',
-        shareWebLine: '«Share» from the bot — the website line; {{token}} is where the link goes, keep it',
-        inlineMessage: '«Share» from the Mini App — the message (the bot adds the link under it)',
-        inlineTitle: '«Share» from the Mini App — the title the sender picks',
-        inlineDescription: '«Share» from the Mini App — the line under the title',
-        inlineOpen: '«Share» from the Mini App — the button under the message',
-        inlineMessagePlain: 'The same when the sender has no referral link — the message',
-        inlineTitlePlain: 'The same without a referral link — the title',
-        inlineDescriptionPlain: 'The same without a referral link — the line under the title',
-        inlineStart: 'The same without a referral link — the button offering to start the bot',
-      },
-    },
     mapNode: {
       notification: 'Notification',
       miniApp: 'Mini App',
@@ -5911,30 +5914,10 @@ export const en = {
       mediaHint: 'Click to upload a screen banner (image or video)',
       placeholders: {
         invite:
-          'Available placeholders: {{link}} — user referral link, {{web_link}} — the same link to the cabinet website (empty when the cabinet has no https address). System buttons «📤 Share» / «📋 Copy» / «🌐 Copy website link» / «◀️ Back to menu» are appended automatically.',
+          'Available placeholders: {{link}} — user referral link, {{web_link}} — the same link to the cabinet website (empty when the cabinet has no https address). The bot adds the system buttons itself — they are listed below, with their conditions. A partner gets a screen of their own (the partner.hub.* texts), not this text.',
         rules:
           'Available placeholder: {{rulesLink}} — service rules URL. The «📜 Open rules» button points at the legal documents when at least one is enabled on the «Legal documents» page, and at the Platform Policy URL otherwise. With neither set there is no button. «◀️ Back to menu» is always appended. Add your own buttons via «Add button».',
-        help: 'Available placeholder: {{supportHandle}} — support @username. The main-menu «🆘 Help» button opens the support chat directly; this screen is shown only when no support handle is configured.',
-      },
-    },
-    systemButtons: {
-      title: 'System buttons',
-      description:
-        'These buttons are appended automatically by the bot — their action depends on user data (referral link, support handle) and is fixed. You can edit their label (RU/EN) and give them a premium emoji (icon) below. To add your own buttons, use «Add button» below.',
-      back: '◀️ Back to menu',
-      labelRu: 'Label (RU)',
-      labelEn: 'Label (EN)',
-      invite: {
-        share: '📤 Share on Telegram',
-        copy: '📋 Copy link',
-        copyWeb: '🌐 Copy the website link',
-      },
-      rules: {
-        open: '📜 Open rules',
-      },
-      help: {
-        contact: '🆘 Message support',
-        openApp: '🆘 Support in the app',
+        help: 'Available placeholder: {{supportHandle}} — support @username. The main-menu «🆘 Help» button opens the support chat directly; it opens this screen only when no support @username is set or the button is set to «Internal callback». The /help command shows its own text (support.title below) and the system buttons only — not this screen’s own buttons.',
       },
     },
     button: {
@@ -5949,7 +5932,7 @@ export const en = {
       webAppUrl: 'Mini App page',
       callbackAction: 'Callback action',
       supportUrlHint:
-        'Opens the Telegram support chat (`BOT_SUPPORT_USERNAME` from .env) with a prefilled "Hello! I need help." message. The bot fills in the handle and text automatically.',
+        'Opens the Telegram support chat — the username from «Support username» in the bot settings (when empty, BOT_SUPPORT_USERNAME from .env) — with the ready first message help.contact_prefill ("Hello! I need help."). With no public username the bot leaves this button out.',
       row: 'Row',
       col: 'Pos',
       labelRuPlaceholder: 'RU',
@@ -5999,7 +5982,7 @@ export const en = {
         'Saves the layout of every block on the canvas — screens and notification / Mini App nodes. Texts, buttons and emojis are persisted on every edit.',
       publishFlow: 'Publish flow',
       publishHint:
-        'Publishes the draft screen graph as a new version and busts the bot cache in the same action — no separate refresh needed. Reply keyboard / emojis / texts are persisted automatically.',
+        'Publishes the draft screen graph as a new version and busts the bot cache in the same action — no separate refresh needed. Main menu / emojis / texts are persisted automatically.',
       autoSaved: 'Auto-saved',
       fetchBlocks: 'Fetch blocks',
       fetchBlocksHint:
@@ -6026,17 +6009,20 @@ export const en = {
       expand: 'Expand editor panel',
     },
     replyKeyboard: {
-      nodeTitle: 'Reply keyboard',
+      // «Main menu», not «Reply keyboard»: the bot sends these buttons as the
+      // inline keyboard under the greeting, never a reply keyboard (reiwa `main-keyboard.ts`).
+      nodeTitle: 'Main menu',
       globalBadge: 'Global',
-      nodeHint: 'Always visible under the chat input. Click to edit.',
-      empty: 'No buttons yet — pre-seeded keyboard will appear after the bot first boots.',
-      title: 'Reply keyboard',
+      nodeHint:
+        'The bot’s main menu — the buttons under the greeting (/start and «◀️ Back to menu»); the bot puts the start screen’s own buttons above them. Click to edit.',
+      empty: 'No buttons yet — the default menu buttons will appear after the bot first boots.',
+      title: 'Main menu',
       subtitle:
-        'Persistent menu under the chat input. Reorder, hide, or rename without redeploying the bot.',
+        'The buttons under the bot’s greeting (/start and «◀️ Back to menu»). Reorder, hide, or rename without redeploying the bot.',
       autoSaveHint:
         'Changes go live immediately — no separate publish step needed. Reiwa picks them up on its 5-minute refresh.',
       cannotConnect:
-        'Reply-keyboard buttons are global — they cannot link to a specific screen via edges.',
+        'Main-menu buttons lead where their action says — an arrow to a screen cannot be drawn by hand.',
       bannerAlt: 'Bot banner preview',
       bannerPlaceholder: 'No banner set — use the «🖼️ Banner» button at the top to upload one',
       bannerSection: {
@@ -6165,20 +6151,20 @@ export const en = {
           },
           hint: {
             CALLBACK:
-              'Plain inline button. Reiwa handles the press internally — useful when the button id matches a screen shortId or you intercept the callback in code.',
-            URL: 'Opens an external URL in the in-app Telegram browser. Only https:// is accepted. The exception is “Cabinet” with an empty target: it opens the cabinet in the phone browser, already signed in (through the Mini App).',
+              'Plain inline button: the bot receives its ID. It answers invite, rules and help with «Invite», «Rules», «Help» (or the canvas screen of the same name), menu and back_to_menu with the main menu, close by deleting the message the button is on, check_channel by checking the channel subscription as «I subscribed» does and sending the greeting, ai_support_exit by leaving AI support, and an ID equal to a canvas screen’s shortId with that screen. With any other ID the button does nothing. A screen of your own is opened more reliably with «Bot screen».',
+            URL: 'Opens a link in Telegram’s in-app browser. The bot sends an http:// or https:// address as typed; a path with no address (such as /plans) is a page of the cabinet website, an empty target its home page. The exception is “Cabinet” with an empty target: it opens the cabinet in the phone browser, already signed in (through the Mini App).',
             WEBAPP:
               'Opens a cabinet page in the Mini App. Pick the page from the list below.',
             SCREEN:
               'Jumps to a bot screen from the navigation graph. Pick the screen from the list below.',
             SUPPORT_URL:
-              'Opens the support chat via t.me/<username>?text=… . The username is taken from BOT_SUPPORT_USERNAME in reiwa .env.',
+              'Opens the support chat via t.me/<username>?text=… . The username comes from «Support username» in the bot settings (when empty, from BOT_SUPPORT_USERNAME in reiwa .env); with no public username the button opens the help screen («Help»).',
           },
         },
         actionTarget: {
           label: 'Action target',
           urlPlaceholder: 'https://example.com/path',
-          urlHint: 'Full URL starting with https:// (Telegram rejects other protocols).',
+          urlHint: 'A full https:// (or http://) address as typed; a path such as /plans is a page of the cabinet website.',
           webappPlaceholder: '/referrals or https://…',
           webappHint:
             '«Custom path…» is for a page with parameters (/promo?code=…) or a full https:// address. A path the cabinet has no page for opens its home screen.',
@@ -6187,6 +6173,16 @@ export const en = {
           screenPlaceholder: 'Pick a bot screen',
           screenHint: 'Bot screen identifier from the navigation graph (Bot Studio → screens).',
           screenEmpty: 'Create at least one screen in Bot Studio first to link it here.',
+          // Why a target is not saved — the server refuses the same (`menuButtonTargetProblem`).
+          problems: {
+            notAPage: 'A cabinet page starts with a single "/" (such as /plans), an address with http:// or https://',
+            badCharacters:
+              'A page address must not contain spaces, backslashes, control or invisible formatting characters',
+            notAnAddress: 'This address does not parse: http:// or https:// must be followed by a site name, with no spaces',
+            webAppNeedsHttps: 'A Mini App opens over https:// only',
+            upperCaseScheme: 'Write https:// in lower case: with Https:// the bot leaves this button out',
+            localAddress: 'Telegram refuses a localhost or 127.0.0.1 address',
+          },
         },
         iconCustomEmojiId: 'Telegram custom emoji ID',
         iconCustomEmojiIdPlaceholder: '5278229211367179752',

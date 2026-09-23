@@ -1,11 +1,16 @@
 import type { Node, Edge } from '@xyflow/react'
 import {
+  menuButtonRoute,
   replyButtonHandleId,
   resolveReplyButtonColor,
+  type MenuButtonRouting,
+  type RouteContext,
 } from './components/reply-keyboard-utils'
 import type { MapInfoNodeData } from './components/MapInfoNode'
 import { MAP_INFO_NODE_TYPE } from './components/MapInfoNode'
+import type { SystemScreenNodeData } from './components/SystemScreenNode'
 import type { BotMapNode, BotMapEdge } from '@/features/bot-map/types'
+import { SYSTEM_SCREENS, systemScreenNodeId } from './system-screens'
 import type { BotFlow, BotFlowButton, BotScreenNodeData, SystemButtonPreview } from './types'
 
 /** Group buttons by row index. */
@@ -23,41 +28,144 @@ export function groupButtonsByRow(buttons: BotFlowButton[]): BotFlowButton[][] {
 }
 
 /**
- * Preview the buttons reiwa injects at RUNTIME for a screen — they are not
- * stored in `bot_flow_buttons`, so without this the canvas showed nothing for
- * built-in screens and no "back to menu" path. Mirrors:
- *   • `ScreenEditorPanel`'s system-button preview for invite / rules / help,
- *   • `dynamic-screen.ts`'s auto `[◀️ В меню]` row appended to ANY non-root
- *     screen that has zero configured buttons.
+ * «◀️ В меню» as reiwa renders it on every screen that offers a way back:
+ * `renderSystemButton(t('back_to_menu'), 'back', …)` → `menu:main`.
+ */
+function backButton(key: string, conditionKey?: string): SystemButtonPreview {
+  return {
+    key,
+    labelKey: 'botFlow.systemButtons.back',
+    isBack: true,
+    iconKey: 'back',
+    textKey: 'back_to_menu',
+    ...(conditionKey !== undefined ? { conditionKey } : {}),
+  }
+}
+
+/**
+ * The buttons reiwa adds to a screen at RUNTIME — they are not stored in
+ * `bot_flow_buttons`. THE ONE LIST: the canvas chips (`BotScreenNode`), the
+ * inspector's «Системные кнопки» (`ScreenEditorPanel`) and the «Список» tab
+ * (through `systemButtonsFor`) all read it. The first two used to keep a copy
+ * each, and each copy missed buttons the bot shows.
+ *
+ * Mirrors reiwa, in the order it builds each keyboard:
+ *   • `invite` — `src/bot/pages/invite.ts`. ONE screen, TWO keyboards: the
+ *     referral hub (share, copy, website link, «👤 Профиль в кабинете»,
+ *     «💱 Обменять баллы», back) and, for an active partner, the partner hub
+ *     (share, copy, website link, «🤝 Партнёрский кабинет», the exchange while
+ *     points remain, back). Listed as one sequence both keyboards are
+ *     subsequences of; the conditions say which buttons are whose. The three
+ *     cabinet buttons go through `hubButton` → `renderButtonLabel`, so they
+ *     have a text key and no icon slot;
+ *   • `rules` — `rules.ts`; `help` — `help-callback.ts` (the `/help` command
+ *     builds the same three in `help.ts`);
+ *   • any other non-root screen with no buttons of its own gets the
+ *     `[◀️ В меню]` row of `dynamic-screen.ts`.
  * The `isBack` entry anchors the dashed edge to the root screen.
  */
 export function computeSystemButtons(screen: BotFlow['screens'][number]): SystemButtonPreview[] {
-  const lower = screen.name.trim().toLowerCase()
+  return systemButtonsFor(screen.name, screen.isRoot, screen.buttons.length)
+}
+
+/**
+ * The same list from what «Список» has of a screen (`GraphScreenMapNode`: its
+ * name, whether it is the start screen, how many buttons of its own) — so the
+ * list tab reads this list rather than keeping a third copy of it.
+ */
+export function systemButtonsFor(
+  screenName: string,
+  isRoot: boolean,
+  ownButtonCount: number,
+): SystemButtonPreview[] {
+  const lower = screenName.trim().toLowerCase()
   if (lower === 'invite') {
     return [
-      { key: 'invite-share', labelKey: 'botFlow.systemButtons.invite.share', isBack: false },
-      { key: 'invite-copy', labelKey: 'botFlow.systemButtons.invite.copy', isBack: false },
-      { key: 'invite-copy-web', labelKey: 'botFlow.systemButtons.invite.copyWeb', isBack: false },
-      { key: 'invite-back', labelKey: 'botFlow.systemButtons.back', isBack: true },
+      {
+        key: 'invite-share',
+        labelKey: 'botFlow.systemButtons.invite.share',
+        isBack: false,
+        iconKey: 'invite_share',
+        textKey: 'invite.share_button',
+      },
+      {
+        key: 'invite-copy',
+        labelKey: 'botFlow.systemButtons.invite.copy',
+        isBack: false,
+        iconKey: 'invite_copy',
+        textKey: 'invite.copy_button',
+      },
+      {
+        key: 'invite-copy-web',
+        labelKey: 'botFlow.systemButtons.invite.copyWeb',
+        isBack: false,
+        iconKey: 'invite_copy_web',
+        textKey: 'invite.copy_web_button',
+        conditionKey: 'botFlow.systemButtons.conditions.webLink',
+      },
+      {
+        key: 'invite-open-cabinet',
+        labelKey: 'botFlow.systemButtons.invite.openCabinet',
+        isBack: false,
+        textKey: 'referral.hub.open_cabinet',
+        conditionKey: 'botFlow.systemButtons.conditions.referralCabinet',
+      },
+      {
+        key: 'invite-partner-cabinet',
+        labelKey: 'botFlow.systemButtons.invite.partnerCabinet',
+        isBack: false,
+        textKey: 'partner.hub.open_cabinet',
+        conditionKey: 'botFlow.systemButtons.conditions.partnerCabinet',
+      },
+      {
+        key: 'invite-open-exchange',
+        labelKey: 'botFlow.systemButtons.invite.openExchange',
+        isBack: false,
+        textKey: 'referral.hub.open_exchange',
+        conditionKey: 'botFlow.systemButtons.conditions.exchange',
+      },
+      backButton('invite-back'),
     ]
   }
   if (lower === 'rules') {
     return [
-      { key: 'rules-open', labelKey: 'botFlow.systemButtons.rules.open', isBack: false },
-      { key: 'rules-back', labelKey: 'botFlow.systemButtons.back', isBack: true },
+      {
+        key: 'rules-open',
+        labelKey: 'botFlow.systemButtons.rules.open',
+        isBack: false,
+        iconKey: 'rules_open',
+        textKey: 'rules.open_button',
+        conditionKey: 'botFlow.systemButtons.conditions.rulesOpen',
+      },
+      backButton('rules-back'),
     ]
   }
   if (lower === 'help') {
     return [
-      { key: 'help-open-app', labelKey: 'botFlow.systemButtons.help.openApp', isBack: false },
-      { key: 'help-contact', labelKey: 'botFlow.systemButtons.help.contact', isBack: false },
-      { key: 'help-back', labelKey: 'botFlow.systemButtons.back', isBack: true },
+      {
+        key: 'help-open-app',
+        labelKey: 'botFlow.systemButtons.help.openApp',
+        isBack: false,
+        iconKey: 'help_open_app',
+        textKey: 'help.open_app_button',
+        conditionKey: 'botFlow.systemButtons.conditions.helpOpenApp',
+      },
+      {
+        key: 'help-contact',
+        labelKey: 'botFlow.systemButtons.help.contact',
+        isBack: false,
+        iconKey: 'help_contact',
+        textKey: 'help.contact_button',
+        conditionKey: 'botFlow.systemButtons.conditions.helpContact',
+      },
+      backButton('help-back'),
     ]
   }
   // Any other non-root screen with no configured buttons gets a runtime
-  // back-to-menu row (see dynamic-screen.ts).
-  if (!screen.isRoot && screen.buttons.length === 0) {
-    return [{ key: 'auto-back', labelKey: 'botFlow.systemButtons.back', isBack: true }]
+  // back-to-menu row (see dynamic-screen.ts) — and loses it with the first
+  // button the operator adds.
+  if (!isRoot && ownButtonCount === 0) {
+    return [backButton('auto-back', 'botFlow.systemButtons.conditions.autoBack')]
   }
   return []
 }
@@ -127,15 +235,19 @@ export function nodesToPositions(nodes: Node[]): Array<{ id: string; x: number; 
 }
 
 /**
- * Build dotted edges from the pinned reply-keyboard pseudo-node to
- * each screen whose `name` matches a reply-button's `buttonId`.
- *
- * This is the visual companion to reiwa's runtime override matching
- * (`findScreenByName`): when a screen named `help` exists, reiwa
- * renders it instead of the built-in "Поддержка" handler. On the
- * canvas the operator now sees an explicit dashed line connecting
- * the reply-keyboard's "Помощь" button slot to the override screen,
- * so the routing is no longer hidden in code.
+ * Build dotted edges from the pinned reply-keyboard pseudo-node (the bot's
+ * main menu) to the screen each of its buttons opens — as reiwa routes the
+ * tap (`menuButtonRoute`), not as its ID suggests:
+ *   • a callback with a built-in ID (`invite` / `rules` / `help`) → the screen
+ *     of that name, which reiwa's handler renders (`findScreenByName`);
+ *   • a callback that is exactly a screen's shortId → that screen;
+ *   • «Экран бота» → the screen it names by shortId;
+ *   • «Чат с поддержкой» → the help screen, which reiwa opens (`help`) when
+ *     there is no public support @username — unless `supportChat` says the
+ *     panel's «Username поддержки» is one, and the button opens only a chat.
+ * A button that opens a page or a link has no screen arrow. It used to be
+ * drawn by name match alone, so «Пригласить» re-pointed at another screen
+ * still arrowed into the invite screen.
  *
  * Why dashed: a regular animated solid edge implies a NAVIGATE
  * `actionType` button drives the link. Reply-keyboard buttons are
@@ -146,17 +258,27 @@ export function nodesToPositions(nodes: Node[]): Array<{ id: string; x: number; 
 export function buildReplyToScreenEdges(
   flow: BotFlow | undefined,
   replyButtons: readonly BotButtonLite[] | undefined,
+  supportChat: boolean | null = null,
 ): Edge[] {
   if (flow === undefined || replyButtons === undefined) return []
   const replyNodeId = '__reply_keyboard__'
-  const screenByName = new Map<string, BotFlow['screens'][number]>()
+  const screenByShortId = new Map<string, BotFlow['screens'][number]>()
   for (const screen of flow.screens) {
-    screenByName.set(screen.name.toLowerCase(), screen)
+    if (!screenByShortId.has(screen.shortId)) screenByShortId.set(screen.shortId, screen)
   }
+  // No Mini App catalog: pages draw no screen arrow either way.
+  const context: RouteContext = { screens: flow.screens, miniAppRoutes: null, supportChat }
   const edges: Edge[] = []
   for (const button of replyButtons) {
     if (!button.visible) continue
-    const target = screenByName.get(button.buttonId.toLowerCase())
+    const route = menuButtonRoute(button, context)
+    // A support button's arrow is to where it goes without a chat to open —
+    // none when the panel knows it has one.
+    const opened = route.kind === 'support' ? route.fallback : route
+    const target =
+      opened !== null && opened.kind === 'screen' && opened.shortId !== null
+        ? screenByShortId.get(opened.shortId)
+        : undefined
     if (target === undefined) continue
     const color = resolveReplyButtonColor(button.buttonId)
     edges.push({
@@ -200,11 +322,11 @@ export function buildReplyToScreenEdges(
  * Minimal contract reply edges need from a `BotButton`. Kept narrow
  * so the helper doesn't pull the full `bot-config-api` schema into
  * `utils.ts` (which would create a cycle if utils imported from
- * features/bot-config).
+ * features/bot-config). The action and its target are part of it: they,
+ * not the ID, decide where the bot sends a tap.
  */
-export interface BotButtonLite {
+export interface BotButtonLite extends MenuButtonRouting {
   readonly id: string
-  readonly buttonId: string
   readonly label: string
   readonly visible: boolean
 }
@@ -332,6 +454,36 @@ export function botMapNodesToReactFlow(
     }
   }
   return out
+}
+
+/** Canvas node type of a bot screen with no flow block (`SystemScreenNode`). */
+export const SYSTEM_SCREEN_NODE_TYPE = 'systemScreen'
+
+/**
+ * The bot's screens with no flow block (`SYSTEM_SCREENS`) as read-only canvas
+ * nodes: a column of their own left of the pinned main menu, where no screen
+ * is placed by default, or where the operator left each (saved like the map
+ * nodes, in `layoutData.mapNodePositions`). Not deletable — the bot sends
+ * them whatever the canvas holds.
+ */
+const SYSTEM_SCREEN_X = -720
+const SYSTEM_SCREEN_Y_START = -40
+const SYSTEM_SCREEN_Y_STEP = 200
+
+export function systemScreensToReactFlow(savedPositions?: MapNodePositions): Node[] {
+  return SYSTEM_SCREENS.map((screen, index) => {
+    const id = systemScreenNodeId(screen.id)
+    return {
+      id,
+      type: SYSTEM_SCREEN_NODE_TYPE,
+      position: savedPositions?.[id] ?? {
+        x: SYSTEM_SCREEN_X,
+        y: SYSTEM_SCREEN_Y_START + index * SYSTEM_SCREEN_Y_STEP,
+      },
+      deletable: false,
+      data: { screenId: screen.id } satisfies SystemScreenNodeData,
+    }
+  })
 }
 
 /**

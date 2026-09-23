@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { screen } from '@testing-library/react'
 
+import { loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 import { ScreenEditorPanel } from './ScreenEditorPanel'
 import type { BotFlowScreen } from '../types'
+
+// What the route loads with the page: part of the panel's words live in it.
+beforeAll(async () => {
+  await loadFeatureBundle('botMap')
+})
 
 describe('ScreenEditorPanel accessibility', () => {
   it('makes the banner upload control keyboard-operable and named', () => {

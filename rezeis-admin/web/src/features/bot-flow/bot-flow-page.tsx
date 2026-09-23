@@ -64,24 +64,30 @@ import {
 import { BotTextsTab } from '@/features/bot-config/bot-texts-tab'
 import BotBannerTab from '@/features/bot-config/bot-banner-tab'
 import { ReplyKeyboardEditorPanel } from '@/features/bot-config/reply-keyboard-editor-panel'
+import { SUPPORT_USERNAME_KEY } from '@/features/bot-config/bot-settings-section'
 import {
   BOT_CONFIG_KEYS,
   botConfigApi,
 } from '@/features/bot-config/bot-config-api'
 
 import { FlowCanvas } from './components/FlowCanvas'
+import { MainMenuSystemPanel } from './components/MainMenuSystemPanel'
 import { ScreenEditorPanel } from './components/ScreenEditorPanel'
 import {
   REPLY_KEYBOARD_NODE_ID,
   REPLY_KEYBOARD_NODE_TYPE,
   type ReplyKeyboardNodeData,
 } from './components/ReplyKeyboardNode'
-import { buildReplyToScreenEdges, buildMapEdges, buildBackToMenuEdges, botMapNodesToReactFlow, flowToReactFlow, nodesToPositions, readMapNodePositions, type MapNodePositions } from './utils'
+import { supportChatOf, type RouteContext } from './components/reply-keyboard-utils'
+import { buildReplyToScreenEdges, buildMapEdges, buildBackToMenuEdges, botMapNodesToReactFlow, flowToReactFlow, nodesToPositions, readMapNodePositions, systemScreensToReactFlow, SYSTEM_SCREEN_NODE_TYPE, type MapNodePositions } from './utils'
+import { systemScreenForNode } from './system-screens'
+import { SystemScreenPanel } from './components/SystemScreenPanel'
 import type { BotFlow, BotFlowScreen } from './types'
 
 import { MAP_INFO_NODE_TYPE } from './components/MapInfoNode'
 
 import { NodeRail } from '@/features/bot-map/components/NodeRail'
+import { withBuiltInNodes } from '@/features/bot-map/utils/built-in-nodes'
 import { NotificationEditor } from '@/features/bot-map/components/inspector/NotificationEditor'
 import { MiniAppTerminalView } from '@/features/bot-map/components/inspector/MiniAppTerminalView'
 import { BOT_MAP_QUERY_KEY, fetchBotMap } from '@/features/bot-map/bot-map-api'
@@ -140,6 +146,10 @@ export default function BotFlowPage() {
     () => botMap?.nodes ?? [],
     [botMap],
   )
+  // The rail lists what the canvas draws: the payload's nodes plus the main
+  // menu under its name and the bot's screens with no block, whose ids are
+  // their canvas nodes' — picking one selects and centres it.
+  const railNodes = useMemo(() => withBuiltInNodes(botMapNodes, t), [botMapNodes, t])
 
   // Project the non-graph bot-map nodes (notifications + Mini App terminals)
   // onto the canvas so a selected event screen is visible and its links to
@@ -154,6 +164,12 @@ export default function BotFlowPage() {
   const mapNodes = useMemo<Node[]>(
     () => botMapNodesToReactFlow(botMapNodes, savedMapPositions),
     [botMapNodes, savedMapPositions],
+  )
+  // The bot's screens with no flow block (language, channel gate, payment
+  // return, error…) — read-only nodes whose inspector edits their texts.
+  const systemNodes = useMemo<Node[]>(
+    () => systemScreensToReactFlow(savedMapPositions),
+    [savedMapPositions],
   )
 
   // Load the operator-uploaded welcome banner so we can render it as
@@ -183,6 +199,24 @@ export default function BotFlowPage() {
     return flowToReactFlow(flow)
   }, [flow])
 
+  // What decides where a menu button leads besides the button: the flow's
+  // screens (a shortId, a built-in name), the cabinet's Mini App pages and
+  // the bot's «Username поддержки» — the screens and the username «Список»
+  // routes with on the server, and the catalog it holds a page against
+  // (`miniAppScreens` is that catalog). Until the texts arrive the username
+  // is not known, which the route reads as «reiwa's `.env` decides».
+  const flowScreens = flow?.screens
+  const miniAppScreens = botMap?.miniAppScreens
+  const supportChat = supportChatOf(botTexts?.find((row) => row.key === SUPPORT_USERNAME_KEY)?.value)
+  const routeContext = useMemo<RouteContext>(
+    () => ({
+      screens: flowScreens ?? [],
+      miniAppRoutes: miniAppScreens !== undefined ? new Set(miniAppScreens.map((page) => page.route)) : null,
+      supportChat,
+    }),
+    [flowScreens, miniAppScreens, supportChat],
+  )
+
   const replyNode: Node | null = useMemo(() => {
     if (!replyButtons) return null
     return {
@@ -197,9 +231,10 @@ export default function BotFlowPage() {
       data: {
         buttons: replyButtons,
         bannerUrl,
+        routeContext,
       } satisfies ReplyKeyboardNodeData,
     } satisfies Node
-  }, [replyButtons, bannerUrl])
+  }, [replyButtons, bannerUrl, routeContext])
 
   // Sync React Flow state — preserve local positions so an in-flight drag
   // is not undone when the server returns the same positionX/Y. Reuses the
@@ -231,6 +266,11 @@ export default function BotFlowPage() {
         const existing = previousById.get(mn.id)
         merged.push(existing ? { ...existing, data: mn.data } : mn)
       }
+      // …and the bot's screens with no block, the same way.
+      for (const sn of systemNodes) {
+        const existing = previousById.get(sn.id)
+        merged.push(existing ? { ...existing, data: sn.data } : sn)
+      }
       return merged
     })
 
@@ -242,7 +282,7 @@ export default function BotFlowPage() {
     const mapNodeIds = new Set<string>(mapNodes.map((n) => n.id))
     setEdges([
       ...incomingEdges,
-      ...buildReplyToScreenEdges(flow, replyButtons),
+      ...buildReplyToScreenEdges(flow, replyButtons, supportChat),
       ...buildMapEdges(botMap?.edges ?? [], mapNodeIds, validNodeIds),
       ...buildBackToMenuEdges(flow, t('botFlow.systemBackEdge')),
     ])
@@ -251,7 +291,7 @@ export default function BotFlowPage() {
     // and recomputing the entire flow because the buttons list got a new
     // reference would yank the user's selection mid-edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectedGraph, replyButtons, mapNodes, botMap?.edges])
+  }, [projectedGraph, replyButtons, mapNodes, systemNodes, botMap?.edges, supportChat])
     /* eslint-enable react-hooks/set-state-in-effect */
 
   // Separate effect to refresh just the reply-node data on bot-button
@@ -541,7 +581,8 @@ export default function BotFlowPage() {
     const positions = nodesToPositions(nodes.filter((n) => n.type === 'botScreen'))
     const mapPositions: MapNodePositions = {}
     for (const n of nodes) {
-      if (n.type === MAP_INFO_NODE_TYPE) {
+      // The bot's screens with no block have no DB row either.
+      if (n.type === MAP_INFO_NODE_TYPE || n.type === SYSTEM_SCREEN_NODE_TYPE) {
         mapPositions[n.id] = { x: n.position.x, y: n.position.y }
       }
     }
@@ -573,6 +614,8 @@ export default function BotFlowPage() {
     !showReplyInspector && selectedMapNode?.kind === 'notification'
   const showTerminalInspector =
     !showReplyInspector && selectedMapNode?.kind === 'mini-app-terminal'
+  // A bot screen with no flow block (`SYSTEM_SCREENS`).
+  const selectedSystemScreen = useMemo(() => systemScreenForNode(selectedNodeId), [selectedNodeId])
 
   // Whether the right inspector has any panel to show for the current
   // selection — drives the collapse strip vs full-panel rendering.
@@ -580,7 +623,8 @@ export default function BotFlowPage() {
     showReplyInspector ||
     (selectedScreen !== null && !showReplyInspector) ||
     showNotificationInspector ||
-    showTerminalInspector
+    showTerminalInspector ||
+    selectedSystemScreen !== null
 
   // Save / Publish only make sense once at least one bot-flow screen exists.
   // The reply-keyboard pseudo-node persists every edit immediately via the
@@ -695,7 +739,7 @@ export default function BotFlowPage() {
           </div>
           <div className="min-h-0 flex-1">
             <NodeRail
-              nodes={botMapNodes}
+              nodes={railNodes}
               selectedId={selectedNodeId}
               onSelect={handleSelectNode}
               query={railQuery}
@@ -746,6 +790,9 @@ export default function BotFlowPage() {
           >
             <div className="p-3">
               <ReplyKeyboardEditorPanel />
+              {/* What reiwa adds to the menu by itself: the trial button and
+                  the texts around the greeting. */}
+              <MainMenuSystemPanel />
             </div>
           </InspectorShell>
         )}
@@ -779,6 +826,19 @@ export default function BotFlowPage() {
           >
             <div className="p-4">
               <MiniAppTerminalView node={selectedMapNode} />
+            </div>
+          </InspectorShell>
+        )}
+        {selectedSystemScreen !== null && !inspectorCollapsed && (
+          <InspectorShell
+            width="w-80"
+            collapseLabel={t('botStudio.inspector.collapse')}
+            onCollapse={() => setInspectorCollapsed(true)}
+          >
+            <div className="p-3">
+              {/* `key`: a different screen is a different set of editors, not
+                  the same ones re-fed — see `TextKeyEditor`'s own re-sync. */}
+              <SystemScreenPanel key={selectedSystemScreen.id} screen={selectedSystemScreen} />
             </div>
           </InspectorShell>
         )}

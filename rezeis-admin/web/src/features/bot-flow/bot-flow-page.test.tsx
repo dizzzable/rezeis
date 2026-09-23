@@ -1,11 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { api } from '@/lib/api'
+import { loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 import BotFlowPage from './bot-flow-page'
 import type { BotFlow, BotFlowScreen } from './types'
+
+// What the route loads with the page: part of its words live in it.
+beforeAll(async () => {
+  await loadFeatureBundle('botMap')
+})
 
 vi.mock('@xyflow/react', async () => {
   const React = await import('react')

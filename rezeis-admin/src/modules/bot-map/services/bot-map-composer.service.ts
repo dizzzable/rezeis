@@ -13,6 +13,7 @@ import {
 
 import { BotFlowService } from '../../bot-flow/services/bot-flow.service';
 import { BotButtonsService } from '../../bot-config/services/bot-buttons.service';
+import { BotTextsService } from '../../bot-config/services/bot-texts.service';
 import { NotificationTemplatesService } from '../../notifications/services/notification-templates.service';
 import {
   readStoredButtons,
@@ -29,6 +30,14 @@ import {
   resolveNotificationCategory,
   resolveTerminalRouteFor,
 } from './notification-target-resolver';
+import {
+  callbackRoute,
+  isLocalAddress,
+  menuButtonRoute,
+  supportChatOf,
+  type MenuButtonRoute,
+  type RouteContext,
+} from './menu-button-route';
 import type {
   BotMapEdge,
   BotMapNode,
@@ -49,11 +58,27 @@ type FlowWithScreens = BotFlow & {
   >;
 };
 
+/** What turning a route into an edge needs: the route context, the screen nodes, the terminals drawn. */
+interface RoutesContext {
+  readonly context: RouteContext;
+  readonly screensByShortId: ReadonlyMap<string, FlowWithScreens['screens'][number]>;
+  readonly referencedTerminals: Set<string>;
+}
+
 interface ComposeInput {
   readonly flow: FlowWithScreens | null;
   readonly replyButtons: ReadonlyArray<BotButton>;
   readonly templates: ReadonlyArray<NotificationTemplate>;
+  /**
+   * The bot's «Username поддержки» (`bot.support_username`, the value reiwa
+   * reads first): whether a support button opens a chat or the help screen.
+   * Absent is «not set», when reiwa's own `.env` decides.
+   */
+  readonly supportUsername?: string | null;
 }
+
+/** The text row holding the bot's «Username поддержки» (`internal-bot-config.service.ts`). */
+const SUPPORT_USERNAME_TEXT_KEY = 'bot.support_username';
 
 /**
  * BotMapComposerService
@@ -65,6 +90,8 @@ interface ComposeInput {
  *     each screen's NAVIGATE/URL/WEBAPP/CALLBACK/BACK/START_OVER buttons.
  *   • The reply-keyboard `BotButton` rows.
  *   • Every `NotificationTemplate` row + its stored `buttons` JSON.
+ *   • The bot's «Username поддержки» text row: a support button without a
+ *     public @username opens the help screen, not a chat.
  *
  * Emits:
  *   • One node per graph screen, one for the reply keyboard pseudo-node,
@@ -73,8 +100,10 @@ interface ComposeInput {
  *     trimmed to keep the canvas readable).
  *   • One edge per button — including `URL` / `WEBAPP` / `CALLBACK` /
  *     `BACK` graph buttons that never produced edges before. Invalid
- *     destinations (dangling shortIds, unsafe URLs, empty webApp paths)
- *     are flagged with `valid: false` so the SPA renders them red.
+ *     destinations (dangling shortIds, unsafe URLs, empty webApp paths,
+ *     callbacks nothing in the bot answers) are flagged with `valid: false`
+ *     so the SPA renders them red. A main-menu button and a callback are
+ *     routed by `menu-button-route.ts`, the rules «Схема» captions with.
  *
  * Invariant: `compose(input)` is pure — no DB, no logging, no time
  * source besides `meta.composedAt` (the only impure value). Property
@@ -87,16 +116,19 @@ export class BotMapComposerService {
     private readonly botFlowService: BotFlowService,
     private readonly botButtonsService: BotButtonsService,
     private readonly notificationTemplatesService: NotificationTemplatesService,
+    private readonly botTextsService: BotTextsService,
   ) {}
 
   /** Live read — used by the controller. */
   public async build(): Promise<BotMapPayload> {
-    const [flow, replyButtons, templates] = await Promise.all([
+    const [flow, replyButtons, templates, texts] = await Promise.all([
       this.botFlowService.getDraft('Main Flow'),
       this.botButtonsService.listAll(),
       this.notificationTemplatesService.listAll(),
+      this.botTextsService.listAll(),
     ]);
-    return this.compose({ flow, replyButtons, templates });
+    const supportUsername = texts.find((text) => text.key === SUPPORT_USERNAME_TEXT_KEY)?.value ?? null;
+    return this.compose({ flow, replyButtons, templates, supportUsername });
   }
 
   /** Pure synthesis — exposed for property tests. */
@@ -107,6 +139,21 @@ export class BotMapComposerService {
 
     // ── Graph screens ────────────────────────────────────────────────
     const screensByShortId = new Map<string, FlowWithScreens['screens'][number]>();
+    // Where a callback or a menu button leads depends on the flow's screens
+    // (a shortId, a built-in name) and on whether the bot has a public
+    // support @username — what «Схема» routes the same buttons with
+    // (`menu-button-route.ts`). No catalog of pages here: a route's page goes
+    // through `miniAppEdge`, which holds it against `KNOWN_MINI_APP_ROUTES`
+    // for every kind of button alike.
+    const routes: RoutesContext = {
+      context: {
+        screens: input.flow?.screens ?? [],
+        miniAppRoutes: null,
+        supportChat: supportChatOf(input.supportUsername),
+      },
+      screensByShortId,
+      referencedTerminals,
+    };
     if (input.flow) {
       for (const screen of input.flow.screens) {
         screensByShortId.set(screen.shortId, screen);
@@ -116,12 +163,7 @@ export class BotMapComposerService {
       }
       for (const screen of input.flow.screens) {
         for (const button of screen.buttons) {
-          const synthesized = composeGraphButtonEdge(
-            screen,
-            button,
-            screensByShortId,
-            referencedTerminals,
-          );
+          const synthesized = composeGraphButtonEdge(screen, button, routes);
           if (synthesized) edges.push(synthesized);
         }
       }
@@ -131,12 +173,7 @@ export class BotMapComposerService {
     nodes.push(toReplyKeyboardNode(input.replyButtons));
     for (const button of input.replyButtons) {
       if (!button.visible) continue;
-      const synthesized = composeReplyButtonEdge(
-        button,
-        screensByShortId,
-        referencedTerminals,
-      );
-      if (synthesized) edges.push(synthesized);
+      edges.push(composeReplyButtonEdge(button, routes));
     }
 
     // ── Notification templates ───────────────────────────────────────
@@ -148,13 +185,7 @@ export class BotMapComposerService {
       const stored = readStoredButtons((template as { buttons?: unknown }).buttons ?? null);
       let edgeIndex = 0;
       for (const button of stored) {
-        const synthesized = composeNotificationButtonEdge(
-          node.id,
-          edgeIndex++,
-          button,
-          referencedTerminals,
-          screensByShortId,
-        );
+        const synthesized = composeNotificationButtonEdge(node.id, edgeIndex++, button, routes);
         edges.push(synthesized);
       }
       // Implicit click-through edge: when no buttons are configured, the
@@ -226,7 +257,11 @@ function toReplyKeyboardNode(buttons: ReadonlyArray<BotButton>): ReplyKeyboardMa
   return {
     id: REPLY_KEYBOARD_NODE_ID,
     kind: 'reply-keyboard',
-    title: 'Reply-клавиатура',
+    // «Главное меню», not «Reply-клавиатура»: reiwa sends these buttons as the
+    // INLINE keyboard under the greeting (`main-keyboard.ts`) and never a reply
+    // keyboard, and the old name sent operators looking for the wrong editor.
+    // The SPA shows the name in the operator's language; this is the fallback.
+    title: 'Главное меню',
     group: 'reply',
     buttons: buttons.map((b) => ({
       id: b.id,
@@ -284,9 +319,9 @@ function toTerminalNode(terminal: (typeof MINI_APP_TERMINALS)[number]): MiniAppT
 function composeGraphButtonEdge(
   screen: FlowWithScreens['screens'][number],
   button: BotFlowButton,
-  screensByShortId: Map<string, FlowWithScreens['screens'][number]>,
-  referencedTerminals: Set<string>,
+  routes: RoutesContext,
 ): BotMapEdge | null {
+  const { screensByShortId, referencedTerminals } = routes;
   const id = `flow-btn:${button.id}`;
   const label = button.labelRu || button.labelEn || '';
   const source = screen.id;
@@ -311,6 +346,25 @@ function composeGraphButtonEdge(
     }
     case BotFlowButtonAction.URL: {
       const trimmed = (button.url ?? '').trim();
+      // reiwa (`buildScreenKeyboard`, `screen-renderer.ts`) sends an https
+      // address whose host is not local as typed, puts anything without `://`
+      // — or starting with `/` — on the cabinet's public address, and leaves
+      // the rest out. A path is a page of the cabinet, not an unsafe link.
+      if (
+        trimmed.length > 0 &&
+        !isTelegramSafeUrl(trimmed) &&
+        (trimmed.startsWith('/') || !trimmed.includes('://'))
+      ) {
+        const path = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+        return {
+          id,
+          source,
+          sourceLabel: label,
+          target: `site:${path}`,
+          destination: { kind: 'site', path },
+          valid: true,
+        };
+      }
       const safe = isTelegramSafeUrl(trimmed);
       const host = safeHost(trimmed);
       return {
@@ -341,15 +395,20 @@ function composeGraphButtonEdge(
     }
     case BotFlowButtonAction.CALLBACK: {
       const id_ = (button.callbackAction ?? '').trim();
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: `callback:${id_ || '∅'}`,
-        destination: { kind: 'callback', id: id_ },
-        valid: id_.length > 0,
-        reason: id_.length > 0 ? undefined : 'empty-callback',
-      };
+      // reiwa leaves a button with no callback out (`buildScreenKeyboard`).
+      if (id_.length === 0) {
+        return {
+          id,
+          source,
+          sourceLabel: label,
+          target: 'callback:∅',
+          destination: { kind: 'callback', id: id_ },
+          valid: false,
+          reason: 'empty-callback',
+        };
+      }
+      // The same callback vocabulary as a menu or notification button.
+      return routeEdge(id, source, label, callbackRoute(id_, routes.context), 'link', routes);
     }
     case BotFlowButtonAction.BACK:
     case BotFlowButtonAction.START_OVER:
@@ -375,93 +434,26 @@ function composeGraphButtonEdge(
   }
 }
 
-function composeReplyButtonEdge(
-  button: BotButton,
-  screensByShortId: Map<string, FlowWithScreens['screens'][number]>,
-  referencedTerminals: Set<string>,
-): BotMapEdge | null {
-  const id = `reply-btn:${button.id}`;
-  const source = REPLY_KEYBOARD_NODE_ID;
-  const label = button.label;
-  const target = (button.actionTarget ?? '').trim();
-  switch (button.actionType) {
-    case BotButtonAction.SCREEN: {
-      if (target.length === 0) return invalidEdge(id, source, label, 'unset-screen-target');
-      const screen = screensByShortId.get(target);
-      if (!screen) return invalidEdge(id, source, label, 'unknown-shortid');
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: screen.id,
-        destination: { kind: 'screen', shortId: target },
-        valid: true,
-      };
-    }
-    case BotButtonAction.URL: {
-      if (isDefaultCabinet(button, target)) {
-        return miniAppEdge(
-          id,
-          source,
-          label,
-          { route: CABINET_BROWSER_ROUTE, shown: CABINET_BROWSER_ROUTE },
-          referencedTerminals,
-        );
-      }
-      const safe = isTelegramSafeUrl(target);
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: `url:${safeHost(target)}`,
-        destination: { kind: 'url', host: safeHost(target), safe },
-        valid: safe,
-        reason: safe ? undefined : 'unsafe-url',
-      };
-    }
-    case BotButtonAction.WEBAPP: {
-      const mini = miniAppTargetOf(target);
-      if (mini !== null) return miniAppEdge(id, source, label, mini, referencedTerminals);
-      const safe = isTelegramSafeUrl(target);
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: `url:${safeHost(target)}`,
-        destination: { kind: 'url', host: safeHost(target), safe },
-        valid: safe,
-        reason: safe ? undefined : 'unsafe-webapp',
-      };
-    }
-    case BotButtonAction.SUPPORT_URL:
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: 'chat',
-        destination: { kind: 'chat' },
-        valid: true,
-      };
-    case BotButtonAction.CALLBACK:
-    default:
-      return {
-        id,
-        source,
-        sourceLabel: label,
-        target: `callback:${button.buttonId}`,
-        destination: { kind: 'callback', id: button.buttonId },
-        valid: true,
-      };
-  }
+/**
+ * A main-menu button's edge: where reiwa sends the tap (`menuButtonRoute`) —
+ * the route «Схема» captions the same button with.
+ */
+function composeReplyButtonEdge(button: BotButton, routes: RoutesContext): BotMapEdge {
+  const route = menuButtonRoute(
+    { buttonId: button.buttonId, actionType: button.actionType, actionTarget: button.actionTarget },
+    routes.context,
+  );
+  const opensAs = button.actionType === BotButtonAction.WEBAPP ? 'miniApp' : 'link';
+  return routeEdge(`reply-btn:${button.id}`, REPLY_KEYBOARD_NODE_ID, button.label, route, opensAs, routes);
 }
 
 function composeNotificationButtonEdge(
   source: string,
   index: number,
   button: StoredNotificationButton,
-  referencedTerminals: Set<string>,
-  screensByShortId: Map<string, FlowWithScreens['screens'][number]>,
+  routes: RoutesContext,
 ): BotMapEdge {
+  const { referencedTerminals } = routes;
   const id = `notif-btn:${source}:${index}`;
   const label = button.labelRu;
   const target = button.target.trim();
@@ -497,41 +489,131 @@ function composeNotificationButtonEdge(
       reason: 'empty-callback',
     };
   }
-  // Resolve callbacks that open a graph screen so the canvas draws an arrow
-  // to it: the well-known "main menu" callback → the always-present reply
-  // keyboard (the bot's main menu, shown even when no root graph screen is
-  // configured), and any callback whose id matches a screen shortId → that
-  // screen. Other callbacks (handled by the bot at runtime) keep a synthetic
-  // target with no node.
-  if (target === 'menu:main' || target === 'menu') {
-    return {
-      id,
-      source,
-      sourceLabel: label,
-      target: REPLY_KEYBOARD_NODE_ID,
-      destination: { kind: 'mainMenu' },
-      valid: true,
-    };
+  // The callback as reiwa answers it (`callbackRoute`, reiwa's vocabulary):
+  // `menu:main`, `menu` and `back_to_menu` → the main menu; `screen:<shortId>`
+  // and a callback that is exactly a screen's shortId → that screen (red when
+  // `screen:` names none — the bot answers «экран не найден»); `invite` /
+  // `rules` / `help` → the screen of that name; the answered service words
+  // (`close`, `lang:…`, …) → a callback with no node; anything else nothing in
+  // the bot answers → red.
+  return routeEdge(id, source, label, callbackRoute(target, routes.context), 'link', routes);
+}
+
+/**
+ * The edge of a button whose route is known (`menu-button-route.ts`), drawn
+ * the way «Схема» captions the same route: an arrow to the screen or the main
+ * menu it opens, a page, a link — or red, when the bot does not do what the
+ * button suggests.
+ */
+function routeEdge(
+  id: string,
+  source: string,
+  label: string,
+  route: MenuButtonRoute,
+  opensAs: 'link' | 'miniApp',
+  routes: RoutesContext,
+): BotMapEdge {
+  switch (route.kind) {
+    case 'screen': {
+      const screen = route.shortId === null ? undefined : routes.screensByShortId.get(route.shortId);
+      if (screen === undefined) {
+        // A built-in screen the flow has no screen of that name for: the bot
+        // renders its own, and the map has no node to point at.
+        return {
+          id,
+          source,
+          sourceLabel: label,
+          target: `callback:${route.name}`,
+          destination: { kind: 'callback', id: route.name },
+          valid: true,
+        };
+      }
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: screen.id,
+        destination: { kind: 'screen', shortId: screen.shortId },
+        valid: true,
+      };
+    }
+    case 'mainMenu':
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: REPLY_KEYBOARD_NODE_ID,
+        destination: { kind: 'mainMenu' },
+        valid: true,
+      };
+    case 'answered':
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: `callback:${route.data}`,
+        destination: { kind: 'callback', id: route.data },
+        valid: true,
+      };
+    case 'missingScreen':
+      return invalidEdge(id, source, label, 'unknown-shortid');
+    case 'unanswered':
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: `callback:${route.data}`,
+        destination: { kind: 'callback', id: route.data },
+        valid: false,
+        reason: 'unanswered-callback',
+      };
+    case 'support':
+      // The chat — and, while the panel cannot tell whether there is a public
+      // support @username (its «Username поддержки» empty, reiwa's `.env`
+      // deciding), the screen the tap opens without one, as «Схема» captions
+      // it. A button the bot is known to send to the help screen arrives as
+      // that screen's route instead (`menuButtonRoute`, `supportChat: false`).
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: 'chat',
+        destination:
+          route.fallback?.kind === 'screen'
+            ? { kind: 'chat', fallbackScreen: route.fallback.name }
+            : { kind: 'chat' },
+        valid: true,
+      };
+    case 'cabinetBrowser':
+      return miniAppEdge(
+        id,
+        source,
+        label,
+        { route: CABINET_BROWSER_ROUTE, shown: CABINET_BROWSER_ROUTE },
+        routes.referencedTerminals,
+      );
+    case 'miniApp':
+      return miniAppEdge(id, source, label, { route: route.page, shown: route.path }, routes.referencedTerminals);
+    case 'site':
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: `site:${route.path}`,
+        destination: { kind: 'site', path: route.path },
+        valid: true,
+      };
+    case 'url':
+      return {
+        id,
+        source,
+        sourceLabel: label,
+        target: `url:${route.host}`,
+        destination: { kind: 'url', host: route.host, safe: route.safe },
+        valid: route.safe,
+        reason: route.safe ? undefined : opensAs === 'miniApp' ? 'unsafe-webapp' : 'unsafe-url',
+      };
   }
-  const callbackScreenNode = screensByShortId.get(target) ?? null;
-  if (callbackScreenNode !== null) {
-    return {
-      id,
-      source,
-      sourceLabel: label,
-      target: callbackScreenNode.id,
-      destination: { kind: 'screen', shortId: callbackScreenNode.shortId },
-      valid: true,
-    };
-  }
-  return {
-    id,
-    source,
-    sourceLabel: label,
-    target: `callback:${target}`,
-    destination: { kind: 'callback', id: target },
-    valid: true,
-  };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -553,12 +635,15 @@ function invalidEdge(
   };
 }
 
+/**
+ * What reiwa keeps on a screen's link or Mini App button
+ * (`isTelegramSafeButtonUrl`): an address starting with `https://` as written
+ * whose HOST is not local (`isLocalAddress`, the rule the route model, the
+ * SPA and reiwa share) — a local address named in a query is no reason to
+ * drop a button, and `https://a@localhost/` is one.
+ */
 function isTelegramSafeUrl(url: string): boolean {
-  if (url.length === 0) return false;
-  if (!url.startsWith('https://')) return false;
-  const lower = url.toLowerCase();
-  if (lower.includes('://localhost') || lower.includes('://127.0.0.1')) return false;
-  return true;
+  return url.startsWith('https://') && !isLocalAddress(url);
 }
 
 function safeHost(url: string): string {
@@ -635,11 +720,14 @@ function miniAppEdge(
  * signed in (`isDefaultCabinet` and `cabinetBrowserEntryUrl` in reiwa's
  * `src/bot/widgets/main-keyboard.ts`), while the map went on drawing it as a
  * link with no address — red. An address the operator typed, or any other
- * action, is not this and keeps its own edge. Without an HTTPS Mini App (a
- * dev install) reiwa keeps the old link; the map draws what production does.
+ * action, is not this and keeps its own edge (`menuButtonRoute` decides which
+ * is which). Without an HTTPS Mini App (a dev install) reiwa keeps the old
+ * link; the map draws what production does.
+ *
+ * Likewise a main-menu «Mini App» button with no page — the panel seeds
+ * «Открыть приложение» so — opens the Mini App's own address, whose home sends
+ * a launch on to the dashboard (`MINI_APP_HOME_PAGE`); a screen's or a
+ * notification's Mini App button with no page is left out by the bot, and
+ * stays red.
  */
 const CABINET_BROWSER_ROUTE: MiniAppRoute = '/open-in-browser';
-
-function isDefaultCabinet(button: BotButton, target: string): boolean {
-  return button.buttonId === 'cabinet' && target.length === 0;
-}

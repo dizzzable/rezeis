@@ -25,16 +25,11 @@ export function DestinationBadge({ edge, nodesById }: DestinationBadgeProps) {
   const { t } = useTranslation()
 
   if (!edge.valid) {
-    if (edge.reason === 'unsafe-url' || edge.reason === 'unsafe-webapp') {
-      return (
-        <Badge variant="destructive" className="text-[10px] font-normal">
-          {t('botMapPage.destination.unsafeUrl')}
-        </Badge>
-      )
-    }
+    // Say what is wrong where the composer knows it — the same words «Схема»
+    // puts under a main-menu button with the same route.
     return (
       <Badge variant="destructive" className="text-[10px] font-normal">
-        {t('botMapPage.destination.invalid')}
+        {t(invalidReasonKey(edge.reason))}
       </Badge>
     )
   }
@@ -61,10 +56,19 @@ export function DestinationBadge({ edge, nodesById }: DestinationBadgeProps) {
           {t('botMapPage.destination.url', { host: edge.destination.host })}
         </Badge>
       )
-    case 'chat':
+    case 'site':
       return (
         <Badge variant="outline" className="text-[10px] font-normal">
-          {t('botMapPage.destination.chat')}
+          {t('botMapPage.destination.site', { path: edge.destination.path })}
+        </Badge>
+      )
+    case 'chat':
+      // With a screen to fall back to: both roads, as «Схема» says them.
+      return (
+        <Badge variant="outline" className="text-[10px] font-normal">
+          {edge.destination.fallbackScreen === undefined
+            ? t('botMapPage.destination.chat')
+            : t('botMapPage.destination.chatOrScreen', { name: edge.destination.fallbackScreen })}
         </Badge>
       )
     case 'callback':
@@ -87,5 +91,22 @@ export function DestinationBadge({ edge, nodesById }: DestinationBadgeProps) {
           {t('botMapPage.destination.mainMenu')}
         </Badge>
       )
+  }
+}
+
+/** The red badge's words for why the composer marked an edge broken. */
+function invalidReasonKey(reason: string | undefined): string {
+  switch (reason) {
+    case 'unsafe-url':
+    case 'unsafe-webapp':
+      return 'botMapPage.destination.unsafeUrl'
+    case 'unanswered-callback':
+      return 'botMapPage.destination.unanswered'
+    case 'unknown-shortid':
+      return 'botMapPage.destination.missingScreen'
+    case 'unknown-mini-app-route':
+      return 'botMapPage.destination.missingPage'
+    default:
+      return 'botMapPage.destination.invalid'
   }
 }

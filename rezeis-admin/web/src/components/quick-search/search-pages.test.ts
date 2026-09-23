@@ -16,6 +16,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { HUB_TABS } from '@/components/layout/admin-nav-config';
+import { mergeDictionary } from './search-engine';
 import {
   IGNORED_NAMESPACES,
   SEARCH_KEY_TARGETS,
@@ -32,7 +33,8 @@ function dictionaryFor(locale: 'ru' | 'en'): Record<string, unknown> {
   for (const [path, module] of [...Object.entries(CORE), ...Object.entries(FEATURES)]) {
     if (!path.endsWith(`/${locale}.ts`) && !path.endsWith(`.${locale}.ts`)) continue;
     const dictionary = module[locale] as Record<string, unknown> | undefined;
-    if (dictionary) Object.assign(merged, dictionary);
+    // Deep, as the engine merges: a namespace may be split between files.
+    if (dictionary) mergeDictionary(merged, dictionary);
   }
   return merged;
 }

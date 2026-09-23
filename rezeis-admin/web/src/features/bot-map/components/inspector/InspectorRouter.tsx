@@ -7,6 +7,10 @@
  */
 import { useTranslation } from 'react-i18next'
 
+import { MainMenuSystemPanel } from '@/features/bot-flow/components/MainMenuSystemPanel'
+import { SystemScreenPanel } from '@/features/bot-flow/components/SystemScreenPanel'
+import { systemScreenById } from '@/features/bot-flow/system-screens'
+
 import type { BotMapNode } from '../../types'
 import { GraphScreenEditor } from './GraphScreenEditor'
 import { MiniAppTerminalView } from './MiniAppTerminalView'
@@ -28,14 +32,25 @@ export function InspectorRouter({ node }: InspectorRouterProps) {
     )
   }
 
+  // The main menu and the bot's screens with no block get the panels «Схема»
+  // shows for them — the same components, so the two tabs cannot drift.
   switch (node.kind) {
     case 'graph-screen':
       return <GraphScreenEditor node={node} />
     case 'reply-keyboard':
-      return <ReplyButtonEditor node={node} />
+      return (
+        <div className="space-y-4">
+          <ReplyButtonEditor node={node} />
+          <MainMenuSystemPanel />
+        </div>
+      )
     case 'notification':
       return <NotificationEditor node={node} />
     case 'mini-app-terminal':
       return <MiniAppTerminalView node={node} />
+    case 'system-screen': {
+      const screen = systemScreenById(node.screenId)
+      return screen === null ? null : <SystemScreenPanel key={screen.id} screen={screen} />
+    }
   }
 }

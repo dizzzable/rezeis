@@ -14,9 +14,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 
+import { systemScreenById } from '@/features/bot-flow/system-screens'
+
 import type { BotMapEdge, BotMapNode, BotMapPayload } from '../types'
+import { systemButtonsOfNode } from '../utils/built-in-nodes'
 import { groupNodes } from '../utils/group-nodes'
 import { DestinationBadge } from './DestinationBadge'
+import { SystemButtonsList } from './SystemButtonsList'
 
 interface ListViewProps {
   readonly payload: BotMapPayload
@@ -80,6 +84,8 @@ interface NodeCardProps {
 
 function NodeCard({ node, edges, nodesById, selected, onSelect }: NodeCardProps) {
   const { t } = useTranslation()
+  // What the bot adds by itself — the list «Схема» draws, not a copy of it.
+  const systemButtons = systemButtonsOfNode(node)
 
   return (
     <Card
@@ -105,13 +111,10 @@ function NodeCard({ node, edges, nodesById, selected, onSelect }: NodeCardProps)
       </CardHeader>
       <CardContent className="space-y-2 pb-3 text-xs">
         <NodeSubtitle node={node} />
-        {edges.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground">
-            {isSystemGraphScreen(node)
-              ? t('botMapPage.badges.systemButtons')
-              : t('botMapPage.badges.noButtons')}
-          </p>
-        ) : (
+        {edges.length === 0 && systemButtons.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">{t('botMapPage.badges.noButtons')}</p>
+        ) : null}
+        {edges.length > 0 ? (
           <ul className="space-y-1">
             {edges.map((edge) => (
               <li key={edge.id} className="flex flex-wrap items-center gap-1.5">
@@ -122,7 +125,8 @@ function NodeCard({ node, edges, nodesById, selected, onSelect }: NodeCardProps)
               </li>
             ))}
           </ul>
-        )}
+        ) : null}
+        <SystemButtonsList buttons={systemButtons} />
       </CardContent>
     </Card>
   )
@@ -155,6 +159,12 @@ function NodeSubtitle({ node }: { node: BotMapNode }) {
           {t('botMapPage.badges.buttons', { count: node.buttons.length })}
         </p>
       )
+    case 'system-screen': {
+      const screen = systemScreenById(node.screenId)
+      return screen === null ? null : (
+        <p className="text-[11px] leading-snug text-muted-foreground">{t(screen.triggerKey)}</p>
+      )
+    }
   }
 }
 
@@ -195,22 +205,6 @@ function NodeStatusPill({ node }: { node: BotMapNode }) {
     default:
       return null
   }
-}
-
-/**
- * Built-in screens (help / invite / rules) whose buttons the bot appends at
- * runtime (not editable graph buttons). The bot-map graph node carries 0
- * outgoing edges for them, so the list would otherwise read "No buttons" —
- * misleading, since the bot DOES render system buttons there. Matches reiwa's
- * `findScreenByName` override sentinels (case-insensitive screen name).
- */
-const SYSTEM_SCREEN_NAMES: ReadonlySet<string> = new Set(['help', 'invite', 'rules'])
-
-function isSystemGraphScreen(node: BotMapNode): boolean {
-  return (
-    node.kind === 'graph-screen' &&
-    SYSTEM_SCREEN_NAMES.has(node.title.trim().toLowerCase())
-  )
 }
 
 function indexEdgesBySource(

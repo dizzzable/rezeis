@@ -70,11 +70,24 @@ export interface BotScreenNodeData extends Record<string, unknown> {
   systemButtons?: readonly SystemButtonPreview[]
 }
 
-/** One runtime-injected system button preview shown on the canvas. */
+/**
+ * One runtime-injected system button, as the canvas chip AND the inspector
+ * card show it — both read the same `computeSystemButtons` list.
+ */
 export interface SystemButtonPreview {
   readonly key: string
   /** i18n key for the chip label. */
   readonly labelKey: string
   /** True for the "back to menu" button — anchors the dashed edge to root. */
   readonly isBack: boolean
+  /**
+   * The slot of `renderSystemButton(label, '<iconKey>', …)` in reiwa — the
+   * premium icon stored as `bot.sysbtn_icon.<iconKey>`. Absent where the bot
+   * reads no such slot: a picker there would save an icon nobody sees.
+   */
+  readonly iconKey?: string
+  /** The bot text key reiwa reads the caption from. */
+  readonly textKey?: string
+  /** i18n key saying when the bot shows the button; absent when it always does. */
+  readonly conditionKey?: string
 }

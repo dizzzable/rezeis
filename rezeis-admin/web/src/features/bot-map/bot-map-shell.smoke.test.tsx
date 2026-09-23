@@ -66,7 +66,10 @@ describe('BotMapShell', () => {
     // List view shows every node card title (also rendered in the rail,
     // so multiple matches are expected — assert presence rather than uniqueness).
     expect(screen.getAllByText('help').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('Reply').length).toBeGreaterThan(0)
+    // The menu node under the name the canvas gives it — the bot's main menu,
+    // sent as the inline keyboard under the greeting — not the payload's title.
+    expect(screen.getAllByText('Main menu').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Reply')).toBeNull()
     expect(screen.getAllByText('Продление').length).toBeGreaterThan(0)
   })
 })

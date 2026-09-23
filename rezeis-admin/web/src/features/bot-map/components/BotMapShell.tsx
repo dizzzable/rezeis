@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 
 import type { BotMapNode, BotMapPayload } from '../types'
+import { withBuiltInNodes } from '../utils/built-in-nodes'
 import { filterNodesByQuery } from '../utils/filter-nodes-by-query'
 import BotFlowPage from '@/features/bot-flow/bot-flow-page'
 import { InspectorRouter } from './inspector/InspectorRouter'
@@ -38,6 +39,10 @@ export function BotMapShell({ payload, isFetching, onRefresh }: BotMapShellProps
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(() => readSelectedId())
   const [tab, setTab] = useState<string>(() => readTab())
+  // The payload's nodes plus what the bot builds by itself — the main menu
+  // named as «Схема» names it and the screens with no flow block — so the
+  // rail, the list, the search and the selection see what the canvas shows.
+  const nodes = useMemo(() => withBuiltInNodes(payload.nodes, t), [payload.nodes, t])
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -61,20 +66,20 @@ export function BotMapShell({ payload, isFetching, onRefresh }: BotMapShellProps
   // payload changed and the screen was deleted), drop it.
   useEffect(() => {
     if (selectedId === null) return
-    if (!payload.nodes.some((n) => n.id === selectedId)) {
+    if (!nodes.some((n) => n.id === selectedId)) {
       setSelectedId(null)
     }
-  }, [payload.nodes, selectedId])
+  }, [nodes, selectedId])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const selected: BotMapNode | null = useMemo(() => {
     if (selectedId === null) return null
-    return payload.nodes.find((n) => n.id === selectedId) ?? null
-  }, [payload.nodes, selectedId])
+    return nodes.find((n) => n.id === selectedId) ?? null
+  }, [nodes, selectedId])
 
   const visibleNodes = useMemo(
-    () => filterNodesByQuery(payload.nodes, query),
-    [payload.nodes, query],
+    () => filterNodesByQuery(nodes, query),
+    [nodes, query],
   )
 
   return (
@@ -112,7 +117,7 @@ export function BotMapShell({ payload, isFetching, onRefresh }: BotMapShellProps
         <TabsContent value="list" className="mt-3 flex flex-1 min-h-0 gap-3">
           <div className="hidden w-64 shrink-0 overflow-hidden rounded-lg border bg-card md:flex md:flex-col">
             <NodeRail
-              nodes={payload.nodes}
+              nodes={nodes}
               selectedId={selectedId}
               onSelect={setSelectedId}
               query={query}

@@ -1,115 +1,40 @@
 /**
- * Utility constants and helpers for reply-keyboard node rendering.
- * Extracted to a dedicated file so that ReplyKeyboardNode.tsx can remain a
- * component-only module (required for Fast Refresh / HMR).
+ * Where the bot sends a tap — the route model «Карта бота» draws from.
+ * ───────────────────────────────────────────────────────────────────
+ * ONE ROUTE MODEL IN TWO BUILDS. «Схема» routes the main menu's buttons in the
+ * SPA (`web/src/features/bot-flow/components/reply-keyboard-utils.ts`), and
+ * this file is a copy of that section for the composer, which draws «Список»:
+ * neither build can import the other's files (the server image compiles `src/`
+ * alone, the SPA image `web/` alone). `test/bot-map-route-parity.spec.ts`
+ * loads both and fails when their vocabularies differ or when they route any
+ * case of its matrix differently. Change both, or neither.
  *
- * Import note
- * ───────────
- * These helpers are also consumed by `bot-flow/utils.ts` (edge builders) so
- * the colour chosen here and the edge stroke in the builder match exactly.
- */
-
-/**
- * Palette of edge colours used when a button id is not in the reserved map.
- * The deterministic hash below always resolves to one of these slots, so
- * colours are stable across renders.
- */
-export const EDGE_COLORS: readonly string[] = [
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#06b6d4', // cyan
-  '#ec4899', // pink
-  '#f97316', // orange
-]
-
-/**
- * Hard-coded colour overrides for well-known reply-keyboard buttons so the
- * visual flow graph stays consistent with the Telegram UI conventions.
- */
-export const RESERVED_BUTTON_COLORS: Record<string, string> = {
-  cabinet: '#3b82f6', // blue
-  invite: '#10b981', // emerald
-  rules: '#f59e0b', // amber
-  help: '#ef4444', // red
-}
-
-/**
- * Resolve a deterministic edge colour for a reply-button. Callers
- * (the `utils.buildReplyToScreenEdges` helper, and the per-button
- * handle render in `ReplyKeyboardNode.tsx`) MUST agree on the result so
- * the indicator dot on the source side and the edge stroke match.
- *
- * Well-known ids fall back to a deterministic hash bucket so the colour stays
- * stable across renders without us hard-coding every possible id.
- */
-export function resolveReplyButtonColor(buttonId: string): string {
-  const reserved = RESERVED_BUTTON_COLORS[buttonId]
-  if (reserved !== undefined) return reserved
-  // Tiny hash so unknown ids land on a stable bucket. Mirrors the
-  // approach React Flow uses internally for default edge colours.
-  let hash = 0
-  for (let i = 0; i < buttonId.length; i++) {
-    hash = (hash << 5) - hash + buttonId.charCodeAt(i)
-    hash |= 0
-  }
-  const idx = Math.abs(hash) % EDGE_COLORS.length
-  return EDGE_COLORS[idx]
-}
-
-/**
- * Source-handle id convention: each reply-keyboard button exposes a
- * dedicated handle whose id encodes the button. The
- * `buildReplyToScreenEdges` helper picks the same id on the edge
- * `sourceHandle` so React Flow positions the line emerging precisely
- * from the right edge of that button's row.
- */
-export function replyButtonHandleId(buttonId: string): string {
-  return `reply-btn-${buttonId}`
-}
-
-/*
- * ── Where the bot sends a tap ────────────────────────────────────────────────
- *
- * ONE ROUTE MODEL IN TWO BUILDS. The server's composer draws «Список» from the
- * same rules — `src/modules/bot-map/services/menu-button-route.ts`, a copy of
- * everything from here down: neither build can import the other's files (the
- * server image compiles `src/` alone, the SPA image `web/` alone). The spec
- * `test/bot-map-route-parity.spec.ts` loads this file next to that one and
- * fails when their vocabularies differ or when they route any case of its
- * matrix differently. Change both, or neither.
- *
- * Nothing in this section may import anything: the server spec loads the file
- * as it is.
- *
- * `menuButtonTargetProblem` is also what the button forms of «Кнопки бота» and
- * the main-menu constructor check a target with before saving, and the server
- * (`bot-buttons.service.ts`) refuses one with: the same check on both sides.
+ * `menuButtonTargetProblem` is also what `bot-config/services/bot-buttons.service.ts`
+ * refuses a main-menu button's target with, and the SPA's button forms say
+ * before saving: the same check on both sides, held equal by the same spec.
  */
 
 /** A main-menu button as far as its route goes — the `BotButton` fields reiwa reads. */
 export interface MenuButtonRouting {
-  readonly buttonId: string
-  readonly actionType: 'CALLBACK' | 'URL' | 'WEBAPP' | 'SCREEN' | 'SUPPORT_URL'
-  readonly actionTarget: string | null
+  readonly buttonId: string;
+  readonly actionType: 'CALLBACK' | 'URL' | 'WEBAPP' | 'SCREEN' | 'SUPPORT_URL';
+  readonly actionTarget: string | null;
 }
 
 /** A screen as reiwa finds it in `BotConfig.screens`. */
 export interface RouteScreen {
-  readonly shortId: string
-  readonly name: string
+  readonly shortId: string;
+  readonly name: string;
 }
 
 /** What a route depends on besides the button. */
 export interface RouteContext {
   /** The flow's screens, in flow order (reiwa takes the FIRST of a repeated name). */
-  readonly screens: ReadonlyArray<RouteScreen>
+  readonly screens: ReadonlyArray<RouteScreen>;
   /** The cabinet's Mini App pages (the map's catalog); `null` while not known — every path then counts. */
-  readonly miniAppRoutes: ReadonlySet<string> | null
+  readonly miniAppRoutes: ReadonlySet<string> | null;
   /** Whether a «Чат с поддержкой» button opens a chat (`supportChatOf`); `null` when the panel cannot tell. */
-  readonly supportChat: boolean | null
+  readonly supportChat: boolean | null;
 }
 
 /**
@@ -137,10 +62,10 @@ export const CALLBACK_VOCABULARY = {
     { source: '^quest_channel:([a-z][a-z0-9]{19,31})$', flags: 'i' },
   ],
   screenPrefix: 'screen:',
-} as const
+} as const;
 
 /** The page a Mini App button with no page of its own lands on: its home sends a launch on to the dashboard. */
-export const MINI_APP_HOME_PAGE = '/dashboard'
+export const MINI_APP_HOME_PAGE = '/dashboard';
 
 /**
  * What a «Чат с поддержкой» button sends when there is no public support
@@ -148,7 +73,7 @@ export const MINI_APP_HOME_PAGE = '/dashboard'
  * `main-keyboard.ts`, from 23.09.2026 — the button's own ID before, which
  * nothing answered for any ID but `help`).
  */
-export const SUPPORT_FALLBACK_CALLBACK = 'help'
+export const SUPPORT_FALLBACK_CALLBACK = 'help';
 
 /**
  * Whether the panel's «Username поддержки» opens a support chat, read the way
@@ -159,10 +84,10 @@ export const SUPPORT_FALLBACK_CALLBACK = 'help'
  * decides.
  */
 export function supportChatOf(username: string | null | undefined): boolean | null {
-  const set = (username ?? '').replace(/^@+/, '').trim()
-  if (set.length === 0) return null
-  const handle = set.replace(/^@+/, '').trim()
-  return handle.length > 0 && !/^-?\d+$/.test(handle)
+  const set = (username ?? '').replace(/^@+/, '').trim();
+  if (set.length === 0) return null;
+  const handle = set.replace(/^@+/, '').trim();
+  return handle.length > 0 && !/^-?\d+$/.test(handle);
 }
 
 export type CallbackRoute =
@@ -174,7 +99,7 @@ export type CallbackRoute =
   /** `screen:<shortId>` of a screen the flow does not have: the bot answers «экран не найден». */
   | { readonly kind: 'missingScreen'; readonly shortId: string }
   /** Nothing in the bot answers it: the tap spins and does nothing. */
-  | { readonly kind: 'unanswered'; readonly data: string }
+  | { readonly kind: 'unanswered'; readonly data: string };
 
 export type MenuButtonRoute =
   | CallbackRoute
@@ -191,30 +116,30 @@ export type MenuButtonRoute =
   /** A page of the cabinet website: `publicWebUrl` + `path`. */
   | { readonly kind: 'site'; readonly path: string }
   /** An address typed in full; `safe` is whether the bot's button can carry it. */
-  | { readonly kind: 'url'; readonly host: string; readonly safe: boolean }
+  | { readonly kind: 'url'; readonly host: string; readonly safe: boolean };
 
 /** Where reiwa sends a callback with this data. */
 export function callbackRoute(data: string, ctx: RouteContext): CallbackRoute {
-  const vocabulary = CALLBACK_VOCABULARY
+  const vocabulary = CALLBACK_VOCABULARY;
   if ((vocabulary.builtInScreens as readonly string[]).includes(data)) {
-    const screen = ctx.screens.find((candidate) => candidate.name.toLowerCase() === data)
-    return { kind: 'screen', name: screen?.name ?? data, shortId: screen?.shortId ?? null }
+    const screen = ctx.screens.find((candidate) => candidate.name.toLowerCase() === data);
+    return { kind: 'screen', name: screen?.name ?? data, shortId: screen?.shortId ?? null };
   }
-  if ((vocabulary.mainMenu as readonly string[]).includes(data)) return { kind: 'mainMenu' }
+  if ((vocabulary.mainMenu as readonly string[]).includes(data)) return { kind: 'mainMenu' };
   if (
     (vocabulary.answered as readonly string[]).includes(data) ||
     vocabulary.answeredPatterns.some((pattern) => new RegExp(pattern.source, pattern.flags).test(data))
   ) {
-    return { kind: 'answered', data }
+    return { kind: 'answered', data };
   }
   if (data.startsWith(vocabulary.screenPrefix) && data.length > vocabulary.screenPrefix.length) {
-    const shortId = data.slice(vocabulary.screenPrefix.length)
-    const screen = ctx.screens.find((candidate) => candidate.shortId === shortId)
-    return screen === undefined ? { kind: 'missingScreen', shortId } : { kind: 'screen', name: screen.name, shortId }
+    const shortId = data.slice(vocabulary.screenPrefix.length);
+    const screen = ctx.screens.find((candidate) => candidate.shortId === shortId);
+    return screen === undefined ? { kind: 'missingScreen', shortId } : { kind: 'screen', name: screen.name, shortId };
   }
-  const bare = ctx.screens.find((candidate) => candidate.shortId === data)
-  if (bare !== undefined) return { kind: 'screen', name: bare.name, shortId: bare.shortId }
-  return { kind: 'unanswered', data }
+  const bare = ctx.screens.find((candidate) => candidate.shortId === data);
+  if (bare !== undefined) return { kind: 'screen', name: bare.name, shortId: bare.shortId };
+  return { kind: 'unanswered', data };
 }
 
 /**
@@ -237,52 +162,37 @@ export function callbackRoute(data: string, ctx: RouteContext): CallbackRoute {
  * opens that screen.
  */
 export function menuButtonRoute(button: MenuButtonRouting, ctx: RouteContext): MenuButtonRoute {
-  const target = (button.actionTarget ?? '').trim()
+  const target = (button.actionTarget ?? '').trim();
   switch (button.actionType) {
     case 'SCREEN':
-      return callbackRoute(target.length > 0 ? `${CALLBACK_VOCABULARY.screenPrefix}${target}` : button.buttonId, ctx)
+      return callbackRoute(target.length > 0 ? `${CALLBACK_VOCABULARY.screenPrefix}${target}` : button.buttonId, ctx);
     case 'SUPPORT_URL': {
-      const help = callbackRoute(SUPPORT_FALLBACK_CALLBACK, ctx)
-      if (ctx.supportChat === false) return help
-      return { kind: 'support', fallback: ctx.supportChat === true ? null : help }
+      const help = callbackRoute(SUPPORT_FALLBACK_CALLBACK, ctx);
+      if (ctx.supportChat === false) return help;
+      return { kind: 'support', fallback: ctx.supportChat === true ? null : help };
     }
     case 'URL':
-      if (button.buttonId === 'cabinet' && target.length === 0) return { kind: 'cabinetBrowser' }
+      if (button.buttonId === 'cabinet' && target.length === 0) return { kind: 'cabinetBrowser' };
       if (ABSOLUTE_ADDRESS.test(target)) {
         // Sent as typed, but not a local address: Telegram refuses one, and
         // reiwa leaves such a button out, as it does a Mini App's.
-        return { kind: 'url', host: hostOf(target), safe: !isLocalAddress(target) }
+        return { kind: 'url', host: hostOf(target), safe: !isLocalAddress(target) };
       }
-      return { kind: 'site', path: pathOn(target) }
+      return { kind: 'site', path: pathOn(target) };
     case 'WEBAPP': {
       if (ABSOLUTE_ADDRESS.test(target)) {
         // Kept only when Telegram takes it as a Mini App: https, not local.
-        return { kind: 'url', host: hostOf(target), safe: target.startsWith('https://') && !isLocalAddress(target) }
+        return { kind: 'url', host: hostOf(target), safe: target.startsWith('https://') && !isLocalAddress(target) };
       }
-      const path = pathOn(target)
-      const cut = path.search(/[?#]/)
-      const bare = cut === -1 ? path : path.slice(0, cut)
-      const page = bare === '/' ? MINI_APP_HOME_PAGE : bare
-      return { kind: 'miniApp', path, page, known: ctx.miniAppRoutes === null || ctx.miniAppRoutes.has(page) }
+      const path = pathOn(target);
+      const cut = path.search(/[?#]/);
+      const bare = cut === -1 ? path : path.slice(0, cut);
+      const page = bare === '/' ? MINI_APP_HOME_PAGE : bare;
+      return { kind: 'miniApp', path, page, known: ctx.miniAppRoutes === null || ctx.miniAppRoutes.has(page) };
     }
     case 'CALLBACK':
     default:
-      return callbackRoute(button.buttonId, ctx)
-  }
-}
-
-/** A route the bot does not carry out as the map would read it: drawn red. */
-export function isBrokenRoute(route: MenuButtonRoute): boolean {
-  switch (route.kind) {
-    case 'missingScreen':
-    case 'unanswered':
-      return true
-    case 'miniApp':
-      return !route.known
-    case 'url':
-      return !route.safe
-    default:
-      return false
+      return callbackRoute(button.buttonId, ctx);
   }
 }
 
@@ -293,7 +203,7 @@ export type MenuButtonTargetProblem =
   | 'notAnAddress'
   | 'webAppNeedsHttps'
   | 'upperCaseScheme'
-  | 'localAddress'
+  | 'localAddress';
 
 /**
  * What is wrong with a «Внешняя ссылка» or «Mini App» target, or `null` when
@@ -314,22 +224,22 @@ export function menuButtonTargetProblem(
   actionType: MenuButtonRouting['actionType'],
   actionTarget: string | null,
 ): MenuButtonTargetProblem | null {
-  if (actionType !== 'URL' && actionType !== 'WEBAPP') return null
-  const target = (actionTarget ?? '').trim()
-  if (target.length === 0) return null
+  if (actionType !== 'URL' && actionType !== 'WEBAPP') return null;
+  const target = (actionTarget ?? '').trim();
+  if (target.length === 0) return null;
   if (ABSOLUTE_ADDRESS.test(target)) {
-    if (!isAddress(target)) return 'notAnAddress'
+    if (!isAddress(target)) return 'notAnAddress';
     if (actionType === 'WEBAPP') {
-      if (!/^https:\/\//i.test(target)) return 'webAppNeedsHttps'
-      if (!target.startsWith('https://')) return 'upperCaseScheme'
+      if (!/^https:\/\//i.test(target)) return 'webAppNeedsHttps';
+      if (!target.startsWith('https://')) return 'upperCaseScheme';
     }
-    return isLocalAddress(target) ? 'localAddress' : null
+    return isLocalAddress(target) ? 'localAddress' : null;
   }
-  if (!target.startsWith('/') || target.startsWith('//')) return 'notAPage'
-  return hasBadCharacter(target) ? 'badCharacters' : null
+  if (!target.startsWith('/') || target.startsWith('//')) return 'notAPage';
+  return hasBadCharacter(target) ? 'badCharacters' : null;
 }
 
-const ABSOLUTE_ADDRESS = /^https?:\/\//i
+const ABSOLUTE_ADDRESS = /^https?:\/\//i;
 
 /**
  * An address on this machine, which Telegram refuses on a button: its host —
@@ -339,22 +249,22 @@ const ABSOLUTE_ADDRESS = /^https?:\/\//i
  * reiwa's test table too.
  */
 export function isLocalAddress(address: string): boolean {
-  let hostname: string
+  let hostname: string;
   try {
-    hostname = new URL(address).hostname
+    hostname = new URL(address).hostname;
   } catch {
-    return false
+    return false;
   }
-  return hostname === 'localhost' || hostname === '127.0.0.1'
+  return hostname === 'localhost' || hostname === '127.0.0.1';
 }
 
 /** An address that parses, has a host, and holds no whitespace anywhere. */
 function isAddress(address: string): boolean {
-  if (/\s/.test(address)) return false
+  if (/\s/.test(address)) return false;
   try {
-    return new URL(address).hostname.length > 0
+    return new URL(address).hostname.length > 0;
   } catch {
-    return false
+    return false;
   }
 }
 
@@ -367,25 +277,25 @@ function isAddress(address: string): boolean {
  */
 function hasBadCharacter(path: string): boolean {
   for (const char of path) {
-    const code = char.codePointAt(0) ?? 0
-    if (char === '\\' || /\s/.test(char)) return true
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true
-    if ((code >= 0x200b && code <= 0x200f) || (code >= 0x202a && code <= 0x202e)) return true
-    if (code >= 0x2060 && code <= 0x2064) return true
+    const code = char.codePointAt(0) ?? 0;
+    if (char === '\\' || /\s/.test(char)) return true;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true;
+    if ((code >= 0x200b && code <= 0x200f) || (code >= 0x202a && code <= 0x202e)) return true;
+    if (code >= 0x2060 && code <= 0x2064) return true;
   }
-  return false
+  return false;
 }
 
 /** A relative target as reiwa's `addressOn` puts it on a base: with its leading slash; none is the root. */
 function pathOn(target: string): string {
-  if (target.length === 0) return '/'
-  return target.startsWith('/') ? target : `/${target}`
+  if (target.length === 0) return '/';
+  return target.startsWith('/') ? target : `/${target}`;
 }
 
 function hostOf(url: string): string {
   try {
-    return new URL(url).host
+    return new URL(url).host;
   } catch {
-    return url
+    return url;
   }
 }

@@ -3,8 +3,9 @@
  * built-in screen (invite / rules / help). These screens render their copy in
  * the bot from `BotText` rows (referral.hub.*, rules.*, support.* …), not from
  * the graph screen's own text. They used to be editable only in the global
- * "Тексты бота" drawer; this surfaces the exact keys right inside the screen
- * inspector so the operator sees and edits what the bot actually shows.
+ * «Тексты» drawer; this surfaces the exact keys right inside the screen
+ * inspector so the operator sees and edits what the bot actually shows. The
+ * keys per screen are `SCREEN_TEXT_KEYS` (`../system-screens`).
  *
  * Each key is upserted through the existing bot-config text endpoints
  * (`createText` / `updateText`, which carry the reiwa cache-bust interceptor),
@@ -30,64 +31,7 @@ import {
   botConfigApi,
 } from '@/features/bot-config/bot-config-api'
 
-/**
- * The reiwa i18n keys each built-in screen renders from. Keyed by the
- * lowercase screen name (matches the `name` field operators give the
- * built-in screens, and reiwa's `SCREEN_OVERRIDE_NAME` sentinels).
- */
-const SCREEN_TEXT_KEYS: Readonly<Record<string, readonly string[]>> = {
-  invite: [
-    'referral.hub.title',
-    'referral.hub.description',
-    'referral.hub.stat_invited',
-    'referral.hub.stat_qualified',
-    'referral.hub.stat_pending',
-    'referral.hub.stat_points',
-    'referral.hub.link_label',
-    // The website link, since 22.09.2026 (reiwa `src/bot/pages/invite.ts`):
-    // its label under the Telegram link, its copy button, and the line that
-    // carries it in the message «Поделиться» sends.
-    'referral.hub.web_link_label',
-    'referral.hub.open_cabinet',
-    'referral.hub.open_exchange',
-    'invite.share_button',
-    'invite.copy_button',
-    'invite.copy_web_button',
-    'invite.share_prompt',
-    'invite.share_web_line',
-    // «Поделиться» on the cabinet's referral page (reiwa
-    // `src/bot/pages/inline-share.ts`): it opens Telegram's inline composer and
-    // the bot answers with one result — `title` and `description` are what the
-    // sender picks in the composer, `message` is what is sent (the bot adds the
-    // link under it), `open` is the button under the message. The `_plain`
-    // three stand in when the sender has no referral link to share (a stranger,
-    // invite-only admission, the program paused), and `start` is the composer's
-    // button offering such a sender the bot.
-    'inline.share.message',
-    'inline.share.title',
-    'inline.share.description',
-    'inline.share.open',
-    'inline.share.message_plain',
-    'inline.share.title_plain',
-    'inline.share.description_plain',
-    'inline.share.start',
-    'partner.hub.title',
-    'partner.hub.description',
-    'partner.hub.stat_balance',
-    'partner.hub.stat_earned',
-    'partner.hub.stat_referred',
-    'partner.hub.open_cabinet',
-  ],
-  rules: ['rules.intro', 'rules.unavailable', 'rules.open_button'],
-  help: [
-    'support.title',
-    'support.not_configured',
-    'help.open_app_button',
-    'help.contact_button',
-    'help.contact_prefill',
-    'help.contact_support',
-  ],
-}
+import { SCREEN_TEXT_KEYS } from '../system-screens'
 
 /**
  * A plain-language name above the key, for the keys an operator looks for by
@@ -99,8 +43,39 @@ const SCREEN_TEXT_KEYS: Readonly<Record<string, readonly string[]>> = {
  * key: Telegram puts the bot link above the prompt by itself, and the website
  * line has to keep its `{{link}}` — passed in as `token` so i18next does not
  * read it as a variable of its own.
+ *
+ * The rest say WHEN the bot shows a text that is not simply part of this
+ * screen (reiwa `invite.ts`, `help-callback.ts`, `help.ts`): a message sent
+ * instead of the hub, a text a partner gets instead of the screen's own, a
+ * hub text the screen's own text replaces, the `/help` command's own text.
  */
 const KEY_CAPTIONS: Readonly<Record<string, string>> = {
+  'referral.hub.title': 'botFlow.screenTexts.captions.hubTitle',
+  'referral.hub.description': 'botFlow.screenTexts.captions.hubDescription',
+  'referral.hub.link_label': 'botFlow.screenTexts.captions.hubLinkLabel',
+  'referral.hub.web_link_label': 'botFlow.screenTexts.captions.hubWebLinkLabel',
+  'partner.hub.title': 'botFlow.screenTexts.captions.partnerTitle',
+  'partner.hub.description': 'botFlow.screenTexts.captions.partnerDescription',
+  'referral.disabled': 'botFlow.screenTexts.captions.referralDisabled',
+  'referral.invited_only': 'botFlow.screenTexts.captions.referralInvitedOnly',
+  'referral.link_unavailable': 'botFlow.screenTexts.captions.referralLinkUnavailable',
+  // Read only while there is no «rules» screen (reiwa `rules.ts` takes the
+  // screen's own text first) — and this editor sits on that very screen.
+  'rules.intro': 'botFlow.screenTexts.captions.rulesIntro',
+  'rules.unavailable': 'botFlow.screenTexts.captions.rulesUnavailable',
+  'support.title': 'botFlow.screenTexts.captions.supportTitle',
+  'support.not_configured': 'botFlow.screenTexts.captions.supportNotConfigured',
+  'help.contact_support': 'botFlow.screenTexts.captions.helpContactSupport',
+  // The main menu's texts (`MAIN_MENU_TEXT_KEYS`).
+  'bot.welcome_message': 'botFlow.screenTexts.captions.welcomeMessage',
+  'menu.choose_action': 'botFlow.screenTexts.captions.chooseAction',
+  'profile.subscription': 'botFlow.screenTexts.captions.subscriptionLine',
+  'profile.devices': 'botFlow.screenTexts.captions.subscriptionLine',
+  'profile.devices_unlimited': 'botFlow.screenTexts.captions.subscriptionLine',
+  'profile.traffic': 'botFlow.screenTexts.captions.subscriptionLine',
+  'profile.unlimited': 'botFlow.screenTexts.captions.subscriptionLine',
+  'profile.until': 'botFlow.screenTexts.captions.subscriptionLine',
+  'common.not_available': 'botFlow.screenTexts.captions.subscriptionLine',
   'invite.share_button': 'botFlow.screenTexts.captions.shareButton',
   'invite.share_prompt': 'botFlow.screenTexts.captions.sharePrompt',
   'invite.share_web_line': 'botFlow.screenTexts.captions.shareWebLine',
@@ -119,17 +94,39 @@ interface SystemScreenTextsProps {
 }
 
 export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
-  const { t } = useTranslation()
   const keys = SCREEN_TEXT_KEYS[screenName.trim().toLowerCase()]
 
   if (keys === undefined || keys.length === 0) return null
+
+  return <BotTextKeysSection keys={keys} />
+}
+
+interface BotTextKeysSectionProps {
+  readonly keys: readonly string[]
+  /** i18n key of the section title; the built-in screens' own by default. */
+  readonly titleKey?: string
+  /** A caption (i18n key) per text key, over `KEY_CAPTIONS`. */
+  readonly captions?: Readonly<Record<string, string>>
+}
+
+/**
+ * The editors of a list of bot text keys, under a title and the screen-texts
+ * hint — the section a built-in screen shows, reused for the texts of the main
+ * menu and of the bot's screens that have no block (`SystemScreenPanel`).
+ */
+export function BotTextKeysSection({
+  keys,
+  titleKey = 'botFlow.screenTexts.title',
+  captions,
+}: BotTextKeysSectionProps) {
+  const { t } = useTranslation()
 
   return (
     <>
       <Separator />
       <div className="space-y-2">
         <div>
-          <Label className="text-xs font-medium">{t('botFlow.screenTexts.title')}</Label>
+          <Label className="text-xs font-medium">{t(titleKey)}</Label>
           <p className="text-[10px] leading-snug text-muted-foreground">
             {t('botFlow.screenTexts.hint')}
           </p>
@@ -140,12 +137,12 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
           overlay's mode, which `TextKeyEditor` now derives from the key itself,
           not the shape of the card. The compact card is a different decision:
           it caps input at 64 characters and drops the key name, and this
-          section lists twenty-nine keys for `invite` alone, where the key name
-          (with a caption above it on the share texts, `KEY_CAPTIONS`) is what
-          tells them apart.
+          section lists thirty-two keys for `invite` alone, where the key name
+          (with a caption above it on the share texts and the conditional ones,
+          `KEY_CAPTIONS`) is what tells them apart.
         */}
         {keys.map((key) => (
-          <TextKeyEditor key={key} textKey={key} />
+          <TextKeyEditor key={key} textKey={key} captionKey={captions?.[key]} />
         ))}
       </div>
     </>
@@ -154,6 +151,8 @@ export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
 
 interface TextKeyEditorProps {
   readonly textKey: string
+  /** The caption above the key (i18n key); `KEY_CAPTIONS` decides when absent. */
+  readonly captionKey?: string
   /**
    * `text` (default) — stacked RU textarea + collapsible EN textarea, for the
    * multi-line bot copy in the system-screen texts section.
@@ -169,7 +168,7 @@ interface TextKeyEditorProps {
  * anywhere (system-screen texts section AND system-button rows). Upserts the
  * key (visible:true) so reiwa picks it up via `translations`.
  */
-export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) {
+export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyEditorProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -313,7 +312,7 @@ export function TextKeyEditor({ textKey, layout = 'text' }: TextKeyEditorProps) 
     )
   }
 
-  const caption = KEY_CAPTIONS[textKey]
+  const caption = captionKey ?? KEY_CAPTIONS[textKey]
 
   return (
     <div className="space-y-1.5 rounded-md border bg-muted/20 p-2">

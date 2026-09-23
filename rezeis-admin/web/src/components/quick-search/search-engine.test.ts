@@ -9,7 +9,7 @@
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 
-import { ensureSearchIndex, queryIndex, type SearchIndexInterface } from './search-engine';
+import { ensureSearchIndex, mergeDictionary, queryIndex, type SearchIndexInterface } from './search-engine';
 
 let index: SearchIndexInterface;
 
@@ -33,6 +33,29 @@ describe('panel search index', () => {
     for (const entry of index.entries) {
       expect(entry.target.path.length, entry.key).toBeGreaterThan(0);
     }
+  });
+
+  it('indexes both halves of a namespace split between the core dictionary and a feature bundle', () => {
+    // `botFlow` lives in `ru.ts`, and its «Карта бота»-only part in the lazy
+    // `botMap` bundle. Merged shallowly, the file read last replaced the other
+    // half of the namespace, and its words vanished from the search.
+    const keys = new Set(index.entries.map((entry) => entry.key));
+    expect(keys.has('botFlow.newScreen'), 'core half').toBe(true);
+    expect(keys.has('botFlow.systemScreens.lang.title'), 'bundle half').toBe(true);
+    const entry = index.entries.find((candidate) => candidate.key === 'botFlow.systemScreens.lang.title');
+    expect(entry?.target.path).toBe('/bot-map');
+  });
+
+  it('merges a split namespace without writing into the dictionaries it reads', () => {
+    // The modules are shared: i18next reads the same objects.
+    const core = { botFlow: { save: 'Сохранить' } };
+    const bundle = { botFlow: { systemScreens: { hint: 'Экран бота' } } };
+    const merged: Record<string, unknown> = {};
+    mergeDictionary(merged, core);
+    mergeDictionary(merged, bundle);
+    expect(merged).toEqual({ botFlow: { save: 'Сохранить', systemScreens: { hint: 'Экран бота' } } });
+    expect(core).toEqual({ botFlow: { save: 'Сохранить' } });
+    expect(bundle).toEqual({ botFlow: { systemScreens: { hint: 'Экран бота' } } });
   });
 });
 

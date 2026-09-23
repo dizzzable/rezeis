@@ -137,17 +137,27 @@ function BotScreenNodeComponent({ data, id, selected }: NodeProps) {
       {/* Runtime-injected system buttons (read-only preview): the per-screen
           built-in buttons of invite/rules/help and the auto "◀️ В меню" row.
           Muted dashed chips so the operator sees the full keyboard; the back
-          chip anchors the dashed edge to the root screen. */}
+          chip anchors the dashed edge to the root screen. A chip the bot
+          shows only sometimes says when under its caption — without it the
+          block reads as a keyboard every customer gets. */}
       {nodeData.systemButtons && nodeData.systemButtons.length > 0 && (
         <div className="px-2 pb-2 pt-1.5 space-y-1 border-t border-dashed border-border/60">
           <p className="px-1 text-[8px] font-medium uppercase tracking-wider text-muted-foreground/60">
             {t('botFlow.systemButtonsCanvasLabel')}
           </p>
           {nodeData.systemButtons.map((sb) => (
-            <div key={sb.key} className="relative">
+            <div key={sb.key} className="relative" data-system-button>
               <div className="truncate rounded-md border border-dashed border-border/70 bg-muted/30 px-2 py-1 text-center text-[10px] font-medium text-muted-foreground">
                 {t(sb.labelKey)}
               </div>
+              {sb.conditionKey !== undefined && (
+                <p
+                  data-condition
+                  className="px-1 pt-0.5 text-center text-[8px] leading-tight text-amber-700/90 dark:text-amber-400/90"
+                >
+                  {t(sb.conditionKey)}
+                </p>
+              )}
               {sb.isBack && (
                 <Handle
                   type="source"

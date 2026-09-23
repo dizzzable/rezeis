@@ -466,6 +466,14 @@ function NotificationButtonRow({
                 maxLength={2_000}
                 className="font-mono text-xs"
               />
+              {/* Free text: what the bot answers is not otherwise written
+                  anywhere the operator can see it (reiwa's vocabulary —
+                  `CALLBACK_VOCABULARY`; the map draws the rest red). */}
+              {button.kind === 'callback' ? (
+                <p className="text-[10px] leading-snug text-muted-foreground">
+                  {t('botMapPage.notification.callbackHint')}
+                </p>
+              ) : null}
             </>
           )}
         </div>

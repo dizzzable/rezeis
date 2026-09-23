@@ -3,7 +3,8 @@
  *
  * Matches a node when the query (case-insensitive, trimmed) appears in
  * any of: `title`, `group`, the kind-specific identifier
- * (`shortId` / `type` / `route` / `buttonId` of any reply button), or
+ * (`shortId` / `type` / `route` / `buttonId` of any reply button / the text
+ * keys of a built-in screen), or
  * the surrounding RU/EN copy when applicable. Empty / whitespace-only
  * queries return the input unchanged.
  *
@@ -12,6 +13,8 @@
  * matches — no regex compilation per call, no string allocation per
  * node beyond the lower-cased haystack.
  */
+import { systemScreenById } from '@/features/bot-flow/system-screens'
+
 import type { BotMapNode } from '../types'
 
 export function filterNodesByQuery(
@@ -53,5 +56,16 @@ function nodeMatchesQuery(node: BotMapNode, query: string): boolean {
         node.descriptionRu.toLowerCase().includes(query) ||
         node.descriptionEn.toLowerCase().includes(query)
       )
+    case 'system-screen': {
+      // By the keys it sends too, its buttons' captions among them: an
+      // operator who met `channel.required` in «Тексты» finds the screen
+      // that sends it.
+      const screen = systemScreenById(node.screenId)
+      if (screen === null) return false
+      return (
+        screen.texts.some((text) => text.key.toLowerCase().includes(query)) ||
+        screen.buttons.some((button) => (button.textKey ?? '').toLowerCase().includes(query))
+      )
+    }
   }
 }

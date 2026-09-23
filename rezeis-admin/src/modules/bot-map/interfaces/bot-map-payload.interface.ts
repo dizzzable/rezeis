@@ -96,7 +96,15 @@ export type EdgeDestination =
   | { readonly kind: 'screen'; readonly shortId: string }
   | { readonly kind: 'webApp'; readonly route: string }
   | { readonly kind: 'url'; readonly host: string; readonly safe: boolean }
-  | { readonly kind: 'chat' }
+  /** A page of the cabinet website — a main-menu link typed as a path, or with none (reiwa `addressOn`). */
+  | { readonly kind: 'site'; readonly path: string }
+  /**
+   * The support chat. `fallbackScreen` names the screen the tap opens instead
+   * when there is no public support @username — set while the panel cannot
+   * tell whether there is one (its «Username поддержки» is empty and reiwa's
+   * `.env` decides), as «Схема» captions it.
+   */
+  | { readonly kind: 'chat'; readonly fallbackScreen?: string }
   | { readonly kind: 'callback'; readonly id: string }
   | { readonly kind: 'back' }
   /** The well-known "main menu" callback (`menu:main`) → the reply keyboard. */

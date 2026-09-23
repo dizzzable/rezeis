@@ -17,6 +17,9 @@ export interface NodeGroup {
 const GROUP_ORDER: ReadonlyArray<string> = [
   'graph',
   'reply',
+  // The bot's screens with no flow block (`withBuiltInNodes`), next to the
+  // other things the bot builds by itself.
+  'system',
   'notification:expires',
   'notification:referral',
   'notification:partner',

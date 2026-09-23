@@ -16,6 +16,7 @@ import {
 
 import { BotMapComposerService } from '../src/modules/bot-map/services/bot-map-composer.service';
 import type { BotMapPayload } from '../src/modules/bot-map/interfaces/bot-map-payload.interface';
+import { LOCAL_ADDRESS_TABLE } from './bot-map-local-address-table';
 
 /**
  * Build a composer with stub services so we can test `compose()` directly.
@@ -24,6 +25,7 @@ import type { BotMapPayload } from '../src/modules/bot-map/interfaces/bot-map-pa
  */
 function makeComposer(): BotMapComposerService {
   return new BotMapComposerService(
+    null as never,
     null as never,
     null as never,
     null as never,
@@ -490,6 +492,45 @@ describe('Mini App pages on «Карта бота»', () => {
     assert.deepStrictEqual(site?.destination, { kind: 'url', host: 'example.com', safe: true });
   });
 
+  /**
+   * The panel seeds «Открыть приложение» as a Mini App button with no page
+   * (`DEFAULT_BUTTONS`, `internal-bot-config.service.ts`), and reiwa opens the
+   * Mini App's own address for it (`miniAppButtonUrl` in `main-keyboard.ts`) —
+   * whose home sends a Mini App launch on to the dashboard. The map read the
+   * missing page as an unsafe address and drew the menu's first button red.
+   */
+  it('draws a menu «Mini App» button with no page to the Mini App’s home, where the bot opens it', () => {
+    const out = makeComposer().compose({
+      flow: null,
+      replyButtons: [
+        replyButton({ buttonId: 'webapp', actionType: BotButtonAction.WEBAPP, actionTarget: null }),
+        replyButton({ buttonId: 'blank', actionType: BotButtonAction.WEBAPP, actionTarget: '   ' }),
+      ] as never,
+      templates: [],
+    });
+    for (const id of ['reply-btn:reply-webapp', 'reply-btn:reply-blank']) {
+      const edge = out.edges.find((e) => e.id === id);
+      assert.equal(edge?.valid, true, id);
+      assert.equal(edge?.target, 'mini-app:/dashboard', id);
+      assert.deepStrictEqual(edge?.destination, { kind: 'webApp', route: '/' }, id);
+    }
+    assert.ok(out.nodes.some((n) => n.id === 'mini-app:/dashboard'));
+  });
+
+  it('keeps a screen’s «Mini App» button with no page red: the bot leaves that one out', () => {
+    const blank = {
+      ...(HELP_SCREEN as unknown as { buttons: Array<Record<string, unknown>> }).buttons[0],
+      id: 'btn-blank',
+      webAppUrl: '',
+    };
+    const flow = {
+      ...(PUBLISHED_FLOW as unknown as Record<string, unknown>),
+      screens: [{ ...(HELP_SCREEN as unknown as Record<string, unknown>), buttons: [blank] }],
+    };
+    const out = makeComposer().compose({ flow: flow as never, replyButtons: [], templates: [] });
+    assert.equal(out.edges.find((e) => e.id === 'flow-btn:btn-blank')?.valid, false);
+  });
+
   it('reads a path the way the bot opens it — without its leading slash, with a query — in every kind of button', () => {
     const screenButton = (id: string, webAppUrl: string) => ({
       ...(HELP_SCREEN as unknown as { buttons: Array<Record<string, unknown>> }).buttons[0],
@@ -518,5 +559,374 @@ describe('Mini App pages on «Карта бота»', () => {
     assert.equal(edge('flow-btn:btn-typo')?.reason, 'unknown-mini-app-route');
     assert.equal(edge('reply-btn:reply-buy')?.target, 'mini-app:/plans');
     assert.equal(out.edges.find((e) => e.source === 'notif:trial_ended')?.target, 'mini-app:/wheel');
+  });
+});
+
+/**
+ * The menu node is the bot's main menu: reiwa sends it as the inline keyboard
+ * under the greeting and never a reply keyboard, and «Reply-клавиатура» sent
+ * operators to the wrong editor.
+ */
+describe('the main menu on «Карта бота»', () => {
+  it('is called «Главное меню»', () => {
+    const out = makeComposer().compose({ flow: null, replyButtons: [], templates: [] });
+    const menu = out.nodes.find((n) => n.kind === 'reply-keyboard');
+    assert.equal(menu?.title, 'Главное меню');
+  });
+});
+
+/**
+ * A notification's «callback» button, drawn the way reiwa answers the tap.
+ *
+ * The editor's callback field is free text (the API takes any string of 1 to
+ * 2000 characters), it has never offered a list, and the shipped defaults write
+ * only `menu:main`. reiwa answers `menu:main`, `menu`, `back_to_menu`,
+ * `screen:<shortId>`, a callback that is exactly a screen's shortId, the
+ * built-in `invite` / `rules` / `help` and a few service words (`start.ts`,
+ * `dynamic-screen.ts` and the rest of `src/bot/pages/**` since 23.09.2026);
+ * anything else nothing answers, and the map draws it red.
+ */
+describe('a notification callback on «Карта бота»', () => {
+  const now = new Date();
+  const screen = (id: string, shortId: string, name: string) => ({
+    ...(HELP_SCREEN as unknown as Record<string, unknown>),
+    id,
+    shortId,
+    name,
+    buttons: [],
+  });
+  const flow = {
+    ...(PUBLISHED_FLOW as unknown as Record<string, unknown>),
+    screens: [screen('screen-promo', 'sc_promo', 'promo'), screen('screen-invite', 'sc_invite', 'invite')],
+  };
+  const edgeFor = (target: string) => {
+    const out = makeComposer().compose({
+      flow: flow as never,
+      replyButtons: [],
+      templates: [
+        {
+          id: 'tpl-cb',
+          type: 'callback_probe',
+          title: 'Проба',
+          body: 'Проба',
+          titleEn: null,
+          bodyEn: null,
+          isActive: true,
+          buttons: [{ labelRu: 'Кнопка', labelEn: null, kind: 'callback', target }],
+          createdAt: now,
+          updatedAt: now,
+        },
+      ] as never,
+    });
+    const edge = out.edges.find((e) => e.source === 'notif:callback_probe');
+    assert.ok(edge, target);
+    return edge;
+  };
+
+  it('draws `screen:<shortId>` — what «Экран бота» sends — to that screen', () => {
+    const edge = edgeFor('screen:sc_promo');
+    assert.equal(edge.valid, true);
+    assert.equal(edge.target, 'screen-promo');
+    assert.deepStrictEqual(edge.destination, { kind: 'screen', shortId: 'sc_promo' });
+  });
+
+  it('draws `screen:` with no such screen red: the bot answers «экран не найден»', () => {
+    const edge = edgeFor('screen:sc_gone');
+    assert.equal(edge.valid, false);
+    assert.equal(edge.reason, 'unknown-shortid');
+  });
+
+  it('draws `menu:main` and `back_to_menu` to the main menu', () => {
+    for (const target of ['menu:main', 'back_to_menu']) {
+      const edge = edgeFor(target);
+      assert.equal(edge.valid, true, target);
+      assert.equal(edge.target, '__reply_keyboard__', target);
+      assert.deepStrictEqual(edge.destination, { kind: 'mainMenu' }, target);
+    }
+  });
+
+  it('draws `invite` to the invite screen, which the bot’s own handler renders', () => {
+    const edge = edgeFor('invite');
+    assert.equal(edge.valid, true);
+    assert.equal(edge.target, 'screen-invite');
+  });
+
+  it('draws `menu` to the main menu and a bare shortId to its screen — reiwa answers both', () => {
+    const menu = edgeFor('menu');
+    assert.equal(menu.valid, true);
+    assert.equal(menu.target, '__reply_keyboard__');
+    const bare = edgeFor('sc_promo');
+    assert.equal(bare.valid, true);
+    assert.equal(bare.target, 'screen-promo');
+  });
+
+  it('leaves a callback the bot answers without a screen a callback, with no arrow', () => {
+    const edge = edgeFor('lang:en');
+    assert.equal(edge.valid, true);
+    assert.equal(edge.target, 'callback:lang:en');
+  });
+
+  it('draws red a callback nothing in the bot answers', () => {
+    const edge = edgeFor('subscription');
+    assert.equal(edge.valid, false);
+    assert.equal(edge.reason, 'unanswered-callback');
+    assert.deepStrictEqual(edge.destination, { kind: 'callback', id: 'subscription' });
+  });
+});
+
+/**
+ * A main-menu button, drawn in «Список» the way «Схема» captions it: both go
+ * through the one route model (`menu-button-route.ts` here, its copy in the
+ * SPA, pinned together by `bot-map-route-parity.spec.ts`).
+ */
+describe('a main-menu button on «Список»', () => {
+  const now = new Date();
+  const screen = (id: string, shortId: string, name: string) => ({
+    ...(HELP_SCREEN as unknown as Record<string, unknown>),
+    id,
+    shortId,
+    name,
+    buttons: [],
+  });
+  const flow = {
+    ...(PUBLISHED_FLOW as unknown as Record<string, unknown>),
+    screens: [
+      screen('screen-promo', 'sc_promo', 'promo'),
+      screen('screen-invite', 'sc_invite', 'invite'),
+      screen('screen-help', 'sc_help', 'help'),
+    ],
+  };
+  const edgeOf = (
+    buttonId: string,
+    actionType: BotButtonAction,
+    actionTarget: string | null = null,
+    supportUsername: string | null = null,
+  ) => {
+    const out = makeComposer().compose({
+      supportUsername,
+      flow: flow as never,
+      replyButtons: [
+        {
+          id: `row-${buttonId}`,
+          buttonId,
+          label: buttonId,
+          style: BotButtonStyle.DEFAULT,
+          iconCustomEmojiId: null,
+          visible: true,
+          onePerRow: true,
+          orderIndex: 0,
+          actionType,
+          actionTarget,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ] as never,
+      templates: [],
+    });
+    const edge = out.edges.find((e) => e.id === `reply-btn:row-${buttonId}`);
+    assert.ok(edge, buttonId);
+    return edge;
+  };
+
+  it('draws `menu` as the main menu and a screen’s shortId as that screen, as the bot answers them', () => {
+    assert.deepStrictEqual(edgeOf('menu', BotButtonAction.CALLBACK).destination, { kind: 'mainMenu' });
+    const bare = edgeOf('sc_promo', BotButtonAction.CALLBACK);
+    assert.equal(bare.valid, true);
+    assert.equal(bare.target, 'screen-promo');
+  });
+
+  it('draws `invite` to the invite screen, and a callback nothing answers red', () => {
+    assert.equal(edgeOf('invite', BotButtonAction.CALLBACK).target, 'screen-invite');
+    const dead = edgeOf('subscription', BotButtonAction.CALLBACK);
+    assert.equal(dead.valid, false);
+    assert.equal(dead.reason, 'unanswered-callback');
+    // An answered service word is not dead.
+    assert.equal(edgeOf('close', BotButtonAction.CALLBACK).valid, true);
+  });
+
+  it('draws a «Внешняя ссылка» typed as a path, or with none, as a page of the cabinet — not an unsafe URL', () => {
+    const plans = edgeOf('plans', BotButtonAction.URL, 'plans');
+    assert.equal(plans.valid, true);
+    assert.deepStrictEqual(plans.destination, { kind: 'site', path: '/plans' });
+    assert.deepStrictEqual(edgeOf('site', BotButtonAction.URL, null).destination, { kind: 'site', path: '/' });
+  });
+
+  it('keeps an http address of a link button working — the bot sends it as typed — and a local one red', () => {
+    assert.equal(edgeOf('news', BotButtonAction.URL, 'http://example.com/news').valid, true);
+    const local = edgeOf('dev', BotButtonAction.URL, 'https://localhost:5173/');
+    assert.equal(local.valid, false);
+    assert.equal(local.reason, 'unsafe-url');
+  });
+
+  it('draws red a Mini App on http (the bot leaves it out), a page the cabinet lacks and a screen that is gone', () => {
+    const http = edgeOf('app', BotButtonAction.WEBAPP, 'http://example.com/app');
+    assert.equal(http.valid, false);
+    assert.equal(http.reason, 'unsafe-webapp');
+    assert.equal(edgeOf('promo', BotButtonAction.WEBAPP, '/promoo').reason, 'unknown-mini-app-route');
+    assert.equal(edgeOf('gone', BotButtonAction.SCREEN, 'sc_gone').reason, 'unknown-shortid');
+  });
+
+  it('routes a «Экран бота» button with no screen chosen by its ID, as the bot sends it', () => {
+    assert.equal(edgeOf('invite', BotButtonAction.SCREEN, null).target, 'screen-invite');
+  });
+
+  /**
+   * reiwa from 23.09.2026: a «Чат с поддержкой» button with no public support
+   * @username sends `help` — the help screen — whatever its own ID; it sent
+   * the ID before, which nothing answered for `support`. The panel's own
+   * «Username поддержки» says which: a numeric id is never public, and reiwa
+   * then does not read its `.env`.
+   */
+  it('draws a support button without a public @username to the help screen, whatever its ID', () => {
+    for (const buttonId of ['help', 'support']) {
+      const edge = edgeOf(buttonId, BotButtonAction.SUPPORT_URL, null, '123456789');
+      assert.equal(edge.target, 'screen-help', buttonId);
+      assert.equal(edge.valid, true, buttonId);
+    }
+  });
+
+  it('draws a support button with a public @username as the chat', () => {
+    assert.deepStrictEqual(edgeOf('support', BotButtonAction.SUPPORT_URL, null, '@support_team').destination, {
+      kind: 'chat',
+    });
+  });
+
+  it('draws one with no «Username поддержки» as «Схема» does: the chat, or without a public one the help screen', () => {
+    // reiwa's `.env` decides, which the panel cannot see; with no public
+    // `BOT_SUPPORT_USERNAME` either — the default setup — the tap opens `help`.
+    for (const username of [null, '', '   ']) {
+      assert.deepStrictEqual(
+        edgeOf('support', BotButtonAction.SUPPORT_URL, null, username).destination,
+        { kind: 'chat', fallbackScreen: 'help' },
+        JSON.stringify(username),
+      );
+    }
+  });
+
+  it('reads the «Username поддержки» from the text row the bot reads it from', async () => {
+    const button = {
+      id: 'row-support',
+      buttonId: 'support',
+      label: 'Поддержка',
+      style: BotButtonStyle.DEFAULT,
+      iconCustomEmojiId: null,
+      visible: true,
+      onePerRow: true,
+      orderIndex: 0,
+      actionType: BotButtonAction.SUPPORT_URL,
+      actionTarget: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const composer = new BotMapComposerService(
+      { getDraft: async () => null } as never,
+      { listAll: async () => [button] } as never,
+      { listAll: async () => [] } as never,
+      { listAll: async () => [{ key: 'bot.support_username', value: ' 123456789 ' }] } as never,
+    );
+    const edge = (await composer.build()).edges.find((e) => e.id === 'reply-btn:row-support');
+    // No flow: the bot's own help screen, which the map has no node for.
+    assert.deepStrictEqual(edge?.destination, { kind: 'callback', id: 'help' });
+  });
+});
+
+/** A screen's own «CALLBACK» button speaks the same vocabulary as a menu or notification button. */
+describe('a screen’s «CALLBACK» button on «Список»', () => {
+  const now = new Date();
+  const withCallback = (callbackAction: string) => ({
+    ...(HELP_SCREEN as unknown as Record<string, unknown>),
+    buttons: [
+      {
+        ...(HELP_SCREEN as unknown as { buttons: Array<Record<string, unknown>> }).buttons[0],
+        id: 'btn-cb',
+        actionType: BotFlowButtonAction.CALLBACK,
+        webAppUrl: null,
+        callbackAction,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+  });
+  const edgeFor = (callbackAction: string) => {
+    const flow = { ...(PUBLISHED_FLOW as unknown as Record<string, unknown>), screens: [withCallback(callbackAction)] };
+    const edge = makeComposer()
+      .compose({ flow: flow as never, replyButtons: [], templates: [] })
+      .edges.find((e) => e.id === 'flow-btn:btn-cb');
+    assert.ok(edge, callbackAction);
+    return edge;
+  };
+
+  it('draws `menu:main` to the main menu, `screen:<shortId>` to the screen, and a word nothing answers red', () => {
+    assert.deepStrictEqual(edgeFor('menu:main').destination, { kind: 'mainMenu' });
+    assert.equal(edgeFor('screen:sc_help').target, 'screen-help');
+    assert.equal(edgeFor('nothing_answers_this').reason, 'unanswered-callback');
+  });
+});
+
+/**
+ * A screen's «Ссылка» and «Mini App» buttons, read the way reiwa renders them
+ * (`buildScreenKeyboard`, `screen-renderer.ts`): an `https://` address whose
+ * HOST is not local as typed, a path on the cabinet's public address, the rest
+ * left out. The composer kept its own substring rule after the bot and the
+ * route model moved to the host (R4 F4: 11 inputs apart), and drew a path red
+ * as «unsafe-url» while reiwa opens it on the cabinet (R4 laterList 4).
+ */
+describe('a screen’s link or Mini App button on «Список»', () => {
+  const now = new Date();
+  const edgeFor = (actionType: BotFlowButtonAction, address: string) => {
+    const screen = {
+      ...(HELP_SCREEN as unknown as Record<string, unknown>),
+      buttons: [
+        {
+          ...(HELP_SCREEN as unknown as { buttons: Array<Record<string, unknown>> }).buttons[0],
+          id: 'btn-link',
+          actionType,
+          url: actionType === BotFlowButtonAction.URL ? address : null,
+          webAppUrl: actionType === BotFlowButtonAction.WEBAPP ? address : null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    };
+    const flow = { ...(PUBLISHED_FLOW as unknown as Record<string, unknown>), screens: [screen] };
+    const edge = makeComposer()
+      .compose({ flow: flow as never, replyButtons: [], templates: [] })
+      .edges.find((e) => e.id === 'flow-btn:btn-link');
+    assert.ok(edge, address);
+    return edge;
+  };
+
+  it('calls an address local by its host alone, as the shared table says', () => {
+    let rows = 0;
+    for (const [address, local] of LOCAL_ADDRESS_TABLE) {
+      // Only https reaches a screen's button at all; the table's http rows are
+      // asked again on https, where locality alone decides.
+      const https = address.replace(/^http:\/\//, 'https://');
+      if (!https.includes('://')) continue;
+      for (const actionType of [BotFlowButtonAction.URL, BotFlowButtonAction.WEBAPP]) {
+        assert.equal(edgeFor(actionType, https).valid, !local, `${actionType} ${https}`);
+      }
+      rows += 1;
+    }
+    assert.equal(rows, LOCAL_ADDRESS_TABLE.length - 1);
+    // Credentials before the host do not hide it; a trailing dot is another host.
+    assert.equal(edgeFor(BotFlowButtonAction.URL, 'https://a@localhost/x').valid, false);
+    assert.equal(edgeFor(BotFlowButtonAction.URL, 'https://user:pw@127.0.0.1/x').valid, false);
+    assert.equal(edgeFor(BotFlowButtonAction.URL, 'https://localhost./x').valid, true);
+  });
+
+  it('draws a link typed as a path as a page of the cabinet, where the bot opens it', () => {
+    assert.deepStrictEqual(edgeFor(BotFlowButtonAction.URL, '/plans').destination, { kind: 'site', path: '/plans' });
+    const bare = edgeFor(BotFlowButtonAction.URL, 'plans');
+    assert.deepStrictEqual(bare.destination, { kind: 'site', path: '/plans' });
+    assert.equal(bare.valid, true);
+  });
+
+  it('keeps red what the bot leaves out: http, another scheme, nothing at all', () => {
+    for (const address of ['http://example.com/a', 'tg://resolve?domain=example', '']) {
+      const edge = edgeFor(BotFlowButtonAction.URL, address);
+      assert.equal(edge.valid, false, address);
+      assert.equal(edge.reason, 'unsafe-url', address);
+    }
   });
 });
