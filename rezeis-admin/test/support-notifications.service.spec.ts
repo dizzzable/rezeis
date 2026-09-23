@@ -62,6 +62,7 @@ function build(opts?: { throwOnCreate?: boolean; guestEmail?: string | null; sen
     },
   };
   const guestService = {
+    extendAccessOnOperatorReply: async () => true,
     newEmailResumeToken: () => 'resume-tok',
     letterTokenIssuedAt: () => null,
     // Recorded when the link is made THE letter link, after the letter went out.

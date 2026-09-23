@@ -165,10 +165,13 @@ export class SupportNotificationsService {
   }
 
   /**
-   * Email-continuity for a GUEST ticket: when an operator replies and the
-   * visitor left an email, send a "you have a reply" email with a resume link
-   * so they can return from any device. Best-effort — a missing email, missing
-   * SMTP, or send failure never blocks the reply.
+   * What an operator's reply means for a GUEST ticket. First, the guest's
+   * access runs for another TTL from now (the owner's rule: each operator
+   * reply extends it — `extendAccessOnOperatorReply`), whether or not a
+   * letter follows. Then email-continuity: when the visitor left an email,
+   * a "you have a reply" email with a resume link, so they can return from
+   * any device. Best-effort — a missing email, missing SMTP, or send failure
+   * never blocks the reply.
    *
    * Sent directly, never through the mail queue: the link is a way into the
    * conversation, and a BullMQ job would keep it readable in Redis for a day
@@ -183,6 +186,17 @@ export class SupportNotificationsService {
    */
   public async notifyGuestReply(ticketId: string): Promise<void> {
     try {
+      // Before anything else — above all before the letter mints its link, so
+      // that link opens: a reply on day 4 used to go out with no button, the
+      // access having ended 72 h after the conversation OPENED. A failure here
+      // leaves the access as it was; the letter below then says what is true.
+      await this.guestService.extendAccessOnOperatorReply(ticketId).catch((err: unknown) => {
+        this.logger.warn(
+          `Guest access not extended for ticket ${ticketId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return false;
+      });
+
       const ticket = await this.prismaService.supportTicket.findUnique({
         where: { id: ticketId },
         select: {
@@ -201,10 +215,12 @@ export class SupportNotificationsService {
       const smtp = await this.emailDelivery.getSmtpSettings();
       if (!smtp.enabled || !smtp.host) return;
 
-      // Past the guest's access (`expiresAt`, fixed at the conversation's
-      // start) or on a CLOSED conversation, every way in opens nothing — this
+      // Past the guest's access (`expiresAt`: the TTL from the conversation's
+      // start, renewed from each operator reply — this one included, above)
+      // or on a CLOSED conversation, every way in opens nothing — this
       // letter's link, a device credential, the guest's own code. The letter
-      // then says so instead of offering a button into a dead end.
+      // then says so instead of offering a button into a dead end. After the
+      // renewal that leaves a closed conversation, or a renewal that failed.
       const reachable =
         ticket.guest.expiresAt.getTime() >= Date.now() && ticket.status !== SupportTicketStatus.CLOSED;
 

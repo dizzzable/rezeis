@@ -260,6 +260,10 @@ describe('the order a guest sees their letters in', () => {
 
     const first = panel.notifications.notifyGuestReply('ticket1');
     await settle();
+    // A letter is dated to the millisecond: two replies minted in the same one
+    // carry the same `Date`, and no letter is "dated last". It flaked so in the
+    // full run, where both replies can fit in one millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 2));
     await panel.notifications.notifyGuestReply('ticket1');
     panel.release(1);
     await first;

@@ -56,8 +56,13 @@ interface Install {
   readonly brandingSettings?: Record<string, unknown>;
   /** SMTP as the SMTP card has it; on unless said otherwise. */
   readonly smtp?: 'on' | 'off';
-  /** The guest's access (`expiresAt`, 72 h from the conversation's start) has ended. */
+  /**
+   * The guest's access (`expiresAt`: the TTL from the conversation's start or
+   * from the last operator reply) had ended before this reply.
+   */
   readonly guestExpired?: boolean;
+  /** Renewing the access on this reply (`extendAccessOnOperatorReply`) fails. */
+  readonly renewalFails?: boolean;
   readonly ticketStatus?: 'OPEN' | 'WAITING_REPLY' | 'CLOSED';
   /** Send attempts that fail before one succeeds; `Infinity`: none ever does. */
   readonly failingAttempts?: number;
@@ -78,8 +83,10 @@ interface Outcome {
   readonly minted: number;
   /** Tokens made THE letter link; each retires the previous letter's link. */
   readonly activated: string[];
-  /** 'sent', 'failed' and 'activated', in the order they happened. */
+  /** 'renewed', 'sent', 'failed' and 'activated', in the order they happened. */
   readonly events: string[];
+  /** Each renewal of the guest's access this reply asked for, and whether it took. */
+  readonly renewals: boolean[];
   readonly warnings: string[];
 }
 
@@ -118,6 +125,10 @@ function buildGuestReply(install: Install = {}): { service: SupportNotifications
     events.push('activated');
     return 'activated' as const;
   };
+  // The guest's access as the database holds it; an operator reply renews it
+  // (the real rule: not on a CLOSED conversation), unless the renewal fails.
+  let accessEnded = install.guestExpired ?? false;
+  const renewals: boolean[] = [];
   const service = new SupportNotificationsService(
     {} as never,
     {
@@ -129,7 +140,7 @@ function buildGuestReply(install: Install = {}): { service: SupportNotifications
           guest: {
             id: 'g-1',
             email: 'visitor@example.com',
-            expiresAt: new Date(Date.now() + (install.guestExpired ? -60_000 : 3_600_000)),
+            expiresAt: new Date(Date.now() + (accessEnded ? -60_000 : 3_600_000)),
           },
         }),
       },
@@ -160,6 +171,14 @@ function buildGuestReply(install: Install = {}): { service: SupportNotifications
       // An unstamped stand-in token: no pinned `Date` (the letter-order spec
       // covers dating, with the real service).
       letterTokenIssuedAt: () => null,
+      // The real rule lives in `support-guest-access-extends-on-reply.spec.ts`.
+      extendAccessOnOperatorReply: async () => {
+        const renewed = !install.renewalFails && install.ticketStatus !== 'CLOSED';
+        if (renewed) accessEnded = false;
+        renewals.push(renewed);
+        events.push('renewed');
+        return renewed;
+      },
       activateEmailResumeToken: activate,
     } as never,
     { getByType: async () => null } as never,
@@ -176,6 +195,7 @@ function buildGuestReply(install: Install = {}): { service: SupportNotifications
     },
     activated,
     events,
+    renewals,
     warnings,
   };
   return { service, outcome };
@@ -270,15 +290,36 @@ describe('the guest-reply email', () => {
 });
 
 /**
- * A guest's access ends `guestTokenTtlHours` after the conversation started
- * (72 h by default; nothing extends it), and a CLOSED conversation opens for
- * no token. Past either, the letter's link, the device credential and the
- * guest's own code all open nothing — so a button there is a dead end, and
- * «Нажмите кнопку ниже» a false promise.
+ * A guest's access ends `guestTokenTtlHours` after the conversation started or
+ * after the last operator reply, and a CLOSED conversation opens for no token.
+ * Past either, the letter's link, the device credential and the guest's own
+ * code all open nothing — so a button there is a dead end, and «Нажмите кнопку
+ * ниже» a false promise. Since each operator reply renews the access first,
+ * that leaves a closed conversation, and a renewal that failed.
  */
+describe('the guest-reply email to a guest whose access had ended', () => {
+  it('renews the access FIRST, so the letter carries a working button', async () => {
+    // The owner's example: answered 74 h after the conversation opened.
+    const outcome = await guestReply({ published: 'https://cab.example.com', guestExpired: true });
+    const html = outcome.delivered[0]?.rawHtml ?? '';
+
+    assert.equal(outcome.events[0], 'renewed', `the letter was composed before the renewal: ${outcome.events}`);
+    assert.deepEqual(outcome.renewals, [true]);
+    assert.ok(html.includes('href="https://cab.example.com/support/guest?resume=resume-tok"'), html);
+    assert.deepEqual(outcome.activated, ['resume-tok']);
+  });
+
+  it('renews it even when no letter goes out (SMTP off)', async () => {
+    const outcome = await guestReply({ published: 'https://cab.example.com', guestExpired: true, smtp: 'off' });
+
+    assert.deepEqual(outcome.renewals, [true]);
+    assert.equal(outcome.attempts.length, 0);
+  });
+});
+
 describe('the guest-reply email to a guest who can no longer open the conversation', () => {
   for (const [why, install] of [
-    ['whose access has ended', { guestExpired: true }],
+    ['whose access had ended and could not be renewed', { guestExpired: true, renewalFails: true }],
     ['whose conversation is closed', { ticketStatus: 'CLOSED' }],
   ] as const) {
     it(`carries no button and no token, and says so — to a guest ${why}`, async () => {
@@ -324,7 +365,7 @@ describe('how the guest-reply email travels', () => {
 
     assert.equal(outcome.attempts.length, 3, 'a transient failure was not retried');
     assert.equal(outcome.delivered.length, 1);
-    assert.deepEqual(outcome.events, ['failed', 'failed', 'sent', 'activated']);
+    assert.deepEqual(outcome.events, ['renewed', 'failed', 'failed', 'sent', 'activated']);
     assert.deepEqual(outcome.activated, ['resume-tok']);
     assert.deepEqual(outcome.warnings, []);
   });

@@ -14,6 +14,13 @@ import { SupportTicketsService } from './support-tickets.service';
 const TOKEN_BYTES = 32;
 
 /**
+ * The `expiresAt` of a guest identity whose conversation was attached to an
+ * account: the epoch, so it is expired for good and an operator reply never
+ * revives it (`extendAccessOnOperatorReply`).
+ */
+const ATTACHED_GUEST_EXPIRY = new Date(0);
+
+/**
  * A device credential: `gdv1.<guestId>.<mac>`, the MAC keyed from the panel's
  * crypt key. Neither of the random tokens (base64url, no dot) can look like one.
  */
@@ -181,10 +188,44 @@ export class SupportGuestService {
       // Expire the guest identity so the old token (cookie/email) is inert.
       this.prismaService.supportGuest.update({
         where: { id: resolution.guestId },
-        data: { expiresAt: new Date(0), emailResumeHash: null },
+        data: { expiresAt: ATTACHED_GUEST_EXPIRY, emailResumeHash: null },
       }),
     ]);
     return true;
+  }
+
+  /**
+   * An operator replied in this guest conversation: the guest can open it for
+   * another `guestTokenTtlHours` from NOW.
+   *
+   * The owner's rule (23.09.2026): «каждый ответ оператора продлевает доступ
+   * ещё на 72 часа». Access used to end the TTL after the conversation OPENED,
+   * whatever happened in it: a reply on day 4 went out with no button and could
+   * not be read anywhere. Called before the reply letter mints its link, so
+   * that link opens.
+   *
+   * The later of the current end and now + TTL wins, in the one conditional
+   * write, so it never shortens access (a TTL lowered since, a concurrent
+   * reply). Not for a closed conversation — reopening it is the operator's
+   * explicit act — and never for an identity attached to an account
+   * (`ATTACHED_GUEST_EXPIRY`: expired for good). The guest's own messages do
+   * not come here. `true` when the access end moved.
+   */
+  public async extendAccessOnOperatorReply(ticketId: string): Promise<boolean> {
+    const ticket = await this.prismaService.supportTicket.findUnique({
+      where: { id: ticketId },
+      select: { status: true, guestId: true },
+    });
+    if (ticket === null || ticket.guestId === null || ticket.status === SupportTicketStatus.CLOSED) {
+      return false;
+    }
+    const limits = await this.settingsService.getSupportLimits();
+    const until = new Date(Date.now() + limits.guestTokenTtlHours * 3_600_000);
+    const { count } = await this.prismaService.supportGuest.updateMany({
+      where: { id: ticket.guestId, expiresAt: { gt: ATTACHED_GUEST_EXPIRY, lt: until } },
+      data: { expiresAt: until },
+    });
+    return count === 1;
   }
   /**
    * A fresh way in for a reply letter's «Открыть переписку». Nothing is written:
