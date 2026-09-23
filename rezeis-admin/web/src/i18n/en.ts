@@ -1178,6 +1178,8 @@ export const en = {
     tokenGlyph: '{{token}} → fallback glyph (this entry has no custom_emoji_id, or the bot owner has no Premium)',
     tokenGlyphButton:
       '{{token}} → glyph: an inline button caption cannot carry a custom emoji anywhere but its leading icon',
+    tokenGlyphPlain:
+      '{{token}} → glyph: this text travels without formatting, so a custom emoji in it arrives as a plain glyph',
     tokenUnknown: '{{token}} → unknown shortcode, sent as raw text',
     tokenDead:
       '{{token}} → sent as raw text: this pack entry has neither a glyph nor a custom_emoji_id',

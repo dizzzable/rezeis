@@ -195,6 +195,33 @@ describe('inline-button captions', () => {
   })
 })
 
+describe('plain text — a share link, an inline answer, a support pre-fill', () => {
+  // reiwa sends these through `renderBotCopy(…, false).text`: no entity and no
+  // icon, whatever the owner's Premium, so the pack picture never arrives.
+  it('draws a token that animates in a message as its glyph, even for a Premium owner', () => {
+    const render = renderEmojiField(':tg_ios_macos_icons_25: Try it', context('plain'))
+    expect(render.icon).toBeNull()
+    expect(render.parts).toEqual([
+      { kind: 'glyph', token: ':tg_ios_macos_icons_25:', glyph: '📣' },
+      { kind: 'text', text: ' Try it' },
+    ])
+  })
+
+  it('carries an id-only entry on the star, and a slot on its glyph', () => {
+    expect(renderEmojiField(':tg_ios_macos_icons_28: {{CARD}}', context('plain')).parts).toEqual([
+      { kind: 'glyph', token: ':tg_ios_macos_icons_28:', glyph: '⭐' },
+      { kind: 'text', text: ' ' },
+      { kind: 'glyph', token: '{{CARD}}', glyph: '💳' },
+    ])
+  })
+
+  it('leaves an undeliverable token as literal text, because that is what is sent', () => {
+    expect(renderEmojiField(':tg_ios_macos_icons_27:', context('plain')).parts).toEqual([
+      { kind: 'raw', token: ':tg_ios_macos_icons_27:', reason: 'undeliverable' },
+    ])
+  })
+})
+
 describe('the rendering is a view, never an edit', () => {
   const VALUES = [
     '',

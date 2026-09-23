@@ -1,8 +1,8 @@
 /**
  * Which renderer a bot-config text KEY feeds.
  * ───────────────────────────────────────────
- * A stored bot text is drawn one of two ways, and the difference is not in the
- * string — it is in the key that names it:
+ * A stored bot text is drawn one of three ways, and the difference is not in
+ * the string — it is in the key that names it:
  *
  *   • ordinary copy goes through reiwa's `renderBotCopy`, where a message may
  *     carry `custom_emoji` entities, so a pack entry with an id really does
@@ -11,7 +11,11 @@
  *     `renderButtonLabel` (reiwa `src/infrastructure/bot-config/emoji-utils.ts`
  *     :356-402), where a caption carries no entities at all: a LEADING token is
  *     cut out of the caption and shipped as `icon_custom_emoji_id`, and every
- *     other token collapses to its carrier glyph.
+ *     other token collapses to its carrier glyph;
+ *   • a few keys travel as PLAIN TEXT — a link's `?text=`, the inline answer
+ *     behind the cabinet's «Поделиться» — with no entities and no icon, so
+ *     every token collapses to its carrier glyph whatever the owner's Premium
+ *     (`PLAIN_TEXT_KEYS` below, each with its callsite).
  *
  * The "Тексты бота" tab edits ANY key — its key field is free text, validated
  * only against `/^[a-z0-9._-]+$/i` — so it cannot be told which of the two it is
@@ -95,6 +99,33 @@ const BUTTON_CAPTION_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * Keys reiwa sends as plain text — `renderBotCopy(…, false).text`, no entities —
+ * each with its callsite. A pack emoji in them arrives as its glyph even for a
+ * Premium owner, so drawing the pack picture promises the operator an emoji
+ * the reader never sees.
+ */
+const PLAIN_TEXT_KEYS: ReadonlySet<string> = new Set([
+  // The `text` of Telegram's share link — `shareText`, reiwa
+  // `bot/pages/invite.ts`.
+  'invite.share_prompt',
+  'invite.share_web_line',
+  // The inline answer behind the cabinet's «Поделиться» — `plain(...)`, reiwa
+  // `bot/pages/inline-share.ts`: the result's title and description, the
+  // message, the URL button under it and the composer's start button.
+  'inline.share.title',
+  'inline.share.description',
+  'inline.share.message',
+  'inline.share.title_plain',
+  'inline.share.description_plain',
+  'inline.share.message_plain',
+  'inline.share.open',
+  'inline.share.start',
+  // The `?text=` a support chat opens with — `supportPrefill`, reiwa
+  // `bot/widgets/main-keyboard.ts`.
+  'help.contact_prefill',
+])
+
+/**
  * reiwa's naming convention for a caption key. Matched as a suffix so a caption
  * key added upstream is drawn correctly without a panel release.
  */
@@ -118,6 +149,7 @@ const BUTTON_OVERRIDE_PREFIX = 'button.'
 export function botTextKeyMode(key: string): EmojiFieldMode {
   const normalized = key.trim().toLowerCase()
   if (normalized.length === 0) return 'text'
+  if (PLAIN_TEXT_KEYS.has(normalized)) return 'plain'
   if (normalized.startsWith(BUTTON_OVERRIDE_PREFIX)) return 'buttonLabel'
   if (normalized.endsWith(BUTTON_CAPTION_SUFFIX)) return 'buttonLabel'
   return BUTTON_CAPTION_KEYS.has(normalized) ? 'buttonLabel' : 'text'

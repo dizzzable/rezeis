@@ -224,6 +224,41 @@ describe('the key decides which renderer the value is drawn for', () => {
   })
 
   /**
+   * `invite.share_prompt` is the text of Telegram's share link (reiwa
+   * `bot/pages/invite.ts`, `shareText`), which carries no entities: reiwa sends
+   * every token as its glyph, a Premium owner's included. Text mode drew the
+   * pack picture — an animated emoji the friend never receives.
+   */
+  it('draws a plain-text key with the glyph that arrives, never the pack picture', async () => {
+    mockApi({
+      key: 'invite.share_prompt',
+      value: ':tg_ios_macos_icons_25: Try it',
+      emojis: [LIVE_EMOJI],
+      ownerHasPremium: true,
+    })
+    renderWithProviders(<BotTextsTab />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+
+    // While the field is being typed into, the strip under it says what
+    // arrives — the message preview that does so for body copy is not there.
+    expect(await screen.findByTestId('emoji-field-strip')).toHaveTextContent('📣 Try it')
+
+    await user.click(await screen.findByRole('dialog'))
+    const field = await screen.findByTestId('emoji-field-overlay')
+    expect(field).toHaveTextContent('📣 Try it')
+    expect(
+      within(field).getByTitle(/^:tg_ios_macos_icons_25: → glyph: this text travels without formatting/),
+    ).toHaveTextContent('📣')
+
+    // The falsifier: the picture is drawn nowhere on the screen…
+    expect(screen.queryByAltText(':tg_ios_macos_icons_25:')).not.toBeInTheDocument()
+    // …and nothing claims a button icon or previews it as a message.
+    expect(screen.queryByText('Button icon — not part of the caption')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rendered-copy-preview')).not.toBeInTheDocument()
+  })
+
+  /**
    * The guard in the other direction, and the reason the rule asks for positive
    * evidence before answering `buttonLabel`. `menu.channel` is body copy: its
    * token really does arrive as a custom emoji, so it is drawn where it will

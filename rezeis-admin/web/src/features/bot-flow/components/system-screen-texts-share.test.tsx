@@ -11,11 +11,17 @@
  * the share texts carry a caption saying what the customer receives.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 
 import { api } from '@/lib/api'
 import { i18n } from '@/i18n/i18n'
-import { emojiStudioPayload, packsPayload } from '@/features/custom-emoji/emoji-catalog.fixtures'
+import {
+  EMOJI_TIMESTAMP,
+  LIVE_EMOJI,
+  emojiStudioPayload,
+  packsPayload,
+  type PackEmojiFixture,
+} from '@/features/custom-emoji/emoji-catalog.fixtures'
 import { renderWithProviders } from '@/test/test-utils'
 
 import { SystemScreenTexts } from './SystemScreenTexts'
@@ -31,9 +37,25 @@ const INLINE_SHARE_KEYS = [
   'inline.share.start',
 ] as const
 
-function mockTextsApi(): void {
+function mockTextsApi(
+  texts: Readonly<Record<string, string>> = {},
+  emojis: readonly PackEmojiFixture[] = [],
+): void {
   vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
-    if (path === '/admin/custom-emoji/packs') return packsPayload([])
+    if (path === '/admin/bot-config/texts') {
+      return {
+        data: Object.entries(texts).map(([key, value], index) => ({
+          id: `text-${index}`,
+          key,
+          value,
+          visible: true,
+          valueEn: null,
+          createdAt: EMOJI_TIMESTAMP,
+          updatedAt: EMOJI_TIMESTAMP,
+        })),
+      }
+    }
+    if (path === '/admin/custom-emoji/packs') return packsPayload(emojis)
     if (path === '/admin/bot-config/emoji-studio') return emojiStudioPayload()
     return { data: [] }
   })
@@ -72,6 +94,30 @@ describe('«Поделиться» texts on the invite screen', () => {
     expect(caption.textContent).toBe(
       i18n.t('botFlow.screenTexts.captions.shareWebLine', { token: '{{link}}' }),
     )
+  })
+
+  // A share text goes out as plain text — a link's `?text=`, an inline answer —
+  // so its pack emoji arrives as the glyph, whatever the owner's Premium. The
+  // hub message beside it carries entities, and there the picture is right.
+  it('draws a share text’s emoji as the glyph the friend receives, not the pack picture', async () => {
+    mockTextsApi(
+      {
+        'inline.share.message': ':tg_ios_macos_icons_25: Try it',
+        'referral.hub.title': ':tg_ios_macos_icons_25: Invite',
+      },
+      [LIVE_EMOJI],
+    )
+    renderWithProviders(<SystemScreenTexts screenName="invite" />)
+
+    const layers = await screen.findAllByTestId('emoji-field-overlay')
+    const hub = layers.find((layer) => layer.textContent?.includes('Invite'))
+    const share = layers.find((layer) => layer.textContent?.includes('Try it'))
+
+    // The anchor: the catalog has landed and the owner has Premium, so the
+    // hub's token is drawn as the animated emoji it will be.
+    expect(within(hub!).getByAltText(':tg_ios_macos_icons_25:')).toBeInTheDocument()
+    expect(share).toHaveTextContent('📣 Try it')
+    expect(within(share!).queryByAltText(':tg_ios_macos_icons_25:')).toBeNull()
   })
 
   it('leaves a key without a caption named by its key alone', async () => {

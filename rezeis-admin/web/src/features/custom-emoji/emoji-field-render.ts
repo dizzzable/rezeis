@@ -9,7 +9,7 @@
  * value: `parts` is a view over the same string, and the field itself keeps
  * holding the untouched `:slug:` / `{{KEY}}` text that goes to the server.
  *
- * Two renderers consume these tokens downstream and they do NOT agree with
+ * Three renderings consume these tokens downstream and they do NOT agree with
  * each other, which is the whole reason this file exists:
  *
  *   • BOT COPY (`renderBotCopy` / `renderBotCopyHtml`) — a message can carry
@@ -27,6 +27,13 @@
  *     'buttonLabel'` reports it separately as `icon` and hands back a body
  *     with the token (and its trailing space) already removed — the same
  *     `body = stripped` the bot performs.
+ *
+ *   • PLAIN TEXT (`renderBotCopy(…, false).text` in reiwa
+ *     `src/bot/pages/invite.ts`, `inline-share.ts` and `supportPrefill`) — a
+ *     link's `?text=` and the inline answer behind the cabinet's «Поделиться»
+ *     carry no entities at all, whatever the owner's Premium. Every token is
+ *     its carrier glyph there and nothing is promoted, which is what `mode:
+ *     'plain'` draws.
  *
  * A custom emoji never travels alone: Telegram draws it OVER an ordinary
  * carrier glyph, so every renderer needs one. All three of reiwa's pick it the
@@ -75,8 +82,10 @@ export interface FieldSlotEmoji {
  *   • `text`        — bot copy / broadcast body: entities are allowed.
  *   • `buttonLabel` — inline-button caption: no entities, leading token is
  *                     promoted to the button's own icon.
+ *   • `plain`       — text sent with no entities and no icon: every token is
+ *                     the glyph the recipient reads.
  */
-export type EmojiFieldMode = 'text' | 'buttonLabel'
+export type EmojiFieldMode = 'text' | 'buttonLabel' | 'plain'
 
 /** Why a token is still shown as literal text. */
 export type EmojiFieldRawReason =
@@ -180,9 +189,10 @@ function renderSlug(token: string, slug: string, context: EmojiFieldContext): Em
 
   const glyph = carrierGlyph(emoji)
 
-  if (context.mode === 'buttonLabel') {
-    // A caption carries no entities, so the pack picture is never what the
-    // user sees here — only the glyph reiwa substitutes in its place.
+  if (context.mode !== 'text') {
+    // A caption, like plain text, carries no entities, so the pack picture is
+    // never what the user sees here — only the glyph reiwa substitutes in its
+    // place.
     if (glyph.length > 0) return { kind: 'glyph', token, glyph }
     return { kind: 'raw', token, reason: 'undeliverable' }
   }

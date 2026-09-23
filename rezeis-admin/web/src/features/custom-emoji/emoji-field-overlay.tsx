@@ -63,7 +63,10 @@ import {
 interface EmojiFieldOverlayProps {
   /** The field's current value — read-only here; rendering never rewrites it. */
   readonly value: string
-  /** Which renderer this field feeds. `buttonLabel` lifts the leading token. */
+  /**
+   * Which renderer this field feeds. `buttonLabel` lifts the leading token;
+   * `plain` draws every token as the glyph that arrives.
+   */
   readonly mode?: EmojiFieldMode
   /** `true` for a `<textarea>`: wrap lines instead of clipping to one. */
   readonly multiline?: boolean
@@ -283,6 +286,13 @@ function ButtonIconRow({ icon }: { readonly icon: EmojiFieldIcon }): JSX.Element
   )
 }
 
+/** Why a token shows as a glyph — the reason differs with the renderer. */
+const GLYPH_TITLE: Readonly<Record<EmojiFieldMode, string>> = {
+  text: 'emojiField.tokenGlyph',
+  buttonLabel: 'emojiField.tokenGlyphButton',
+  plain: 'emojiField.tokenGlyphPlain',
+}
+
 function FieldPart({
   part,
   mode,
@@ -308,16 +318,7 @@ function FieldPart({
   }
 
   if (part.kind === 'glyph') {
-    return (
-      <span
-        title={t(
-          mode === 'buttonLabel' ? 'emojiField.tokenGlyphButton' : 'emojiField.tokenGlyph',
-          { token: part.token },
-        )}
-      >
-        {part.glyph}
-      </span>
-    )
+    return <span title={t(GLYPH_TITLE[mode], { token: part.token })}>{part.glyph}</span>
   }
 
   return (

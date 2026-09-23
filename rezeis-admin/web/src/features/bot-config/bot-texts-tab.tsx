@@ -206,6 +206,9 @@ export function BotTextsTab(): JSX.Element {
  *     a focused field, so without the preview below, a caption key would show
  *     nothing at all while being typed into. For body copy the preview is
  *     already there and a strip as well would just be a second copy of it.
+ *
+ * A `plain` key is treated like a caption on both counts: the preview would
+ * draw its pack emoji as artwork, and the reader gets only the glyph.
  */
 function fieldModeFor(key: string): {
   readonly mode: ReturnType<typeof botTextKeyMode>
@@ -213,7 +216,7 @@ function fieldModeFor(key: string): {
   readonly showsCopyPreview: boolean
 } {
   const mode = botTextKeyMode(key)
-  return { mode, liveStrip: mode === 'buttonLabel', showsCopyPreview: mode === 'text' }
+  return { mode, liveStrip: mode !== 'text', showsCopyPreview: mode === 'text' }
 }
 
 interface TextEditDialogProps {
