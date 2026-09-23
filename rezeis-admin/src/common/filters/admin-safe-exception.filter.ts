@@ -73,6 +73,11 @@ const GENERIC_INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
  */
 export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   'SUBSCRIPTION_LIMIT_REACHED',
+  // Its sibling at the same draft guard: the buyer holds a trial, so the
+  // purchase has to UPGRADE it rather than create a subscription. The cabinet
+  // answers it by re-reading the subscriptions and pricing the conversion; as
+  // an untyped 400 the buyer would only be told the payment failed.
+  'TRIAL_UPGRADE_REQUIRED',
   'REGISTRATION_DISABLED',
   'INVITE_REQUIRED',
   // Sits with its two neighbours above for the same reason: all three are

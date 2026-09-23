@@ -252,11 +252,23 @@ export class PaymentsTransactionsService {
     // increase the count, so they are exempt (renewing an expired sub must
     // stay possible at the cap). Add-on top-ups run through
     // `AddOnPurchaseService` (not this draft path) and never create a new sub.
+    //
+    // A buyer holding a trial is refused first, and with a code of its own: the
+    // purchase converts that trial (UPGRADE), which takes no slot, so at the cap
+    // too "upgrade your trial" is the answer and "limit reached" is not. See
+    // `isConvertibleTrial`.
     if (
       input.purchaseType === PurchaseType.NEW ||
       input.purchaseType === PurchaseType.ADDITIONAL
     ) {
       const capacity = await this.subscriptionQuoteService.getSubscriptionCapacity(input.userId);
+      if (capacity.convertibleTrialId !== null) {
+        throw new BadRequestException({
+          code: 'TRIAL_UPGRADE_REQUIRED',
+          message:
+            'The user holds a trial subscription; a purchase upgrades it instead of creating another subscription.',
+        });
+      }
       if (!capacity.capacityAvailable) {
         throw new BadRequestException({
           code: 'SUBSCRIPTION_LIMIT_REACHED',

@@ -319,6 +319,60 @@ describe('PaymentsTransactionsService', () => {
     assert.equal(state.transactionCreateCalls.length, 0);
   });
 
+  // A purchase beside a trial converts the trial. Multi-subscription left
+  // ADDITIONAL open, so the buyer who pressed «Купить» next to it came away with
+  // the trial and a second subscription — a second link — instead.
+  for (const purchaseType of [PurchaseType.NEW, PurchaseType.ADDITIONAL]) {
+    it(`refuses a ${purchaseType} draft while the buyer holds a trial, before the cap and with a code of its own`, async () => {
+      const { service, state } = createService({
+        quoteResult: createEligibleQuote(),
+        convertibleTrialId: 'trial-sub',
+        // Full as well: converting takes no slot, so the trial is the answer.
+        capacityAvailable: false,
+      });
+
+      const error = await captureRejection(() =>
+        service.createDraft({
+          userId: 'user-1',
+          purchaseType,
+          planId: 'plan-1',
+          durationDays: 30,
+          gatewayType: PaymentGatewayType.YOOKASSA,
+          channel: PurchaseChannel.WEB,
+        }),
+      );
+
+      assert.ok(error instanceof BadRequestException);
+      assert.equal((error.getResponse() as { code?: unknown }).code, 'TRIAL_UPGRADE_REQUIRED');
+      const wire = runSafeFilter(error);
+      assert.equal(wire.statusCode, 400);
+      assert.equal(wire.body['code'], 'TRIAL_UPGRADE_REQUIRED', 'the safe filter stripped the code');
+      assert.equal(state.quoteCalls, 0);
+      assert.equal(state.transactionCreateCalls.length, 0);
+    });
+  }
+
+  it('lets the UPGRADE of that trial through', async () => {
+    const { service, state } = createService({
+      quoteResult: { ...createEligibleQuote(), purchaseType: PurchaseType.UPGRADE },
+      convertibleTrialId: 'trial-sub',
+      capacityAvailable: false,
+    });
+
+    const transaction = await service.createDraft({
+      userId: 'user-1',
+      purchaseType: PurchaseType.UPGRADE,
+      sourceSubscriptionId: 'trial-sub',
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      channel: PurchaseChannel.WEB,
+    });
+
+    assert.equal(transaction.id, 'transaction-1');
+    assert.equal(state.transactionCreateCalls.length, 1);
+  });
+
   it('allows an ADDITIONAL draft when capacity remains', async () => {
     const { service, state } = createService({
       quoteResult: createEligibleQuote(),
@@ -422,6 +476,8 @@ function createService(input: {
   /** Subscription-cap mock: capacityAvailable defaults to true. */
   readonly capacityAvailable?: boolean;
   readonly capacityMax?: number;
+  /** The trial a purchase must convert; none by default. */
+  readonly convertibleTrialId?: string;
 }): {
   readonly service: PaymentsTransactionsService;
   readonly state: {
@@ -498,6 +554,7 @@ function createService(input: {
       activeSubscriptionCount: 0,
       effectiveMaxSubscriptions: input.capacityMax ?? 1,
       capacityAvailable: input.capacityAvailable ?? true,
+      convertibleTrialId: input.convertibleTrialId ?? null,
     }),
   };
   return {

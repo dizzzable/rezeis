@@ -79,6 +79,31 @@ const TRIAL_UPGRADE_REQUIRED: SubscriptionQuoteWarningInterface = {
   message:
     'An existing trial subscription must be upgraded instead of creating a new subscription.',
 };
+
+/**
+ * The trial a purchase converts instead of creating another subscription: one
+ * the buyer still holds (`buildContext` reads no DELETED row) and an upgrade
+ * may move onto a regular plan. That is every status but DISABLED — an
+ * operator's freeze, which the upgrade would lift (its fulfilment writes
+ * ACTIVE), and which the cabinet never offers for an upgrade either.
+ *
+ * While the buyer holds one, a purchase that CREATES a subscription (NEW or
+ * ADDITIONAL) is refused: the action policy closes both, and the checkout draft
+ * enforces it with `TRIAL_UPGRADE_REQUIRED`. The purchase is an UPGRADE of the
+ * trial — same subscription, same link, the trial flag cleared. NEW was already
+ * closed this way; ADDITIONAL was not, so with multi-subscription on a
+ * subscriber who pressed «Купить» beside a trial came away holding the trial
+ * AND a second subscription with a second link.
+ */
+export function isConvertibleTrial(
+  subscription: Pick<Subscription, 'isTrial' | 'status'>,
+): boolean {
+  return (
+    subscription.isTrial &&
+    subscription.status !== SubscriptionStatus.DELETED &&
+    subscription.status !== SubscriptionStatus.DISABLED
+  );
+}
 const TRIAL_ALREADY_USED: SubscriptionQuoteWarningInterface = {
   code: 'TRIAL_ALREADY_USED',
   message: 'The user has already used a trial subscription.',
@@ -245,17 +270,23 @@ export class SubscriptionQuoteService {
    * never touches subscriptions the user already owns, so lowering the limit
    * (or disabling multi-subscription) can't push existing subs into any
    * restricted state — it just stops further purchases.
+   *
+   * `convertibleTrialId` is the other reason a purchase may not create a
+   * subscription — see {@link isConvertibleTrial}. It is read from the same
+   * context, so the draft guard and the action policy agree on it too.
    */
   public async getSubscriptionCapacity(userId: string): Promise<{
     readonly activeSubscriptionCount: number;
     readonly effectiveMaxSubscriptions: number;
     readonly capacityAvailable: boolean;
+    readonly convertibleTrialId: string | null;
   }> {
     const context = await this.buildContext({ userId, channel: PurchaseChannel.WEB });
     return {
       activeSubscriptionCount: context.activeSubscriptionCount,
       effectiveMaxSubscriptions: context.effectiveMaxSubscriptions,
       capacityAvailable: context.activeSubscriptionCount < context.effectiveMaxSubscriptions,
+      convertibleTrialId: context.activeSubscriptions.find(isConvertibleTrial)?.id ?? null,
     };
   }
 
@@ -291,11 +322,11 @@ export class SubscriptionQuoteService {
       plans: freeTrialPlans,
     });
     const capacityAvailable = context.activeSubscriptionCount < context.effectiveMaxSubscriptions;
-    const hasActiveTrial = context.activeSubscriptions.some((subscription) => subscription.isTrial);
+    const holdsConvertibleTrial = context.activeSubscriptions.some(isConvertibleTrial);
     const warnings = [
       ...sourceSelection.warnings,
       ...upgradeSelection.warnings,
-      ...(hasActiveTrial ? [TRIAL_UPGRADE_REQUIRED] : []),
+      ...(holdsConvertibleTrial ? [TRIAL_UPGRADE_REQUIRED] : []),
       ...claimableFreeTrials.warnings,
       ...(!capacityAvailable ? [SUBSCRIPTION_LIMIT_REACHED] : []),
     ];
@@ -303,8 +334,8 @@ export class SubscriptionQuoteService {
       userId,
       channel,
       actions: {
-        NEW: capacityAvailable && !hasActiveTrial,
-        ADDITIONAL: capacityAvailable,
+        NEW: capacityAvailable && !holdsConvertibleTrial,
+        ADDITIONAL: capacityAvailable && !holdsConvertibleTrial,
         RENEW: sourceSelection.plans.length > 0,
         UPGRADE: upgradeSelection.plans.length > 0,
         TRIAL:

@@ -103,6 +103,9 @@ describe('SubscriptionQuoteService', () => {
     });
 
     assert.equal(actualPolicy.actions.NEW, false);
+    // A slot is free (cap 2), and still no second subscription: the purchase
+    // converts the trial.
+    assert.equal(actualPolicy.actions.ADDITIONAL, false);
     assert.equal(actualPolicy.actions.UPGRADE, true);
     assert.deepStrictEqual(
       actualPolicy.warnings.map((warning) => warning.code),
@@ -113,6 +116,62 @@ describe('SubscriptionQuoteService', () => {
         'TRIAL_ALREADY_USED',
       ],
     );
+  });
+
+  // Multi-subscription left ADDITIONAL open beside a trial, so a subscriber who
+  // pressed «Купить» next to it came away holding the trial and a second
+  // subscription with a second link.
+  for (const status of [SubscriptionStatus.ACTIVE, SubscriptionStatus.LIMITED, SubscriptionStatus.EXPIRED]) {
+    it(`closes ADDITIONAL beside a ${status} trial with multi-subscription on, and says the trial is upgraded`, async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [
+          createSubscription({ id: 'paid-sub', isTrial: false, planId: 'paid-plan' }),
+          createSubscription({ id: 'trial-sub', isTrial: true, planId: 'trial-plan', status }),
+        ],
+        plans: [
+          createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL }),
+          createPlan({ id: 'paid-plan', availability: PlanAvailability.ALL }),
+        ],
+        multiSubscriptionSettings: { enabled: true, defaultMaxSubscriptions: 5 },
+      });
+
+      const policy = await service.getActionPolicy({ userId: 'user-1', channel: PurchaseChannel.WEB });
+      const capacity = await service.getSubscriptionCapacity('user-1');
+
+      assert.equal(policy.actions.ADDITIONAL, false);
+      assert.equal(policy.actions.NEW, false);
+      assert.ok(policy.warnings.some((warning) => warning.code === 'TRIAL_UPGRADE_REQUIRED'));
+      // The draft guard reads the same answer.
+      assert.equal(capacity.capacityAvailable, true);
+      assert.equal(capacity.convertibleTrialId, 'trial-sub');
+    });
+  }
+
+  it('leaves ADDITIONAL open beside a DISABLED trial, which no upgrade may lift', async () => {
+    const service = createService({
+      user: createUser({ maxSubscriptions: 1 }),
+      subscriptions: [
+        createSubscription({
+          id: 'trial-sub',
+          isTrial: true,
+          planId: 'trial-plan',
+          status: SubscriptionStatus.DISABLED,
+        }),
+      ],
+      plans: [
+        createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL }),
+        createPlan({ id: 'paid-plan', availability: PlanAvailability.ALL }),
+      ],
+      multiSubscriptionSettings: { enabled: true, defaultMaxSubscriptions: 5 },
+    });
+
+    const policy = await service.getActionPolicy({ userId: 'user-1', channel: PurchaseChannel.WEB });
+    const capacity = await service.getSubscriptionCapacity('user-1');
+
+    assert.equal(policy.actions.ADDITIONAL, true);
+    assert.ok(!policy.warnings.some((warning) => warning.code === 'TRIAL_UPGRADE_REQUIRED'));
+    assert.equal(capacity.convertibleTrialId, null);
   });
 
   it('lets a trial without configured upgrade targets upgrade to any non-trial plan (fallback)', async () => {

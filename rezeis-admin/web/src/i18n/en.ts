@@ -1027,7 +1027,8 @@ export const en = {
       title: 'Multi-Subscription',
       description: 'Allow users to have multiple active subscriptions simultaneously',
       enable: 'Enable Multi-Subscription',
-      enableHint: 'When enabled, users can purchase multiple subscriptions',
+      enableHint:
+        'When enabled, users can purchase multiple subscriptions. While a user holds a trial, a purchase moves the trial onto the chosen plan instead of creating a second subscription.',
       defaultMax: 'Default Max Subscriptions per User',
       defaultMaxHint: 'Can be overridden per-user in User Detail',
       saved: 'Multi-subscription settings saved',
