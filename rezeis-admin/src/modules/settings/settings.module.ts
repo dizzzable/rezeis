@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AuthModule } from '../auth/auth.module';
 import { BotConfigModule } from '../bot-config/bot-config.module';
+import { BrandingDeliveryModule } from './branding-delivery/branding-delivery.module';
 import { InternalBrandingController } from './controllers/internal-branding.controller';
 import { InternalEventsController } from './controllers/internal-events.controller';
 import { InternalPlatformPolicyController } from './controllers/internal-platform-policy.controller';
@@ -16,7 +17,7 @@ import { SettingsService } from './services/settings.service';
  * Registers the first business settings module for the admin backend.
  */
 @Module({
-  imports: [AuthModule, BotConfigModule, OutboundHttpModule],
+  imports: [AuthModule, BotConfigModule, OutboundHttpModule, BrandingDeliveryModule],
   controllers: [
     SettingsController,
     InternalPlatformPolicyController,

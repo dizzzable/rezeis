@@ -32,6 +32,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { BrandingPreview } from "./branding-preview";
 import { BrandingAssetField } from "./branding-asset-field";
+import { BrandingDeliveryNotice } from "./branding-delivery-notice";
 import { BrandMarkPreviewPanel } from "./brand-mark-tile";
 import { BRAND_LOGO_TILE_BASE_PX } from "./brand-logo-geometry";
 import { CARD_LOGO_PRESETS, CardLogoMark, type CardLogoPreset } from "./card-logo-mark";
@@ -262,6 +263,9 @@ export default function WebReiwaPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<BrandingTab>('brand');
+  // When the last save succeeded: the cabinet's report on what it took of it
+  // arrives within seconds, and the notice asks for it again from here.
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   const [presetQuery, setPresetQuery] = useState('');
   const customGradients = useCustomGradients();
   const validationMessages = useMemo<BrandingFormValidationMessages>(() => ({
@@ -320,6 +324,7 @@ export default function WebReiwaPage() {
       queryClient.setQueryData(["admin", "branding"], data);
       form.reset(data);
       toast.success(t('brandingPage.saved'));
+      setSavedAt(Date.now());
     },
     onError: () => toast.error(t('brandingPage.saveFailed')),
   });
@@ -1052,6 +1057,12 @@ export default function WebReiwaPage() {
         </div>
       </div>
 
+      <BrandingDeliveryNotice
+        savedAt={savedAt}
+        tabLabelOf={(field) => t(`brandingPage.tabs.${tabForBrandingField(field)}`)}
+        onOpenField={(field) => setTab(tabForBrandingField(field))}
+      />
+
       <Tabs value={tab} onValueChange={(v) => setTab(v as BrandingTab)}>
         <TabsList className="flex w-full flex-wrap justify-start gap-1">
           {BRANDING_TABS.map((id) => (
@@ -1455,6 +1466,14 @@ export default function WebReiwaPage() {
                   </div>
                 </BrandingAssetField>
                 <FieldError message={form.formState.errors.pwaIconUrl?.message} />
+                {/* What a new icon does to an app that is already installed —
+                    the owner's point of 24.09.2026. iOS keeps the icon it took
+                    at «Добавить на экран Домой» and nothing the cabinet serves
+                    changes it; Chrome on Android re-reads the manifest at launch
+                    at most once a day. */}
+                <p className="text-[11px] text-muted-foreground" data-testid="pwa-icon-installed-hint">
+                  {t('brandingPage.sections.pwaIcon.installedHint')}
+                </p>
               </CardContent>
             </Card>
           </div>

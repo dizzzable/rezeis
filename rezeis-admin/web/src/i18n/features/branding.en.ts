@@ -612,5 +612,68 @@ export const en = {
         top: 'Top',
       },
     },
+    /** Merged into the core `sections.pwaIcon` block (deep merge). */
+    sections: {
+      pwaIcon: {
+        installedHint:
+          'An app that is already installed does not pick up a new icon at once. iPhone stores the icon once, when the app is added to the Home Screen, so to see the new one the app has to be removed from the Home Screen and added again. On Android the icon updates by itself within a day: Chrome re-checks it at launch at most once a day.',
+      },
+    },
+    /** «Кабинет не принял часть оформления» — the cabinet's report on the last save. */
+    deliveryNotice: {
+      title: 'The cabinet did not accept part of the appearance',
+      body: 'Customers already see everything else from the last save. The cabinet kept the fields below as they were: customers see their value from before the save. Fix them and save again.',
+      sent: 'Saved in the panel:',
+      openTab: 'Open the “{{tab}}” tab',
+      elsewhere: {
+        locales: 'Cabinet languages (REZEIS_LOCALES and REZEIS_DEFAULT_LOCALE in the panel .env)',
+        defaultCurrency: 'Default currency (platform settings)',
+        customIcons: 'Icon library',
+        botUsername: 'Bot username',
+        supportUsername: 'Support account',
+        platformBranding: 'Project name and site title (platform settings)',
+        emailEnabled: 'E-mail delivery (SMTP)',
+      },
+      reasons: {
+        'not-an-object': 'not the right kind of value: the cabinet expects a set of settings',
+        'not-an-array': 'not the right kind of value: the cabinet expects a list',
+        empty: 'the list is empty',
+        'contains-a-blank-entry': 'the list has an empty entry',
+        'not-a-non-empty-string': 'the value is empty',
+        'not-listed-in-locales': 'the default language is not in the list of languages',
+        'not-a-preset-id': 'the cabinet does not know this theme',
+        'not-a-preset-version': 'wrong theme version',
+        'not-an-allowed-value': 'the cabinet does not know this value',
+        'not-a-valid-theme-variant-pair': 'the light and dark versions of the concept are incomplete',
+        'not-a-string-or-null': 'the cabinet expects text here',
+        'not-an-allowed-image-url':
+          'the cabinet cannot show this image: use an https:// link, a data:image URL or a file uploaded on this page',
+        'not-a-hex-colour': 'not a colour written as #RRGGBB',
+        'not-a-safe-css-gradient': 'not a CSS gradient: only linear-, radial- and conic-gradient work',
+        'not-a-safe-css-gradient-or-null':
+          'not a CSS gradient: only linear-, radial- and conic-gradient or an empty field work',
+        'not-a-valid-card-text-policy': 'the text colour is incomplete: a custom colour needs a #RRGGBB value',
+        'does-not-match-the-root-card-text-policy':
+          'the card text in the light and dark versions of the concept differs from the general setting',
+        'not-a-valid-glass-layer': 'the glass layer is incomplete or out of range',
+        'not-a-string': 'the cabinet expects text here',
+        'not-an-effect-id': 'wrong effect name',
+        'not-a-valid-card-effect-slot': 'one of the slots is incomplete',
+        'not-a-valid-app-background': 'the app background is incomplete or out of range',
+        'not-a-hex-colour-map': 'one of the colours is not written as #RRGGBB',
+        'not-a-valid-icon-decor-map': 'the look of one of the icons is set wrongly',
+        'not-a-valid-corner-radius-set': 'the corner radii are out of range',
+        'not-a-valid-surface-theme': 'one of the surface colours or opacities is set wrongly',
+        'not-a-valid-custom-icon': 'one of the library icons is incomplete',
+        'not-a-valid-platform-branding': 'the project name or the site title is not text',
+        'not-a-boolean': 'the cabinet expects yes or no here',
+        'not-a-valid-plan-card-style-map': 'the look of one of the plan cards is set wrongly',
+        'not-a-valid-nav-item': 'the navigation has a section the cabinet does not know',
+        'duplicate-destination-id': 'the same section appears twice in the navigation',
+        outOfRange: 'out of range: from {{min}} to {{max}}',
+        tooManyEntries: 'too many entries: at most {{max}}',
+        unknown: 'the cabinet did not accept this value',
+      },
+    },
   },
 } as const
