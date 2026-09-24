@@ -32,7 +32,7 @@
  * server returns the unchanged positionX/Y. We extend it with a sentinel
  * filter so the pinned reply-node never gets a server-side override.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -52,6 +52,7 @@ import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { expectArray } from '@/lib/api-utils'
 import { Button } from '@/components/ui/button'
+import { UnsavedChangesGuard } from '@/components/unsaved-changes-guard'
 import { cn } from '@/lib/utils'
 import {
   Sheet,
@@ -82,6 +83,7 @@ import { supportChatOf, type RouteContext } from './components/reply-keyboard-ut
 import { buildReplyToScreenEdges, buildMapEdges, buildBackToMenuEdges, botMapNodesToReactFlow, flowToReactFlow, nodesToPositions, readMapNodePositions, systemScreensToReactFlow, SYSTEM_SCREEN_NODE_TYPE, type MapNodePositions } from './utils'
 import { systemScreenForNode } from './system-screens'
 import { SystemScreenPanel } from './components/SystemScreenPanel'
+import { createPendingEdits, PendingEditsContext } from './pending-edits'
 import type { BotFlow, BotFlowScreen } from './types'
 
 import { MAP_INFO_NODE_TYPE } from './components/MapInfoNode'
@@ -122,6 +124,27 @@ export default function BotFlowPage() {
   // editor (like the left rail) to get the full canvas width while arranging
   // blocks. Selecting a node re-opens it.
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false)
+
+  // What the inspector has typed and not saved, and its saves in flight: saved
+  // and waited for before «Опубликовать» and «Сохранить позиции», asked about
+  // before the page is left (`pending-edits.ts`).
+  const [pendingEdits] = useState(createPendingEdits)
+  const unsavedWork = useSyncExternalStore(pendingEdits.subscribe, pendingEdits.isDirty)
+  const [flushing, setFlushing] = useState(false)
+  // A phone gives no prompt: the page going to the background — another app,
+  // the tab closed — is the last moment it runs, so what is typed goes then.
+  useEffect(() => {
+    const onHidden = (): void => {
+      if (document.visibilityState === 'hidden') void pendingEdits.flush()
+    }
+    const onPageHide = (): void => void pendingEdits.flush()
+    document.addEventListener('visibilitychange', onHidden)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onHidden)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+  }, [pendingEdits])
 
   // ── Load draft flow + reply-keyboard buttons in parallel ───────────────────
   const { data: flow, isLoading: flowLoading } = useQuery<BotFlow>({
@@ -572,8 +595,15 @@ export default function BotFlowPage() {
     createScreenMutation.mutate({ x: 120 + nextIndex * 32, y: 120 + nextIndex * 32 })
   }, [flow, createScreenMutation])
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     if (!flow) return
+    // What the inspector has typed goes first: «Сохранить» saves it too.
+    setFlushing(true)
+    try {
+      await pendingEdits.flush()
+    } finally {
+      setFlushing(false)
+    }
     // Graph screens persist to their own DB rows; the read-only map nodes
     // (notifications / Mini App terminals) persist into the flow layout JSON.
     // Both are saved together so a single "Save positions" keeps the entire
@@ -593,7 +623,21 @@ export default function BotFlowPage() {
     ])
       .then(() => toast.success(t('botFlow.saved')))
       .catch(() => toast.error(t('botFlow.saveError')))
-  }, [flow, nodes, savePositionsMutation, saveLayoutMutation, t])
+  }, [flow, nodes, pendingEdits, savePositionsMutation, saveLayoutMutation, t])
+
+  // «Опубликовать» publishes the draft AS THE SERVER HOLDS IT, so what the
+  // inspector has typed is saved first and every save in flight lands first —
+  // a link typed and then «Опубликовать» clicked went out with the blur's save
+  // ~100 ms behind the publish, and Safari gives no blur at all.
+  const handlePublish = useCallback(async () => {
+    setFlushing(true)
+    try {
+      await pendingEdits.flush()
+    } finally {
+      setFlushing(false)
+    }
+    publishMutation.mutate()
+  }, [pendingEdits, publishMutation])
 
   // ── Right inspector router ─────────────────────────────────────────────────
   const selectedScreen = useMemo<BotFlowScreen | null>(() => {
@@ -644,7 +688,17 @@ export default function BotFlowPage() {
   }
 
   return (
+    <PendingEditsContext.Provider value={pendingEdits}>
     <div className="flex h-full flex-col overflow-hidden">
+      {/* A reload, a closed tab or the side menu with something typed and not
+          saved — or still on its way — asks first. */}
+      <UnsavedChangesGuard
+        when={unsavedWork}
+        title={t('botMapPage.unsavedGuard.title')}
+        description={t('botMapPage.unsavedGuard.description')}
+        stay={t('botMapPage.unsavedGuard.stay')}
+        leave={t('botMapPage.unsavedGuard.leave')}
+      />
       {/* Toolbar */}
       <div className="flex shrink-0 items-center justify-between border-b px-4 py-2">
         <div className="flex items-center gap-2">
@@ -692,8 +746,8 @@ export default function BotFlowPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleSave}
-                disabled={savePositionsMutation.isPending || saveLayoutMutation.isPending}
+                onClick={() => void handleSave()}
+                disabled={flushing || savePositionsMutation.isPending || saveLayoutMutation.isPending}
                 title={t('botStudio.toolbar.saveHint')}
               >
                 <Save className="mr-1.5 h-3.5 w-3.5" aria-hidden />
@@ -701,8 +755,8 @@ export default function BotFlowPage() {
               </Button>
               <Button
                 size="sm"
-                onClick={() => publishMutation.mutate()}
-                disabled={publishMutation.isPending}
+                onClick={() => void handlePublish()}
+                disabled={flushing || publishMutation.isPending}
                 title={t('botStudio.toolbar.publishHint')}
               >
                 <Upload className="mr-1.5 h-3.5 w-3.5" aria-hidden />
@@ -803,7 +857,9 @@ export default function BotFlowPage() {
             onCollapse={() => setInspectorCollapsed(true)}
           >
             <div className="p-3">
-              <ScreenEditorPanel screen={selectedScreen} flowName={FLOW_NAME} />
+              {/* Keyed by the screen: another screen is another editor, and
+                  this one saves what was typed in it as it goes. */}
+              <ScreenEditorPanel key={selectedScreen.id} screen={selectedScreen} flowName={FLOW_NAME} />
             </div>
           </InspectorShell>
         )}
@@ -869,6 +925,7 @@ export default function BotFlowPage() {
         </SheetContent>
       </Sheet>
     </div>
+    </PendingEditsContext.Provider>
   )
 }
 

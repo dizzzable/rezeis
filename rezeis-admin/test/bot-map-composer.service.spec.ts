@@ -461,17 +461,28 @@ describe('Mini App pages on «Карта бота»', () => {
     }
   });
 
-  it('draws a button to `/subscribe` red — the cabinet has no such page — and one to «Тарифы» green', () => {
+  it('draws a button to `/subscribe` to «Тарифы», where the cabinet now sends it, and one to a page it does not have red', () => {
+    // The cabinet had no `/subscribe` page and showed its home screen; since
+    // 23.09.2026 it sends `/subscribe` on to the plans page, query kept
+    // (reiwa `SubscribeAlias`). The route model follows (`MINI_APP_PAGE_ALIASES`).
     const out = makeComposer().compose({
       flow: null,
       replyButtons: [],
-      templates: [notification([{ target: '/subscribe' }, { target: '/plans' }])] as never,
+      templates: [
+        notification([{ target: '/subscribe?plan=pro' }, { target: '/plans' }, { target: 'renew' }, { target: '/subscribed' }]),
+      ] as never,
     });
-    const [subscribe, plans] = out.edges.filter((e) => e.source === 'notif:trial_ended');
-    assert.equal(subscribe?.valid, false);
-    assert.equal(subscribe?.reason, 'unknown-mini-app-route');
+    const [subscribe, plans, renew, typo] = out.edges.filter((e) => e.source === 'notif:trial_ended');
+    assert.equal(subscribe?.valid, true);
+    assert.equal(subscribe?.target, 'mini-app:/plans');
+    assert.deepStrictEqual(subscribe?.destination, { kind: 'webApp', route: '/subscribe?plan=pro' });
     assert.equal(plans?.valid, true);
     assert.equal(plans?.target, 'mini-app:/plans');
+    // A page typed without its slash: the bot gives it one.
+    assert.equal(renew?.valid, true);
+    assert.equal(renew?.target, 'mini-app:/renew');
+    assert.equal(typo?.valid, false);
+    assert.equal(typo?.reason, 'unknown-mini-app-route');
   });
 
   it('draws «Кабинет» with no address of its own to «Кабинет в браузере», where the bot sends it', () => {
@@ -868,8 +879,8 @@ describe('a screen’s «CALLBACK» button on «Список»', () => {
  * (`buildScreenKeyboard`, `screen-renderer.ts`): an `https://` address whose
  * HOST is not local as typed, a path on the cabinet's public address, the rest
  * left out. The composer kept its own substring rule after the bot and the
- * route model moved to the host (R4 F4: 11 inputs apart), and drew a path red
- * as «unsafe-url» while reiwa opens it on the cabinet (R4 laterList 4).
+ * route model moved to the host (11 inputs apart), and drew a path red as
+ * «unsafe-url» while reiwa opens it on the cabinet.
  */
 describe('a screen’s link or Mini App button on «Список»', () => {
   const now = new Date();

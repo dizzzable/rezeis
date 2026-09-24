@@ -74,6 +74,15 @@ export const ru = {
       missingScreen: '✕ Такого экрана нет — бот ответит «экран не найден»',
       missingPage: '✕ В мини-приложении нет такой страницы',
     },
+    // «Схема»: something typed in the inspector is not saved yet, or its save
+    // is still on its way (`pending-edits.ts`).
+    unsavedGuard: {
+      title: 'Правки ещё не сохранены',
+      description:
+        'В редакторе экрана есть несохранённое: ссылка, подпись или текст ещё сохраняются, или ссылку бот не откроет — почему, сказано под полем. Останьтесь, чтобы проверить.',
+      stay: 'Остаться',
+      leave: 'Всё равно уйти',
+    },
     inspector: {
       empty: 'Выберите узел слева, чтобы открыть редактор.',
       saved: 'Сохранено',
@@ -377,6 +386,24 @@ export const ru = {
         starsReceived: 'Оплата звёздами Telegram — сообщение после оплаты',
         starsRefused: 'Оплата звёздами Telegram — почему форма оплаты отказала',
         commandDescription: 'Подпись команды в списке по «/»',
+      },
+    },
+  },
+  // Why a button's target is not saved — the reasons only a notification's or
+  // a screen's button can have. They join the main menu's six in the core
+  // dictionary (`botConfigPage.buttons.fields.actionTarget.problems`); the server
+  // refuses the same (`buttonTargetProblem`).
+  botConfigPage: {
+    buttons: {
+      fields: {
+        actionTarget: {
+          problems: {
+            linkNeedsHttps: 'Эту ссылку бот откроет только по https://',
+            pageOnly:
+              'Здесь нужна страница кабинета, например /renew: адрес бот откроет как страницу, которой в кабинете нет',
+            addressOnly: 'Здесь нужен полный адрес с https://, а страницу кабинета открывает кнопка «Mini App»',
+          },
+        },
       },
     },
   },

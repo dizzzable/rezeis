@@ -6178,7 +6178,7 @@ export const en = {
           screenEmpty: 'Create at least one screen in Bot Studio first to link it here.',
           // Why a target is not saved — the server refuses the same (`menuButtonTargetProblem`).
           problems: {
-            notAPage: 'A cabinet page starts with a single "/" (such as /plans), an address with http:// or https://',
+            notAPage: 'This takes a cabinet page such as /plans, or a whole address starting with http:// or https://',
             badCharacters:
               'A page address must not contain spaces, backslashes, control or invisible formatting characters',
             notAnAddress: 'This address does not parse: http:// or https:// must be followed by a site name, with no spaces',

@@ -74,7 +74,8 @@ describe('a main-menu button’s address in its form', () => {
   })
 
   it.each([
-    ['URL', 'plans', 'notAPage'],
+    // An address with its scheme left off: the bot would open it as a page the cabinet does not have.
+    ['URL', 'example.com/plans', 'notAPage'],
     ['URL', '//evil.example', 'notAPage'],
     ['URL', '/pl ans', 'badCharacters'],
     ['URL', `/pro${String.fromCodePoint(0x200b)}mo`, 'badCharacters'],
@@ -100,6 +101,9 @@ describe('a main-menu button’s address in its form', () => {
 
   it.each([
     ['URL', '/plans'],
+    // A page without its slash: reiwa's `addressOn` gives it one.
+    ['URL', 'plans'],
+    ['WEBAPP', 'referrals'],
     ['URL', 'http://example.com/a'],
     ['WEBAPP', '/referrals'],
     ['WEBAPP', '/promo?code=SALE'],
@@ -126,7 +130,7 @@ describe('a main-menu button’s address in its form', () => {
     const patch = vi.spyOn(api, 'patch').mockResolvedValue({ data: botButton({ actionTarget: '/plans' }) })
     const user = userEvent.setup()
     renderWithProviders(
-      <BotButtonEditDialog button={botButton({ actionTarget: 'plans' })} open onOpenChange={() => undefined} />,
+      <BotButtonEditDialog button={botButton({ actionTarget: 'example.com/plans' })} open onOpenChange={() => undefined} />,
     )
 
     const save = screen.getByRole('button', { name: t('botConfigPage.buttons.save') })
@@ -158,7 +162,7 @@ describe('a main-menu button’s address in its form', () => {
     await user.click(screen.getByRole('combobox', { name: t('botConfigPage.buttons.fields.actionType.label') }))
     await user.click(await screen.findByRole('option', { name: t('botConfigPage.buttons.fields.actionType.options.URL') }))
     const target = screen.getByLabelText(t('botConfigPage.buttons.fields.actionTarget.label'))
-    await user.type(target, 'plans')
+    await user.type(target, 'example.com/plans')
 
     const create = screen.getByRole('button', { name: t('botConfigPage.buttons.create') })
     expect(create).toBeDisabled()

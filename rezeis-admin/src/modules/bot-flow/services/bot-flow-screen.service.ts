@@ -2,6 +2,30 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { BotFlowButton, BotFlowButtonAction, BotFlowButtonStyle, BotFlowMediaType, BotFlowParseMode, BotFlowScreen, BotFlowStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { assertButtonTarget } from '../../bot-map/services/button-target-refusal';
+
+/**
+ * Refuse a screen button's link or Mini App target the bot could not open —
+ * the rule the main menu's are saved by, and the map draws red by
+ * (`buttonTargetProblem`): a link on https or a page of the cabinet, a Mini App
+ * on https or a page of the Mini App.
+ *
+ * Only the target this request writes. A button saved before with a target
+ * the rule refuses still loads, still saves its caption, row or style, and may
+ * be switched to another action — its target field in «Схема» says why it is
+ * refused, and the target itself saves once it is fixed. Checking the stored
+ * one on every write would lock the operator out of the very field that fixes
+ * it: the field shows only for the button's current action.
+ */
+function assertScreenButtonTargets(input: {
+  readonly url?: string | null;
+  readonly webAppUrl?: string | null;
+}): void {
+  if (input.url !== undefined && input.url !== null) assertButtonTarget('screenUrl', input.url, 'url');
+  if (input.webAppUrl !== undefined && input.webAppUrl !== null) {
+    assertButtonTarget('screenWebApp', input.webAppUrl, 'webAppUrl');
+  }
+}
 
 function generateShortId(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -168,6 +192,7 @@ export class BotFlowScreenService {
 
   /** Add a button to a screen. */
   public async createButton(input: CreateButtonInput): Promise<BotFlowButton> {
+    assertScreenButtonTargets(input);
     const screen = await this.prisma.botFlowScreen.findUnique({
       where: { id: input.screenId },
       select: { flowId: true },
@@ -195,6 +220,7 @@ export class BotFlowScreenService {
 
   /** Update a button. */
   public async updateButton(buttonId: string, input: UpdateButtonInput): Promise<BotFlowButton> {
+    assertScreenButtonTargets(input);
     const button = await this.prisma.botFlowButton.findUnique({
       where: { id: buttonId },
       include: { screen: { select: { flowId: true } } },

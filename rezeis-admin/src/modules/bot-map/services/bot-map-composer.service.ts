@@ -34,6 +34,7 @@ import {
   callbackRoute,
   isLocalAddress,
   menuButtonRoute,
+  miniAppLandingPage,
   supportChatOf,
   type MenuButtonRoute,
   type RouteContext,
@@ -669,14 +670,15 @@ interface MiniAppTarget {
  * THE ROUTE; the query and the fragment are what it is asked: «📲 Подключить»
  * opens `/dashboard?connect=help&subscriptionId=…` — the dashboard, told which
  * card to open — and comparing the whole string marked that working button red.
+ * The route is the page it lands on (`miniAppLandingPage`, the route model's):
+ * `/subscribe` opens «Тарифы», and the Mini App's root, the dashboard.
  * `null` for an empty target or an absolute URL.
  */
 function miniAppTargetOf(target: string): MiniAppTarget | null {
   const trimmed = target.trim();
   if (trimmed.length === 0 || trimmed.includes('://')) return null;
   const shown = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-  const cut = shown.search(/[?#]/);
-  return { route: cut === -1 ? shown : shown.slice(0, cut), shown };
+  return { route: miniAppLandingPage(shown), shown };
 }
 
 /**

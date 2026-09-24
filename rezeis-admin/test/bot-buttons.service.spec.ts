@@ -91,11 +91,14 @@ describe('a main-menu button’s address, as saved', () => {
     assert.equal((await created(BotButtonAction.WEBAPP, '   ')).actionTarget, null);
   });
 
-  it('refuses a path without its leading slash, and one starting with two', async () => {
+  it('takes a page typed without its leading slash — the bot gives it one — and refuses one starting with two, or an address with its scheme left off', async () => {
     for (const actionType of ADDRESS_KINDS) {
-      for (const target of ['plans', '//evil.example/x']) {
+      // reiwa's `addressOn` opens `plans` as `/plans`, as the notification
+      // sender and the screen renderer do.
+      assert.equal((await created(actionType, 'plans')).actionTarget, 'plans');
+      for (const target of ['//evil.example/x', 'example.com/plans', 'tg://resolve?domain=x']) {
         const error = await refusal(actionType, target);
-        assert.match(String(error.message), /single "\/"/);
+        assert.match(String(error.message), /a page of the cabinet \(such as \/plans\) or a whole address/, target);
       }
     }
   });
@@ -158,7 +161,7 @@ describe('a main-menu button’s address, as saved', () => {
 
   it('keeps its reason on the way to the operator: the admin filter passes each one through', async () => {
     const targets: ReadonlyArray<[BotButtonAction, string]> = [
-      [BotButtonAction.URL, 'plans'],
+      [BotButtonAction.URL, 'example.com/plans'],
       [BotButtonAction.URL, '/pl ans'],
       [BotButtonAction.URL, 'https://exa mple.com'],
       [BotButtonAction.URL, 'https://localhost:5173/'],

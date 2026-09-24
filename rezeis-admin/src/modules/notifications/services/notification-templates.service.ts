@@ -9,6 +9,7 @@ import { NotificationTemplate, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { assertButtonTarget } from '../../bot-map/services/button-target-refusal';
 
 import {
   DEFAULT_NOTIFICATION_TEMPLATES,
@@ -81,6 +82,7 @@ export class NotificationTemplatesService implements OnModuleInit {
   }
 
   public async upsert(input: UpsertTemplateInput): Promise<NotificationTemplate> {
+    assertNotificationButtonTargets(input.buttons);
     const existing = await this.prismaService.notificationTemplate.findUnique({
       where: { type: input.type },
       select: { id: true },
@@ -121,6 +123,7 @@ export class NotificationTemplatesService implements OnModuleInit {
   }
 
   public async update(input: UpdateTemplateInput): Promise<NotificationTemplate> {
+    assertNotificationButtonTargets(input.buttons);
     const existing = await this.prismaService.notificationTemplate.findUnique({
       where: { id: input.id },
     });
@@ -324,6 +327,30 @@ export class NotificationTemplatesService implements OnModuleInit {
       isActive: true,
     };
   }
+}
+
+/**
+ * Refuse a notification button whose target the bot could not open — the
+ * main menu's rule, the one the map draws red by (`buttonTargetProblem`): a
+ * «Mini App» button opens a page of the cabinet and nothing else, since the
+ * bot puts whatever it holds after its own address; a «URL» button an https
+ * address and nothing else, since the panel sends no other
+ * (`validateStoredButton`). A callback's target is the bot's to answer.
+ *
+ * On the buttons this request writes, all of them: the editor sends the whole
+ * list, so a template saved before with such a button keeps it until the
+ * buttons are saved again — its title, text and switch still save — and the
+ * editor says which one is refused, and why, before the request.
+ */
+function assertNotificationButtonTargets(buttons: ReadonlyArray<unknown> | undefined): void {
+  buttons?.forEach((raw, index) => {
+    if (raw === null || typeof raw !== 'object') return;
+    const button = raw as { readonly kind?: unknown; readonly target?: unknown };
+    const target = typeof button.target === 'string' ? button.target : null;
+    const field = `buttons.${index}.target`;
+    if (button.kind === 'url') assertButtonTarget('notificationUrl', target, field);
+    else if (button.kind === 'webApp') assertButtonTarget('notificationWebApp', target, field);
+  });
 }
 
 /** Normalize an operator-supplied banner reference: empty/whitespace → null. */

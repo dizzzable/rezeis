@@ -1,7 +1,7 @@
 /**
  * The map's hints name what the panel shows and say what the bot does.
  *
- * The review of 23.09.2026 found three that did not:
+ * On 23.09.2026 three did not:
  *   - a no-block screen sent its reader to «Тексты бота» / «Bot texts» — the
  *     toolbar button and the tab read «Тексты» / «Texts»
  *     (`botStudio.toolbar.texts`, rendered by `bot-flow-page.tsx`);

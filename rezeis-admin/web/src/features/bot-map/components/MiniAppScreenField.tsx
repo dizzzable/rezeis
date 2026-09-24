@@ -41,6 +41,18 @@ interface MiniAppScreenFieldProps {
   readonly placeholder: string
   /** Id for the free-text box, so a `<label htmlFor>` can point at it. */
   readonly inputId?: string
+  /**
+   * For a form that saves the field by itself rather than with a button
+   * («Схема»'s screen buttons): called with a page picked from the list, and
+   * with what is typed under «Свой путь…» when the box loses focus or Enter is
+   * pressed — never on each keystroke, so half a path is never saved.
+   */
+  readonly onCommit?: (target: string) => void
+  /**
+   * The id of the note that says why what is typed cannot be saved, while one
+   * shows: the box is marked invalid and read with it.
+   */
+  readonly describedBy?: string
 }
 
 export function MiniAppScreenField({
@@ -49,6 +61,8 @@ export function MiniAppScreenField({
   labelId,
   placeholder,
   inputId,
+  onCommit,
+  describedBy,
 }: MiniAppScreenFieldProps) {
   const { t, i18n } = useTranslation()
   // The screens hosting a Mini App button already hold this query on the
@@ -70,8 +84,18 @@ export function MiniAppScreenField({
       id={inputId}
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      onBlur={onCommit === undefined ? undefined : (e) => onCommit(e.target.value)}
+      onKeyDown={
+        onCommit === undefined
+          ? undefined
+          : (e) => {
+              if (e.key === 'Enter') onCommit(e.currentTarget.value)
+            }
+      }
       placeholder={placeholder}
       aria-labelledby={labelId}
+      aria-invalid={describedBy !== undefined ? true : undefined}
+      aria-describedby={describedBy}
       maxLength={2_000}
       className="font-mono text-xs"
     />
@@ -92,6 +116,7 @@ export function MiniAppScreenField({
           }
           setCustomChosen(false)
           onChange(next)
+          onCommit?.(next)
         }}
       >
         <SelectTrigger className="h-8 text-xs" aria-labelledby={labelId}>

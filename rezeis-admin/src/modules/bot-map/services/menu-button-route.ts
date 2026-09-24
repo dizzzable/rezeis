@@ -9,9 +9,12 @@
  * loads both and fails when their vocabularies differ or when they route any
  * case of its matrix differently. Change both, or neither.
  *
- * `menuButtonTargetProblem` is also what `bot-config/services/bot-buttons.service.ts`
- * refuses a main-menu button's target with, and the SPA's button forms say
- * before saving: the same check on both sides, held equal by the same spec.
+ * `buttonTargetProblem` is also what the server refuses a button's target with
+ * wherever one is saved — a main-menu button (`bot-config/services/bot-buttons.service.ts`),
+ * a screen's (`bot-flow/services/bot-flow-screen.service.ts`), a notification's
+ * (`notifications/services/notification-templates.service.ts`), all through
+ * `button-target-refusal.ts` — and what the SPA's forms say before saving: the
+ * same check on both sides, held equal by the same spec.
  */
 
 /** A main-menu button as far as its route goes — the `BotButton` fields reiwa reads. */
@@ -66,6 +69,31 @@ export const CALLBACK_VOCABULARY = {
 
 /** The page a Mini App button with no page of its own lands on: its home sends a launch on to the dashboard. */
 export const MINI_APP_HOME_PAGE = '/dashboard';
+
+/**
+ * Pages of the cabinet that open another page, and the page each opens.
+ * `/subscribe` is the plans page (reiwa `web/src/App.tsx`, `SubscribeAlias`,
+ * from 23.09.2026, its query kept): «Карта бота» offered it as «Покупка
+ * подписки» and the legacy «vpn» button opened it, so buttons are saved with
+ * it, and the cabinet takes every one of them to «Тарифы». The map draws such
+ * a button to the page it lands on; the page picker does not offer the alias
+ * (`mini-app-terminals.catalog.ts`) — a new button is set to the page itself.
+ * `web/src/features/bot-flow/system-screens.reiwa.parity.test.ts` holds each
+ * alias to reiwa's route table.
+ */
+export const MINI_APP_PAGE_ALIASES: Readonly<Record<string, string>> = { '/subscribe': '/plans' };
+
+/**
+ * The page a Mini App path lands on: the path without its query and fragment
+ * (they are what the page is asked, not which page), the dashboard for the
+ * Mini App's root, the page an alias opens for an alias.
+ */
+export function miniAppLandingPage(path: string): string {
+  const cut = path.search(/[?#]/);
+  const bare = cut === -1 ? path : path.slice(0, cut);
+  if (bare === '/') return MINI_APP_HOME_PAGE;
+  return Object.prototype.hasOwnProperty.call(MINI_APP_PAGE_ALIASES, bare) ? MINI_APP_PAGE_ALIASES[bare] : bare;
+}
 
 /**
  * What a «Чат с поддержкой» button sends when there is no public support
@@ -185,9 +213,7 @@ export function menuButtonRoute(button: MenuButtonRouting, ctx: RouteContext): M
         return { kind: 'url', host: hostOf(target), safe: target.startsWith('https://') && !isLocalAddress(target) };
       }
       const path = pathOn(target);
-      const cut = path.search(/[?#]/);
-      const bare = cut === -1 ? path : path.slice(0, cut);
-      const page = bare === '/' ? MINI_APP_HOME_PAGE : bare;
+      const page = miniAppLandingPage(path);
       return { kind: 'miniApp', path, page, known: ctx.miniAppRoutes === null || ctx.miniAppRoutes.has(page) };
     }
     case 'CALLBACK':
@@ -196,47 +222,130 @@ export function menuButtonRoute(button: MenuButtonRouting, ctx: RouteContext): M
   }
 }
 
-/** Why a main-menu button's target cannot be saved: the bot could not open it. */
-export type MenuButtonTargetProblem =
+/** Why a button's target cannot be saved: the bot could not open it. */
+export type ButtonTargetProblem =
   | 'notAPage'
   | 'badCharacters'
   | 'notAnAddress'
   | 'webAppNeedsHttps'
   | 'upperCaseScheme'
-  | 'localAddress';
+  | 'localAddress'
+  /** An http:// address where only https is opened: a screen's link, a notification's. */
+  | 'linkNeedsHttps'
+  /** Anything but a page where the bot opens a page and nothing else: a notification's Mini App. */
+  | 'pageOnly'
+  /** A page where only a whole address goes: a notification's link. */
+  | 'addressOnly';
+
+/** The main menu's reasons are the same as everyone's. */
+export type MenuButtonTargetProblem = ButtonTargetProblem;
 
 /**
- * What is wrong with a «Внешняя ссылка» or «Mini App» target, or `null` when
- * the bot can open it:
- *   • an `http(s)://` address that parses, with a host and no whitespace
- *     (`notAnAddress`), whose host is not this machine (`localAddress`); a Mini
- *     App's on https (`webAppNeedsHttps`) written in lower case, which is all
- *     reiwa keeps (`isTelegramSafeButtonUrl` compares case-sensitively; a
- *     phone's auto-capital makes `Https://` — `upperCaseScheme`);
- *   • or a page of the cabinet: a path that starts with a single `/`
- *     (`notAPage`) and holds no space, backslash, control or invisible
- *     formatting character (`badCharacters`).
- * Empty is fine too: the cabinet's (the Mini App's) home. The check the server
- * makes before saving a main-menu button (`bot-buttons.service.ts`) and the one
- * its forms make, so the operator reads why before saving.
+ * Where a button's target is read, and so what it may be. Each place the bot
+ * opens a target reads it its own way:
+ *   • `menuUrl` — a main-menu «Внешняя ссылка»: an `http(s)://` address as
+ *     typed, anything else a page of the cabinet website (reiwa `addressOn`);
+ *   • `menuWebApp`, `screenWebApp` — a «Mini App» button of the main menu or
+ *     of a screen: an `https://` address as typed (`isTelegramSafeButtonUrl`),
+ *     anything else a page of the Mini App;
+ *   • `screenUrl` — a screen's «Открыть URL»: an `https://` address as typed,
+ *     anything else a page of the cabinet website, and an `http://` one left
+ *     out (reiwa `buildScreenKeyboard`);
+ *   • `notificationWebApp` — a notification's «Mini App»: a page, nothing
+ *     else. The bot puts whatever it holds after its own address, so an
+ *     address opens `<miniApp>/https://…`, a page the cabinet does not have;
+ *   • `notificationUrl` — a notification's «URL»: an `https://` address,
+ *     nothing else. The panel sends no other (`validateStoredButton`).
+ * `opens` picks the word for an address that is not https.
+ */
+export const BUTTON_TARGET_RULES = {
+  menuUrl: { opens: 'link', address: 'http', page: true },
+  menuWebApp: { opens: 'miniApp', address: 'https', page: true },
+  screenUrl: { opens: 'link', address: 'https', page: true },
+  screenWebApp: { opens: 'miniApp', address: 'https', page: true },
+  notificationUrl: { opens: 'link', address: 'https', page: false },
+  notificationWebApp: { opens: 'miniApp', address: 'none', page: true },
+} as const;
+
+export type ButtonTargetPlace = keyof typeof BUTTON_TARGET_RULES;
+
+/** What a place opens: a link or a Mini App; which addresses as typed; whether a page. */
+interface ButtonTargetRule {
+  readonly opens: 'link' | 'miniApp';
+  readonly address: 'http' | 'https' | 'none';
+  readonly page: boolean;
+}
+
+/**
+ * What is wrong with a button's target where `place` reads it, or `null`
+ * when the bot can open it:
+ *   • an `http(s)://` address — where the place opens one — that parses, with
+ *     a host and no whitespace (`notAnAddress`), whose host is not this machine
+ *     (`localAddress`); where only https opens, on https (`webAppNeedsHttps`,
+ *     `linkNeedsHttps`) written in lower case, which is all the bot keeps
+ *     (`isTelegramSafeButtonUrl` compares case-sensitively; a phone's
+ *     auto-capital makes `Https://` — `upperCaseScheme`);
+ *   • or a page of the cabinet — where the place opens one — a path the bot
+ *     opens as a page (`isPageTarget`: with its single leading `/`, or typed
+ *     without it — `renew` opens `/renew`; `notAPage`) that holds no space,
+ *     backslash, control or invisible formatting character (`badCharacters`);
+ *   • a place that opens only a page refuses anything else (`pageOnly`), one
+ *     that opens only an address, a page (`addressOnly`).
+ * Empty is fine too: a main-menu button then opens the cabinet's (the Mini
+ * App's) home, and elsewhere the map draws the button red. The check the server
+ * makes before saving a button's target and the one its form makes, so the
+ * operator reads why before saving.
+ */
+export function buttonTargetProblem(place: ButtonTargetPlace, target: string | null): ButtonTargetProblem | null {
+  const rule: ButtonTargetRule = BUTTON_TARGET_RULES[place];
+  const trimmed = (target ?? '').trim();
+  if (trimmed.length === 0) return null;
+  if (ABSOLUTE_ADDRESS.test(trimmed)) {
+    if (rule.address === 'none') return 'pageOnly';
+    if (!isAddress(trimmed)) return 'notAnAddress';
+    if (rule.address === 'https') {
+      if (!/^https:\/\//i.test(trimmed)) return rule.opens === 'miniApp' ? 'webAppNeedsHttps' : 'linkNeedsHttps';
+      if (!trimmed.startsWith('https://')) return 'upperCaseScheme';
+    }
+    return isLocalAddress(trimmed) ? 'localAddress' : null;
+  }
+  if (!rule.page) return 'addressOnly';
+  if (!isPageTarget(trimmed)) return rule.address === 'none' ? 'pageOnly' : 'notAPage';
+  return hasBadCharacter(trimmed) ? 'badCharacters' : null;
+}
+
+/**
+ * A target the bot opens as a page of the cabinet: a path with a single
+ * leading `/`, or one typed without it, which the bot gives its slash — the
+ * main menu (`addressOn`), a notification (`internal-http-listener.ts`) and a
+ * screen (`buildScreenKeyboard`) alike, so `renew` opens `/renew` and the map
+ * draws it green. Not a page: `//host`, and a target that reads as an address
+ * with its scheme or its site left off — its first segment names a scheme, a
+ * site or a user (`tg://…`, `mailto:…`, `t.me/channel`, `www.example.com`,
+ * `@support`). The bot would open those as pages the cabinet does not have
+ * (a screen's `tg://` it leaves out); the reason says to write the address
+ * whole.
+ */
+function isPageTarget(target: string): boolean {
+  if (target.startsWith('/')) return !target.startsWith('//');
+  const firstSegment = target.split(/[/?#]/, 1)[0];
+  return !/[.:@]/.test(firstSegment);
+}
+
+/**
+ * What is wrong with a main-menu «Внешняя ссылка» or «Mini App» target, or
+ * `null` when the bot can open it (`buttonTargetProblem`, `menuUrl` and
+ * `menuWebApp`); the other actions carry no address. The check the server makes
+ * before saving a main-menu button (`bot-buttons.service.ts`) and the one its
+ * forms make.
  */
 export function menuButtonTargetProblem(
   actionType: MenuButtonRouting['actionType'],
   actionTarget: string | null,
 ): MenuButtonTargetProblem | null {
-  if (actionType !== 'URL' && actionType !== 'WEBAPP') return null;
-  const target = (actionTarget ?? '').trim();
-  if (target.length === 0) return null;
-  if (ABSOLUTE_ADDRESS.test(target)) {
-    if (!isAddress(target)) return 'notAnAddress';
-    if (actionType === 'WEBAPP') {
-      if (!/^https:\/\//i.test(target)) return 'webAppNeedsHttps';
-      if (!target.startsWith('https://')) return 'upperCaseScheme';
-    }
-    return isLocalAddress(target) ? 'localAddress' : null;
-  }
-  if (!target.startsWith('/') || target.startsWith('//')) return 'notAPage';
-  return hasBadCharacter(target) ? 'badCharacters' : null;
+  if (actionType === 'URL') return buttonTargetProblem('menuUrl', actionTarget);
+  if (actionType === 'WEBAPP') return buttonTargetProblem('menuWebApp', actionTarget);
+  return null;
 }
 
 const ABSOLUTE_ADDRESS = /^https?:\/\//i;

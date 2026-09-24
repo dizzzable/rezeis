@@ -20,7 +20,10 @@
  *   3. every callback word reiwa registers is one the map routes, and every
  *      word the map routes is registered — the vocabulary «Схема» and
  *      «Список» draw from (its server copy is pinned to this one by
- *      `test/bot-map-route-parity.spec.ts`).
+ *      `test/bot-map-route-parity.spec.ts`);
+ *   4. every page alias the route model follows (`MINI_APP_PAGE_ALIASES`) is
+ *      a route of the cabinet's `web/src/App.tsx` that sends on to that page —
+ *      the map draws a button to the alias green only because it does.
  * "Reads" is a literal census: a key of reiwa's ru pack quoted in `src/bot/**`
  * or `src/infrastructure/bot-message/**`, or built by a template there
  * (`commands.${…}.description`, `lang.name.${…}`).
@@ -30,7 +33,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { CALLBACK_VOCABULARY, callbackRoute } from './components/reply-keyboard-utils'
+import { CALLBACK_VOCABULARY, MINI_APP_PAGE_ALIASES, callbackRoute } from './components/reply-keyboard-utils'
 import {
   MAIN_MENU_SYSTEM_BUTTONS,
   MAIN_MENU_TEXT_KEYS,
@@ -164,5 +167,23 @@ describe.skipIf(!hasSibling)('the map’s copy of the bot, against reiwa’s sou
       expect(source, handler).toContain(handler)
     }
     expect(source).toContain(`const SCREEN_PREFIX = '${CALLBACK_VOCABULARY.screenPrefix}'`)
+  })
+
+  it('follows a page alias only where the cabinet’s router sends it on to that page', () => {
+    const app = join(REIWA, 'web', 'src', 'App.tsx')
+    expect(existsSync(app), 'moved in reiwa — point this test at its new place').toBe(true)
+    const source = readFileSync(app, 'utf8')
+    const aliases = Object.entries(MINI_APP_PAGE_ALIASES)
+    expect(aliases.length).toBeGreaterThan(0)
+    for (const [alias, page] of aliases) {
+      // `<Route path="/subscribe" element={<SubscribeAlias />} />` …
+      const route = new RegExp(`<Route\\s+path="${alias}"\\s+element=\\{<(\\w+)\\s*/>\\}`).exec(source)
+      expect(route, `${alias}: no route in the cabinet`).not.toBeNull()
+      // … whose component navigates to the page, its query kept or not.
+      const component = new RegExp(`function ${route?.[1] ?? ''}\\(\\)\\s*\\{([\\s\\S]*?)\\n\\}`).exec(source)
+      expect(component?.[1] ?? '', `${alias}: ${route?.[1]} does not send it on to ${page}`).toMatch(
+        new RegExp(`<Navigate\\s+to=\\{?[\`"]${page}(\\$\\{[^}]*\\})?[\`"]\\}?`),
+      )
+    }
   })
 })

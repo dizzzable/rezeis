@@ -15,6 +15,7 @@
  * Telegram itself); `callback` requires a non-empty `target`. Invalid
  * rows are dropped at delivery (degrade, never fail).
  */
+import { buttonTargetProblem } from '../../bot-map/services/menu-button-route';
 import type { NotifyButton } from '../services/bot-notifier.client';
 
 /** Locale codes the notifications layer recognises. */
@@ -122,15 +123,22 @@ export function readStoredButtons(raw: unknown): readonly StoredNotificationButt
 }
 
 /**
- * Telegram-safe URL gate, mirroring reiwa's
- * `widgets/main-keyboard.ts#isTelegramSafeButtonUrl`. Reproduced here so
- * we don't pull a reiwa import into rezeis just for this guard.
+ * Telegram-safe URL gate: the rule a notification's link is SAVED by
+ * (`buttonTargetProblem`, `notificationUrl`), so the save, the delivery and the
+ * map agree on every stored row — an address written with `https://` that
+ * parses, has a site and holds no whitespace, whose HOST is not this machine
+ * (`isLocalAddress`, the rule the route model, the SPA and reiwa share).
+ *
+ * It was a substring test first: `https://example.com/?next=http://localhost`
+ * saved, then was dropped here at delivery and drawn red on the map, while
+ * `https://user@localhost/` passed all three. Then a host test that did not
+ * parse: `https://exa mple.com`, refused on save, still passed here from a row
+ * saved before — and Telegram refuses the WHOLE message for one such button,
+ * not the button alone. Now such a row is left out, as reiwa leaves out one it
+ * cannot open, and the notice goes without it.
  */
 function isTelegramSafeUrl(url: string): boolean {
-  if (!url.startsWith('https://')) return false;
-  const lower = url.toLowerCase();
-  if (lower.includes('://localhost') || lower.includes('://127.0.0.1')) return false;
-  return true;
+  return url.length > 0 && buttonTargetProblem('notificationUrl', url) === null;
 }
 
 /**

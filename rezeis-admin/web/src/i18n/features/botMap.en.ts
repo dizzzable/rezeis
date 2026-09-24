@@ -74,6 +74,15 @@ export const en = {
       missingScreen: '✕ No such screen — the bot answers «screen not found»',
       missingPage: '✕ The Mini App has no such page',
     },
+    // «Схема»: something typed in the inspector is not saved yet, or its save
+    // is still on its way (`pending-edits.ts`).
+    unsavedGuard: {
+      title: 'Edits are not saved yet',
+      description:
+        'The screen editor holds something unsaved: a link, a caption or a text still being saved, or a link the bot cannot open — the reason is under its field. Stay to check it.',
+      stay: 'Stay',
+      leave: 'Leave anyway',
+    },
     inspector: {
       empty: 'Pick a node on the left to open its editor.',
       saved: 'Saved',
@@ -375,6 +384,24 @@ export const en = {
         starsReceived: 'Telegram Stars payment — the message after paying',
         starsRefused: 'Telegram Stars payment — why the payment form refused',
         commandDescription: 'The command’s description in the «/» list',
+      },
+    },
+  },
+  // Why a button's target is not saved — the reasons only a notification's or
+  // a screen's button can have. They join the main menu's six in the core
+  // dictionary (`botConfigPage.buttons.fields.actionTarget.problems`); the server
+  // refuses the same (`buttonTargetProblem`).
+  botConfigPage: {
+    buttons: {
+      fields: {
+        actionTarget: {
+          problems: {
+            linkNeedsHttps: 'The bot opens this link over https:// only',
+            pageOnly:
+              'This takes a cabinet page such as /renew: the bot would open an address as a page the cabinet does not have',
+            addressOnly: 'This takes a whole address starting with https://; a cabinet page opens from a "Mini App" button',
+          },
+        },
       },
     },
   },

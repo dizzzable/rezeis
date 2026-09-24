@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useContext, useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Lock, Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { getErrorMessage } from '@/lib/http-errors'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
@@ -18,6 +19,8 @@ import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { CustomEmojiPicker } from './CustomEmojiPicker'
 import { SystemButtonCard } from './SystemButtonCard'
 import { SystemScreenTexts } from './SystemScreenTexts'
+import { buttonTargetProblem, type ButtonTargetProblem } from './reply-keyboard-utils'
+import { PendingEditsContext, usePendingDrafts } from '../pending-edits'
 import { computeSystemButtons } from '../utils'
 import type { BotFlowButton, BotFlowButtonAction, BotFlowButtonStyle, BotFlowParseMode, BotFlowScreen } from '../types'
 
@@ -36,6 +39,7 @@ const PARSE_MODES: BotFlowParseMode[] = ['HTML', 'PLAIN']
 export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const edits = useContext(PendingEditsContext)
   const mediaInputRef = useRef<HTMLInputElement | null>(null)
   const textRuRef = useRef<HTMLTextAreaElement | null>(null)
   const textEnRef = useRef<HTMLTextAreaElement | null>(null)
@@ -49,17 +53,22 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
   const [textRu, setTextRu] = useState(screenTextRu)
   const [textEn, setTextEn] = useState(screenTextEn)
   const [isRoot, setIsRoot] = useState(screenIsRoot)
+  // What each text field last saved or loaded. A draft that differs is not
+  // saved yet (`usePendingDrafts`); a refetch replaces only a draft that does
+  // not, so what is typed while the last save is on its way stays in the box.
+  const savedScreen = useRef({ name: screenName, textRu: screenTextRu, textEn: screenTextEn })
 
-  // Sync when screen changes (user clicks different node)
+  // Sync when the screen's row comes back changed (a save, another tab). The
+  // page keys this panel by the screen, so another screen is another panel.
   // TODO: refactor — derive these values inline from props/key instead of mirroring into state.
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    setName(screenName)
-    setTextRu(screenTextRu)
-    setTextEn(screenTextEn)
+    const previous = savedScreen.current
+    savedScreen.current = { name: screenName, textRu: screenTextRu, textEn: screenTextEn }
+    setName((draft) => (draft === previous.name ? screenName : draft))
+    setTextRu((draft) => (draft === previous.textRu ? screenTextRu : draft))
+    setTextEn((draft) => (draft === previous.textEn ? screenTextEn : draft))
     setIsRoot(screenIsRoot)
   }, [screenId, screenName, screenTextRu, screenTextEn, screenIsRoot])
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * Built-in callback screens (`help` / `rules` / `invite`) get
@@ -92,6 +101,8 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', flowName] })
     },
+    // A refused save of the screen's name or texts said nothing at all.
+    onError: (error) => toast.error(getErrorMessage(error, t('botMapPage.inspector.saveFailed'))),
   })
 
   const deleteScreenMutation = useMutation({
@@ -129,6 +140,9 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bot-flow', 'draft', flowName] })
     },
+    // A refused save said nothing at all: the server's own reason — a target
+    // the bot could not open names its field.
+    onError: (error) => toast.error(getErrorMessage(error, t('botMapPage.inspector.saveFailed'))),
   })
 
   const deleteButtonMutation = useMutation({
@@ -140,17 +154,32 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
     },
   })
 
-  // ── Save screen on blur ─────────────────────────────────────────────────────
-  const handleScreenBlur = useCallback(() => {
-    const changes: Record<string, unknown> = {}
-    if (name !== screenName) changes.name = name
-    if (textRu !== screenTextRu) changes.textRu = textRu
-    if (textEn !== screenTextEn) changes.textEn = textEn
-    if (isRoot !== screenIsRoot) changes.isRoot = isRoot
-    if (Object.keys(changes).length > 0) {
-      updateScreenMutation.mutate(changes)
-    }
-  }, [name, textRu, textEn, isRoot, screenName, screenTextRu, screenTextEn, screenIsRoot, updateScreenMutation])
+  // ── Save the screen's texts: on leaving a field, before a publish, on unmount ─
+  type ScreenTexts = typeof savedScreen.current
+  /** Saves `changes` and marks them saved; a refused save marks them unsaved again. */
+  const saveScreenTexts = (changes: Partial<ScreenTexts>): void => {
+    const before = savedScreen.current
+    savedScreen.current = { ...before, ...changes }
+    void edits.track(updateScreenMutation.mutateAsync(changes)).catch(() => {
+      savedScreen.current = revertUnsaved(savedScreen.current, before, changes)
+      edits.changed()
+    })
+  }
+  const saveScreenDrafts = (): void => {
+    const saved = savedScreen.current
+    const changes: Partial<ScreenTexts> = {}
+    if (name !== saved.name) changes.name = name
+    if (textRu !== saved.textRu) changes.textRu = textRu
+    if (textEn !== saved.textEn) changes.textEn = textEn
+    if (Object.keys(changes).length > 0) saveScreenTexts(changes)
+  }
+  usePendingDrafts({
+    flush: saveScreenDrafts,
+    dirty: () =>
+      name !== savedScreen.current.name ||
+      textRu !== savedScreen.current.textRu ||
+      textEn !== savedScreen.current.textEn,
+  })
 
   // ── Emoji insert into screen text (insert at caret + persist) ───────────────
   const insertEmojiRu = (emoji: string) => {
@@ -159,7 +188,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
     const end = el?.selectionEnd ?? textRu.length
     const { value: next, caret } = insertAtCaret(textRu, start, end, emoji)
     setTextRu(next)
-    updateScreenMutation.mutate({ textRu: next })
+    saveScreenTexts({ textRu: next })
     requestAnimationFrame(() => {
       el?.focus()
       el?.setSelectionRange(caret, caret)
@@ -171,7 +200,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
     const end = el?.selectionEnd ?? textEn.length
     const { value: next, caret } = insertAtCaret(textEn, start, end, emoji)
     setTextEn(next)
-    updateScreenMutation.mutate({ textEn: next })
+    saveScreenTexts({ textEn: next })
     requestAnimationFrame(() => {
       el?.focus()
       el?.setSelectionRange(caret, caret)
@@ -186,7 +215,10 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
         <Input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onBlur={handleScreenBlur}
+          onBlur={saveScreenDrafts}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') saveScreenDrafts()
+          }}
           className="h-8 text-xs"
         />
         <p className="text-[10px] leading-snug text-muted-foreground">
@@ -245,7 +277,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
             ref={textRuRef}
             value={textRu}
             onChange={(e) => setTextRu(e.target.value)}
-            onBlur={handleScreenBlur}
+            onBlur={saveScreenDrafts}
             rows={3}
             className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
             placeholder={t('botFlow.fields.textRuPlaceholder')}
@@ -269,7 +301,7 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
             ref={textEnRef}
             value={textEn}
             onChange={(e) => setTextEn(e.target.value)}
-            onBlur={handleScreenBlur}
+            onBlur={saveScreenDrafts}
             rows={3}
             className="w-full rounded-md border bg-background px-3 py-2 text-xs resize-y min-h-[60px] focus:outline-none focus:ring-1 focus:ring-ring"
             placeholder={t('botFlow.fields.textEnPlaceholder')}
@@ -384,7 +416,12 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
             <ButtonEditor
               key={btn.id}
               button={btn}
-              onUpdate={(data) => updateButtonMutation.mutate({ id: btn.id, data })}
+              onUpdate={(data) =>
+                edits.track(updateButtonMutation.mutateAsync({ id: btn.id, data })).then(
+                  () => true,
+                  () => false,
+                )
+              }
               onDelete={() => deleteButtonMutation.mutate(btn.id)}
             />
           ))}
@@ -411,32 +448,121 @@ export function ScreenEditorPanel({ screen, flowName }: ScreenEditorPanelProps) 
 
 interface ButtonEditorProps {
   button: BotFlowButton
-  onUpdate: (data: Record<string, unknown>) => void
+  /** Saves `data`; resolves `false` when the server refused it. Never rejects. */
+  onUpdate: (data: Record<string, unknown>) => Promise<boolean>
   onDelete: () => void
+}
+
+/** The typed fields of a button, `''` for an empty target. */
+interface ButtonDrafts {
+  readonly labelRu: string
+  readonly labelEn: string
+  readonly url: string
+  readonly webAppUrl: string
 }
 
 function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
   const { t } = useTranslation()
   const webAppLabelId = useId()
+  const urlLabelId = useId()
+  const problemId = useId()
   const [labelRu, setLabelRu] = useState(button.labelRu)
   const [labelEn, setLabelEn] = useState(button.labelEn)
+  // The link's and the Mini App's targets as typed. They were saved on every
+  // keystroke, so a target the rule refuses could not even be typed through:
+  // `h` of `https://` was refused and the box snapped back. Now they save when
+  // the box is left, on Enter, when a page is picked, before «Опубликовать» or
+  // «Сохранить позиции», and when the editor goes — and only a target the bot
+  // can open (`usePendingDrafts`).
+  const [urlDraft, setUrlDraft] = useState(button.url ?? '')
+  const [webAppDraft, setWebAppDraft] = useState(button.webAppUrl ?? '')
+  // What each typed field last saved or loaded: a draft that differs is not
+  // saved yet, and one that does not is saved again by nothing — not by a
+  // second blur of an unchanged box. A refetch replaces only a draft that does
+  // not differ, so text typed while the last save is on its way stays.
+  const saved = useRef<ButtonDrafts>({
+    labelRu: button.labelRu,
+    labelEn: button.labelEn,
+    url: button.url ?? '',
+    webAppUrl: button.webAppUrl ?? '',
+  })
   const labelRuRef = useRef<HTMLInputElement | null>(null)
   const labelEnRef = useRef<HTMLInputElement | null>(null)
 
   // TODO: refactor — re-derive labelRu/labelEn from `button` prop directly via key/identity.
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    setLabelRu(button.labelRu)
-    setLabelEn(button.labelEn)
+    const previous = saved.current
+    saved.current = { ...saved.current, labelRu: button.labelRu, labelEn: button.labelEn }
+    setLabelRu((draft) => (draft === previous.labelRu ? button.labelRu : draft))
+    setLabelEn((draft) => (draft === previous.labelEn ? button.labelEn : draft))
   }, [button.labelRu, button.labelEn])
-  /* eslint-enable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    const previous = saved.current.url
+    const stored = button.url ?? ''
+    saved.current = { ...saved.current, url: stored }
+    setUrlDraft((draft) => (draft === previous ? stored : draft))
+  }, [button.url])
+  useEffect(() => {
+    const previous = saved.current.webAppUrl
+    const stored = button.webAppUrl ?? ''
+    saved.current = { ...saved.current, webAppUrl: stored }
+    setWebAppDraft((draft) => (draft === previous ? stored : draft))
+  }, [button.webAppUrl])
+
+  /** Saves `changes` and marks them saved; a refused save marks them unsaved again. */
+  const saveDrafts = (changes: Partial<ButtonDrafts>): void => {
+    const before = saved.current
+    saved.current = { ...before, ...changes }
+    const body: Record<string, unknown> = { ...changes }
+    for (const field of ['url', 'webAppUrl'] as const) {
+      if (changes[field] === '') body[field] = null
+    }
+    void onUpdate(body).then((stored) => {
+      if (!stored) saved.current = revertUnsaved(saved.current, before, changes)
+    })
+  }
+
+  // Why the bot could not open the target, said under it — the main menu's
+  // rule and words (`buttonTargetProblem`), which the server refuses the same
+  // target with. A button saved before with such a target loads as it is, the
+  // map draws it red, and this says why until it is fixed.
+  const urlProblem = button.actionType === 'URL' ? buttonTargetProblem('screenUrl', urlDraft) : null
+  const webAppProblem = button.actionType === 'WEBAPP' ? buttonTargetProblem('screenWebApp', webAppDraft) : null
+  const problemNote = (problem: ButtonTargetProblem | null) =>
+    problem === null ? null : (
+      <p id={problemId} role="alert" className="text-[10px] leading-snug text-destructive">
+        {t(`botConfigPage.buttons.fields.actionTarget.problems.${problem}`)}
+      </p>
+    )
+  /** Saves a target — only one the bot can open, and only when it changed. */
+  const commitTarget = (field: 'url' | 'webAppUrl', target: string): void => {
+    const place = field === 'url' ? 'screenUrl' : 'screenWebApp'
+    if (buttonTargetProblem(place, target) !== null) return
+    if (target === saved.current[field]) return
+    saveDrafts({ [field]: target })
+  }
 
   const handleLabelBlur = () => {
-    const changes: Record<string, unknown> = {}
-    if (labelRu !== button.labelRu) changes.labelRu = labelRu
-    if (labelEn !== button.labelEn) changes.labelEn = labelEn
-    if (Object.keys(changes).length > 0) onUpdate(changes)
+    const changes: { labelRu?: string; labelEn?: string } = {}
+    if (labelRu !== saved.current.labelRu) changes.labelRu = labelRu
+    if (labelEn !== saved.current.labelEn) changes.labelEn = labelEn
+    if (Object.keys(changes).length > 0) saveDrafts(changes)
   }
+
+  // The drafts the page saves before a publish, and this editor as it goes.
+  // A target the rule refuses stays unsaved — and counts as unsaved.
+  usePendingDrafts({
+    flush: () => {
+      handleLabelBlur()
+      if (button.actionType === 'URL') commitTarget('url', urlDraft)
+      if (button.actionType === 'WEBAPP') commitTarget('webAppUrl', webAppDraft)
+    },
+    dirty: () =>
+      labelRu !== saved.current.labelRu ||
+      labelEn !== saved.current.labelEn ||
+      (button.actionType === 'URL' && urlDraft !== saved.current.url) ||
+      (button.actionType === 'WEBAPP' && webAppDraft !== saved.current.webAppUrl),
+  })
 
   const insertLabelRu = (emoji: string) => {
     const el = labelRuRef.current
@@ -444,7 +570,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
     const end = el?.selectionEnd ?? labelRu.length
     const { value: next, caret } = insertAtCaret(labelRu, start, end, emoji)
     setLabelRu(next)
-    onUpdate({ labelRu: next })
+    saveDrafts({ labelRu: next })
     requestAnimationFrame(() => {
       el?.focus()
       el?.setSelectionRange(caret, caret)
@@ -456,7 +582,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
     const end = el?.selectionEnd ?? labelEn.length
     const { value: next, caret } = insertAtCaret(labelEn, start, end, emoji)
     setLabelEn(next)
-    onUpdate({ labelEn: next })
+    saveDrafts({ labelEn: next })
     requestAnimationFrame(() => {
       el?.focus()
       el?.setSelectionRange(caret, caret)
@@ -482,6 +608,9 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
               value={labelRu}
               onChange={(e) => setLabelRu(e.target.value)}
               onBlur={handleLabelBlur}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleLabelBlur()
+              }}
               placeholder={t('botFlow.button.labelRuPlaceholder')}
               className="h-7 text-[11px]"
             />
@@ -500,6 +629,9 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
               value={labelEn}
               onChange={(e) => setLabelEn(e.target.value)}
               onBlur={handleLabelBlur}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleLabelBlur()
+              }}
               placeholder={t('botFlow.button.labelEnPlaceholder')}
               className="h-7 text-[11px]"
             />
@@ -516,7 +648,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
             type="number"
             min={0}
             value={button.row}
-            onChange={(e) => onUpdate({ row: parseInt(e.target.value) || 0 })}
+            onChange={(e) => void onUpdate({ row: parseInt(e.target.value) || 0 })}
             className="h-7 text-[11px] w-14"
             aria-label={t('botFlow.button.row')}
           />
@@ -527,7 +659,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
             type="number"
             min={0}
             value={button.col}
-            onChange={(e) => onUpdate({ col: parseInt(e.target.value) || 0 })}
+            onChange={(e) => void onUpdate({ col: parseInt(e.target.value) || 0 })}
             className="h-7 text-[11px] w-14"
             aria-label={t('botFlow.button.col')}
           />
@@ -538,7 +670,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
       <div className="grid grid-cols-2 gap-1.5">
         <Select
           value={button.actionType}
-          onValueChange={(v) => onUpdate({ actionType: v })}
+          onValueChange={(v) => void onUpdate({ actionType: v })}
         >
           <SelectTrigger className="h-7 text-[11px]" aria-label={t('botFlow.button.action')}>
             <SelectValue />
@@ -555,7 +687,7 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
         {/* Style */}
         <Select
           value={button.style}
-          onValueChange={(v) => onUpdate({ style: v })}
+          onValueChange={(v) => void onUpdate({ style: v })}
         >
           <SelectTrigger className="h-7 text-[11px]" aria-label={t('botFlow.button.style')}>
             <SelectValue />
@@ -573,17 +705,31 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
       {/* Custom Emoji Picker */}
       <CustomEmojiPicker
         value={button.iconCustomEmojiId}
-        onChange={(emojiId) => onUpdate({ iconCustomEmojiId: emojiId })}
+        onChange={(emojiId) => void onUpdate({ iconCustomEmojiId: emojiId })}
       />
 
       {/* Action-specific fields */}
       {button.actionType === 'URL' && (
-        <Input
-          value={button.url ?? ''}
-          onChange={(e) => onUpdate({ url: e.target.value || null })}
-          placeholder={t('botFlow.button.url')}
-          className="h-7 text-[11px]"
-        />
+        <div className="space-y-1">
+          <span id={urlLabelId} className="sr-only">
+            {t('botFlow.button.url')}
+          </span>
+          <Input
+            value={urlDraft}
+            onChange={(e) => setUrlDraft(e.target.value)}
+            onBlur={() => commitTarget('url', urlDraft)}
+            onKeyDown={(e) => {
+              // Enter — a phone keyboard's «Go» among them — saves as leaving does.
+              if (e.key === 'Enter') commitTarget('url', urlDraft)
+            }}
+            placeholder={t('botFlow.button.url')}
+            aria-labelledby={urlLabelId}
+            aria-invalid={urlProblem !== null}
+            aria-describedby={urlProblem !== null ? problemId : undefined}
+            className="h-7 text-[11px]"
+          />
+          {problemNote(urlProblem)}
+        </div>
       )}
       {button.actionType === 'WEBAPP' && (
         <div className="space-y-1">
@@ -591,17 +737,20 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
             {t('botFlow.button.webAppUrl')}
           </span>
           <MiniAppScreenField
-            value={button.webAppUrl ?? ''}
-            onChange={(target) => onUpdate({ webAppUrl: target || null })}
+            value={webAppDraft}
+            onChange={setWebAppDraft}
+            onCommit={(target) => commitTarget('webAppUrl', target)}
             labelId={webAppLabelId}
             placeholder={t('botConfigPage.buttons.fields.actionTarget.webappPlaceholder')}
+            describedBy={webAppProblem !== null ? problemId : undefined}
           />
+          {problemNote(webAppProblem)}
         </div>
       )}
       {button.actionType === 'CALLBACK' && (
         <Input
           value={button.callbackAction ?? ''}
-          onChange={(e) => onUpdate({ callbackAction: e.target.value || null })}
+          onChange={(e) => void onUpdate({ callbackAction: e.target.value || null })}
           placeholder={t('botFlow.button.callbackAction')}
           className="h-7 text-[11px]"
         />
@@ -625,4 +774,17 @@ function ButtonEditor({ button, onUpdate, onDelete }: ButtonEditorProps) {
       </div>
     </div>
   )
+}
+
+/**
+ * The saved marks after a refused save: each field the save marked saved goes
+ * back to what it was before it — unless a later save has marked it since. The
+ * draft is then unsaved again, which is what it is.
+ */
+function revertUnsaved<T extends object>(current: T, before: T, changes: Partial<T>): T {
+  const next = { ...current }
+  for (const key of Object.keys(changes) as Array<keyof T>) {
+    if (next[key] === changes[key]) next[key] = before[key]
+  }
+  return next
 }

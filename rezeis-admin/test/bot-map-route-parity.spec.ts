@@ -34,7 +34,7 @@ before(async () => {
  * `src/` alone, the SPA image `web/` alone — so the route model is written
  * twice, and this spec is what keeps it one: the two vocabularies must be
  * equal, and the two functions must return the same route for every case
- * below. The review of 23.09.2026 found them apart on six kinds of button
+ * below. On 23.09.2026 they were apart on six kinds of button
  * (a relative link read as an unsafe URL on one tab and a cabinet page on the
  * other; `menu` dead on one, the main menu on the other).
  *
@@ -108,6 +108,8 @@ const TARGETS: ReadonlyArray<string | null> = [
   '/plans',
   '/plans?code=SALE',
   '/dashboard?connect=help',
+  '/subscribe',
+  'subscribe?plan=pro',
   '/promoo',
   '#top',
   'sc_promo',
@@ -137,6 +139,25 @@ describe('«Схема» and «Список» route a button the same way', () =
     );
     assert.equal(server.MINI_APP_HOME_PAGE, spa.MINI_APP_HOME_PAGE);
     assert.equal(server.SUPPORT_FALLBACK_CALLBACK, spa.SUPPORT_FALLBACK_CALLBACK);
+    assert.deepStrictEqual(
+      server.MINI_APP_PAGE_ALIASES,
+      spa.MINI_APP_PAGE_ALIASES,
+      'The composer and the SPA disagree on which cabinet pages open another — change both, or neither.',
+    );
+  });
+
+  it('land a Mini App path on the same page, an alias on the page it opens', () => {
+    const paths = ['/', '/?startapp=x', '/plans', '/subscribe', '/subscribe?plan=pro', '/subscribe#top', '/subscribed', '/promo?code=A'];
+    for (const path of paths) {
+      assert.equal(server.miniAppLandingPage(path), spa.miniAppLandingPage(path), path);
+    }
+    assert.equal(server.miniAppLandingPage('/subscribe?plan=pro'), '/plans');
+    assert.equal(server.miniAppLandingPage('/subscribed'), '/subscribed');
+    assert.equal(server.miniAppLandingPage('/'), '/dashboard');
+    // Every alias opens a page of the catalog, so the map draws it green.
+    for (const page of Object.values(server.MINI_APP_PAGE_ALIASES)) {
+      assert.ok(MINI_APP_TERMINALS.some((terminal) => terminal.route === page), page);
+    }
   });
 
   it('route every callback the same way', () => {
@@ -194,6 +215,50 @@ describe('«Схема» and «Список» route a button the same way', () =
     assert.equal(cases, ACTIONS.length * (TARGETS.length + more.length));
   });
 
+  it('refuse the same targets wherever a button is saved — a notification’s, a screen’s — and know the same places', () => {
+    assert.deepStrictEqual(
+      server.BUTTON_TARGET_RULES,
+      spa.BUTTON_TARGET_RULES,
+      'The server and the SPA disagree on what a place opens — change both, or neither.',
+    );
+    const places = Object.keys(server.BUTTON_TARGET_RULES) as server.ButtonTargetPlace[];
+    assert.equal(places.length, 6);
+    const targets = [
+      ...TARGETS,
+      'renew',
+      '/renew',
+      '//evil.example',
+      '/re new',
+      'https://example.com/app',
+      'Https://example.com/app',
+      'http://example.com/app',
+      'https://exa mple.com',
+      'https://user@localhost/x',
+      'https://example.com/?next=http://localhost/x',
+      'tg://resolve?domain=x',
+      '/dashboard?connect=help',
+      'referrals?tab=1',
+      't.me/channel',
+      'www.example.com',
+      'mailto:help@example.com',
+      '@support',
+      're new',
+      '?next=/plans',
+    ];
+    let cases = 0;
+    for (const place of places) {
+      for (const target of targets) {
+        assert.equal(
+          server.buttonTargetProblem(place, target),
+          spa.buttonTargetProblem(place, target),
+          JSON.stringify({ place, target }),
+        );
+        cases += 1;
+      }
+    }
+    assert.equal(cases, places.length * targets.length);
+  });
+
   it('route every main-menu button the same way, in every context', () => {
     let cases = 0;
     for (const context of CONTEXTS) {
@@ -214,7 +279,7 @@ describe('«Схема» and «Список» route a button the same way', () =
     assert.equal(cases, CONTEXTS.length * ACTIONS.length * IDS.length * TARGETS.length);
   });
 
-  it('answer what reiwa answers on the cases the review found apart', () => {
+  it('answer what reiwa answers on the cases found apart on 23.09.2026', () => {
     const route = (buttonId: string, actionType: server.MenuButtonRouting['actionType'], actionTarget: string | null) =>
       server.menuButtonRoute({ buttonId, actionType, actionTarget }, CONTEXT);
     // `menu` is `menu:main` (reiwa `start.ts`); a bare shortId opens its screen (`dynamic-screen.ts`).
@@ -231,6 +296,13 @@ describe('«Схема» and «Список» route a button the same way', () =
     assert.deepStrictEqual(route('app', 'WEBAPP', 'http://example.com/a'), { kind: 'url', host: 'example.com', safe: false });
     assert.deepStrictEqual(route('news', 'URL', 'http://example.com/a'), { kind: 'url', host: 'example.com', safe: true });
     assert.deepStrictEqual(route('subscription', 'CALLBACK', null), { kind: 'unanswered', data: 'subscription' });
+    // `/subscribe` opens «Тарифы» in the cabinet (reiwa `SubscribeAlias`): a known page, not a red one.
+    assert.deepStrictEqual(route('vpn', 'WEBAPP', '/subscribe?plan=pro'), {
+      kind: 'miniApp',
+      path: '/subscribe?plan=pro',
+      page: '/plans',
+      known: true,
+    });
   });
 
   it('send a support button without a public @username to the help screen, whatever its ID', () => {
@@ -261,7 +333,10 @@ describe('«Схема» and «Список» route a button the same way', () =
     assert.equal(problem('URL', '/promo?code=SALE'), null);
     assert.equal(problem('URL', 'http://example.com/a'), null);
     assert.equal(problem('WEBAPP', 'https://example.com/app'), null);
-    assert.equal(problem('URL', 'plans'), 'notAPage');
+    // A page without its slash is the page the bot opens (`addressOn` gives it one).
+    assert.equal(problem('URL', 'plans'), null);
+    assert.equal(problem('WEBAPP', 'subscribe'), null);
+    assert.equal(problem('URL', 'example.com/plans'), 'notAPage');
     assert.equal(problem('URL', '//evil.example'), 'notAPage');
     assert.equal(problem('URL', '/\\evil.example'), 'badCharacters');
     assert.equal(problem('WEBAPP', '/pl ans'), 'badCharacters');

@@ -2,10 +2,8 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { BotButton, BotButtonAction, BotButtonStyle, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import {
-  menuButtonTargetProblem,
-  type MenuButtonTargetProblem,
-} from '../../bot-map/services/menu-button-route';
+import { buttonTargetRefusal } from '../../bot-map/services/button-target-refusal';
+import { menuButtonTargetProblem } from '../../bot-map/services/menu-button-route';
 
 interface CreateButtonInput {
   readonly buttonId: string;
@@ -33,23 +31,6 @@ interface UpdateButtonInput {
 
 /** A button ID the bot can send as callback data; the SPA's create form holds the same (`BUTTON_ID_PATTERN`). */
 export const BUTTON_ID_REGEX = /^[a-z0-9._-]+$/i;
-
-/**
- * Why a target is refused, in words the SPA shows as they come. None repeats
- * the target: the admin exception filter blanks a message that carries an
- * address (`admin-safe-exception.filter.ts`), and the operator knows what
- * they typed.
- */
-const TARGET_PROBLEM_MESSAGES: Readonly<Record<MenuButtonTargetProblem, string>> = {
-  notAPage:
-    'actionTarget must be a page of the cabinet starting with a single "/" (such as /plans) or an address starting with http:// or https://',
-  badCharacters: 'actionTarget must not contain spaces, backslashes, control or invisible formatting characters',
-  notAnAddress: 'actionTarget must be a whole address: http:// or https:// then a site name, with no spaces',
-  webAppNeedsHttps: 'actionTarget for WEBAPP buttons must use https:// (Telegram refuses non-HTTPS web_app)',
-  upperCaseScheme:
-    'actionTarget for WEBAPP buttons must start with https:// in lower case: the bot leaves out one that starts with Https:// or HTTPS:// instead',
-  localAddress: 'actionTarget must not point at localhost or 127.0.0.1: Telegram refuses such an address',
-};
 
 /**
  * Validate an `actionTarget` against its `actionType`. Returns the
@@ -80,8 +61,10 @@ function validateAction(
       // saves) or an address — the targets reiwa opens (`addressOn`,
       // `miniAppButtonUrl` in its `main-keyboard.ts`). The rule is the map's
       // own, so the forms refuse the same before the request is sent.
+      // The words are every button's (`button-target-refusal.ts`): a screen's
+      // and a notification's targets are refused by the same rule.
       const problem = menuButtonTargetProblem(actionType, trimmed);
-      if (problem !== null) throw new BadRequestException(TARGET_PROBLEM_MESSAGES[problem]);
+      if (problem !== null) throw new BadRequestException(buttonTargetRefusal(problem, 'actionTarget'));
       return trimmed;
     }
     case BotButtonAction.SCREEN: {

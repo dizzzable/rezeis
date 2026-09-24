@@ -25,8 +25,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { buttonTargetProblem, type ButtonTargetProblem } from '@/features/bot-flow/components/reply-keyboard-utils'
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
+import { getErrorMessage } from '@/lib/http-errors'
 import { insertAtCaret } from '../../utils/insert-at-caret'
 
 import {
@@ -72,6 +74,17 @@ function fromShape(button: NotificationButtonShape, index: number): DraftButton 
     // them.
     row: typeof button.row === 'number' && button.row >= 0 ? button.row : index,
   }
+}
+
+/**
+ * Why the bot could not open this button's target, or `null` — the main
+ * menu's rule (`buttonTargetProblem`), the one the server refuses the save
+ * with: a «Mini App» button takes a page of the cabinet and nothing else, a
+ * «URL» one a whole https address. A callback's target is the bot's to answer.
+ */
+function targetProblemOf(button: Pick<DraftButton, 'kind' | 'target'>): ButtonTargetProblem | null {
+  if (button.kind === 'callback') return null
+  return buttonTargetProblem(button.kind === 'url' ? 'notificationUrl' : 'notificationWebApp', button.target)
 }
 
 function toShape(button: DraftButton): NotificationButtonShape {
@@ -140,7 +153,8 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
       void queryClient.invalidateQueries({ queryKey: BOT_MAP_QUERY_KEY })
       toast.success(t('botMapPage.inspector.saved'))
     },
-    onError: () => toast.error(t('botMapPage.inspector.saveFailed')),
+    // The server's own reason — a refused button target names the button.
+    onError: (error) => toast.error(getErrorMessage(error, t('botMapPage.inspector.saveFailed'))),
   })
 
   const saveCopy = (patch: { ru?: string; en?: string | null }, kind: 'title' | 'body') => {
@@ -193,6 +207,11 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
   }
 
   const buttonsDirty = !sameButtons(node.buttons, buttons)
+  // A button whose target the bot could not open keeps the list from being
+  // saved — one saved before this rule included: it loads, the map draws it
+  // red, its row says why, and the list saves once it is fixed or removed.
+  // The title, the text and the switch save on their own.
+  const buttonsBlocked = buttons.some((button) => targetProblemOf(button) !== null)
   const saveButtons = () => {
     mutation.mutate({ buttons: buttons.map(toShape) })
   }
@@ -322,7 +341,7 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
           <Button
             size="sm"
             onClick={saveButtons}
-            disabled={!buttonsDirty || mutation.isPending}
+            disabled={!buttonsDirty || buttonsBlocked || mutation.isPending}
           >
             <SaveIcon className="mr-1.5 h-3.5 w-3.5" aria-hidden />
             {t('botMapPage.notification.save')}
@@ -354,8 +373,18 @@ function NotificationButtonRow({
 }: NotificationButtonRowProps) {
   const { t } = useTranslation()
   const screenLabelId = useId()
+  const problemId = useId()
   const labelRuRef = useRef<HTMLInputElement | null>(null)
   const labelEnRef = useRef<HTMLInputElement | null>(null)
+  // Said under the target before the list is saved: the reason the server
+  // refuses the same target with, in the main menu's words.
+  const problem = targetProblemOf(button)
+  const problemNote =
+    problem === null ? null : (
+      <p id={problemId} role="alert" className="text-[10px] leading-snug text-destructive">
+        {t(`botConfigPage.buttons.fields.actionTarget.problems.${problem}`)}
+      </p>
+    )
 
   const insertRu = (emoji: string) => {
     const el = labelRuRef.current
@@ -455,6 +484,7 @@ function NotificationButtonRow({
                 labelId={screenLabelId}
                 placeholder={t('botMapPage.notification.targetWebApp')}
               />
+              {problemNote}
             </>
           ) : (
             <>
@@ -465,7 +495,10 @@ function NotificationButtonRow({
                 placeholder={t(targetLabelKey(button.kind))}
                 maxLength={2_000}
                 className="font-mono text-xs"
+                aria-invalid={problem !== null}
+                aria-describedby={problem !== null ? problemId : undefined}
               />
+              {problemNote}
               {/* Free text: what the bot answers is not otherwise written
                   anywhere the operator can see it (reiwa's vocabulary —
                   `CALLBACK_VOCABULARY`; the map draws the rest red). */}

@@ -6312,7 +6312,7 @@ export const ru = {
           screenEmpty: 'Сначала создайте экран в Bot Studio, чтобы привязать его сюда.',
           // Why a target is not saved — the server refuses the same (`menuButtonTargetProblem`).
           problems: {
-            notAPage: 'Страница кабинета начинается с одного «/» (например, /plans), адрес — с http:// или https://',
+            notAPage: 'Нужна страница кабинета, например /plans, или адрес целиком, с http:// или https://',
             badCharacters:
               'В адресе страницы не должно быть пробелов, обратной косой черты, управляющих и невидимых символов форматирования',
             notAnAddress: 'Адрес не читается: после http:// или https:// должно идти имя сайта, без пробелов',
