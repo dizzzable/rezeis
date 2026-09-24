@@ -410,8 +410,15 @@ export class AutoRenewService {
       return 0;
     }
 
+    // The date is asked again here, not only in the read that started the pass:
+    // between the two it can move — forward, by an operator or a payment; or
+    // away altogether, by an UPGRADE to a plan without an end, which makes the
+    // subscription one that never expires — and the charge for it is then
+    // refused as final (`isRefusedBeforePayment`: a lifetime subscription's
+    // renewal is `SUBSCRIPTION_IS_LIFETIME`, a 400). Without it, that refusal
+    // expired a subscription that no longer had a date.
     const result = await this.prismaService.subscription.updateMany({
-      where: { id: { in: uniqueIds }, status: SubscriptionStatus.ACTIVE },
+      where: { id: { in: uniqueIds }, status: SubscriptionStatus.ACTIVE, expiresAt: { lt: now } },
       data: { status: SubscriptionStatus.EXPIRED },
     });
 

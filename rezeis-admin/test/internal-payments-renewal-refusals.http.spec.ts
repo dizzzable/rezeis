@@ -18,6 +18,7 @@ import { PaymentsCheckoutService } from '../src/modules/payments/services/paymen
 import { PaymentsRenewalCheckoutService } from '../src/modules/payments/services/payments-renewal-checkout.service';
 import { SettingsService } from '../src/modules/settings/services/settings.service';
 import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/subscription-renewal.service';
+import { subscriptionIsLifetime } from '../src/modules/payments/utils/lifetime-renewal.util';
 import { TelegramStarsWebhookService } from '../src/modules/payments/services/telegram-stars-webhook.service';
 import {
   buildRenewalCheckoutFingerprint,
@@ -428,6 +429,31 @@ describe('POST internal/payments/renewal-checkout — the refusal labels on the 
     );
     assert.equal(response.status, 400);
     assert.equal((response.body as { errorCode?: string }).errorCode, 'RENEWAL_ITEM_NOT_PRICEABLE');
+  });
+
+  it('delivers code: "SUBSCRIPTION_IS_LIFETIME" at a 400, for a renewal of a subscription with no end date', async () => {
+    // The owner, 24.09.2026: a subscription with no end date is never renewed,
+    // and the pricing refuses it by name. On the wire reiwa reads it as its
+    // own refusal and says why. A 400, not a 409: a cabinet that does not know
+    // the code turns any untyped 409 into QUOTE_CHANGED and re-prices into the
+    // same refusal.
+    const app = await boot({
+      existing: null,
+      priceRenewalItems: async () => {
+        throw subscriptionIsLifetime();
+      },
+    });
+
+    const response = await request(app.getHttpServer())
+      .post('/api/internal/payments/renewal-checkout')
+      .send(BASE_BODY);
+
+    assert.equal(
+      wireCode(response.text),
+      'SUBSCRIPTION_IS_LIFETIME',
+      'the lifetime refusal reached reiwa without a code: keep the label in SAFE_PRODUCT_CODES.',
+    );
+    assert.equal(response.status, 400);
   });
 
   it('still strips a non-allowlisted product code at the same 503', async () => {

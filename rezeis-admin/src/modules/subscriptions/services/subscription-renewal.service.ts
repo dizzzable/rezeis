@@ -12,6 +12,12 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
 import { AddOnEligibilityService } from '../../add-ons/services/add-on-eligibility.service';
+import {
+  findOpenEndedQueuedTerm,
+  isLifetimeSubscription,
+  SUBSCRIPTION_IS_LIFETIME_CODE,
+  subscriptionIsLifetime,
+} from '../../payments/utils/lifetime-renewal.util';
 import type { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.interface';
 import { isPlanSoftDeleted } from '../../plans/utils/plan-deletion.util';
 import {
@@ -115,13 +121,24 @@ export class SubscriptionRenewalService {
         id: { in: subscriptionIds },
         status: { not: SubscriptionStatus.DELETED },
       },
-      select: { id: true, status: true, isTrial: true },
+      select: { id: true, status: true, isTrial: true, expiresAt: true },
     });
     if (subscriptions.length !== subscriptionIds.length) {
       throw new NotFoundException('RENEWAL_SUBSCRIPTION_NOT_FOUND');
     }
     if (subscriptions.some((subscription) => subscription.isTrial)) {
       throw new BadRequestException('TRIAL_NOT_RENEWABLE');
+    }
+    // A draft made before its subscription lost its end date must not hand back
+    // its payment link: the replay is the one path that skips the pricing below.
+    // Nor one whose paid periods now end in a queued period without an end.
+    if (subscriptions.some(isLifetimeSubscription)) {
+      throw subscriptionIsLifetime();
+    }
+    for (const subscription of subscriptions) {
+      if ((await findOpenEndedQueuedTerm(this.prismaService, subscription)) !== null) {
+        throw subscriptionIsLifetime();
+      }
     }
     if (
       subscriptions.some(
@@ -238,6 +255,12 @@ export class SubscriptionRenewalService {
     if (subscriptions.length !== uniqueIds.length) {
       throw new NotFoundException('RENEWAL_SUBSCRIPTION_NOT_FOUND');
     }
+    // Before any line is priced, and by name. Its quote would only read as an
+    // unpriceable line (`RENEWAL_ITEM_NOT_PRICEABLE`), which the cabinet answers
+    // by re-pricing the review — for a subscription no review can ever price.
+    if (subscriptions.some(isLifetimeSubscription)) {
+      throw subscriptionIsLifetime();
+    }
 
     const renewalAddOnsEnabled = resolveAddOnRolloutFlags().renewalAddOns;
     const items: PricedRenewalItemInterface[] = [];
@@ -250,6 +273,12 @@ export class SubscriptionRenewalService {
         chosenDurationDays: input.durations?.get(subscription.id) ?? null,
         chosenPlanId: input.plans?.get(subscription.id) ?? null,
       });
+      // A line its quote closed for the lifetime reason — its paid periods end
+      // in a queued period without an end (`findOpenEndedQueuedTerm`) — is
+      // refused by that name too, not as an unpriceable line to re-price.
+      if (!quote.renewable && quote.warnings.some((warning) => warning.code === SUBSCRIPTION_IS_LIFETIME_CODE)) {
+        throw subscriptionIsLifetime();
+      }
       if (
         !quote.renewable ||
         quote.amount === null ||
@@ -612,7 +641,7 @@ export class SubscriptionRenewalService {
   private async loadCandidateSubscriptions(
     userId: string,
     subscriptionIds?: readonly string[],
-  ): Promise<readonly { id: string; planSnapshot: Prisma.JsonValue }[]> {
+  ): Promise<readonly { id: string; planSnapshot: Prisma.JsonValue; expiresAt: Date | null }[]> {
     return this.prismaService.subscription.findMany({
       where: {
         userId,
@@ -620,7 +649,7 @@ export class SubscriptionRenewalService {
         ...(subscriptionIds !== undefined ? { id: { in: [...subscriptionIds] } } : {}),
       },
       orderBy: [{ createdAt: 'asc' }],
-      select: { id: true, planSnapshot: true },
+      select: { id: true, planSnapshot: true, expiresAt: true },
     });
   }
 

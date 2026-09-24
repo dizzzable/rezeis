@@ -45,6 +45,9 @@ interface NotificationEditorProps {
   readonly node: NotificationMapNode
 }
 
+/** «Трафик исчерпан»: the one template whose renewal buttons the bot swaps for a lifetime subscription. */
+const LIMITED_NOTIFICATION_TYPE = 'limited'
+
 interface DraftButton {
   readonly localId: string
   labelRu: string
@@ -336,6 +339,15 @@ export function NotificationEditor({ node }: NotificationEditorProps) {
             ))}
           </ul>
         )}
+
+        {/* «Трафик исчерпан»: the bot swaps its renewal buttons for the add-on
+            page when the subscription never expires (rezeis
+            `offerTrafficTopUpForLifetime`); the map draws that as its own edge. */}
+        {node.type === LIMITED_NOTIFICATION_TYPE ? (
+          <p role="note" className="rounded-md border bg-muted/20 p-3 text-[11px] leading-snug text-muted-foreground">
+            {t('botMapPage.notification.lifetimeTopUpHint')}
+          </p>
+        ) : null}
 
         <div className="flex justify-end">
           <Button

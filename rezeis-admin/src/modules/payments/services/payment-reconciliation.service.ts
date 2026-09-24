@@ -59,7 +59,7 @@ import {
   UNKNOWN_AUTOPAY_GATEWAY,
 } from '../utils/refund-autopay.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
-import { isTrialConversionSnapshot, isWithheldConversion } from '../utils/trial-conversion.util';
+import { isWithheldConversion } from '../utils/trial-conversion.util';
 import { enqueueSyncJobsDeferringFailure } from './payment-fulfillment-claim.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
@@ -695,16 +695,18 @@ export class PaymentReconciliationService implements OnModuleDestroy {
       );
       return;
     }
-    // Nor for a trial's conversion that was withheld — received after another
-    // payment converted the trial, applied to nothing, waiting for the
-    // operator's refund (`PaymentSubscriptionMutationService`, "A TRIAL
-    // CONVERTS ONCE"). Nothing was sold: no commission, no referral reward, no
-    // cashback, no «Мой налог» income, no ad conversion, no card saved for
-    // autopay. Read from the row as it is now: every caller holds a copy from
-    // before the fulfilment that withheld it.
+    // Nor for a payment that was withheld — a trial's conversion received
+    // after another payment converted the trial ("A TRIAL CONVERTS ONCE"), an
+    // autopay charge after a refund, a renewal or an upgrade of a subscription
+    // with no end date (`PaymentSubscriptionMutationService`): applied to
+    // nothing, waiting for the operator's refund. Nothing was sold: no
+    // commission, no referral reward, no cashback, no «Мой налог» income, no
+    // ad conversion, no card saved for autopay. Read from the row as it is
+    // now: every caller holds a copy from before the fulfilment that withheld
+    // it.
     if (await this.isWithheldConversionNow(transaction)) {
       this.logger.warn(
-        `Post-fulfilment hooks not run for transaction ${transaction.id}: a trial conversion withheld for refund`,
+        `Post-fulfilment hooks not run for transaction ${transaction.id}: withheld for refund`,
       );
       return;
     }
@@ -721,17 +723,19 @@ export class PaymentReconciliationService implements OnModuleDestroy {
   }
 
   /**
-   * Whether `transaction` is a trial's conversion withheld for refund, read
-   * from the row as it is now. Only a conversion's draft can be one, so no
-   * other payment costs a read. A read that fails counts as not withheld: the
-   * hooks it would skip are never run again, while a withheld payment's are
-   * reversed by the refund that settles it.
+   * Whether `transaction` was withheld for refund, read from the row as it is
+   * now. Only a renewal, an upgrade or a provider's autopay charge can be, so
+   * no first purchase or add-on costs a read. A read that fails counts as not
+   * withheld: the hooks it would skip are never run again, while a withheld
+   * payment's are reversed by the refund that settles it.
    */
   private async isWithheldConversionNow(transaction: Transaction): Promise<boolean> {
-    // Two payments can be withheld at fulfilment: a trial's conversion, and an
-    // autopay charge that lands after a refund ended the autopay.
+    // What can be withheld at fulfilment: a trial's conversion (an UPGRADE),
+    // an autopay charge that lands after a refund ended the autopay, and a
+    // renewal or an upgrade of a subscription that has no end date.
     const mayBeWithheld =
-      (transaction.purchaseType === 'UPGRADE' && isTrialConversionSnapshot(transaction.planSnapshot)) ||
+      transaction.purchaseType === 'RENEW' ||
+      transaction.purchaseType === 'UPGRADE' ||
       readProviderChargeMarker(transaction) !== null;
     if (!mayBeWithheld) {
       return false;

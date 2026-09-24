@@ -68,8 +68,28 @@ const WITHHELD: TransactionRow = {
   paymentId: 'cmfk2x9pq0021abcd1234efgh',
   gatewayId: 'platega-2',
   conversionWithheld: {
+    reason: 'TRIAL_ALREADY_CONVERTED',
     withheldAt: '2026-09-01T10:00:05.000Z',
     convertedByPaymentId: ORDINARY.paymentId,
+    refundedAt: null,
+  },
+}
+
+/**
+ * A renewal paid for a subscription with no end date (the owner, 24.09.2026),
+ * as the server sends it: `lifetimeSubscription`, and no `reason` — the user
+ * card's schema knows only the two older ones.
+ */
+const LIFETIME: TransactionRow = {
+  ...ORDINARY,
+  id: 'cmfk2x9pq0030abcd1234efgh',
+  paymentId: 'cmfk2x9pq0031abcd1234efgh',
+  gatewayId: 'platega-3',
+  purchaseType: 'RENEW',
+  conversionWithheld: {
+    lifetimeSubscription: true,
+    withheldAt: '2026-09-24T10:00:05.000Z',
+    convertedByPaymentId: null,
     refundedAt: null,
   },
 }
@@ -148,6 +168,17 @@ describe('a withheld payment in its details', () => {
 
     const section = await screen.findByRole('region', { name: /Payment received but not applied/ })
     expect(within(section).getByText(/after a refund had ended the autopay/)).toBeInTheDocument()
+    expect(within(section).queryByText(/converted the customer's trial/)).not.toBeInTheDocument()
+    expect(within(section).getByRole('button', { name: 'Record refund' })).toBeInTheDocument()
+  })
+
+  it('explains a renewal of a subscription with no end date as what it is, and offers «Record refund»', async () => {
+    grant([VIEW, REFUND])
+
+    renderSheet(LIFETIME)
+
+    const section = await screen.findByRole('region', { name: /Payment received but not applied/ })
+    expect(within(section).getByText(/a subscription with no end date/)).toBeInTheDocument()
     expect(within(section).queryByText(/converted the customer's trial/)).not.toBeInTheDocument()
     expect(within(section).getByRole('button', { name: 'Record refund' })).toBeInTheDocument()
   })
@@ -262,7 +293,9 @@ describe('a withheld payment where payments are listed', () => {
     })
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
       if (path === '/admin/users/12345/operations') {
-        return { data: { items: [operation(WITHHELD), operation(ORDINARY)], total: 2, page: 1, limit: 25 } }
+        return {
+          data: { items: [operation(WITHHELD), operation(LIFETIME), operation(ORDINARY)], total: 3, page: 1, limit: 25 },
+        }
       }
       return {
         data: {
@@ -301,6 +334,13 @@ describe('a withheld payment where payments are listed', () => {
     await screen.findByText(WITHHELD.paymentId)
     expect(within(card(WITHHELD.paymentId)).getByText('Not applied')).toBeInTheDocument()
     expect(within(card(ORDINARY.paymentId)).queryByText('Not applied')).not.toBeInTheDocument()
+    // A lifetime subscription's renewal comes without a `reason`, so the
+    // card's schema reads it — the whole list with it — and its
+    // `lifetimeSubscription` gives the mark the lifetime wording.
+    expect(within(card(LIFETIME.paymentId)).getByText('Not applied')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/^The subscription never expires/),
+    )
   })
 
   it('says on the «Not applied» mark itself why it was withheld', () => {
@@ -322,6 +362,20 @@ describe('a withheld payment where payments are listed', () => {
     const [trial, autopay] = screen.getAllByText('Not applied')
     expect(trial).toHaveAttribute('title', expect.stringMatching(/^Another payment had already converted the customer's trial\./))
     expect(autopay).toHaveAttribute('title', expect.stringMatching(/^The provider charged it on an autopay that a refund had ended\./))
+  })
+
+  it('says why for a subscription with no end date, and something true for a mark that names no reason', () => {
+    renderWithProviders(
+      <>
+        <WithheldBadge mark={LIFETIME.conversionWithheld!} />
+        <WithheldBadge mark={{ withheldAt: '2026-09-24T10:00:05.000Z', convertedByPaymentId: null, refundedAt: null }} />
+      </>,
+    )
+
+    const [lifetime, other] = screen.getAllByText('Not applied')
+    expect(lifetime).toHaveAttribute('title', expect.stringMatching(/^The subscription never expires/))
+    expect(other).toHaveAttribute('title', expect.stringMatching(/^Received but changed nothing/))
+    expect(other).not.toHaveAttribute('title', expect.stringMatching(/trial/))
   })
 })
 

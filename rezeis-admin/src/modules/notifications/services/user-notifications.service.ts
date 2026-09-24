@@ -1229,7 +1229,12 @@ export class UserNotificationsService {
             ? undefined
             : (() => {
                 const resolved = linkButtonsToSubscription(
-                  resolveTemplateButtons({ buttons: (template as { buttons?: unknown }).buttons ?? null }, locale),
+                  offerTrafficTopUpForLifetime(
+                    resolveTemplateButtons({ buttons: (template as { buttons?: unknown }).buttons ?? null }, locale),
+                    input.type,
+                    input.payload,
+                    locale,
+                  ),
                   input.payload,
                 );
                 return resolved.length > 0 ? resolved : undefined;
@@ -2278,12 +2283,60 @@ function isAddOnNoticeType(type: string): boolean {
 }
 
 /**
+ * «Трафик исчерпан» (`limited`) about a subscription with no end date (the
+ * owner, 24.09.2026). Such a subscription is never renewed
+ * (`payments/utils/lifetime-renewal.util.ts`), so the way on is more traffic,
+ * not a renewal. Read from the notice's own payload, which states the expiry
+ * (`SubscriptionNoticePayloadService`): `null` there is no end date. A payload
+ * without the key says nothing, and keeps the renewal.
+ */
+function isLifetimeTrafficNotice(type: string, payload: unknown): boolean {
+  if (resolveToggleKey(type) !== 'limited') return false;
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const record = payload as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(record, 'expiresAt') && record['expiresAt'] === null;
+}
+
+/** What the renewal button of such a notice becomes, in the reader's language. */
+const TRAFFIC_TOP_UP_BUTTON = { ru: '📦 Докупить трафик', en: '📦 Buy more traffic' } as const;
+
+/** The cabinet's renewal page, which a subscription with no end date is never sent to. */
+const RENEWAL_PAGE = '/renew';
+
+/**
+ * The renewal button of a lifetime subscription's «Трафик исчерпан» becomes
+ * «📦 Докупить трафик» on the add-on page: every Mini App button the template
+ * sends to `/renew` (with its slash or without), keeping its colour and row.
+ * `linkButtonsToSubscription` then names the subscription on it. Any other
+ * notice, subscription or button is left as the operator saved it. «Карта
+ * бота» draws the substitution beside the template's own buttons
+ * (`BotMapComposerService`).
+ */
+function offerTrafficTopUpForLifetime(
+  buttons: NotifyButton[],
+  type: string,
+  payload: unknown,
+  locale: NotificationLocale,
+): NotifyButton[] {
+  if (!isLifetimeTrafficNotice(type, payload)) return buttons;
+  return buttons.map((button) => {
+    const path = button.webAppPath;
+    if (path === undefined) return button;
+    const cut = path.search(/[?#]/);
+    const page = cut === -1 ? path : path.slice(0, cut);
+    if ((page.startsWith('/') ? page : `/${page}`) !== RENEWAL_PAGE) return button;
+    return { ...button, text: locale === 'en' ? TRAFFIC_TOP_UP_BUTTON.en : TRAFFIC_TOP_UP_BUTTON.ru, webAppPath: ADD_ONS_PAGE };
+  });
+}
+
+/**
  * Resolve the cabinet route a web-push notification should deep-link to when
  * clicked, mirroring reiwa web's `resolveNotificationTarget` so the PWA push
  * and the in-app bell agree on destinations:
  *   • «Помощь с подключением»           → the dashboard's connect deep link
  *   • an add-on's end, or its approach  → the add-on page, on its subscription
  *   • expiry / traffic-limit reminders → the renewal page
+ *   • the traffic limit of a subscription with no end date → the add-on page
  *   • referral / partner program       → the referrals cabinet
  *   • broadcasts / news                 → the notifications feed
  *   • everything else                   → the dashboard
@@ -2293,7 +2346,9 @@ function isAddOnNoticeType(type: string): boolean {
  */
 function resolveNotificationPushUrl(type: string, payload?: unknown): string {
   if (resolveToggleKey(type) === 'connect_help') return connectHelpPushUrl(payload);
-  if (isAddOnNoticeType(type)) {
+  // An add-on's notice, and «Трафик исчерпан» for a subscription that is never
+  // renewed (`isLifetimeTrafficNotice`): the add-on page, on its subscription.
+  if (isAddOnNoticeType(type) || isLifetimeTrafficNotice(type, payload)) {
     const subscriptionId = payloadSubscriptionId(payload);
     return subscriptionId === null
       ? ADD_ONS_PAGE

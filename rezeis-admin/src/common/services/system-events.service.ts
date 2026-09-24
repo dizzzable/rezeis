@@ -248,6 +248,10 @@ export const EVENT_TYPES = {
    * subscriptionId, trialConvertedByPaymentId, note }`. Raised once more, with
    * `paidAfterRefund: true`, when the provider says such a payment is paid again
    * after its refund — the same news as `payment.amount_mismatch` for any other.
+   * Raised the same way, with `withheldReason`, for an autopay charge after a
+   * refund (`AUTOPAY_AFTER_REFUND`) and, since 24.09.2026, for a renewal or an
+   * upgrade paid for a subscription with no end date (`SUBSCRIPTION_IS_LIFETIME`,
+   * with `subscriptionId` or a combined renewal's `subscriptionIds`).
    */
   PAYMENT_WITHHELD: 'payment.withheld',
   /**
@@ -1733,6 +1737,15 @@ export class SystemEventsService {
               ? `на этом тарифе это +${meta['renewalConvertedDays']} дн.`
               : 'на этом тарифе это 0 дн.: срок не продлён, деньги нужно вернуть.'),
         );
+      // A renewal or an upgrade that met a subscription with no end date: it
+      // changed nothing, and the money is to go back — the whole payment on
+      // «Платёж получен, но не применён», a combined renewal's line on «Платёж
+      // получен, нужна проверка». The note names the subscription and where
+      // the refund is made.
+      if (meta['lifetimeRenewalNotApplied'] === true)
+        planLines.push('♾ Продление бессрочной подписки не применено: деньги за него нужно вернуть.');
+      if (meta['lifetimeUpgradeNotApplied'] === true)
+        planLines.push('♾ Смена тарифа бессрочной подписки не применена: деньги за неё нужно вернуть.');
       if (meta['isTrial'] !== undefined)
         planLines.push(`🎁 Триал: ${meta['isTrial'] ? 'да' : 'нет'}`);
       const expireRaw = meta['expireAt'] ?? meta['expiresAt'];

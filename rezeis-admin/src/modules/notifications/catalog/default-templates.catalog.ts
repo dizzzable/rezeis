@@ -157,6 +157,10 @@ const DURATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     buttons: EXPIRY_BUTTONS,
   },
   {
+    // A subscription with no end date is never renewed: for it the renewal
+    // button goes out as «📦 Докупить трафик» → `/addons` of that subscription
+    // (`offerTrafficTopUpForLifetime`, `user-notifications.service.ts`), and
+    // «Карта бота» draws both.
     type: 'limited',
     title: '⚠️ Подписка ограничена',
     titleEn: '⚠️ Subscription limited',

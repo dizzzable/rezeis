@@ -15,6 +15,8 @@ export type SubscriptionQuoteWarningCode =
   | 'TRIAL_NOT_RENEWABLE'
   | 'TRIAL_PLAN_NOT_RENEWAL_TARGET'
   | 'SUBSCRIPTION_DISABLED_NOT_RENEWABLE'
+  /** A subscription with no end date is never renewed (`lifetime-renewal.util.ts`). */
+  | 'SUBSCRIPTION_IS_LIFETIME'
   /** @deprecated Kept for compatibility with older Reiwa clients. */
   | 'TRIAL_FREE_NOT_RENEWABLE'
   | 'TRIAL_INVITED_ONLY'

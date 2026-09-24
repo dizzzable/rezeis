@@ -218,6 +218,44 @@ describe('PaymentsTransactionsService', () => {
     });
   }
 
+  // The owner, 24.09.2026: a subscription with no end date is never renewed.
+  // The quote closes it (`SUBSCRIPTION_IS_LIFETIME`, with the PLAN_NOT_AVAILABLE
+  // an empty plan list adds), and the draft names it — for a gateway and the
+  // partner balance alike — so the cabinet can say why instead of "could not pay".
+  it('answers SUBSCRIPTION_IS_LIFETIME for the renewal of a subscription with no end date, through the safe filter', async () => {
+    const { service, state } = createService({
+      quoteResult: {
+        ...createEligibleQuote(),
+        isEligible: false,
+        selectedPlan: null,
+        selectedDuration: null,
+        price: null,
+        warnings: [
+          { code: 'SUBSCRIPTION_IS_LIFETIME', message: 'The subscription has no end date: there is nothing to renew.' },
+          { code: 'PLAN_NOT_AVAILABLE', message: 'The selected plan is not available for this action.' },
+        ],
+      },
+    });
+
+    const error = await captureRejection(() =>
+      service.createDraft({
+        userId: 'user-1',
+        purchaseType: PurchaseType.RENEW,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        channel: PurchaseChannel.WEB,
+      }),
+    );
+
+    assert.ok(error instanceof BadRequestException);
+    assert.equal((error.getResponse() as { code?: unknown }).code, 'SUBSCRIPTION_IS_LIFETIME');
+    const wire = runSafeFilter(error);
+    assert.equal(wire.statusCode, 400, 'a 409 would read as QUOTE_CHANGED to a cabinet that does not know the code');
+    assert.equal(wire.body['code'], 'SUBSCRIPTION_IS_LIFETIME', 'the safe filter stripped the code');
+    assert.equal(state.transactionCreateCalls.length, 0);
+  });
+
   for (const scenario of [
     {
       name: 'a paid trial the buyer cannot claim, which is still on sale',

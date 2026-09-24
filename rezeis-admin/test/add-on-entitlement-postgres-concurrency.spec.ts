@@ -1266,8 +1266,12 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         trafficResetStrategy: 'NO_RESET', resetAnchorAt: new Date('2020-01-01T00:00:00.000Z'),
       },
     });
+    // With a date: a line whose subscription has none is not renewed at all
+    // (`lifetime-renewal-postgres.spec.ts`), and this case is about the term a
+    // renewed line gets.
+    const noTermEndsAt = new Date('2030-02-01T00:00:00.000Z');
     await prisma.subscription.create({
-      data: { id: noTerm, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 200, deviceLimit: 5, remnawaveId: `${prefix}-rw-comb-2` },
+      data: { id: noTerm, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 200, deviceLimit: 5, expiresAt: noTermEndsAt, remnawaveId: `${prefix}-rw-comb-2` },
     });
 
     const txn = await prisma.transaction.create({
@@ -1307,9 +1311,8 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     assert.equal(scheduled.baseTrafficLimitBytes, 100n * gib);
     assert.equal(scheduled.baseDeviceLimit, 3);
     // The line without a durable term ENTERS the model — stage 1 is on — and
-    // gets its renewal term too. It had no expiry (a lifetime row), so its
-    // open-ended first term is closed at the renewal and the renewal's term
-    // follows it, where a renewal of a lifetime row used to throw.
+    // gets its renewal term too, after the first term the entry minted to its
+    // expiry.
     const noTermTerms = await prisma.subscriptionTerm.findMany({
       where: { subscriptionId: noTerm },
       orderBy: { generation: 'asc' },
@@ -1321,8 +1324,8 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         [2, 'SCHEDULED'],
       ],
     );
-    assert.notEqual(noTermTerms[0]!.endsAt, null, 'the open tail was closed');
-    assert.equal(noTermTerms[1]!.startsAt.getTime(), noTermTerms[0]!.endsAt!.getTime());
+    assert.equal(noTermTerms[0]!.endsAt?.getTime(), noTermEndsAt.getTime(), 'the entry minted its term to the expiry');
+    assert.equal(noTermTerms[1]!.startsAt.getTime(), noTermEndsAt.getTime());
     assert.equal(noTermTerms[1]!.baseTrafficLimitBytes, 200n * gib);
   });
 

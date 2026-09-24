@@ -53,6 +53,7 @@ import {
   readLiveTermLimitBonusesInTransaction,
 } from '../../add-on-entitlements/services/term-limit-bonus.util';
 import { LAPSED_TERM_WINDOW_MS } from '../../add-on-entitlements/domain/term-window';
+import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
@@ -81,6 +82,22 @@ import {
   consumePaidTrialClaim,
   countCommittedTrialClaimUnits,
 } from '../../subscriptions/services/trial-claim-ledger.util';
+import {
+  describeLifetimeLineRefund,
+  describeLifetimeRenewalNotApplied,
+  describeLifetimeUpgradeNotApplied,
+  findOpenEndedQueuedTerm,
+  isLifetimeSubscription,
+  LIFETIME_PAYMENT_WITHHELD_MESSAGE,
+  LIFETIME_RENEWAL_CARD_KEY,
+  LIFETIME_RENEWAL_NOT_APPLIED_CODE,
+  LIFETIME_RENEWAL_NOT_APPLIED_KEY,
+  LIFETIME_RENEWAL_NOT_APPLIED_MESSAGE,
+  LIFETIME_UPGRADE_CARD_KEY,
+  lifetimeRenewalNotAppliedProvenance,
+  type LifetimeRenewalNotApplied,
+  subscriptionIsLifetime,
+} from '../utils/lifetime-renewal.util';
 import { readProviderSubscriptionTerms } from '../utils/provider-subscription-terms.util';
 import {
   AUTOPAY_AFTER_REFUND,
@@ -88,6 +105,7 @@ import {
   isTrialConversionSnapshot,
   isWithheldConversion,
   TRIAL_CONVERTED_BY_KEY,
+  WITHHELD_FOR_LIFETIME_SUBSCRIPTION,
   WITHHELD_REASON_KEY,
   WITHHELD_REFUND_UI_PATH,
 } from '../utils/trial-conversion.util';
@@ -187,7 +205,32 @@ type UpgradeOutcome =
       readonly subscriptionId: string;
       readonly convertedByPaymentId: string;
       readonly announce: boolean;
-    };
+    }
+  | LifetimeWithheld;
+
+/**
+ * A renewal or an upgrade paid for a subscription that has no end date — or
+ * whose paid periods end in a queued one without an end — withheld for refund
+ * (`lifetime-renewal.util.ts`). `announce` is true for the run that wrote the
+ * mark, which is the one that tells the operator.
+ */
+interface LifetimeWithheld {
+  readonly kind: 'WITHHELD_LIFETIME';
+  /** What was paid for, on which subscription, and why it was not applied. */
+  readonly line: LifetimeRenewalNotApplied;
+  readonly announce: boolean;
+}
+
+/** What a single renewal did: renewed the subscription, or was withheld because it has no end date. */
+type RenewalOutcome =
+  | {
+      readonly kind: 'RENEWED';
+      readonly subscription: Subscription;
+      readonly syncJob: ProfileSyncJob;
+      readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
+      readonly renewalPricedBeforeUpgrade: RenewalPricedBeforeUpgrade | null;
+    }
+  | LifetimeWithheld;
 
 /**
  * The payment that converted a trial, when a payment did: another UPGRADE on
@@ -311,14 +354,19 @@ export class PaymentSubscriptionMutationService {
       // but each LINE was priced with its own — so a grant restricted to one of
       // them was applied and has to be settled. Passing `null` alone said
       // nothing applied, and the grant survived every combined renewal.
-      await this.consumePurchaseDiscount(
-        transaction.userId,
-        null,
-        items,
-        // Lines kept on their current plan — by a migration, or priced before
-        // an upgrade — were still priced with the plan they paid for.
-        [...combined.latePlanMigrationRenewals, ...combined.renewalsPricedBeforeUpgrade],
-      );
+      //
+      // Not when every line met a subscription with no end date: nothing was
+      // bought, the money is to go back, and the discount with it.
+      if (!combined.lifetimeOnly) {
+        await this.consumePurchaseDiscount(
+          transaction.userId,
+          null,
+          items,
+          // Lines kept on their current plan — by a migration, or priced before
+          // an upgrade — were still priced with the plan they paid for.
+          [...combined.latePlanMigrationRenewals, ...combined.renewalsPricedBeforeUpgrade],
+        );
+      }
       return { syncJobs: combined.syncJobs };
     }
 
@@ -354,19 +402,53 @@ export class PaymentSubscriptionMutationService {
           selectedDurationDays,
         });
         break;
-      case PurchaseType.RENEW:
-        result = await this.renewSubscriptionFromPayment({
+      case PurchaseType.RENEW: {
+        const renewed = await this.renewSubscriptionFromPayment({
           transaction,
           purchasedPlan,
           selectedDurationDays,
         });
+        if (renewed.kind === 'WITHHELD_LIFETIME') {
+          // A subscription with no end date: settled and not applied, as a
+          // trial's second conversion is. No «Платёж получен» for a sale, no
+          // «Подписка продлена», and the one-time discount stays unspent: the
+          // money is to go back. The operator's notice replaces all three.
+          if (renewed.announce) {
+            this.announceLifetimeWithheld({
+              transaction,
+              purchaseType: PurchaseType.RENEW,
+              lines: [renewed.line],
+              planName: displayPlanName(purchasedPlan),
+              planType: purchasedPlan.type,
+              durationDays: selectedDurationDays,
+            });
+          }
+          return { syncJobs: [] };
+        }
+        result = renewed;
         break;
+      }
       case PurchaseType.UPGRADE: {
         const upgraded = await this.upgradeSubscriptionFromPayment({
           transaction,
           purchasedPlan,
           selectedDurationDays,
         });
+        if (upgraded.kind === 'WITHHELD_LIFETIME') {
+          // The same for an upgrade: it would have restarted the term at the
+          // payment and given the subscription an end date.
+          if (upgraded.announce) {
+            this.announceLifetimeWithheld({
+              transaction,
+              purchaseType: PurchaseType.UPGRADE,
+              lines: [upgraded.line],
+              planName: displayPlanName(purchasedPlan),
+              planType: purchasedPlan.type,
+              durationDays: selectedDurationDays,
+            });
+          }
+          return { syncJobs: [] };
+        }
         if (upgraded.kind === 'WITHHELD') {
           // Settled and not applied: no «Платёж получен» for a sale, no
           // lifecycle card, and the one-time discount stays unspent. The
@@ -629,6 +711,105 @@ export class PaymentSubscriptionMutationService {
         note,
       },
     );
+  }
+
+  /**
+   * «⚠️ Платёж получен, но не применён» for a renewal or an upgrade paid for a
+   * subscription that has no end date — or whose paid periods end in a queued
+   * one without an end — and withheld for refund (`lifetime-renewal.util.ts`,
+   * the owner's decision of 24.09.2026).
+   *
+   * The card, type and refund path of a trial's second conversion
+   * ({@link announceWithheldConversion}): `payment.withheld`, operator-only,
+   * never `payment.completed`, which is a receipt to the payer and a sale to
+   * every rule and integration. Raised after the commit that withheld the
+   * payment, by the run that wrote the mark, so once per payment. The note
+   * names every subscription it was paid for, says nothing changed, and where
+   * the refund is recorded.
+   */
+  private announceLifetimeWithheld(input: {
+    readonly transaction: Transaction;
+    readonly purchaseType: 'RENEW' | 'UPGRADE';
+    /** What it paid for: one line for a single payment, each line of a combined renewal. */
+    readonly lines: readonly LifetimeRenewalNotApplied[];
+    readonly planName: string | undefined;
+    readonly planType?: string;
+    readonly durationDays: number | null;
+  }): void {
+    const { transaction } = input;
+    const charged = Number(transaction.amount.toString()) > 0;
+    const described = input.lines.map((line) =>
+      input.purchaseType === PurchaseType.UPGRADE
+        ? describeLifetimeUpgradeNotApplied(line)
+        : describeLifetimeRenewalNotApplied(line),
+    );
+    const note = [
+      ...described,
+      charged
+        ? `Верните деньги у платёжного провайдера (${transaction.gatewayType}), затем отметьте это в панели: ` +
+          `${WITHHELD_REFUND_UI_PATH}.`
+        : 'Денег по нему не списано — возвращать нечего.',
+    ].join(' ');
+    const subscriptionIds = [...new Set(input.lines.map((line) => line.subscriptionId))];
+    this.logger.warn(
+      `${WITHHELD_FOR_LIFETIME_SUBSCRIPTION} transaction=${transaction.id} payment=${transaction.paymentId} ` +
+        `purchaseType=${input.purchaseType} subscriptions=${subscriptionIds.join(',')}: not applied — refund it`,
+    );
+    this.events.warn(EVENT_TYPES.PAYMENT_WITHHELD, 'PAYMENT', LIFETIME_PAYMENT_WITHHELD_MESSAGE, {
+      userId: transaction.userId,
+      paymentId: transaction.paymentId,
+      purchaseType: input.purchaseType,
+      ...(input.planName === undefined ? {} : { planName: input.planName }),
+      ...(input.planType === undefined ? {} : { planType: input.planType }),
+      durationDays: input.durationDays !== null && input.durationDays > 0 ? input.durationDays : undefined,
+      amount: transaction.amount.toString(),
+      currency: transaction.currency,
+      gatewayType: transaction.gatewayType,
+      channel: transaction.channel,
+      ...(subscriptionIds.length === 1 ? { subscriptionId: subscriptionIds[0] } : { subscriptionIds }),
+      conversionWithheld: true,
+      [WITHHELD_REASON_KEY]: WITHHELD_FOR_LIFETIME_SUBSCRIPTION,
+      // The card's ♾ line, for money that is to go back.
+      ...(charged
+        ? { [input.purchaseType === PurchaseType.UPGRADE ? LIFETIME_UPGRADE_CARD_KEY : LIFETIME_RENEWAL_CARD_KEY]: true }
+        : {}),
+      needsManualReview: charged,
+      note,
+    });
+  }
+
+  /**
+   * Withholds a payment for refund because its subscription has no end date,
+   * in the fulfilment's own transaction (`lifetime-renewal.util.ts`): settled
+   * — COMPLETED, `fulfilledAt` — so the notification is processed rather than
+   * retried, and marked (`CONVERSION_WITHHELD_AT_KEY`, with `withheldReason`)
+   * so no post-payment hook pays out on it, a refund revokes nothing and the
+   * lists show «Не применён» with «Отметить возврат». `provenance` is written
+   * beside the mark. Returns whether this run wrote the mark: the one run that
+   * tells the operator.
+   */
+  private async withholdForLifetimeSubscriptionInTransaction(
+    tx: Prisma.TransactionClient,
+    transactionId: string,
+    provenance: Record<string, unknown> = {},
+  ): Promise<boolean> {
+    const held = await tx.transaction.findUnique({ where: { id: transactionId }, select: { gatewayData: true } });
+    const first = !isWithheldConversion(held?.gatewayData);
+    const withheldAt = new Date();
+    if (first) {
+      await writeTransactionGatewayData(tx, transactionId, {
+        merge: {
+          ...provenance,
+          [CONVERSION_WITHHELD_AT_KEY]: withheldAt.toISOString(),
+          [WITHHELD_REASON_KEY]: WITHHELD_FOR_LIFETIME_SUBSCRIPTION,
+        },
+      });
+    }
+    await tx.transaction.update({
+      where: { id: transactionId },
+      data: { fulfilledAt: withheldAt, status: TransactionStatus.COMPLETED },
+    });
+    return first;
   }
 
   /**
@@ -912,10 +1093,12 @@ export class PaymentSubscriptionMutationService {
     readonly latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[];
     /** Lines priced for the plan an upgrade left; see `readRenewalPricedBeforeUpgrade`. */
     readonly renewalsPricedBeforeUpgrade: readonly RenewalPricedBeforeUpgrade[];
+    /** Every line this run claimed met a subscription with no end date: nothing was bought. */
+    readonly lifetimeOnly: boolean;
   }> {
     const pending = items.filter((item) => item.appliedAt === null);
     if (pending.length === 0) {
-      return { syncJobs: [], latePlanMigrationRenewals: [], renewalsPricedBeforeUpgrade: [] };
+      return { syncJobs: [], latePlanMigrationRenewals: [], renewalsPricedBeforeUpgrade: [], lifetimeOnly: false };
     }
 
     const committed = await this.prismaService.$transaction(async (transactionClient) => {
@@ -929,6 +1112,9 @@ export class PaymentSubscriptionMutationService {
       // for the lines priced for the plan an upgrade has since left.
       const latePlanMigrationRenewals: LatePlanMigrationRenewal[] = [];
       const renewalsPricedBeforeUpgrade: RenewalPricedBeforeUpgrade[] = [];
+      // And for the lines that met a subscription with no end date, which
+      // change nothing and are to be refunded.
+      const lifetimeRenewals: LifetimeRenewalNotApplied[] = [];
       // What the operator's card calls this renewal. Collected from the plan
       // each line actually renewed on, not from the line's stored snapshot: an
       // autopay charge deliberately carries no snapshot so that it renews on
@@ -964,6 +1150,8 @@ export class PaymentSubscriptionMutationService {
           dormantAddOnLines,
           latePlanMigrationRenewals,
           renewalsPricedBeforeUpgrade,
+          lifetimeRenewals,
+          withheld: null,
           paidPlanNames,
           renewedLines,
         };
@@ -990,6 +1178,30 @@ export class PaymentSubscriptionMutationService {
           currentSubscription,
           readPersistedPlanAvailability(item.planSnapshot),
         );
+        // A subscription with no end date is not renewed, and this line
+        // changes nothing about it — the same rule, and for the same reasons,
+        // as the single renewal (`renewSubscriptionFromPayment`), and the same
+        // for one whose paid periods end in a queued period without an end.
+        // The line stays claimed (`appliedAt` above), so no later run applies
+        // it; its add-on lines, if any, are part of what is refunded. Every
+        // line such: the payment is withheld, below.
+        const openEndedTerm = isLifetimeSubscription(currentSubscription)
+          ? null
+          : await findOpenEndedQueuedTerm(transactionClient, currentSubscription);
+        if (isLifetimeSubscription(currentSubscription) || openEndedTerm !== null) {
+          if (transaction.gatewayType === PaymentGatewayType.PARTNER_BALANCE) {
+            throw subscriptionIsLifetime();
+          }
+          lifetimeRenewals.push({
+            subscriptionId: currentSubscription.id,
+            paidPlanName: displayPlanName(plan),
+            paidDays: item.durationDays,
+            amount: item.amount.toString(),
+            currency: item.currency,
+            ...(openEndedTerm === null ? {} : { openEndedTerm }),
+          });
+          continue;
+        }
         // Moved by a plan migration after the checkout priced it? Then
         // the line keeps its subscription on the plan it is on now: the term,
         // snapshot and limit decisions below all branch on this. Asked here,
@@ -1393,6 +1605,26 @@ export class PaymentSubscriptionMutationService {
           },
         });
       }
+      // And which lines met a subscription with no end date and were not
+      // applied. When every line did, nothing was bought: the payment is
+      // withheld for refund, as a single renewal of one is. When some lines
+      // renewed, the payment stands and only the lifetime lines' part goes
+      // back, which the completion below says.
+      const lifetimeProvenance = {
+        [LIFETIME_RENEWAL_NOT_APPLIED_KEY]: lifetimeRenewalNotAppliedProvenance(lifetimeRenewals, now),
+      };
+      let withheld: { readonly announce: boolean } | null = null;
+      if (lifetimeRenewals.length === claimedItems.length) {
+        withheld = {
+          announce: await this.withholdForLifetimeSubscriptionInTransaction(
+            transactionClient,
+            transaction.id,
+            lifetimeProvenance,
+          ),
+        };
+      } else if (lifetimeRenewals.length > 0) {
+        await writeTransactionGatewayData(transactionClient, transaction.id, { merge: lifetimeProvenance });
+      }
       // Stamp the transaction-level idempotency flag atomically
       // applications so the webhook reconciler treats the combined renewal as
       // fulfilled (its per-item `appliedAt` still guards partial re-runs).
@@ -1405,6 +1637,8 @@ export class PaymentSubscriptionMutationService {
         dormantAddOnLines,
         latePlanMigrationRenewals,
         renewalsPricedBeforeUpgrade,
+        lifetimeRenewals,
+        withheld,
         paidPlanNames,
         renewedLines,
       };
@@ -1425,14 +1659,33 @@ export class PaymentSubscriptionMutationService {
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
     };
-    if (committed.latePlanMigrationRenewals.length === 0 && committed.renewalsPricedBeforeUpgrade.length === 0) {
+    const lifetime = committed.lifetimeRenewals;
+    // Every line met a subscription with no end date: withheld, and told as
+    // such — never as a completed sale, and nothing renewed to announce.
+    if (committed.withheld !== null) {
+      if (committed.withheld.announce) {
+        this.announceLifetimeWithheld({
+          transaction,
+          purchaseType: PurchaseType.RENEW,
+          lines: lifetime,
+          planName: planNameMetadata(committed.paidPlanNames).planName,
+          durationDays: null,
+        });
+      }
+      return { syncJobs: [], latePlanMigrationRenewals: [], renewalsPricedBeforeUpgrade: [], lifetimeOnly: true };
+    }
+    if (
+      committed.latePlanMigrationRenewals.length === 0 &&
+      committed.renewalsPricedBeforeUpgrade.length === 0 &&
+      lifetime.length === 0
+    ) {
       this.events.info(
         EVENT_TYPES.PAYMENT_COMPLETED,
         'PAYMENT',
         `Payment completed: RENEW x${pending.length}`,
         completedMetadata,
       );
-    } else if (committed.renewalsPricedBeforeUpgrade.length === 0) {
+    } else if (committed.renewalsPricedBeforeUpgrade.length === 0 && lifetime.length === 0) {
       // ONE announcement for the payment, however many of its lines a plan
       // migration kept on their current plan: the completion itself, raised as
       // WARNING, exactly as the single renewal does. The list is metadata for
@@ -1446,31 +1699,49 @@ export class PaymentSubscriptionMutationService {
       });
     } else {
       // Lines priced for the plan an upgrade left are told the same way, on
-      // the same one completion; a payment with both kinds names both.
+      // the same one completion; a payment with both kinds names both. So are
+      // the lines that met a subscription with no end date while others
+      // renewed: the note names each one and asks for its part back.
       const migrated = committed.latePlanMigrationRenewals;
+      const priced = committed.renewalsPricedBeforeUpgrade;
       this.events.warn(
         EVENT_TYPES.PAYMENT_COMPLETED,
         'PAYMENT',
         migrated.length > 0
           ? LATE_PLAN_MIGRATION_RENEWAL_MESSAGE
-          : renewalPricedBeforeUpgradeMessage(committed.renewalsPricedBeforeUpgrade),
+          : priced.length > 0
+            ? renewalPricedBeforeUpgradeMessage(priced)
+            : LIFETIME_RENEWAL_NOT_APPLIED_MESSAGE,
         {
           ...completedMetadata,
           code:
             migrated.length > 0
               ? LATE_PLAN_MIGRATION_RENEWAL_CODE
-              : renewalPricedBeforeUpgradeCode(committed.renewalsPricedBeforeUpgrade),
+              : priced.length > 0
+                ? renewalPricedBeforeUpgradeCode(priced)
+                : LIFETIME_RENEWAL_NOT_APPLIED_CODE,
           ...(migrated.length > 0 ? { planMigrationRenewals: migrated.map((renewal) => ({ ...renewal })) } : {}),
-          renewalsPricedBeforeUpgrade: committed.renewalsPricedBeforeUpgrade.map((line) => ({
-            subscriptionId: line.subscriptionId,
-            paidPlanId: line.paidPlanId,
-            currentPlanId: line.currentPlanId,
-            ...line.conversion,
-            ...(line.cause === 'PLAN_CHANGE' ? { cause: line.cause } : {}),
-          })),
+          ...(priced.length > 0
+            ? {
+                renewalsPricedBeforeUpgrade: priced.map((line) => ({
+                  subscriptionId: line.subscriptionId,
+                  paidPlanId: line.paidPlanId,
+                  currentPlanId: line.currentPlanId,
+                  ...line.conversion,
+                  ...(line.cause === 'PLAN_CHANGE' ? { cause: line.cause } : {}),
+                })),
+              }
+            : {}),
+          ...(lifetime.length > 0
+            ? {
+                lifetimeRenewalsNotApplied: lifetime.map((line) => ({ ...line })),
+                [LIFETIME_RENEWAL_CARD_KEY]: true,
+              }
+            : {}),
           note: [
             ...(migrated.length > 0 ? [describeLatePlanMigrationRenewals(migrated)] : []),
-            ...committed.renewalsPricedBeforeUpgrade.map(describeRenewalPricedBeforeUpgrade),
+            ...priced.map(describeRenewalPricedBeforeUpgrade),
+            ...lifetime.map((line) => `${describeLifetimeRenewalNotApplied(line)} ${describeLifetimeLineRefund(line)}`),
           ].join(' '),
         },
       );
@@ -1497,6 +1768,7 @@ export class PaymentSubscriptionMutationService {
       syncJobs: committed.jobs,
       latePlanMigrationRenewals: committed.latePlanMigrationRenewals,
       renewalsPricedBeforeUpgrade: committed.renewalsPricedBeforeUpgrade,
+      lifetimeOnly: false,
     };
   }
 
@@ -2226,16 +2498,11 @@ export class PaymentSubscriptionMutationService {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
-  }): Promise<{
-    readonly subscription: Subscription;
-    readonly syncJob: ProfileSyncJob;
-    readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
-    readonly renewalPricedBeforeUpgrade: RenewalPricedBeforeUpgrade | null;
-  }> {
+  }): Promise<RenewalOutcome> {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
-    const result = await this.prismaService.$transaction(async (transactionClient) => {
+    const result = await this.prismaService.$transaction(async (transactionClient): Promise<RenewalOutcome> => {
       const currentSubscription = await this.lockRenewalSubscriptionInTransaction(
         transactionClient,
         input.transaction.subscriptionId!,
@@ -2244,6 +2511,41 @@ export class PaymentSubscriptionMutationService {
         currentSubscription,
         readPersistedPlanAvailability(input.transaction.planSnapshot),
       );
+      // ── A SUBSCRIPTION WITH NO END DATE IS NOT RENEWED ────────────────────
+      //
+      // The checkout refuses it (`SUBSCRIPTION_IS_LIFETIME`). A payment that
+      // arrives anyway was drafted while the subscription still had a date,
+      // and another payment took the date away before this one was paid — an
+      // UPGRADE to a plan without an end. It changes NOTHING: no expiry (it
+      // used to get one, counted from the payment), no status, plan, limits or
+      // squads, no sync job, and in the term model no term appended or closed
+      // and no add-on given an end. It is withheld for refund, as a trial's
+      // second conversion is (`withholdForLifetimeSubscriptionInTransaction`):
+      // settled, so the webhook does not retry it; no post-payment hook; «Не
+      // применён» on «Платежи»; the operator told to return the money. The
+      // same for a subscription whose paid periods end in a queued period
+      // without an end (`findOpenEndedQueuedTerm`), which the renewal's term
+      // could never follow. Asked under the row lock, first.
+      const openEndedTerm = isLifetimeSubscription(currentSubscription)
+        ? null
+        : await findOpenEndedQueuedTerm(transactionClient, currentSubscription);
+      if (isLifetimeSubscription(currentSubscription) || openEndedTerm !== null) {
+        // No provider holds partner-balance money: refused instead, and that
+        // path puts the balance back when fulfilment throws.
+        if (input.transaction.gatewayType === PaymentGatewayType.PARTNER_BALANCE) {
+          throw subscriptionIsLifetime();
+        }
+        const line: LifetimeRenewalNotApplied = {
+          subscriptionId: currentSubscription.id,
+          paidPlanName: displayPlanName(input.purchasedPlan),
+          paidDays: input.selectedDurationDays,
+          ...(openEndedTerm === null ? {} : { openEndedTerm }),
+        };
+        const announce = await this.withholdForLifetimeSubscriptionInTransaction(transactionClient, input.transaction.id, {
+          [LIFETIME_RENEWAL_NOT_APPLIED_KEY]: lifetimeRenewalNotAppliedProvenance([line], new Date()),
+        });
+        return { kind: 'WITHHELD_LIFETIME', line, announce };
+      }
       // ── PRICED FOR THE PLAN AN UPGRADE HAS SINCE LEFT ─────────────────────
       //
       // Drafted on the old plan, paid after the subscription was upgraded: as
@@ -2451,6 +2753,7 @@ export class PaymentSubscriptionMutationService {
         data: { fulfilledAt: now, status: TransactionStatus.COMPLETED },
       });
       return {
+        kind: 'RENEWED',
         subscription: renewedSubscription,
         syncJob,
         latePlanMigrationRenewal,
@@ -2687,34 +2990,37 @@ export class PaymentSubscriptionMutationService {
     });
     if (tail === null) return null;
 
-    const now = new Date();
-    // ── AN OPEN-ENDED TAIL: A LIFETIME SUBSCRIPTION BEING RENEWED ──────────
+    // ── AN OPEN-ENDED TAIL IS NOT RENEWED AFTER ───────────────────────────
     //
-    // A lifetime subscription's term never ends (`endsAt = null`), and a
-    // renewal of one — the quote offers RENEW on its plan, and the column path
-    // restarts it from the payment — has nowhere to append after it. It used to
-    // throw here: the money taken, the webhook FAILED, nothing fulfilled. The
-    // open tail is closed instead, at the payment (never before its own start:
-    // a term's window cannot close before it opened), and the renewal's term
-    // follows it — exactly what the renewal does to `expiresAt`.
-    const closedTailAt =
-      tail.endsAt === null
-        ? new Date(Math.max(now.getTime(), tail.startsAt.getTime() + LAPSED_TERM_WINDOW_MS))
-        : null;
-    const tailEndsAt = tail.endsAt ?? closedTailAt!;
+    // A term that never ends (`endsAt = null`) is a lifetime subscription's,
+    // and a lifetime subscription is not renewed: the checkout refuses it and
+    // a payment that arrives anyway is withheld — both renewals stop before
+    // they reach here (`renewSubscriptionFromPayment`, `applyCombinedRenewal`).
+    // The alignment above closes an open tail on any subscription that has an
+    // end date, save one case: the expiry moved to or before the start of a
+    // queued open-ended term, which it leaves for a human
+    // (`SCHEDULED_SUCCESSOR_BLOCKS`, an incident). The quote refuses that case
+    // too, and both renewals withhold a payment for it before they get here
+    // (`findOpenEndedQueuedTerm`). Closing the tail here, as a renewal once
+    // did, ended a period bought without an end — and the add-ons riding on
+    // it — on a payment for thirty days. So whatever still reaches it fails
+    // closed: the payment stays paid and unfulfilled, the webhook is marked
+    // FAILED with this code, and the operator's alert fires. The code is bare
+    // because the webhook inbox keeps an error text only when it is one
+    // (`normalizePaymentProviderError`).
+    if (tail.endsAt === null) {
+      this.logger.warn(
+        `RENEWAL_AFTER_OPEN_ENDED_TERM subscription=${input.subscriptionId} term=${tail.id} ` +
+          `status=${tail.status}: the chain ends in a term with no end, and a renewal does not close it`,
+      );
+      throw new ConflictException('RENEWAL_AFTER_OPEN_ENDED_TERM');
+    }
+    const now = new Date();
     const startsAt =
-      tail.status === SubscriptionTermStatus.SCHEDULED || tailEndsAt.getTime() > now.getTime()
-        ? tailEndsAt
+      tail.status === SubscriptionTermStatus.SCHEDULED || tail.endsAt.getTime() > now.getTime()
+        ? tail.endsAt
         : now;
     const endsAt = calculateExpiry(startsAt, input.durationDays);
-    if (closedTailAt !== null) {
-      await this.closeOpenTailForRenewalInTransaction(tx, {
-        subscriptionId: input.subscriptionId,
-        tailId: tail.id,
-        closedAt: closedTailAt,
-        renewalEndsAt: endsAt,
-      });
-    }
     const baseTrafficLimitBytes =
       input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES;
     const baseDeviceLimit = input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit;
@@ -2744,73 +3050,6 @@ export class PaymentSubscriptionMutationService {
       resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, startsAt),
     });
     return { id: created.id, startsAt, endsAt, baseTrafficLimitBytes, baseDeviceLimit };
-  }
-
-  /**
-   * Closes a lifetime subscription's open-ended tail term for the renewal that
-   * follows it, under the row lock the caller holds.
-   *
-   * THE ADD-ONS WITH NO END FOLLOW THE SUBSCRIPTION'S NEW ONE. An
-   * UNTIL_SUBSCRIPTION_END add-on on a lifetime subscription has no date
-   * (`expiresAt = null` — the subscription was made lifetime after it was
-   * bought, and alignment opened it with the tail). Left so, it would count for
-   * ever on an ENDED term: nothing expires a row with no date, and the drift
-   * sweep compares only the tail. It ends where the subscription now does — at
-   * the end of the renewal's term, which is what "until the end of the
-   * subscription" means once the subscription has one; a renewal that is
-   * itself lifetime leaves it open. Each move is audited as an alignment is: a
-   * version bump under a version guard, and an event carrying both dates.
-   */
-  private async closeOpenTailForRenewalInTransaction(
-    tx: Prisma.TransactionClient,
-    input: {
-      readonly subscriptionId: string;
-      readonly tailId: string;
-      readonly closedAt: Date;
-      readonly renewalEndsAt: Date | null;
-    },
-  ): Promise<void> {
-    await tx.subscriptionTerm.update({ where: { id: input.tailId }, data: { endsAt: input.closedAt } });
-    if (input.renewalEndsAt === null) return;
-    const renewalEndsAt = input.renewalEndsAt;
-    const open = await tx.addOnEntitlement.findMany({
-      where: {
-        subscriptionId: input.subscriptionId,
-        lifetime: AddOnLifetime.UNTIL_SUBSCRIPTION_END,
-        state: { in: [AddOnEntitlementState.PENDING_ACTIVATION, AddOnEntitlementState.ACTIVE] },
-        expiresAt: null,
-      },
-      orderBy: { id: 'asc' },
-      select: { id: true, state: true, version: true, scheduledActivationAt: true },
-    });
-    for (const entitlement of open) {
-      // Never at or before its own activation (`add_on_entitlements_boundary_check`).
-      const expiresAt = new Date(
-        Math.max(renewalEndsAt.getTime(), entitlement.scheduledActivationAt.getTime() + LAPSED_TERM_WINDOW_MS),
-      );
-      const claimed = await tx.addOnEntitlement.updateMany({
-        where: { id: entitlement.id, state: entitlement.state, version: entitlement.version },
-        data: { expiresAt, version: { increment: 1 } },
-      });
-      if (claimed.count !== 1) continue;
-      await tx.addOnEntitlementEvent.create({
-        data: {
-          entitlementId: entitlement.id,
-          fromState: entitlement.state,
-          toState: entitlement.state,
-          reason: 'LIFETIME_TERM_CLOSED_BY_RENEWAL',
-          actorType: AddOnEntitlementActorType.SYSTEM,
-          correlationId: `renewal-close:${input.subscriptionId}`,
-          commandKey: `lifetime-close:v${entitlement.version + 1}`,
-          metadata: {
-            termId: input.tailId,
-            termEndsAt: input.closedAt.toISOString(),
-            previousExpiresAt: null,
-            expiresAt: expiresAt.toISOString(),
-          },
-        },
-      });
-    }
   }
 
   /**
@@ -3287,6 +3526,41 @@ export class PaymentSubscriptionMutationService {
           };
         }
       }
+      // ── NOR IS A SUBSCRIPTION WITH NO END DATE UPGRADED ──────────────────
+      //
+      // The checkout refuses it (`SUBSCRIPTION_IS_LIFETIME`, the owner's
+      // decision of 24.09.2026): an upgrade restarts the term at the payment,
+      // which would put a subscription bought without an end on the new plan's
+      // clock. A payment that arrives anyway — drafted while the subscription
+      // had a date, then another payment took the date away — changes nothing
+      // and is withheld for refund, as a renewal of one is. The same for one
+      // whose paid periods end in a queued period without an end: the upgrade
+      // would cancel that paid period. A trial is exempt: an upgrade is how a
+      // trial is left, and its own rule is above.
+      if (!currentSubscription.isTrial) {
+        const openEndedTerm = isLifetimeSubscription(currentSubscription)
+          ? null
+          : await findOpenEndedQueuedTerm(transactionClient, currentSubscription);
+        if (isLifetimeSubscription(currentSubscription) || openEndedTerm !== null) {
+          if (input.transaction.gatewayType === PaymentGatewayType.PARTNER_BALANCE) {
+            throw subscriptionIsLifetime('UPGRADE');
+          }
+          const announce = await this.withholdForLifetimeSubscriptionInTransaction(
+            transactionClient,
+            input.transaction.id,
+          );
+          return {
+            kind: 'WITHHELD_LIFETIME',
+            line: {
+              subscriptionId: currentSubscription.id,
+              paidPlanName: displayPlanName(input.purchasedPlan),
+              paidDays: input.selectedDurationDays,
+              ...(openEndedTerm === null ? {} : { openEndedTerm }),
+            },
+            announce,
+          };
+        }
+      }
       const now = new Date();
       // ── WHAT WAS LEFT OF THE OLD PLAN, AS DAYS ON THE NEW ONE ─────────────
       //
@@ -3366,11 +3640,19 @@ export class PaymentSubscriptionMutationService {
           // (and the trial badge / "active trial" gating). Mirrors the NEW
           // path: the flag follows the purchased plan's availability.
           isTrial: input.purchasedPlan.availability === PlanAvailability.TRIAL,
-          planSnapshot: buildPlanSnapshot({
-            transaction: input.transaction,
-            purchasedPlan: input.purchasedPlan,
-            selectedDurationDays: input.selectedDurationDays,
-          }) as Prisma.InputJsonValue,
+          // The purchased plan's snapshot, and the row's import keys kept
+          // (`carryImportDomainKeys`, R1-02): an imported customer's upgrade
+          // used to drop `sourceSubscriptionId`, and the next import of the
+          // same backup created a second subscription. Read under the row lock
+          // this transaction took first.
+          planSnapshot: carryImportDomainKeys(
+            currentSubscription.planSnapshot,
+            buildPlanSnapshot({
+              transaction: input.transaction,
+              purchasedPlan: input.purchasedPlan,
+              selectedDurationDays: input.selectedDurationDays,
+            }) as Prisma.InputJsonValue,
+          ),
           trafficLimit: carry.columns.trafficLimit,
           deviceLimit: carry.columns.deviceLimit,
           internalSquads: input.purchasedPlan.internalSquads,

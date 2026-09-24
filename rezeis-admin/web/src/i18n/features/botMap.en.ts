@@ -163,6 +163,8 @@ export const en = {
         'The bot answers: menu:main or menu — the main menu; screen:<shortId> or a screen’s shortId itself — that screen (a screen of your own opens more reliably with screen:<shortId>); invite, rules, help — their screens; back_to_menu — the main menu; close — deletes the message; check_channel or check_channel:q:<id> — the channel subscription check, as «I subscribed»; quest_channel:<id> — the «Subscribe to channel» quest check; lang:<code>, such as lang:ru — switches the language; ai_support_exit — leaves AI support. With any other value the button does nothing.',
       defaultTargetHint:
         'With no buttons, the system still deep-links into the most relevant cabinet section — see the diagram.',
+      lifetimeTopUpHint:
+        'A subscription that never expires has nothing to renew, so the bot turns this notification’s buttons that open «Subscription renewal» (/renew) into «📦 Buy more traffic» → «Add-ons» (/addons) for that subscription. The push and the cabinet bell lead there too. The diagram draws it as its own arrow.',
       save: 'Save template',
     },
     terminal: {

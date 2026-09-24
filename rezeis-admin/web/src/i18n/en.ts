@@ -4330,11 +4330,17 @@ export const en = {
       badgeRefunded: 'Not applied · refunded',
       hint: "Another payment had already converted the customer's trial. This one was received but changed nothing, and the money is to be returned.",
       hintAutopay: 'The provider charged it on an autopay that a refund had ended. It was received but renewed nothing, and the money is to be returned.',
+      hintLifetime: 'The subscription never expires: a purchase neither renews it nor changes its plan. This payment was received but changed nothing, and the money is to be returned.',
+      hintOther: 'Received but changed nothing, and the money is to be returned.',
       title: 'Payment received but not applied',
       description:
         "Another payment had already converted the customer's trial to a plan, so this one changed nothing: the subscription and its term stayed as they were. Return the money to the customer at the payment provider.",
       descriptionAutopay:
         'The provider took this autopay charge after a refund had ended the autopay. It renewed nothing: the subscription stayed as the refund left it. Return the money to the customer at the payment provider.',
+      descriptionLifetime:
+        'This payment paid for a renewal or a plan change of a subscription with no end date (or one whose current period is followed by a period with no end). It changed nothing: the term, the plan and the limits stayed as they were. Return the money to the customer at the payment provider.',
+      descriptionOther:
+        'Received but changed nothing. Return the money to the customer at the payment provider.',
       convertedBy: 'Converted by payment',
       refundedAt: 'Refund recorded {{time}}',
       recordRefund: 'Record refund',

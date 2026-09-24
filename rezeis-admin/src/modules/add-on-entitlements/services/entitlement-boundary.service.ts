@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import { resolveResetCapabilities } from '../add-on-rollout.config';
@@ -242,12 +243,24 @@ export class EntitlementBoundaryService {
           ? {}
           : await this.resolveDeferredSquadWrite(tx, subscriptionId, deferredPlan);
       if (projection.changed || deferredPlan !== null) {
+        // The term's plan replaces the snapshot, and the subscription's import
+        // keys stay (`carryImportDomainKeys`): a row an import made keeps the
+        // donor ids the next import of the same backup finds it by, or that
+        // import creates a second subscription. Read under the row lock the
+        // activation above took.
+        const stored =
+          deferredPlan === null
+            ? null
+            : await tx.subscription.findUnique({ where: { id: subscriptionId }, select: { planSnapshot: true } });
         const subscription = await tx.subscription.update({
           where: { id: subscriptionId },
           data: {
             ...(deferredPlan === null
               ? {}
-              : { planSnapshot: deferredPlan.planSnapshot, ...deferredSquads }),
+              : {
+                  planSnapshot: carryImportDomainKeys(stored?.planSnapshot, deferredPlan.planSnapshot),
+                  ...deferredSquads,
+                }),
             trafficLimit:
               projection.desiredTrafficLimitBytes === null
                 ? null

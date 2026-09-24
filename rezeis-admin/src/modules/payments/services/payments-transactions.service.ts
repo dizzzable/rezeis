@@ -36,6 +36,7 @@ import {
   renewsOntoAnotherPlan,
   resolveProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
+import { SUBSCRIPTION_IS_LIFETIME_CODE, subscriptionIsLifetime } from '../utils/lifetime-renewal.util';
 import { readWithheldConversion, TRIAL_CONVERSION_SNAPSHOT_KEY } from '../utils/trial-conversion.util';
 
 /**
@@ -304,6 +305,13 @@ export class PaymentsTransactionsService {
       quote.selectedPlan === null ||
       quote.selectedDuration === null
     ) {
+      // A renewal or an upgrade of a subscription with no end date is refused
+      // by name, for every door this draft serves — a gateway, the partner
+      // balance, the admin draft, a Platega or RollyPay sign-up — so the
+      // cabinet says why rather than "could not pay".
+      if (quote.warnings.some((warning) => warning.code === SUBSCRIPTION_IS_LIFETIME_CODE)) {
+        throw subscriptionIsLifetime(input.purchaseType === PurchaseType.UPGRADE ? 'UPGRADE' : 'RENEW');
+      }
       // A plan or term no longer offered gets a code of its own. The safe
       // filter strips `warnings`, so under the shared code below a client
       // cannot tell a withdrawn plan from any other refusal — and the cabinet's

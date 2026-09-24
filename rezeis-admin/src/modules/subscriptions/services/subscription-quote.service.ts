@@ -18,6 +18,11 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import { recordedAddOnContributionOf } from '../../add-on-entitlements/services/configured-baseline.util';
+import {
+  findOpenEndedQueuedTerm,
+  isLifetimeSubscription,
+  SUBSCRIPTION_IS_LIFETIME_CODE,
+} from '../../payments/utils/lifetime-renewal.util';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
@@ -155,6 +160,36 @@ const TRIAL_PLAN_NOT_RENEWAL_TARGET: SubscriptionQuoteWarningInterface = {
 const SUBSCRIPTION_DISABLED_NOT_RENEWABLE: SubscriptionQuoteWarningInterface = {
   code: 'SUBSCRIPTION_DISABLED_NOT_RENEWABLE',
   message: 'A disabled subscription cannot be renewed. Enable it before renewing.',
+};
+/**
+ * A subscription with no end date is never renewed (`lifetime-renewal.util.ts`).
+ * Blocking: the action policy closes RENEW, the renewal list reads the line as
+ * not renewable and names the reason, and the draft refuses it with the same
+ * code.
+ */
+const SUBSCRIPTION_IS_LIFETIME: SubscriptionQuoteWarningInterface = {
+  code: SUBSCRIPTION_IS_LIFETIME_CODE,
+  message: 'The subscription has no end date: there is nothing to renew.',
+};
+/**
+ * And for an UPGRADE: it restarts the term at the payment
+ * (`UPGRADE_RESETS_EXPIRY`), which would give the subscription an end date.
+ * The action policy closes UPGRADE, the upgrade options list nothing, and the
+ * draft refuses it with the same code. A trial is exempt.
+ */
+const SUBSCRIPTION_IS_LIFETIME_UPGRADE: SubscriptionQuoteWarningInterface = {
+  code: SUBSCRIPTION_IS_LIFETIME_CODE,
+  message: 'The subscription has no end date: its plan is not changed by a purchase.',
+};
+/**
+ * The same code for a subscription with a date whose paid periods end in a
+ * queued one without an end (`findOpenEndedQueuedTerm`): a renewal has nowhere
+ * to go after it, an upgrade would cancel it, and for the customer the
+ * subscription is one that does not end.
+ */
+const QUEUED_OPEN_ENDED_TERM: SubscriptionQuoteWarningInterface = {
+  code: SUBSCRIPTION_IS_LIFETIME_CODE,
+  message: 'A period with no end date is queued on this subscription: it is neither renewed nor upgraded.',
 };
 const SUBSCRIPTION_LIMIT_REACHED: SubscriptionQuoteWarningInterface = {
   code: 'SUBSCRIPTION_LIMIT_REACHED',
@@ -877,6 +912,30 @@ export class SubscriptionQuoteService {
     // reopen this bypass.
     if (input.purchaseType === PurchaseType.RENEW && input.sourceSubscription.isTrial) {
       return { plans: [], warnings: [TRIAL_NOT_RENEWABLE] };
+    }
+    // Before DISABLED: "enable it before renewing" would send the operator to a
+    // switch that changes nothing — enabled, it still has no end to move.
+    if (input.purchaseType === PurchaseType.RENEW && isLifetimeSubscription(input.sourceSubscription)) {
+      return { plans: [], warnings: [SUBSCRIPTION_IS_LIFETIME] };
+    }
+    // An UPGRADE restarts the term at the payment, so it is closed to one as
+    // well — save a trial, which is left by an upgrade and nothing else.
+    if (
+      input.purchaseType === PurchaseType.UPGRADE &&
+      !input.sourceSubscription.isTrial &&
+      isLifetimeSubscription(input.sourceSubscription)
+    ) {
+      return { plans: [], warnings: [SUBSCRIPTION_IS_LIFETIME_UPGRADE] };
+    }
+    // Nor either for a subscription with a date whose paid periods end in a
+    // queued one without an end (R1-08): the checkout would sell a renewal
+    // fulfilment cannot apply, or an upgrade that cancels that period. (A trial
+    // never reaches here for a renewal, and is upgraded whatever it holds.)
+    if (
+      !input.sourceSubscription.isTrial &&
+      (await findOpenEndedQueuedTerm(this.prismaService, input.sourceSubscription)) !== null
+    ) {
+      return { plans: [], warnings: [QUEUED_OPEN_ENDED_TERM] };
     }
     if (
       input.purchaseType === PurchaseType.RENEW &&

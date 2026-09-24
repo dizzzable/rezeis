@@ -82,6 +82,9 @@ const userOperationSchema = z.discriminatedUnion('kind', [
       conversionWithheld: z
         .object({
           reason: z.enum(['TRIAL_ALREADY_CONVERTED', 'AUTOPAY_AFTER_REFUND']).optional(),
+          // A renewal or an upgrade paid for a subscription with no end date.
+          // It comes without `reason`, so a build that predates it still parses.
+          lifetimeSubscription: z.boolean().optional(),
           withheldAt: z.string(),
           convertedByPaymentId: z.string().nullable(),
           refundedAt: z.string().nullable(),

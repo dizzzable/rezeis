@@ -187,6 +187,9 @@ function world(options: {
       findUnique: async () => ({ type: PaymentGatewayType.PLATEGA, settings: { merchantId: 'm-1', secret: 's-1' } }),
     },
     planDuration: { findMany: async () => [] },
+    // No term chain: the quote's question about a queued period without an
+    // end (`findOpenEndedQueuedTerm`) finds none.
+    subscriptionTerm: { findFirst: async () => null, count: async () => 0 },
     // A paid trial's quota: nothing spent, nothing reserved.
     trialClaim: {
       aggregate: async () => ({ _sum: { units: 0 } }),

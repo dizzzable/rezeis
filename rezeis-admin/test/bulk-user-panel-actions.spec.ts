@@ -222,6 +222,54 @@ describe('extending subscriptions in bulk', () => {
     assert.equal(data.status, SubscriptionStatus.ACTIVE);
   });
 
+  // The owner, 24.09.2026: a subscription with no end date stays without one.
+  // Counted from today, the days used to GIVE it one — thirty days left of a
+  // subscription bought without an end.
+  const LIFETIME = {
+    id: 'sub-lifetime',
+    status: SubscriptionStatus.ACTIVE,
+    expiresAt: null,
+    remnawaveId: '4712',
+    remnawavePanelId: 4712,
+    remnawavePanelUsername: 'rz_lifetime',
+  };
+
+  it('leaves a subscription with no end date as it is, and counts a user who holds nothing else as skipped', async () => {
+    const { run, updates, syncJobs, audit } = buildService({ subscriptions: [LIFETIME] });
+
+    const result = await run('extend_subscription', { days: 3 });
+
+    assert.deepStrictEqual(updates, [], 'the subscription with no end date was given one');
+    assert.deepStrictEqual(syncJobs, []);
+    assert.deepStrictEqual(audit, []);
+    assert.deepStrictEqual([result.succeeded, result.skipped, result.failed], [0, 1, 0]);
+    assert.equal(result.items[0].message, 'Only subscriptions with no end date: nothing to extend');
+  });
+
+  it('extends the dated subscription beside it, and says how many it left', async () => {
+    const dated = {
+      id: 'sub-dated',
+      status: SubscriptionStatus.ACTIVE,
+      expiresAt: new Date(NOW + 5 * 24 * 60 * 60 * 1000),
+      remnawaveId: '4711',
+      remnawavePanelId: 4711,
+      remnawavePanelUsername: 'rz_one',
+    };
+    const { run, updates, audit } = buildService({ subscriptions: [LIFETIME, dated] });
+
+    const result = await run('extend_subscription', { days: 3 });
+
+    assert.deepStrictEqual(
+      updates.map((update) => (update['where'] as { id: string }).id),
+      ['sub-dated'],
+    );
+    assert.deepStrictEqual([result.succeeded, result.skipped, result.failed], [1, 0, 0]);
+    assert.equal(result.items[0].message, 'Left 1 with no end date as they are');
+    const metadata = audit[0]['metadata'] as { subscriptions: number; leftWithoutEndDate?: number };
+    assert.equal(metadata.subscriptions, 1);
+    assert.equal(metadata.leftWithoutEndDate, 1);
+  });
+
   it('pushes the status upstream for a revived row', async () => {
     const { run, syncJobs } = buildService({
       subscriptions: [

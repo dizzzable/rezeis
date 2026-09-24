@@ -29,7 +29,12 @@ import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/s
  *                          blocked owners; PAYMENT_GATEWAY_NOT_ACTIVE and
  *                          PAYMENT_GATEWAY_NOT_CONFIGURED (400);
  *                          RENEWAL_ITEM_NOT_PRICEABLE (400) and
- *                          RENEWAL_SUBSCRIPTION_NOT_FOUND (404) from pricing
+ *                          RENEWAL_SUBSCRIPTION_NOT_FOUND (404) from pricing;
+ *                          SUBSCRIPTION_IS_LIFETIME (400) from pricing too — the
+ *                          date was taken away after autopay read it, and the
+ *                          expiry write asks for the date again, so such a
+ *                          subscription is not expired
+ *                          (`lifetime-renewal-postgres.spec.ts`)
  *   may pass               SERVICE_RESTRICTED (503), the only access-mode
  *                          rejection the renewal gate has
  *   cannot reach autopay   PAYMENT_GATEWAY_CHANNEL_UNSUPPORTED (a charge method is

@@ -684,6 +684,155 @@ describe('SubscriptionQuoteService', () => {
     );
   });
 
+  // The owner, 24.09.2026: a subscription with no end date stays without one,
+  // so nothing offers to renew it. The renewal list, the draft and the cabinet
+  // all read this warning.
+  describe('a subscription with no end date', () => {
+    const lifetimeService = (status: SubscriptionStatus = SubscriptionStatus.ACTIVE) =>
+      createService({
+        user: createUser({ maxSubscriptions: 2 }),
+        subscriptions: [
+          createSubscription({ id: 'lifetime-sub', isTrial: false, planId: 'regular-plan', status, expiresAt: null }),
+          createSubscription({ id: 'dated-sub', isTrial: false, planId: 'regular-plan' }),
+        ],
+        plans: [createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL, upgradeToPlanIds: ['bigger-plan'] }), createPlan({ id: 'bigger-plan', availability: PlanAvailability.ALL })],
+      });
+
+    it('is offered neither RENEW nor UPGRADE, and the policy says why (the owner, 24.09.2026)', async () => {
+      const policy = await lifetimeService().getActionPolicy({
+        userId: 'user-1',
+        subscriptionId: 'lifetime-sub',
+        channel: PurchaseChannel.WEB,
+      });
+
+      assert.equal(policy.actions.RENEW, false);
+      assert.equal(policy.actions.UPGRADE, false, 'an upgrade restarts the term and would give it an end date');
+      assert.deepStrictEqual(
+        policy.warnings.filter((warning) => warning.code.endsWith('RENEWABLE') || warning.code === 'SUBSCRIPTION_IS_LIFETIME').map((warning) => warning.code),
+        ['SUBSCRIPTION_IS_LIFETIME'],
+      );
+    });
+
+    it('control: the dated subscription beside it is offered RENEW and UPGRADE', async () => {
+      const policy = await lifetimeService().getActionPolicy({
+        userId: 'user-1',
+        subscriptionId: 'dated-sub',
+        channel: PurchaseChannel.WEB,
+      });
+
+      assert.equal(policy.actions.RENEW, true);
+      assert.equal(policy.actions.UPGRADE, true);
+      assert.equal(policy.warnings.some((warning) => warning.code === 'SUBSCRIPTION_IS_LIFETIME'), false);
+    });
+
+    it('gets no eligible UPGRADE quote, and the refusal names the reason', async () => {
+      const quote = await lifetimeService().getQuote({
+        userId: 'user-1',
+        subscriptionId: 'lifetime-sub',
+        purchaseType: PurchaseType.UPGRADE,
+        planId: 'bigger-plan',
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+      assert.equal(quote.isEligible, false);
+      assert.deepStrictEqual(quote.availablePlans, []);
+      assert.equal(quote.warnings[0]?.code, 'SUBSCRIPTION_IS_LIFETIME', 'named first, ahead of PLAN_NOT_AVAILABLE');
+    });
+
+    it('a trial with no end date is still upgraded: that is how a trial is left', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 2 }),
+        subscriptions: [createSubscription({ id: 'trial-sub', isTrial: true, planId: 'trial-plan', expiresAt: null })],
+        plans: [
+          createPlan({ id: 'trial-plan', availability: PlanAvailability.TRIAL, upgradeToPlanIds: ['regular-plan'] }),
+          createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL }),
+        ],
+      });
+
+      const policy = await service.getActionPolicy({ userId: 'user-1', subscriptionId: 'trial-sub', channel: PurchaseChannel.WEB });
+
+      assert.equal(policy.actions.UPGRADE, true);
+      assert.equal(policy.warnings.some((warning) => warning.code === 'SUBSCRIPTION_IS_LIFETIME'), false);
+    });
+
+    it('gets no eligible RENEW quote on its own plan', async () => {
+      const quote = await lifetimeService().getQuote({
+        userId: 'user-1',
+        subscriptionId: 'lifetime-sub',
+        purchaseType: PurchaseType.RENEW,
+        planId: 'regular-plan',
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+      assert.equal(quote.isEligible, false);
+      assert.deepStrictEqual(quote.availablePlans, []);
+      assert.equal(quote.warnings.some((warning) => warning.code === 'SUBSCRIPTION_IS_LIFETIME'), true);
+    });
+
+    it('disabled as well: named for having no end date, not sent to a switch that changes nothing', async () => {
+      const quote = await lifetimeService(SubscriptionStatus.DISABLED).getQuote({
+        userId: 'user-1',
+        subscriptionId: 'lifetime-sub',
+        purchaseType: PurchaseType.RENEW,
+        planId: 'regular-plan',
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+      const codes = quote.warnings.map((warning) => warning.code);
+      assert.equal(codes.includes('SUBSCRIPTION_IS_LIFETIME'), true);
+      assert.equal(codes.includes('SUBSCRIPTION_DISABLED_NOT_RENEWABLE'), false);
+    });
+
+    // R1-08: a period bought without an end is queued, and an operator moved
+    // the date to or before its start. Fulfilment has nowhere to put a renewal
+    // after it, and an upgrade would cancel it.
+    describe('with a date, but its paid periods end in a queued one without an end', () => {
+      const DAY = 86_400_000;
+      const queuedAt = new Date(Date.now() + 20 * DAY);
+      const queuedService = (expiresAt: Date, queuedEndsAt: Date | null = null) =>
+        createService({
+          user: createUser({ maxSubscriptions: 2 }),
+          subscriptions: [createSubscription({ id: 'queued-sub', isTrial: false, planId: 'regular-plan', expiresAt })],
+          plans: [
+            createPlan({ id: 'regular-plan', availability: PlanAvailability.ALL, upgradeToPlanIds: ['bigger-plan'] }),
+            createPlan({ id: 'bigger-plan', availability: PlanAvailability.ALL }),
+          ],
+          terms: [
+            { id: 'term-1', status: 'ACTIVE', generation: 1, startsAt: new Date(Date.now() - 10 * DAY), endsAt: queuedAt },
+            { id: 'term-2', status: 'SCHEDULED', generation: 2, startsAt: queuedAt, endsAt: queuedEndsAt },
+          ],
+        });
+      const policyOf = (service: SubscriptionQuoteService) =>
+        service.getActionPolicy({ userId: 'user-1', subscriptionId: 'queued-sub', channel: PurchaseChannel.WEB });
+
+      it('is offered neither RENEW nor UPGRADE while the date is at or before that period, and says why', async () => {
+        for (const expiresAt of [new Date(Date.now() + 5 * DAY), queuedAt]) {
+          const policy = await policyOf(queuedService(expiresAt));
+          assert.equal(policy.actions.RENEW, false, `RENEW with the date at ${expiresAt.toISOString()}`);
+          assert.equal(policy.actions.UPGRADE, false, `UPGRADE with the date at ${expiresAt.toISOString()}`);
+          assert.equal(policy.warnings.some((warning) => warning.code === 'SUBSCRIPTION_IS_LIFETIME'), true);
+        }
+      });
+
+      it('control: a date after its start renews and upgrades, since the renewal ends the queued period there', async () => {
+        const policy = await policyOf(queuedService(new Date(queuedAt.getTime() + DAY)));
+
+        assert.equal(policy.actions.RENEW, true);
+        assert.equal(policy.actions.UPGRADE, true);
+      });
+
+      it('control: a queued period WITH an end is renewed after', async () => {
+        const policy = await policyOf(queuedService(new Date(Date.now() + 5 * DAY), new Date(queuedAt.getTime() + 30 * DAY)));
+
+        assert.equal(policy.actions.RENEW, true);
+        assert.equal(policy.warnings.some((warning) => warning.code === 'SUBSCRIPTION_IS_LIFETIME'), false);
+      });
+    });
+  });
+
   it('blocks RENEW for a disabled regular subscription', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),
@@ -1362,6 +1511,18 @@ function createService(input: {
   /** The ACTIVE durable term an upgrade quote looks for when the durable model is on. */
   readonly activeTerm?: { readonly id: string } | null;
   /**
+   * A whole term chain, read by status and newest generation first — for the
+   * queued period without an end (`findOpenEndedQueuedTerm`). Replaces
+   * `activeTerm` when given.
+   */
+  readonly terms?: ReadonlyArray<{
+    readonly id: string;
+    readonly status: 'ACTIVE' | 'SCHEDULED';
+    readonly generation: number;
+    readonly startsAt: Date;
+    readonly endsAt: Date | null;
+  }>;
+  /**
    * The fulfilled payments an upgrade quote weighs for the paid remainder —
    * or an error the read fails with.
    */
@@ -1371,7 +1532,14 @@ function createService(input: {
 }): SubscriptionQuoteService {
   const prismaService = {
     subscriptionTerm: {
-      findFirst: async () => input.activeTerm ?? null,
+      findFirst: async (args?: { readonly where?: { readonly status?: unknown } }) =>
+        input.terms === undefined
+          ? (input.activeTerm ?? null)
+          : ([...input.terms]
+              .filter((term) => args?.where?.status === undefined || term.status === args.where.status)
+              .sort((left, right) => right.generation - left.generation)[0] ?? null),
+      count: async (args?: { readonly where?: { readonly status?: unknown } }) =>
+        (input.terms ?? []).filter((term) => term.status === args?.where?.status).length,
     },
     addOnEntitlement: {
       findMany: async () => {
@@ -1519,7 +1687,11 @@ function createSubscription(input: {
     isTrial: input.isTrial,
     planSnapshot: input.planId === null ? {} : { id: input.planId },
     createdAt: new Date('2026-04-19T12:00:00.000Z'),
-    expiresAt: input.expiresAt ?? null,
+    // A date unless a case asks for none: `null` is a subscription that never
+    // expires, and one of those is never renewed (`SUBSCRIPTION_IS_LIFETIME`).
+    // The default used to be `null`, so every renewal case here renewed a
+    // lifetime subscription by accident.
+    expiresAt: input.expiresAt === undefined ? new Date(Date.now() + 20 * 86_400_000) : input.expiresAt,
   };
 }
 

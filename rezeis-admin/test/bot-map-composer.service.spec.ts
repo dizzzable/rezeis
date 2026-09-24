@@ -293,6 +293,63 @@ describe('BotMapComposerService.compose', () => {
     assert.equal((promoDefault.destination as { route: string }).route, '/promo');
   });
 
+  // The owner, 24.09.2026: «Трафик исчерпан» for a subscription with no end
+  // date sends its renewal buttons to the add-on page instead
+  // (`offerTrafficTopUpForLifetime`). The map shows that beside the button,
+  // or beside the default click-through when the template has none.
+  it('draws where «Трафик исчерпан» sends a subscription with no end date: «📦 Докупить трафик» to the add-on page', () => {
+    const composer = makeComposer();
+    const limited = (buttons: unknown[]) =>
+      ({
+        id: 'tpl-limited',
+        type: 'limited',
+        title: '⚠️ Подписка ограничена',
+        body: 'Лимит трафика исчерпан',
+        titleEn: null,
+        bodyEn: null,
+        isActive: true,
+        buttons,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }) as never;
+    const out = composer.compose({
+      flow: null,
+      replyButtons: [],
+      templates: [
+        limited([
+          { labelRu: '🔄 Продлить подписку', labelEn: '🔄 Renew subscription', kind: 'webApp', target: '/renew' },
+          { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
+        ]),
+        ...(TEMPLATES as unknown as unknown[]),
+      ] as never,
+    });
+
+    const edges = out.edges.filter((e) => e.source === 'notif:limited');
+    assert.deepStrictEqual(
+      edges.map((e) => e.id),
+      ['notif-btn:notif:limited:0', 'notif-btn:notif:limited:1', 'notif-lifetime:notif:limited:0'],
+      'the template’s two buttons, and the lifetime case beside the renewal one',
+    );
+    assert.equal(edges[0]?.target, 'mini-app:/renew', 'a subscription with a date still renews');
+    const lifetime = edges.find((e) => e.id === 'notif-lifetime:notif:limited:0');
+    assert.equal(lifetime?.target, 'mini-app:/addons');
+    assert.equal(lifetime?.valid, true);
+    assert.deepStrictEqual(lifetime?.destination, { kind: 'webApp', route: '/addons' });
+    assert.match(lifetime?.sourceLabel ?? '', /^📦 Докупить трафик — у бессрочной подписки, вместо «🔄 Продлить подписку»$/);
+    assert.ok(out.nodes.some((n) => n.id === 'mini-app:/addons'), 'the add-on page is on the map');
+    // Only this template: an expiry notice's renewal button stays the only arrow.
+    assert.equal(out.edges.filter((e) => e.id.startsWith('notif-lifetime')).length, 1);
+
+    const bare = composer.compose({ flow: null, replyButtons: [], templates: [limited([])] });
+    assert.deepStrictEqual(
+      bare.edges.map((e) => [e.id.startsWith('notif-lifetime-default') ? 'lifetime-default' : e.id.startsWith('notif-default') ? 'default' : e.id, e.target]),
+      [
+        ['default', 'mini-app:/renew'],
+        ['lifetime-default', 'mini-app:/addons'],
+      ],
+    );
+  });
+
   it('reads a notification button by its PATH, so a query string or fragment is not a broken route', () => {
     // «📲 Подключить» on the connect-help notice opens the dashboard told which
     // card to open. Compared whole, the string matched no known route and the

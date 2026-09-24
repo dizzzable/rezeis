@@ -45,7 +45,8 @@ import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
  *     term before it reads its window.
  *  4. Renewal, combined renewal and upgrade follow the term ROW, not the
  *     flag.
- *  5. A lifetime subscription's renewal no longer throws.
+ *  5. A lifetime subscription's renewal changes nothing in the model (the
+ *     whole rule: `lifetime-renewal-postgres.spec.ts`).
  *  6. A paid upgrade on the durable path carries what sat above the old plan
  *     (the snapshot and the carry are written BEFORE the recompute).
  *  7. Live add-ons keep their own end across a paid upgrade, clamped to the
@@ -803,7 +804,10 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
   // ── 5 ─────────────────────────────────────────────────────────────────────
 
   describe('a lifetime subscription renewed', () => {
-    it('no longer throws: the open-ended tail closes at the payment, the renewal’s term follows, and an add-on with no end ends with the renewal', async () => {
+    // The owner, 24.09.2026: a subscription with no end date stays without one.
+    // The renewal used to close its open-ended term at the payment, append its
+    // own after it and end the add-ons with no end at the renewal's end.
+    it('changes nothing: the open-ended term stays open, nothing is appended, and the add-on keeps no end', async () => {
       const plan = await createPlan({ trafficLimit: 100, deviceLimit: 3 });
       const owner = await subscriptionOn(plan, { trafficLimit: 100, deviceLimit: 3 }, { expiresAt: null });
       await enter(owner.subscriptionId);
@@ -811,19 +815,14 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
       assert.equal(open.endsAt, null, 'fixture: a lifetime term');
       const addOnId = await addOnRow(owner, open.id, { type: AddOnType.EXTRA_DEVICES, value: 2, expiresAt: null });
 
-      const before = Date.now();
       await withFlags({}, () => pay(owner, PurchaseType.RENEW, plan));
 
       const rows = await termsOf(owner.subscriptionId);
-      assert.deepEqual(rows.map((term) => [term.generation, term.status]), [[1, 'ACTIVE'], [2, 'SCHEDULED']]);
-      assert.ok(rows[0]!.endsAt !== null && rows[0]!.endsAt.getTime() >= before, 'the open tail closed at the payment');
-      assert.equal(rows[1]!.startsAt.getTime(), rows[0]!.endsAt!.getTime());
+      assert.deepEqual(rows.map((term) => [term.generation, term.status, term.endsAt]), [[1, 'ACTIVE', null]]);
       const addOn = await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: addOnId } });
-      assert.equal(addOn.expiresAt?.getTime(), rows[1]!.endsAt?.getTime(), 'it ends where the subscription now does');
-      assert.equal(
-        await prisma.addOnEntitlementEvent.count({ where: { entitlementId: addOnId, reason: 'LIFETIME_TERM_CLOSED_BY_RENEWAL' } }),
-        1,
-      );
+      assert.equal(addOn.expiresAt, null);
+      assert.equal(await prisma.addOnEntitlementEvent.count({ where: { entitlementId: addOnId } }), 0);
+      assert.equal((await subscriptionOf(owner.subscriptionId)).expiresAt, null);
     });
   });
 

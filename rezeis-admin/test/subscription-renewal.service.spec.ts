@@ -58,6 +58,14 @@ interface SubFixture {
    * being asked for a choice.
    */
   readonly replacementBackOnSaleMidQuote?: boolean;
+  /** The subscription has no end date (`expiresAt = null`): it is never renewed. */
+  readonly lifetime?: boolean;
+  /**
+   * The subscription has a date, and its paid periods end in a queued one
+   * without an end, starting after that date (R1-08): the real quote closes
+   * RENEW with `SUBSCRIPTION_IS_LIFETIME`, and so does this one.
+   */
+  readonly queuedOpenEnded?: boolean;
 }
 
 const GATEWAY = PaymentGatewayType.YOOKASSA;
@@ -154,6 +162,62 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
         }),
       isNotPriceableRefusal,
     );
+  });
+
+  // The owner, 24.09.2026: a subscription with no end date stays without one.
+  // The quote below prices it like any other (it knows nothing of the date), so
+  // only the renewal's own refusal can stop it — and it must, by name.
+  it('refuses a line whose subscription has no end date, by name, beside a dated line (SUBSCRIPTION_IS_LIFETIME)', async () => {
+    const service = createService([sub({ id: 's1', price: '10.00' }), sub({ id: 's2', lifetime: true })]);
+    await assert.rejects(
+      () =>
+        service.priceRenewalItems({
+          identity: { userId: 'u' },
+          subscriptionIds: ['s1', 's2'],
+          gatewayType: GATEWAY,
+        }),
+      (e: unknown) =>
+        e instanceof BadRequestException &&
+        (e.getResponse() as { readonly code?: unknown }).code === 'SUBSCRIPTION_IS_LIFETIME',
+    );
+    // Control: the dated line alone is priced.
+    const priced = await service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY });
+    assert.equal(priced.total, '10');
+  });
+
+  it('refuses the keyed replay of a draft whose subscription lost its end date since (SUBSCRIPTION_IS_LIFETIME)', async () => {
+    const service = createService([sub({ id: 's1' }), sub({ id: 's2', lifetime: true })]);
+    await assert.rejects(
+      () => service.assertRenewalPolicy({ identity: { userId: 'u' }, subscriptionIds: ['s1', 's2'] }),
+      (e: unknown) =>
+        e instanceof BadRequestException &&
+        (e.getResponse() as { readonly code?: unknown }).code === 'SUBSCRIPTION_IS_LIFETIME',
+    );
+    await service.assertRenewalPolicy({ identity: { userId: 'u' }, subscriptionIds: ['s1'] });
+  });
+
+  // R1-08: a dated subscription whose paid periods end in a queued one without
+  // an end. Fulfilment could not put a renewal after it, so the checkout
+  // refuses it by the lifetime name — not as an unpriceable line, which the
+  // cabinet answers by re-pricing a review that can never be priced.
+  it('refuses a line whose paid periods end in a queued period without an end, by the lifetime name', async () => {
+    const service = createService([sub({ id: 's1', price: '10.00' }), sub({ id: 's2', queuedOpenEnded: true })]);
+    await assert.rejects(
+      () => service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: ['s1', 's2'], gatewayType: GATEWAY }),
+      (e: unknown) =>
+        e instanceof BadRequestException &&
+        (e.getResponse() as { readonly code?: unknown }).code === 'SUBSCRIPTION_IS_LIFETIME',
+    );
+    await assert.rejects(
+      () => service.assertRenewalPolicy({ identity: { userId: 'u' }, subscriptionIds: ['s1', 's2'] }),
+      (e: unknown) =>
+        e instanceof BadRequestException &&
+        (e.getResponse() as { readonly code?: unknown }).code === 'SUBSCRIPTION_IS_LIFETIME',
+      'the keyed replay hands back no payment link for it either',
+    );
+    // Control: the dated line alone is priced and replayed.
+    assert.equal((await service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: ['s1'], gatewayType: GATEWAY })).total, '10');
+    await service.assertRenewalPolicy({ identity: { userId: 'u' }, subscriptionIds: ['s1'] });
   });
 
   it('carries each item discount through from the quote', async () => {
@@ -601,6 +665,8 @@ function sub(input: {
   readonly replacementPlanIds?: readonly string[];
   readonly replacementsOffSale?: boolean;
   readonly replacementBackOnSaleMidQuote?: boolean;
+  readonly lifetime?: boolean;
+  readonly queuedOpenEnded?: boolean;
 }): SubFixture {
   return {
     id: input.id,
@@ -617,6 +683,8 @@ function sub(input: {
     replacementPlanIds: input.replacementPlanIds,
     replacementsOffSale: input.replacementsOffSale,
     replacementBackOnSaleMidQuote: input.replacementBackOnSaleMidQuote,
+    lifetime: input.lifetime ?? false,
+    queuedOpenEnded: input.queuedOpenEnded ?? false,
   };
 }
 
@@ -636,6 +704,10 @@ function createService(
           .map((f) => ({
             id: f.id,
             planSnapshot: f.planLess ? {} : { id: f.planId, selectedDurationDays: f.durationDays },
+            // What `assertRenewalPolicy` and the lifetime refusal read.
+            status: 'ACTIVE',
+            isTrial: false,
+            expiresAt: f.lifetime === true ? null : new Date(Date.now() + 20 * 86_400_000),
           }));
       },
       findUnique: async (args: { where: { id: string } }) => {
@@ -648,6 +720,17 @@ function createService(
       },
     },
     user: { findUnique: async () => ({ id: 'user-1' }) },
+    // The term chain, asked only about a queued period without an end
+    // (`findOpenEndedQueuedTerm`): one after the date for `queuedOpenEnded`,
+    // under an ACTIVE term; none for anything else.
+    subscriptionTerm: {
+      findFirst: async (args: { where: { subscriptionId: string; status: string } }) =>
+        args.where.status === 'SCHEDULED' && byId.get(args.where.subscriptionId)?.queuedOpenEnded === true
+          ? { id: `queued-${args.where.subscriptionId}`, startsAt: new Date(Date.now() + 40 * 86_400_000), endsAt: null }
+          : null,
+      count: async (args: { where: { subscriptionId: string; status: string } }) =>
+        args.where.status === 'ACTIVE' && byId.get(args.where.subscriptionId)?.queuedOpenEnded === true ? 1 : 0,
+    },
     plan: {
       // The renewal asks whether the snapshot's plan still exists and was never
       // deleted. A fixture's own plan is live unless `planState` says otherwise;
@@ -697,7 +780,7 @@ function createService(
   const quoteService = {
     getQuote: async (input: { subscriptionId?: string; planId?: string; durationDays?: number }) => {
       const f = input.subscriptionId ? byId.get(input.subscriptionId) : undefined;
-      if (f === undefined || f.notRenewable) {
+      if (f === undefined || f.notRenewable || f.queuedOpenEnded === true) {
         return {
           isEligible: false,
           price: null,
@@ -705,7 +788,11 @@ function createService(
           selectedDuration: null,
           selectedSubscriptionId: input.subscriptionId ?? null,
           availablePlans: [],
-          warnings: [{ code: 'SOURCE_PLAN_MISSING', message: 'missing' }],
+          warnings: [
+            f?.queuedOpenEnded === true
+              ? { code: 'SUBSCRIPTION_IS_LIFETIME', message: 'queued without an end' }
+              : { code: 'SOURCE_PLAN_MISSING', message: 'missing' },
+          ],
         };
       }
       const durationDaysList =

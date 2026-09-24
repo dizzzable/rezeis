@@ -30,6 +30,7 @@ import {
   runPaymentReconciliationEnqueueWithTimeout,
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
+import { isLifetimeSubscription } from '../utils/lifetime-renewal.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { DISPUTE_EVENT_KEY_MARKER } from '../utils/payment-webhook-auto-retry.util';
 import {
@@ -1029,7 +1030,8 @@ export class ProviderSubscriptionService {
    * Cancels at the provider every subscription that would charge for access
    * the panel no longer gives: the account was deleted or blocked, the VPN
    * subscription was deleted, or it was moved to another plan (by the
-   * operator, a plan deletion, or the customer's own plan change).
+   * operator, a plan deletion, or the customer's own plan change), or it has
+   * no end date left to renew.
    *
    * One pass here rather than a call in every place that bans, deletes or
    * moves: those are spread over a dozen modules (anti-fraud, automations,
@@ -1083,7 +1085,7 @@ export class ProviderSubscriptionService {
         ? []
         : await this.prismaService.subscription.findMany({
             where: { id: { in: subscriptionIds } },
-            select: { id: true, status: true, planSnapshot: true, isTrial: true },
+            select: { id: true, status: true, planSnapshot: true, isTrial: true, expiresAt: true },
           });
     const byId = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
     // Read AFTER the subscriptions, and the order is what makes `LOST` safe: a
@@ -1107,6 +1109,7 @@ export class ProviderSubscriptionService {
               : {
                   status: subscription.status,
                   planId: readSnapshotPlanId(subscription.planSnapshot),
+                  lifetime: isLifetimeSubscription(subscription),
                   ...trialConversionOf(conversions.get(row.firstTransactionId), row.subscriptionId, subscription.isTrial),
                 },
         planId: row.planId,
@@ -1717,6 +1720,12 @@ export function strandedReason(input: {
          * charges would renew a subscription it never bought.
          */
         readonly trialConversion?: 'PENDING' | 'LOST';
+        /**
+         * The subscription has no end date. It is never renewed
+         * (`lifetime-renewal.util.ts`), so every charge would be money taken
+         * for nothing, to be handed back by hand. Absent reads as dated.
+         */
+        readonly lifetime?: boolean;
       };
   readonly planId: string;
 }): string | null {
@@ -1729,6 +1738,7 @@ export function strandedReason(input: {
   if (input.subscription.status === SubscriptionStatus.DELETED) return 'subscription deleted';
   if (input.subscription.trialConversion === 'LOST') return 'trial converted without its first charge';
   if (input.subscription.trialConversion === 'PENDING') return null;
+  if (input.subscription.lifetime === true) return 'subscription has no end date: nothing to renew';
   if (input.subscription.planId !== null && input.subscription.planId !== input.planId) {
     return 'subscription moved to another plan';
   }

@@ -31,18 +31,22 @@ export interface TransactionRow {
   readonly updatedAt?: string | null
   readonly fulfilledAt?: string | null
   /**
-   * Set for a trial's conversion received after another payment had converted
-   * the trial: COMPLETED and stamped delivered, yet applied to nothing, and its
-   * money due back to the payer (`payment.withheld`). Null for every other
-   * payment; absent from a server older than the mark.
+   * Set for a payment withheld for refund — a trial's conversion received
+   * after another payment had converted the trial, an autopay charge after a
+   * refund, a renewal or an upgrade of a subscription with no end date:
+   * COMPLETED and stamped delivered, yet applied to nothing, and its money due
+   * back to the payer (`payment.withheld`). Null for every other payment;
+   * absent from a server older than the mark.
    */
   readonly conversionWithheld?: WithheldConversion | null
 }
 
 /** `WithheldConversionMark` on the server. */
 export interface WithheldConversion {
-  /** Why: a trial's second conversion, or an autopay charge after a refund. Absent from an older server. */
+  /** Why: a trial's second conversion, or an autopay charge after a refund. Absent for any later reason. */
   readonly reason?: 'TRIAL_ALREADY_CONVERTED' | 'AUTOPAY_AFTER_REFUND'
+  /** A renewal or an upgrade of a subscription that has no end date; comes without `reason`. */
+  readonly lifetimeSubscription?: boolean
   /** When fulfilment withheld it. */
   readonly withheldAt: string
   /** The payment that converted the trial first. */

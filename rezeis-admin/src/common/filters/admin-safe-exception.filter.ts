@@ -205,6 +205,13 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // Pay). With the code the BFF answers a typed conflict and the renewal page
   // re-prices the review. Thrown by `renewalItemNotPriceable()`.
   'RENEWAL_ITEM_NOT_PRICEABLE',
+  // The renewal of a subscription with no end date, refused by every checkout
+  // before money is asked (`lifetime-renewal.util.ts`): the combined renewal,
+  // its keyed replay, and the single draft (a gateway or the partner balance).
+  // The cabinet says «Подписка бессрочная — продлевать не нужно»; stripped of
+  // the code it could only report a failed payment. Thrown by
+  // `subscriptionIsLifetime()`.
+  'SUBSCRIPTION_IS_LIFETIME',
   // The panel's own second-factor pivot, and the only entry here that is not
   // SCREAMING_SNAKE: the label is the wire value the sign-in form compares
   // against, so it is spelled the way the client reads it, not the way the

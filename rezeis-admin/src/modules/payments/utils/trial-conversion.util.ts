@@ -46,7 +46,9 @@ export const TRIAL_CONVERTED_BY_KEY = 'trialConvertedByPaymentId';
  * mark was made for a trial's second conversion, and a row that carries no
  * reason is one; since a refund ends the autopay, an autopay charge the
  * provider takes after that refund is withheld the same way
- * ({@link AUTOPAY_AFTER_REFUND}), and everything that reads the mark — the
+ * ({@link AUTOPAY_AFTER_REFUND}), and so is a renewal or an upgrade paid for a
+ * subscription that has no end date ({@link WITHHELD_FOR_LIFETIME_SUBSCRIPTION},
+ * 24.09.2026); everything that reads the mark — the
  * post-payment hooks, the refund, the lists, «Отметить возврат», analytics —
  * treats it as the same thing: money received, applied to nothing, to refund.
  */
@@ -55,8 +57,18 @@ export const WITHHELD_REASON_KEY = 'withheldReason';
 /** An autopay charge taken after a refund ended the autopay; see {@link WITHHELD_REASON_KEY}. */
 export const AUTOPAY_AFTER_REFUND = 'AUTOPAY_AFTER_REFUND';
 
+/**
+ * A renewal or an upgrade of a subscription with no end date, paid after the
+ * date went (`lifetime-renewal.util.ts`); see {@link WITHHELD_REASON_KEY}. The
+ * refusal's code, since it is the same fact.
+ */
+export const WITHHELD_FOR_LIFETIME_SUBSCRIPTION = 'SUBSCRIPTION_IS_LIFETIME';
+
 /** The reasons a payment is withheld for. */
-export type WithheldReason = 'TRIAL_ALREADY_CONVERTED' | typeof AUTOPAY_AFTER_REFUND;
+export type WithheldReason =
+  | 'TRIAL_ALREADY_CONVERTED'
+  | typeof AUTOPAY_AFTER_REFUND
+  | typeof WITHHELD_FOR_LIFETIME_SUBSCRIPTION;
 
 /** Whether a transaction's `gatewayData` carries {@link CONVERSION_WITHHELD_AT_KEY}. */
 export function isWithheldConversion(gatewayData: unknown): boolean {
@@ -94,8 +106,17 @@ export const WITHHELD_REFUND_UI_PATH = '«Платежи» → «Транзак�
 
 /** What the panel shows about a withheld conversion. */
 export interface WithheldConversionMark {
-  /** Why: a trial's second conversion, or an autopay charge after a refund. */
-  readonly reason: WithheldReason;
+  /**
+   * Why, for the two reasons the panel has named from the start: a trial's
+   * second conversion, or an autopay charge after a refund. ABSENT for a
+   * payment withheld for any later reason, which says so in its own field
+   * ({@link lifetimeSubscription}): the user card's schema accepts exactly
+   * these two values and would fail the whole list over a third, while it
+   * drops a field it does not know and shows the general wording.
+   */
+  readonly reason?: 'TRIAL_ALREADY_CONVERTED' | typeof AUTOPAY_AFTER_REFUND;
+  /** Set when the payment renewed or upgraded a subscription that has no end date. */
+  readonly lifetimeSubscription?: true;
   /** When fulfilment withheld it. */
   readonly withheldAt: string;
   /** The payment that converted the trial first. */
@@ -113,8 +134,11 @@ export function readWithheldConversion(gatewayData: unknown): WithheldConversion
   const record = gatewayData as Record<string, unknown>;
   const convertedBy = record[TRIAL_CONVERTED_BY_KEY];
   const refundedAt = record['refundReversedAt'];
+  const reason = record[WITHHELD_REASON_KEY];
   return {
-    reason: record[WITHHELD_REASON_KEY] === AUTOPAY_AFTER_REFUND ? AUTOPAY_AFTER_REFUND : 'TRIAL_ALREADY_CONVERTED',
+    ...(reason === WITHHELD_FOR_LIFETIME_SUBSCRIPTION
+      ? { lifetimeSubscription: true as const }
+      : { reason: reason === AUTOPAY_AFTER_REFUND ? AUTOPAY_AFTER_REFUND : ('TRIAL_ALREADY_CONVERTED' as const) }),
     withheldAt: record[CONVERSION_WITHHELD_AT_KEY] as string,
     convertedByPaymentId: typeof convertedBy === 'string' ? convertedBy : null,
     refundedAt: typeof refundedAt === 'string' ? refundedAt : null,

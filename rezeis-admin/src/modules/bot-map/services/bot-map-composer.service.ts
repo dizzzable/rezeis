@@ -206,6 +206,8 @@ export class BotMapComposerService {
           valid: true,
         });
       }
+      // And where «Трафик исчерпан» sends a subscription with no end date.
+      edges.push(...composeLifetimeTopUpEdges(node.id, template.type, stored, routes));
     }
 
     // ── Mini App terminals (only those that any edge targets) ────────
@@ -498,6 +500,52 @@ function composeNotificationButtonEdge(
   // (`close`, `lang:…`, …) → a callback with no node; anything else nothing in
   // the bot answers → red.
   return routeEdge(id, source, label, callbackRoute(target, routes.context), 'link', routes);
+}
+
+/** The template the bot changes for a subscription with no end date: «Трафик исчерпан». */
+const LIMITED_NOTIFICATION_TYPE = 'limited';
+
+/** The renewal page such a subscription is never sent to, and where it is sent instead. */
+const RENEWAL_ROUTE: MiniAppRoute = '/renew';
+const ADD_ONS_ROUTE: MiniAppRoute = '/addons';
+
+/**
+ * Where «Трафик исчерпан» sends a subscription with no end date (the owner,
+ * 24.09.2026). Such a subscription is never renewed, so every Mini App button
+ * of the template that opens «Продление подписки» opens «Дополнения» of that
+ * subscription instead, as «📦 Докупить трафик» — what the bot is sent
+ * (`offerTrafficTopUpForLifetime` in `user-notifications.service.ts`, which
+ * this mirrors). One edge beside each button it replaces, the case in its
+ * label, so the operator sees both destinations; with no buttons, one beside
+ * the default click-through, which the push and the cabinet's bell follow
+ * (`resolveNotificationPushUrl`). None for any other template.
+ */
+function composeLifetimeTopUpEdges(
+  source: string,
+  type: string,
+  stored: ReadonlyArray<StoredNotificationButton>,
+  routes: RoutesContext,
+): BotMapEdge[] {
+  if (type !== LIMITED_NOTIFICATION_TYPE) return [];
+  const addOns = { route: ADD_ONS_ROUTE, shown: ADD_ONS_ROUTE };
+  if (stored.length === 0) {
+    return [miniAppEdge(`notif-lifetime-default:${source}`, source, 'у бессрочной подписки', addOns, routes.referencedTerminals)];
+  }
+  const edges: BotMapEdge[] = [];
+  stored.forEach((button, index) => {
+    if (button.kind !== 'webApp') return;
+    if (miniAppTargetOf(button.target)?.route !== RENEWAL_ROUTE) return;
+    edges.push(
+      miniAppEdge(
+        `notif-lifetime:${source}:${index}`,
+        source,
+        `📦 Докупить трафик — у бессрочной подписки, вместо «${button.labelRu}»`,
+        addOns,
+        routes.referencedTerminals,
+      ),
+    );
+  });
+  return edges;
 }
 
 /**

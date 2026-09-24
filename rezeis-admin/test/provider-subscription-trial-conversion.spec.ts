@@ -72,6 +72,26 @@ describe('strandedReason on a trial conversion', () => {
   });
 });
 
+// The owner, 24.09.2026: a subscription with no end date is never renewed, so
+// a Platega or RollyPay subscription left on one would charge for nothing,
+// every period, each charge to be refunded by hand.
+describe('strandedReason on a subscription with no end date', () => {
+  const reason = (subscription: Parameters<typeof strandedReason>[0]['subscription']) =>
+    strandedReason({ userDeleted: false, userBlocked: false, subscription, planId: 'plan-1' });
+
+  it('stops it, on the plan it was bought for', () => {
+    assert.equal(
+      reason({ status: SubscriptionStatus.ACTIVE, planId: 'plan-1', lifetime: true }),
+      'subscription has no end date: nothing to renew',
+    );
+  });
+
+  it('control: the same subscription with a date goes on', () => {
+    assert.equal(reason({ status: SubscriptionStatus.ACTIVE, planId: 'plan-1', lifetime: false }), null);
+    assert.equal(reason({ status: SubscriptionStatus.ACTIVE, planId: 'plan-1' }), null);
+  });
+});
+
 describe('trialConversionOf', () => {
   // Fulfilled unless the case says otherwise: a paid checkout whose conversion landed.
   const checkout = (status: TransactionStatus, subscriptionId: string | null = TRIAL, fulfilledAt: Date | null = new Date()) => ({

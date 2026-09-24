@@ -52,10 +52,15 @@ export function WithheldBadge({ mark }: { readonly mark: WithheldConversion }) {
 
 /**
  * The sentence for why the payment was withheld: a trial's second conversion,
- * or an autopay charge the provider took after a refund ended the autopay. A
- * server older than the reason sends none, and then it is the first.
+ * an autopay charge the provider took after a refund ended the autopay, or a
+ * renewal or an upgrade of a subscription with no end date
+ * (`lifetimeSubscription`, which comes without a `reason`). A mark with
+ * neither says only that nothing was applied: that is how the user card's list
+ * reads a lifetime one, since its schema keeps just the two older reasons.
  */
 function withheldText(mark: WithheldConversion, text: 'hint' | 'description'): string {
+  if (mark.lifetimeSubscription === true) return `paymentsPage.withheld.${text}Lifetime`
+  if (mark.reason === undefined) return `paymentsPage.withheld.${text}Other`
   const autopay = mark.reason === 'AUTOPAY_AFTER_REFUND'
   return `paymentsPage.withheld.${text}${autopay ? 'Autopay' : ''}`
 }

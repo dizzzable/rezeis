@@ -13,6 +13,7 @@ import {
 } from '../../../common/services/system-events.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { isLifetimeSubscription } from '../../payments/utils/lifetime-renewal.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { observePanelEra, type PanelEraObservation } from '../../remnawave/services/panel-version.util';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
@@ -660,9 +661,21 @@ export class BulkUserOperationsService {
           return { userId, status: 'skipped', message: 'days must be 1..365' };
         }
         const wholeDays = Math.floor(days);
-        const subscriptions = await this.loadLiveSubscriptions(user.id);
-        if (subscriptions.length === 0) {
+        const live = await this.loadLiveSubscriptions(user.id);
+        if (live.length === 0) {
           return { userId, status: 'skipped', message: 'No live subscriptions' };
+        }
+        // A SUBSCRIPTION WITH NO END DATE HAS NONE TO ADD DAYS TO. Counted from
+        // today, as this did, the days GAVE it one: a customer who had bought
+        // it without an end was left with thirty days (the owner, 24.09.2026:
+        // it stays without one — `lifetime-renewal.util.ts`). Left exactly as
+        // it is, and a user who holds nothing else is counted as skipped.
+        // «Быстрые действия» → «Истекает:» on the user's card still gives one a
+        // date, deliberately.
+        const subscriptions = live.filter((subscription) => !isLifetimeSubscription(subscription));
+        const lifetimeLeft = live.length - subscriptions.length;
+        if (subscriptions.length === 0) {
+          return { userId, status: 'skipped', message: 'Only subscriptions with no end date: nothing to extend' };
         }
         const now = new Date();
         let extended = 0;
@@ -742,6 +755,8 @@ export class BulkUserOperationsService {
               // Present only when the run fell short, so a complete row keeps
               // exactly the shape it always had.
               ...(failure !== null ? { partial: true, of: subscriptions.length } : {}),
+              // The same rule for the subscriptions with no end date it left.
+              ...(lifetimeLeft > 0 ? { leftWithoutEndDate: lifetimeLeft } : {}),
             },
           );
         }
@@ -754,7 +769,9 @@ export class BulkUserOperationsService {
             message: `Extended ${extended} of ${subscriptions.length} subscriptions, then failed: ${failure.message}`,
           };
         }
-        return { userId, status: 'ok' };
+        return lifetimeLeft > 0
+          ? { userId, status: 'ok', message: `Left ${lifetimeLeft} with no end date as they are` }
+          : { userId, status: 'ok' };
       }
 
       default: {

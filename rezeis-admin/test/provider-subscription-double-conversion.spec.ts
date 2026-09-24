@@ -164,6 +164,9 @@ function world(options: { readonly paidSource?: boolean } = {}) {
       findMany: async () => [{ id: 'gw-1', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, isActive: true, orderIndex: 1 }],
     },
     planDuration: { findMany: async () => [] },
+    // No term chain: the quote's question about a queued period without an
+    // end (`findOpenEndedQueuedTerm`) finds none.
+    subscriptionTerm: { findFirst: async () => null, count: async () => 0 },
     transaction: {
       findMany: async ({ where, select }: { where: Record<string, unknown>; select?: Record<string, boolean> }) =>
         transactions.filter((row) => matches(row, where)).map((row) => selected(select, row)),
