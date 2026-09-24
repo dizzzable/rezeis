@@ -87,8 +87,6 @@
     "@nestjs/cli": "12.0.0",
     "@nestjs/schematics": "^12.0.1",
     "@nestjs/testing": "^12.0.1",
-    "@remnawave/contract-panel-2.7": "npm:@remnawave/backend-contract@2.7.2",
-    "@remnawave/contract-panel-2.8": "npm:@remnawave/backend-contract@2.8.35",
     "@remnawave/contract-panel-3.2.1": "npm:@remnawave/backend-contract@3.2.0",
     "@remnawave/contract-panel-3.2.3": "npm:@remnawave/backend-contract@3.2.3",
     "@remnawave/contract-panel-3.3": "npm:@remnawave/backend-contract@3.4.2",

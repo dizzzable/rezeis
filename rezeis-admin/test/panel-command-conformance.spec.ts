@@ -530,10 +530,11 @@ describe('no vendor contract reaches the runtime', () => {
       ...manifest.peerDependencies,
     };
     assert.deepStrictEqual(Object.keys(runtime).filter((name) => name.startsWith('@remnawave/')), []);
-    // Anchor: the oracles are still there, where they belong.
+    // Anchor: the oracles are still there, where they belong — the five 3.x
+    // contracts; the 2.7 and 2.8 ones left with Remnawave 2.x.
     assert.equal(
       Object.keys(manifest.devDependencies ?? {}).filter((name) => name.startsWith('@remnawave/')).length,
-      7,
+      5,
     );
   });
 
@@ -542,7 +543,7 @@ describe('no vendor contract reaches the runtime', () => {
       packages: Record<string, { name?: string; version?: string; dev?: boolean }>;
     };
     const vendor = Object.entries(lock.packages).filter(([path]) => path.includes('node_modules/@remnawave/'));
-    assert.ok(vendor.length >= 7, 'the lockfile lost the oracles — this check would compare nothing');
+    assert.ok(vendor.length >= 5, 'the lockfile lost the oracles — this check would compare nothing');
     assert.deepStrictEqual(
       vendor.filter(([, entry]) => entry.dev !== true).map(([path]) => path),
       [],
