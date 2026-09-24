@@ -1,28 +1,28 @@
 /**
- * Every panel route rezeis builds, in one place, for both eras.
+ * Every panel route the old adapter builds, in one place, for Remnawave 3.x.
  *
- * WHY THIS FILE EXISTS RATHER THAN INLINE TEMPLATE STRINGS: the 2.x and 3.x
- * paths differ only in the identifier they carry, so inline templates put the
- * version decision at seventeen call sites instead of one. Collecting them also
- * makes them checkable — `test/remnawave-3x-contract-guard.spec.ts` asserts every
- * USER-SCOPED builder below against the URL builders of every contract the
- * fleet's panel releases ship, and the whole-panel constants at the top of the
- * table are pinned the same way by `test/remnawave-squad-status-era-decode.spec.ts`.
- * A path that drifts in a future panel release fails a test here instead of
- * failing silently against a live panel.
+ * WHY THIS FILE EXISTS RATHER THAN INLINE TEMPLATE STRINGS: collecting the
+ * paths makes them checkable — `test/remnawave-3x-contract-guard.spec.ts`
+ * asserts every USER-SCOPED builder below against the URL builders of every 3.x
+ * contract the fleet's panel releases ship, and the whole-panel constants at the
+ * top of the table are pinned the same way by
+ * `test/remnawave-squad-status-era-decode.spec.ts`. A path that drifts in a
+ * future panel release fails a test here instead of failing silently against a
+ * live panel.
  *
  * THIS TABLE SERVES `remnawave-api.service.ts`. The three contract-driven
  * clients (`panel-users`, `panel-devices`, `panel-infra`) take their routes from
  * the hand-owned command table in `panel-commands.ts`, which
- * `test/panel-command-conformance.spec.ts` holds to the five 3.x contract
- * oracles the same way. One of those commands reaches a panel of any era: the
- * version probe, `GetMetadataCommand`, which `PanelInfraClient.forVersionProbe`
- * sends over the bare transport, because its answer is what identifies a 2.x
- * panel. Every other one goes through `LegacyPanelRefusal` in
- * `panel-transport.ts`, which turns it away once the probe has reported a major
- * below 3 — and lets it out as if to 3.x while the probe has no answer yet. The
- * routes in THIS table are behind no refusal at all:
- * `remnawave-api.service.ts` sends them over its own HTTP helpers.
+ * `test/panel-command-conformance.spec.ts` holds to the 3.x contract oracles the
+ * same way. One of those commands reaches a panel of any version: the version
+ * probe, `GetMetadataCommand`, which `PanelInfraClient.forVersionProbe` sends
+ * over the bare transport, because its answer is what identifies a 2.x panel.
+ * Every other one goes through `LegacyPanelRefusal` in `panel-transport.ts`,
+ * which turns it away once the probe has reported a major below 3 — and lets it
+ * out as if to 3.x while the probe has no answer yet. The routes in THIS table
+ * meet the SAME refusal, read from the same probe: `remnawave-api.service.ts`
+ * refuses before each of its own HTTP sends, and only its two version readers
+ * (`getSystemRecap`, `getSystemMetadata`) are exempt.
  *
  * WHY NO VENDOR PACKAGE IS IMPORTED HERE — OR ANYWHERE IN `src/`. This spot has
  * held a claim about the vendor packages several times, and each time the claim
@@ -32,8 +32,9 @@
  * `package.json` lists one outside `devDependencies`, or if `npm ls --omit=dev`
  * finds one. The contracts are devDependency ORACLES, one per panel release
  * family, named by the panel release and pinned exactly to the contract that
- * release ships (https://docs.rw/sdk/typescript-sdk/) — `@remnawave/contract-panel-2.7`
- * through `@remnawave/contract-panel-3.4.4`. `Dockerfile` stage 1 runs
+ * release ships (https://docs.rw/sdk/typescript-sdk/) — `@remnawave/contract-panel-3.2.1`
+ * through `@remnawave/contract-panel-3.4.4`; no spec reads a 2.x oracle any
+ * more, since a 2.x panel is refused on every path. `Dockerfile` stage 1 runs
  * `npm ci --omit=dev`, so none of them, and none of their AGPL-3.0-only
  * licences, reaches the image. Holding a route to the vendor at BUILD time is
  * the whole benefit; executing vendor schemas at RUN time never was one.
@@ -44,18 +45,18 @@
  * 2.7.3's `GetExternalSquadsCommand`, which requires a `responseHeaders` field
  * that panel 3.x renamed. Every 3.x install with at least one external squad
  * got `ServiceUnavailableException` from a perfectly healthy panel. A vendor
- * schema describes ONE era; the panels this codebase reads span several. See
- * `panel-response-decoders.ts`.
+ * schema describes ONE release; the panels this codebase reads span several.
+ * See `panel-response-decoders.ts`.
  *
  * The reason THIS file imports nothing is unchanged and still good: its response
  * parsing is deliberately more tolerant than the published contract (see
  * `mapSubscriptionSettings` and the defensive `total` reads), so executing
  * vendor schemas here would turn cosmetic panel drift into an outage.
  *
- * `segment` is always the already-resolved identifier — a 2.x UUID or a 3.x
- * numeric id in decimal — produced by `panelUserAddress`. These builders do not
- * decide which one it is; that is not their job and a route file that guessed
- * would be the second place a version decision lived.
+ * `segment` is always the already-resolved numeric id in decimal, produced by
+ * `panelUserAddress` through the adapter. These builders do not decide what it
+ * is; a route file that guessed would be a second place an addressing decision
+ * lived.
  */
 
 /** `encodeURIComponent`, but a plain numeric id is left alone for readability. */
@@ -66,8 +67,8 @@ function seg(value: string): string {
 export const PANEL_ROUTES = {
   // ── Whole-panel reads ────────────────────────────────────────────────────
   // Constants, not builders, and byte-identical in every contract a panel
-  // release ships, 2.7.2 through 3.4.15 — pinned against all seven in
-  // `test/remnawave-squad-status-era-decode.spec.ts`. They came off
+  // release ships — pinned against every contract oracle the repository
+  // carries in `test/remnawave-squad-status-era-decode.spec.ts`. They came off
   // `GetStatusCommand.url` / `GetInternalSquadsCommand.url` /
   // `GetExternalSquadsCommand.url` when those imports left the runtime.
   //
@@ -86,7 +87,7 @@ export const PANEL_ROUTES = {
 
   // ── User-scoped ──────────────────────────────────────────────────────────
 
-  /** `GET` one profile. 2.x: by uuid. 3.x: by numeric id. Same shape either way. */
+  /** `GET` one profile, by numeric id. */
   user: (segment: string): string => `/api/users/${seg(segment)}`,
 
   /** `DELETE` one profile. 3.x answers `204` with an empty body. */
@@ -105,10 +106,10 @@ export const PANEL_ROUTES = {
   /** `GET` — devices registered to one profile. */
   userHwidDevices: (segment: string): string => `/api/hwid/devices/${seg(segment)}`,
 
-  /** `POST` — drop one device. Owner goes in the BODY, keyed per version. */
+  /** `POST` — drop one device. Owner goes in the BODY, as `userId`. */
   deleteHwidDevice: '/api/hwid/devices/delete',
 
-  /** `POST` — drop every device. Owner goes in the BODY, keyed per version. */
+  /** `POST` — drop every device. Owner goes in the BODY, as `userId`. */
   deleteAllHwidDevices: '/api/hwid/devices/delete-all',
 
   /** `GET`/`POST` — the whole-panel user list and the profile write. */
@@ -133,24 +134,14 @@ export const PANEL_ROUTES = {
     `/api/users/by-short-uuid/${encodeURIComponent(shortUuid)}`,
 
   // ── Live connections ─────────────────────────────────────────────────────
-  // 2.x served these under `/api/ip-control/*`; 3.x deleted that family outright
-  // and replaced it with `/api/connections/*`. Both are two-phase: the POST
-  // starts a job and answers with an id, the GET collects the result.
+  // `/api/connections/*`, two-phase: the POST starts a job and answers with an
+  // id, the GET collects the result.
   //
   // MIND THE COLLISION: start and result are the SAME path with different
   // methods, and the positional segment means different things — the user id on
   // the POST, the JOB id on the GET. They are trivially confusable and, on a
   // small panel, numerically equal (job "2" for user 2), so a mix-up reads as
   // working right up until it doesn't.
-  ipControlUserStart: (segment: string): string => `/api/ip-control/fetch-ips/${seg(segment)}`,
-  ipControlUserResult: (jobId: string): string =>
-    `/api/ip-control/fetch-ips/result/${encodeURIComponent(jobId)}`,
-  ipControlNodeStart: (nodeUuid: string): string =>
-    `/api/ip-control/fetch-users-ips/${encodeURIComponent(nodeUuid)}`,
-  ipControlNodeResult: (jobId: string): string =>
-    `/api/ip-control/fetch-users-ips/result/${encodeURIComponent(jobId)}`,
-  ipControlDrop: '/api/ip-control/drop-connections',
-
   connectionsByUserStart: (segment: string): string => `/api/connections/by-user/${seg(segment)}`,
   connectionsByUserResult: (jobId: string): string =>
     `/api/connections/by-user/${encodeURIComponent(jobId)}`,

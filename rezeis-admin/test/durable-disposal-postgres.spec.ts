@@ -246,7 +246,7 @@ async function paidRenewalTermOn(subscriptionId: string): Promise<void> {
 function deletion(): UserDeletionService {
   return new UserDeletionService(
     prisma,
-    { getPanelShape: async () => ({ shape: 'id' as const }), deletePanelUser: async () => undefined } as never,
+    { deletePanelUser: async () => undefined } as never,
     new AddOnEntitlementService(),
     new SubscriptionTermService(),
   );

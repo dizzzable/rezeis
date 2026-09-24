@@ -1,9 +1,13 @@
 /**
  * The bulk panel read is the input to a DESTRUCTIVE decision: a subscription
- * whose UUID is missing from it is written EXPIRED (stealthnet passes a
+ * whose identity is missing from it is written EXPIRED (stealthnet passes a
  * hardcoded ACTIVE, so a miss expires unconditionally). These tests pin the one
  * property that makes that sound — an empty or short list is only ever believed
  * when the adapter can prove it is the whole panel.
+ *
+ * Every row here is a 3.x row, keyed by its numeric `id`: that is the only
+ * identity the decoder reads. A row with no usable id is the "dropped row" the
+ * read must refuse over.
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -28,7 +32,7 @@ import { RemnawaveImporterService } from '../src/modules/imports/services/remnaw
 
 /**
  * The absence probe for every path that must NOT need one: a bulk hit, a miss
- * on a blessed map, an unreachable panel, and a per-uuid read that found the
+ * on a blessed map, an unreachable panel, and a per-profile read that found the
  * profile. Reaching it is the failure — a healthy read may not cost an extra
  * round trip, and no verdict here comes from a strict confirmation.
  */
@@ -49,10 +53,10 @@ function axiosError(status: number, headers: Record<string, string> = {}, data?:
 }
 
 /**
- * The body Remnawave sends with a 404 for a uuid it does not have
+ * The body Remnawave sends with a 404 for a profile it does not have
  * (USER_NOT_FOUND / `A025`, see `@remnawave/backend-contract`). The strict
- * per-uuid read only says `notFound` for a 404 that carries it — a bare 404 is
- * a proxy with no healthy backend, and reading that as "gone" expires live
+ * per-profile read only says `notFound` for a 404 that carries it — a bare 404
+ * is a proxy with no healthy backend, and reading that as "gone" expires live
  * customers on a deploy.
  */
 const USER_NOT_FOUND_BODY = { errorCode: 'A025', message: 'User not found' } as const;
@@ -84,15 +88,17 @@ function build(handler: (start: number) => unknown) {
   return { service, requestedStarts };
 }
 
-/** A well-formed panel row (2.7.4/2.8.0 wire shape). */
-function row(uuid: string, over: Record<string, unknown> = {}) {
+/**
+ * A well-formed 3.x panel row, keyed by the numeric id `key` names. An empty
+ * `key` is a row with no usable id — the one the decoder must drop.
+ */
+function row(key: string, over: Record<string, unknown> = {}) {
   return {
-    uuid,
-    username: `name-${uuid}`,
+    id: key === '' ? null : Number(key),
+    username: `name-${key}`,
     status: 'ACTIVE',
-    subscriptionUrl: `https://example.test/${uuid}`,
+    subscriptionUrl: `https://example.test/${key}`,
     telegramId: 42,
-    id: 7,
     email: null,
     expireAt: '2030-01-01T00:00:00.000Z',
     createdAt: '2025-01-01T00:00:00.000Z',
@@ -108,18 +114,37 @@ function row(uuid: string, over: Record<string, unknown> = {}) {
   };
 }
 
-function page(users: unknown[], total: number, version = '2.8.0') {
+/**
+ * An ALREADY-DECODED panel user, for the cases that hand a list straight to the
+ * overlay or the importer rather than through the adapter. Its `uuid` is the
+ * identity string the lookup is keyed by.
+ */
+function decodedUser(identity: string) {
+  return {
+    ...row(''),
+    uuid: identity,
+    panelId: /^\d+$/.test(identity) ? Number(identity) : null,
+    username: `name-${identity}`,
+  } as never;
+}
+
+function page(users: unknown[], total: number, version = '3.3.2') {
   return of({ data: { response: { users, total }, version } });
+}
+
+/** `count` decimal identities, `1…count`, as the panel would number them. */
+function ids(count: number, from = 1): string[] {
+  return Array.from({ length: count }, (_, i) => String(from + i));
 }
 
 /**
  * A service backed by an in-memory panel roster.
  *
  * `/api/users` pages honour `start` and the panel's OWN page size (`pageCap`,
- * which may be smaller than the size we ask for), and `/api/users/{uuid}`
+ * which may be smaller than the size we ask for), and `/api/users/{id}`
  * answers from the same roster — so a test drives the REAL bulk read and the
- * REAL per-uuid confirmation the importers wire together
- * (`resolvePanelProfile(uuid, lookup, (u) => remnawaveApiService.getPanelUser(u))`),
+ * REAL per-profile confirmation the importers wire together
+ * (`resolvePanelProfile(id, lookup, (u) => remnawaveApiService.getPanelUser(u))`),
  * rather than a stub of either. `roster` is a thunk so a test can mutate the
  * panel between pages, which is the case offset pagination cannot survive.
  */
@@ -140,7 +165,7 @@ function buildPanel(
       request: (input: { url: string }) => {
         const url = new URL(input.url, 'http://x');
         // The panel-version probe, answered with no version on purpose. These
-        // tests are about the OFFSET walk; letting the probe report 2.8 would
+        // tests are about the OFFSET walk; letting the probe report a 3.x would
         // move them onto the keyset path, where `start` does not exist and
         // every assertion below would be measuring a walk that never ran.
         if (url.pathname.startsWith('/api/system/')) {
@@ -148,10 +173,10 @@ function buildPanel(
         }
         const single = /^\/api\/users\/(.+)$/.exec(url.pathname);
         if (single !== null) {
-          const uuid = single[1];
-          profileReads.push(uuid);
-          return roster().includes(uuid)
-            ? of({ data: { response: row(uuid) } })
+          const id = single[1];
+          profileReads.push(id);
+          return roster().includes(id)
+            ? of({ data: { response: row(id) } })
             : throwError(() => axiosError(404, {}, USER_NOT_FOUND_BODY));
         }
         const start = Number.parseInt(url.searchParams.get('start') ?? '0', 10);
@@ -161,7 +186,7 @@ function buildPanel(
           .map((u) => row(u));
         const body: Record<string, unknown> = { users };
         if (options.noTotal !== true) body.total = options.total ?? roster().length;
-        const response = of({ data: { response: body, version: '2.8.0' } });
+        const response = of({ data: { response: body, version: '3.3.2' } });
         options.afterPage?.();
         return response;
       },
@@ -187,11 +212,23 @@ describe('strictGetAllPanelUsers — an empty list is only believed when it is p
     assert.notEqual(outcome.kind, 'ok');
     assert.equal(outcome.kind, 'invalidContract');
     if (outcome.kind !== 'invalidContract') return;
-    assert.match(outcome.details, /3 user rows and none carried a usable uuid/);
+    assert.match(outcome.details, /3 user rows and none carried a usable numeric id/);
+  });
+
+  it('a row carrying only a uuid is a dropped row, not a keyed one', async () => {
+    // What a 2.x panel sent. Keyed by the uuid, it would match a stored 2.x
+    // link and hide the fact that the list is not a 3.x list at all.
+    const { service } = build(() =>
+      page([row('1'), row('', { uuid: '11111111-1111-4111-8111-111111111111' })], 2),
+    );
+    const outcome = await service.strictGetAllPanelUsers();
+    assert.equal(outcome.kind, 'invalidContract');
+    if (outcome.kind !== 'invalidContract') return;
+    assert.match(outcome.details, /decoded 1 of 2 rows/);
   });
 
   it('a single dropped row (decoded < total) → not ok', async () => {
-    const { service } = build(() => page([row('a'), row(''), row('c')], 3));
+    const { service } = build(() => page([row('1'), row(''), row('3')], 3));
     const outcome = await service.strictGetAllPanelUsers();
     assert.notEqual(outcome.kind, 'ok');
     assert.equal(outcome.kind, 'invalidContract');
@@ -203,7 +240,7 @@ describe('strictGetAllPanelUsers — an empty list is only believed when it is p
     const { service } = build((start) =>
       page(
         Array.from({ length: 500 }, (_, i) =>
-          start === 0 && i === 0 ? row('') : row(`u-${start + i}`),
+          start === 0 && i === 0 ? row('') : row(String(start + i + 1)),
         ),
         30_000,
       ),
@@ -226,7 +263,7 @@ describe('strictGetAllPanelUsers — an empty list is only believed when it is p
   it('a page that errored mid-read → not ok (never a shorter panel)', async () => {
     const { service } = build((start) =>
       start === 0
-        ? page(Array.from({ length: 500 }, (_, i) => row(`u-${i}`)), 3000)
+        ? page(ids(500).map((id) => row(id)), 3000)
         : throwError(() => axiosError(503, { 'retry-after': '30' })),
     );
     const outcome = await service.strictGetAllPanelUsers();
@@ -265,7 +302,7 @@ describe('strictGetAllPanelUsers — an empty list is only believed when it is p
 
   it('pagination walks RAW rows, so a dropped row cannot shift the cursor', async () => {
     const { service, requestedStarts } = build(() =>
-      page([...Array.from({ length: 499 }, (_, i) => row(`u-${i}`)), row('')], 500),
+      page([...ids(499).map((id) => row(id)), row('')], 500),
     );
     await service.strictGetAllPanelUsers();
     // Counting decoded rows (499) would leave the cursor short of the total and
@@ -274,22 +311,22 @@ describe('strictGetAllPanelUsers — an empty list is only believed when it is p
   });
 });
 
-describe('strictGetAllPanelUsers — healthy 2.7.4 / 2.8.0 reads are unchanged', () => {
+describe('strictGetAllPanelUsers — healthy offset reads', () => {
   it('a single-page panel decodes every row and reports the panel version', async () => {
     const { service, requestedStarts } = build(() =>
-      page([row('a'), row('b'), row('c')], 3, '2.7.4'),
+      page([row('1'), row('2'), row('3')], 3, '3.2.1'),
     );
     const outcome = await service.strictGetAllPanelUsers();
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.deepEqual(
       outcome.value.users.map((u) => u.uuid),
-      ['a', 'b', 'c'],
+      ['1', '2', '3'],
     );
     assert.equal(outcome.value.total, 3);
     assert.equal(outcome.value.users[0].hwidDeviceLimit, 3);
-    assert.equal(outcome.value.users[0].panelId, 7);
-    assert.equal(outcome.detectedVersion, '2.7.4');
+    assert.equal(outcome.value.users[0].panelId, 1);
+    assert.equal(outcome.detectedVersion, '3.2.1');
     assert.deepEqual(requestedStarts, [0]);
   });
 
@@ -297,7 +334,7 @@ describe('strictGetAllPanelUsers — healthy 2.7.4 / 2.8.0 reads are unchanged',
     const total = 1200;
     const { service, requestedStarts } = build((start) =>
       page(
-        Array.from({ length: Math.min(500, total - start) }, (_, i) => row(`u-${start + i}`)),
+        ids(Math.min(500, total - start), start + 1).map((id) => row(id)),
         total,
       ),
     );
@@ -320,12 +357,13 @@ describe('strictGetAllPanelUsers — healthy 2.7.4 / 2.8.0 reads are unchanged',
 });
 
 describe('buildPanelLookup — only a vouched-for read may say "this profile is gone"', () => {
-  it('an ok read is reachable and complete, keyed by uuid', async () => {
-    const { service } = build(() => page([row('a'), row('b')], 2));
+  it('an ok read is reachable and complete, keyed by the numeric id', async () => {
+    const { service } = build(() => page([row('1'), row('2')], 2));
     const lookup = await buildPanelLookup(() => service.strictGetAllPanelUsers());
     assert.equal(lookup.reachable, true);
     assert.equal(lookup.complete, true);
-    assert.equal(lookup.map.get('b')?.username, 'name-b');
+    assert.equal(lookup.keyKind, 'id');
+    assert.equal(lookup.map.get('2')?.username, 'name-2');
   });
 
   it('every non-ok outcome is unreachable — never complete', async () => {
@@ -370,7 +408,7 @@ describe('per-caller treatment: the panel importer REFUSES, it does not degrade'
 
   it('refuses a read whose rows could not be decoded', async () => {
     await assert.rejects(
-      () => importer(strictInvalidContract('4 user rows and none carried a usable uuid')).run(RUN),
+      () => importer(strictInvalidContract('4 user rows and none carried a usable numeric id')).run(RUN),
       /REMNAWAVE_INTEGRATION_UNAVAILABLE/,
     );
   });
@@ -389,17 +427,17 @@ describe('per-caller treatment: the panel importer REFUSES, it does not degrade'
     // COMMITTED with `errors: []` — green in the SPA — while 5 000 paying
     // customers have no account and `rollback.createdUserIds` describes only the
     // prefix. The overlay consumers survive a prefix because they confirm every
-    // miss per-uuid; this importer has no second signal and never looks for one.
+    // miss per profile; this importer has no second signal and never looks for one.
     await assert.rejects(
-      () => importer(strictOk({ users: [row('u-1')], total: 30_000, complete: false })).run(RUN),
+      () => importer(strictOk({ users: [decodedUser('1')], total: 30_000, complete: false })).run(RUN),
       /REMNAWAVE_INTEGRATION_UNAVAILABLE/,
     );
   });
 
   it('proceeds on a read the adapter vouches for as the WHOLE panel', async () => {
-    // The other half of the guard: `complete: true` is the healthy 2.7.4/2.8.0
-    // read, and it must still import. A refusal that fires on every panel is not
-    // a safer importer, it is a broken one.
+    // The other half of the guard: `complete: true` is the healthy read, and it
+    // must still import. A refusal that fires on every panel is not a safer
+    // importer, it is a broken one.
     const users: string[] = [];
     const service = new RemnawaveImporterService(
       {
@@ -414,7 +452,7 @@ describe('per-caller treatment: the panel importer REFUSES, it does not degrade'
       } as never,
       {
         strictGetAllPanelUsers: async () =>
-          strictOk({ users: [row('u-1'), row('u-2')], total: 2, complete: true }),
+          strictOk({ users: [decodedUser('1'), decodedUser('2')], total: 2, complete: true }),
       } as never,
     );
     const summary = await service.run({ mode: 'sync', createdBy: null });
@@ -441,7 +479,7 @@ describe('the destruction path: a lossy read must not expire a live subscription
     const { service } = build(() => page([row(''), row('')], 2));
     const lookup = await buildPanelLookup(() => service.strictGetAllPanelUsers());
     const { panel, known } = await resolvePanelProfile(
-      'live-uuid',
+      '4471',
       lookup,
       async () => null,
       NEVER_CONFIRMED,
@@ -457,10 +495,10 @@ describe('the destruction path: a lossy read must not expire a live subscription
   });
 
   it('still expires a live backup row when the panel read IS vouched for', async () => {
-    const { service } = build(() => page([row('someone-else')], 1));
+    const { service } = build(() => page([row('1')], 1));
     const lookup = await buildPanelLookup(() => service.strictGetAllPanelUsers());
     const { known } = await resolvePanelProfile(
-      'gone-uuid',
+      '2',
       lookup,
       async () => null,
       NEVER_CONFIRMED,
@@ -475,7 +513,7 @@ describe('the destruction path: a lossy read must not expire a live subscription
 
 describe('a panel past the page ceiling is TRUNCATED, not invalid', () => {
   /** 30 000 users: five thousand of them live past the 50 × 500 page budget. */
-  const BIG = Array.from({ length: 30_000 }, (_, i) => `u-${i}`);
+  const BIG = ids(30_000);
 
   it('reads as ok, and says out loud that the list is incomplete', async () => {
     const { service, requestedStarts } = buildPanel(() => BIG);
@@ -498,55 +536,55 @@ describe('a panel past the page ceiling is TRUNCATED, not invalid', () => {
 
     // A hit inside the prefix still overlays live state with zero extra calls.
     const hit = await resolvePanelProfile(
-      'u-10',
+      '11',
       lookup,
-      (uuid) => service.getPanelUser(uuid),
+      (id) => service.getPanelUser(id),
       NEVER_CONFIRMED,
     );
     assert.equal(hit.known, true);
-    assert.equal(hit.panel?.uuid, 'u-10');
-    assert.deepEqual(profileReads, [], 'a hit must not cost a per-uuid round trip');
+    assert.equal(hit.panel?.uuid, '11');
+    assert.deepEqual(profileReads, [], 'a hit must not cost a per-profile round trip');
   });
 
-  it('confirms a user living PAST the ceiling per-uuid instead of expiring them', async () => {
+  it('confirms a user living PAST the ceiling per profile instead of expiring them', async () => {
     const { service, profileReads } = buildPanel(() => BIG);
     const lookup = await buildPanelLookup(() => service.strictGetAllPanelUsers());
     const { panel, known } = await resolvePanelProfile(
-      'u-29999',
+      '30000',
       lookup,
-      (uuid) => service.getPanelUser(uuid),
+      (id) => service.getPanelUser(id),
       // A profile that comes back needs no absence confirmation — the panel
       // served it. `NEVER_CONFIRMED` is the assertion that it costs no second
       // round trip on the common miss (a user living past the ceiling).
       NEVER_CONFIRMED,
     );
-    assert.deepEqual(profileReads, ['u-29999'], 'the fetchOne confirmation path must be reached');
+    assert.deepEqual(profileReads, ['30000'], 'the fetchOne confirmation path must be reached');
     assert.equal(known, true);
     if (panel === null) return assert.fail('the panel does have this profile');
-    assert.equal(panel.uuid, 'u-29999');
+    assert.equal(panel.uuid, '30000');
     // The customer's subscription is refreshed from the panel, not expired and
     // not left on a stale backup value.
     assert.equal(panelSubscriptionState(panel).status, SubscriptionStatus.ACTIVE);
   });
 
-  it('still expires a uuid the panel really does not have, after confirming it', async () => {
+  it('still expires an id the panel really does not have, after confirming it', async () => {
     const { service, profileReads } = buildPanel(() => BIG);
     const lookup = await buildPanelLookup(() => service.strictGetAllPanelUsers());
     const unconfirmed: string[] = [];
     const { panel, known } = await resolvePanelProfile(
-      'gone-uuid',
+      '99999999',
       lookup,
-      (uuid) => service.getPanelUser(uuid),
+      (id) => service.getPanelUser(id),
       {
         // The REAL strict read of the same panel: it answers 404 → `notFound`,
         // which is the only outcome allowed to mean "this profile is gone".
-        confirmAbsence: (uuid) => service.strictGetPanelUserExpiry(uuid),
-        onUnconfirmed: (uuid, reason) => unconfirmed.push(`${uuid}: ${reason}`),
+        confirmAbsence: (id) => service.strictGetPanelUserExpiry(id),
+        onUnconfirmed: (id, reason) => unconfirmed.push(`${id}: ${reason}`),
       },
     );
-    // Two reads of the same uuid: the best-effort one that returned nothing,
+    // Two reads of the same id: the best-effort one that returned nothing,
     // and the strict one that proved the nothing.
-    assert.deepEqual(profileReads, ['gone-uuid', 'gone-uuid']);
+    assert.deepEqual(profileReads, ['99999999', '99999999']);
     assert.deepEqual(unconfirmed, [], 'a proven 404 is not a degrade');
     assert.equal(panel, null);
     assert.equal(known, true);
@@ -556,7 +594,7 @@ describe('a panel past the page ceiling is TRUNCATED, not invalid', () => {
     );
   });
 
-  it('is REFUSED by the native importer, which cannot confirm a miss per-uuid', async () => {
+  it('is REFUSED by the native importer, which cannot confirm a miss per profile', async () => {
     // Not a mocked outcome: the REAL adapter walks the REAL 30 000-row panel and
     // the REAL importer decides what to do with what comes out.
     //
@@ -564,14 +602,14 @@ describe('a panel past the page ceiling is TRUNCATED, not invalid', () => {
     // status COMMITTED — on the reasoning that refusing would switch the overlay
     // off for the biggest panels. That reasoning belongs to the OVERLAY
     // consumers (stealthnet/remnashop/altshop), which keep the prefix precisely
-    // because they settle every miss with a per-uuid read. This importer is not
-    // one of them: it WRITES for every row it is handed, creates users, rebinds
-    // `Subscription.userId`, and reports `rollback.createdUserIds` as the undo
-    // set. Handing it a prefix does not import less of the panel — it produces a
-    // run whose success report and whose rollback set both describe something
-    // that never happened, while 5 000 paying customers silently have no
-    // account. Its own contract, unchanged since it was written: "anything short
-    // of a vouched-for read refuses."
+    // because they settle every miss with a per-profile read. This importer is
+    // not one of them: it WRITES for every row it is handed, creates users,
+    // rebinds `Subscription.userId`, and reports `rollback.createdUserIds` as
+    // the undo set. Handing it a prefix does not import less of the panel — it
+    // produces a run whose success report and whose rollback set both describe
+    // something that never happened, while 5 000 paying customers silently
+    // have no account. Its own contract, unchanged since it was written:
+    // "anything short of a vouched-for read refuses."
     const { service } = buildPanel(() => BIG);
     const touched: string[] = [];
     const importer = new RemnawaveImporterService(
@@ -603,8 +641,8 @@ describe('a panel past the page ceiling is TRUNCATED, not invalid', () => {
   });
 });
 
-describe('`total` is read defensively — a 2.7.4/2.8.0 divergence must not switch the overlay off', () => {
-  const PANEL = Array.from({ length: 1200 }, (_, i) => `u-${i}`);
+describe('`total` is read defensively — a build divergence must not switch the overlay off', () => {
+  const PANEL = ids(1200);
 
   it('a build that reports no total at all is still read to the end', async () => {
     const { service, requestedStarts } = buildPanel(() => PANEL, { noTotal: true });
@@ -620,13 +658,13 @@ describe('`total` is read defensively — a 2.7.4/2.8.0 divergence must not swit
   });
 
   it('a total that is not a number does not throw away rows that all arrived', async () => {
-    const { service } = buildPanel(() => ['a', 'b'], { total: '2' });
+    const { service } = buildPanel(() => ['1', '2'], { total: '2' });
     const outcome = await service.strictGetAllPanelUsers();
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.deepEqual(
       outcome.value.users.map((u) => u.uuid),
-      ['a', 'b'],
+      ['1', '2'],
     );
     assert.equal(outcome.value.total, 2);
     assert.equal(outcome.value.complete, true);
@@ -651,20 +689,20 @@ describe('`total` is read defensively — a 2.7.4/2.8.0 divergence must not swit
     assert.equal(lookup.reachable, true);
     assert.equal(lookup.map.size, 1200);
     const { panel, known } = await resolvePanelProfile(
-      'u-1199',
+      '1200',
       lookup,
-      (uuid) => service.getPanelUser(uuid),
+      (id) => service.getPanelUser(id),
       NEVER_CONFIRMED,
     );
     assert.equal(known, true);
-    assert.deepEqual(profileReads, [], 'a clamped page is not a reason to re-read every uuid');
-    if (panel === null) return assert.fail('u-1199 lives past the clamp but is on the panel');
-    assert.equal(panel.uuid, 'u-1199');
+    assert.deepEqual(profileReads, [], 'a clamped page is not a reason to re-read every profile');
+    if (panel === null) return assert.fail('1200 lives past the clamp but is on the panel');
+    assert.equal(panel.uuid, '1200');
     assert.equal(panelSubscriptionState(panel).status, SubscriptionStatus.ACTIVE);
   });
 
   it('a clamping panel that ALSO reports no total is still walked to the end', async () => {
-    const SMALL = Array.from({ length: 600 }, (_, i) => `u-${i}`);
+    const SMALL = ids(600);
     const { service, requestedStarts } = buildPanel(() => SMALL, { pageCap: 100, noTotal: true });
     const outcome = await service.strictGetAllPanelUsers();
     assert.equal(outcome.kind, 'ok');
@@ -684,14 +722,14 @@ describe('what a MISS in a blessed list actually proves', () => {
    * check has never been able to see it.
    */
   it('a delete between pages hides a LIVE user, and the arithmetic still reconciles', async () => {
-    let live: readonly string[] = Array.from({ length: 1200 }, (_, i) => `u-${i}`);
+    let live: readonly string[] = ids(1200);
     let served = 0;
     const { service } = buildPanel(() => live, {
       afterPage: () => {
-        // u-100 — already served on page 0 — is deleted before page 1 is asked
+        // 101 — already served on page 0 — is deleted before page 1 is asked
         // for. Every later row shifts one place left.
         served += 1;
-        if (served === 1) live = live.filter((u) => u !== 'u-100');
+        if (served === 1) live = live.filter((u) => u !== '101');
       },
     });
 
@@ -705,19 +743,19 @@ describe('what a MISS in a blessed list actually proves', () => {
     const lookup = await buildPanelLookup(() => Promise.resolve(outcome));
     // The deleted user is still IN the map — we read his row before he went.
     // That one is harmless: it overlays a slightly stale but real profile.
-    assert.equal(lookup.map.has('u-100'), true);
-    // u-500 is ALIVE on the panel and simply shifted across the page boundary
+    assert.equal(lookup.map.has('101'), true);
+    // 501 is ALIVE on the panel and simply shifted across the page boundary
     // before we asked for it. The count cannot notice: the panel's own total
     // fell by exactly the one row we really did lose.
-    assert.equal(lookup.map.has('u-500'), false);
-    assert.equal(live.includes('u-500'), true);
+    assert.equal(lookup.map.has('501'), false);
+    assert.equal(live.includes('501'), true);
 
     const { panel, known } = await resolvePanelProfile(
-      'u-500',
+      '501',
       lookup,
-      (uuid) => service.getPanelUser(uuid),
-      // A blessed map answers on its own: the per-uuid seam is never reached,
-      // so there is nothing for a confirmation to correct.
+      (id) => service.getPanelUser(id),
+      // A blessed map answers on its own: the per-profile seam is never
+      // reached, so there is nothing for a confirmation to correct.
       NEVER_CONFIRMED,
     );
     assert.equal(panel, null);
@@ -729,10 +767,10 @@ describe('what a MISS in a blessed list actually proves', () => {
       SubscriptionStatus.EXPIRED,
     );
     // The second signal that WOULD settle it — a targeted read of that one
-    // uuid — is available and disagrees with the miss. Wiring it into the
+    // profile — is available and disagrees with the miss. Wiring it into the
     // complete-map path is deliberately left out of this change.
-    const confirmation = await service.getPanelUser('u-500');
-    assert.equal(confirmation?.uuid, 'u-500');
+    const confirmation = await service.getPanelUser('501');
+    assert.equal(confirmation?.uuid, '501');
   });
 });
 
@@ -748,7 +786,7 @@ describe('a panel keyed differently from what we stored — the upgrade-day trap
   function idKeyedPanel() {
     return buildPanelLookup(async () =>
       strictOk({
-        users: [row('4821'), row('4822')] as never,
+        users: [decodedUser('4821'), decodedUser('4822')],
         total: 2,
         complete: true,
       }),
@@ -782,10 +820,13 @@ describe('a panel keyed differently from what we stored — the upgrade-day trap
     assert.equal(resolved.panel?.uuid, '4821');
   });
 
-  it('a uuid-keyed list still proves absence for a uuid — the 2.x path is untouched', async () => {
+  it('a hand-built uuid-keyed list still proves absence for a uuid — the overlay rule is symmetric', async () => {
+    // No adapter read produces such a list any more (a row is keyed by its
+    // numeric id or dropped); this pins the overlay's own rule, which does not
+    // depend on where the list came from.
     const lookup = await buildPanelLookup(async () =>
       strictOk({
-        users: [row('11111111-1111-4111-8111-111111111111')] as never,
+        users: [decodedUser('11111111-1111-4111-8111-111111111111')],
         total: 1,
         complete: true,
       }),

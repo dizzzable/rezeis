@@ -304,46 +304,6 @@ export const EVENT_TYPES = {
    * renewal needs to see this rather than infer it from silence.
    */
   PAYMENT_AUTOPAY_CONFIRMATION_REQUIRED: 'payment.autopay_confirmation_required',
-  /**
-   * A PAID renewal add-on line was captured against a baseline that absorbs it,
-   * so as things stand today it will deliver nothing. The customer paid for
-   * extra traffic on a subscription that is already unlimited, or extra devices
-   * on one that is already uncapped.
-   *
-   * WHY IT EXISTS. `PaymentSubscriptionMutationService.applyCombinedRenewal`
-   * re-asks the eligibility question at CAPTURE time — eligibility itself only
-   * ran at QUOTE time, and an operator can lift this one customer's limit to
-   * unlimited in between. The deliberate answer there is CAPTURE AND FLAG: the
-   * entitlement is created as quoted and the verdict is written into its
-   * immutable `applicabilitySnapshot`, because refusing would roll back every
-   * subscription on a combined renewal and a recorded no-op would leave a paid
-   * line with no durable record at all. That reasoning is right and is NOT
-   * revisited here. What it lacked was a reader: the only other trace was a
-   * `logger.warn` in a container, which is indistinguishable — from the
-   * operator's seat — from a renewal that delivered everything it sold.
-   *
-   * SEVERITY IS `WARNING`, NOT `ERROR`, and the difference is that this is a
-   * PREDICTION rather than a fact. The entitlement is PENDING until
-   * `term.startsAt`, days or weeks out; an operator who puts the finite limit
-   * back before then makes the line deliver exactly what was sold and nothing
-   * was ever wrong. ERROR also routes differently in this file — `isErrorEvent`
-   * sends it through `formatErrorEventCardHtml`, the fixed-header incident card
-   * with build info and a `.txt` attachment — which is the shape for a fault in
-   * the system, not for a commercial fact awaiting a human decision before a
-   * known deadline. (The DIRECT-purchase counterpart is different in exactly
-   * this respect: it activates at capture, so its answer is a verdict, and
-   * `AddOnPurchaseService` refuses at checkout rather than capturing.)
-   *
-   * VOLUME. It fires PER LINE at capture, and a bulk renewal can carry many, so
-   * the emit site is expected to collapse repeats the way
-   * `AntiFraudService`'s `NOTIFY_COOLDOWN_MS` does: one card per identical
-   * signature per hour, the signature being
-   * `subscriptionId + termId + addOn.type`. Not per transaction and not
-   * global — an hour of the same operator mistake across one term is one thing
-   * to look at, while two different subscriptions are two. An event stream
-   * nobody can read is the same as no event.
-   */
-  PAYMENT_ADDON_ADDS_NOTHING: 'payment.addon_adds_nothing',
 
   // Referral
   REFERRAL_ATTACHED: 'referral.attached',
@@ -3468,16 +3428,17 @@ function humanizeImportMode(value: string): string {
 
 /**
  * The facts of a `system.remnawave_sync` event, from every producer's keys:
- * the expired-profile cleanup, the duplicate merge, the panel-link
- * reconciliation, the user-row shape drift, subscription deletion, the admin
+ * the expired-profile cleanup, the duplicate merge, the automatic panel-link
+ * check, the user-row shape drift, subscription deletion, the admin
  * subscription edit and the refund revocation.
  *
  * Gated on the type, because these keys — `scanned`, `linked`, `merged` — are
  * generic words another producer may use for something else.
  *
- * Several of these events exist to tell the operator to DO something — run the
- * reconciliation, delete a profile by hand. That instruction is not composed
- * here: it belongs to the producer, as a Russian `note`.
+ * Several of these events exist to tell the operator to DO something — link a
+ * subscription in «Подписки» → «Инструменты», delete a profile by hand. That
+ * instruction is not composed here: it belongs to the producer, as a Russian
+ * `note`.
  */
 function formatRemnawaveSyncBlock(meta: Record<string, unknown>): string[] {
   const facts: string[] = [];
@@ -3491,11 +3452,11 @@ function formatRemnawaveSyncBlock(meta: Record<string, unknown>): string[] {
     // [key, label, show a zero]
     ['scanned', '🔎 Проверено строк', true],
     ['linked', '🔗 Привязано', true],
-    ['wouldLink', '🔗 Можно привязать', false],
-    ['unrepaired', '🛠 Не удалось исправить', false],
-    ['staleIdentityScanned', '🧬 Проверено устаревших привязок', false],
-    ['duplicatePairs', '👯 Пар-дубликатов', false],
-    ['sharedIdentityPairs', '🔀 Пар с общим профилем на панели', false],
+    // `PanelLinkCheckService` after a backup import: what the check left
+    // without a proven link, and how many of those hold an id no supported
+    // Remnawave issued.
+    ['unprovenLinks', '⛓ Без доказанной привязки к Remnawave', true],
+    ['nonNumericLinks', '🧬 Из них с нечисловым идентификатором Remnawave', false],
     ['pairsExamined', '🔎 Пар проверено', true],
     ['merged', '🔗 Объединено', true],
     ['wouldMerge', '🔗 Можно объединить', false],
@@ -3629,13 +3590,6 @@ const SYSTEM_ERROR_HEADERS = {
   backup_delivery_failed: { emoji: '📤', title: 'Бэкап не доставлен в Telegram' },
   // `BackupProcessor` — a restore threw.
   restore_failed: { emoji: '🧯', title: 'Восстановление базы не удалось' },
-  // `PaymentSubscriptionMutationService` — raised at WARNING, still an incident
-  // card: an upgrade ends the subscription before a paid, queued period that
-  // carries add-ons begins, so those add-ons cannot be delivered.
-  upgrade_addons_after_end: {
-    emoji: '⏭',
-    title: 'Тариф улучшен, а оплаченный следующий период начнётся после конца подписки',
-  },
 } as const;
 
 /**
@@ -3773,15 +3727,6 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'payment.autopay_confirmation_required': {
     emoji: '🔐',
     title: 'Автосписание ждёт подтверждения пользователя',
-  },
-  // A prediction about a line that is ALREADY PAID, not a failure: the
-  // entitlement is PENDING until the renewed term starts, and an operator who
-  // restores the finite limit before then makes it deliver what was sold.
-  // Titled as the question the operator has to answer — "will this deliver
-  // anything?" — rather than as an incident.
-  'payment.addon_adds_nothing': {
-    emoji: '🫙',
-    title: 'Оплаченное дополнение ничего не добавит',
   },
 
   // Referral
@@ -3981,6 +3926,20 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
     // `DuplicateSubscriptionMergeService`: a run stopped part-way.
     variants: variantsByReason({
       merge_stopped: { emoji: '⏸', title: 'Слияние подписок-дубликатов остановилось' },
+      // `PanelLinkCheckService`: after a backup import, subscriptions the
+      // automatic check could not link — the list is in «Подписки» →
+      // «Инструменты».
+      links_unproven_after_import: {
+        emoji: '⛓',
+        title: 'После импорта остались подписки без привязки к Remnawave',
+      },
+      // `StalePanelIdentityCensus`: at boot, live subscriptions still holding
+      // a non-numeric (2.x) Remnawave identifier. Raised as ERROR, so this is
+      // the header of its incident card.
+      stale_panel_identities: {
+        emoji: '🧬',
+        title: 'В базе остались подписки с идентификатором Remnawave 2.x',
+      },
     }),
   },
   'settings.email.updated': { emoji: '⚙️', title: 'Обновлены настройки почты' },
@@ -4124,6 +4083,9 @@ function humanizeSource(value: unknown): string {
       return 'Вебхук платёжки';
     case 'REMNAWAVE_WEBHOOK':
       return 'Вебхук Remnawave';
+    // `PanelLinkCheckService`'s card after a backup import, read as its `reason`.
+    case 'LINKS_UNPROVEN_AFTER_IMPORT':
+      return 'Проверка привязки к панели после импорта';
     default:
       return escapeHtml(value);
   }

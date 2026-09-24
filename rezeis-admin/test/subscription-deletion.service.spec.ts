@@ -195,27 +195,15 @@ function buildService(state: FakeState) {
       state.lifecycleCalls.push({ kind: 'terms', subscriptionId, tx: transaction });
     },
   };
-  // The panel adapter, answering only "the era cannot be read".
-  //
-  // `deleteSubscription` asks which Remnawave era it is talking to before it
-  // arms a panel deletion and refuses only on a PROVEN 3.x panel holding a 2.x
-  // uuid. Every case in this file predates that guard — several of them delete
-  // rows whose `remnawaveId` is `'rw-1'`, which IS uuid-shaped — and together
-  // they are the standing proof that an unreadable era changes nothing. The
-  // guard's own cases, which stub a real era, live in
-  // `subscription-delete-stale-panel-link.spec.ts`.
-  //
-  // `deletePanelUser` is deliberately absent: this service must never call the
-  // panel, so a build that grew such a call dies here rather than passing.
-  const panel = {
-    getPanelShape: async () => ({ addressing: 'unknown' }),
-  };
+  // No panel adapter at all: this service never calls the panel, and its
+  // stale-link refusal reads no version (`isStalePanelIdentity`). Every row
+  // here holds a decimal `remnawaveId`, the only kind a 3.x panel issues; the
+  // refusal's own cases live in `subscription-delete-stale-panel-link.spec.ts`.
   const service = new SubscriptionDeletionService(
     prisma as never,
     queue as never,
     entitlements as never,
     terms as never,
-    panel as never,
     events as never,
   );
   const logger = (
@@ -255,7 +243,7 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-1',
       userId: 'user-1',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: 'rw-1',
+      remnawaveId: '4471',
     });
     const service = buildService(state);
 
@@ -270,7 +258,7 @@ describe('SubscriptionDeletionService', () => {
     // its identity columns cleared — long before the worker reads it.
     assert.deepStrictEqual(state.createdJobs[0]?.payload, {
       source: 'SELF_SERVICE_DELETE',
-      targetRemnawaveId: 'rw-1',
+      targetRemnawaveId: '4471',
       targetRemnawavePanelId: 4471,
       targetRemnawavePanelUsername: 'rz_bob_1',
     });
@@ -311,7 +299,7 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-admin',
       userId: 'user-7',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: 'rw-7',
+      remnawaveId: '4477',
     });
     const service = buildService(state);
 
@@ -335,13 +323,13 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-race',
       userId: 'user-1',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: 'rw-1',
+      remnawaveId: '4471',
     });
     state.lockedSubscription = lockedRow({
       id: 'sub-race',
       userId: 'user-1',
       status: SubscriptionStatus.DELETED,
-      remnawaveId: 'rw-1',
+      remnawaveId: '4471',
     });
     const service = buildService(state);
 
@@ -357,27 +345,25 @@ describe('SubscriptionDeletionService', () => {
     assert.deepEqual(state.emittedEvents, []);
   });
 
-  it('carries the recorded numeric id in the DELETE payload when remnawaveId is a stale 2.x uuid', async () => {
-    // Created on 2.x, panel since upgraded to 3.x, nothing re-synced. The
-    // stored string names nothing on that panel, and by the time the worker
-    // runs the row it came from may be gone — so if the numeric id does not
-    // travel WITH the job, the profile is never deleted and never noticed.
-    const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+  it('carries the whole identity in the DELETE payload, enough to BUILD the 3.x path', async () => {
+    // By the time the worker runs, the row it came from may be gone or
+    // re-provisioned onto a different profile — so the identity travels WITH
+    // the job, and it has to be one the panel can be addressed by.
     const state = freshState({
-      id: 'sub-upgraded',
+      id: 'sub-linked',
       userId: 'user-1',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: staleUuid,
+      remnawaveId: '4471',
       remnawavePanelId: 4471,
       remnawavePanelUsername: 'rz_bob_1',
     });
     const service = buildService(state);
 
-    await service.delete({ userId: 'user-1', subscriptionId: 'sub-upgraded' });
+    await service.delete({ userId: 'user-1', subscriptionId: 'sub-linked' });
 
     assert.equal(state.createdJobs.length, 1);
     const payload = state.createdJobs[0]?.payload as Record<string, unknown>;
-    assert.equal(payload['targetRemnawaveId'], staleUuid);
+    assert.equal(payload['targetRemnawaveId'], '4471');
     assert.equal(payload['targetRemnawavePanelId'], 4471);
     assert.equal(payload['targetRemnawavePanelUsername'], 'rz_bob_1');
     // Asserted through the real addressing function: what the payload carries
@@ -387,11 +373,12 @@ describe('SubscriptionDeletionService', () => {
       panelId: payload['targetRemnawavePanelId'] as number | null,
       panelUsername: payload['targetRemnawavePanelUsername'] as string | null,
     };
-    assert.deepStrictEqual(panelUserAddress(fromPayload, 'id'), { kind: 'ready', segment: '4471' });
-    // Counter-check: `targetRemnawaveId` alone — all the payload used to carry
-    // — names nothing on that panel.
+    assert.deepStrictEqual(panelUserAddress(fromPayload), { kind: 'ready', segment: '4471' });
+    // Counter-check: a stored 2.x uuid alone names nothing on that panel —
+    // which is why such a row is refused before any job is armed (see
+    // `subscription-delete-stale-panel-link.spec.ts`).
     assert.equal(
-      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
+      panelUserAddress({ remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479', panelId: null, panelUsername: null }).kind,
       'impossible',
     );
   });
@@ -401,7 +388,7 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-1',
       userId: 'user-1',
       status: SubscriptionStatus.DELETED,
-      remnawaveId: 'rw-1',
+      remnawaveId: '4471',
     });
     const service = buildService(state);
 
@@ -493,7 +480,7 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-queue-outage',
       userId: 'user-1',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: 'rw-outage',
+      remnawaveId: '4499',
     });
     state.enqueueError = new Error('Redis unavailable');
     const service = buildService(state);
@@ -522,7 +509,7 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-1',
       userId: 'user-1',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: 'rw-1',
+      remnawaveId: '4471',
     });
     const service = buildService(state);
 
@@ -557,7 +544,7 @@ describe('SubscriptionDeletionService', () => {
       id: 'sub-1',
       userId: 'owner',
       status: SubscriptionStatus.ACTIVE,
-      remnawaveId: 'rw-1',
+      remnawaveId: '4471',
     });
     const service = buildService(state);
 
@@ -581,7 +568,7 @@ describe('SubscriptionDeletionService', () => {
             id: 'sub-x',
             userId: ownerId,
             status: SubscriptionStatus.ACTIVE,
-            remnawaveId: 'rw-x',
+            remnawaveId: '4480',
           });
           const service = buildService(state);
           if (ownerId === requesterId) {

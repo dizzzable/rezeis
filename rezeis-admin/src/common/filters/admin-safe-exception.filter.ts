@@ -124,19 +124,20 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // refused on the STATE OF THE DATA rather than on the request, both are 409,
   // and a 409 without a code is indistinguishable from every other conflict the
   // panel can answer with. This one refuses because the subscription's stored
-  // Remnawave identity is a 2.x uuid on a panel that is now 3.x, so a deletion
+  // Remnawave identity is not a 3.x numeric id (a 2.x uuid), so a deletion
   // would remove whatever the address fallback resolves to instead of the
   // profile the row was written for. The operator's next action is specific —
-  // run the panel-link reconciliation on the Subscriptions page, then delete
-  // again — and stripped of the code the SPA can only offer a retry, which
-  // presses the same refusal a second time.
+  // link the subscription to its numeric id («Подписки» → «Инструменты» →
+  // «Подписки без привязки к Remnawave»), then delete again — and stripped of
+  // the code the SPA can only offer a retry, which presses the same refusal a
+  // second time.
   'SUBSCRIPTION_DELETE_STALE_PANEL_LINK',
   // The same refusal on the DEVICE verb, and a separate code rather than a
   // second use of the one above because a client BRANCHES on it and the two
   // branches differ. `deletePanelUserDevice` addresses its owner through the
-  // identical `panelUserAddress` fallback, so on a 3.x panel a stale 2.x
-  // identity unbinds a device belonging to whichever account is live at that
-  // address. What the client has to say afterwards is not what the subscription
+  // identical `panelUserAddress` fallback, so a stale 2.x identity unbinds a
+  // device belonging to whichever account is live at that address. What the
+  // client has to say afterwards is not what the subscription
   // refusal says: the subscription is intact and it is the DEVICE that is still
   // bound, so the follow-up is "revoke it again after the repair", not "delete
   // it again". Sharing the code would put subscription-deletion copy on a
@@ -151,9 +152,9 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // The same refusal on the REGENERATE verb, and a THIRD code for the same
   // reason the second one exists: a client branches on it and the branches
   // differ. `regeneratePanelUserSubscription` addresses its target through the
-  // identical `panelUserAddress` fallback, so on a 3.x panel a stale 2.x
-  // identity rotates the subscription short uuid of whichever account is live
-  // at that address — and unlike the other two, that is IRREVERSIBLE: every
+  // identical `panelUserAddress` fallback, so a stale 2.x identity rotates the
+  // subscription short uuid of whichever account is live at that address —
+  // and unlike the other two, that is IRREVERSIBLE: every
   // client link the real customer holds dies at once, the panel cannot re-issue
   // the old value, and nothing here ever held it in a restorable form.
   //
@@ -165,6 +166,13 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // which presses the same refusal, and the one fact they needed — that the
   // link they wanted rotated is still live — is never said at all.
   'SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK',
+  // A Remnawave 2.x panel, refused on every path: the old adapter's throwing
+  // senders raise `RemnawavePanelTooOldError` with this code before any
+  // request goes out. The sentence beside it («Обновите панель до 3.x») is
+  // Russian and passes the scrub; stripped of the code, the SPA could not tell
+  // "upgrade your panel" from any other 502 and would offer a retry that can
+  // never succeed. `LEGACY_PANEL_REFUSAL_CODE` in `panel-transport.ts`.
+  'REZEIS_PANEL_TOO_OLD',
   // The two paid-trial refusals ask the buyer for opposite things — one is
   // final, the other is resolvable by abandoning their own unfinished
   // checkout. Without both here the filter strips the code and the BFF can
@@ -212,6 +220,11 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // the code it could only report a failed payment. Thrown by
   // `subscriptionIsLifetime()`.
   'SUBSCRIPTION_IS_LIFETIME',
+  // «Доп. услуги» → «Настройки»: a switch a line in `.env` decides, and a
+  // switch-off sent without its confirmation (`AddOnSwitchesService`). The page
+  // prevents both and names each in its own words when one reaches it anyway.
+  'ADD_ON_SWITCH_SET_IN_ENV',
+  'ADD_ON_SWITCH_OFF_NOT_CONFIRMED',
   // The panel's own second-factor pivot, and the only entry here that is not
   // SCREAMING_SNAKE: the label is the wire value the sign-in form compares
   // against, so it is spelled the way the client reads it, not the way the
@@ -548,7 +561,6 @@ export const SAFE_REFUSAL_REASONS: ReadonlySet<string> = new Set<string>([
   'DURATION',
   'AMOUNT',
   'ITEMS',
-  'ADD_ONS',
   'ALREADY_ACTIVE',
   'PENDING_SIGN_UP',
   'PLAN',

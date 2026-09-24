@@ -6,9 +6,22 @@ import { of, throwError } from 'rxjs';
 
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
 
-function fixture(rel: string): unknown {
+function fixture(rel: string): { version?: string; response: Record<string, unknown> } {
   return JSON.parse(readFileSync(join(__dirname, 'fixtures', 'remnawave', rel), 'utf8'));
 }
+
+/**
+ * A 3.x user row: the 3.3.2 OpenAPI-derived fixture with the fields a case is
+ * about overridden. Built from the specification's row rather than written out
+ * by hand, so no case here can be about a shape the panel does not send.
+ */
+const ROW_332 = fixture('3.3.2/user.json').response;
+function userBody(over: Record<string, unknown> = {}, version = '3.3.2') {
+  return { version, response: { ...ROW_332, ...over } };
+}
+
+/** A decimal identity: what a 3.x link stores. */
+const ID = '4471';
 
 const CONFIG = {
   host: 'remnawave',
@@ -37,11 +50,9 @@ function build(handler: (input: { method: string; url: string; data?: unknown })
 }
 
 /**
- * Drops the panel-version probe (`/api/system/...`). Every user-scoped call
- * makes one before it can decide whether this panel wants a uuid or a numeric
- * id, so `captured[0]` is the probe, not the request under test. Filtering by
- * path keeps these assertions about the request being made rather than about
- * how many round-trips addressing happens to cost.
+ * Drops any panel-version read (`/api/system/...`), so these assertions stay
+ * about the request being made rather than about how many round-trips a path
+ * happens to cost.
  */
 function panelCalls(
   captured: ReadonlyArray<{ method: string; url: string; data?: unknown }>,
@@ -50,39 +61,54 @@ function panelCalls(
 }
 
 describe('RemnawaveApiService strict adapter (T-010)', () => {
-  it('strictGetPanelUser decodes a 2.7.4 finite user and reports the version', async () => {
-    const { service } = build(() => of({ data: fixture('2.7.4/user.json') }));
-    const outcome = await service.strictGetPanelUser('11111111-1111-4111-8111-111111111111');
+  it('strictGetPanelUser decodes a finite 3.x user and reports the version', async () => {
+    const { service, captured } = build(() =>
+      of({
+        data: userBody({
+          id: 4471,
+          trafficLimitBytes: 107374182400,
+          hwidDeviceLimit: 3,
+          status: 'ACTIVE',
+          createdAt: '2024-03-31T10:15:00.000Z',
+        }),
+      }),
+    );
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
+    assert.equal(outcome.value.uuid, '4471');
+    assert.equal(outcome.value.panelId, 4471);
     assert.equal(outcome.value.trafficLimitBytes, 107374182400n);
     assert.equal(outcome.value.hwidDeviceLimit, 3);
     assert.equal(outcome.value.status, 'ACTIVE');
     assert.equal(outcome.value.createdAt, '2024-03-31T10:15:00.000Z');
-    assert.equal(outcome.detectedVersion, '2.7.4');
+    assert.equal(outcome.detectedVersion, '3.3.2');
+    assert.deepEqual(
+      panelCalls(captured).map((c) => c.url),
+      ['/api/users/4471'],
+    );
   });
 
-  it('strictGetPanelUser decodes 2.8.0 upstream zeros to canonical unlimited (null)', async () => {
-    const { service } = build(() => of({ data: fixture('2.8.0/user.json') }));
-    const outcome = await service.strictGetPanelUser('22222222-2222-4222-8222-222222222222');
+  it('strictGetPanelUser decodes upstream zeros to canonical unlimited (null)', async () => {
+    const { service } = build(() => of({ data: userBody({ id: 4471, trafficLimitBytes: 0, hwidDeviceLimit: 0 }) }));
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.trafficLimitBytes, null);
     assert.equal(outcome.value.hwidDeviceLimit, null);
-    assert.equal(outcome.detectedVersion, '2.8.0');
   });
 
-  it('strictGetPanelUser accepts a schema-valid nullable hwidDeviceLimit from 2.7.4', async () => {
-    const { service } = build(() => of({ data: fixture('2.7.4/nullable-user.json') }));
-    const outcome = await service.strictGetPanelUser('11111111-1111-4111-8111-111111111111');
+  it('strictGetPanelUser accepts a schema-valid nullable hwidDeviceLimit', async () => {
+    const { service } = build(() => of({ data: userBody({ id: 4471, hwidDeviceLimit: null }) }));
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.hwidDeviceLimit, null);
   });
 
   it('strictGetPanelUser reads the complete writable identity projection', async () => {
-    const { service } = build(() => of({ data: fixture('2.8.0/user.json') }));
-    const outcome = await service.strictGetPanelUser('22222222-2222-4222-8222-222222222222');
+    const { service } = build(() => of({ data: userBody({ id: 4471 }) }));
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.tag, null);
@@ -91,19 +117,37 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(outcome.value.externalSquadUuid, null);
   });
 
+  it('strictGetPanelUser refuses a row without a numeric id, whatever uuid it carries', async () => {
+    const { service } = build(() =>
+      of({ data: userBody({ id: null, uuid: '11111111-1111-4111-8111-111111111111' }) }),
+    );
+    const outcome = await service.strictGetPanelUser(ID);
+    assert.equal(outcome.kind, 'invalidContract');
+  });
+
+  it('strictGetPanelUser cannot name a bare 2.x uuid: unavailable, and nothing is sent', async () => {
+    // Nothing else was recorded (no numeric id, no short uuid, no name), so the
+    // address chain has nowhere to go. `unavailable`, not `notFound`: the
+    // profile may be perfectly alive; we just cannot say which one it is.
+    const { service, captured } = build(() => of({ data: userBody() }));
+    const outcome = await service.strictGetPanelUser('11111111-1111-4111-8111-111111111111');
+    assert.equal(outcome.kind, 'unavailable');
+    assert.deepEqual(panelCalls(captured), []);
+  });
+
   it('strictGetPanelUser maps 404 to notFound', async () => {
     // Deliberately NOT envelope-guarded, unlike `strictGetPanelUserExpiry`
     // below: the only consumer of this `notFound` (the profile-sync read-back)
     // already fails closed, and softening the 404 into `unavailable` would turn
     // a terminal job into a retrying one.
     const { service } = build(() => throwError(() => axiosError(404)));
-    const outcome = await service.strictGetPanelUser('missing');
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'notFound');
   });
 
   it('strictGetPanelUser maps 503 + Retry-After to unavailable with parsed backoff', async () => {
     const { service } = build(() => throwError(() => axiosError(503, { 'retry-after': '30' })));
-    const outcome = await service.strictGetPanelUser('u');
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'unavailable');
     if (outcome.kind !== 'unavailable') return;
     assert.equal(outcome.retryAfterMs, 30000);
@@ -111,19 +155,19 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
 
   it('strictGetPanelUser maps a network/timeout error to unavailable', async () => {
     const { service } = build(() => throwError(() => new Error('ETIMEDOUT')));
-    const outcome = await service.strictGetPanelUser('u');
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'unavailable');
   });
 
   it('strictGetPanelUser rejects a malformed 2xx payload as invalidContract', async () => {
     const { service } = build(() => of({ data: { response: { status: 'ACTIVE', trafficLimitBytes: 1, hwidDeviceLimit: 1 } } }));
-    const outcome = await service.strictGetPanelUser('u');
+    const outcome = await service.strictGetPanelUser(ID);
     assert.equal(outcome.kind, 'invalidContract');
   });
 
-  it('strictSetUserLimits PATCHes absolute limits with the uuid in the body and null→0 encoding', async () => {
-    const { service, captured } = build(() => of({ data: fixture('2.8.0/user.json') }));
-    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+  it('strictSetUserLimits PATCHes absolute limits with the numeric id in the body and null→0 encoding', async () => {
+    const { service, captured } = build(() => of({ data: userBody({ id: 4471 }) }));
+    const outcome = await service.strictSetUserLimits(ID, {
       trafficLimitBytes: null,
       hwidDeviceLimit: null,
     });
@@ -132,16 +176,16 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(call.method, 'patch');
     assert.equal(call.url, '/api/users');
     assert.deepEqual(call.data, {
-      uuid: '22222222-2222-4222-8222-222222222222',
+      id: 4471,
       trafficLimitBytes: 0,
       hwidDeviceLimit: 0,
     });
   });
 
   it('strictSetUserLimits propagates the deferred full plan identity when supplied', async () => {
-    const { service, captured } = build(() => of({ data: fixture('2.8.0/user.json') }));
+    const { service, captured } = build(() => of({ data: userBody({ id: 4471 }) }));
 
-    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+    const outcome = await service.strictSetUserLimits(ID, {
       trafficLimitBytes: 20n * 1024n ** 3n,
       hwidDeviceLimit: 4,
       tag: 'DEFERRED_PREMIUM',
@@ -152,7 +196,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
 
     assert.equal(outcome.kind, 'ok');
     assert.deepEqual(panelCalls(captured)[0]!.data, {
-      uuid: '22222222-2222-4222-8222-222222222222',
+      id: 4471,
       trafficLimitBytes: 20 * 1024 ** 3,
       hwidDeviceLimit: 4,
       tag: 'DEFERRED_PREMIUM',
@@ -166,10 +210,10 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     let httpCalls = 0;
     const { service } = build(() => {
       httpCalls += 1;
-      return of({ data: fixture('2.8.0/user.json') });
+      return of({ data: userBody({ id: 4471 }) });
     });
 
-    const outcome = await service.strictSetUserLimits('22222222-2222-4222-8222-222222222222', {
+    const outcome = await service.strictSetUserLimits(ID, {
       trafficLimitBytes: 1n,
       hwidDeviceLimit: null,
       tag: 'lowercase-not-upstream-compatible',
@@ -181,27 +225,24 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.equal(httpCalls, 0);
   });
 
-  it('strictListUserDevices validates the 2.7.4 list (unique hwids, total==rows)', async () => {
-    const { service } = build(() => of({ data: fixture('2.7.4/devices.json') }));
-    const outcome = await service.strictListUserDevices('11111111-1111-4111-8111-111111111111');
+  it('strictListUserDevices validates the 3.x list (unique hwids, total==rows)', async () => {
+    const { service, captured } = build(() => of({ data: fixture('3.2.1/devices.json') }));
+    const outcome = await service.strictListUserDevices('2');
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.total, 2);
-    assert.deepEqual(outcome.value.devices.map((d) => d.hwid), ['hwid-older', 'hwid-newer']);
-  });
-
-  it('strictListUserDevices accepts the 2.8.0 shape', async () => {
-    const { service } = build(() => of({ data: fixture('2.8.0/devices.json') }));
-    const outcome = await service.strictListUserDevices('22222222-2222-4222-8222-222222222222');
-    assert.equal(outcome.kind, 'ok');
-    if (outcome.kind !== 'ok') return;
-    assert.equal(outcome.value.total, 1);
-    assert.equal(outcome.value.devices[0]!.hwid, 'hwid-2800');
+    assert.deepEqual(outcome.value.devices.map((d) => d.hwid), ['hwid-321-older', 'hwid-321-newer']);
+    // Last activity is read off `updatedAt`, which is what 3.x names it.
+    assert.equal(outcome.value.devices[0]!.lastSeenAt, '2026-08-10T13:01:17.530Z');
+    assert.deepEqual(
+      panelCalls(captured).map((c) => c.url),
+      ['/api/hwid/devices/2'],
+    );
   });
 
   it('strictListUserDevices rejects a total that disagrees with the row count', async () => {
     const { service } = build(() => of({ data: { response: { total: 5, devices: [{ hwid: 'a', createdAt: '2026-01-01T00:00:00Z' }] } } }));
-    const outcome = await service.strictListUserDevices('u');
+    const outcome = await service.strictListUserDevices(ID);
     assert.equal(outcome.kind, 'invalidContract');
   });
 
@@ -210,49 +251,35 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
       { hwid: 'dup', createdAt: '2026-01-01T00:00:00Z' },
       { hwid: 'dup', createdAt: '2026-02-01T00:00:00Z' },
     ] } } }));
-    const outcome = await service.strictListUserDevices('u');
+    const outcome = await service.strictListUserDevices(ID);
     assert.equal(outcome.kind, 'invalidContract');
   });
 
   it('strictListUserDevices rejects an empty hwid', async () => {
     const { service } = build(() => of({ data: { response: { total: 1, devices: [{ hwid: '', createdAt: '2026-01-01T00:00:00Z' }] } } }));
-    const outcome = await service.strictListUserDevices('u');
+    const outcome = await service.strictListUserDevices(ID);
     assert.equal(outcome.kind, 'invalidContract');
   });
 
-  it('strictDeleteUserDevice sends a stable {userUuid,hwid} body and returns the remaining total', async () => {
+  it('strictDeleteUserDevice sends a stable {userId,hwid} body and returns the remaining total', async () => {
     const { service, captured } = build(() => of({ data: { response: { total: 1 } } }));
-    const outcome = await service.strictDeleteUserDevice('user-uuid', 'hwid-x', {
-      addressing: 'unknown',
-    });
+    const outcome = await service.strictDeleteUserDevice(ID, 'hwid-x');
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.total, 1);
     const call = captured.find((c) => c.url === '/api/hwid/devices/delete');
     assert.ok(call !== undefined, 'the delete request was never issued');
     assert.equal(call.method, 'post');
-    assert.deepEqual(call.data, { userUuid: 'user-uuid', hwid: 'hwid-x' });
+    assert.deepEqual(call.data, { userId: 4471, hwid: 'hwid-x' });
   });
 
-  it('strictDeleteUserDevice builds its address from the era it was HANDED, and takes no reading of its own', async () => {
-    // THE LAST DESTRUCTIVE METHOD THAT USED TO RE-READ THE ERA.
-    //
-    // Its five siblings (`deletePanelUser`, `deletePanelUserDevice`,
-    // `deleteAllPanelUserDevices`, `regeneratePanelUserSubscription`) all take a
-    // caller-supplied `PanelEraObservation` and, given one, never read the shape
-    // again. This one took its own — and the reading a guard decides on can
-    // legitimately differ from a reading taken microseconds later, because
-    // `getPanelShape()` caches a FAILURE for fifteen seconds. A guard seeing
-    // 'unknown' (fail-open: proceed) while this method saw 'id' is the whole
-    // hazard: the 'id' branch resolves a dead 2.x uuid through the recorded
-    // panel id to whatever profile is LIVE at that address, and unbinds a device
-    // from it.
-    //
-    // TWO CLAIMS, and the second is what makes the first mean anything: the
-    // owner key follows the SUPPLIED era, and no version probe is issued at all.
+  it('strictDeleteUserDevice takes no version reading: the owner key follows the id alone', async () => {
+    // It used to take the caller's "era" and build the key from it. There is
+    // one key now — the number — so there is nothing for a reading to decide,
+    // and none is taken.
     const { service, captured } = build(() => of({ data: { response: { total: 0 } } }));
 
-    const outcome = await service.strictDeleteUserDevice('4711', 'hwid-x', { addressing: 'id' });
+    const outcome = await service.strictDeleteUserDevice('4711', 'hwid-x');
 
     assert.equal(outcome.kind, 'ok');
     const call = captured.find((c) => c.url === '/api/hwid/devices/delete');
@@ -260,37 +287,45 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
     assert.deepEqual(
       captured.filter((c) => c.url.startsWith('/api/system/')),
       [],
-      'and NOT ONE version probe — a second reading is no longer reachable from here',
+      'and NOT ONE version probe',
     );
   });
 
-  it('strictListUserDevices addresses the read from a supplied era too', async () => {
-    // A read destroys nothing, so the era stays OPTIONAL here — but both callers
-    // ACT on the answer (the planner persists it as targets, the executor writes
-    // the final one into `postconditionMetadata` as the proof a plan is APPLIED),
-    // so a guarded caller hands its observation over and this proves it lands.
+  it('strictDeleteUserDevice refuses a stored 2.x uuid before anything is sent', async () => {
+    // The fallback chain could resolve such a row to whatever profile is live
+    // at its recorded name — and unbind a device from somebody else.
+    const { service, captured } = build(() => of({ data: { response: { total: 0 } } }));
+
+    const outcome = await service.strictDeleteUserDevice(
+      { remnawaveId: '11111111-1111-4111-8111-111111111111', panelId: 4711, panelUsername: 'rz_a' },
+      'hwid-x',
+    );
+
+    assert.equal(outcome.kind, 'invalidContract');
+    assert.deepEqual(captured, []);
+  });
+
+  it('strictListUserDevices addresses the read by the id and takes no version reading', async () => {
     const { service, captured } = build(() =>
       of({ data: { response: { total: 0, devices: [] } } }),
     );
 
-    const outcome = await service.strictListUserDevices('4711', { addressing: 'id' });
+    const outcome = await service.strictListUserDevices('4711');
 
     assert.equal(outcome.kind, 'ok');
     assert.deepEqual(
       captured.map((c) => c.url),
       ['/api/hwid/devices/4711'],
-      'the supplied era addressed the path and no probe was taken',
+      'the id addressed the path and no probe was taken',
     );
   });
 
   it('strictDeleteUserDevice maps 404 to notFound (idempotent-absent)', async () => {
     // Also deliberately unguarded: a device 404 is not USER_NOT_FOUND, so
     // demanding that envelope here would stop an already-absent HWID delete
-    // from being idempotent on a healthy 2.7.4/2.8.0 panel.
+    // from being idempotent on a healthy panel.
     const { service } = build(() => throwError(() => axiosError(404)));
-    const outcome = await service.strictDeleteUserDevice('user-uuid', 'gone', {
-      addressing: 'unknown',
-    });
+    const outcome = await service.strictDeleteUserDevice(ID, 'gone');
     assert.equal(outcome.kind, 'notFound');
   });
 });
@@ -302,7 +337,7 @@ describe('RemnawaveApiService strict adapter (T-010)', () => {
  * terminated, terms closed, `status = DELETED`, panel DELETE enqueued), and the
  * three backup importers write EXPIRED over a live row.
  *
- * So the status code alone is not the signal. Remnawave answers a uuid it does
+ * So the status code alone is not the signal. Remnawave answers an id it does
  * not have with its own USER_NOT_FOUND envelope (`A025`); a reverse proxy
  * mid-deploy answers EVERY request with a bare 404. Reading the second as the
  * first retires a whole batch of live subscriptions per sweep, for the length of
@@ -318,7 +353,7 @@ describe('strictGetPanelUserExpiry — only the PANEL may say a profile is gone'
   for (const [label, data] of GONE_BODIES) {
     it(`maps a 404 carrying ${label} to notFound`, async () => {
       const { service } = build(() => throwError(() => axiosError(404, {}, data)));
-      const outcome = await service.strictGetPanelUserExpiry('missing');
+      const outcome = await service.strictGetPanelUserExpiry(ID);
       assert.equal(outcome.kind, 'notFound');
     });
   }
@@ -333,7 +368,7 @@ describe('strictGetPanelUserExpiry — only the PANEL may say a profile is gone'
   for (const [label, data] of PROXY_BODIES) {
     it(`maps a bare 404 (${label}) to unavailable, never notFound`, async () => {
       const { service } = build(() => throwError(() => axiosError(404, {}, data)));
-      const outcome = await service.strictGetPanelUserExpiry('live-profile');
+      const outcome = await service.strictGetPanelUserExpiry(ID);
       assert.notEqual(outcome.kind, 'notFound');
       assert.equal(outcome.kind, 'unavailable');
     });
@@ -343,7 +378,7 @@ describe('strictGetPanelUserExpiry — only the PANEL may say a profile is gone'
     const { service } = build(() =>
       throwError(() => axiosError(404, { 'retry-after': '30' }, 'gateway')),
     );
-    const outcome = await service.strictGetPanelUserExpiry('u');
+    const outcome = await service.strictGetPanelUserExpiry(ID);
     assert.equal(outcome.kind, 'unavailable');
     if (outcome.kind !== 'unavailable') return;
     assert.equal(outcome.retryAfterMs, 30_000);
@@ -354,16 +389,25 @@ describe('strictGetPanelUserExpiry — only the PANEL may say a profile is gone'
       of({
         data: {
           response: { expireAt: '2030-01-01T00:00:00.000Z', subscriptionUrl: 'https://p/sub/1' },
-          version: '2.8.0',
+          version: '3.3.2',
         },
       }),
     );
-    const outcome = await service.strictGetPanelUserExpiry('u');
+    const outcome = await service.strictGetPanelUserExpiry(ID);
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.expireAtMs, Date.parse('2030-01-01T00:00:00.000Z'));
     assert.equal(outcome.value.subscriptionUrl, 'https://p/sub/1');
-    assert.equal(outcome.detectedVersion, '2.8.0');
+    assert.equal(outcome.detectedVersion, '3.3.2');
+  });
+
+  it('an identity it cannot name is unavailable — never notFound', async () => {
+    // The sweep deletes on `notFound`. A stored 2.x uuid with nothing else
+    // recorded names nobody we can ask about, which is not the same as gone.
+    const { service, captured } = build(() => throwError(() => axiosError(404, {}, { errorCode: 'A025' })));
+    const outcome = await service.strictGetPanelUserExpiry('11111111-1111-4111-8111-111111111111');
+    assert.equal(outcome.kind, 'unavailable');
+    assert.deepEqual(panelCalls(captured), []);
   });
 
   it('keeps every other status on its existing class', async () => {
@@ -376,7 +420,7 @@ describe('strictGetPanelUserExpiry — only the PANEL may say a profile is gone'
       [400, 'invalidContract'],
     ] as const) {
       const { service } = build(() => throwError(() => axiosError(status)));
-      const outcome = await service.strictGetPanelUserExpiry('u');
+      const outcome = await service.strictGetPanelUserExpiry(ID);
       assert.equal(outcome.kind, expected, `HTTP ${status} must stay ${expected}`);
     }
   });

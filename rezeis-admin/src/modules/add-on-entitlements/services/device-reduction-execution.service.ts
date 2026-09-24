@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import {
   DeviceReductionPlanState,
   EntitlementIncidentKind,
@@ -9,15 +9,16 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import { readAddOnRolloutFlags } from '../add-on-rollout.config';
+import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import {
   storedIdentityOf,
   type StoredPanelIdentity,
 } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
-  assessObservedPanelLink,
-  observePanelEra,
+  isStalePanelIdentity,
+  UNLINKED_SUBSCRIPTIONS_PATH,
 } from '../../remnawave/services/stale-panel-link';
 import {
   DORMANT_RETENTION_CONFLICT,
@@ -112,19 +113,20 @@ interface PlanTarget {
 const PANEL_PROFILE_SHARED = 'PANEL_PROFILE_SHARED';
 
 /**
- * The stored panel identity cannot be trusted to name the right customer.
+ * The stored panel identity names nobody on a supported panel
+ * (`isStalePanelIdentity`: not a decimal).
  *
  * ── WHY THE SAGA NEEDS ITS OWN REFUSAL ───────────────────────────────────────
  *
  * Remnawave 3.x deleted the user `uuid` and re-keyed every user-scoped route on
  * the numeric `id`. `Subscription.remnawaveId` keeps whichever spelling was
- * current when the row was linked and is deliberately never rewritten, so after
- * a 2.x → 3.x upgrade a row linked in the old era holds an identity the panel
- * does not answer to — and that identity does NOT fail closed. `panelUserAddress`
- * falls back (numeric fast path → `remnawavePanelId` → the short uuid recovered
- * from `config_url` → `remnawavePanelUsername`), so a dead 2.x uuid still
- * resolves to whatever profile is LIVE at that address. On the duplicate pairs
- * the old importer produced, that is a paying customer.
+ * current when the row was linked and is deliberately never rewritten, so a row
+ * linked on a 2.x panel holds an identity a 3.x panel does not answer to — and
+ * that identity does NOT fail closed. `panelUserAddress` falls back (numeric
+ * fast path → `remnawavePanelId` → the short uuid recovered from `config_url` →
+ * `remnawavePanelUsername`), so a dead 2.x uuid still resolves to whatever
+ * profile is LIVE at that address. On the duplicate pairs the old importer
+ * produced, that is a paying customer.
  *
  * ── AND WHY IT IS NOT COVERED BY THE THREE THAT ALREADY EXIST ────────────────
  *
@@ -142,12 +144,13 @@ const PANEL_PROFILE_SHARED = 'PANEL_PROFILE_SHARED';
  * them IS the decision. `{ status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' }`
  * means "come back later" and raises nothing; `block(...)` means a terminal stop
  * with a named reason and a CRITICAL incident. A STALE LINK IS NOT TRANSIENT: it
- * does not heal by retrying, and only an operator running the panel-link
- * reconciliation clears it. Deferred, the plan would beat forever against a link
- * that cannot come right on its own, and beat SILENTLY, because a deferral raises
- * no incident. Blocked, it stops, an operator is told, and once the
- * reconciliation has rewritten `remnawaveId` the same plan can be re-driven
- * through the override — `BLOCKED` is in {@link OPERATOR_OVERRIDE_STARTABLE_STATES}
+ * does not heal by retrying; it clears when the row is linked to its numeric id
+ * (the automatic link check does it when it can prove the owner, or an operator
+ * does it with «Привязать профиль»). Deferred, the plan would beat forever
+ * against a link that cannot come right on its own, and beat SILENTLY, because a
+ * deferral raises no incident. Blocked, it stops, an operator is told, and once
+ * `remnawaveId` is rewritten the same plan can be re-driven through the
+ * override — `BLOCKED` is in {@link OPERATOR_OVERRIDE_STARTABLE_STATES}
  * precisely so that a fixed cause can be re-driven.
  *
  * ── IT IS NOT AN HTTP PRODUCT CODE, AND MUST NOT BE ALLOWLISTED AS ONE ───────
@@ -165,8 +168,9 @@ const PANEL_PROFILE_SHARED = 'PANEL_PROFILE_SHARED';
  *
  * SPELLED TO ECHO THE THREE SIBLING CODES rather than to join the
  * `PANEL_PROFILE_*` family above it. Those three mean the profile MOVED, is
- * SHARED, or is GONE; this one means the stored id is from the wrong ERA, which
- * is a different fact needing a different remedy.
+ * SHARED, or is GONE; this one means the stored id names nobody — a 2.x uuid —
+ * which is a different fact needing a different remedy. A persisted wire value:
+ * it stays spelled exactly so.
  */
 export const STALE_PANEL_LINK = 'STALE_PANEL_LINK';
 
@@ -211,6 +215,8 @@ export class DeviceReductionExecutionService {
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
     private readonly entitlementBoundaryService: EntitlementBoundaryService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   /**
@@ -227,7 +233,7 @@ export class DeviceReductionExecutionService {
     options: { readonly force?: boolean } = {},
   ): Promise<DeviceReductionExecutionOutcome> {
     const override = options.force === true;
-    if (!override && !resolveAddOnRolloutFlags().deviceCleanupAuto) {
+    if (!override && !(await readAddOnRolloutFlags(this.addOnSwitches)).deviceCleanupAuto) {
       return { status: 'AUTO_DISABLED' };
     }
 
@@ -280,17 +286,10 @@ export class DeviceReductionExecutionService {
 
     // ── THE STALE-LINK REFUSAL, IN FRONT OF THE ENTIRE EXECUTION ───────────
     //
-    // ONE OBSERVATION FOR THE WHOLE PLAN, and deliberately not one per target.
-    // The identity every panel call in this run is addressed from is the
+    // ONCE FOR THE WHOLE PLAN, and deliberately not once per target. The
+    // identity every panel call in this run is addressed from is the
     // SUBSCRIPTION'S — `identity` above, fixed for the run and re-checked for a
-    // relink on every pass — so the era question has exactly one answer here.
-    // Asking it per target would buy nothing and cost the one thing that
-    // matters: `getPanelShape()` caches a FAILURE for fifteen seconds, so two
-    // readings taken microseconds apart can legitimately disagree, and the
-    // disagreement that hurts runs "the guard saw 'unknown', so proceed" into
-    // "the builder saw 'id', so fall back through panelId to whatever is live
-    // at that address". `assessObservedPanelLink` is synchronous and pure
-    // precisely so it CANNOT reach for the era itself.
+    // relink on every pass — so the question has exactly one answer here.
     //
     // IT COVERS THE READS AS WELL AS THE DELETES, which is why it stands here
     // rather than immediately above `strictDeleteUserDevice`. A read against
@@ -311,23 +310,20 @@ export class DeviceReductionExecutionService {
     // exists to withhold. It still precedes every panel call, which is the
     // property that matters.
     //
-    // THE FAIL-OPEN IS PRESERVED EXACTLY, and it matters more here than on the
-    // three sibling guards. An unreadable era is TRUSTED: version detection
-    // fails for the same reasons requests fail — an unreachable panel, an
-    // expired token, a panel mid-restart — so a refusal keyed on it would fire
-    // exactly when the panel is already answering with terminal errors. On the
-    // HTTP verbs that would cost one button; here it is a TERMINAL block with a
-    // CRITICAL incident, so a single auth blip would convert every in-flight
-    // reduction plan into an operator ticket. `observePanelEra` turns a throw
-    // into `'unknown'`, and `'unknown'` proceeds — as does a proven 2.x panel,
-    // where a uuid-shaped identity is CORRECT and this population is empty.
-    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
-    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+    // NO PANEL VERSION IS READ, and that matters more here than on the three
+    // sibling guards: this refusal is a TERMINAL block with a CRITICAL incident.
+    // A refusal keyed on the version would fire exactly when version detection
+    // fails — an unreachable panel, an expired token — and turn every in-flight
+    // reduction plan into an operator ticket. A decimal proceeds under every
+    // reading of the version and a non-decimal is refused under every reading,
+    // so nothing about the probe can move this answer.
+    if (isStalePanelIdentity(identity.remnawaveId)) {
       this.logger.error(
         `Device reduction plan ${planId} refused for subscription ${plan.subscriptionId}: its ` +
-          'stored 2.x identifier does not name the account it was written for on a 3.x panel, so ' +
-          'reducing would have unbound a device belonging to somebody else. Nothing was read and ' +
-          'nothing was deleted. Run the panel link reconciliation, then re-drive this plan.',
+          'stored Remnawave identity is not a 3.x numeric id, so reducing could have unbound a ' +
+          'device belonging to somebody else. Nothing was read and nothing was deleted. The ' +
+          'automatic link check re-links it if it can prove the owner; otherwise it is listed in ' +
+          `${UNLINKED_SUBSCRIPTIONS_PATH}. Then re-drive this plan.`,
       );
       return this.block(plan.subscriptionId, planId, STALE_PANEL_LINK);
     }
@@ -355,11 +351,9 @@ export class DeviceReductionExecutionService {
       }
       const desiredLimit = reguard.desiredLimit;
 
-      // The SAME observation the guard above decided on, handed to the adapter
-      // rather than left for it to take again. Two independent readings can
-      // legitimately disagree across the fifteen-second failure cache, and this
-      // is the read every decision in this loop is made FROM.
-      const listing = await this.remnawaveApiService.strictListUserDevices(identity, era);
+      // The read every decision in this loop is made FROM — off the profile the
+      // guard above cleared.
+      const listing = await this.remnawaveApiService.strictListUserDevices(identity);
       if (listing.kind === 'unavailable') {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       }
@@ -404,18 +398,10 @@ export class DeviceReductionExecutionService {
         return this.block(plan.subscriptionId, planId, DORMANT_RETENTION_CONFLICT);
       }
 
-      // THE OBSERVATION TRAVELS INTO THE DELETE, and the parameter is REQUIRED
-      // on that method so it cannot be otherwise. Until it was, this service
-      // held one reading and the adapter took a second one microseconds later:
-      // the guard could see `unknown` (fail-open, proceed) while the adapter saw
-      // `'id'`, took the `'id'` branch, and resolved the dead uuid through
-      // `remnawavePanelId` to whatever profile is LIVE at that address. That
-      // window is now closed by the type system rather than by convention.
-      const del = await this.remnawaveApiService.strictDeleteUserDevice(
-        identity,
-        target.hwid,
-        era,
-      );
+      // The adapter refuses a non-decimal identity here too (a TERMINAL
+      // `invalidContract`), so even a guard removed above could not turn a dead
+      // uuid into a delete on whatever profile is LIVE at its fallback address.
+      const del = await this.remnawaveApiService.strictDeleteUserDevice(identity, target.hwid);
       if (del.kind === 'unavailable') {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       }
@@ -429,11 +415,10 @@ export class DeviceReductionExecutionService {
       deleted += 1;
     }
 
-    // Final strict read-back proves the post-condition — from the same era
-    // observation as everything above it, because this read is the PROOF written
-    // into `postconditionMetadata`. Taken against a different reading it could
-    // certify a limit that was never applied to the profile this run was about.
-    const final = await this.remnawaveApiService.strictListUserDevices(identity, era);
+    // Final strict read-back proves the post-condition — off the same profile as
+    // everything above it, because this read is the PROOF written into
+    // `postconditionMetadata`.
+    const final = await this.remnawaveApiService.strictListUserDevices(identity);
     if (final.kind === 'unavailable') {
       return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
     }

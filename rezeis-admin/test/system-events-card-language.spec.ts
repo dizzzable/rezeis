@@ -433,23 +433,48 @@ const FORMERLY_PRINTED: readonly Fixture[] = [
     says: ['🧾 Транзакция: <code>tx-1</code>', '🃏 Профиль на панели: <code>anna</code>'],
   },
   {
-    producer: 'PanelLinkReconciliationService.reconcile',
+    producer: 'PanelLinkCheckService (a pass that linked)',
     type: 'system.remnawave_sync',
     severity: 'INFO',
-    message: 'Panel link reconciliation: linked 5 of 9 rows',
+    message: 'Panel link check: linked 5 subscription(s) to their Remnawave profiles',
     metadata: {
-      dryRun: false,
+      trigger: 'daily',
       scanned: 9,
       linked: 5,
-      wouldLink: 0,
-      unrepaired: 4,
-      hasMore: true,
-      panelEra: '3.x',
-      staleIdentityScanned: 2,
-      duplicatePairs: 1,
-      sharedIdentityPairs: 0,
+      note:
+        'Проверка привязки к панели сама привязала подписки к их профилям Remnawave: 5. Что осталось без ' +
+        'привязки — «Подписки» → «Инструменты» → «Подписки без привязки к Remnawave».',
     },
-    says: ['🔎 Проверено строк: 9', '🔗 Привязано: 5', '🛠 Не удалось исправить: 4'],
+    says: [
+      '🔎 Проверено строк: 9',
+      '🔗 Привязано: 5',
+      '«Подписки» → «Инструменты» → «Подписки без привязки к Remnawave»',
+    ],
+  },
+  {
+    producer: 'PanelLinkCheckService (after a backup import)',
+    type: 'system.remnawave_sync',
+    severity: 'WARNING',
+    message: 'After the backup import, 12 live subscription(s) have no proven Remnawave link (9 hold a non-numeric id)',
+    metadata: {
+      reason: 'links_unproven_after_import',
+      importRecordIds: ['import-1'],
+      sourceTypes: ['remnashop'],
+      unprovenLinks: 12,
+      nonNumericLinks: 9,
+      linked: 3,
+      note:
+        'После импорта (Remnashop) проверка привязки к панели привязала подписок: 3, но не смогла доказать ' +
+        'привязку к профилю Remnawave у подписок: 12. Список — «Подписки» → «Инструменты» → «Подписки без ' +
+        'привязки к Remnawave».',
+    },
+    says: [
+      'После импорта остались подписки без привязки к Remnawave',
+      '⛓ Без доказанной привязки к Remnawave: 12',
+      '🧬 Из них с нечисловым идентификатором Remnawave: 9',
+      '🔗 Привязано: 3',
+      '📌 Причина: Проверка привязки к панели после импорта',
+    ],
   },
 ];
 

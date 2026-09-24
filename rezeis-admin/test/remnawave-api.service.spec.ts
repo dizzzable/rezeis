@@ -178,7 +178,7 @@ describe('RemnawaveApiService', () => {
     );
   });
 
-  it('lists panel HWID devices by user UUID and maps the payload', async () => {
+  it('lists panel HWID devices by the numeric user id and maps the payload', async () => {
     const capturedRequests: Array<{
       readonly method?: string;
       readonly url: string;
@@ -187,9 +187,8 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
-          // The adapter reads the panel's own version before building any
-          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
-          // Those probes are not part of the operation under test.
+          // Any panel-version read the adapter makes is not part of the
+          // operation under test.
           if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(input);
           return of({
@@ -221,10 +220,10 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices('4471');
 
     assert.deepStrictEqual(capturedRequests.map(projectRequestContractShape), [
-      { method: 'get', url: '/api/hwid/devices/33333333-3333-4333-8333-333333333333' },
+      { method: 'get', url: '/api/hwid/devices/4471' },
     ]);
     assert.equal(outcome.kind, 'ok');
     assert.deepStrictEqual(outcome.kind === 'ok' ? outcome.value : null, {
@@ -258,7 +257,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices('4471');
 
     // The whole point of the type: the caller can tell this apart from a real
     // empty list. Asserting the kind AND that no list is reachable on it.
@@ -279,7 +278,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices('4471');
 
     assert.equal(outcome.kind, 'invalidContract');
     assert.equal('value' in outcome, false);
@@ -298,7 +297,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const outcome = await service.strictGetPanelUserDevices('33333333-3333-4333-8333-333333333333');
+    const outcome = await service.strictGetPanelUserDevices('4471');
 
     assert.equal(outcome.kind, 'ok');
     assert.deepStrictEqual(outcome.kind === 'ok' ? outcome.value : null, {
@@ -307,7 +306,7 @@ describe('RemnawaveApiService', () => {
     });
   });
 
-  it('deletes one panel HWID device by user UUID and hwid', async () => {
+  it('deletes one panel HWID device by the numeric user id and hwid', async () => {
     const capturedRequests: Array<{
       readonly method?: string;
       readonly url: string;
@@ -316,9 +315,8 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
-          // The adapter reads the panel's own version before building any
-          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
-          // Those probes are not part of the operation under test.
+          // Any panel-version read the adapter makes is not part of the
+          // operation under test.
           if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(input);
           return of({
@@ -339,23 +337,14 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    // The era the method used to read for itself is now handed in: the
-    // destructive calls take ONE observation so a guard and the address it
-    // guards cannot be built from two different readings. `getPanelShape()` is
-    // cached, so this is the same single probe the assertion below still
-    // filters out of `capturedRequests`.
-    const result = await service.deletePanelUserDevice(
-      '33333333-3333-4333-8333-333333333333',
-      'hwid-to-delete',
-      await service.getPanelShape(),
-    );
+    const result = await service.deletePanelUserDevice('4471', 'hwid-to-delete');
 
     assert.deepStrictEqual(capturedRequests.map(projectRequestContractShape), [
       {
         method: 'post',
         url: '/api/hwid/devices/delete',
         data: {
-          userUuid: '33333333-3333-4333-8333-333333333333',
+          userId: 4471,
           hwid: 'hwid-to-delete',
         },
       },
@@ -368,15 +357,14 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
-          // The adapter reads the panel's own version before building any
-          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
-          // Those probes are not part of the operation under test.
+          // Any panel-version read the adapter makes is not part of the
+          // operation under test.
           if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(projectRequestContractShape(input));
           return of({
             data: {
               response: {
-                uuid: '33333333-3333-4333-8333-333333333333',
+                id: 4471,
                 username: 'rezeis-user',
                 status: 'ACTIVE',
                 subscriptionUrl: 'https://example.com/subscription',
@@ -403,7 +391,7 @@ describe('RemnawaveApiService', () => {
       },
     );
 
-    const updatedUser = await service.updatePanelUser('33333333-3333-4333-8333-333333333333', {
+    const updatedUser = await service.updatePanelUser('4471', {
       expireAt: '2026-06-01T00:00:00.000Z',
       status: 'ACTIVE',
       trafficLimitBytes: 1073741824,
@@ -415,7 +403,7 @@ describe('RemnawaveApiService', () => {
         method: 'patch',
         url: '/api/users',
         data: {
-          uuid: '33333333-3333-4333-8333-333333333333',
+          id: 4471,
           status: 'ACTIVE',
           expireAt: '2026-06-01T00:00:00.000Z',
           trafficLimitBytes: 1073741824,
@@ -423,7 +411,8 @@ describe('RemnawaveApiService', () => {
         },
       },
     ]);
-    assert.equal(updatedUser.uuid, '33333333-3333-4333-8333-333333333333');
+    assert.equal(updatedUser.uuid, '4471');
+    assert.equal(updatedUser.panelId, 4471);
     assert.equal(updatedUser.status, 'ACTIVE');
   });
 
@@ -487,14 +476,12 @@ describe('RemnawaveApiService', () => {
     const rawHappRouting = 'configUrl=https://config.example/raw-route-token-secret';
     const service = new RemnawaveApiService(
       {
+        // The 3.x shape: the display fields live in `customResponseHeaders`
+        // (`announce` / `routing` are Happ's), never at the top level.
         request: () => of({
           data: {
             response: {
               uuid: '11111111-1111-4111-8111-111111111111',
-              profileTitle: 'Safe profile title',
-              supportLink,
-              profileUpdateInterval: 12,
-              isProfileWebpageUrlEnabled: true,
               serveJsonAtBaseSubscription: false,
               isShowCustomRemarks: true,
               customRemarks: {
@@ -506,9 +493,14 @@ describe('RemnawaveApiService', () => {
                 HWIDNotSupported: ['unsupported'],
               },
               randomizeHosts: false,
-              happAnnounce: rawHappAnnounce,
-              happRouting: rawHappRouting,
-              customResponseHeaders: null,
+              customResponseHeaders: {
+                'profile-title': 'Safe profile title',
+                'support-url': supportLink,
+                'profile-update-interval': '12',
+                'profile-web-page-url': 'https://sub.example.test',
+                announce: rawHappAnnounce,
+                routing: rawHappRouting,
+              },
               responseRules: null,
               hwidSettings: null,
               createdAt: '2026-04-19T10:00:00.000Z',
@@ -525,6 +517,8 @@ describe('RemnawaveApiService', () => {
 
     assert.equal(settings?.profileTitle, 'Safe profile title');
     assert.equal(settings?.supportLink, supportLink);
+    assert.equal(settings?.profileUpdateInterval, 12);
+    assert.equal(settings?.isProfileWebpageUrlEnabled, true);
     assert.equal(settings?.hasHappAnnounce, true);
     assert.equal(settings?.hasHappRouting, true);
     assert.equal(serializedSettings.includes(rawHappAnnounce), false);
@@ -548,10 +542,10 @@ describe('RemnawaveApiService', () => {
     );
 
     await assert.rejects(
-      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'ACTIVE' }),
+      () => service.updatePanelUser('4471', { status: 'ACTIVE' }),
       (err: unknown) => {
         assert.ok(err instanceof RemnawaveProfileNotFoundError);
-        assert.equal(err.uuid, '33333333-3333-4333-8333-333333333333');
+        assert.equal(err.uuid, '4471');
         return true;
       },
     );
@@ -572,7 +566,7 @@ describe('RemnawaveApiService', () => {
     );
 
     await assert.rejects(
-      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'ACTIVE' }),
+      () => service.updatePanelUser('4471', { status: 'ACTIVE' }),
       { name: 'ServiceUnavailableException', message: 'Remnawave integration is unavailable' },
     );
   });
@@ -591,7 +585,7 @@ describe('RemnawaveApiService', () => {
     );
 
     await assert.rejects(
-      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'ACTIVE' }),
+      () => service.updatePanelUser('4471', { status: 'ACTIVE' }),
       { name: 'ServiceUnavailableException', message: 'Remnawave integration is unavailable' },
     );
   });
@@ -601,21 +595,20 @@ describe('RemnawaveApiService', () => {
     const service = new RemnawaveApiService(
       {
         request: (input: { readonly method?: string; readonly url: string; readonly data?: unknown }) => {
-          // The adapter reads the panel's own version before building any
-          // user-scoped path — 2.x addresses users by uuid, 3.x by numeric id.
-          // Those probes are not part of the operation under test.
+          // Any panel-version read the adapter makes is not part of the
+          // operation under test.
           if (input.url.startsWith('/api/system/')) return of({ data: { response: {} } });
           capturedRequests.push(projectRequestContractShape(input));
-          return of({ data: { response: { uuid: '33333333-3333-4333-8333-333333333333' } } });
+          return of({ data: { response: { id: 4471 } } });
         },
       } as never,
       { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
     );
 
-    await service.resetPanelUserTraffic('33333333-3333-4333-8333-333333333333');
+    await service.resetPanelUserTraffic('4471');
 
     assert.deepStrictEqual(capturedRequests, [
-      { method: 'post', url: '/api/users/33333333-3333-4333-8333-333333333333/actions/reset-traffic' },
+      { method: 'post', url: '/api/users/4471/actions/reset-traffic' },
     ]);
   });
 
@@ -723,7 +716,7 @@ describe('RemnawaveApiService', () => {
     const service = axiosServiceFor({ status: 400, data: { message: 'status must be one of ACTIVE, DISABLED' } });
 
     await assert.rejects(
-      () => service.updatePanelUser('33333333-3333-4333-8333-333333333333', { status: 'EXPIRED' }),
+      () => service.updatePanelUser('4471', { status: 'EXPIRED' }),
       (err: unknown) => {
         assert.ok(err instanceof RemnawaveUpstreamRejectionError);
         assert.equal(err.upstreamStatus, 400);
@@ -736,7 +729,7 @@ describe('RemnawaveApiService', () => {
     const service = axiosServiceFor({ status: 400 });
 
     await assert.rejects(
-      async () => service.deletePanelUser('not-a-uuid', await service.getPanelShape()),
+      async () => service.deletePanelUser('4471'),
       (err: unknown) => {
         assert.ok(err instanceof RemnawaveUpstreamRejectionError);
         assert.equal(err.upstreamStatus, 400);
@@ -770,12 +763,10 @@ describe('RemnawaveApiService', () => {
     return new RemnawaveApiService(
       {
         request: (input: { readonly url?: string; readonly data?: unknown }) => {
-          // The panel-version probe is not a body under test. Any user-scoped
-          // call makes one first — it is how the adapter learns whether this
-          // panel wants a uuid or a numeric id — and capturing it would shift
-          // every `captured[0]` in this file by one.
+          // A panel-version read is not a body under test, and capturing one
+          // would shift every `captured[0]` in this file by one.
           if (input.url?.startsWith('/api/system/') !== true) captured.push(input.data);
-          return of({ data: { response: { uuid: '33333333-3333-4333-8333-333333333333' } } });
+          return of({ data: { response: { id: 4471 } } });
         },
       } as never,
       { host: 'remnawave', port: 3000, token: 'secret', webhookSecret: null },
@@ -804,11 +795,11 @@ describe('RemnawaveApiService', () => {
     const captured: unknown[] = [];
     const service = capturingService(captured);
 
-    await service.updatePanelUser('33333333-3333-4333-8333-333333333333', {
+    await service.updatePanelUser('4471', {
       trafficLimitStrategy: null,
       hwidDeviceLimit: 3,
     });
-    await service.updatePanelUser('33333333-3333-4333-8333-333333333333', {
+    await service.updatePanelUser('4471', {
       trafficLimitStrategy: 'DAY',
     });
 
@@ -819,7 +810,7 @@ describe('RemnawaveApiService', () => {
 
   it('omits a null trafficLimitStrategy from the strict desired-limit PATCH', async () => {
     const captured: unknown[] = [];
-    await capturingService(captured).strictSetUserLimits('33333333-3333-4333-8333-333333333333', {
+    await capturingService(captured).strictSetUserLimits('4471', {
       trafficLimitBytes: null,
       hwidDeviceLimit: null,
       trafficLimitStrategy: null,

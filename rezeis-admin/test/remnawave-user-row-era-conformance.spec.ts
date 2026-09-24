@@ -1,6 +1,6 @@
 /**
- * THE PANEL USER ROW, held against the vendor's own contracts — for EVERY panel
- * era rezeis ships to, not just the newest one.
+ * THE PANEL USER ROW, held against the vendor's own contracts — for EVERY
+ * Remnawave 3.x release rezeis ships to, not just the newest one.
  *
  * WHY THIS FILE EXISTS. `unwrapPanelUser` used to CAST the create/update
  * response into `RemnawavePanelUser` instead of decoding it. A Remnawave 3.x
@@ -15,19 +15,17 @@
  * schema can, because it PARSES. That is why the vendor SDKs are pinned and
  * actually executed here rather than imported for their types.
  *
- * WHY BOTH ERAS, AND WHY THAT IS THE POINT. rezeis ships to deployments whose
- * panels are still on 2.x, and to deployments on 3.x. Those operators upgrade on
- * their own schedule. So "supports the newest panel" is never a licence to
- * narrow: a decoder that satisfies 3.3.2 while silently breaking 2.x is exactly
- * the regression this repo must not ship again. Every claim below is therefore
- * made PER ERA.
+ * WHY EVERY 3.x RELEASE. Operators upgrade on their own schedule, so "supports
+ * the newest panel" is never a licence to narrow. A 2.x panel is a different
+ * matter since the 2.x cut: it is refused on every path before a row is read,
+ * so no 2.x row is decoded here and no 2.x contract is imported. A row that
+ * still carries a `uuid` beside its numeric id is keyed by the id, and the
+ * `uuid` is reported as drift — a 3.x panel never sends one.
  *
  * THE ANCHORS, all available in CI — the contract each panel release ships, per
  * the vendor's own table (https://docs.rw/sdk/typescript-sdk/), as devDependency
  * aliases named by panel release. None of them is a runtime dependency.
  *
- *   `@remnawave/contract-panel-2.7`    backend-contract 2.7.2   panel 2.7.3–2.7.4
- *   `@remnawave/contract-panel-2.8`    backend-contract 2.8.35  panel 2.8.0–2.8.1
  *   `@remnawave/contract-panel-3.2.1`  backend-contract 3.2.0   panel 3.2.0–3.2.1
  *   `@remnawave/contract-panel-3.2.3`  backend-contract 3.2.3   panel 3.2.3
  *   `@remnawave/contract-panel-3.3`    backend-contract 3.4.2   panel 3.3.0–3.3.2
@@ -51,8 +49,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import * as contractPanel27 from '@remnawave/contract-panel-2.7';
-import * as contractPanel28 from '@remnawave/contract-panel-2.8';
 import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
 import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
 import * as contractPanel33 from '@remnawave/contract-panel-3.3';
@@ -86,34 +82,24 @@ interface ContractUnderTest {
   readonly version: string;
   readonly create: UserCommand;
   readonly update: UserCommand;
-  /** Which panel era this contract line describes. */
-  readonly era: '2.x' | '3.x';
 }
 
-function contractOf(
-  panels: string,
-  version: string,
-  era: '2.x' | '3.x',
-  mod: unknown,
-): ContractUnderTest {
+function contractOf(panels: string, version: string, mod: unknown): ContractUnderTest {
   const contract = mod as { CreateUserCommand: unknown; UpdateUserCommand: unknown };
   return {
     label: `contract ${version} (panel ${panels})`,
     version,
-    era,
     create: contract.CreateUserCommand as UserCommand,
     update: contract.UpdateUserCommand as UserCommand,
   };
 }
 
 const CONTRACTS: readonly ContractUnderTest[] = [
-  contractOf('2.7.3–2.7.4', '2.7.2', '2.x', contractPanel27),
-  contractOf('2.8.0–2.8.1', '2.8.35', '2.x', contractPanel28),
-  contractOf('3.2.0–3.2.1', '3.2.0', '3.x', contractPanel321),
-  contractOf('3.2.3', '3.2.3', '3.x', contractPanel323),
-  contractOf('3.3.0–3.3.2', '3.4.2', '3.x', contractPanel33),
-  contractOf('3.4.0–3.4.3', '3.4.13', '3.x', contractPanel343),
-  contractOf('3.4.4', '3.4.15', '3.x', contractPanel344),
+  contractOf('3.2.0–3.2.1', '3.2.0', contractPanel321),
+  contractOf('3.2.3', '3.2.3', contractPanel323),
+  contractOf('3.3.0–3.3.2', '3.4.2', contractPanel33),
+  contractOf('3.4.0–3.4.3', '3.4.13', contractPanel343),
+  contractOf('3.4.4', '3.4.15', contractPanel344),
 ];
 
 function contractByVersion(version: string): ContractUnderTest {
@@ -174,100 +160,43 @@ function fixture(rel: string): PanelFixture {
   ) as PanelFixture;
 }
 
-const ROW_274 = fixture('2.7.4/created-user.json');
-const ROW_280 = fixture('2.8.0/created-user.json');
 const ROW_321 = fixture('3.2.1/user.json');
 const ROW_332 = fixture('3.3.2/user.json');
 
-/** What a contract does with a given era's row. Measured, then pinned here. */
-type Verdict = 'accepts, uuid preserved' | 'accepts, uuid DISCARDED' | 'rejects: uuid required';
+/** The uuid a 2.x panel would have sent beside the numeric id. */
+const STRAY_UUID = '11111111-1111-4111-8111-111111111111';
 
 interface EraCase {
   readonly label: string;
-  /** What `/api/system/stats/recap` reports, i.e. which era we are addressing. */
+  /** What `/api/system/stats/recap` reports. */
   readonly panelVersion: string;
   /** The contract that panel release ships — the one its row is judged by. */
   readonly shippedContract: string;
   readonly row: PanelFixture;
-  /** Which field the ROW itself says is its identity. */
-  readonly identityField: 'uuid' | 'id';
   readonly expectedIdentity: string;
   readonly expectedPanelId: number;
-  /** How an UPDATE names this profile, exactly as the row would hand it over. */
-  readonly ref: string | { remnawaveId: string; panelId: number; panelUsername: string };
-  /** Verdict per contract VERSION. Every contract must appear. */
-  readonly verdicts: Readonly<Record<string, Verdict>>;
+  /** How an UPDATE names this profile, exactly as the link path stored it. */
+  readonly ref: { remnawaveId: string; panelId: number; panelUsername: string };
 }
 
-/** Every 3.x contract does the same thing to a user row: no `uuid` is declared, so none survives. */
-const THREE_X_DISCARDS: Readonly<Record<string, Verdict>> = {
-  '3.2.0': 'accepts, uuid DISCARDED',
-  '3.2.3': 'accepts, uuid DISCARDED',
-  '3.4.2': 'accepts, uuid DISCARDED',
-  '3.4.13': 'accepts, uuid DISCARDED',
-  '3.4.15': 'accepts, uuid DISCARDED',
-};
-
 const ERAS: readonly EraCase[] = [
-  {
-    label: '2.7.4 (a shipped deployment still on the 2.7 line)',
-    panelVersion: '2.7.4',
-    shippedContract: '2.7.2',
-    row: ROW_274,
-    identityField: 'uuid',
-    expectedIdentity: '11111111-1111-4111-8111-111111111111',
-    expectedPanelId: 4471,
-    ref: '11111111-1111-4111-8111-111111111111',
-    verdicts: {
-      '2.7.2': 'accepts, uuid preserved',
-      '2.8.35': 'accepts, uuid preserved',
-      ...THREE_X_DISCARDS,
-    },
-  },
-  {
-    label: '2.8.0 (a shipped deployment on the 2.8 line)',
-    panelVersion: '2.8.0',
-    shippedContract: '2.8.35',
-    row: ROW_280,
-    identityField: 'uuid',
-    expectedIdentity: '22222222-2222-4222-8222-222222222222',
-    expectedPanelId: 8123,
-    ref: '22222222-2222-4222-8222-222222222222',
-    verdicts: {
-      '2.7.2': 'accepts, uuid preserved',
-      '2.8.35': 'accepts, uuid preserved',
-      ...THREE_X_DISCARDS,
-    },
-  },
   {
     label: '3.2.1 (verbatim live capture)',
     panelVersion: '3.2.1',
     shippedContract: '3.2.0',
     row: ROW_321,
-    identityField: 'id',
     expectedIdentity: '2',
     expectedPanelId: 2,
     ref: { remnawaveId: '2', panelId: 2, panelUsername: 'labuser1' },
-    verdicts: {
-      '2.7.2': 'rejects: uuid required',
-      '2.8.35': 'rejects: uuid required',
-      ...THREE_X_DISCARDS,
-    },
   },
   {
     label: "3.3.2 (the owner's panel, shape taken from its OpenAPI document)",
     panelVersion: '3.3.2',
     shippedContract: '3.4.2',
     row: ROW_332,
-    identityField: 'id',
     expectedIdentity: '7',
     expectedPanelId: 7,
     ref: { remnawaveId: '7', panelId: 7, panelUsername: 'rz_sub_332' },
-    verdicts: {
-      '2.7.2': 'rejects: uuid required',
-      '2.8.35': 'rejects: uuid required',
-      ...THREE_X_DISCARDS,
-    },
   },
 ];
 
@@ -358,75 +287,47 @@ function createInput(username: string) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  1. NO SINGLE CONTRACT CAN READ BOTH ERAS — the measured table
+//  1. EVERY 3.x CONTRACT READS EVERY 3.x ROW — the measured table
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * This table is the reason a single pinned runtime contract would be a DEFECT
- * rather than a fix, and the reason our hand-written decoder still exists.
- *
- *   • a 2.x contract REJECTS every 3.x row outright (`uuid` is required there);
- *   • a 3.x contract ACCEPTS a 2.x row and SILENTLY DISCARDS its `uuid`, because
- *     3.x declares no such field and zod strips unknown keys by default.
- *
- * The second is the more dangerous: it is the original defect arriving from the
- * other direction — a successful parse that quietly loses the identity.
+ * Every pinned 3.x contract accepts every 3.x row. The one thing none of them
+ * can do is keep a `uuid`: 3.x declares no such field, and zod strips unknown
+ * keys by default — so a contract would silently drop the identity a 2.x row
+ * carried. That is why our decoder keys by the numeric id and REPORTS a stray
+ * `uuid` rather than reading it.
  */
-describe('no single vendor contract reads both panel eras', () => {
+describe('every 3.x contract reads every 3.x row', () => {
   for (const era of ERAS) {
     for (const contract of CONTRACTS) {
-      const expected = era.verdicts[contract.version];
-
-      it(`${era.label} through ${contract.label}: ${expected}`, () => {
-        assert.ok(expected !== undefined, `no verdict recorded for ${contract.version}`);
-        const body = { response: era.row.response };
-        const parsed = contract.create.ResponseSchema.safeParse(body);
-
-        if (expected === 'rejects: uuid required') {
-          assert.equal(parsed.success, false, 'expected a rejection, got a successful parse');
-          const issues = (parsed as { error: { issues: ReadonlyArray<{ path: unknown[] }> } }).error
-            .issues;
-          assert.ok(issues.length > 0, 'rejected with no issues — cannot confirm the reason');
-          assert.ok(
-            issues.some((i) => i.path.join('.') === 'response.uuid'),
-            `rejected, but not for the uuid: ${JSON.stringify(issues.map((i) => i.path.join('.')))}`,
-          );
-          return;
-        }
-
+      it(`${era.label} through ${contract.label}: accepted, no uuid`, () => {
+        const parsed = contract.create.ResponseSchema.safeParse({ response: era.row.response });
         assert.equal(parsed.success, true, 'expected a successful parse, got a rejection');
         const out = (parsed as { data: { response: Record<string, unknown> } }).data.response;
-        const kept = Object.prototype.hasOwnProperty.call(out, 'uuid');
-
-        if (expected === 'accepts, uuid preserved') {
-          assert.equal(kept, true, 'the contract dropped a uuid it declares');
-          assert.equal(out['uuid'], era.row.response['uuid']);
-          return;
-        }
-
-        // 'accepts, uuid DISCARDED'
-        assert.equal(kept, false, 'the contract preserved a uuid — this verdict is stale');
-        // Only meaningful when the row HAD one to lose.
-        if (era.identityField === 'uuid') {
-          assert.equal(
-            typeof era.row.response['uuid'],
-            'string',
-            'precondition: this era\'s row carries a uuid',
-          );
-        }
+        assert.equal(Object.prototype.hasOwnProperty.call(out, 'uuid'), false);
+        assert.equal(out['id'], era.expectedPanelId);
       });
     }
   }
 
-  it('the table covers every contract for every era — no era silently skipped', () => {
-    for (const era of ERAS) {
-      const covered = Object.keys(era.verdicts).sort();
-      const all = CONTRACTS.map((c) => c.version).sort();
-      assert.deepStrictEqual(covered, all, `${era.label} does not name every contract`);
+  it('a stray uuid is stripped by every 3.x contract — the vendor cannot say "damaged"', () => {
+    for (const contract of CONTRACTS) {
+      const parsed = contract.create.ResponseSchema.safeParse({
+        response: { ...ROW_332.response, uuid: STRAY_UUID },
+      });
+      assert.equal(parsed.success, true, `${contract.label} rejected a row with a stray uuid`);
+      const out = (parsed as { data: { response: Record<string, unknown> } }).data.response;
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(out, 'uuid'),
+        false,
+        `${contract.label} preserved a uuid it does not declare`,
+      );
     }
-    // Anchor: the matrix is not empty.
-    assert.equal(ERAS.length, 4);
-    assert.equal(CONTRACTS.length, 7);
+  });
+
+  it('the matrix is not empty and names every pinned 3.x release', () => {
+    assert.equal(ERAS.length, 2);
+    assert.equal(CONTRACTS.length, 5);
   });
 
   it('each row is accepted by the contract its own panel release ships', () => {
@@ -445,26 +346,13 @@ describe('no single vendor contract reads both panel eras', () => {
       );
     }
   });
-
-  it('at least one era is REJECTED by the 2.x line and one loses its uuid to the 3.x line', () => {
-    // Without this, the table above could degenerate to "everything accepts
-    // everything" and still pass its own assertions.
-    const rejections = ERAS.flatMap((e) =>
-      Object.entries(e.verdicts).filter(([, v]) => v === 'rejects: uuid required'),
-    );
-    const losses = ERAS.filter((e) => e.identityField === 'uuid').flatMap((e) =>
-      Object.entries(e.verdicts).filter(([, v]) => v === 'accepts, uuid DISCARDED'),
-    );
-    assert.ok(rejections.length > 0, 'no era is rejected by any contract — the table is toothless');
-    assert.ok(losses.length > 0, 'no 2.x row loses its uuid to a 3.x contract — table is toothless');
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  2. OUR DECODER READS EVERY ERA CORRECTLY
+//  2. OUR DECODER KEYS EVERY ROW BY ITS NUMERIC ID
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('our decoder keys every era by what the ROW says its identity is', () => {
+describe('our decoder keys every row by its numeric id', () => {
   for (const era of ERAS) {
     it(`${era.label}: CREATE yields the identity the link path persists`, async () => {
       const { service } = panelOn(era.panelVersion, era.row);
@@ -473,17 +361,8 @@ describe('our decoder keys every era by what the ROW says its identity is', () =
 
       assert.equal(created.uuid, era.expectedIdentity);
       assert.equal(created.panelId, era.expectedPanelId);
-      if (era.identityField === 'uuid') {
-        assert.equal(created.uuid, era.row.response['uuid']);
-        assert.notEqual(
-          created.uuid,
-          String(era.row.response['id']),
-          'a 2.x row must NOT be keyed by its numeric id',
-        );
-      } else {
-        assert.equal(created.uuid, String(era.row.response['id']));
-        assert.equal('uuid' in era.row.response, false);
-      }
+      assert.equal(created.uuid, String(era.row.response['id']));
+      assert.equal('uuid' in era.row.response, false);
     });
 
     it(`${era.label}: PATCH decodes the same body to the same identity`, async () => {
@@ -496,11 +375,19 @@ describe('our decoder keys every era by what the ROW says its identity is', () =
     });
   }
 
-  it('the 2.x eras and the 3.x eras really do differ in identity field', () => {
-    // Anchor for the loop above: if every era were 'id', the uuid branch would
-    // never execute and the loop would prove nothing about 2.x.
-    const byField = new Set(ERAS.map((e) => e.identityField));
-    assert.deepStrictEqual([...byField].sort(), ['id', 'uuid']);
+  it('a row that still carries a uuid is keyed by its numeric id — and the uuid is drift', async () => {
+    // What a 2.x panel sent. Keying it by the uuid would mint an identity no
+    // 3.x panel can address; the numeric id is the one that works.
+    const { service, events } = panelOn('3.3.2', {
+      response: { ...ROW_332.response, uuid: STRAY_UUID },
+    });
+
+    const created = await service.createPanelUser(createInput('rz_sub_332'));
+
+    assert.equal(created.uuid, String(ROW_332.response['id']));
+    assert.notEqual(created.uuid, STRAY_UUID);
+    assert.equal(events.length, 1, 'the stray uuid was not reported');
+    assert.deepStrictEqual(events[0].metadata['unknownFields'], ['uuid']);
   });
 });
 
@@ -583,12 +470,9 @@ describe('PANEL_USER_SPEC_REQUIRED_KEYS_3X is pinned to the vendor, two ways', (
     assertKeySetsAgree(sdk, spec, 'the 3.4.2 SDK vs the 3.3.2 OpenAPI document');
   });
 
-  it('the 2.x contracts declare exactly one field more, and it is the uuid', () => {
-    const threeX = new Set(declaredRowKeys(contractByVersion('3.4.2')));
-    for (const version of ['2.7.2', '2.8.35']) {
-      const twoX = declaredRowKeys(contractByVersion(version));
-      const extra = twoX.filter((k) => !threeX.has(k)).sort();
-      assert.deepStrictEqual(extra, ['uuid'], `${version} differs from 3.x by more than the uuid`);
+  it('no 3.x contract declares a uuid on a user row', () => {
+    for (const contract of CONTRACTS) {
+      assert.equal(declaredRowKeys(contract).includes('uuid'), false, contract.label);
     }
   });
 
@@ -601,40 +485,47 @@ describe('PANEL_USER_SPEC_REQUIRED_KEYS_3X is pinned to the vendor, two ways', (
       PANEL_USER_KNOWN_ROW_KEYS.length,
       PANEL_USER_SPEC_REQUIRED_KEYS_3X.length + PANEL_USER_LEGACY_ROW_KEYS.length,
     );
-    // `uuid` MUST stay known. Deployments on 2.x panels are live, and our own
-    // database holds uuids recorded in that era; dropping the ability to read
-    // them would strand paying customers permanently.
-    assert.ok(PANEL_USER_KNOWN_ROW_KEYS.includes('uuid'));
+  });
+
+  it('`uuid` is NOT a known key — a row carrying one is drift, not a shape we decode', () => {
+    // It used to be kept "because 2.x deployments are live". A 2.x panel is now
+    // refused before any row is read, so the only way a uuid reaches the decoder
+    // is a panel that is not what it says — which an operator should see.
+    assert.equal(PANEL_USER_KNOWN_ROW_KEYS.includes('uuid'), false);
+    assert.equal(PANEL_USER_LEGACY_ROW_KEYS.includes('uuid'), false);
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  4. A DAMAGED uuid IS UNDECODABLE — NEVER SILENTLY RE-KEYED
+//  4. A ROW WITHOUT A USABLE NUMERIC id IS UNDECODABLE — NEVER RE-KEYED
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('a 2.x row whose uuid arrived damaged stays UNDECODABLE', () => {
+describe('a row without a usable numeric id stays UNDECODABLE', () => {
   /**
-   * The test is ABSENCE of the field, not emptiness of it:
-   *   • no `uuid` key at all  → a 3.x row; key it by the numeric id.
-   *   • `uuid` present but unusable → a 2.x row that arrived damaged. Keying it
-   *     by its numeric id would mint a key matching no `remnawaveId` ever stored
-   *     from that era, turning "we could not read this row" into "this user is
-   *     unknown to us" — and the callers that act on absence would act.
+   * The identity is the numeric `id`, and nothing else. Keying a row by a uuid
+   * it happens to carry would mint a key that no 3.x panel can address and no
+   * stored `remnawaveId` should match — turning "we could not read this row"
+   * into "this user is unknown to us", and the callers that act on absence
+   * would act.
    */
-  const DAMAGED: ReadonlyArray<readonly [string, unknown]> = [
-    ['an empty string', ''],
-    ['a number', 12345],
+  const DAMAGED_IDS: ReadonlyArray<readonly [string, unknown]> = [
+    ['missing', undefined],
     ['null', null],
-    ['an object', {}],
+    ['a decimal string', '7'],
+    ['a fraction', 7.5],
+    ['an unsafe integer', Number.MAX_SAFE_INTEGER + 2],
   ];
 
-  for (const [label, badUuid] of DAMAGED) {
-    it(`POST refuses a row whose uuid is ${label} — no fallback to the numeric id`, async () => {
-      const row: Record<string, unknown> = { ...ROW_274.response, uuid: badUuid };
-      // The numeric id is present and perfectly usable. Refusing anyway is the
-      // whole point: this row must not be re-keyed onto 3.x terms.
-      assert.equal(typeof row['id'], 'number');
-      const { service } = panelOn('2.7.4', { response: row });
+  function damagedRow(badId: unknown): Record<string, unknown> {
+    const row: Record<string, unknown> = { ...ROW_332.response, uuid: STRAY_UUID };
+    if (badId === undefined) delete row['id'];
+    else row['id'] = badId;
+    return row;
+  }
+
+  for (const [label, badId] of DAMAGED_IDS) {
+    it(`POST refuses a row whose id is ${label} — even with a uuid right there`, async () => {
+      const { service } = panelOn('3.3.2', { response: damagedRow(badId) });
 
       await assert.rejects(
         () => service.createPanelUser(createInput('rz_sub_1')),
@@ -646,12 +537,11 @@ describe('a 2.x row whose uuid arrived damaged stays UNDECODABLE', () => {
       );
     });
 
-    it(`PATCH refuses it too, and NOT as a transient failure`, async () => {
-      const row = { ...ROW_274.response, uuid: badUuid };
-      const { service } = panelOn('2.7.4', { response: row });
+    it(`PATCH refuses a row whose id is ${label} too, and NOT as a transient failure`, async () => {
+      const { service } = panelOn('3.3.2', { response: damagedRow(badId) });
 
       await assert.rejects(
-        () => service.updatePanelUser('11111111-1111-4111-8111-111111111111', { description: 'x' }),
+        () => service.updatePanelUser(ERAS[1]!.ref, { description: 'x' }),
         (err: unknown) => {
           assert.match((err as Error).message, /PATCH \/api\/users/);
           // NOT laundered into ServiceUnavailableException: that is what
@@ -665,65 +555,13 @@ describe('a 2.x row whose uuid arrived damaged stays UNDECODABLE', () => {
     });
   }
 
-  it('a genuinely ABSENT uuid is not damaged — the distinction is load-bearing', async () => {
-    // The same row, uuid REMOVED rather than emptied. This must decode.
-    const row = { ...ROW_274.response };
-    delete (row as Record<string, unknown>)['uuid'];
-    const { service } = panelOn('3.3.2', { response: row });
+  it('the same row with a usable id decodes — the refusal is about the id alone', async () => {
+    const { service } = panelOn('3.3.2', { response: damagedRow(7) });
 
     const created = await service.createPanelUser(createInput('rz_sub_1'));
 
-    assert.equal(created.uuid, String(ROW_274.response['id']));
-    assert.equal(created.panelId, ROW_274.response['id']);
-  });
-
-  /**
-   * DIVERGENCE — NAMED EXCEPTION.
-   *
-   * Every 3.x contract ACCEPTS all four damaged rows above, because 3.x declares
-   * no `uuid` at all and a stray key of any type is simply stripped. The
-   * contract cannot express "this row is damaged"; it has no vocabulary for a
-   * field it does not know exists.
-   *
-   * Our decoder is right and the contract is not wrong — it is SILENT. This is
-   * recorded so that "the vendor accepts it" is never mistaken for "the vendor
-   * agrees it is fine".
-   */
-  it('DIVERGENCE: every 3.x contract accepts each damaged row we refuse', () => {
-    for (const contract of CONTRACTS.filter((c) => c.era === '3.x')) {
-      for (const [label, badUuid] of DAMAGED) {
-        const row = { ...ROW_274.response, uuid: badUuid };
-        const parsed = contract.create.ResponseSchema.safeParse({ response: row });
-        assert.equal(
-          parsed.success,
-          true,
-          `${contract.label} unexpectedly rejected the ${label} case`,
-        );
-        const out = (parsed as { data: { response: Record<string, unknown> } }).data.response;
-        assert.equal(
-          Object.prototype.hasOwnProperty.call(out, 'uuid'),
-          false,
-          `${contract.label} preserved the damaged uuid for ${label} — divergence is stale`,
-        );
-      }
-    }
-  });
-
-  /**
-   * DIVERGENCE — NAMED EXCEPTION, the other direction.
-   *
-   * The 2.x contracts REJECT a damaged uuid, and so do we. We agree on the
-   * outcome for a different reason (they type-check a declared field; we refuse
-   * to re-key), and that agreement is worth pinning: if a 2.x contract ever
-   * started tolerating an empty uuid, our stricter behaviour would become the
-   * only thing standing between a damaged row and a wrong identity.
-   */
-  it('the 2.x contracts also refuse a damaged uuid — we agree, for our own reason', () => {
-    for (const contract of CONTRACTS.filter((c) => c.era === '2.x')) {
-      const row = { ...ROW_274.response, uuid: 12345 };
-      const parsed = contract.create.ResponseSchema.safeParse({ response: row });
-      assert.equal(parsed.success, false, `${contract.label} accepted a numeric uuid`);
-    }
+    assert.equal(created.uuid, '7');
+    assert.equal(created.panelId, 7);
   });
 });
 
@@ -751,11 +589,10 @@ const DECLARED_BUT_DELIBERATELY_IGNORED: Readonly<Record<string, string>> = {
 };
 
 /**
- * Fields our decoder reads that panel 3.x does not declare. Both are legacy
- * tolerances and both must survive.
+ * Fields our decoder reads that panel 3.x does not declare. One legacy
+ * tolerance, and it must survive. (`uuid` was the other, until the 2.x cut.)
  */
 const READ_BUT_NOT_DECLARED_BY_3X: Readonly<Record<string, string>> = {
-  uuid: '2.x identity spelling; deployments on 2.x panels are live and send it',
   telegram_id: 'snake_case fallback accepted when telegramId is absent or not a number',
 };
 
@@ -777,8 +614,8 @@ describe('the decoder and the vendor contract cover the same fields, both direct
    * kind of note that rots silently; this drives the REAL decoder over a
    * recording Proxy and observes what it genuinely touches.
    */
-  async function observedReadSet(): Promise<Set<string>> {
-    const { proxy, reads } = recordingRow({ ...ROW_332.response });
+  async function observedReadSet(row: Record<string, unknown> = { ...ROW_332.response }): Promise<Set<string>> {
+    const { proxy, reads } = recordingRow(row);
     const { service } = panelOn('3.3.2', { response: proxy });
     await service.createPanelUser(createInput('rz_sub_332'));
     return reads;
@@ -813,16 +650,13 @@ describe('the decoder and the vendor contract cover the same fields, both direct
     );
   });
 
-  it('the decoder reads the 2.x uuid when the row carries one', async () => {
-    // The exception list above is only honest if `uuid` is genuinely read on a
-    // 2.x row rather than merely probed on a 3.x one.
-    const { proxy, reads } = recordingRow({ ...ROW_274.response });
-    const { service } = panelOn('2.7.4', { response: proxy });
+  it('the decoder never reads a uuid, even when the row carries one', async () => {
+    // The exception list above is only honest if `uuid` is genuinely unread on
+    // a row that HAS one, rather than merely absent from a 3.x row.
+    const reads = await observedReadSet({ ...ROW_332.response, uuid: STRAY_UUID });
 
-    const created = await service.createPanelUser(createInput('rz_sub_1'));
-
-    assert.ok(reads.has('uuid'));
-    assert.equal(created.uuid, ROW_274.response['uuid']);
+    assert.ok(reads.size > 10, 'the decoder did not run');
+    assert.equal(reads.has('uuid'), false);
   });
 
   it('every recorded exception names a real field, so the lists cannot rot', () => {
@@ -854,10 +688,10 @@ describe('the decoder and the vendor contract cover the same fields, both direct
  * actually happened: a panel upgraded in production and started returning a
  * different shape, silently, for months, with CI green throughout.
  *
- * With multiple eras in the field, "the panel started answering differently" is
- * a routine event rather than an exception — which is exactly why the detector
- * must REPORT and never REJECT. A panel patch release that adds a field must not
- * become an outage.
+ * With several 3.x releases in the field, "the panel started answering
+ * differently" is a routine event rather than an exception — which is exactly
+ * why the detector must REPORT and never REJECT. A panel patch release that adds
+ * a field must not become an outage.
  */
 describe('runtime shape drift is detected and reported on a live panel', () => {
   it('a conformant 3.3.2 row raises nothing at all', async () => {
@@ -869,7 +703,7 @@ describe('runtime shape drift is detected and reported on a live panel', () => {
   });
 
   for (const era of ERAS) {
-    it(`${era.label}: a conformant row of this era raises nothing`, async () => {
+    it(`${era.label}: a conformant row of this release raises nothing`, async () => {
       const { service, events } = panelOn(era.panelVersion, era.row);
 
       await service.createPanelUser(createInput('rz_sub'));
@@ -877,7 +711,7 @@ describe('runtime shape drift is detected and reported on a live panel', () => {
       assert.deepStrictEqual(
         events.map((e) => e.message),
         [],
-        'a conformant row of a shipped era was reported as drift',
+        'a conformant row of a shipped release was reported as drift',
       );
     });
   }
@@ -927,50 +761,48 @@ describe('runtime shape drift is detected and reported on a live panel', () => {
   });
 
   it('a row that cannot be decoded at all still reports its shape', async () => {
-    // Damaged uuid: the decode is refused, but the operator still needs to see
+    // No numeric id: the decode is refused, but the operator still needs to see
     // what the panel actually sent.
-    const row = { ...ROW_274.response, uuid: '', mysteryField: 1 };
-    const { service, events } = panelOn('2.7.4', { response: row });
+    const row: Record<string, unknown> = { ...ROW_332.response, mysteryField: 1 };
+    delete row['id'];
+    const { service, events } = panelOn('3.3.2', { response: row });
 
     await assert.rejects(() => service.createPanelUser(createInput('rz_sub_1')));
 
     assert.equal(events.length, 1, 'an undecodable row reported no shape');
     assert.deepStrictEqual(events[0].metadata['unknownFields'], ['mysteryField']);
+    assert.deepStrictEqual(events[0].metadata['missingFields'], ['id']);
   });
 
-  it('the reported signal NAMES THE DETECTED ERA', async () => {
-    // Two operators, same field drift, different panel eras. Their reports must
-    // be distinguishable — otherwise a 2.x report and a 3.x report look
-    // identical in the feed and neither can be acted on.
+  it('the reported signal NAMES THE DETECTED MAJOR', async () => {
+    // Two operators, same field drift, different panel majors. Their reports
+    // must be distinguishable — otherwise a 3.x report and a report from a
+    // newer major look identical in the feed and neither can be acted on.
     //
-    // Driven through UPDATE rather than CREATE because update resolves the panel
-    // segment first, which warms the shape cache — as every read path does in
-    // production. The cold-CREATE case is asserted separately below, because it
-    // reports something different and that difference is deliberate.
+    // The version is read first, as every read path in production does before
+    // a row is decoded. The cold-CREATE case is asserted separately below,
+    // because it reports something different and that difference is deliberate.
     const threeX = panelOn('3.3.2', { response: { ...ROW_332.response, mystery: 1 } });
-    await threeX.service.updatePanelUser(
-      { remnawaveId: '7', panelId: 7, panelUsername: 'rz_sub_332' },
-      { description: 'x' },
-    );
+    await threeX.service.getPanelShape();
+    await threeX.service.updatePanelUser(ERAS[1]!.ref, { description: 'x' });
 
-    const twoX = panelOn('2.7.4', { response: { ...ROW_274.response, mystery: 1 } });
-    await twoX.service.updatePanelUser('11111111-1111-4111-8111-111111111111', {
-      description: 'x',
-    });
+    const fourX = panelOn('4.0.0', { response: { ...ROW_332.response, mystery: 1 } });
+    await fourX.service.getPanelShape();
+    await fourX.service.updatePanelUser(ERAS[1]!.ref, { description: 'x' });
 
     assert.equal(threeX.events.length, 1);
-    assert.equal(twoX.events.length, 1);
+    assert.equal(fourX.events.length, 1);
     assert.equal(threeX.events[0].metadata['panelEra'], '3.x');
-    assert.equal(twoX.events[0].metadata['panelEra'], '2.x');
+    assert.equal(fourX.events[0].metadata['panelEra'], '4.x');
     assert.equal(threeX.events[0].metadata['panelVersion'], '3.3.2');
-    assert.equal(twoX.events[0].metadata['panelVersion'], '2.7.4');
+    assert.equal(fourX.events[0].metadata['panelVersion'], '4.0.0');
     assert.notEqual(
       threeX.events[0].metadata['signature'],
-      twoX.events[0].metadata['signature'],
-      'the same field drift on two different eras produced the same signature',
+      fourX.events[0].metadata['signature'],
+      'the same field drift on two different majors produced the same signature',
     );
     assert.match(threeX.events[0].message, /3\.x/);
-    assert.match(twoX.events[0].message, /2\.x/);
+    assert.match(fourX.events[0].message, /4\.x/);
   });
 
   it('an unprobed panel reports "unprobed" rather than guessing an era', async () => {
@@ -1078,7 +910,7 @@ describe('runtime shape drift is detected and reported on a live panel', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('describePanelUserShapeDrift', () => {
-  it('returns null for a conformant row of every shipped era', () => {
+  it('returns null for a conformant row of every shipped release', () => {
     for (const era of ERAS) {
       assert.equal(
         describePanelUserShapeDrift(era.row.response),
@@ -1086,6 +918,12 @@ describe('describePanelUserShapeDrift', () => {
         `${era.label} was reported as drift`,
       );
     }
+  });
+
+  it('names a stray uuid as unknown — it is not a shape any supported panel sends', () => {
+    const drift = describePanelUserShapeDrift({ ...ROW_332.response, uuid: STRAY_UUID });
+    assert.deepStrictEqual(drift?.unknownFields, ['uuid']);
+    assert.deepStrictEqual(drift?.missingFields, []);
   });
 
   it('names an added field in the unknown direction only', () => {
@@ -1119,18 +957,19 @@ describe('describePanelUserShapeDrift', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  7. THE TRAFFIC BLOCK — "DID THIS PROFILE EVER CONNECT" — ON EVERY ERA
+//  8. THE TRAFFIC BLOCK — "DID THIS PROFILE EVER CONNECT" — ON EVERY RELEASE
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * «Купил, но не подключился» reads the connection from the row's `userTraffic`
- * block, which every era carries, nested and REQUIRED, under the same five
- * keys. Each case below is first proven to be a row the vendor's own contract
- * for that release accepts (`GetUserByUsernameCommand` — the single-profile read
- * shape), then pushed through the service's real public reads — never the
- * decoder in isolation — and the decoded block is compared with the input.
+ * block, which every 3.x release carries, nested and REQUIRED, under the same
+ * five keys. Each case below is first proven to be a row the vendor's own
+ * contract for that release accepts (`GetUserByUsernameCommand` — the
+ * single-profile read shape), then pushed through the service's real public
+ * reads — never the decoder in isolation — and the decoded block is compared
+ * with the input.
  *
- * Three states per era, because the whole feature depends on telling them
+ * Three states per release, because the whole feature depends on telling them
  * apart: a block that shows a connection (its `usedTrafficBytes` is 0, as it is
  * after every monthly reset — the counter the old reader relied on), a block
  * that is present and empty (never connected), and NO block (unknown: the
@@ -1145,13 +984,11 @@ interface TrafficEra {
 }
 
 const TRAFFIC_ERAS: readonly TrafficEra[] = [
-  { label: '2.7.4', panelVersion: '2.7.4', contract: contractPanel27, row: ROW_274, ref: ERAS[0]!.ref },
-  { label: '2.8.0', panelVersion: '2.8.0', contract: contractPanel28, row: ROW_280, ref: ERAS[1]!.ref },
-  { label: '3.2.1', panelVersion: '3.2.1', contract: contractPanel321, row: ROW_321, ref: ERAS[2]!.ref },
-  { label: '3.2.3', panelVersion: '3.2.3', contract: contractPanel323, row: ROW_321, ref: ERAS[2]!.ref },
-  { label: '3.3.2', panelVersion: '3.3.2', contract: contractPanel33, row: ROW_332, ref: ERAS[3]!.ref },
-  { label: '3.4.3', panelVersion: '3.4.3', contract: contractPanel343, row: ROW_332, ref: ERAS[3]!.ref },
-  { label: '3.4.4', panelVersion: '3.4.4', contract: contractPanel344, row: ROW_332, ref: ERAS[3]!.ref },
+  { label: '3.2.1', panelVersion: '3.2.1', contract: contractPanel321, row: ROW_321, ref: ERAS[0]!.ref },
+  { label: '3.2.3', panelVersion: '3.2.3', contract: contractPanel323, row: ROW_321, ref: ERAS[0]!.ref },
+  { label: '3.3.2', panelVersion: '3.3.2', contract: contractPanel33, row: ROW_332, ref: ERAS[1]!.ref },
+  { label: '3.4.3', panelVersion: '3.4.3', contract: contractPanel343, row: ROW_332, ref: ERAS[1]!.ref },
+  { label: '3.4.4', panelVersion: '3.4.4', contract: contractPanel344, row: ROW_332, ref: ERAS[1]!.ref },
 ];
 
 /** A connection the panel remembers, on a counter that was just reset. */
@@ -1168,7 +1005,7 @@ function acceptedByContract(contract: unknown, row: Record<string, unknown>): bo
   return schema.safeParse({ response: row }).success;
 }
 
-describe('the traffic block decodes on every era the panel serves', () => {
+describe('the traffic block decodes on every release the panel serves', () => {
   for (const era of TRAFFIC_ERAS) {
     it(`${era.label}: a connection survives a traffic reset — decoded, and read as connected`, async () => {
       const row = { ...era.row.response, userTraffic: CONNECTED_BLOCK };
@@ -1237,7 +1074,7 @@ describe('the traffic block decodes on every era the panel serves', () => {
     };
     const { service } = panelOn('3.3.2', { response: row });
 
-    const outcome = await service.getPanelUserOutcome(ERAS[3]!.ref);
+    const outcome = await service.getPanelUserOutcome(ERAS[1]!.ref);
 
     assert.equal(outcome.kind, 'ok');
     assert.equal(outcome.kind === 'ok' ? outcome.user.userTraffic : undefined, null);
@@ -1248,7 +1085,7 @@ describe('the traffic block decodes on every era the panel serves', () => {
     const captured = fixture('3.2.1/connected-user.json');
     const { service } = panelOn('3.2.1', { response: captured.response });
 
-    const outcome = await service.getPanelUserOutcome(ERAS[2]!.ref);
+    const outcome = await service.getPanelUserOutcome(ERAS[0]!.ref);
 
     assert.equal(outcome.kind, 'ok');
     const traffic = outcome.kind === 'ok' ? outcome.user.userTraffic : undefined;

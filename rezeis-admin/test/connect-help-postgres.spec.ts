@@ -285,7 +285,6 @@ function sender(options: { readonly ladder?: 'throws' } = {}): ConnectHelpSweepS
     },
   };
   const panel = {
-    getPanelShape: async () => ({ addressing: 'id' as const }),
     getPanelUserOutcome: async (identity: { remnawaveId: string }) => {
       const subscriptionId = subscriptionOfProfile.get(identity.remnawaveId) ?? identity.remnawaveId;
       world.panelReads.push(subscriptionId);

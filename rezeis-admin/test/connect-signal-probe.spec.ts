@@ -62,7 +62,6 @@ const NEVER = { usedTrafficBytes: 0, lifetimeUsedTrafficBytes: 0, onlineAt: null
 function harness(options: {
   readonly candidates: readonly ProbeCandidateRow[];
   readonly read?: (remnawaveId: string) => Promise<Outcome>;
-  readonly addressing?: 'id' | 'uuid' | 'unknown';
   readonly backlog?: number;
   readonly previousStatus?: ConnectProbeStatus | null;
   readonly failCandidateQuery?: boolean;
@@ -115,8 +114,9 @@ function harness(options: {
       findUnique: async () => ({ telegramId: null, name: 'Anna', username: null }),
     },
   };
+  // No `getPanelShape`: the probe reads no panel version, so a build that
+  // started to would die here rather than pass.
   const api = {
-    getPanelShape: async () => ({ addressing: options.addressing ?? 'id' }),
     getPanelUserOutcome: async (identity: { remnawaveId: string }) => {
       reads.push(identity.remnawaveId);
       inFlight += 1;
@@ -306,7 +306,6 @@ describe('one probe cycle', () => {
 
   it('does not ask the panel about a profile it cannot name, and does not count it as an outage', async () => {
     const h = harness({
-      addressing: 'id',
       candidates: [candidate('s1', { remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' }), candidate('s2')],
     });
 

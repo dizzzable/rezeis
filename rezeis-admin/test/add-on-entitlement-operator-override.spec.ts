@@ -223,7 +223,7 @@ function build(
     },
     subscription: {
       findUnique: async () => ({
-        remnawaveId: 'rem-ov-1',
+        remnawaveId: '8123',
         remnawavePanelId: 8123,
         remnawavePanelUsername: 'rz_ov_sub',
         configUrl: null,

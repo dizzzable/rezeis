@@ -66,8 +66,7 @@ import {
 } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
-  assessObservedPanelLink,
-  observePanelEra,
+  isStalePanelIdentity,
   staleDeviceDeleteRefusalBody,
 } from '../../remnawave/services/stale-panel-link';
 import {
@@ -103,66 +102,57 @@ import type { SubscriptionSyncPanelLimits, SubscriptionSyncReadback } from './su
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from './subscription-sync-refusals';
 import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detectors';
 
-/** A v1–v8 UUID: the identity a Remnawave 2.7.x/2.8.x panel issues. */
-const REMNAWAVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 /**
- * Longest identity we accept, in characters — the 36 of a UUID. A numeric 3.x
- * id needs 20 at the very most (an unsigned 64-bit id), so one ceiling covers
- * both forms. It is not decoration: `^\d+$` is happy to match a megabyte of
- * digits, and that value goes on to be interpolated into a panel URL.
+ * Longest identity we accept, in characters. A numeric 3.x id needs 20 at the
+ * very most (an unsigned 64-bit id). It is not decoration: `^[0-9]+$` is happy to
+ * match a megabyte of digits, and that value goes on to be interpolated into a
+ * panel URL.
  */
-const MAX_REMNAWAVE_ID_LENGTH = 36;
+const MAX_REMNAWAVE_ID_LENGTH = 20;
 
 /**
- * Whether a string can name a panel profile on ANY supported panel version.
+ * Whether a string can name a panel profile on the panel this build speaks:
+ * Remnawave 3.x, which keys every user-scoped route on the numeric `id`.
  *
- * Two accepted forms, because there are two panel eras. 2.7.x/2.8.x key a user
- * by UUID; 3.x deleted that column outright and re-keyed every user-scoped
- * route on the numeric `id`. `Subscription.remnawaveId` stores whichever form
- * the panel handed us, so a gate that knows only about UUIDs rejects every
- * legitimate identifier an operator can read off a 3.x panel — and this
- * endpoint is the only operator-facing way to repair a broken link, so it used
- * to fail exactly where it was needed most.
+ * A 2.x UUID is NOT accepted any more. It names nobody on a 3.x panel, and
+ * linking one would re-create exactly the stale row the destructive paths
+ * refuse (`isStalePanelIdentity`). Only the numeric id an operator reads off
+ * the 3.x panel links.
  *
- * "Accept anything" is the wrong widening, though. The value is interpolated
- * into a panel URL path segment (`GET /api/users/{segment}`) and used as a
- * Prisma `where` value. Both accepted shapes are fully anchored over
- * `[0-9a-f-]` / `[0-9]`, so `/`, `?`, `#`, `.`, `%` and whitespace — everything
- * that could re-target the panel request — are refused by construction rather
- * than by a blacklist somebody has to keep complete.
+ * "Accept anything" is the wrong widening, too. The value is interpolated into
+ * a panel URL path segment (`GET /api/users/{segment}`) and used as a Prisma
+ * `where` value; a decimal is fully anchored over `[0-9]`, so `/`, `?`, `#`,
+ * `.`, `%` and whitespace — everything that could re-target the panel request —
+ * are refused by construction rather than by a blacklist somebody has to keep
+ * complete.
  */
 function isLinkableRemnawaveId(value: string): boolean {
   if (value.length === 0 || value.length > MAX_REMNAWAVE_ID_LENGTH) return false;
   // `isNumericPanelIdentity` is imported, not re-spelled: it is the same
-  // predicate the panel adapter uses to decide whether a stored identity is a
-  // 3.x id, and two copies could drift into disagreeing about what counts as
-  // numeric — this one accepting a value the adapter then cannot address.
-  return REMNAWAVE_UUID_PATTERN.test(value) || isNumericPanelIdentity(value);
+  // predicate the adapter and the stale-link refusal use, and two copies could
+  // drift into disagreeing about what counts as numeric — this one accepting a
+  // value the adapter then cannot address.
+  return isNumericPanelIdentity(value);
 }
 
 /**
- * Names both accepted forms on purpose. The operator reading this is holding a
- * panel screen; "a valid UUID is required" told them nothing when the panel in
- * front of them had no UUID to give.
+ * Names the accepted form and the panel it comes from. The operator reading
+ * this is holding a panel screen.
  */
 const REMNAWAVE_ID_REQUIRED_MESSAGE =
-  'A valid Remnawave profile identifier is required: a UUID (panel 2.x) or a numeric profile id (panel 3.x)';
+  'A valid Remnawave profile identifier is required: the numeric profile id shown by panel 3.x';
 
 /**
- * The panel profile's numeric id — the ONE identity both panel eras agree on —
- * as established by a verification read, or `null` when this read cannot
- * establish it.
+ * The panel profile's numeric id as established by a verification read, or
+ * `null` when this read cannot establish it.
  *
- * The panel row is the first source: 2.x carries the numeric `id` beside the
- * uuid and 3.x keys everything by it, so a decoded row normally has it. The
- * identifier the operator pasted is the second source, and only when it is
- * already numeric: the panel answered `ok` for a path segment built from that
- * decimal, which only an id-addressed panel does, so the number names the
- * profile even if the body we got back happened to omit the field.
+ * The panel row is the first source: 3.x keys everything by it, so a decoded
+ * row has it. The identifier the operator pasted is the second: the panel
+ * answered `ok` for a path segment built from that decimal, so the number names
+ * the profile even if the body we got back happened to omit the field.
  *
  * `Number.isSafeInteger`, not a null check, on both. `isLinkableRemnawaveId`
- * admits up to 36 digits, and a decimal past 2^53 parses to a ROUNDED number —
+ * admits up to 20 digits, and a decimal past 2^53 parses to a ROUNDED number —
  * which would then compare equal to some other row's `remnawavePanelId` and
  * refuse a repair over a collision that exists only in the float.
  */
@@ -772,10 +762,8 @@ export class AdminUserSubscriptionsController {
           subscriptionId: updated.id,
           action: SyncAction.UPDATE,
           status: SyncJobStatus.PENDING,
-          // Versioned only when a projection backs the change, exactly as the
-          // paid upgrade and plan migration: a job carrying neither field stays
-          // on the legacy absolute update, which is also what every job gets
-          // while `ADDON_PROJECTION_SYNC` is off.
+          // The revision it pushes, when a projection backs the change, exactly
+          // as the paid upgrade and plan migration record it.
           ...(projection === null
             ? {}
             : {
@@ -901,10 +889,18 @@ export class AdminUserSubscriptionsController {
   /**
    * Explicitly repairs a legacy local-to-panel link. Generic edits never
    * create a profile for an unlinked row: that could duplicate an existing
-   * imported user. The identifier — a 2.x UUID or a 3.x numeric id, see
+   * imported user. The identifier — the 3.x numeric id, see
    * {@link isLinkableRemnawaveId} — is verified against the panel before
    * persisting, and the profile that read identifies is then checked against
    * every other subscription, not just the string the operator typed.
+   *
+   * A ROW WITH NO LINK, OR WITH A STALE ONE. Besides an empty `remnawaveId`, it
+   * overwrites one that is not a decimal (`isStalePanelIdentity`: a 2.x uuid, or
+   * imported junk) — such an id names nobody on a 3.x panel, every destructive
+   * path refuses it, and without this endpoint those rows had no remedy but the
+   * automatic check (owner's decision, 24.09.2026). The same ownership proof
+   * applies, and the audit row keeps the id it replaced. A NUMERIC link is
+   * never overwritten here: that is a working link to a real profile.
    *
    * It is also where the panel-link repair and the duplicate merge send every
    * profile they refuse for want of proof, so it must be able to link one:
@@ -922,10 +918,15 @@ export class AdminUserSubscriptionsController {
     @CurrentAdmin() admin: CurrentAdminInterface,
     @Req() req: Request,
   ) {
-    const remnawaveId = typeof body.remnawaveId === 'string' ? body.remnawaveId.trim() : '';
-    if (!isLinkableRemnawaveId(remnawaveId)) {
+    const pasted = typeof body.remnawaveId === 'string' ? body.remnawaveId.trim() : '';
+    if (!isLinkableRemnawaveId(pasted)) {
       throw new BadRequestException(REMNAWAVE_ID_REQUIRED_MESSAGE);
     }
+    // The panel's own spelling of the number, never `0042`: the stored string is
+    // compared as a string by the duplicate guard below and by every later
+    // lookup, and the panel only ever reports `42`. Stripped as text, not
+    // through `Number`, which would round anything past 2^53.
+    const remnawaveId = pasted.replace(/^0+(?=\d)/, '');
 
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
@@ -946,14 +947,14 @@ export class AdminUserSubscriptionsController {
       },
     });
     if (subscription === null) throw new NotFoundException('Subscription not found');
-    if (subscription.remnawaveId !== null) {
+    if (subscription.remnawaveId !== null && !isStalePanelIdentity(subscription.remnawaveId)) {
       throw new BadRequestException('Subscription already has a Remnawave profile linked');
     }
 
     // A bare string on purpose: the operator has just READ this identifier off
-    // the panel in front of them, so it already names the profile in that
-    // panel's own era. There is no stored row to widen it from — that is the
-    // very thing this endpoint is repairing.
+    // the panel in front of them, so it already names the profile. There is no
+    // stored row to widen it from — that is the very thing this endpoint is
+    // repairing.
     //
     // `getPanelUserOutcome`, not `getPanelUser`: the latter answers `null` for
     // an outage, an expired token, a 5xx and a timeout as well as for a profile
@@ -1469,25 +1470,21 @@ export class AdminUserSubscriptionsController {
     //
     // The same hazard as the subscription delete this controller already
     // refuses, reached through a different verb: `deletePanelUserDevice` names
-    // its owner through the SAME `panelUserAddress` fallback, so a uuid-shaped
-    // stored identity on a 3.x panel resolves through the recorded panel id,
+    // its owner through the SAME `panelUserAddress` fallback, so a stored
+    // identity that is not a decimal resolves through the recorded panel id,
     // the saved subscription short uuid or the panel username to whatever
     // account is LIVE at that address — on an unrepaired duplicate pair, a
     // paying customer, whose device this would then unbind.
     //
-    // ONE OBSERVATION, USED TWICE: the era judged here is the era the adapter
-    // builds the request from, because `deletePanelUserDevice` takes it as a
-    // required argument and never re-reads the shape.
-    //
-    // OPERATOR WORDING, unlike the two reiwa-facing sites, which get the same
-    // code with a sentence that does not name a screen a customer cannot open.
-    // This reader CAN run the reconciliation, so the refusal says so.
-    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
-    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+    // The adapter refuses the same identity (`StalePanelIdentityRefusal`); this
+    // check is what turns the refusal into a 409 with a code the SPA branches
+    // on. OPERATOR WORDING, unlike the two reiwa-facing sites: this reader can
+    // open the list the sentence names.
+    if (isStalePanelIdentity(identity.remnawaveId)) {
       throw new ConflictException(staleDeviceDeleteRefusalBody('operator'));
     }
 
-    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid, era);
+    const result = await this.remnawaveApiService.deletePanelUserDevice(identity, hwid);
 
     this.systemEvents.info(
       EVENT_TYPES.SUBSCRIPTION_DEVICE_REVOKED,

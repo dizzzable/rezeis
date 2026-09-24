@@ -165,11 +165,13 @@ describe('EntitlementBoundaryService (T-008)', () => {
     assert.deepEqual(result.syncJobIds, []);
   });
 
-  it('activates a due scheduled term and its pending entitlements atomically', async () => {
+  it('activates a due scheduled term, recomputes and pushes — and activates no add-on', async () => {
+    // Renewal add-ons (stage 5) were deleted on 24.09.2026, and with them the
+    // activation of their PENDING rows here. No entitlement is read or moved:
+    // a row such a sale left behind stays PENDING and counts for nothing.
     const commands: string[] = [];
     const tx = {
       subscriptionTerm: { findFirst: async () => ({ id: 'term-2' }) },
-      addOnEntitlement: { findMany: async () => [{ id: 'ent-pending' }] },
       subscription: { update: async () => ({ remnawaveId: 'rem-1' }) },
       profileSyncJob: { create: async () => ({ id: 'job-activate' }) },
     };
@@ -188,8 +190,7 @@ describe('EntitlementBoundaryService (T-008)', () => {
     const result = await service.activateDueScheduledTerm('sub-1');
     assert.equal(result.activated, true);
     assert.equal(result.termId, 'term-2');
-    assert.equal(result.activatedEntitlements, 1);
-    assert.deepEqual(commands, ['ACTIVATE']);
+    assert.deepEqual(commands, [], 'no entitlement is activated at a term start');
     assert.deepEqual(result.syncJobIds, ['job-activate']);
   });
 
@@ -257,138 +258,6 @@ describe('EntitlementBoundaryService (T-008)', () => {
       deviceLimit: 3,
     });
     assert.deepStrictEqual(result.syncJobIds, ['job-plan-cutover']);
-  });
-
-  it('refines a pending UNTIL_NEXT_RESET entitlement to the term first epoch before activation', async () => {
-    const previous = process.env.ADDON_RESET_EXPIRY_DAY;
-    process.env.ADDON_RESET_EXPIRY_DAY = 'true';
-    const epochEndsAt = new Date('2026-08-01T00:00:00.000Z');
-    const entitlementUpdates: unknown[] = [];
-    const epochLookups: unknown[] = [];
-    const commands: string[] = [];
-    const tx = {
-      subscriptionTerm: {
-        findFirst: async () => ({
-          id: 'term-day',
-          startsAt: new Date('2026-07-31T00:00:00.000Z'),
-          trafficResetStrategy: 'DAY',
-          resetAnchorAt: new Date('2026-07-31T00:00:00.000Z'),
-        }),
-      },
-      subscriptionResetEpoch: {
-        findUnique: async (input: unknown) => {
-          epochLookups.push(input);
-          return {
-            id: 'epoch-first',
-            startsAt: new Date('2026-07-31T00:00:00.000Z'),
-            plannedEndsAt: epochEndsAt,
-          };
-        },
-      },
-      addOnEntitlement: {
-        findMany: async () => [{ id: 'ent-reset', lifetime: 'UNTIL_NEXT_RESET' }],
-        updateMany: async (input: unknown) => {
-          entitlementUpdates.push(input);
-          return { count: 1 };
-        },
-      },
-      subscription: { update: async () => ({ remnawaveId: 'rem-1' }) },
-      profileSyncJob: { create: async () => ({ id: 'job-1' }) },
-    };
-    const prisma = { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) };
-    const service = new EntitlementBoundaryService(
-      prisma as never,
-      {
-        transitionInTransaction: async (_t: unknown, input: { command: string }) => {
-          commands.push(input.command);
-          return { changed: true };
-        },
-      } as never,
-      { activateInTransaction: async () => ({ id: 'term-day', status: 'ACTIVE', changed: true }) } as never,
-      {
-        recomputeInTransaction: async () => ({
-          desiredRevision: 2n,
-          changed: true,
-          desiredTrafficLimitBytes: null,
-          desiredDeviceLimit: 0,
-        }),
-      } as never,
-    );
-
-    try {
-      await service.activateDueScheduledTerm('sub-1', new Date('2026-08-03T12:00:00.000Z'));
-      assert.deepStrictEqual(epochLookups[0], {
-        where: {
-          termId_plannedEndsAt: {
-            termId: 'term-day',
-            plannedEndsAt: epochEndsAt,
-          },
-        },
-        select: { id: true, startsAt: true, plannedEndsAt: true },
-      });
-      assert.deepStrictEqual(entitlementUpdates, [{
-        where: {
-          id: 'ent-reset',
-          state: 'PENDING_ACTIVATION',
-          lifetime: 'UNTIL_NEXT_RESET',
-        },
-        data: { expiryEpochId: 'epoch-first', expiresAt: epochEndsAt },
-      }]);
-      assert.deepStrictEqual(commands, ['ACTIVATE']);
-    } finally {
-      if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_DAY;
-      else process.env.ADDON_RESET_EXPIRY_DAY = previous;
-    }
-  });
-
-  it('fails closed instead of activating a paid reset entitlement without an epoch', async () => {
-    const previous = process.env.ADDON_RESET_EXPIRY_DAY;
-    delete process.env.ADDON_RESET_EXPIRY_DAY;
-    const commands: string[] = [];
-    const tx = {
-      subscriptionTerm: {
-        findFirst: async () => ({
-          id: 'term-no-epoch',
-          startsAt: new Date('2026-07-31T00:00:00.000Z'),
-          trafficResetStrategy: 'DAY',
-          resetAnchorAt: new Date('2026-07-31T00:00:00.000Z'),
-        }),
-      },
-      addOnEntitlement: {
-        findMany: async () => [{ id: 'ent-paid-reset', lifetime: 'UNTIL_NEXT_RESET' }],
-      },
-      subscription: { update: async () => ({ remnawaveId: 'rem-1' }) },
-      profileSyncJob: { create: async () => ({ id: 'job-1' }) },
-    };
-    const service = new EntitlementBoundaryService(
-      { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
-      {
-        transitionInTransaction: async (_t: unknown, input: { command: string }) => {
-          commands.push(input.command);
-          return { changed: true };
-        },
-      } as never,
-      { activateInTransaction: async () => ({ id: 'term-no-epoch', status: 'ACTIVE', changed: true }) } as never,
-      {
-        recomputeInTransaction: async () => ({
-          desiredRevision: 2n,
-          changed: false,
-          desiredTrafficLimitBytes: null,
-          desiredDeviceLimit: 0,
-        }),
-      } as never,
-    );
-
-    try {
-      await assert.rejects(
-        () => service.activateDueScheduledTerm('sub-1', new Date('2026-07-31T00:00:00.000Z')),
-        /reset epoch/i,
-      );
-      assert.deepStrictEqual(commands, []);
-    } finally {
-      if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_DAY;
-      else process.env.ADDON_RESET_EXPIRY_DAY = previous;
-    }
   });
 
   it('completes verified due EXPIRING device entitlements with stable command keys', async () => {
@@ -498,7 +367,7 @@ describe('EntitlementBoundaryService (T-008)', () => {
     assert.deepEqual(result.syncJobIds, []);
   });
 
-  it('anchors a due MONTH_ROLLING term to panel createdAt before minting its epoch', async () => {
+  it('anchors a due MONTH_ROLLING term to panel createdAt, and mints no reset epoch', async () => {
     const previous = process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
     process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = 'true';
     const panelCreatedAt = new Date('2025-01-31T08:00:00.000Z');
@@ -513,14 +382,6 @@ describe('EntitlementBoundaryService (T-008)', () => {
         }),
         update: async (input: unknown) => { termUpdates.push(input); },
       },
-      subscriptionResetEpoch: {
-        findUnique: async () => ({
-          id: 'epoch-existing',
-          startsAt: new Date('2026-06-30T08:00:00.000Z'),
-          plannedEndsAt: new Date('2026-07-31T08:00:00.000Z'),
-        }),
-      },
-      addOnEntitlement: { findMany: async () => [] },
     };
     const panelRefs: unknown[] = [];
     const prisma = {
@@ -573,11 +434,10 @@ describe('EntitlementBoundaryService (T-008)', () => {
     }
   });
 
-  it('activates fail-closed without an epoch when MONTH_ROLLING panel anchor is unavailable', async () => {
+  it('activates with a cleared anchor when the MONTH_ROLLING panel anchor is unavailable', async () => {
     const previous = process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
     process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = 'true';
     const termUpdates: unknown[] = [];
-    let epochReads = 0;
     const tx = {
       subscriptionTerm: {
         findFirst: async () => ({
@@ -588,10 +448,6 @@ describe('EntitlementBoundaryService (T-008)', () => {
         }),
         update: async (input: unknown) => { termUpdates.push(input); },
       },
-      subscriptionResetEpoch: {
-        findUnique: async () => { epochReads += 1; return null; },
-      },
-      addOnEntitlement: { findMany: async () => [] },
     };
     const prisma = {
       subscriptionTerm: {
@@ -621,7 +477,6 @@ describe('EntitlementBoundaryService (T-008)', () => {
         where: { id: 'term-rolling' },
         data: { resetAnchorAt: null },
       }]);
-      assert.equal(epochReads, 0);
     } finally {
       if (previous === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING;
       else process.env.ADDON_RESET_EXPIRY_MONTH_ROLLING = previous;
@@ -650,14 +505,6 @@ describe('EntitlementBoundaryService (T-008)', () => {
         }),
         update: async (input: unknown) => { termUpdates.push(input); },
       },
-      subscriptionResetEpoch: {
-        findUnique: async () => ({
-          id: 'epoch-existing',
-          startsAt: new Date('2026-06-30T08:00:00.000Z'),
-          plannedEndsAt: new Date('2026-07-31T08:00:00.000Z'),
-        }),
-      },
-      addOnEntitlement: { findMany: async () => [] },
     };
     const service = new EntitlementBoundaryService(
       {
@@ -690,7 +537,7 @@ describe('EntitlementBoundaryService (T-008)', () => {
       assert.deepStrictEqual(panelRefs, [
         { remnawaveId: staleUuid, panelId: 8123, panelUsername: 'rz_alice_sub' },
       ]);
-      assert.deepStrictEqual(panelUserAddress(panelRefs[0] as StoredPanelIdentity, 'id'), {
+      assert.deepStrictEqual(panelUserAddress(panelRefs[0] as StoredPanelIdentity), {
         kind: 'ready',
         segment: '8123',
       });
@@ -711,16 +558,12 @@ describe('EntitlementBoundaryService (T-008)', () => {
  *
  * A stubbed projection would assert this file's own fixture back at itself and
  * stay green against the defect, because the defect IS what the projection
- * derives. And stopping at the subscription row would miss the harm entirely:
- * the versioned sync worker reads the desired limits off
- * `SubscriptionEffectiveProjection` by the `desiredRevision` the job carries
- * (`ProfileSyncProcessor.tryVersionedDesiredStateWrite`), so the number the
- * customer actually loses is the one on THAT row, reached through THAT job.
- * Every assertion below follows the job to the row it names.
+ * derives. The columns the push sends mirror the projection row the job names
+ * (`desiredRevision`), so every assertion below follows the job to that row as
+ * well as reading the column.
  *
- * Numbers: plan 3, operator 12, add-on 5. The correct answer is 17; the
- * plan-wins defect reads 8, an unapplied add-on reads 12, and the "plan raised
- * to 4" control reads 9 — four values, no collisions.
+ * Numbers: plan 3, operator 12. The correct answer is 12; the plan-wins defect
+ * reads 3, and the "plan raised to 4" control reads 4 — no collisions.
  */
 describe('EntitlementBoundaryService term activation preserves operator configuration', () => {
   const PLAN_DEVICES = 3;
@@ -736,7 +579,6 @@ describe('EntitlementBoundaryService term activation preserves operator configur
     }>;
     readonly scheduledBaseDeviceLimit?: number;
     readonly scheduledPlanSnapshot?: Record<string, unknown>;
-    readonly addOnDevices?: bigint | null;
   }
 
   function createStore(options: ActivationOptions = {}) {
@@ -776,19 +618,6 @@ describe('EntitlementBoundaryService term activation preserves operator configur
         },
       },
     ];
-    const entitlements =
-      options.addOnDevices === null
-        ? []
-        : [
-            {
-              id: 'ent-devices',
-              termId: 'term-next',
-              lifetime: 'UNTIL_SUBSCRIPTION_END',
-              type: 'EXTRA_DEVICES',
-              state: 'PENDING_ACTIVATION',
-              totalValue: options.addOnDevices ?? 5n,
-            },
-          ];
     const projections: Record<string, Record<string, unknown>> = {};
     const syncJobs: Array<Record<string, unknown>> = [];
     const stats = { subscriptionReads: 0 };
@@ -828,12 +657,7 @@ describe('EntitlementBoundaryService term activation preserves operator configur
         },
       },
       addOnEntitlement: {
-        findMany: async (input: { where: Record<string, unknown> }) => {
-          const wanted = String(input.where.state ?? '');
-          return entitlements
-            .filter((row) => row.state === wanted)
-            .map((row) => ({ ...row }));
-        },
+        findMany: async () => [],
         updateMany: async () => ({ count: 0 }),
       },
       subscriptionEffectiveProjection: {
@@ -858,14 +682,7 @@ describe('EntitlementBoundaryService term activation preserves operator configur
 
     const service = new EntitlementBoundaryService(
       { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
-      {
-        transitionInTransaction: async (_t: unknown, input: { entitlementId: string; command: string }) => {
-          const row = entitlements.find((entry) => entry.id === input.entitlementId);
-          if (row === undefined || input.command !== 'ACTIVATE') return { changed: false };
-          row.state = 'ACTIVE';
-          return { changed: true };
-        },
-      } as never,
+      { transitionInTransaction: async () => ({ changed: false }) } as never,
       {
         activateInTransaction: async (_t: unknown, termId: string) => {
           for (const term of terms) {
@@ -884,7 +701,7 @@ describe('EntitlementBoundaryService term activation preserves operator configur
 
   /** The desired limits the panel push would read, reached through the job. */
   function pushedDesiredState(store: ReturnType<typeof createStore>) {
-    assert.equal(store.syncJobs.length, 1, 'activation must enqueue exactly one versioned job');
+    assert.equal(store.syncJobs.length, 1, 'activation must enqueue exactly one sync job');
     const job = store.syncJobs[0]!;
     assert.equal(job.aggregateKey, 'sub-1');
     assert.equal(job.cause, 'TERM_ACTIVATION');
@@ -902,7 +719,7 @@ describe('EntitlementBoundaryService term activation preserves operator configur
     };
   }
 
-  it('an operator-raised device limit survives activation and is what the sync job pushes (12 + 5 = 17)', async () => {
+  it('an operator-raised device limit survives activation and is what the sync job pushes (12, not the plan 3)', async () => {
     const store = createStore();
 
     const result = await store.service.activateDueScheduledTerm(
@@ -914,17 +731,14 @@ describe('EntitlementBoundaryService term activation preserves operator configur
     assert.equal(result.termId, 'term-next');
     assert.equal(store.stats.subscriptionReads > 0, true, 'the recompute must read the subscription');
 
-    // The compatibility column first, so that the two assertions below are
-    // visibly NOT the same claim: a right column with a wrong projection row is
-    // a reachable state, and it is the state in which the customer still loses
-    // the devices, because the versioned worker never reads this column.
-    assert.equal(store.subscription.deviceLimit, 17, 'the mirrored column must keep the operator value');
+    // The column the push sends, and the projection row it mirrors: a right
+    // column over a wrong row would be undone by the next recompute.
+    assert.equal(store.subscription.deviceLimit, OPERATOR_DEVICES, 'the mirrored column must keep the operator value');
 
     const pushed = pushedDesiredState(store);
-    assert.equal(pushed.baseDeviceLimit, OPERATOR_DEVICES, 'the row the push reads must carry the operator baseline');
-    assert.equal(pushed.desiredDeviceLimit, 17, 'the pushed desired state must keep the operator value');
-    assert.notEqual(pushed.desiredDeviceLimit, 8, 'pushing 8 is the plan taking the devices back');
-    assert.notEqual(pushed.desiredDeviceLimit, OPERATOR_DEVICES, 'pushing 12 means the paid add-on never landed');
+    assert.equal(pushed.baseDeviceLimit, OPERATOR_DEVICES, 'the row the column mirrors must carry the operator baseline');
+    assert.equal(pushed.desiredDeviceLimit, OPERATOR_DEVICES, 'the pushed desired state must keep the operator value');
+    assert.notEqual(pushed.desiredDeviceLimit, PLAN_DEVICES, 'pushing 3 is the plan taking the devices back');
   });
 
   it('a subscription that was never individually adjusted still takes the plan at activation', async () => {
@@ -938,8 +752,8 @@ describe('EntitlementBoundaryService term activation preserves operator configur
 
     const pushed = pushedDesiredState(store);
     assert.equal(pushed.baseDeviceLimit, 4, 'an untouched column must not freeze the plan out');
-    assert.equal(pushed.desiredDeviceLimit, 9);
-    assert.notEqual(pushed.desiredDeviceLimit, 8, 'deriving 8 means the column was mistaken for an override');
+    assert.equal(pushed.desiredDeviceLimit, 4);
+    assert.notEqual(pushed.desiredDeviceLimit, PLAN_DEVICES, 'deriving 3 means the column was mistaken for an override');
   });
 
   it('the deferred term plan squads land when the subscription still holds the plan list', async () => {
@@ -990,6 +804,6 @@ describe('EntitlementBoundaryService term activation preserves operator configur
     await store.service.activateDueScheduledTerm('sub-1', new Date('2026-08-01T00:00:00.000Z'));
 
     assert.deepStrictEqual(store.subscription.internalSquads, ['operator-squad']);
-    assert.equal(pushedDesiredState(store).desiredDeviceLimit, 9);
+    assert.equal(pushedDesiredState(store).desiredDeviceLimit, 4);
   });
 });

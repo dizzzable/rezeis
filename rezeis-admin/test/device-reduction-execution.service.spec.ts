@@ -6,6 +6,7 @@ import {
   panelUserAddress,
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
+import { STALE_PANEL_LINK } from '../src/modules/add-on-entitlements/services/device-reduction-execution.service';
 
 const ORIGINAL_FLAG = process.env['ADDON_DEVICE_CLEANUP_AUTO'];
 afterEach(() => {
@@ -20,7 +21,7 @@ function okList(...hwids: string[]) {
   return {
     kind: 'ok' as const,
     value: { devices: hwids.map((hwid) => ({ hwid, createdAt: '2026-01-01T00:00:00Z' })), total: hwids.length },
-    detectedVersion: '2.8.0',
+    detectedVersion: '3.2.1',
   };
 }
 
@@ -28,15 +29,15 @@ function okList(...hwids: string[]) {
  * A subscription row as Prisma returns it once the guard's select asks for the
  * panel identity.
  *
- * Both supplementary columns are populated by DEFAULT: every supported panel
- * version carries a numeric `id` and a `username` on every user row, so both
- * are recorded when the profile is linked. Omitting them from the fake would
+ * The stored identity is a decimal — the only kind a 3.x panel issues — and
+ * both supplementary columns are populated by DEFAULT: every user row carries a
+ * numeric `id` and a `username`, so both are recorded when the profile is linked. Omitting them from the fake would
  * hide the case this saga is most exposed to — it deletes, and an identity it
  * cannot name is an identity it cannot verify a delete against.
  */
 function subscriptionRow(patch: Record<string, unknown> = {}) {
   return {
-    remnawaveId: 'rem-1',
+    remnawaveId: '4711',
     remnawavePanelId: 4711,
     remnawavePanelUsername: 'rz_alice_sub',
     status: 'ACTIVE',
@@ -125,7 +126,7 @@ function build(opts: Opts = {}) {
     strictDeleteUserDevice: async (ref: unknown, hwid: string) => {
       panelRefs.push(ref);
       deleteCalls.push(hwid);
-      return deleteResults.length > 0 ? deleteResults.shift() : { kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' };
+      return deleteResults.length > 0 ? deleteResults.shift() : { kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' };
     },
   };
 
@@ -172,7 +173,7 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
     const { service, planUpdates, deleteCalls, completedSubscriptions } = build({
       // initial list (overage), post-delete final read-back within limit
       listQueue: [okList('old', 'new'), okList('old')],
-      deleteResults: [{ kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' }],
+      deleteResults: [{ kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' }],
     });
     const outcome = await service.executePlan('plan-1');
     assert.equal(outcome.status, 'APPLIED');
@@ -222,7 +223,7 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
         subscriptionRow(),
         // A relink between the guard and the first delete: same subscription,
         // different panel profile.
-        subscriptionRow({ remnawaveId: 'rem-2', remnawavePanelId: 5122, remnawavePanelUsername: 'rz_alice_sub_2' }),
+        subscriptionRow({ remnawaveId: '5122', remnawavePanelId: 5122, remnawavePanelUsername: 'rz_alice_sub_2' }),
       ],
     });
 
@@ -245,15 +246,12 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
     assert.deepEqual(deleteCalls, []);
   });
 
-  it('addresses every panel call with the recorded numeric id when the stored id is a stale 2.x uuid', async () => {
-    // The upgraded-panel case: created on 2.x, panel now 3.x, uuid destroyed by
-    // the panel's own migration. Each pass re-reads the row, so the identity has
-    // to survive the guard — a delete addressed by the dead uuid would fail
-    // validation and strand the saga short of the limit it was built to restore.
+  it('addresses every panel call with the full stored identity', async () => {
+    // Each pass re-reads the row, so the identity has to survive the guard: list,
+    // delete and the final read-back all carry it — the delete included, which
+    // is the one that destroys something.
     enableAuto();
-    const staleUuid = '330f2b38-1362-46ab-b5c0-dea32167eff9';
     const { service, deleteCalls, panelRefs } = build({
-      subscription: subscriptionRow({ remnawaveId: staleUuid, remnawavePanelId: 8123 }),
       listQueue: [okList('old', 'new'), okList('old')],
       deleteResults: [{ kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' }],
     });
@@ -262,20 +260,36 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
 
     assert.equal(outcome.status, 'APPLIED');
     assert.deepEqual(deleteCalls, ['new']);
-    // List, delete and the final read-back all carry the full identity — the
-    // delete included, which is the one that destroys something.
     assert.equal(panelRefs.length, 3);
     for (const ref of panelRefs) {
       assert.deepStrictEqual(ref, {
-        remnawaveId: staleUuid,
-        panelId: 8123,
+        remnawaveId: '4711',
+        panelId: 4711,
         panelUsername: 'rz_alice_sub',
       });
-      assert.deepStrictEqual(panelUserAddress(ref as StoredPanelIdentity, 'id'), {
+      assert.deepStrictEqual(panelUserAddress(ref as StoredPanelIdentity), {
         kind: 'ready',
-        segment: '8123',
+        segment: '4711',
       });
     }
+  });
+
+  it('BLOCKS a row that still stores a 2.x uuid before any panel call — whatever the panel is', async () => {
+    // The address fallback would carry the dead uuid to the recorded numeric id
+    // and delete off whatever profile is live there. The full guard matrix is in
+    // `device-reduction-stale-panel-link.spec.ts`; this is its footprint here.
+    enableAuto();
+    const { service, deleteCalls, panelRefs, incidents } = build({
+      subscription: subscriptionRow({ remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9', remnawavePanelId: 8123 }),
+      listQueue: [okList('old', 'new'), okList('old')],
+    });
+
+    const outcome = await service.executePlan('plan-1');
+
+    assert.deepEqual(outcome, { status: 'BLOCKED', reason: STALE_PANEL_LINK });
+    assert.deepEqual(panelRefs, [], 'not one panel call');
+    assert.deepEqual(deleteCalls, []);
+    assert.equal(incidents.length, 1);
   });
 
   it('DEFERS without deleting when the panel is unavailable', async () => {
@@ -332,7 +346,7 @@ describe('DeviceReductionExecutionService (T-011c)', () => {
     const { service, incidents } = build({
       // delete succeeds but final read-back still over the limit
       listQueue: [okList('old', 'new'), okList('old', 'extra')],
-      deleteResults: [{ kind: 'ok', value: { total: 2 }, detectedVersion: '2.8.0' }],
+      deleteResults: [{ kind: 'ok', value: { total: 2 }, detectedVersion: '3.2.1' }],
     });
     const outcome = await service.executePlan('plan-1');
     assert.equal(outcome.status, 'REMEDIATION_REQUIRED');

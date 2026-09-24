@@ -65,7 +65,7 @@ describe('AdminRemnawaveController', () => {
       {
         getCapabilities: async (force?: boolean) => {
           forcedFlags.push(force);
-          return { version: '2.8.0' } as never;
+          return { version: '3.3.2' } as never;
         },
       } as never,
     );

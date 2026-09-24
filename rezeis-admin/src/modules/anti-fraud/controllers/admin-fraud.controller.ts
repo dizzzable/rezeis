@@ -154,7 +154,7 @@ export class AdminFraudController {
 
   @Get('signals/:id/live-ips')
   @RequirePermission('fraud_signals', 'view')
-  @ApiOperation({ summary: 'Live per-node source IPs for the signal user (ip-control drilldown)' })
+  @ApiOperation({ summary: 'Live per-node source IPs for the signal user (live-connections drilldown)' })
   public getLiveIps(@Param('id') id: string) {
     return this.antiFraudService.getSignalLiveIps(id);
   }
@@ -162,7 +162,7 @@ export class AdminFraudController {
   @Post('signals/:id/enforce')
   @HttpCode(HttpStatus.OK)
   @RequirePermission('fraud_signals', 'enforce')
-  @ApiOperation({ summary: 'Drops the flagged user/IPs live connections via Remnawave ip-control' })
+  @ApiOperation({ summary: 'Drops the flagged user/IPs live connections via Remnawave /api/connections/drop' })
   public enforce(
     @Param('id') id: string,
     @Body() dto: EnforceFraudSignalDto,
@@ -213,7 +213,7 @@ export class AdminFraudController {
    *
    * Checked against the neighbours rather than guessed: reads on this
    * controller take `view`, `enforce` is reserved for the one destructive panel
-   * call (`ip-control` drop), and `resolve` is what gates
+   * call (the live-connections drop), and `resolve` is what gates
    * `POST /signals/:id/transition` — i.e. "Dismiss — false positive". An
    * exemption is that same judgement made durable and forward-looking, so it
    * belongs to whoever is already trusted to make it once.

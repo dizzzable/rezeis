@@ -30,6 +30,11 @@ import {
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE,
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
 } from '../src/modules/remnawave/services/stale-panel-link';
+import {
+  LEGACY_PANEL_REFUSAL_CODE,
+  LEGACY_PANEL_REFUSAL_MESSAGE,
+} from '../src/modules/remnawave/services/panel-transport';
+import { RemnawavePanelTooOldError } from '../src/modules/remnawave/services/remnawave-api.service';
 import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/subscription-renewal.service';
 import type { DeleteBlockers } from '../src/modules/users/services/user-deletion.service';
 
@@ -441,6 +446,23 @@ describe('AdminSafeExceptionFilter', () => {
       assert.equal(body.factor, undefined);
     });
   }
+
+  it(`preserves ${LEGACY_PANEL_REFUSAL_CODE}: a 2.x panel is told "update the panel", not "request failed"`, () => {
+    // Thrown by the adapter on every path to a Remnawave 2.x panel. Scrubbed to
+    // a generic 502, the Remnawave page would read like an outage — and invite
+    // retries that can never succeed.
+    const captured = runFilter(new RemnawavePanelTooOldError(), {
+      originalUrl: '/api/admin/remnawave/status',
+      headers: { 'x-request-id': 'request.safe-too-old' },
+    });
+
+    assert.equal(captured.statusCode, 502);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, LEGACY_PANEL_REFUSAL_CODE);
+    assert.equal(body.errorCode, LEGACY_PANEL_REFUSAL_CODE);
+    assert.equal(body.message, LEGACY_PANEL_REFUSAL_MESSAGE);
+    assert.ok(SAFE_PRODUCT_CODES.has(LEGACY_PANEL_REFUSAL_CODE));
+  });
 
   it('does not forward non-allowlisted product codes from exception bodies', () => {
     const captured = runFilter(

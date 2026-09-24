@@ -201,7 +201,7 @@ describe('↻ reports the verdict on a subscription in the term model', () => {
 
   const NOT_SENT_BACK = [
     { verdict: 'PROFILE_DELETED', reason: 'it reports the profile deleted' },
-    { verdict: 'SHARED_PROFILE', reason: 'Merge them: Subscriptions → “Duplicate subscription merge”.' },
+    { verdict: 'SHARED_PROFILE', reason: 'Merge them: Subscriptions → “Tools” → “Duplicate subscription merge”.' },
     { verdict: 'UNLINKED', reason: 'the subscription has no link to a Remnawave profile' },
   ] as const
 
@@ -285,7 +285,7 @@ describe('↻ reports the verdict on a subscription in the term model', () => {
       })
       expect(shared).toHaveTextContent('В панели действуют другие ограничения:')
       expect(shared).toHaveTextContent(
-        'Назначенные лимиты в Remnawave не отправлены: этот профиль числится ещё за одной подпиской. Объедините их: страница «Подписки» → «Слияние подписок-дубликатов».',
+        'Назначенные лимиты в Remnawave не отправлены: этот профиль числится ещё за одной подпиской. Объедините их: «Подписки» → «Инструменты» → «Слияние подписок-дубликатов».',
       )
     } finally {
       await i18n.changeLanguage('en')

@@ -126,6 +126,7 @@ import {
 } from './subscription-sync-readback'
 import {
   readSubscriptionDeleteRefusal,
+  SUBSCRIPTION_DELETE_REFUSAL_REMEDY_HREF,
   type SubscriptionDeleteRefusal,
 } from './subscription-delete-refusals'
 import { readPlanAssignmentRefusal } from './plan-assignment-refusals'
@@ -904,12 +905,12 @@ function InfoRow({ label, value, mono, icon }: { label: string; value: string | 
   )
 }
 
-// ── Panel identity: two shapes, one per panel era ────────────────────────────
+// ── Panel identity: the 3.x numeric id ───────────────────────────────────────
 //
-// Remnawave 2.7.x/2.8.x key a user by UUID. Remnawave 3.x dropped that column
-// entirely and names a user by its numeric `id` (e.g. `4471`). `remnawaveId`
-// carries whichever form the panel gave, so nothing here may assume 36 hex
-// characters — not the preview, and not the link dialog's gate.
+// Remnawave 3.x names a user by its numeric `id` (e.g. `4471`), and that is the
+// only identifier this build links. A row linked in the 2.x era may still STORE
+// a uuid until it is re-linked, so the preview must not assume digits either —
+// but the link dialog's gate accepts the number alone.
 
 /**
  * How much of a panel identity the collapsed row shows before it cuts.
@@ -917,26 +918,23 @@ function InfoRow({ label, value, mono, icon }: { label: string; value: string | 
  */
 const REMNAWAVE_ID_PREVIEW_LENGTH = 8
 
-/** Mirrors `REMNAWAVE_UUID_PATTERN` in `admin-user-subscriptions.controller.ts`. */
-const REMNAWAVE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 /** A decimal integer, no sign, no separators — a 3.x panel id. */
 const REMNAWAVE_NUMERIC_ID_PATTERN = /^\d+$/
-/** A UUID's 36 characters; the widest either form ever needs. */
-const REMNAWAVE_ID_MAX_LENGTH = 36
+/** Mirrors `MAX_REMNAWAVE_ID_LENGTH` in `admin-user-subscriptions.controller.ts`. */
+const REMNAWAVE_ID_MAX_LENGTH = 20
 
 /**
  * The same accept-rule the backend applies in `linkRemnawaveProfile`, restated
  * here rather than shared — nothing crosses the SPA/Nest boundary but JSON.
  *
- * The server stays the authority and re-checks; this exists only so a typo
- * comes back as a sentence next to the field instead of a bare 400 toast that
- * does not say what the field wanted. Keep the two in step: if the backend
- * widens, this must widen too, or the dialog will refuse an identifier the
- * panel would have accepted.
+ * The server stays the authority and re-checks; this exists only so a typo — or
+ * a 2.x UUID, which names nobody on a 3.x panel — comes back as a sentence next
+ * to the field instead of a bare 400 toast that does not say what the field
+ * wanted. Keep the two in step.
  */
 function isLinkableRemnawaveId(value: string): boolean {
   if (value.length === 0 || value.length > REMNAWAVE_ID_MAX_LENGTH) return false
-  return REMNAWAVE_UUID_PATTERN.test(value) || REMNAWAVE_NUMERIC_ID_PATTERN.test(value)
+  return REMNAWAVE_NUMERIC_ID_PATTERN.test(value)
 }
 
 /**
@@ -1319,26 +1317,19 @@ function SubscriptionSyncOutcomeNotice({
  * identity can no longer be trusted — turned into the one next step that
  * clears it.
  *
- * WHY A LINK AND NOT A BUTTON THAT RUNS THE REPAIR HERE. Three facts decided
- * this, and none of them is a style preference:
+ * WHERE IT SENDS THE OPERATOR. The automatic link check tries to link such a
+ * subscription by itself (at boot, after each backup import, daily, and an hour
+ * after a run it could not finish); what it could not prove it lists, with the
+ * reason, in «Подписки» → «Инструменты» → «Подписки без привязки к Remnawave»,
+ * where «Привязать профиль» on the row writes the link by hand. The link here
+ * opens that tab directly (`SUBSCRIPTION_DELETE_REFUSAL_REMEDY_HREF`), because
+ * the refusal is not “something went wrong” — it is “do this specific thing and
+ * the delete will work”, and an operator handed a sentence and left to find the
+ * page will not go.
  *
- *  • The remedy is `POST /admin/profile-sync/panel-link-reconciliation`, and
- *    that endpoint takes NO subscription id. It is a sweep over a population,
- *    bounded by `limit` / `chunkSize` / `startAfterId`. So there is nothing to
- *    deep-link with this subscription pre-filled; a control that appeared to
- *    do that would be describing a request the backend cannot receive.
- *  • An inline “repair it now” button would be a second, unconfirmed path to
- *    a BULK write, fired from a screen that shows one customer. The
- *    reconciliation surface exists to hold the opposite guarantee — preview
- *    first, then a confirmation that names the scope — and a shortcut around
- *    it is the shortcut that eventually gets used by accident.
- *  • The refusal is not “something went wrong”. It is “do this specific thing
- *    and the delete will work”, and an operator handed a sentence and left to
- *    find the page will not go.
- *
- * So: one press to the surface that owns the write, and the sequence spelled
- * out on the card — preview, real run, delete again — rather than left to be
- * remembered across two screens.
+ * So: one press to the list that owns the fix, and the sequence spelled out on
+ * the card — find the row, link the profile, delete again — rather than left
+ * to be remembered across two screens.
  */
 function SubscriptionDeleteRefusalNotice({
   refusal,
@@ -1367,10 +1358,10 @@ function SubscriptionDeleteRefusalNotice({
         <li>{t(`${key}.step3`)}</li>
       </ol>
       <div className="mt-1 pl-4">
-        <Button asChild size="sm" variant="outline" className="h-6 px-2 text-[10px]">
-          <Link to="/subscriptions">
-            <Wrench className="mr-1 h-3 w-3" aria-hidden="true" />
-            {t('userDetailPanel.subscriptions.deleteRefusal.openReconciliation')}
+        <Button asChild size="sm" variant="outline" className="h-auto min-h-6 whitespace-normal px-2 py-0.5 text-left text-[10px]">
+          <Link to={SUBSCRIPTION_DELETE_REFUSAL_REMEDY_HREF[refusal]}>
+            <Wrench className="mr-1 h-3 w-3 shrink-0" aria-hidden="true" />
+            {t(`${key}.open`)}
           </Link>
         </Button>
       </div>

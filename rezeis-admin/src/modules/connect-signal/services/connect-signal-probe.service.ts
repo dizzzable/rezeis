@@ -9,7 +9,6 @@ import { EVENT_TYPES, SystemEventsService } from '../../../common/services/syste
 import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { panelUserAddress, storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
-import type { RemnawaveUserAddressing } from '../../remnawave/services/panel-version.util';
 import { panelIdentityWhere } from '../../remnawave/services/remnawave-webhook.service';
 import {
   claimFirstTraffic,
@@ -208,8 +207,7 @@ export class ConnectSignalProbeService {
       },
     });
     if (row === null || row.remnawaveId === null) return 'gone';
-    const addressing = await this.readAddressing();
-    return this.probeOne({ ...row, remnawaveId: row.remnawaveId, checkedAt: null, dueSoon: false }, addressing, now);
+    return this.probeOne({ ...row, remnawaveId: row.remnawaveId, checkedAt: null, dueSoon: false }, now);
   }
 
   private async probeBatch(now: Date): Promise<ConnectProbeCycleResult> {
@@ -217,10 +215,9 @@ export class ConnectSignalProbeService {
     const candidates = await this.prismaService.$queryRaw<ProbeCandidateRow[]>(
       probeCandidatesSql({ now, settings, limit: CONNECT_PROBE_BATCH }),
     );
-    const addressing = candidates.length > 0 ? await this.readAddressing() : null;
     const tally = { connected: 0, notConnected: 0, missing: 0, failed: 0, unaddressable: 0 };
     await forEachLimited(candidates, CONNECT_PROBE_CONCURRENCY, async (candidate) => {
-      const outcome = await this.probeOne(candidate, addressing, now);
+      const outcome = await this.probeOne(candidate, now);
       if (outcome === 'connected') tally.connected += 1;
       else if (outcome === 'not_connected') tally.notConnected += 1;
       else if (outcome === 'missing') tally.missing += 1;
@@ -234,18 +231,16 @@ export class ConnectSignalProbeService {
   }
 
   /** Reads one profile and writes what it proves. Never throws. */
-  private async probeOne(
-    candidate: ProbeCandidateRow,
-    addressing: RemnawaveUserAddressing | null,
-    now: Date,
-  ): Promise<ProbeReadOutcome> {
+  private async probeOne(candidate: ProbeCandidateRow, now: Date): Promise<ProbeReadOutcome> {
     try {
       const identity = storedIdentityOf(candidate);
       if (identity === null) return 'unaddressable';
       // Asked BEFORE the read, because the adapter answers an unaddressable
       // profile with the same `unavailable` as an outage — and an install whose
       // only candidates are unreachable-by-design must not read as a dead panel.
-      if (addressing !== null && panelUserAddress(identity, addressing).kind === 'impossible') {
+      // The one set of addressing rules the adapter builds every request by,
+      // whatever the version probe says — so nothing waits on the probe here.
+      if (panelUserAddress(identity).kind === 'impossible') {
         await recordProbeFailure(this.prismaService, candidate.id, now);
         return 'unaddressable';
       }
@@ -309,15 +304,6 @@ export class ConnectSignalProbeService {
       connectedAt: connectedAt.toISOString(),
       source: 'PROBE',
     });
-  }
-
-  /** The panel's addressing, or `null` when it cannot be read — then nothing is pre-judged unaddressable. */
-  private async readAddressing(): Promise<RemnawaveUserAddressing | null> {
-    try {
-      return (await this.remnawaveApiService.getPanelShape()).addressing;
-    } catch {
-      return null;
-    }
   }
 
   /** The operator's «Помощь с подключением» switches, for the ordering only. */

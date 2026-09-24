@@ -14,35 +14,34 @@ import {
   SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_CODE,
   SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_MESSAGE,
   SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
+  UNLINKED_SUBSCRIPTIONS_PATH,
 } from '../src/modules/remnawave/services/stale-panel-link';
 
 /**
  * THE STALE-LINK GUARD ON THE THIRD VERB: SUBSCRIPTION LINK REGENERATION.
  *
  * A SIBLING FILE RATHER THAN MORE OF `subscription-delete-stale-panel-link.spec.ts`,
- * on purpose. That file is about DELETION — five call sites, one shape test, two
- * codes — and is already a thousand lines. This is a different verb with a
+ * on purpose. That file is about DELETION; this is a different verb with a
  * different consequence (a rotation nothing can undo, rather than a removal that
  * can be re-provisioned), a different code, and a different flow to trace: the
  * regenerate endpoint issues TWO destructive panel calls behind ONE guard, and
- * the interesting assertions are about that arrangement. Keeping it separate
- * also keeps a mutation run legible — one file, one verb, one named victim per
- * mutation.
+ * the interesting assertions are about that arrangement.
  *
  * WHAT MAKES THIS VERB THE WORST OF THE THREE. `regeneratePanelUserSubscription`
  * names its target through the SAME `panelUserAddress` fallback — numeric fast
  * path → `remnawavePanelId` → the short uuid recovered from `config_url` →
- * `remnawavePanelUsername` — so on a 3.x panel a stale 2.x identity resolves to
- * whatever account is LIVE at that address and revokes ITS short uuid. Every
- * client link that customer holds dies at once and the panel cannot re-issue the
- * old value. A deletion can be re-provisioned and a device slot can be re-bound;
- * this cannot be walked back at all.
+ * `remnawavePanelUsername` — so a stale 2.x identity resolves to whatever
+ * account is LIVE at that address and revokes ITS short uuid. Every client link
+ * that customer holds dies at once and the panel cannot re-issue the old value.
+ *
+ * THE GUARD READS NO PANEL VERSION: a stored identity that is not a decimal names
+ * nobody on the only panel this build speaks. The harness's `getPanelShape`
+ * records and throws, so a guard that asked would show up in the call list.
  *
  * EVERY REFUSAL HERE PINS A POSITIVE SIDE. "No panel mutation happened" passes
  * just as happily for a controller that reached no code at all, so each refusal
  * is paired with an INERTNESS CONTROL driving the SAME harness with a healthy
- * link and asserting the exact arguments that arrive. The stubs are always
- * present and always record; the empty array is therefore a real zero.
+ * link and asserting the exact arguments that arrive.
  */
 
 /** A live 2.x uuid, in the spelling a 3.x panel can no longer answer to. */
@@ -54,17 +53,14 @@ const OLD_LINK = 'https://sub.example.test/OLDshortOLD';
 /** What the panel answers with when a rotation really does happen. */
 const NEW_LINK = 'https://sub.example.test/NEWshortNEW';
 
-type Addressing = 'id' | 'uuid' | 'unknown';
-
-/** One destructive panel call, with everything it was handed. */
+/** One destructive panel call, with every argument it was handed. */
 interface PanelMutation {
   readonly verb: 'rotate' | 'wipe';
-  readonly ref: unknown;
-  readonly era: unknown;
+  readonly args: unknown[];
 }
 
 interface RegeneratePanelHarness {
-  /** Every adapter method reached, in order — the era read included. */
+  /** Every adapter method reached, in order. */
   readonly calls: string[];
   /**
    * Every DESTRUCTIVE call, in order. Both stubs exist and both record, which
@@ -75,30 +71,22 @@ interface RegeneratePanelHarness {
   readonly api: unknown;
 }
 
-function regeneratePanelHarness(
-  options: { addressing?: Addressing; throws?: boolean } = {},
-): RegeneratePanelHarness {
+function regeneratePanelHarness(): RegeneratePanelHarness {
   const calls: string[] = [];
   const mutations: PanelMutation[] = [];
   const api = {
     getPanelShape: async () => {
       calls.push('getPanelShape');
-      if (options.throws === true) {
-        // Exactly how the era read fails in production: the probe goes out over
-        // the same transport as everything else, so an unreachable panel, an
-        // expired token or a panel mid-restart all arrive as a throw.
-        throw new Error('Remnawave version could not be read');
-      }
-      return { addressing: options.addressing ?? 'unknown' };
+      throw new Error('the panel version must not be read on a regenerate');
     },
-    regeneratePanelUserSubscription: async (ref: unknown, era: unknown) => {
+    regeneratePanelUserSubscription: async (...args: unknown[]) => {
       calls.push('regeneratePanelUserSubscription');
-      mutations.push({ verb: 'rotate', ref, era });
+      mutations.push({ verb: 'rotate', args });
       return { subscriptionUrl: NEW_LINK };
     },
-    deleteAllPanelUserDevices: async (ref: unknown, era: unknown) => {
+    deleteAllPanelUserDevices: async (...args: unknown[]) => {
       calls.push('deleteAllPanelUserDevices');
-      mutations.push({ verb: 'wipe', ref, era });
+      mutations.push({ verb: 'wipe', args });
       return { total: 0 };
     },
   };
@@ -141,13 +129,7 @@ function healthyRow(): SubscriptionRow {
   };
 }
 
-/** What `storedIdentityOf` builds from each row — asserted, never assumed. */
-const STALE_IDENTITY = {
-  remnawaveId: DEAD_UUID,
-  panelId: null,
-  panelUsername: null,
-  panelShortUuid: 'OLDshortOLD',
-};
+/** What `storedIdentityOf` builds from the healthy row — asserted, never assumed. */
 const HEALTHY_IDENTITY = {
   remnawaveId: LIVE_DECIMAL,
   panelId: 5150,
@@ -236,7 +218,7 @@ function refusalBodyOf(error: unknown): { code?: string; message?: string; statu
 
 describe('regenerating a subscription link is refused on a stale panel link', () => {
   it('THE PROOF: the rotation is refused, no panel mutation is issued, and the stored link is left alone', async () => {
-    const panel = regeneratePanelHarness({ addressing: 'id' });
+    const panel = regeneratePanelHarness();
     const harness = regenerateController(staleRow(), panel);
 
     const refusal = refusalBodyOf(
@@ -248,17 +230,12 @@ describe('regenerating a subscription link is refused on a stale panel link', ()
     assert.equal(
       refusal.message,
       SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
-      'reiwa serves a customer, who cannot open the Subscriptions page the operator sentence names',
+      'reiwa serves a customer, who cannot open the operator screen the operator sentence names',
     );
 
     // The whole point of the guard: it stands in front of STEP 1, so the panel
-    // is asked which era it is and then nothing else at all. Both destructive
-    // calls in this flow are downstream of the throw.
-    assert.deepEqual(
-      panel.calls,
-      ['getPanelShape'],
-      'the era read is the ONLY thing this path may ask the panel',
-    );
+    // is asked nothing at all — not its version, not a rotation, not a wipe.
+    assert.deepEqual(panel.calls, [], 'the panel is asked nothing on a stale link');
     assert.deepEqual(
       panel.mutations,
       [],
@@ -273,7 +250,19 @@ describe('regenerating a subscription link is refused on a stale panel link', ()
       'nothing rotated and nothing was lost, so the feed is not told a link went missing',
     );
     assert.equal(harness.errors.length, 1, 'the refusal is said out loud once, so it is traceable');
-    assert.match(harness.errors[0], /reconciliation/i);
+    assert.ok(harness.errors[0].includes(UNLINKED_SUBSCRIPTIONS_PATH));
+  });
+
+  it('an empty stored id is refused the same way — it names nobody either', async () => {
+    const panel = regeneratePanelHarness();
+    const harness = regenerateController(staleRow({ remnawaveId: '' }), panel);
+
+    const refusal = refusalBodyOf(
+      await rejectionOf(() => harness.controller.regenerateSubscription('123456789', 'sub-1')),
+    );
+
+    assert.equal(refusal.code, SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_CODE);
+    assert.deepEqual(panel.mutations, []);
   });
 
   it('INERTNESS CONTROL: the same harness DOES record a rotation when the link is healthy', async () => {
@@ -281,20 +270,17 @@ describe('regenerating a subscription link is refused on a stale panel link', ()
     // controller that crashed before reaching any of it. Same harness, same
     // stubs, one repaired row — and the assertion is on the ARGUMENTS, not on a
     // count.
-    const panel = regeneratePanelHarness({ addressing: 'id' });
+    const panel = regeneratePanelHarness();
     const harness = regenerateController(healthyRow(), panel);
 
     const result = await harness.controller.regenerateSubscription('123456789', 'sub-1');
 
     assert.deepEqual(result, { regenerated: true, url: NEW_LINK, devicesCleared: true });
-    assert.deepEqual(panel.calls, [
-      'getPanelShape',
-      'regeneratePanelUserSubscription',
-      'deleteAllPanelUserDevices',
-    ]);
+    assert.deepEqual(panel.calls, ['regeneratePanelUserSubscription', 'deleteAllPanelUserDevices']);
+    // The identity alone: no era rides along into either destructive call.
     assert.deepEqual(panel.mutations, [
-      { verb: 'rotate', ref: HEALTHY_IDENTITY, era: { addressing: 'id' } },
-      { verb: 'wipe', ref: HEALTHY_IDENTITY, era: { addressing: 'id' } },
+      { verb: 'rotate', args: [HEALTHY_IDENTITY] },
+      { verb: 'wipe', args: [HEALTHY_IDENTITY] },
     ]);
     // The new URL is stored, and the assertion names it: a persist of the OLD
     // url would satisfy a bare "one update happened".
@@ -307,40 +293,13 @@ describe('regenerating a subscription link is refused on a stale panel link', ()
     ]);
   });
 
-  it('ONE OBSERVATION: the era is read once and that same reading reaches both destructive calls', async () => {
-    // The defect the observation shape exists to close, restated on this flow.
-    // `getPanelShape()` caches a FAILURE for fifteen seconds, so two reads taken
-    // microseconds apart can legitimately disagree — and the disagreement that
-    // matters runs "the guard saw 'unknown', so proceed" into "the builder saw
-    // 'id', so fall back through panelId to whatever is live at that address".
-    // A guard that took its own reading would show up here as a second
-    // `getPanelShape`.
-    const panel = regeneratePanelHarness({ addressing: 'id' });
-    const harness = regenerateController(healthyRow(), panel);
-
-    await harness.controller.regenerateSubscription('123456789', 'sub-1');
-
-    assert.equal(
-      panel.calls.filter((call) => call === 'getPanelShape').length,
-      1,
-      'the era is observed exactly once per request; a second read is the defect, not a detail',
-    );
-    assert.equal(panel.mutations.length, 2);
-    assert.equal(
-      panel.mutations[0].era,
-      panel.mutations[1].era,
-      'the SAME object, not merely an equal one: one observation, carried by value',
-    );
-    assert.deepEqual(panel.mutations[0].era, { addressing: 'id' });
-  });
-
   it('the refusal is raised in front of STEP 1, so the device wipe is unreachable too', async () => {
     // Both panel calls in this flow are destructive on a stale link, and only
     // ONE guard stands in front of them. That is deliberate — step 1 rotates the
     // link, so a guard placed anywhere after it speaks too late — but it makes
     // this guard the sole protection for step 3 as well, and that has to be
     // pinned somewhere rather than inferred.
-    const panel = regeneratePanelHarness({ addressing: 'id' });
+    const panel = regeneratePanelHarness();
     const harness = regenerateController(staleRow(), panel);
 
     await rejectionOf(() => harness.controller.regenerateSubscription('123456789', 'sub-1'));
@@ -351,76 +310,6 @@ describe('regenerating a subscription link is refused on a stale panel link', ()
       'deleteAllPanelUserDevices unbinds every device of whatever the fallback resolved to',
     );
     assert.equal(panel.mutations.filter((mutation) => mutation.verb === 'rotate').length, 0);
-  });
-});
-
-// ── THE THREE ERAS THAT MUST NOT NOTICE THE GUARD ───────────────────────────
-
-describe('regeneration on a link that is NOT stale is untouched', () => {
-  it('3.x panel, current decimal identity: the ordinary regeneration is unchanged', async () => {
-    // The inverted-shape-test catcher. A guard that refused a decimal would make
-    // every correctly-linked subscription on a 3.x panel un-regenerable.
-    const panel = regeneratePanelHarness({ addressing: 'id' });
-    const harness = regenerateController(healthyRow(), panel);
-
-    const result = await harness.controller.regenerateSubscription('123456789', 'sub-1');
-
-    assert.deepEqual(result, { regenerated: true, url: NEW_LINK, devicesCleared: true });
-    assert.deepEqual(panel.mutations, [
-      { verb: 'rotate', ref: HEALTHY_IDENTITY, era: { addressing: 'id' } },
-      { verb: 'wipe', ref: HEALTHY_IDENTITY, era: { addressing: 'id' } },
-    ]);
-  });
-
-  it('2.x panel: a uuid identity is what that panel issued, so the rotation goes through', async () => {
-    // Installations still on 2.x must not notice this guard at all.
-    const panel = regeneratePanelHarness({ addressing: 'uuid' });
-    const harness = regenerateController(staleRow(), panel);
-
-    const result = await harness.controller.regenerateSubscription('123456789', 'sub-1');
-
-    assert.deepEqual(result, { regenerated: true, url: NEW_LINK, devicesCleared: true });
-    assert.deepEqual(panel.mutations, [
-      { verb: 'rotate', ref: STALE_IDENTITY, era: { addressing: 'uuid' } },
-      { verb: 'wipe', ref: STALE_IDENTITY, era: { addressing: 'uuid' } },
-    ]);
-    assert.deepEqual(harness.updates, [
-      { where: { id: 'sub-1' }, data: { configUrl: NEW_LINK } },
-    ]);
-  });
-
-  it('an unreadable era still regenerates — the fail-open is deliberate and stays', async () => {
-    // THIS STANCE IS NOT AN OVERSIGHT and is asserted here for the same reason
-    // it is asserted on the delete verbs. Version detection fails for the same
-    // reasons requests fail — an unreachable panel, an expired token, a panel
-    // mid-restart — so a refusal keyed on it would fire exactly when the panel
-    // is already answering with terminal errors, and would turn a customer's
-    // regenerate button into a second thing that is broken while it is down. On
-    // 'unknown' the address builder emits the stored string unchanged, which
-    // names the right account or nobody; a 3.x panel answers 400.
-    const panel = regeneratePanelHarness({ throws: true });
-    const harness = regenerateController(staleRow(), panel);
-
-    const result = await harness.controller.regenerateSubscription('123456789', 'sub-1');
-
-    assert.deepEqual(result, { regenerated: true, url: NEW_LINK, devicesCleared: true });
-    assert.deepEqual(panel.mutations, [
-      { verb: 'rotate', ref: STALE_IDENTITY, era: { addressing: 'unknown' } },
-      { verb: 'wipe', ref: STALE_IDENTITY, era: { addressing: 'unknown' } },
-    ]);
-  });
-
-  it('an era the panel reported as unknown behaves the same as an unreachable one', async () => {
-    const panel = regeneratePanelHarness({ addressing: 'unknown' });
-    const harness = regenerateController(staleRow(), panel);
-
-    const result = await harness.controller.regenerateSubscription('123456789', 'sub-1');
-
-    assert.deepEqual(result, { regenerated: true, url: NEW_LINK, devicesCleared: true });
-    assert.deepEqual(panel.mutations, [
-      { verb: 'rotate', ref: STALE_IDENTITY, era: { addressing: 'unknown' } },
-      { verb: 'wipe', ref: STALE_IDENTITY, era: { addressing: 'unknown' } },
-    ]);
   });
 });
 
@@ -526,10 +415,10 @@ describe('the regenerate refusal survives the real safe-exception filter', () =>
       SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_MESSAGE,
       SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
     );
-    assert.match(SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_MESSAGE, /reconciliation/i);
+    assert.ok(SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_MESSAGE.includes(UNLINKED_SUBSCRIPTIONS_PATH));
     assert.doesNotMatch(
       SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
-      /reconciliation|Subscriptions page/i,
+      /Подписки|Инструменты|reconciliation|Subscriptions page/i,
       'naming a screen the customer cannot open is a dead end, not a next step',
     );
     assert.match(

@@ -504,15 +504,15 @@ async function updateCleanupSettings(
 // ── Panel version & capabilities (auto-detected; drives version-gated UI) ─────
 //
 // Hand-mirrored from `src/modules/remnawave/services/remnawave-version.service.ts`.
-// Keep the unions three-valued in both places: the backend really does send
-// `'unknown'` whenever version detection fails, and a two-valued mirror would
-// make every `=== 'uuid'` comparison here silently take a branch that talks to
-// a live panel the wrong way.
+// This build speaks Remnawave 3.x only, so each union has one real value and
+// `'unknown'`: the backend sends `'unknown'` whenever the version could not be
+// read OR is not 3.x. The 2.x values (`'uuid'`, `'ip-control'`) are gone on both
+// sides — a payload still carrying one degrades to `'unknown'` below.
 
-/** Mirrors `RemnawaveUserAddressing`. `'unknown'` = detection failed. */
-export type RemnawaveUserAddressing = "uuid" | "id" | "unknown";
-/** Mirrors `RemnawaveConnectionsApi`. `'unknown'` = detection failed. */
-export type RemnawaveConnectionsApi = "ip-control" | "connections" | "unknown";
+/** Mirrors `RemnawaveUserAddressing`. `'unknown'` = not a readable 3.x. */
+export type RemnawaveUserAddressing = "id" | "unknown";
+/** Mirrors `RemnawaveConnectionsApi`. `'unknown'` = not a readable 3.x. */
+export type RemnawaveConnectionsApi = "connections" | "unknown";
 
 export interface RemnawaveCapabilities {
   version: string | null;
@@ -520,6 +520,12 @@ export interface RemnawaveCapabilities {
   minor: number | null;
   patch: number | null;
   supported: boolean;
+  /**
+   * The panel is Remnawave 2.x. The server refuses every request to it, so the
+   * page says "update the panel" rather than "untested version". False when the
+   * version could not be read — an unreadable version is never refused.
+   */
+  tooOld: boolean;
   reachable: boolean;
   liveIpControl: boolean;
   bandwidthNodesUsers: boolean;
@@ -528,12 +534,8 @@ export interface RemnawaveCapabilities {
   userLookups: { byTelegramId: boolean; byEmail: boolean };
 }
 
-const USER_ADDRESSING_VALUES: readonly RemnawaveUserAddressing[] = ["uuid", "id", "unknown"];
-const CONNECTIONS_API_VALUES: readonly RemnawaveConnectionsApi[] = [
-  "ip-control",
-  "connections",
-  "unknown",
-];
+const USER_ADDRESSING_VALUES: readonly RemnawaveUserAddressing[] = ["id", "unknown"];
+const CONNECTIONS_API_VALUES: readonly RemnawaveConnectionsApi[] = ["connections", "unknown"];
 
 /** What an absent/malformed payload degrades to: nothing known, nothing enabled. */
 const UNKNOWN_CAPABILITIES: RemnawaveCapabilities = {
@@ -542,6 +544,7 @@ const UNKNOWN_CAPABILITIES: RemnawaveCapabilities = {
   minor: null,
   patch: null,
   supported: false,
+  tooOld: false,
   reachable: false,
   liveIpControl: false,
   bandwidthNodesUsers: false,
@@ -585,6 +588,7 @@ export function normalizeCapabilities(raw: unknown): RemnawaveCapabilities {
     minor: pickNumber(record.minor),
     patch: pickNumber(record.patch),
     supported: record.supported === true,
+    tooOld: record.tooOld === true,
     reachable: record.reachable === true,
     liveIpControl: record.liveIpControl === true,
     bandwidthNodesUsers: record.bandwidthNodesUsers === true,

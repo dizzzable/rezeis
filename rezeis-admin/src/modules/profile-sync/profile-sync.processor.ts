@@ -1,7 +1,6 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import {
-  EffectiveProjectionState,
   Prisma,
   SubscriptionStatus,
   SubscriptionTermStatus,
@@ -14,7 +13,6 @@ import { createHash } from 'node:crypto';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
-import { resolveAddOnRolloutFlags } from '../add-on-entitlements/add-on-rollout.config';
 import type { PanelCommandOutcome } from '../remnawave/services/panel-command.executor';
 import { PANEL_USER_NOT_FOUND_ERROR_CODES } from '../remnawave/services/panel-routes';
 import {
@@ -32,7 +30,7 @@ import {
 import { toPanelExpireAt } from '../remnawave/services/panel-expiry';
 import { RemnawaveWebhookService } from '../remnawave/services/remnawave-webhook.service';
 import {
-  isUuidShapedPanelIdentity,
+  isStalePanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
 } from '../remnawave/services/stale-panel-link';
 import { toPanelDeviceLimit, toPanelTrafficLimitBytes } from '../remnawave/utils/panel-limit-wire.util';
@@ -47,7 +45,12 @@ import {
   takePanelAnswerStatus,
   type PanelAnswerPush,
 } from './panel-answer-status';
-import { readProfileOwnerMarker, readProfileOwnerMarkers } from './panel-owner-marker';
+import {
+  readProfileOwnerMarker,
+  readProfileOwnerMarkers,
+  readProfileSubscriptionMarkers,
+  subscriptionMarkerAllows,
+} from './panel-owner-marker';
 import { ProfileSyncQueueService } from './profile-sync-queue.service';
 import { RemnawaveProfileNamingService } from './remnawave-profile-naming.service';
 
@@ -79,7 +82,8 @@ interface ProfileSyncJobData {
  * WHAT DID NOT GO AWAY is the stale STORED identity. `Subscription.remnawaveId`
  * still holds whatever spelling was current when the row was linked, so a row
  * provisioned before the operator upgraded still carries a 2.x uuid that this
- * panel answers to for NOBODY — see {@link ProfileSyncProcessor.handleDelete}.
+ * panel answers to for NOBODY — see {@link ProfileSyncProcessor.handleDelete}
+ * and `stale-panel-link.ts`.
  */
 @Processor(PROFILE_SYNC_QUEUE, { concurrency: PROFILE_SYNC_CONCURRENCY })
 export class ProfileSyncProcessor extends WorkerHost {
@@ -183,11 +187,6 @@ export class ProfileSyncProcessor extends WorkerHost {
       if (completed.count !== 1) {
         return;
       }
-
-      // Converge: now that the latest desired revision has been applied,
-      // supersede any older-revision, non-terminal versioned sibling jobs for
-      // the same aggregate so they never re-push a stale state upstream.
-      await this.supersedeOlderSiblings(syncJob);
     } catch (err: unknown) {
       const outcome = await this.recordFailure(this.prismaService, syncJob, err, leaseStartedAt);
       this.reportFailure(syncJob, err, outcome);
@@ -212,15 +211,6 @@ export class ProfileSyncProcessor extends WorkerHost {
     }
 
     if (syncJob.status === SyncJobStatus.COMPLETED || syncJob.supersededAt != null) {
-      return null;
-    }
-
-    // A versioned job (carries aggregateKey + desiredRevision) must only push
-    // the LATEST desired state. If the authoritative projection has already
-    // advanced past this job's revision, this job is stale: supersede it (no
-    // upstream write) so an out-of-order older revision can never overwrite a
-    // newer one. Non-versioned jobs and the flag-off path are untouched.
-    if (await this.supersedeIfStaleRevision(syncJob)) {
       return null;
     }
 
@@ -606,267 +596,6 @@ export class ProfileSyncProcessor extends WorkerHost {
         `Sync job ${job.id}: the status it sent (${sent}) was not recorded: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-  }
-
-  /**
-   * Versioned desired-state write (T-009/T-010). Returns `true` when it fully
-   * handled the update (caller stops). Flag-gated by `projectionSync` and only
-   * for versioned jobs (aggregateKey + desiredRevision) with an existing panel
-   * profile and projection. Absolute limit PATCH → INDEPENDENT read-back →
-   * advance `lastAppliedRevision` only on equality (else record drift and throw
-   * so BullMQ retries / the sweep re-drives). Transient panel failures throw
-   * (retry); returns `false` to fall back to the legacy absolute update
-   * otherwise.
-   *
-   * THE READ-BACK IS A SECOND REQUEST AND NOT THE PATCH'S OWN ANSWER, which is
-   * the whole point of this path: the panel echoing what we just sent proves
-   * only that it read the body. `GET /api/users/{id}` proves it STORED it.
-   *
-   * The canonical `null`-means-unlimited encoding the strict adapter used to
-   * perform now happens here, because the client hands back the panel's own
-   * numbers: upstream `0` (and, on 3.3.x, an explicit `null` for
-   * `hwidDeviceLimit`) both mean unlimited, and the projection spells unlimited
-   * `null`. Comparing the raw values instead would call `0` and `null`
-   * different and mark every unlimited plan DRIFTED forever.
-   */
-  private async tryVersionedDesiredStateWrite(
-    syncJob: SyncJobRecord,
-    client: Prisma.TransactionClient | PrismaService = this.prismaService,
-  ): Promise<boolean> {
-    if (!resolveAddOnRolloutFlags().projectionSync) return false;
-    if (syncJob.aggregateKey === null || syncJob.desiredRevision === null) return false;
-    const subscription = syncJob.subscription;
-    if (subscription.remnawaveId === null) return false;
-
-    const projection = await client.subscriptionEffectiveProjection.findUnique({
-      where: { subscriptionId: subscription.id },
-      select: { desiredRevision: true, desiredTrafficLimitBytes: true, desiredDeviceLimit: true },
-    });
-    if (projection === null) return false;
-
-    const planSnapshot = readRecord(subscription.planSnapshot);
-    const identity = panelIdentityOf(subscription);
-    if (identity === null) return false;
-    const address = await this.panelUserIdFor(identity);
-    if (address.kind !== 'ok') {
-      throw this.panelFailure(address, `Desired-state PATCH for subscription ${subscription.id}`);
-    }
-    const userId = address.userId;
-
-    const strategy = readOptionalString(planSnapshot, 'trafficLimitStrategy');
-    const setOutcome = await this.panelUsers.updateUser({
-      id: userId,
-      // Unlimited is `null` locally and `0` upstream, on both fields.
-      trafficLimitBytes: Number(projection.desiredTrafficLimitBytes ?? 0n),
-      hwidDeviceLimit: projection.desiredDeviceLimit ?? 0,
-      tag: readOptionalString(planSnapshot, 'tag'),
-      // Never nullable upstream: an absent field means "leave the panel's own
-      // strategy alone", which is exactly what a plan with no opinion wants and
-      // the only encoding the route accepts.
-      ...(strategy === null ? {} : { trafficLimitStrategy: strategy as PanelResetPeriod }),
-      activeInternalSquads: subscription.internalSquads,
-      externalSquadUuid: subscription.externalSquad,
-    });
-    if (setOutcome.kind !== 'ok') {
-      throw this.panelFailure(
-        readPanelFailure(setOutcome),
-        `Desired-state PATCH for subscription ${subscription.id}`,
-      );
-    }
-
-    const readOutcome = await this.panelUsers.getUserById(userId);
-    if (readOutcome.kind !== 'ok') {
-      throw this.panelFailure(
-        readPanelFailure(readOutcome),
-        `Desired-state read-back for subscription ${subscription.id}`,
-      );
-    }
-    const observed = readOutcome.data.response;
-
-    // Second back-fill channel — and it now carries the username as well as the
-    // id, because the read is the panel's whole user row rather than the nine
-    // fields the strict decoder used to keep. The id is still the one that
-    // matters (it is what the path segment is built from); the username is the
-    // last resort when no id was ever recorded.
-    await this.backfillPanelIdentity(subscription, {
-      panelId: observed.id,
-      username: observed.username,
-    });
-
-    const bigintEq = (left: bigint | null, right: bigint | null): boolean =>
-      left === null ? right === null : right !== null && left === right;
-    const observedTrafficLimitBytes = canonicalTrafficLimit(observed.trafficLimitBytes);
-    const observedDeviceLimit = canonicalDeviceLimit(observed.hwidDeviceLimit);
-    const matches =
-      bigintEq(observedTrafficLimitBytes, projection.desiredTrafficLimitBytes) &&
-      observedDeviceLimit === projection.desiredDeviceLimit;
-    const now = new Date();
-
-    if (matches) {
-      // Advance applied revision only for THIS revision (guarded so a concurrent
-      // newer projection is never stamped applied by a stale write).
-      await client.subscriptionEffectiveProjection.updateMany({
-        where: { subscriptionId: subscription.id, desiredRevision: projection.desiredRevision },
-        data: {
-          state: EffectiveProjectionState.APPLIED,
-          lastAppliedRevision: projection.desiredRevision,
-          lastAppliedAt: now,
-          observedTrafficLimitBytes,
-          observedDeviceLimit,
-          observedAt: now,
-          // NULL, and not any contract version of ours. The column records
-          // what the PANEL said its build was, and the user routes do not say —
-          // the strict adapter read it off an envelope field 3.x does not send,
-          // so it was already null on every 3.x answer. Writing a version of
-          // ours here would put a number in an operator-facing column that
-          // describes us rather than them.
-          observedContractVersion: null,
-          driftClass: null,
-        },
-      });
-      // The read-back is the profile after the PATCH: its status too. This
-      // PATCH carries limits only, never a status.
-      await this.takeAnswerStatus(syncJob, observed, subscription.status, {
-        sent: null,
-        ownerBlocked: subscription.user?.isBlocked === true,
-      });
-      const deleteJobId = await this.ensureDeleteJobIfDeleted(
-        subscription.id,
-        panelIdentityOf(subscription),
-        panelTimestamp(observed.createdAt),
-        client,
-      );
-      if (deleteJobId !== null) {
-        await this.enqueueCompensatingDelete(deleteJobId);
-      }
-      this.logger.log(
-        `Applied desired revision ${projection.desiredRevision} for subscription ${subscription.id}`,
-      );
-      return true;
-    }
-
-    await client.subscriptionEffectiveProjection.updateMany({
-      where: { subscriptionId: subscription.id, desiredRevision: projection.desiredRevision },
-      data: {
-        state: EffectiveProjectionState.DRIFTED,
-        observedTrafficLimitBytes,
-        observedDeviceLimit,
-        observedAt: now,
-        observedContractVersion: null,
-        driftClass: 'LIMIT_MISMATCH',
-      },
-    });
-    throw new Error(`Desired-state drift after read-back for subscription ${subscription.id}`);
-  }
-
-  /**
-   * Versioned-convergence stale check (flag-gated by `projectionSync`).
-   *
-   * Returns `true` when the job was superseded (caller must stop). A job is
-   * stale when it carries a `desiredRevision` for its `aggregateKey` but the
-   * authoritative {@link SubscriptionEffectiveProjection} has already advanced
-   * past it — applying it would push an out-of-order older desired state.
-   * Non-versioned jobs (no aggregateKey/revision) and the flag-off path always
-   * return `false` (legacy behavior, no projection read).
-   */
-  private async supersedeIfStaleRevision(
-    syncJob: SyncJobRecord,
-    client: Prisma.TransactionClient | PrismaService = this.prismaService,
-  ): Promise<boolean> {
-    if (!resolveAddOnRolloutFlags().projectionSync) return false;
-    const aggregateKey = syncJob.aggregateKey;
-    const jobRevision = syncJob.desiredRevision;
-    if (aggregateKey === null || jobRevision === null) return false;
-
-    const projection = await client.subscriptionEffectiveProjection.findUnique({
-      where: { subscriptionId: aggregateKey },
-      select: { desiredRevision: true },
-    });
-    if (projection === null || projection.desiredRevision <= jobRevision) {
-      // Not stale by revision — but a queued retirement (DELETE) for the same
-      // aggregate takes priority over a CREATE/UPDATE/TRAFFIC_RESET push: the
-      // profile is about to be removed, so applying a limit is wrong. DELETE
-      // jobs themselves are never blocked here.
-      if (syncJob.action !== SyncAction.DELETE && (await this.hasPendingDelete(aggregateKey, client))) {
-        await this.markSuperseded(syncJob.id, 'SUPERSEDED_BY_DELETE', client);
-        return true;
-      }
-      return false;
-    }
-
-    await this.markSuperseded(syncJob.id, 'SUPERSEDED_BY_REVISION', client);
-    this.logger.log(
-      `Superseded stale profile-sync job ${syncJob.id} (revision ${jobRevision} < projection ${projection.desiredRevision}) for aggregate ${aggregateKey}`,
-    );
-    return true;
-  }
-
-  /** True when a non-terminal DELETE job exists for the aggregate's subscription. */
-  private async hasPendingDelete(
-    subscriptionId: string,
-    client: Prisma.TransactionClient | PrismaService = this.prismaService,
-  ): Promise<boolean> {
-    const pendingDeletes = await client.profileSyncJob.findMany({
-      where: {
-        subscriptionId,
-        action: SyncAction.DELETE,
-        supersededAt: null,
-        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.RUNNING, SyncJobStatus.FAILED] },
-      },
-      select: { id: true },
-      take: 1,
-    });
-    return pendingDeletes.length > 0;
-  }
-
-  /** Terminal supersession via `supersededAt` (no dedicated enum value). */
-  private async markSuperseded(
-    syncJobId: string,
-    cause: string,
-    client: Prisma.TransactionClient | PrismaService = this.prismaService,
-  ): Promise<void> {
-    await client.profileSyncJob.updateMany({
-      where: {
-        id: syncJobId,
-        supersededAt: null,
-        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.FAILED] },
-      },
-      data: {
-        supersededAt: new Date(),
-        status: SyncJobStatus.COMPLETED,
-        cause,
-      },
-    });
-  }
-
-  /**
-   * After the latest desired revision is applied, mark every older-revision,
-   * non-terminal versioned sibling for the same aggregate as superseded so a
-   * queued or previously-failed stale revision never re-pushes upstream. No-op
-   * for non-versioned jobs and when the flag is off.
-   */
-  private async supersedeOlderSiblings(
-    syncJob: SyncJobRecord,
-    client: Prisma.TransactionClient | PrismaService = this.prismaService,
-  ): Promise<void> {
-    if (!resolveAddOnRolloutFlags().projectionSync) return;
-    const aggregateKey = syncJob.aggregateKey;
-    const jobRevision = syncJob.desiredRevision;
-    if (aggregateKey === null || jobRevision === null) return;
-
-    await client.profileSyncJob.updateMany({
-      where: {
-        aggregateKey,
-        desiredRevision: { lt: jobRevision },
-        supersededAt: null,
-        status: { in: [SyncJobStatus.PENDING, SyncJobStatus.FAILED] },
-      },
-      data: {
-        supersededAt: new Date(),
-        status: SyncJobStatus.COMPLETED,
-        cause: 'SUPERSEDED_BY_REVISION',
-      },
-    });
   }
 
   private async handleCreate(
@@ -1270,6 +999,13 @@ export class ProfileSyncProcessor extends WorkerHost {
    *    marker, so a profile an earlier attempt made always carries it. Under
    *    the RECORDED name the customer it was recorded for counts as well: an
    *    account merge between two attempts moves the row, not the marker.
+   *  • no `subscription_id` line names ANOTHER subscription. Newer profiles
+   *    carry that line beside `reiwa_id` (`subscriptionMarkerLine`); when it is
+   *    there, it must name this subscription — the owner's rule for every
+   *    automatic link (`subscriptionMarkerAllows`). A profile provisioned for
+   *    another of this customer's subscriptions is that subscription's, even
+   *    when no live row holds it any more. A profile without the line predates
+   *    it and is judged by the other two tests alone.
    *  • no other live subscription is on it. The marker says WHOSE profile it
    *    is and nothing about which of that user's subscriptions holds it.
    *    Adopting one another live subscription is on puts two rows on one panel
@@ -1355,6 +1091,14 @@ export class ProfileSyncProcessor extends WorkerHost {
         this.logger.warn(
           `Remnawave profile '${name}' is not provably user ${subscription.userId}'s ` +
             `(reiwa_id line: ${owner ?? 'none'}); not adopting it for subscription ${subscription.id}`,
+        );
+        continue;
+      }
+      if (!subscriptionMarkerAllows(existing.description, subscription.id)) {
+        this.logger.warn(
+          `Remnawave profile '${name}' is user ${subscription.userId}'s, but its subscription_id ` +
+            `line names another subscription (${readProfileSubscriptionMarkers(existing.description).join(', ')}); ` +
+            `not adopting it for subscription ${subscription.id}`,
         );
         continue;
       }
@@ -1633,12 +1377,6 @@ export class ProfileSyncProcessor extends WorkerHost {
 
   private async handleUpdate(syncJob: SyncJobRecord): Promise<void> {
     let current = (await this.loadSyncJob(this.prismaService, syncJob.id)) ?? syncJob;
-
-    // Versioned desired-state write (T-009/T-010, flag-gated) already rereads
-    // the current projection and verifies a strict panel read-back.
-    if (await this.tryVersionedDesiredStateWrite(current)) {
-      return;
-    }
 
     // Legacy absolute updates are external calls and must stay outside any DB
     // transaction. Converge after an out-of-order call by rereading the live
@@ -2170,9 +1908,10 @@ export class ProfileSyncProcessor extends WorkerHost {
         // handed a dead end: the tool that resolves exactly this pair already
         // exists, is not on the user card where the alert is felt, and previews
         // by default so reading this message is never a risk.
-        'Untangle them before deleting either: run the duplicate-subscription merge on the ' +
-        'Subscriptions page. It previews by default, keeps the OLDER row (the one carrying ' +
-        'the history and payments), and moves the panel identity onto it.';
+        'Untangle them before deleting either: run the duplicate-subscription merge ' +
+        '(«Подписки» → «Инструменты» → «Слияние подписок-дубликатов»). It previews by default, ' +
+        'keeps the OLDER row (the one carrying the history and payments), and moves the panel ' +
+        'identity onto it.';
       this.logger.error(message);
       this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', message, {
         subscriptionId: subscription.id,
@@ -2184,9 +1923,9 @@ export class ProfileSyncProcessor extends WorkerHost {
           'Две живые подписки записаны на один профиль Remnawave. Они перезаписывают друг другу срок ' +
           'и лимиты, а удаление любой из них панель теперь не выполняет — оно снесло бы профиль второй.',
         nextSteps:
-          'Откройте «Подписки» → «Слияние подписок-дубликатов» и начните с предпросмотра — он ничего ' +
-          'не меняет. Слияние оставляет СТАРШУЮ подписку (с историей и платежами) и переносит на неё ' +
-          'профиль. Не удаляйте ни одну из пары вручную.',
+          'Откройте «Подписки» → «Инструменты» → «Слияние подписок-дубликатов» и начните с ' +
+          'предпросмотра — он ничего не меняет. Слияние оставляет СТАРШУЮ подписку (с историей и ' +
+          'платежами) и переносит на неё профиль. Не удаляйте ни одну из пары вручную.',
       });
     } catch (err: unknown) {
       // The identity was already recorded, which is the part that matters.
@@ -2396,30 +2135,25 @@ export class ProfileSyncProcessor extends WorkerHost {
     // THROWN, not skipped, matching the collision refusal immediately above:
     // the job is recorded FAILED and `reportFailure` tells an operator, where a
     // silent skip would report COMPLETED and leave a live profile that
-    // everything downstream believes is gone. The message carries none of
-    // `timeout|temporar|econn|429|502|503|504|unavailable`, so
-    // `classifyRecovery` reads this plain `Error` as TERMINAL rather than
-    // retrying it forever.
+    // everything downstream believes is gone.
     //
-    // THE ERA IS NO LONGER OBSERVED, AND THE GUARD IS NOT WEAKER FOR IT. This
-    // used to take one reading of the panel shape and use it twice — once to
-    // judge the stored identity, once to build the address — precisely so the
-    // two could not disagree across the fifteen-second negative cache. The
-    // panel is 3.x now, unconditionally, so there is one era and nothing left
-    // for two readings to disagree about; what survives is the SHAPE TEST on
-    // the stored identity, which is the half that was ever load-bearing.
+    // A `PanelRefusedError`, NOT a plain `Error`: `classifyRecovery` reads the
+    // CLASS first and TERMINAL follows from it. A plain `Error` is classified by
+    // scanning its message for `429|502|503|504|…`, and this message names the
+    // stored identity and the subscription — a uuid or a cuid carrying `503`
+    // made the refusal TRANSIENT, and the recovery sweep then retried it every
+    // five minutes, forever, with no operator alert.
     //
-    // `contains '-'` is the whole test and it is exact rather than approximate:
-    // a panel id is decimal and can never carry a hyphen, a uuid always does.
-    // The same spelling `selectBrokenLinks` uses for its stale population, so
-    // the refusal and the remedy describe one set of rows.
-    if (isUuidShapedPanelIdentity(targetRemnawaveId)) {
-      throw new Error(
+    // THE TEST IS THE SAFETY NET'S (`isStalePanelIdentity`: not a decimal), the
+    // one every destructive path and the boot count share. It reads no panel
+    // version: a decimal target proceeds and a non-decimal one — a 2.x uuid, an
+    // empty string, imported junk — is refused however the panel answers.
+    if (isStalePanelIdentity(targetRemnawaveId)) {
+      throw new PanelRefusedError(
         `${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE}: refusing to delete Remnawave profile ` +
-          `'${targetRemnawaveId}' for subscription ${subscription.id} — that is a 2.x uuid and ` +
-          'the panel answers only to 3.x numeric ids, so it no longer names the profile this job ' +
-          'was written for and the address fallback would resolve it to whatever is live at that ' +
-          'address. Run the panel-link reconciliation, then retry this job.',
+          `'${targetRemnawaveId}' for subscription ${subscription.id} — that is not a 3.x numeric ` +
+          'id, so it no longer names the profile this job was written for and the address ' +
+          'fallback would resolve it to whatever is live at that address. Nothing was deleted.',
       );
     }
 
@@ -2732,9 +2466,8 @@ export type PanelUserAddress =
  * The NUMERIC id `PanelUsersClient` wants, out of the identity a subscription
  * row carries.
  *
- * `panelUserAddress(identity, 'id')` is asked rather than re-implemented, and
- * `'id'` is passed as a CONSTANT rather than as a discovered era: this build
- * talks to 3.x only. Its documented fallback chain is what keeps a
+ * `panelUserAddress(identity)` is asked rather than re-implemented: this build
+ * talks to 3.x only, and so does it. Its documented fallback chain is what keeps a
  * 2.x-provisioned row addressable — stored decimal → `remnawavePanelId` → the
  * subscription short uuid recovered from `config_url` → the panel username —
  * and the last two need a `POST /api/users/resolve` round-trip, which is why
@@ -2752,15 +2485,14 @@ export type PanelUserAddress =
  * adapter this replaces, which threw `ServiceUnavailableException` for it. That
  * reads TRANSIENT to {@link classifyRecovery}, so a row holding a dead uuid
  * with no id, no short uuid and no username retried every five minutes forever
- * and never raised an operator alert — the hole `panel-user-address.ts` names
- * in its own `'unknown'` branch. Nothing about such a row changes on its own,
- * so the honest answer is the one somebody is told about.
+ * and never raised an operator alert. Nothing about such a row changes on its
+ * own, so the honest answer is the one somebody is told about.
  */
 export async function resolvePanelUserId(
   panelUsers: PanelUsersClient,
   identity: StoredPanelIdentity,
 ): Promise<PanelUserAddress> {
-  const address = panelUserAddress(identity, 'id');
+  const address = panelUserAddress(identity);
   if (address.kind === 'impossible') {
     return { kind: 'terminal', detail: address.reason };
   }
@@ -2931,22 +2663,6 @@ const PANEL_USER_NOT_FOUND_CODES: ReadonlySet<string> = new Set(PANEL_USER_NOT_F
 
 /** The `trafficLimitStrategy` values the contract accepts, named once. */
 type PanelResetPeriod = NonNullable<UpdatePanelUserBody['trafficLimitStrategy']>;
-
-/**
- * The canonical local encoding of "unlimited", out of the panel's own numbers.
- *
- * Upstream `0` means unlimited on both limit fields, and 3.3.x additionally
- * answers `null` for `hwidDeviceLimit`. The projection spells unlimited `null`,
- * so comparing the panel's raw value against it would call `0` and `null`
- * different and mark every unlimited plan DRIFTED forever.
- */
-function canonicalTrafficLimit(value: number): bigint | null {
-  return value === 0 ? null : BigInt(value);
-}
-
-function canonicalDeviceLimit(value: number | null): number | null {
-  return value === null || value === 0 ? null : value;
-}
 
 /**
  * The panel's numeric id off a user row, or `null` when the row cannot supply
@@ -3343,16 +3059,18 @@ export function syncFailedForGoodCopy(
       };
     case SyncAction.DELETE:
       // The processor's own guards refuse before Remnawave is asked. Two say
-      // the profile is another subscription's; one, that a 2.x uuid would now
-      // resolve to whoever is live at that address.
+      // the profile is another subscription's; one, that an identity which is
+      // not a decimal (a 2.x uuid) would now resolve to whoever is live at that
+      // address.
       if (errorMessage.startsWith(`${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE}:`)) {
         return {
           why:
             `${failed}Панель не стала удалять профиль: у подписки сохранён идентификатор Remnawave 2.x, и ` +
             'по нему панель 3.x нашла бы чужой профиль.',
           nextSteps:
-            'Запустите «Подписки» → «Починка привязки к панели». Если профиль этого пользователя после ' +
-            'этого остался в Remnawave, удалите его вручную: подписка в панели уже удалена.',
+            'Подписка в панели уже удалена, а её профиль, скорее всего, остался в Remnawave: найдите его ' +
+            'там по имени профиля этого пользователя и удалите вручную. Повторять задачу не нужно — ' +
+            'по этому идентификатору панель 3.x профиль не найдёт.',
         };
       }
       return /^Refusing to delete Remnawave profile/.test(errorMessage)

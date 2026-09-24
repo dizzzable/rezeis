@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 
 import {
   BadRequestException,
+  ConflictException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -19,6 +20,10 @@ import {
   panelUserAddress,
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
+import {
+  staleDeviceDeleteRefusalBody,
+  SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE,
+} from '../src/modules/remnawave/services/stale-panel-link';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
 import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 import { OPERATOR_LIMIT_SOURCE } from '../src/modules/anti-fraud/detectors/sharing-detectors';
@@ -27,11 +32,11 @@ import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * The one message `linkRemnawaveProfile` gives an operator whose identifier is
- * neither shape. Asserted verbatim below because it is the whole remedy: the
- * operator cannot see the regex, only this sentence.
+ * not the numeric profile id. Asserted verbatim below because it is the whole
+ * remedy: the operator cannot see the regex, only this sentence.
  */
 const REMNAWAVE_ID_REQUIRED_MESSAGE =
-  'A valid Remnawave profile identifier is required: a UUID (panel 2.x) or a numeric profile id (panel 3.x)';
+  'A valid Remnawave profile identifier is required: the numeric profile id shown by panel 3.x';
 
 /**
  * The refusal an operator gets when the profile they pasted is already held by
@@ -366,39 +371,48 @@ describe('AdminUserSubscriptionsController', () => {
     assert.deepStrictEqual(warned, []);
   });
 
-  it('repairs an unlinked legacy subscription only after verifying a unique panel UUID', async () => {
+  // ── A stale link is repaired here too, under the same proof ──────────────
+  //
+  // A row that still stores a 2.x uuid names nobody on a 3.x panel, and every
+  // destructive path refuses it. The automatic link check re-links the ones it
+  // can prove; the rest are listed for an operator, whose remedy is this
+  // endpoint (owner's decision, 24.09.2026). Only a STALE id is overwritten — a
+  // decimal is a working link, and replacing it here would move a paying
+  // customer onto a profile somebody typed.
+
+  it('overwrites a stale 2.x link with the same ownership proof, and the audit row keeps the id it replaced', async () => {
+    const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
     const updateCalls: unknown[] = [];
-    const auditCalls: unknown[] = [];
+    const auditCalls: Array<{ data: { metadata: Record<string, unknown> } }> = [];
     const controller = new AdminUserSubscriptionsController(
       {
         subscription: {
           findUnique: async () => ({
             id: 'legacy-subscription',
             userId: 'user-1',
-            remnawaveId: null,
+            remnawaveId: staleUuid,
             configUrl: null,
             user: { id: 'user-1', telegramId: BigInt(42), email: null },
           }),
           findFirst: async () => null,
           update: async (input: unknown) => {
             updateCalls.push(input);
-            return { id: 'legacy-subscription', remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' };
+            return { id: 'legacy-subscription', remnawaveId: '4471' };
           },
         },
-        adminAuditLog: { create: async (input: unknown) => auditCalls.push(input) },
+        adminAuditLog: {
+          create: async (input: { data: { metadata: Record<string, unknown> } }) => auditCalls.push(input),
+        },
       } as never,
       {
         getPanelUserOutcome: async () => ({
           kind: 'ok',
           user: {
             subscriptionUrl: 'https://panel.example.test/sub',
+            // The proof: the Telegram id matches the customer's.
             telegramId: 42,
             email: null,
             description: null,
-            // A real panel row carries both on every supported version, and the
-            // verification read already has them in hand. Recording them is what
-            // keeps a link repaired on 2.x addressable after the upgrade that
-            // destroys the uuid it was repaired with.
             panelId: 4471,
             username: 'rz_bob_1',
           },
@@ -413,16 +427,16 @@ describe('AdminUserSubscriptionsController', () => {
 
     const result = await controller.linkRemnawaveProfile(
       'legacy-subscription',
-      { remnawaveId: ' f47ac10b-58cc-4372-a567-0e02b2c3d479 ' },
+      { remnawaveId: ' 4471 ' },
       { id: 'admin-1' } as never,
       { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
     );
 
-    assert.deepStrictEqual(result, { id: 'legacy-subscription', remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' });
+    assert.deepStrictEqual(result, { id: 'legacy-subscription', remnawaveId: '4471' });
     assert.deepStrictEqual(updateCalls, [{
       where: { id: 'legacy-subscription' },
       data: {
-        remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        remnawaveId: '4471',
         remnawavePanelId: 4471,
         remnawavePanelUsername: 'rz_bob_1',
         configUrl: 'https://panel.example.test/sub',
@@ -431,6 +445,106 @@ describe('AdminUserSubscriptionsController', () => {
       },
     }]);
     assert.equal(auditCalls.length, 1);
+    assert.equal(auditCalls[0]?.data.metadata['previousRemnawaveId'], staleUuid);
+    assert.equal(auditCalls[0]?.data.metadata['remnawaveId'], '4471');
+    assert.equal(auditCalls[0]?.data.metadata['ownershipVerifiedBy'], 'telegram_id');
+  });
+
+  it('an overwrite of a stale link needs the same proof: with none, it refuses and writes nothing', async () => {
+    let updated = false;
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({
+            id: 'legacy-subscription',
+            userId: 'user-1',
+            remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+            configUrl: null,
+            user: { id: 'user-1', telegramId: BigInt(42), email: null },
+          }),
+          findFirst: async () => null,
+          update: async () => { updated = true; return {}; },
+        },
+      } as never,
+      {
+        getPanelUserOutcome: async () => ({
+          kind: 'ok',
+          user: {
+            subscriptionUrl: 'https://panel.example.test/sub',
+            telegramId: 99,
+            email: null,
+            description: null,
+            panelId: 4471,
+            username: 'rz_somebody',
+          },
+        }),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      NOT_IN_TERM_MODEL as never,
+    );
+
+    const failure = await captureRejection(() =>
+      controller.linkRemnawaveProfile(
+        'legacy-subscription',
+        { remnawaveId: '4471' },
+        { id: 'admin-1' } as never,
+        { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
+      ),
+    );
+
+    assert.equal(failure instanceof BadRequestException, true, String(failure));
+    assert.match((failure as Error).message, /^Nothing proves/);
+    assert.equal(updated, false);
+  });
+
+  it('never overwrites a NUMERIC link, and does not even ask the panel', async () => {
+    for (const current of ['4471', '0']) {
+      let panelAsked = false;
+      let updated = false;
+      const controller = new AdminUserSubscriptionsController(
+        {
+          subscription: {
+            findUnique: async () => ({
+              id: 'legacy-subscription',
+              userId: 'user-1',
+              remnawaveId: current,
+              configUrl: null,
+              user: { id: 'user-1', telegramId: BigInt(42), email: null },
+            }),
+            findFirst: async () => null,
+            update: async () => { updated = true; return {}; },
+          },
+        } as never,
+        {
+          getPanelUserOutcome: async () => {
+            panelAsked = true;
+            return { kind: 'missing' };
+          },
+        } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        NOT_IN_TERM_MODEL as never,
+      );
+
+      const failure = await captureRejection(() =>
+        controller.linkRemnawaveProfile(
+          'legacy-subscription',
+          { remnawaveId: '5150' },
+          { id: 'admin-1' } as never,
+          { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
+        ),
+      );
+
+      assert.equal(failure instanceof BadRequestException, true, `${current}: ${String(failure)}`);
+      assert.equal((failure as Error).message, 'Subscription already has a Remnawave profile linked');
+      assert.equal(panelAsked, false, `${current}: the panel was asked`);
+      assert.equal(updated, false, `${current}: a working link was overwritten`);
+    }
   });
 
   it('rejects a malformed identifier before querying Remnawave', async () => {
@@ -457,16 +571,15 @@ describe('AdminUserSubscriptionsController', () => {
     assert.equal(queried, false);
   });
 
-  // ── Panel identity gate: both eras accepted, nothing else ────────────────
+  // ── Panel identity gate: the 3.x numeric id, nothing else ────────────────
   //
   // Remnawave 3.x deleted the uuid column; a 3.x profile is named by its
-  // numeric `id`. This endpoint is the ONLY operator-facing repair for a broken
-  // profile link, and its gate used to be uuid-only — so on a 3.x panel it
-  // refused every identifier the operator could possibly have, i.e. it failed
-  // exactly where it was needed. Widening it is not "accept anything": the
-  // value is interpolated into a panel URL path segment, so the rejection cases
-  // below are the half of this behaviour that actually guards something. The
-  // accept cases alone would pass a gate with no gate in it.
+  // numeric `id`, and this build speaks 3.x only. A 2.x uuid names nobody on
+  // such a panel, and linking one would re-create exactly the stale row the
+  // destructive paths refuse. The value is also interpolated into a panel URL
+  // path segment, so the rejection cases below are the half of this behaviour
+  // that actually guards something. The accept cases alone would pass a gate
+  // with no gate in it.
 
   it('links a Remnawave 3.x numeric profile id, which has no uuid form to offer', async () => {
     const panelReads: unknown[] = [];
@@ -500,8 +613,8 @@ describe('AdminUserSubscriptionsController', () => {
               email: null,
               description: null,
               // On 3.x the numeric id IS the identity, so `panelId` simply agrees
-              // with what the operator typed; the username is the extra material
-              // that makes the row survive a rollback to 2.x.
+              // with what the operator typed; the username is recorded as the
+              // address chain's last resort.
               panelId: 4471,
               username: 'rz_bob_1',
             },
@@ -539,11 +652,18 @@ describe('AdminUserSubscriptionsController', () => {
     }]);
   });
 
-  it('refuses an identifier that is neither a uuid nor a numeric panel id, before touching Prisma or the panel', async () => {
+  it('refuses anything but a decimal profile id — a 2.x uuid included — before touching Prisma or the panel', async () => {
     const refused = [
       { label: 'empty', value: '' },
       { label: 'whitespace only', value: '   ' },
       { label: 'a hex fragment that is not a number', value: '12a' },
+      // What the endpoint accepted until the 2.x cut. It names nobody on a 3.x
+      // panel, and `parseInt` would read it as profile 4047 — somebody else.
+      { label: 'a 2.x uuid', value: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' },
+      { label: 'a signed number', value: '-4471' },
+      { label: 'an exponent', value: '4e3' },
+      // Longer than any 64-bit id: `^[0-9]+$` alone would take a megabyte.
+      { label: 'twenty-one digits', value: '1'.repeat(21) },
       // The two that matter most: this value ends up in a panel URL path
       // segment, so a separator would address a different route entirely.
       { label: 'a uuid with a trailing slash', value: 'f47ac10b-58cc-4372-a567-0e02b2c3d479/' },
@@ -631,7 +751,7 @@ describe('AdminUserSubscriptionsController', () => {
     assert.deepStrictEqual(updateCalls, [], 'the refusal must land before any write');
   });
 
-  it('refuses a uuid repair when another subscription already holds that profile by its 3.x numeric id', async () => {
+  it('refuses a repair when another subscription stores that profile as the same decimal', async () => {
     const { controller, updateCalls } = linkRepairFor({
       rows: [{
         id: 'sibling-subscription',
@@ -643,41 +763,38 @@ describe('AdminUserSubscriptionsController', () => {
         remnawavePanelId: null,
         remnawavePanelUsername: 'rz_bob_1',
       }],
-      // The operator is on a panel that still shows uuids and pastes one; the
-      // same profile answers with the same numeric id it always had.
       panelUser: panelProfile({ panelId: PROFILE_P_PANEL_ID }),
     });
 
-    const failure = await captureRejection(() => repairLink(controller, PROFILE_P_UUID));
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
 
     assert.equal(failure instanceof BadRequestException, true, String(failure));
     assert.equal((failure as Error).message, REMNAWAVE_PROFILE_TAKEN_MESSAGE);
     assert.deepStrictEqual(updateCalls, [], 'the refusal must land before any write');
   });
 
-  it('still refuses a duplicate named exactly as the other subscription stored it', async () => {
+  it('still refuses a zero-padded paste of a decimal another subscription already stores', async () => {
     const { controller, updateCalls } = linkRepairFor({
       rows: [{
         id: 'sibling-subscription',
-        // Neither supplementary column ever recorded: the same-era string
-        // comparison is the whole answer here, and widening the guard must not
-        // have quietly replaced it.
-        remnawaveId: PROFILE_P_UUID,
+        // Neither supplementary column ever recorded: the stored string is the
+        // whole answer here, so `05150` has to be read as the `5150` it is.
+        remnawaveId: String(PROFILE_P_PANEL_ID),
         remnawavePanelId: null,
         remnawavePanelUsername: null,
       }],
       panelUser: panelProfile({ panelId: PROFILE_P_PANEL_ID }),
     });
 
-    const failure = await captureRejection(() => repairLink(controller, PROFILE_P_UUID));
+    const failure = await captureRejection(() => repairLink(controller, `0${PROFILE_P_PANEL_ID}`));
 
     assert.equal(failure instanceof BadRequestException, true, String(failure));
     assert.equal((failure as Error).message, REMNAWAVE_PROFILE_TAKEN_MESSAGE);
     assert.deepStrictEqual(updateCalls, []);
   });
 
-  it('still links a profile no other subscription names, in either identifier form', async () => {
-    for (const pasted of [PROFILE_P_UUID, String(PROFILE_P_PANEL_ID)]) {
+  it('still links a profile no other subscription names, stored as the panel spells its id', async () => {
+    for (const pasted of [String(PROFILE_P_PANEL_ID), `00${PROFILE_P_PANEL_ID}`]) {
       const { controller, updateCalls, guardQueries } = linkRepairFor({
         rows: [{
           id: 'namesake-subscription',
@@ -704,7 +821,8 @@ describe('AdminUserSubscriptionsController', () => {
         [{
           where: { id: 'legacy-subscription' },
           data: {
-            remnawaveId: pasted,
+            // Never `005150`: every later lookup compares the stored string.
+            remnawaveId: String(PROFILE_P_PANEL_ID),
             remnawavePanelId: PROFILE_P_PANEL_ID,
             remnawavePanelUsername: 'rz_bob_1',
             configUrl: 'https://panel.example.test/sub',
@@ -758,7 +876,7 @@ describe('AdminUserSubscriptionsController', () => {
     await assert.rejects(
       () => controller.linkRemnawaveProfile(
         'legacy-subscription',
-        { remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' },
+        { remnawaveId: '9901' },
         { id: 'admin-1' } as never,
         { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
       ),
@@ -1023,7 +1141,7 @@ describe('AdminUserSubscriptionsController', () => {
     const failure = await captureRejection(() =>
       controller.linkRemnawaveProfile(
         'legacy-subscription',
-        { remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' },
+        { remnawaveId: '4471' },
         { id: 'admin-1' } as never,
         { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
       ),
@@ -1065,7 +1183,7 @@ describe('AdminUserSubscriptionsController', () => {
     const failure = await captureRejection(() =>
       controller.linkRemnawaveProfile(
         'legacy-subscription',
-        { remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' },
+        { remnawaveId: '4471' },
         { id: 'admin-1' } as never,
         { headers: {}, ip: null, socket: { remoteAddress: null } } as never,
       ),
@@ -1110,14 +1228,14 @@ describe('AdminUserSubscriptionsController', () => {
     // Asserted through the real addressing function, not by eyeballing the
     // object: what matters is that a 3.x panel path can be BUILT from what the
     // controller handed over.
-    assert.deepStrictEqual(panelUserAddress(panelReads[0] as StoredPanelIdentity, 'id'), {
+    assert.deepStrictEqual(panelUserAddress(panelReads[0] as StoredPanelIdentity), {
       kind: 'ready',
       segment: '4471',
     });
     // Counter-check: the stored string alone — what this call site used to pass
     // — names nothing on that panel.
     assert.equal(
-      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
+      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }).kind,
       'impossible',
     );
   });
@@ -1193,6 +1311,68 @@ describe('AdminUserSubscriptionsController', () => {
       deviceCount: 0,
     });
     assert.deepStrictEqual(panelReads, [PANEL_BACKED_IDENTITY]);
+  });
+
+  // ── «Удалить» on one device: the stale-link refusal, with no era ─────────
+  //
+  // The device verb names its owner through the same address fallback as every
+  // other, so a stored 2.x uuid resolves through the recorded panel id to
+  // whoever is LIVE at that address — and would unbind THEIR device. The refusal
+  // reads no panel version: a non-decimal is refused however the panel answers.
+
+  function deviceRevoker(remnawaveId: string) {
+    const deletes: unknown[] = [];
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription: {
+          findUnique: async () => ({
+            ...panelBackedRow({ remnawaveId }),
+            configUrl: null,
+            planSnapshot: null,
+            userId: 'user-1',
+            user: { telegramId: BigInt(42), username: 'bob', name: 'Bob' },
+          }),
+        },
+        adminAuditLog: { create: async () => undefined },
+      } as never,
+      {
+        deletePanelUserDevice: async (ref: unknown, hwid: string) => {
+          deletes.push({ ref, hwid });
+          return { total: 1 };
+        },
+      } as never,
+      {} as never,
+      { info: () => undefined } as never,
+      {} as never,
+      {} as never,
+      NOT_IN_TERM_MODEL as never,
+    );
+    return { controller, deletes };
+  }
+
+  it('refuses «Удалить» on a device of a subscription whose stored id is a 2.x uuid, and asks the panel nothing', async () => {
+    const { controller, deletes } = deviceRevoker('f47ac10b-58cc-4372-a567-0e02b2c3d479');
+
+    const failure = await captureRejection(() =>
+      controller.revokeDevice('subscription-1', 'hwid-1', ACTING_ADMIN, ACTING_REQUEST),
+    );
+
+    assert.equal(failure instanceof ConflictException, true, String(failure));
+    assert.deepStrictEqual((failure as ConflictException).getResponse(), staleDeviceDeleteRefusalBody('operator'));
+    assert.equal(
+      ((failure as ConflictException).getResponse() as { code: string }).code,
+      SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE,
+    );
+    assert.deepStrictEqual(deletes, [], 'the device was not unbound from anybody');
+  });
+
+  it('control: a decimal link reaches the panel through the same handler', async () => {
+    const { controller, deletes } = deviceRevoker('4471');
+
+    const result = await controller.revokeDevice('subscription-1', 'hwid-1', ACTING_ADMIN, ACTING_REQUEST);
+
+    assert.deepStrictEqual(result, { revoked: true, remainingDevices: 1 });
+    assert.equal(deletes.length, 1);
   });
 });
 

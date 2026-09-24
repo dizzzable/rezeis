@@ -12,8 +12,7 @@
  * Until this module existed the SPA rendered that 409 as a generic conflict —
  * in fact `deleteSubMutation` had no `onError` at all — so the operator saw a
  * failure with no route to the fix, and the one thing the backend went to the
- * trouble of saying (run the panel link reconciliation, then delete again)
- * never reached them.
+ * trouble of saying (fix the link, then delete again) never reached them.
  *
  * ── BRANCH ON THE CODE, NEVER ON THE SENTENCE ────────────────────────────────
  *
@@ -60,6 +59,26 @@ const REFUSAL_BY_CODE = new Map<string, SubscriptionDeleteRefusal>([
 ])
 
 /**
+ * Where each refusal's remedy lives — one press away on the refusal notice.
+ *
+ * `stalePanelLink` opens «Подписки» → «Инструменты» → «Подписки без привязки к
+ * Remnawave»: the automatic link check lists this very subscription there with
+ * the reason it could not link it, and «Привязать профиль» on its row writes
+ * the link by hand. (The bulk «Починка привязки к панели» this used to open is
+ * gone; the check runs by itself.)
+ *
+ * A literal, like the code above, because this module imports nothing. The
+ * `tools=` value is the sheet's own deep-link vocabulary
+ * (`features/subscriptions/tools/subscription-tools.ts`), and
+ * `subscriptions-page.test.tsx` opens the page at THIS address and asserts the
+ * tab it lands on — so a renamed tab fails there by name instead of quietly
+ * landing the operator on the first tab.
+ */
+export const SUBSCRIPTION_DELETE_REFUSAL_REMEDY_HREF: Readonly<Record<SubscriptionDeleteRefusal, string>> = {
+  stalePanelLink: '/subscriptions?tools=unlinked',
+}
+
+/**
  * The product code off an axios-shaped rejection, or `null`.
  *
  * BOTH SPELLINGS, `code` FIRST. `AdminSafeExceptionFilter` writes the product
@@ -91,7 +110,8 @@ function readProductCode(error: unknown): string | null {
  * `null` KEEPS THE GENERIC PATH. A refusal this module cannot name must not be
  * dressed up as the one it can: the guidance attached to `stalePanelLink` names
  * a specific remedy, and printing it for an unrelated failure would send an
- * operator to run a bulk repair that has nothing to do with what stopped them.
+ * operator to relink a subscription whose link has nothing to do with what
+ * stopped them.
  */
 export function readSubscriptionDeleteRefusal(error: unknown): SubscriptionDeleteRefusal | null {
   const code = readProductCode(error)

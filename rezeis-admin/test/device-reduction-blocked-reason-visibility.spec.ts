@@ -30,7 +30,7 @@ import {
  * The staleness bites on the intended workflow, not on an exotic one. `BLOCKED`
  * is in `OPERATOR_OVERRIDE_STARTABLE_STATES` precisely so an operator can fix
  * the cause and re-drive; a plan first blocked for a malformed device list and
- * then, once the panel is answering again, for a stale panel link still tells
+ * then, once the list reads again, for a refused device delete still tells
  * them about the device list. They fix the wrong thing.
  *
  * `update: {}` has a second edge that is sharper still: it leaves a RESOLVED
@@ -64,9 +64,12 @@ import {
 /** A live 2.x uuid, in the spelling a 3.x panel can no longer answer to. */
 const DEAD_UUID = '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f';
 
-/** The two reasons this plan is blocked for, in order, pinned as literals. */
+/** A 3.x link: the plan reaches the panel and can fail there. */
+const LINKED_ID = '8123';
+
+/** The two reasons the linked plan is blocked for, in order, pinned as literals. */
 const FIRST_REASON = 'STRICT_LIST_INVALIDCONTRACT';
-const SECOND_REASON = 'STALE_PANEL_LINK';
+const SECOND_REASON = 'STRICT_DELETE_INVALIDCONTRACT';
 
 const ORIGINAL_FLAG = process.env['ADDON_DEVICE_CLEANUP_AUTO'];
 afterEach(() => {
@@ -100,9 +103,8 @@ function okList(...hwids: string[]) {
 
 /** The panel's answers, switchable BETWEEN runs so one plan can fail twice differently. */
 interface PanelMode {
-  addressing: 'id' | 'uuid' | 'unknown';
-  throws: boolean;
   listQueue: unknown[];
+  deleteQueue: unknown[];
 }
 
 /**
@@ -126,7 +128,7 @@ function world(remnawaveId: string = DEAD_UUID) {
     createdAt: new Date(Date.now() - 60_000),
   };
   const incidents: Array<Record<string, unknown>> = [];
-  const mode: PanelMode = { addressing: 'id', throws: false, listQueue: [] };
+  const mode: PanelMode = { listQueue: [], deleteQueue: [] };
   const panelCalls: string[] = [];
 
   const prisma = {
@@ -222,19 +224,18 @@ function world(remnawaveId: string = DEAD_UUID) {
     },
   };
 
+  // No `getPanelShape`: the execution reads no panel version, and a build that
+  // started to would die here rather than pass.
   const remnawave = {
-    getPanelShape: async () => {
-      panelCalls.push('getPanelShape');
-      if (mode.throws) throw new Error('panel unreachable');
-      return { addressing: mode.addressing };
-    },
     strictListUserDevices: async () => {
       panelCalls.push('strictListUserDevices');
       return mode.listQueue.length > 0 ? mode.listQueue.shift() : okList('old');
     },
     strictDeleteUserDevice: async () => {
       panelCalls.push('strictDeleteUserDevice');
-      return { kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' };
+      return mode.deleteQueue.length > 0
+        ? mode.deleteQueue.shift()
+        : { kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' };
     },
   };
 
@@ -270,22 +271,20 @@ function project(
 /**
  * Blocks the same plan twice, for two different causes, the way it actually
  * happens: the panel was garbling its device list, the operator fixed that and
- * re-drove the plan, and the now-readable era revealed a stale link underneath.
+ * re-drove the plan, and the now-readable list got as far as a delete the
+ * panel refused.
  */
 async function blockTwiceForDifferentReasons(w: ReturnType<typeof world>) {
   enableAuto();
-  // Run 1 -- the era probe is down, so the guard fails open (deliberately) and
-  // the run reaches the device list, which comes back malformed.
-  w.mode.throws = true;
+  // Run 1 -- the device list comes back malformed.
   w.mode.listQueue = [{ kind: 'invalidContract', details: 'total mismatch' }];
   const first = await w.execution.executePlan('plan-1');
 
-  // Run 2 -- the panel is answering again, and the operator re-drives the
-  // BLOCKED plan through the override. Now the era is readable: 3.x, against a
-  // stored 2.x uuid.
-  w.mode.throws = false;
-  w.mode.addressing = 'id';
-  w.mode.listQueue = [];
+  // Run 2 -- the operator re-drives the BLOCKED plan through the override. The
+  // list reads now (two devices over a limit of one, the target present), and
+  // the delete is what the panel refuses.
+  w.mode.listQueue = [okList('old', 'new')];
+  w.mode.deleteQueue = [{ kind: 'invalidContract', details: 'unexpected body' }];
   const second = await w.execution.executePlan('plan-1', { force: true });
   return { first, second };
 }
@@ -294,7 +293,7 @@ async function blockTwiceForDifferentReasons(w: ReturnType<typeof world>) {
 
 describe('a plan blocked twice for different reasons', () => {
   it('THE PROOF: the operator is shown the CURRENT reason, not the first one', async () => {
-    const w = world();
+    const w = world(LINKED_ID);
 
     const { first, second } = await blockTwiceForDifferentReasons(w);
 
@@ -319,7 +318,7 @@ describe('a plan blocked twice for different reasons', () => {
     // acknowledged by whom, resolved by whom, with what resolution code -- so
     // rewriting its `summaryCode` would leave a person's acknowledgement
     // attached to a cause they never saw.
-    const w = world();
+    const w = world(LINKED_ID);
 
     await blockTwiceForDifferentReasons(w);
 
@@ -339,9 +338,8 @@ describe('a plan blocked twice for different reasons', () => {
     // The concrete harm of mutating in place. The SPA renders its acknowledge
     // control only while `state === 'OPEN'`, so a new cause landing on an
     // already-ACKNOWLEDGED row would arrive looking handled.
-    const w = world();
+    const w = world(LINKED_ID);
     enableAuto();
-    w.mode.throws = true;
     w.mode.listQueue = [{ kind: 'invalidContract', details: 'total mismatch' }];
     await w.execution.executePlan('plan-1');
 
@@ -350,9 +348,8 @@ describe('a plan blocked twice for different reasons', () => {
     acknowledged['state'] = 'ACKNOWLEDGED';
     acknowledged['acknowledgedBy'] = 'admin-alice';
 
-    w.mode.throws = false;
-    w.mode.addressing = 'id';
-    w.mode.listQueue = [];
+    w.mode.listQueue = [okList('old', 'new')];
+    w.mode.deleteQueue = [{ kind: 'invalidContract', details: 'unexpected body' }];
     await w.execution.executePlan('plan-1', { force: true });
 
     assert.deepEqual(
@@ -373,10 +370,10 @@ describe('a plan blocked twice for different reasons', () => {
     // resolved, so a recurrence raises nothing visible at all. Re-driving a
     // BLOCKED plan is a deliberate operator action, never an unattended sweep
     // (`BLOCKED` is not in `AUTO_STARTABLE_STATES`), so a repeat is real news:
-    // the remedy was tried and the fault came back.
-    const w = world();
+    // the remedy was tried and the fault came back. (The stored 2.x uuid is
+    // refused on every run, whatever the panel would answer.)
+    const w = world(DEAD_UUID);
     enableAuto();
-    w.mode.addressing = 'id';
     await w.execution.executePlan('plan-1');
     assert.equal(w.incidents.length, 1);
 
@@ -396,7 +393,7 @@ describe('a plan blocked twice for different reasons', () => {
         resolutionCode: row['resolutionCode'],
         summaryCode: row['summaryCode'],
       },
-      { state: 'OPEN', resolvedBy: null, resolutionCode: null, summaryCode: SECOND_REASON },
+      { state: 'OPEN', resolvedBy: null, resolutionCode: null, summaryCode: STALE_PANEL_LINK },
       'a live fault under a closed record is the one state this must never leave behind',
     );
   });
@@ -405,16 +402,16 @@ describe('a plan blocked twice for different reasons', () => {
     // What the empty `update` was protecting, kept. The automatic sweep re-runs
     // PENDING and IN_PROGRESS plans, so an identical failure must land on the
     // same row rather than minting one per tick.
-    const w = world();
+    const w = world(DEAD_UUID);
     enableAuto();
-    w.mode.addressing = 'id';
 
     await w.execution.executePlan('plan-1');
     await w.execution.executePlan('plan-1', { force: true });
     await w.execution.executePlan('plan-1', { force: true });
 
     assert.equal(w.incidents.length, 1);
-    assert.equal(w.incidents[0]?.['summaryCode'], SECOND_REASON);
+    assert.equal(w.incidents[0]?.['summaryCode'], STALE_PANEL_LINK);
+    assert.deepEqual(w.panelCalls, [], 'a stale link is refused before the panel is asked anything');
   });
 });
 
@@ -422,9 +419,8 @@ describe('a plan blocked twice for different reasons', () => {
 
 describe('lastErrorCode on the inspection contract', () => {
   it('THE PROOF: the field is on the RETURNED OBJECT, not merely written to a row', async () => {
-    const w = world();
+    const w = world(DEAD_UUID);
     enableAuto();
-    w.mode.addressing = 'id';
     await w.execution.executePlan('plan-1');
 
     const result = await w.inspection.inspectSubscription('sub-1');

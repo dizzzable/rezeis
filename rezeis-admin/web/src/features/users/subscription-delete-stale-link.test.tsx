@@ -221,29 +221,34 @@ describe('a refused subscription delete points at the repair', () => {
     expect(notice).toHaveTextContent('Not deleted — the stored panel link is stale')
     // The REASON, in the panel's own words.
     expect(notice).toHaveTextContent('Nothing was deleted.')
-    // The REMEDY, as a sequence: preview, real run, delete again. An operator
-    // handed only "repair the link" does not know that a preview comes first.
+    // The REMEDY, as a sequence: find the row in the list the automatic check
+    // keeps, link the profile there, delete again. The bulk repair these steps
+    // used to name is gone — the check runs by itself.
     const steps = within(notice as HTMLElement).getAllByRole('listitem')
     expect(steps).toHaveLength(3)
     expect(steps[0]).toHaveTextContent(
-      'Open the panel link repair on the Subscriptions page and run the preview.',
+      'Open Subscriptions → “Tools” → “Subscriptions without a Remnawave link”',
     )
-    expect(steps[1]).toHaveTextContent('Repair for real once the preview looks right.')
+    expect(steps[0]).toHaveTextContent('the automatic check links such subscriptions by itself')
+    expect(steps[1]).toHaveTextContent('press “Link profile” on its row')
     expect(steps[2]).toHaveTextContent('Come back here and delete this subscription again.')
+    expect(notice).not.toHaveTextContent('panel link repair')
+    expect(notice).not.toHaveTextContent('preview')
   })
 
-  it('puts the reconciliation surface one press away, not one sentence away', async () => {
+  it('puts the list that holds the fix one press away, not one sentence away', async () => {
     // A pointer an operator has to act on by memory across two screens is a
-    // pointer nobody follows. The control is a real link to the page that owns
-    // the write.
+    // pointer nobody follows. The control is a real link that opens the sheet
+    // ON the tab — not the Subscriptions page, where the operator would still
+    // have to find the button and then the tab.
     await pressDelete(conflict({ code: BACKEND_CODE, message: BACKEND_MESSAGE }))
 
     const notice = refusalNotice()
     expect(notice).not.toBeNull()
     const link = within(notice as HTMLElement).getByRole('link', {
-      name: 'Open the panel link repair',
+      name: 'Open “Tools” → “Subscriptions without a Remnawave link”',
     })
-    expect(link).toHaveAttribute('href', '/subscriptions')
+    expect(link).toHaveAttribute('href', '/subscriptions?tools=unlinked')
   })
 
   it('branches on the code even when the backend reworded its sentence', async () => {
@@ -330,7 +335,9 @@ describe('a refused subscription delete points at the repair', () => {
     await waitFor(() => expect(toastCount(spies)).toBeGreaterThan(0))
     expect(firedToast(spies)?.channel).toBe('success')
     expect(refusalNotice()).toBeNull()
-    expect(screen.queryByRole('link', { name: 'Open the panel link repair' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('link', { name: 'Open “Tools” → “Subscriptions without a Remnawave link”' }),
+    ).not.toBeInTheDocument()
   })
 
   it('refuses in Russian for a Russian operator', async () => {
@@ -353,12 +360,18 @@ describe('a refused subscription delete points at the repair', () => {
       expect(notice).toHaveTextContent('Ничего не удалено.')
       const steps = within(notice as HTMLElement).getAllByRole('listitem')
       expect(steps[0]).toHaveTextContent(
-        'Откройте починку привязки на странице «Подписки» и запустите предпросмотр.',
+        'Откройте «Подписки» → «Инструменты» → «Подписки без привязки к Remnawave»',
       )
+      expect(steps[1]).toHaveTextContent('нажмите «Привязать профиль» в её строке')
       expect(steps[2]).toHaveTextContent('Вернитесь сюда и удалите подписку ещё раз.')
+      // The label names the PLACE, with the tab's title byte for byte as the
+      // sheet shows it.
       expect(
-        within(notice as HTMLElement).getByRole('link', { name: 'Открыть починку привязки' }),
-      ).toHaveAttribute('href', '/subscriptions')
+        within(notice as HTMLElement).getByRole('link', {
+          name: 'Открыть «Инструменты» → «Подписки без привязки к Remnawave»',
+        }),
+      ).toHaveAttribute('href', '/subscriptions?tools=unlinked')
+      expect(notice).not.toHaveTextContent('починку привязки')
       // Not one word of the backend's English paragraph is on screen.
       expect(notice).not.toHaveTextContent('Run the panel link reconciliation')
     } finally {

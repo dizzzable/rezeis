@@ -123,7 +123,7 @@ async function webhookWrites(trafficLimitBytes: number): Promise<Written> {
   );
   await service.handleEvent(
     'user.modified',
-    { data: { uuid: 'profile-1', trafficLimitBytes } },
+    { data: { id: 7, trafficLimitBytes } },
     null,
   );
   return written;

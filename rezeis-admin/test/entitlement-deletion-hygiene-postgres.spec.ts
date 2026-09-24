@@ -43,7 +43,6 @@ const users: string[] = [];
 
 const panelDeletes: string[] = [];
 const recordingPanel = {
-  getPanelShape: async () => ({ shape: 'id' as const }),
   deletePanelUser: async (identity: { readonly remnawaveId?: string }) => {
     panelDeletes.push(identity.remnawaveId ?? 'unknown');
   },

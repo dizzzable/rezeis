@@ -13,11 +13,11 @@ import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-
 import { retireDurableRowsInTransaction } from '../../add-on-entitlements/services/durable-retirement.util';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
-import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
-  assessStoredPanelLink,
+  isStalePanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
+  UNLINKED_SUBSCRIPTIONS_PATH,
 } from '../../remnawave/services/stale-panel-link';
 
 export interface SubscriptionDeleteInput {
@@ -79,10 +79,10 @@ type LockedSubscription = DeletableSubscription & {
  * `id === undefined`, both of which Prisma reads as "leave the column alone",
  * while `remnawavePanelUsername` and `configUrl` came from arguments and DID
  * land. The write succeeded, the sync job reported COMPLETED, and the row was
- * left owning a live profile it cannot name. `PanelLinkReconciliationService`
- * selects on exactly this signature, and it is the only thing that can repair
- * such a row — and it skips `DELETED` rows, so the retirement below closes the
- * repair window for good.
+ * left owning a live profile it cannot name. The automatic panel-link check
+ * (`PanelLinkReconciliationService`) selects on exactly this signature, and it
+ * is the only thing that can repair such a row — and it skips `DELETED` rows,
+ * so the retirement below closes the repair window for good.
  *
  * Narrow on purpose. A row that was never provisioned has neither column, and
  * every path that detaches a profile (`reprovisionMissingProfile`, the DELETE
@@ -113,8 +113,9 @@ export interface ExpiredSubscriptionDeleteResult {
   /**
    * Separates the ONE deferral the sweep cannot fix by waiting from the several
    * it can. A compare-and-swap that lost is a race the next sweep wins; a stale
-   * panel link stays refused until a human runs the reconciliation, so it is
-   * counted and named rather than folded into "nothing to do".
+   * panel link stays refused until the row is linked to its numeric id — by the
+   * automatic link check, or by hand — so it is counted and named rather than
+   * folded into "nothing to do".
    */
   readonly refusedStalePanelLink: boolean;
 }
@@ -144,9 +145,9 @@ interface LifecycleDeleteOutcome {
   readonly orphanedPanelUsername?: string | null;
   /**
    * Set only when the panel-side deletion was REFUSED because the row's stored
-   * identity cannot be trusted to name the right panel profile. Nothing was
-   * written: the row is still live, still linked, and still repairable by the
-   * panel-link reconciliation the refusal names.
+   * identity names nobody on a supported panel. Nothing was written: the row is
+   * still live, still linked, and still repairable — by the automatic link
+   * check, or with «Привязать профиль» from the list the refusal names.
    */
   readonly stalePanelLinkRefused?: boolean;
   /** The deleted row's plan snapshot, carried out for the operator's card. */
@@ -196,13 +197,9 @@ export class SubscriptionDeletionService {
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly addOnEntitlementService: AddOnEntitlementService,
     private readonly subscriptionTermService: SubscriptionTermService,
-    // REQUIRED, deliberately, and placed before the optional events service so
-    // that omitting it is a compile error rather than a guard that quietly is
-    // not there. Only ONE method is called on it — the cached
-    // `getPanelShape()` — and a throw from that call is already the "era
-    // unknown" answer, so a degraded panel cannot turn this dependency into a
-    // second way for a deletion to fail.
-    private readonly remnawaveApiService: RemnawaveApiService,
+    // No panel adapter any more. It was here for one call — the panel era the
+    // stale-link refusal used to read — and the refusal now reads no era at
+    // all (`isStalePanelIdentity`): this service never calls the panel.
     @Optional()
     private readonly systemEventsService?: SystemEventsService,
   ) {}
@@ -302,33 +299,31 @@ export class SubscriptionDeletionService {
 
     // ── THE STALE-LINK REFUSAL ───────────────────────────────────────────────
     //
-    // BEFORE THE TRANSACTION, for two reasons. The era read is a network call
-    // and this file's own contract is that external calls stay outside a
-    // database transaction; and refusing here means not one statement runs, so
+    // BEFORE THE TRANSACTION: refusing here means not one statement runs, so
     // there is nothing to roll back and no window in which the row is retired.
     //
     // CHECKED ON THE SNAPSHOT, NOT ON THE LOCKED ROW, and that is exact rather
     // than merely close enough. The only value the guard would read
-    // differently is `remnawaveId`, and on the era where the guard is armed —
-    // a PROVEN 3.x panel — the panel has no uuid left to hand out, so nothing
-    // can write one. The value can therefore only move decimal → decimal,
-    // → null, or uuid → decimal (a reconciliation repair landing mid-flight).
-    // The last one makes this refuse a delete that would have been safe; the
-    // operator presses again and it goes through. It cannot drift the other
-    // way, which is the direction that would cost a live profile.
+    // differently is `remnawaveId`, and a 3.x panel — the only one this build
+    // talks to — has no uuid to hand out, so nothing can write a non-decimal
+    // one. The value can therefore only move decimal → decimal, → null, or
+    // stale → decimal (a relink landing mid-flight). The last one makes this
+    // refuse a delete that would have been safe; the operator presses again and
+    // it goes through. It cannot drift the other way, which is the direction
+    // that would cost a live profile.
     //
     // WHY THE WHOLE OPERATION IS REFUSED RATHER THAN "RETIRE LOCALLY, SKIP THE
     // PANEL DELETE". The local retirement is not the harmless half. Writing
-    // `status = DELETED` takes the row out of `PanelLinkReconciliationService`,
-    // which selects `status <> DELETED` and is the ONLY thing that can put a
-    // trustworthy identity back — so the "safe" variant permanently destroys
-    // the repair this refusal exists to send the operator to, and leaves an
-    // unbilled panel profile with nothing pointing at it. Refusing loses
+    // `status = DELETED` takes the row out of the automatic panel-link check
+    // (`PanelLinkReconciliationService`), which selects `status <> DELETED` and
+    // is what puts a trustworthy identity back — so the "safe" variant
+    // permanently destroys the repair this refusal sends the operator to, and
+    // leaves an unbilled panel profile with nothing pointing at it. Refusing loses
     // nothing at all: the row keeps its history, keeps its link, stays
     // repairable, and the same delete succeeds the moment the link is fixed.
     // The cost is one extra step for an operator who wanted the row gone; the
     // alternative charges that step to a customer who is still paying.
-    if (await this.panelLinkIsStale(subscription, options)) {
+    if (this.panelLinkIsStale(subscription, options)) {
       // The SWEEP DEFERS, the operator is TOLD. Same decision, two deliveries.
       // A cron has no one to answer to and cannot act on a remedy, so throwing
       // there would only convert a refusal into an unhandled rejection the
@@ -485,32 +480,20 @@ export class SubscriptionDeletionService {
   }
 
   /**
-   * True when this row's stored identity cannot be trusted to name the right
-   * panel profile, so the panel-side deletion must not be armed.
+   * True when this row's stored identity names nobody on a supported panel
+   * (`isStalePanelIdentity`: not a decimal), so the panel-side deletion must not
+   * be armed. It reads no panel version, so no reading of one can loosen it.
    *
    * ASKED ONLY OF A ROW THAT NAMES A PROFILE. A null `remnawaveId` never
    * reaches the `SyncAction.DELETE` branch below, so there is no deletion to
-   * refuse — and skipping the era read for those rows keeps the ordinary
-   * never-provisioned delete free of any panel round-trip at all.
-   *
-   * The three answers, and the fact that only one of them refuses, live in
-   * {@link assessStoredPanelLink}. Reading them here as a bare boolean is
-   * deliberate: this method decides ONE thing, and the reason is carried into
-   * the alert rather than branched on.
+   * refuse.
    */
-  private async panelLinkIsStale(
+  private panelLinkIsStale(
     subscription: DeletableSubscription,
     options: LifecycleDeleteOptions,
-  ): Promise<boolean> {
+  ): boolean {
     const remnawaveId = subscription.remnawaveId;
-    if (remnawaveId === null) {
-      return false;
-    }
-    const trust = await assessStoredPanelLink(
-      () => this.remnawaveApiService.getPanelShape(),
-      remnawaveId,
-    );
-    if (trust.trusted) {
+    if (remnawaveId === null || !isStalePanelIdentity(remnawaveId)) {
       return false;
     }
     this.publishStalePanelLinkRefusal(subscription, remnawaveId, options.source);
@@ -531,8 +514,8 @@ export class SubscriptionDeletionService {
    * skipped population once per sweep with a count instead of once per row.
    *
    * An OPERATOR-driven refusal is the opposite case: it happens because a human
-   * just pressed delete, it is rare, and the event is what puts the incident
-   * beside the reconciliation report they are about to run.
+   * just pressed delete, it is rare, and the event puts the incident on record
+   * beside the list the refusal sends them to.
    */
   private publishStalePanelLinkRefusal(
     subscription: DeletableSubscription,
@@ -541,10 +524,12 @@ export class SubscriptionDeletionService {
   ): void {
     const message =
       `Refused the Remnawave deletion for subscription ${subscription.id}: its stored identity ` +
-      `'${remnawaveId}' is a 2.x uuid and the panel is 3.x, so it no longer names the profile ` +
-      'it was written for — deleting would remove whatever the address fallback resolves to, ' +
-      'which on an unrepaired duplicate pair is a live customer. Nothing was written. Run the ' +
-      'panel-link reconciliation, then delete again.';
+      `'${remnawaveId}' is not a 3.x numeric id (a 2.x uuid, or imported junk), so it names no ` +
+      'profile on a supported panel — deleting would remove whatever the address fallback ' +
+      'resolves to, which on an unrepaired duplicate pair is a live customer. Nothing was ' +
+      'written. Link the subscription to its numeric id (the automatic link check does it when ' +
+      `it can prove the owner; the rest are listed in ${UNLINKED_SUBSCRIPTIONS_PATH}), then ` +
+      'delete again.';
     this.logger.warn(message);
     if (source === 'EXPIRED_PROFILE_CLEANUP' || this.systemEventsService === undefined) {
       return;
@@ -560,6 +545,13 @@ export class SubscriptionDeletionService {
           remnawaveId,
           source,
           code: SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+          // The card prints no message; the remedy is its note.
+          note:
+            'У подписки сохранён нечисловой идентификатор Remnawave (такие выдавала панель 2.x), ' +
+            'поэтому не удалены ни профиль в Remnawave, ни подписка. Автоматическая проверка ' +
+            'привязки сама привязывает такие подписки, когда ' +
+            `может доказать владельца; остальные — в ${UNLINKED_SUBSCRIPTIONS_PATH}, кнопка ` +
+            '«Привязать профиль». После привязки удалите подписку ещё раз.',
         },
       );
     } catch (error: unknown) {

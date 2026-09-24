@@ -273,7 +273,7 @@ describe('InternalUserDevicesController', () => {
           userName: 'User Name',
           username: 'user_name',
           subscriptionId: 'subscription-1',
-          remnawaveId: 'rem-user-1',
+          remnawaveId: '4471',
           hwid: 'hwid-to-delete',
           remainingDevices: 2,
         },
@@ -312,9 +312,9 @@ describe('InternalUserDevicesController', () => {
     const actualResponse = await controller.regenerateSubscription('123456789', 'subscription-1');
 
     assert.deepStrictEqual(trace, [
-      'regenerate:rem-user-1',
+      'regenerate:4471',
       'persist',
-      'delete-all:rem-user-1',
+      'delete-all:4471',
     ]);
     assert.deepStrictEqual(persistedUpdates, [
       {
@@ -335,7 +335,7 @@ describe('InternalUserDevicesController', () => {
       metadata: {
         userId: 'user-1',
         subscriptionId: 'subscription-1',
-        remnawaveId: 'rem-user-1',
+        remnawaveId: '4471',
         devicesCleared: true,
       },
     });
@@ -479,7 +479,7 @@ describe('InternalUserDevicesController', () => {
     await controller.listDevices('123456789');
 
     assert.equal(remnawaveCalls.length, 1);
-    assert.deepStrictEqual(panelUserAddress(remnawaveCalls[0] as StoredPanelIdentity, 'id'), {
+    assert.deepStrictEqual(panelUserAddress(remnawaveCalls[0] as StoredPanelIdentity), {
       kind: 'ready',
       segment: '4471',
     });
@@ -489,7 +489,6 @@ describe('InternalUserDevicesController', () => {
     assert.equal(
       panelUserAddress(
         { remnawaveId: staleUuidRow.remnawaveId as string, panelId: null, panelUsername: null },
-        'id',
       ).kind,
       'impossible',
     );
@@ -556,7 +555,7 @@ function createSubscription(
   return {
     id: 'subscription-1',
     userId: 'user-1',
-    remnawaveId: 'rem-user-1',
+    remnawaveId: '4471',
     remnawavePanelId: 4471,
     remnawavePanelUsername: 'rz_bob_1',
     ...overrides,
@@ -574,7 +573,7 @@ interface SubscriptionRow {
 
 /** What {@link createSubscription} must reach the panel adapter as. */
 const EXPECTED_IDENTITY: StoredPanelIdentity = {
-  remnawaveId: 'rem-user-1',
+  remnawaveId: '4471',
   panelId: 4471,
   panelUsername: 'rz_bob_1',
 };

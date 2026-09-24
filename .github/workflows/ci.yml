@@ -243,14 +243,18 @@ jobs:
           test/upgrade-and-term-start-keep-import-keys-postgres.spec.ts
           test/durable-disposal-postgres.spec.ts
           test/add-on-offer-dated-postgres.spec.ts
+          test/add-on-switches-postgres.spec.ts
           test/limit-bonus-lifetime-postgres.spec.ts
           test/term-baseline-own-share-postgres.spec.ts
           test/remnawave-webhook-term-model-postgres.spec.ts
           test/panel-readback-term-model-postgres.spec.ts
           test/remnawave-status-term-model-postgres.spec.ts
           test/remnawave-lifetime-postgres.spec.ts
+          test/lifetime-restore-postgres.spec.ts
           test/backup-reimport-plan-snapshot-postgres.spec.ts
           test/subscription-refresh-verdict-postgres.spec.ts
           test/plan-writers-keep-import-keys-postgres.spec.ts
           test/backup-plan-cloner-postgres.spec.ts
           test/stripped-plan-snapshot-repair-postgres.spec.ts
+          test/panel-link-check-postgres.spec.ts
+          test/stale-panel-identity-census-postgres.spec.ts

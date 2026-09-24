@@ -12,23 +12,22 @@ import {
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../src/modules/remnawave/services/remnawave-api.service';
-import type { RemnawavePanelShape } from '../src/modules/remnawave/services/remnawave-api.service';
 import { mapHwidTopUser } from '../src/modules/remnawave/services/remnawave-extended-mappers';
-import {
-  assessObservedPanelLink,
-  observePanelEra,
-} from '../src/modules/remnawave/services/stale-panel-link';
 
 /**
- * The layer that decides HOW a panel profile is named, across the three panel
- * versions a stored profile can come from.
+ * The layer that decides HOW a panel profile is named on a Remnawave 3.x panel —
+ * the only version this build speaks.
  *
- * This is the load-bearing piece of reading all three: seventeen adapter
- * methods build their paths from it, and the failure it must never produce is
- * the quiet one — addressing SOMEBODY rather than nobody. Remnawave 2.x keys
- * users by UUID, 3.x deleted that column and keys them by a numeric id, and the
- * old uuid survives nowhere after the panel's own upgrade migration. So an
- * identifier that "looks fine" can belong to a different profile entirely.
+ * This is the load-bearing piece: every user-scoped adapter method builds its
+ * path from it, and the failure it must never produce is the quiet one —
+ * addressing SOMEBODY rather than nobody. 3.x deleted the user uuid column and
+ * keys users by a numeric id, and a row linked back on 2.x keeps its uuid in our
+ * database. So an identifier that "looks fine" can belong to a different profile
+ * entirely.
+ *
+ * ONE SET OF RULES. The version probe no longer shapes a request: a 2.x panel is
+ * refused before anything is built, and an unreadable version is addressed
+ * exactly as a proven 3.x one.
  */
 
 const UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
@@ -65,75 +64,45 @@ describe('panelShortUuidFromConfigUrl', () => {
   });
 });
 
-describe('panelUserAddress — 2.x panels (uuid-addressed)', () => {
-  it('uses the stored uuid as-is', () => {
-    const address = panelUserAddress(stored(), 'uuid');
-    assert.deepEqual(address, { kind: 'ready', segment: UUID });
-  });
-
-  it('a numeric identity on a uuid panel means a rollback — resolve by name', () => {
-    // Only reachable when a profile was created on 3.x and the operator then
-    // downgraded. We never had a uuid for it, because 3.x had none to give.
-    const address = panelUserAddress(
-      stored({ remnawaveId: '42', panelUsername: 'rz_bob_1' }),
-      'uuid',
-    );
-    assert.deepEqual(address, { kind: 'needsResolve', selector: { username: 'rz_bob_1' } });
-  });
-
-  it('a numeric identity with no name recorded is honestly impossible', () => {
-    const address = panelUserAddress(stored({ remnawaveId: '42' }), 'uuid');
-    assert.equal(address.kind, 'impossible');
-  });
-});
-
-describe('panelUserAddress — 3.x panels (id-addressed)', () => {
+describe('panelUserAddress — the one set of rules', () => {
   it('uses the stored identity when it is already the numeric id', () => {
-    const address = panelUserAddress(stored({ remnawaveId: '42' }), 'id');
+    const address = panelUserAddress(stored({ remnawaveId: '42' }));
     assert.deepEqual(address, { kind: 'ready', segment: '42' });
   });
 
   it('prefers the recorded numeric id over a round-trip', () => {
-    const address = panelUserAddress(stored({ panelId: 7, panelUsername: 'rz_bob_1' }), 'id');
+    const address = panelUserAddress(stored({ panelId: 7, panelUsername: 'rz_bob_1' }));
     assert.deepEqual(address, { kind: 'ready', segment: '7' });
   });
 
   it('falls back to the short uuid when the panel was upgraded before we saw the id', () => {
-    const address = panelUserAddress(stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }), 'id');
+    const address = panelUserAddress(stored({ panelShortUuid: SHORT_UUID, panelUsername: 'rz_bob_1' }));
     assert.deepEqual(address, { kind: 'needsResolve', selector: { shortUuid: SHORT_UUID } });
   });
 
   it('uses the name when no saved subscription short uuid exists', () => {
-    const address = panelUserAddress(stored({ panelUsername: 'rz_bob_1' }), 'id');
+    const address = panelUserAddress(stored({ panelUsername: 'rz_bob_1' }));
     assert.deepEqual(address, { kind: 'needsResolve', selector: { username: 'rz_bob_1' } });
   });
 
   it('refuses when neither the id nor the name was ever recorded', () => {
-    const address = panelUserAddress(stored(), 'id');
+    const address = panelUserAddress(stored());
     assert.equal(address.kind, 'impossible');
     // The reason has to name the actual obstacle — an operator reads this.
-    assert.match((address as { reason: string }).reason, /2\.x uuid/);
+    assert.match((address as { reason: string }).reason, /not a 3\.x numeric id/);
   });
 
-  it('NEVER falls back to the uuid, which a 3.x panel rejects as NaN', () => {
+  it('NEVER emits the uuid, which a 3.x panel rejects as NaN', () => {
     // The whole point. A 3.x panel answers `400 expected number, received NaN`
     // for a uuid in an id slot — safe, but the integration is dead. Emitting the
     // uuid anyway would be the bug this type exists to prevent.
     //
-    // THE REGRESSION THIS WATCHES FOR, by name: the tempting "the panel is
-    // 3.x-only now, so just return what we stored" edit, which collapses this
-    // whole branch into `return { kind: 'ready', segment: stored }`. Every case
-    // below then emits a 2.x uuid into an id slot.
-    //
-    // It used to watch for nothing. The two identities it looped over both
-    // leave through `needsResolve`/`impossible`, so the `kind === 'ready'` body
-    // — the only assertion in the test — never executed once. The third case
-    // is what makes the guard live: a recorded numeric id DOES reach `ready`,
-    // so the uuid comparison actually runs, and `reachedReady` below fails
-    // loudly if a later edit makes it dead again.
+    // THE REGRESSION THIS WATCHES FOR, by name: the tempting "just return what
+    // we stored" edit. Every case below then emits a 2.x uuid into an id slot.
+    // The third case is what makes the guard live: a recorded numeric id DOES
+    // reach `ready`, so the uuid comparison actually runs, and `reachedReady`
+    // fails loudly if a later edit makes it dead again.
     const CASES: ReadonlyArray<readonly [string, StoredPanelIdentity, string | null]> = [
-      // [what is recorded, the identity, the segment that may be emitted —
-      //  `null` means NO segment may be emitted for it at all]
       ['the uuid alone', stored(), null],
       ['the uuid and a name', stored({ panelUsername: 'rz_bob_1' }), null],
       ['the uuid and a recorded numeric id', stored({ panelId: 7 }), '7'],
@@ -141,7 +110,7 @@ describe('panelUserAddress — 3.x panels (id-addressed)', () => {
 
     let reachedReady = 0;
     for (const [label, identity, expected] of CASES) {
-      const address = panelUserAddress(identity, 'id');
+      const address = panelUserAddress(identity);
       if (expected === null) {
         assert.notEqual(address.kind, 'ready', `${label}: emitted a segment where none was safe`);
         continue;
@@ -157,84 +126,39 @@ describe('panelUserAddress — 3.x panels (id-addressed)', () => {
   });
 });
 
-describe('panelUserAddress — an unknown panel version', () => {
-  it('uses the stored identity unchanged rather than refusing', () => {
-    // Deliberate, and the opposite of what looks safe. Version detection fails
-    // for the same reasons a request fails — unreachable panel, bad token — so
-    // refusing here would fire exactly when the panel is already answering with
-    // TERMINAL errors, and would turn those into "cannot act", which the sync
-    // layer classifies as transient. Forever-retry with no alert.
-    //
-    // The stored string names the right profile or nobody; it is a conversion
-    // between the two forms, done without the material, that can name someone
-    // ELSE. That is what stays impossible.
-    assert.deepEqual(panelUserAddress(stored(), 'unknown'), { kind: 'ready', segment: UUID });
-    assert.deepEqual(panelUserAddress(stored({ remnawaveId: '42' }), 'unknown'), {
-      kind: 'ready',
-      segment: '42',
-    });
+describe('panelUserPatchKey — the key half of a PATCH', () => {
+  it('keys by the numeric id — the stored one or the recorded one', () => {
+    assert.deepEqual(panelUserPatchKey(stored({ remnawaveId: '42' })), { id: 42 });
+    assert.deepEqual(panelUserPatchKey(stored({ panelId: 7 })), { id: 7 });
   });
 
-  it('never converts between the two forms without the material', () => {
-    // The invariant that survives: no output segment is ever a form the stored
-    // identity was not already in, unless it came from a recorded id or a
-    // resolve-by-name.
-    const address = panelUserAddress(stored({ panelId: 7 }), 'unknown');
-    assert.equal(address.kind, 'ready');
-    if (address.kind !== 'ready') return;
-    assert.equal(address.segment, UUID, 'must not silently switch to the recorded numeric id');
-  });
-});
-
-describe('panelUserPatchKey — the one write that needs no version branch', () => {
-  it('keys by uuid on 2.x and by numeric id on 3.x', () => {
-    assert.deepEqual(panelUserPatchKey(stored(), 'uuid'), { uuid: UUID });
-    assert.deepEqual(panelUserPatchKey(stored({ panelId: 7 }), 'id'), { id: 7 });
-  });
-
-  it('falls back to the username, which every supported version accepts', () => {
-    assert.deepEqual(panelUserPatchKey(stored({ panelUsername: 'rz_bob_1' }), 'id'), {
+  it('falls back to the username when the chain resolves by name', () => {
+    assert.deepEqual(panelUserPatchKey(stored({ panelUsername: 'rz_bob_1' })), {
       username: 'rz_bob_1',
     });
   });
 
-  it('keeps preferring the identifier when the version is unknown', () => {
-    // The name is the one key BOTH eras accept, so writing by it always lands —
-    // and that is exactly why it must not be the preference. Panel usernames are
-    // deterministic, so a re-provisioned profile inherits the name of the one we
-    // hold an identity for, and a write keyed by name silently retargets it.
-    // The stored identifier names the right profile or nobody: the wrong-era key
-    // is dropped and the panel answers `400 At least one of …`.
-    assert.deepEqual(panelUserPatchKey(stored({ panelUsername: 'rz_bob_1' }), 'unknown'), {
-      uuid: UUID,
-    });
-    assert.deepEqual(
-      panelUserPatchKey(
-        { remnawaveId: '42', panelId: 42, panelUsername: 'rz_bob_1' },
-        'unknown',
-      ),
-      { id: 42 },
-      'a numeric stored identity is a 3.x id, whatever the panel turns out to be',
-    );
-  });
-
-  it('gives up rather than inventing a key', () => {
-    assert.equal(panelUserPatchKey(stored({ remnawaveId: '42' }), 'uuid'), null);
+  it('has no uuid key, and never parses a uuid into an id', () => {
+    // `{ uuid }` was the 2.x key; a 3.x panel drops it and answers `400 At
+    // least one of username, id must be provided`. And `parseInt` of this uuid is
+    // 330 — somebody else's id.
+    for (const identity of [stored(), stored({ panelShortUuid: SHORT_UUID })]) {
+      const key = panelUserPatchKey(identity);
+      assert.equal(key, null, JSON.stringify(identity));
+    }
   });
 
   it('prefers the immutable identifier over the name', () => {
     // An operator who renames a profile by hand in the panel would otherwise
     // silently retarget every later write.
-    assert.deepEqual(panelUserPatchKey(stored({ panelUsername: 'renamed' }), 'uuid'), {
-      uuid: UUID,
-    });
+    assert.deepEqual(panelUserPatchKey(stored({ panelId: 7, panelUsername: 'renamed' })), { id: 7 });
   });
 });
 
 describe('panelDeviceOwnerKey — the HWID body key', () => {
-  it('is userUuid on 2.x and userId on 3.x', () => {
-    assert.deepEqual(panelDeviceOwnerKey(UUID, 'uuid'), { userUuid: UUID });
-    assert.deepEqual(panelDeviceOwnerKey('42', 'id'), { userId: 42 });
+  it('is userId, the number, chosen by the form of the segment', () => {
+    assert.deepEqual(panelDeviceOwnerKey('42'), { userId: 42 });
+    assert.equal(panelDeviceOwnerKey(UUID), null, 'a uuid is refused, never read as user 330');
   });
 });
 
@@ -254,15 +178,14 @@ describe('isNumericPanelIdentity', () => {
  * The BATCH lookup: the same "a 2.x row is named by a 3.x id" problem
  * `panelIdentityWhere` solves one event at a time, asked of a whole batch.
  *
- * Its two bounds are what these cases pin. The first is the one
- * `panelIdentityWhere` already states: a numeric angle may only be taken from
- * an identity that is entirely digits, because `Number.parseInt('330f2b38-…')`
- * is `330` — a valid-looking id belonging to somebody else. The second is
- * specific to the plural form and is the dangerous one: `remnawave_panel_id`
- * has no unique constraint and is null on most rows, so an EMPTY numeric list
- * that degenerates into `remnawavePanelId: null` (or an `in` carrying a null)
- * matches every row that has no panel id — inside an anti-fraud detector, every
- * customer at once.
+ * Its two bounds are what these cases pin. The first: a numeric angle may only
+ * be taken from an identity that is entirely digits, because
+ * `Number.parseInt('330f2b38-…')` is `330` — a valid-looking id belonging to
+ * somebody else. The second is specific to the plural form and is the dangerous
+ * one: `remnawave_panel_id` has no unique constraint and is null on most rows, so
+ * an EMPTY numeric list that degenerates into `remnawavePanelId: null` (or an
+ * `in` carrying a null) matches every row that has no panel id — inside an
+ * anti-fraud detector, every customer at once.
  */
 describe('panelIdentityLookup — matching a batch on both angles', () => {
   it('asks only the stored column when nothing in the batch is numeric', () => {
@@ -329,7 +252,7 @@ describe('panelIdentityLookup — matching a batch on both angles', () => {
   });
 });
 
-// ── The adapter half: shape detection and the resolve round-trip ─────────────
+// ── The adapter half: version detection and the resolve round-trip ──────────
 
 const CONFIG = {
   host: 'remnawave',
@@ -354,29 +277,22 @@ function build(handler: (input: { method: string; url: string; data?: unknown })
 
 const recap = (version: string) => of({ data: { response: { version } } });
 
-describe('RemnawaveApiService.getPanelShape', () => {
-  it('reads 2.8.0 as uuid-addressed with the ip-control family', async () => {
-    const { service } = build(() => recap('2.8.0'));
-    assert.deepEqual(await service.getPanelShape(), {
-      version: '2.8.0',
-      addressing: 'uuid',
-      connectionsApi: 'ip-control',
-      userLookups: { byTelegramId: true, byEmail: true },
-      // Keyset paging arrived in 2.8; 2.7.4 has no such route.
-      usersStream: true,
-    });
+describe('RemnawaveApiService.getPanelShape — detection, not addressing', () => {
+  it('reads 3.2.1 with the keyset user stream', async () => {
+    const { service } = build(() => recap('3.2.1'));
+    assert.deepEqual(await service.getPanelShape(), { version: '3.2.1', usersStream: true });
   });
 
-  it('reads 3.2.1 as id-addressed with the connections family', async () => {
-    const { service } = build(() => recap('3.2.1'));
-    assert.deepEqual(await service.getPanelShape(), {
-      version: '3.2.1',
-      addressing: 'id',
-      connectionsApi: 'connections',
-      // Both shortcuts were deleted in 3.x; the stream filters replace them.
-      userLookups: { byTelegramId: false, byEmail: false },
-      usersStream: true,
-    });
+  it('carries no addressing, live-connection family or lookup shortcuts any more', async () => {
+    // Every request is built in the 3.x shape whatever the version reads, so a
+    // shape that still carried these would be a second place a version decision
+    // could live. A 2.x version is still READ — it is what lets the SPA say
+    // "too old" — and is not refused here.
+    const { service } = build(() => recap('2.8.0'));
+    const shape = await service.getPanelShape();
+    assert.deepEqual(Object.keys(shape).sort(), ['usersStream', 'version']);
+    assert.equal(shape.version, '2.8.0');
+    assert.equal(shape.usersStream, false, 'keyset walking is a 3.x route');
   });
 
   it('falls back to /api/system/metadata when recap carries no version', async () => {
@@ -390,24 +306,12 @@ describe('RemnawaveApiService.getPanelShape', () => {
     );
   });
 
-  it('an unreachable panel is unknown on BOTH fields, never a default', async () => {
+  it('an unreachable panel is an unknown version and the offset walk, never a default', async () => {
     const { service } = build(() => throwError(() => new Error('ECONNREFUSED')));
-    assert.deepEqual(await service.getPanelShape(), {
-      version: null,
-      addressing: 'unknown',
-      connectionsApi: 'unknown',
-      // The ONE field where unknown does not mean unknown, deliberately: both
-      // lookup routes are pure reads that find the right user or nobody, so the
-      // tie goes to what every panel this integration has run against serves.
-      userLookups: { byTelegramId: true, byEmail: true },
-      // And here the conservative choice is the opposite one: the offset route
-      // exists on every panel version this adapter has read, the stream only
-      // from 2.8 on.
-      usersStream: false,
-    });
+    assert.deepEqual(await service.getPanelShape(), { version: null, usersStream: false });
   });
 
-  it('caches a successful read instead of asking on every path build', async () => {
+  it('caches a successful read instead of asking on every call', async () => {
     const { service, captured } = build(() => recap('3.2.1'));
     await service.getPanelShape();
     await service.getPanelShape();
@@ -434,8 +338,8 @@ describe('RemnawaveApiService.getPanelShape', () => {
   });
 });
 
-/** A 2.x user row: has both `uuid` and the numeric `id`. */
-function row2x(over: Record<string, unknown> = {}) {
+/** A user row as 2.x sent it: a `uuid` beside the numeric `id`. */
+function rowWithUuid(over: Record<string, unknown> = {}) {
   return {
     uuid: UUID,
     id: 7,
@@ -460,24 +364,12 @@ function row2x(over: Record<string, unknown> = {}) {
 
 /** A 3.x user row: no `uuid` FIELD AT ALL, keyed by the numeric `id`. */
 function row3x(over: Record<string, unknown> = {}) {
-  const { uuid: _dropped, ...rest } = row2x();
+  const { uuid: _dropped, ...rest } = rowWithUuid();
   return { ...rest, id: 42, shortUuid: 'PyTr7C5568QuLhup', ...over };
 }
 
-describe('decoding a user row across the two eras', () => {
-  it('a 2.x row keeps its uuid as the identity', async () => {
-    const { service } = build(() => of({ data: { response: { users: [row2x()], total: 1 } } }));
-    const outcome = await service.strictGetAllPanelUsers();
-    assert.equal(outcome.kind, 'ok');
-    if (outcome.kind !== 'ok') return;
-    assert.equal(outcome.value.users[0].uuid, UUID);
-    assert.equal(outcome.value.users[0].panelId, 7);
-  });
-
+describe('decoding a user row: the numeric id is the identity', () => {
   it('a 3.x row is keyed by its numeric id, and the read is ok', async () => {
-    // Before: every 3.x row decoded to null for want of a `uuid`, and the walk
-    // escalated a whole page of them to "none carried a usable uuid" — taking
-    // the bulk list, the import overlay and both anti-fraud bridges dark at once.
     const { service } = build(() => of({ data: { response: { users: [row3x()], total: 1 } } }));
     const outcome = await service.strictGetAllPanelUsers();
     assert.equal(outcome.kind, 'ok');
@@ -486,30 +378,27 @@ describe('decoding a user row across the two eras', () => {
     assert.equal(outcome.value.users[0].panelId, 42);
   });
 
-  it('a 2.x row with an EMPTY uuid stays undecodable, id or no id', async () => {
-    // The distinction the decoder turns on. A damaged 2.x row must refuse the
-    // read, not acquire a numeric key that matches no stored remnawaveId from
-    // that era — that would turn "could not read" into "user unknown", and the
-    // callers that act on absence would act.
-    const { service } = build(() =>
-      of({ data: { response: { users: [row2x({ uuid: '' })], total: 1 } } }),
-    );
+  it('a row that still carries a uuid is keyed by its numeric id, never by the uuid', async () => {
+    const { service } = build(() => of({ data: { response: { users: [rowWithUuid()], total: 1 } } }));
     const outcome = await service.strictGetAllPanelUsers();
-    assert.equal(outcome.kind, 'invalidContract');
+    assert.equal(outcome.kind, 'ok');
+    if (outcome.kind !== 'ok') return;
+    assert.equal(outcome.value.users[0].uuid, '7');
   });
 
-  it('a row with neither identity is undecodable', async () => {
-    const { service } = build(() =>
-      of({ data: { response: { users: [row3x({ id: null })], total: 1 } } }),
-    );
-    assert.equal((await service.strictGetAllPanelUsers()).kind, 'invalidContract');
+  it('a row without a numeric id is undecodable, whatever uuid it carries', async () => {
+    // Keyed by anything else, a row would mint a key that matches no stored
+    // `remnawaveId` — turning "could not read" into "user unknown", and the
+    // callers that act on absence would act.
+    for (const row of [rowWithUuid({ id: null }), row3x({ id: null })]) {
+      const { service } = build(() => of({ data: { response: { users: [row], total: 1 } } }));
+      assert.equal((await service.strictGetAllPanelUsers()).kind, 'invalidContract');
+    }
   });
 
   it('the CREATE idempotency lookup finds a 3.x profile', async () => {
     // `getPanelUserByUsername` used to require a string `uuid` and so answered
-    // "no such profile" for every 3.x profile that exists. profile-sync would
-    // then try to create a duplicate, which the panel refuses with
-    // `400 username already exists` — a create loop, from one field name.
+    // "no such profile" for every 3.x profile that exists.
     const { service } = build(() => of({ data: { response: row3x() } }));
     const found = await service.getPanelUserByUsername('rz_bob_1');
     assert.notEqual(found, null);
@@ -518,100 +407,87 @@ describe('decoding a user row across the two eras', () => {
   });
 });
 
-describe('live connections across the two endpoint families', () => {
+describe('live connections: /api/connections/*, whatever the version reads', () => {
   /** Answers the version probe, then plays the two-phase job. */
-  function panel(version: string, result: unknown) {
+  function panel(version: string | null, result: unknown) {
     return build(({ url }) => {
-      if (url.startsWith('/api/system/')) return recap(version);
-      if (url.includes('by-user') || url.includes('by-node') || url.includes('fetch-')) {
-        // A POST starts the job, a GET collects it. Both hit the same path on
-        // 3.x, so the METHOD is what tells them apart.
+      if (url.startsWith('/api/system/')) {
+        return version === null ? throwError(() => new Error('down')) : recap(version);
+      }
+      if (url.includes('by-user') || url.includes('by-node')) {
+        // A POST starts the job, a GET collects it. Both hit the same path, so
+        // the METHOD is what tells them apart.
         return of({ data: { response: { jobId: '9', isCompleted: true, isFailed: false, result } } });
       }
       return of({ data: { response: {} } });
     });
   }
 
-  it('a 2.8 panel is asked through ip-control', async () => {
-    const { service, captured } = panel('2.8.0', { users: [{ userId: '7', ips: [] }] });
-    await service.fetchUsersIpsForNode('node-uuid');
-    const paths = captured.map((c) => c.url).filter((u) => !u.startsWith('/api/system/'));
-    assert.ok(paths.every((p) => p.startsWith('/api/ip-control/')), paths.join(', '));
-  });
+  for (const version of ['3.2.1', null] as const) {
+    it(`is asked through connections on ${version ?? 'an unreadable version'}`, async () => {
+      // An unreadable version used to mean the 2.x family here — a guaranteed
+      // 404 on every 3.x, which the sharing detector read as "nobody online".
+      const { service, captured } = panel(version, { success: true, users: [{ userId: 7, ips: [] }] });
+      await service.fetchUsersIpsForNode('node-uuid');
+      const paths = captured.map((c) => c.url).filter((u) => !u.startsWith('/api/system/'));
+      assert.ok(paths.length > 0, 'the panel was never asked');
+      assert.ok(paths.every((p) => p.startsWith('/api/connections/')), paths.join(', '));
+    });
+  }
 
-  it('a 3.2 panel is asked through connections, which is all it serves', async () => {
-    // The whole family was deleted in 3.x. Asking the old paths there is a
-    // guaranteed 404, and a 404 that comes back as `[]` reads to the sharing
-    // detector as "nobody is online".
-    const { service, captured } = panel('3.2.1', { success: true, users: [{ userId: 7, ips: [] }] });
-    await service.fetchUsersIpsForNode('node-uuid');
-    const paths = captured.map((c) => c.url).filter((u) => !u.startsWith('/api/system/'));
-    assert.ok(paths.length > 0, 'the panel was never asked');
-    assert.ok(paths.every((p) => p.startsWith('/api/connections/')), paths.join(', '));
-  });
-
-  it('reads a 3.x row whose userId is a NUMBER, not a string', async () => {
-    // 2.x sends this id as a string, 3.x as a number. Accepting only the string
-    // dropped every row on 3.x — an empty snapshot, not a reported failure.
+  it('reads a row whose userId is a NUMBER — and not a string one, which only 2.x sent', async () => {
     const { service } = panel('3.2.1', {
       success: true,
-      users: [{ userId: 42, ips: [{ ip: '203.0.113.9', lastSeen: '2026-08-10T13:13:02.000Z' }] }],
+      users: [
+        { userId: 42, ips: [{ ip: '203.0.113.9', lastSeen: '2026-08-10T13:13:02.000Z' }] },
+        { userId: '43', ips: [] },
+      ],
     });
     const rows = await service.fetchUsersIpsForNode('node-uuid');
     // `null` is the separate "could not read this node" answer, not an empty
-    // snapshot — see the test below. Naming it here keeps a read failure from
-    // arriving as a property-access crash on the next line.
+    // snapshot — see the test below.
     assert.ok(rows !== null, 'the node was not read at all');
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].userId, '42');
+    assert.deepEqual(
+      rows.map((row) => row.userId),
+      ['42'],
+    );
     assert.equal(rows[0].ips.length, 1);
   });
 
   it('a completed-but-failed job is a failure, not an empty snapshot', async () => {
-    // This assertion used to be `deepEqual(…, [])` for BOTH cases — it asserted
-    // the two are indistinguishable while its name claimed the opposite, and a
-    // mutation that deleted the `success: false` guard entirely left the whole
-    // suite green. The distinction has to reach the caller, or the guard is
-    // decoration: `null` = could not look, `[]` = looked and found nobody.
+    // `null` = could not look, `[]` = looked and found nobody.
     const { service } = panel('3.2.1', { success: false, users: [] });
     assert.equal(await service.fetchUsersIpsForNode('node-uuid'), null);
 
-    // Same shape, success true, still empty: the case that legitimately means
-    // nobody is online, and it must stay reachable and distinct.
     const ok = panel('3.2.1', { success: true, users: [] });
     assert.deepEqual(await ok.service.fetchUsersIpsForNode('node-uuid'), []);
   });
 
-
-  it('dropping by user sends numeric ids on 3.x and uuids on 2.x', async () => {
-    const three = panel('3.2.1', {});
-    await three.service.dropConnections({
-      dropBy: { by: 'userUuids', userUuids: ['42', '77'] },
-      targetNodes: { target: 'allNodes' },
-    });
-    const dropped = three.captured.find((c) => c.url === '/api/connections/drop');
-    assert.ok(dropped !== undefined, 'the 3.x drop was never sent');
-    assert.deepEqual(dropped.data, {
-      dropBy: { by: 'userIds', userIds: [42, 77] },
-      targetNodes: { target: 'allNodes' },
-    });
-
-    const two = panel('2.8.0', {});
-    await two.service.dropConnections({
-      dropBy: { by: 'userUuids', userUuids: [UUID] },
-      targetNodes: { target: 'allNodes' },
-    });
-    const old = two.captured.find((c) => c.url === '/api/ip-control/drop-connections');
-    assert.ok(old !== undefined, 'the 2.x drop was never sent');
-    assert.deepEqual(old.data, {
-      dropBy: { by: 'userUuids', userUuids: [UUID] },
-      targetNodes: { target: 'allNodes' },
-    });
+  it('dropping by user sends numeric ids, on every version reading', async () => {
+    for (const version of ['3.2.1', null] as const) {
+      const harness = panel(version, {});
+      await harness.service.dropConnections({
+        dropBy: { by: 'userUuids', userUuids: ['42', '77'] },
+        targetNodes: { target: 'allNodes' },
+      });
+      const dropped = harness.captured.filter((c) => !c.url.startsWith('/api/system/'));
+      assert.deepEqual(
+        dropped.map((c) => [c.url, c.data]),
+        [
+          [
+            '/api/connections/drop',
+            { dropBy: { by: 'userIds', userIds: [42, 77] }, targetNodes: { target: 'allNodes' } },
+          ],
+        ],
+        String(version),
+      );
+    }
   });
 
-  it('refuses a 3.x drop whose identities are all 2.x uuids', async () => {
+  it('refuses a drop whose identities are all 2.x uuids', async () => {
     // Sending them would have the panel reject the whole request over the first
-    // bad element, taking the enforcement action for every OTHER user with it.
+    // bad element, taking the enforcement action for every OTHER user with it —
+    // and `parseInt` of this uuid is somebody else's id.
     const { service, captured } = panel('3.2.1', {});
     const outcome = await service.dropConnections({
       dropBy: { by: 'userUuids', userUuids: [UUID] },
@@ -643,9 +519,6 @@ describe('getHwidTopUsers — the size the panel would otherwise pick for us', (
     captured.filter((c) => c.url.startsWith('/api/hwid/devices/top-users'));
 
   it('sends an explicit size instead of inheriting the contract default of five', async () => {
-    // All three vendored contracts declare `size: z.coerce.number()…default(5)`.
-    // Sending nothing did not mean "everything" — it meant five rows, and the
-    // device-overage detector called everyone below them clean.
     const { service, captured } = topUsersPanel(3);
     await service.getHwidTopUsers();
     assert.equal(pages(captured).length, 1);
@@ -657,7 +530,6 @@ describe('getHwidTopUsers — the size the panel would otherwise pick for us', (
     const { service, captured } = topUsersPanel(250);
     const rows = await service.getHwidTopUsers();
     assert.equal(rows.length, 250, 'a 250-user panel must not be judged on 100 of them');
-    // 100 + 100 + 50 — and no fourth request asking for rows the total ruled out.
     assert.deepEqual(
       pages(captured).map((c) => c.url),
       [
@@ -669,8 +541,6 @@ describe('getHwidTopUsers — the size the panel would otherwise pick for us', (
   });
 
   it('honours a caller that only wants a card of rows', async () => {
-    // The admin card renders every row it is handed; the fraud detector wants
-    // coverage. One method, and the CALLER says which.
     const { service, captured } = topUsersPanel(250);
     const rows = await service.getHwidTopUsers(5);
     assert.equal(rows.length, 5);
@@ -681,8 +551,6 @@ describe('getHwidTopUsers — the size the panel would otherwise pick for us', (
   });
 
   it('stops on a short page even when the panel ignores size and reports nonsense', async () => {
-    // The endless-walk guard: a build that re-serves the same page forever would
-    // otherwise be walked until the ceiling, at one request per hundred rows.
     const { service, captured } = build((input) =>
       input.url.startsWith('/api/system/')
         ? recap('3.2.1')
@@ -701,7 +569,7 @@ describe('getHwidTopUsers — the size the panel would otherwise pick for us', (
   });
 });
 
-describe('a panel that changes era under an in-flight request', () => {
+describe('a refusal is a refusal: no version re-read decides its class', () => {
   const rejection = (status: number) =>
     throwError(() => ({
       isAxiosError: true,
@@ -709,107 +577,37 @@ describe('a panel that changes era under an in-flight request', () => {
       message: `HTTP ${status}`,
     }));
 
-  /**
-   * A panel that is 2.8.0 until `flip()` is called and 3.2.1 afterwards, and
-   * that refuses every user-scoped request throughout. This is the upgrade
-   * window: the shape was cached before, the request was built from it, and the
-   * panel has since stopped accepting that shape.
-   */
-  function upgradingPanel() {
-    let version = '2.8.0';
-    const harness = build((input) =>
-      input.url.startsWith('/api/system/') ? recap(version) : rejection(400),
+  it('a 400 on the PATCH is terminal, and costs no extra version read', async () => {
+    // The adapter used to re-read the version on every refusal to ask "did the
+    // panel change era under this request?" and make such a refusal retryable.
+    // No request is built from the era any more, so there is nothing for an
+    // upgrade to have changed — a refusal is the panel's answer.
+    const { service, captured } = build((input) =>
+      input.url.startsWith('/api/system/') ? recap('3.3.2') : rejection(400),
     );
-    return { ...harness, flip: () => { version = '3.2.1'; } };
-  }
-
-  it('re-reads the version on a refusal and makes THAT failure retryable', async () => {
-    const { service, captured, flip } = upgradingPanel();
-    // Warm the cache the way a live process would: one successful shape read.
-    assert.equal((await service.getPanelShape()).addressing, 'uuid');
-    flip();
-
-    // A 400 is normally TERMINAL — `RemnawaveUpstreamRejectionError`, which
-    // `classifyRecovery` never retries. Here the addressing provably moved
-    // between building the request and being refused, so the next attempt is
-    // built differently and the job must live to make it.
+    await service.getPanelShape();
+    const versionReads = () => captured.filter((c) => c.url.startsWith('/api/system/')).length;
+    const before = versionReads();
     await assert.rejects(
       () => service.updatePanelUser(stored({ panelId: 7 }), { description: 'x' }),
       (err: Error) => {
-        assert.equal(err.name, 'ServiceUnavailableException', err.name);
-        return true;
-      },
-    );
-    // The re-read happened, and it was forced rather than served from the
-    // five-minute cache.
-    assert.ok(
-      captured.filter((c) => c.url.startsWith('/api/system/')).length >= 2,
-      'the refusal must force a version re-read, not trust the cached shape',
-    );
-    assert.equal((await service.getPanelShape()).addressing, 'id');
-  });
-
-  it('leaves an ordinary refusal terminal — the version has not moved', async () => {
-    // The forever-retry-with-no-alert hole this taxonomy was built to close. A
-    // bad body, a rejected status value, a bad token: all still 400, all still
-    // terminal, because the re-read comes back with the SAME addressing.
-    const { service } = build((input) =>
-      input.url.startsWith('/api/system/') ? recap('2.8.0') : rejection(400),
-    );
-    await service.getPanelShape();
-    await assert.rejects(
-      () => service.updatePanelUser(stored(), { description: 'x' }),
-      (err: Error) => {
         assert.equal(err.name, 'RemnawaveUpstreamRejectionError', err.name);
         return true;
       },
     );
-  });
-
-  it('does not read an unreadable version as a moved one', async () => {
-    // A revoked token 401s every request INCLUDING the version read, so the
-    // re-probe comes back with `addressing: 'unknown'`. Counting that as a move
-    // would make every auth failure retryable — the same
-    // forever-retry-with-no-alert hole, entered from the other side.
-    let reachable = true;
-    const { service } = build((input) =>
-      input.url.startsWith('/api/system/')
-        ? (reachable ? recap('2.8.0') : rejection(401))
-        : rejection(401),
-    );
-    assert.equal((await service.getPanelShape()).addressing, 'uuid');
-    reachable = false;
-
-    await assert.rejects(
-      () => service.updatePanelUser(stored(), { description: 'x' }),
-      (err: Error) => {
-        assert.equal(err.name, 'RemnawaveUpstreamRejectionError', err.name);
-        return true;
-      },
-    );
-  });
-
-  it('does not re-probe on its own version read — that would never terminate', async () => {
-    // The re-read goes through this same transport. A panel refusing the recap
-    // itself is the recursion this latch exists to stop.
-    const { service, captured } = build(() => rejection(403));
-    await service.getPanelShape();
-    const before = captured.length;
-    await service.getPanelShape(true);
-    assert.equal(captured.length - before, 2, 'recap + metadata, and nothing recursive');
+    assert.equal(versionReads(), before);
   });
 });
 
 describe('RemnawaveApiService.resolvePanelSegment', () => {
-  it('needs no round-trip when the stored identity already fits the panel', async () => {
-    const { service, captured } = build(() => recap('2.8.0'));
-    const resolved = await service.resolvePanelSegment(stored());
-    assert.deepEqual(resolved, { segment: UUID, panelId: null });
-    // One call: the version read. No resolve.
+  it('needs no round-trip when the stored identity already is the numeric id', async () => {
+    const { service, captured } = build(() => recap('3.3.2'));
+    const resolved = await service.resolvePanelSegment(stored({ remnawaveId: '4471' }));
+    assert.deepEqual(resolved, { segment: '4471', panelId: 4471 });
     assert.equal(captured.filter((c) => c.url.includes('resolve')).length, 0);
   });
 
-  it('resolves by username when a 2.x profile meets an upgraded panel', async () => {
+  it('resolves by username when a 2.x-linked row recorded nothing else', async () => {
     const { service, captured } = build(({ url }) =>
       url.includes('recap')
         ? recap('3.2.1')
@@ -855,213 +653,23 @@ describe('RemnawaveApiService.resolvePanelSegment', () => {
     assert.equal(await service.resolvePanelSegment(stored({ panelUsername: 'gone' })), null);
   });
 
-  it('falls back to the stored identity when the panel version cannot be read', async () => {
-    // A down panel must not change how its own errors get classified. See the
-    // `panelUserAddress — an unknown panel version` block for why refusing here
-    // would be the more dangerous choice.
-    const { service } = build(() => throwError(() => new Error('down')));
+  it('an unreadable version is addressed exactly as a 3.x one', async () => {
+    // It used to send the stored uuid unchanged — a certain 400 on a 3.x panel.
+    // Now the version is not consulted at all: the recorded numeric id names the
+    // profile. (Destructive verbs never get here with a uuid; they refuse it
+    // first — see `stale-panel-identity.spec.ts`.)
+    const { service, captured } = build(() => throwError(() => new Error('down')));
     assert.deepEqual(await service.resolvePanelSegment(stored({ panelId: 7 })), {
-      segment: UUID,
-      panelId: null,
+      segment: '7',
+      panelId: 7,
     });
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  ONE OBSERVATION OF THE PANEL ERA, THREADED THROUGH A DELETION
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * THE DEFECT THIS BLOCK EXISTS FOR, stated as the sequence that loses a paying
- * customer's account.
- *
- * The stale-link guard and the address builder each used to perform their OWN
- * `getPanelShape()`. `getPanelShape()` never throws — an unreachable panel, an
- * expired token or an unparseable version all produce `{ addressing: 'unknown' }`
- * — and it caches that answer for only fifteen seconds
- * (`CAPABILITIES_NEGATIVE_CACHE_TTL_MS`). Two reads one await apart can
- * therefore legitimately DISAGREE, and the disagreement that matters runs in one
- * direction:
- *
- *   1. the guard reads `'unknown'` and answers `panelEraUnknown` → PROCEED. That
- *      is deliberate and correct on its own terms: on `'unknown'` the address
- *      builder emits the stored string unchanged, and a 3.x panel answers a
- *      2.x uuid with `400 expected number, received NaN` rather than deleting;
- *   2. the negative cache entry expires;
- *   3. the address builder reads `'id'`, takes the `'id'` branch, and falls back
- *      through the recorded numeric id (or the saved short uuid, or the panel
- *      username) to whatever profile is LIVE at that address;
- *   4. the DELETE goes to that profile.
- *
- * Neither read is wrong. The guard's fail-open stance is not wrong either — it
- * is documented, deliberate, and unchanged by any of this. The defect is that
- * they were TWO READS, so the decision was made about one panel and carried out
- * against another.
- *
- * A deletion now takes a `PanelEraObservation` as a REQUIRED argument,
- * `assessObservedPanelLink` is synchronous and cannot read anything, and the
- * adapter — given an observation — never re-reads the shape. So the assertions
- * below are on THE ADDRESS THE PANEL WAS ACTUALLY HANDED, not on how many times
- * a spy was poked; the read count is corroboration, never the case on its own.
- */
-
-/** The 2.x identity of a row the reconciliation has not repaired yet. */
-const DEAD_UUID = '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f';
-
-const SHAPE_UNKNOWN: RemnawavePanelShape = {
-  version: null,
-  addressing: 'unknown',
-  connectionsApi: 'unknown',
-  userLookups: { byTelegramId: true, byEmail: true },
-  usersStream: false,
-};
-const SHAPE_3X: RemnawavePanelShape = {
-  version: '3.3.2',
-  addressing: 'id',
-  connectionsApi: 'connections',
-  userLookups: { byTelegramId: false, byEmail: false },
-  usersStream: true,
-};
-
-/**
- * Replaces ONLY the era read and leaves every layer under test real:
- * `resolvePanelSegment`, `panelUserAddress`, `PANEL_ROUTES` and the request
- * itself all still run. The seam has to be exactly here, because the thing
- * under test is how many times this one function is consulted and what each of
- * its answers is used for — and the fifteen-second window that makes two reads
- * differ cannot be waited out in a unit test.
- *
- * First call answers `'unknown'`, every call after it answers 3.x: the negative
- * cache boundary, compressed.
- */
-function eraFlippingAfterFirstRead(service: RemnawaveApiService): { reads: () => number } {
-  let reads = 0;
-  (service as unknown as { getPanelShape: () => Promise<RemnawavePanelShape> }).getPanelShape =
-    async () => {
-      reads += 1;
-      return reads === 1 ? SHAPE_UNKNOWN : SHAPE_3X;
-    };
-  return { reads: () => reads };
-}
-
-/** The unrepaired duplicate pair: a dead 2.x uuid over a live numeric id. */
-function staleIdentity() {
-  return { remnawaveId: DEAD_UUID, panelId: 5150, panelUsername: 'rz_alice_sub' };
-}
-
-describe('the era a deletion is guarded on is the era it is addressed with', () => {
-  it('THE PROOF: a guard that trusted an unknown era addresses the panel with THAT era', async () => {
-    const { service, captured } = build(() => of({ data: { response: { isDeleted: true } } }));
-    const era = eraFlippingAfterFirstRead(service);
-
-    const identity = staleIdentity();
-    const observed = await observePanelEra(() => service.getPanelShape());
-    assert.deepEqual(
-      assessObservedPanelLink(observed, identity.remnawaveId),
-      { trusted: true, because: 'panelEraUnknown' },
-      'the fail-open on an unreadable era is unchanged — that is the stance being preserved',
-    );
-
-    await service.deletePanelUser(identity, observed);
-
-    // THE LOAD-BEARING ASSERTION: the argument the panel was handed. `'unknown'`
-    // means "send the stored string", which a 3.x panel refuses with a 400 that
-    // nobody reads as a deletion. `/api/users/5150` is the live customer.
-    assert.deepEqual(
-      captured.map((c) => `${c.method} ${c.url}`),
-      [`delete /api/users/${DEAD_UUID}`],
-      'the DELETE must carry the address the OBSERVED era produces',
-    );
-    assert.equal(era.reads(), 1, 'and it must have cost exactly one reading of the era');
-  });
-
-  it('INERTNESS CONTROL: that same panel really does flip, and an unthreaded build follows it', async () => {
-    // Without this the assertion above could pass against a stub that never
-    // changed its answer at all. Here the FIRST read is consumed by the guard,
-    // exactly as in the proof, and then an address is built WITHOUT the
-    // observation — the shape this code had before the fix. It resolves the
-    // dead uuid to the live profile, which is the loss being prevented.
-    const { service } = build(() => of({ data: { response: { isDeleted: true } } }));
-    const era = eraFlippingAfterFirstRead(service);
-
-    const identity = staleIdentity();
-    const observed = await observePanelEra(() => service.getPanelShape());
-    assert.equal(observed.addressing, 'unknown');
-
-    const unthreaded = await service.resolvePanelSegment(identity);
-
-    assert.deepEqual(
-      unthreaded,
-      { segment: '5150', panelId: 5150 },
-      'a second, independent reading DOES resolve the dead uuid to the live numeric id',
-    );
-    assert.equal(era.reads(), 2);
-  });
-
-  it('a device deletion builds its owner key AND its path segment from the one observation', async () => {
-    // `deletePanelUserDevice` carried the defect twice over: it read the shape
-    // for the body's owner key and `segmentFor` read it again for the path, so
-    // even inside one request the two halves could describe different panels.
-    const { service, captured } = build(() => of({ data: { response: { total: 1 } } }));
-    const era = eraFlippingAfterFirstRead(service);
-
-    const identity = staleIdentity();
-    const observed = await observePanelEra(() => service.getPanelShape());
-
-    await service.deletePanelUserDevice(identity, 'hwid-x', observed);
-
-    assert.deepEqual(captured, [
-      {
-        method: 'post',
-        url: '/api/hwid/devices/delete',
-        // `userUuid` and the stored string, because the observation said
-        // `'unknown'`. A second read would have produced `{ userId: 5150 }` —
-        // the live customer's device list.
-        data: { userUuid: DEAD_UUID, hwid: 'hwid-x' },
-      },
-    ]);
-    assert.equal(era.reads(), 1);
-  });
-
-  it('a proven 3.x era still addresses by the numeric id, so threading is not just "never resolve"', async () => {
-    // The anti-vacuity side. Threading the observation must not have turned the
-    // address builder inert: handed a 3.x observation it still takes the `'id'`
-    // branch and still emits the numeric identity.
-    const { service, captured } = build(() => of({ data: { response: { isDeleted: true } } }));
-    let reads = 0;
-    (service as unknown as { getPanelShape: () => Promise<RemnawavePanelShape> }).getPanelShape =
-      async () => {
-        reads += 1;
-        return SHAPE_3X;
-      };
-
-    const identity = { remnawaveId: '5150', panelId: 5150, panelUsername: 'rz_alice_sub' };
-    const observed = await observePanelEra(() => service.getPanelShape());
-    assert.deepEqual(assessObservedPanelLink(observed, identity.remnawaveId), {
-      trusted: true,
-      because: 'identityIsCurrent',
-    });
-
-    await service.deletePanelUser(identity, observed);
-
-    assert.deepEqual(
-      captured.map((c) => `${c.method} ${c.url}`),
-      ['delete /api/users/5150'],
-    );
-    assert.equal(reads, 1);
+    assert.deepEqual(captured, [], 'no version read and no resolve: the id was recorded');
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  The identifier in the BODY, and the reads that build it
 // ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * `PATCH /api/users` is the one write with no path segment: the identifier
- * travels in the body, under a name that differs per era. These cover the four
- * methods that were still hard-coding `{ uuid }` there or interpolating the
- * stored string straight into a path.
- */
 
 /** Answers the version probe with `version`, everything else with `payload`. */
 function panelOn(version: string, payload: unknown) {
@@ -1072,7 +680,8 @@ function panelOn(version: string, payload: unknown) {
   );
 }
 
-const USER_2X = {
+/** A row carrying a `uuid` beside its numeric id — how 2.x sent it. */
+const USER_WITH_UUID = {
   response: {
     uuid: UUID,
     id: 4471,
@@ -1124,25 +733,19 @@ function pathOf(captured: ReadonlyArray<{ url: string }>): string {
   return call.url;
 }
 
-describe('updatePanelUser — the identifier travels in the body, keyed per era', () => {
-  it('2.x gets { uuid }', async () => {
-    const { service, captured } = panelOn('2.8.0', USER_2X);
-    await service.updatePanelUser(stored(), { description: 'x' });
-    assert.equal(bodyOf(captured)['uuid'], UUID);
-    assert.equal('id' in bodyOf(captured), false);
-  });
-
-  it('3.x gets { id } as a NUMBER — a decimal string fails validation upstream', async () => {
+describe('updatePanelUser — the identifier travels in the body as the number', () => {
+  it('gets { id } as a NUMBER — a decimal string fails validation upstream', async () => {
     const { service, captured } = panelOn('3.2.1', USER_3X);
     await service.updatePanelUser(stored({ remnawaveId: '4471' }), { description: 'x' });
     assert.deepEqual(bodyOf(captured)['id'], 4471);
     assert.equal('uuid' in bodyOf(captured), false);
   });
 
-  it('a 2.x-created profile on an upgraded panel is keyed by its RECORDED id', async () => {
+  it('a 2.x-created profile is keyed by its RECORDED id', async () => {
     const { service, captured } = panelOn('3.2.1', USER_3X);
     await service.updatePanelUser(stored({ panelId: 4471 }), { description: 'x' });
     assert.equal(bodyOf(captured)['id'], 4471);
+    assert.equal('uuid' in bodyOf(captured), false);
   });
 
   it('resolves a saved subscription short uuid to the numeric id before PATCH on 3.2.3', async () => {
@@ -1168,32 +771,26 @@ describe('updatePanelUser — the identifier travels in the body, keyed per era'
     assert.equal('uuid' in patchBodyOf(captured), false);
   });
 
-  it('an unidentifiable panel is STILL keyed by the stored identifier, not the name', async () => {
-    // Version detection folds every failure into "no version", and the name is
-    // the one key all three eras accept — so writing by it always lands. That is
-    // exactly why it is not used: panel usernames are deterministic, so a
-    // re-provisioned profile inherits the name and the write lands on IT. The
-    // stored uuid names the right profile or earns "At least one of username,
-    // id must be provided", which nobody reads as success.
-    const { service, captured } = build((input) =>
-      input.url.startsWith('/api/system/')
-        ? throwError(() => new Error('ECONNREFUSED'))
-        : of({ data: USER_2X }),
-    );
+  it('a row that recorded only a name is keyed by the name — never by its uuid', async () => {
+    // The name is the address chain's last step, taken only when nothing else
+    // was recorded; the uuid is never a key (3.x drops `{ uuid }` and answers
+    // `400 At least one of username, id must be provided`).
+    const { service, captured } = panelOn('3.2.1', USER_3X);
     await service.updatePanelUser(stored({ panelUsername: 'rz_bob_1' }), { description: 'x' });
-    assert.equal(bodyOf(captured)['uuid'], UUID);
-    assert.equal('username' in bodyOf(captured), false);
+    assert.equal(bodyOf(captured)['username'], 'rz_bob_1');
+    assert.equal('uuid' in bodyOf(captured), false);
   });
 
   it('refuses rather than guessing when nothing can name the profile', async () => {
-    // A 2.x uuid, a 3.x panel, and neither a numeric id nor a name recorded.
-    const { service } = panelOn('3.2.1', USER_3X);
+    // A 2.x uuid, and neither a numeric id, a short uuid nor a name recorded.
+    const { service, captured } = panelOn('3.2.1', USER_3X);
     await assert.rejects(() => service.updatePanelUser(stored(), { description: 'x' }));
+    assert.equal(captured.some((c) => c.method === 'patch'), false);
   });
 });
 
 describe('strictSetUserLimits — same key, and an unaddressable profile DEFERS', () => {
-  it('3.x gets { id }', async () => {
+  it('gets { id }', async () => {
     const { service, captured } = panelOn('3.2.1', USER_3X);
     const outcome = await service.strictSetUserLimits(stored({ remnawaveId: '4471' }), {
       trafficLimitBytes: null,
@@ -1233,8 +830,7 @@ describe('strictSetUserLimits — same key, and an unaddressable profile DEFERS'
 
   it('reports unavailable, NOT invalidContract, when the profile cannot be named', async () => {
     // The distinction decides whether the saga retries or gives up. The
-    // contract is fine here; only our ability to name the profile is missing,
-    // and that can come back after a version re-detect.
+    // contract is fine here; only our ability to name the profile is missing.
     const { service } = panelOn('3.2.1', USER_3X);
     const outcome = await service.strictSetUserLimits(stored(), {
       trafficLimitBytes: null,
@@ -1269,7 +865,7 @@ describe('strictGetPanelUserDevices — legacy profile recovery on Remnawave 3.2
   });
 });
 
-describe('parseStrictUser — a 3.x row has no uuid to validate', () => {
+describe('parseStrictUser — the numeric id is the identity', () => {
   it('decodes a 3.x row by its numeric id', async () => {
     const { service } = panelOn('3.2.1', USER_3X);
     const outcome = await service.strictGetPanelUser(stored({ remnawaveId: '4471' }));
@@ -1279,28 +875,24 @@ describe('parseStrictUser — a 3.x row has no uuid to validate', () => {
     assert.equal(outcome.value.panelId, 4471);
   });
 
-  it('carries the panel id off a 2.x row too, so it can be back-filled early', async () => {
-    const { service } = panelOn('2.8.0', USER_2X);
-    const outcome = await service.strictGetPanelUser(stored());
+  it('keys a row that still carries a uuid by its numeric id', async () => {
+    const { service } = panelOn('3.2.1', USER_WITH_UUID);
+    const outcome = await service.strictGetPanelUser(stored({ remnawaveId: '4471' }));
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
-    assert.equal(outcome.value.uuid, UUID);
-    assert.equal(outcome.value.panelId, 4471);
+    assert.equal(outcome.value.uuid, '4471');
   });
 
-  it('still REFUSES a 2.x row whose uuid is present but empty', async () => {
-    // Absence means 3.x. An empty string means a DAMAGED 2.x row, and falling
-    // back to the id there would quietly accept what this parser exists to
-    // reject.
-    const damaged = { response: { ...USER_2X.response, uuid: '' } };
-    const { service } = panelOn('2.8.0', damaged);
-    const outcome = await service.strictGetPanelUser(stored());
+  it('REFUSES a row without a numeric id, whatever uuid it carries', async () => {
+    const damaged = { response: { ...USER_WITH_UUID.response, id: null } };
+    const { service } = panelOn('3.2.1', damaged);
+    const outcome = await service.strictGetPanelUser(stored({ remnawaveId: '4471' }));
     assert.equal(outcome.kind, 'invalidContract');
   });
 });
 
 describe('the two path-building reads that were still interpolating the raw string', () => {
-  it('getPanelUserUsage addresses by id on 3.x', async () => {
+  it('getPanelUserUsage addresses by id', async () => {
     const { service, captured } = panelOn('3.2.1', USER_3X);
     await service.getPanelUserUsage(stored({ panelId: 4471 }));
     assert.equal(pathOf(captured), '/api/users/4471');
@@ -1319,16 +911,8 @@ describe('the two path-building reads that were still interpolating the raw stri
 });
 
 describe('mapHwidTopUser — the HWID overage detector must see 3.x rows', () => {
-  it('reads the 2.7 row key', () => {
-    assert.equal(mapHwidTopUser({ userUuid: UUID, username: 'a', devicesCount: 9 }).userUuid, UUID);
-  });
-
-  it('reads the 2.8 row key', () => {
-    assert.equal(mapHwidTopUser({ userId: UUID, username: 'a', devicesCount: 9 }).userUuid, UUID);
-  });
-
-  it('reads a 3.x row, which has NEITHER key — only a numeric id', () => {
-    // Before this, a 3.x row mapped to '' , missed the limit map keyed by what
+  it('reads a 3.x row by its numeric id', () => {
+    // Before this, a 3.x row mapped to '', missed the limit map keyed by what
     // rezeis stored, took the `?? 0` limit and was filtered out. The detector
     // reported "nobody is over their device limit" for every 3.x panel and
     // logged nothing.
@@ -1340,10 +924,10 @@ describe('mapHwidTopUser — the HWID overage detector must see 3.x rows', () =>
   });
 });
 
-describe('resolveRemnawaveUser — two of the four selectors moved in 3.x', () => {
+describe('resolveRemnawaveUser — e-mail and Telegram id go through the stream', () => {
   // The row carries the selector it was found by, which is what a panel that
   // actually APPLIED the filter returns. A row that does not is how a panel
-  // which ignored the filter looks, and the adapter now refuses those.
+  // which ignored the filter looks, and the adapter refuses those.
   const SUMMARY = {
     response: {
       users: [
@@ -1351,47 +935,46 @@ describe('resolveRemnawaveUser — two of the four selectors moved in 3.x', () =
       ],
     },
   };
-  const LEGACY = { response: { uuid: UUID, id: 7, username: 'rz_bob_1', status: 'ACTIVE' } };
 
-  it('2.x keeps the by-email shortcut', async () => {
-    const { service, captured } = panelOn('2.8.0', LEGACY);
-    await service.resolveRemnawaveUser({ email: 'bob@example.test' });
-    assert.equal(pathOf(captured), '/api/users/by-email/bob%40example.test');
-  });
-
-  it('3.x filters the stream instead — the shortcut answers 404 Cannot GET there', async () => {
+  it('filters the stream by e-mail — the old shortcut answers 404 Cannot GET on 3.x', async () => {
     // Measured on a live 3.2.1, not inferred: `by-email` and `by-telegram-id`
-    // are gone, and `stream` gained `email` / `telegramId` filters. Without the
-    // branch, an operator searching a real customer is told "no such user",
-    // because the 404 lands in the catch-all and comes back as null.
+    // are gone, and `stream` gained `email` / `telegramId` filters.
     const { service, captured } = panelOn('3.2.1', SUMMARY);
     const found = await service.resolveRemnawaveUser({ email: 'bob@example.test' });
     assert.equal(pathOf(captured), '/api/users/stream?size=1&email=bob%40example.test');
     assert.equal(found?.username, 'rz_bob_1');
   });
 
-  it('3.x filters the stream by telegram id too', async () => {
+  it('filters the stream by telegram id too', async () => {
     const { service, captured } = panelOn('3.2.1', SUMMARY);
     await service.resolveRemnawaveUser({ telegramId: '12345' });
     assert.equal(pathOf(captured), '/api/users/stream?size=1&telegramId=12345');
   });
 
-  it('an unknown panel takes the LEGACY route, not the stream', async () => {
-    // The one place "unknown" leans 2.x rather than refusing. Both branches are
-    // pure reads that find the right user or nobody, so the tie goes to what
-    // every panel this integration has run against actually serves — and the
-    // 2.8 stream does not accept these filters at all, so guessing the other way
-    // would silently return an ARBITRARY user from the first keyset page.
+  it('an unreadable version takes the stream as well, and asks nothing else', async () => {
+    // An unknown version used to try the 2.x shortcut first. That route does not
+    // exist on any supported panel.
     const { service, captured } = build((input) =>
       input.url.startsWith('/api/system/')
         ? throwError(() => new Error('ECONNREFUSED'))
-        : of({ data: LEGACY }),
+        : of({ data: SUMMARY }),
     );
     await service.resolveRemnawaveUser({ email: 'bob@example.test' });
-    assert.equal(pathOf(captured), '/api/users/by-email/bob%40example.test');
+    assert.deepEqual(
+      captured.map((c) => c.url),
+      ['/api/users/stream?size=1&email=bob%40example.test'],
+    );
   });
 
-  it('the two selectors that survive every version are never rerouted', async () => {
+  it('a stream answer that does not match the selector is nobody, not the first customer', async () => {
+    const stranger = {
+      response: { users: [{ id: 9, username: 'rz_carol', status: 'ACTIVE', email: 'carol@example.test' }] },
+    };
+    const { service } = panelOn('3.2.1', stranger);
+    assert.equal(await service.resolveRemnawaveUser({ email: 'bob@example.test' }), null);
+  });
+
+  it('the two selectors with routes of their own are never rerouted', async () => {
     const byName = panelOn('3.2.1', SUMMARY);
     await byName.service.resolveRemnawaveUser({ username: 'rz_bob_1' });
     assert.equal(pathOf(byName.captured), '/api/users/by-username/rz_bob_1');
@@ -1431,13 +1014,12 @@ function walker(version: string, pages: readonly unknown[]) {
   return { service, urls };
 }
 
-describe('strictGetAllPanelUsers — keyset where the panel offers it', () => {
-  it('2.8+ walks by cursor, and the cursor is what the panel handed back', async () => {
+describe('strictGetAllPanelUsers — keyset on 3.x', () => {
+  it('walks by cursor, and the cursor is what the panel handed back', async () => {
     // Offset paging loses a row whenever the list shrinks mid-walk: every later
     // row shifts one place left, one live user is never served, and the count
     // check still reconciles because the panel's own total fell by the same one.
-    // That user then misses in the overlay map and is written EXPIRED.
-    const { service, urls } = walker('2.8.0', [
+    const { service, urls } = walker('3.3.2', [
       { response: { users: [ROW_3X(1)], nextCursor: '41', hasMore: true } },
       { response: { users: [ROW_3X(2)], nextCursor: null, hasMore: false } },
     ]);
@@ -1452,31 +1034,21 @@ describe('strictGetAllPanelUsers — keyset where the panel offers it', () => {
     assert.equal(urls[1], '/api/users/stream?size=500&cursor=41');
   });
 
-  it('2.7.4 keeps the offset walk — the stream route does not exist there', async () => {
-    const { service, urls } = walker('2.7.4', [
-      { response: { users: [ROW_3X(1)], total: 1 } },
-    ]);
-
+  it('an unknown version keeps the offset walk, which every 3.x serves too', async () => {
+    const urls: string[] = [];
+    const { service } = build((input) => {
+      if (input.url.startsWith('/api/system/')) return throwError(() => new Error('ECONNREFUSED'));
+      urls.push(input.url);
+      return of({ data: { response: { users: [ROW_3X(1)], total: 1 } } });
+    });
     const outcome = await service.strictGetAllPanelUsers();
-
     assert.equal(outcome.kind, 'ok');
     assert.equal(urls[0], '/api/users/?start=0&size=500');
   });
 
-  it('an unknown version keeps the offset walk, which every version serves', async () => {
-    const { service } = build((input) =>
-      input.url.startsWith('/api/system/')
-        ? throwError(() => new Error('ECONNREFUSED'))
-        : of({ data: { response: { users: [ROW_3X(1)], total: 1 } } }),
-    );
-    const outcome = await service.strictGetAllPanelUsers();
-    assert.equal(outcome.kind, 'ok');
-  });
-
   it('a SHORT keyset page is not the end of the list', async () => {
     // The offset walk reads a short page as the end. Applying that heuristic to
-    // a keyset walk would bless a prefix of the panel as all of it — and a
-    // prefix is exactly what makes every later "missing" verdict destructive.
+    // a keyset walk would bless a prefix of the panel as all of it.
     const { service } = walker('3.2.1', [
       { response: { users: [ROW_3X(1)], nextCursor: '9', hasMore: true } },
       { response: { users: [ROW_3X(2), ROW_3X(3)], nextCursor: null, hasMore: false } },
@@ -1491,9 +1063,6 @@ describe('strictGetAllPanelUsers — keyset where the panel offers it', () => {
   });
 
   it('refuses a cursor that does not advance instead of spinning to the page cap', async () => {
-    // Without this the walk would fetch the same page fifty times and then
-    // report an INCOMPLETE list assembled from one page — a contract failure
-    // dressed up as a short read.
     const { service } = walker('3.2.1', [
       { response: { users: [ROW_3X(1)], nextCursor: '7', hasMore: true } },
       { response: { users: [ROW_3X(1)], nextCursor: '7', hasMore: true } },

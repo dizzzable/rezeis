@@ -2,33 +2,36 @@
  * Pure version → panel-shape derivation, shared by the two services that need
  * it and owned by neither.
  *
- * WHY IT IS ITS OWN FILE. `RemnawaveVersionService` already derived all of this,
- * but it is constructed WITH `RemnawaveApiService`, so the adapter cannot inject
- * it back without a dependency cycle — and the adapter is exactly what needs the
- * answer, because it is the thing building the paths. Lifting the derivation out
- * leaves both services importing a module with no dependencies of its own, and
- * keeps one definition of "which shape is this panel" rather than two that drift.
- */
-
-/**
- * How the panel addresses a user inside its REST paths. Remnawave 2.x takes the
- * profile UUID (`/api/users/{uuid}`); 3.x renamed the parameter and takes the
- * numeric user id (`/api/users/{userId}`).
+ * WHY IT IS ITS OWN FILE. `RemnawaveVersionService` derives the capability
+ * record, but it is constructed WITH `RemnawaveApiService`, so the adapter
+ * cannot inject it back without a dependency cycle — and the adapter needs the
+ * same version read for its own shape cache. Lifting the derivation out leaves
+ * both services importing a module with no dependencies of its own, and keeps
+ * one definition of "which shape is this panel" rather than two that drift.
  *
- * `'unknown'` is not padding — it is the value the failure branch returns.
- * Version detection collapses every failure (401, timeout, DNS, unconfigured
- * token) into "no version", and a two-valued union would force a default that
- * addresses a live panel the wrong way for the whole cache window. Callers must
- * branch on `'unknown'` explicitly instead of guessing.
+ * WHAT IS LEFT OF "SHAPE". This build speaks Remnawave 3.x only: a 2.x panel is
+ * refused out loud (`LegacyPanelRefusal`, and the adapter's gate), and no
+ * request is shaped by the version any more — every one goes out in the 3.x
+ * shape, an unreadable version included. The two unions below survive for the
+ * capability record the admin SPA reads, where `'unknown'` is what a 2.x panel,
+ * a 4.x panel and a failed read all report.
  */
-export type RemnawaveUserAddressing = 'uuid' | 'id' | 'unknown';
 
 /**
- * Which live-connection endpoint family the panel serves. 2.x exposes
- * `/api/ip-control/*`; 3.x dropped that family wholesale and replaced it with
- * `/api/connections/*`. `'unknown'` carries the same meaning as above.
+ * How the panel addresses a user inside its REST paths: `'id'` on 3.x, which
+ * keys every user-scoped route on the numeric user id.
+ *
+ * `'unknown'` is not padding — it is what a failed version read, and every
+ * major this build does not speak, reports. Version detection collapses every
+ * failure (401, timeout, DNS, unconfigured token) into "no version".
  */
-export type RemnawaveConnectionsApi = 'ip-control' | 'connections' | 'unknown';
+export type RemnawaveUserAddressing = 'id' | 'unknown';
+
+/**
+ * Which live-connection endpoint family the panel serves: `/api/connections/*`
+ * on 3.x. `'unknown'` carries the same meaning as above.
+ */
+export type RemnawaveConnectionsApi = 'connections' | 'unknown';
 
 /** Parses a `major.minor.patch` prefix from a version string. */
 export function parseSemver(
@@ -44,34 +47,14 @@ export function parseSemver(
   };
 }
 
-/** Only 2.x and 3.x path shapes are known; anything else stays unknown. */
+/** Only the 3.x path shape is spoken; anything else stays unknown. */
 export function userAddressingFor(major: number): RemnawaveUserAddressing {
-  if (major === 2) return 'uuid';
-  if (major === 3) return 'id';
-  return 'unknown';
+  return major === 3 ? 'id' : 'unknown';
 }
 
-/** Only 2.x and 3.x endpoint families are known; anything else stays unknown. */
+/** Only the 3.x endpoint family is spoken; anything else stays unknown. */
 export function connectionsApiFor(major: number): RemnawaveConnectionsApi {
-  if (major === 2) return 'ip-control';
-  if (major === 3) return 'connections';
-  return 'unknown';
-}
-
-/**
- * The same derivation straight from a version string, for callers that hold one
- * and do not want to re-implement the parse-then-branch dance.
- * An unparseable or absent version yields `'unknown'`, never a guess.
- */
-export function addressingForVersion(version: string | null): RemnawaveUserAddressing {
-  const parsed = parseSemver(version);
-  return parsed === null ? 'unknown' : userAddressingFor(parsed.major);
-}
-
-/** As {@link addressingForVersion}, for the live-connection family. */
-export function connectionsApiForVersion(version: string | null): RemnawaveConnectionsApi {
-  const parsed = parseSemver(version);
-  return parsed === null ? 'unknown' : connectionsApiFor(parsed.major);
+  return major === 3 ? 'connections' : 'unknown';
 }
 
 /** How long a successful detection is trusted before the panel is re-read. */
@@ -87,59 +70,14 @@ export const CAPABILITIES_CACHE_TTL_MS = 5 * 60_000;
  */
 export const CAPABILITIES_NEGATIVE_CACHE_TTL_MS = 15_000;
 
-/**
- * ONE reading of which era the panel is, taken at a single point in time and
- * then carried BY VALUE through every step that depends on it.
- *
- * WHY A VALUE AND NOT A SECOND CALL. `getPanelShape()` is cached, and the
- * failure cache is fifteen seconds ({@link CAPABILITIES_NEGATIVE_CACHE_TTL_MS}),
- * so two reads taken microseconds apart can legitimately disagree: the first
- * can be served from a negative entry that expires before the second, and the
- * second can come back with a real version. Two consumers that each read for
- * themselves therefore "usually agree" — which on a delete path is the whole
- * defect, because the consumer that decides WHETHER to delete and the consumer
- * that decides WHAT ADDRESS to delete are then answering about different
- * panels. A stored 2.x uuid assessed against `'unknown'` (proceed: the address
- * builder will emit the stored string and the panel will answer 400) and then
- * addressed against `'id'` (fall back through `panelId`/short uuid/username)
- * resolves to a LIVE profile and deletes it.
- *
- * So the era stops being something callers ask for and becomes something they
- * HOLD. It is threaded into the destructive adapter methods as a required
- * argument, which is what makes "the same value" a compile-time property
- * rather than a convention.
- */
-export interface PanelEraObservation {
-  readonly addressing: RemnawaveUserAddressing;
-}
-
-/**
- * Takes that one reading.
- *
- * A THROW IS THE UNKNOWN ERA, not an error to propagate — the same rule
- * `getPanelShape()` already applies internally, restated here because this is
- * the entry point a caller wired without a working adapter reaches. The job of
- * this function is to answer which era the panel is; it must never become a
- * second way for a deletion to fail.
- */
-export async function observePanelEra(
-  readPanelShape: () => Promise<{ readonly addressing: RemnawaveUserAddressing }>,
-): Promise<PanelEraObservation> {
-  try {
-    return { addressing: (await readPanelShape()).addressing };
-  } catch {
-    return { addressing: 'unknown' };
-  }
-}
-
 /** A source of the panel's self-reported version. Both readers are optional. */
 type VersionSource = () => Promise<{ readonly version?: unknown } | null>;
 
 /**
  * Reads the panel version from `/api/system/stats/recap` (authoritative
- * `version` field on every tested build), falling back to the canonical 2.8
- * source `/api/system/metadata`. Returns `null` when the panel is unreachable
- * or omits the field.
+ * `version` field on every tested build), falling back to
+ * `/api/system/metadata`. Returns `null` when the panel is unreachable or omits
+ * the field.
  *
  * Takes the two readers rather than a service so that the adapter and the
  * capability service — which need the same answer but cannot depend on each

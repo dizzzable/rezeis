@@ -7,13 +7,13 @@ import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { InternalUserDevicesController } from '../src/modules/internal-user/controllers/internal-user-devices.controller';
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 import {
-  assessStoredPanelLink,
-  isUuidShapedPanelIdentity,
+  isStalePanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE,
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE,
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE,
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
+  UNLINKED_SUBSCRIPTIONS_PATH,
 } from '../src/modules/remnawave/services/stale-panel-link';
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
@@ -26,13 +26,17 @@ import { SubscriptionTermService } from '../src/modules/add-on-entitlements/serv
  * THE STALE-LINK DELETE GUARD.
  *
  * Remnawave 3.x dropped the user `uuid` and re-keyed every user route on the
- * numeric `id`. `Subscription.remnawaveId` keeps whichever spelling was current
- * when the row was linked and is never rewritten, so a 2.x-era row on an
- * upgraded panel holds an identity the panel does not answer to — and that
- * identity does NOT fail closed: `panelUserAddress` falls back to the
- * subscription short UUID recovered from `config_url`, which resolves to
- * whatever profile is LIVE at that address. A delete built from it destroys a
- * paying customer's account.
+ * numeric `id`, and this build talks to 3.x only. `Subscription.remnawaveId`
+ * keeps whichever spelling was current when the row was linked and is never
+ * rewritten, so a row linked on a 2.x panel holds an identity no supported
+ * panel answers to — and that identity does NOT fail closed: `panelUserAddress`
+ * falls back to the subscription short UUID recovered from `config_url`, which
+ * resolves to whatever profile is LIVE at that address. A delete built from it
+ * destroys a paying customer's account.
+ *
+ * THE TEST IS "NOT A DECIMAL" AND IT READS NO PANEL VERSION. Every harness here
+ * offers a `getPanelShape` that records the call and throws: a guard that asked
+ * the version again would show up in the call list before it could matter.
  *
  * EVERY CASE HERE PINS A POSITIVE SIDE. "Nothing was deleted" passes just as
  * happily for a service that reached no code at all, so each refusal also pins
@@ -44,8 +48,6 @@ import { SubscriptionTermService } from '../src/modules/add-on-entitlements/serv
 const DEAD_UUID = '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f';
 /** The same profile as a 3.x panel names it. */
 const LIVE_DECIMAL = '5150';
-
-type Addressing = 'id' | 'uuid' | 'unknown';
 
 interface PanelHarness {
   /** Every adapter method that was actually reached, in order. */
@@ -64,22 +66,16 @@ interface PanelHarness {
  * record a call and pass its "no deletion" check by comparing arrays; with the
  * method missing, a deletion that slips through dies with "not a function"
  * instead of being silently recorded and then asserted away.
+ *
+ * `getPanelShape` is a TRAP: recorded, then thrown. No guard may ask it.
  */
-function panelHarness(
-  options: { addressing?: Addressing; throws?: boolean; allowDelete?: boolean } = {},
-): PanelHarness {
+function panelHarness(options: { allowDelete?: boolean } = {}): PanelHarness {
   const calls: string[] = [];
   const deleted: unknown[] = [];
   const api: Record<string, unknown> = {
     getPanelShape: async () => {
       calls.push('getPanelShape');
-      if (options.throws === true) {
-        // Exactly how the era read fails in production: the probe goes out over
-        // the same transport as everything else, so an unreachable panel, an
-        // expired token or a panel mid-restart all arrive as a throw.
-        throw new Error('Remnawave version could not be read');
-      }
-      return { addressing: options.addressing ?? 'unknown' };
+      throw new Error('the panel version must not be read on a delete path');
     },
   };
   if (options.allowDelete === true) {
@@ -133,7 +129,7 @@ interface DeletionHarness {
   readonly service: SubscriptionDeletionService;
 }
 
-function deletionHarness(row: LockedRow | null, panel: PanelHarness): DeletionHarness {
+function deletionHarness(row: LockedRow | null): DeletionHarness {
   const writes: string[] = [];
   const createdJobs: DeletionHarness['createdJobs'] = [];
   const statuses: SubscriptionStatus[] = [];
@@ -182,6 +178,10 @@ function deletionHarness(row: LockedRow | null, panel: PanelHarness): DeletionHa
     user: { findFirst: async () => ({ id: row?.userId ?? 'user-1' }) },
     $transaction: async (cb: (t: typeof tx) => Promise<unknown>) => cb(tx),
   };
+  // No panel adapter: the deletion service never calls the panel, and its
+  // stale-link refusal reads no panel version. The events service is the
+  // fifth argument — a constructor that still took the adapter would receive
+  // it there and the events below would never arrive.
   const service = new SubscriptionDeletionService(
     prisma as never,
     {
@@ -199,9 +199,9 @@ function deletionHarness(row: LockedRow | null, panel: PanelHarness): DeletionHa
         writes.push('terms.close');
       },
     } as never,
-    panel.api as never,
     {
       info: () => undefined,
+      emit: () => undefined,
       warn: (_type: string, _category: string, message: string, metadata: Record<string, unknown>) => {
         events.push({ message, metadata });
       },
@@ -215,45 +215,23 @@ function deletionHarness(row: LockedRow | null, panel: PanelHarness): DeletionHa
 }
 
 describe('the stale-panel-link predicate', () => {
-  it('is the same shape test the reconciliation sweep selects on: a hyphen, nothing else', () => {
-    assert.equal(isUuidShapedPanelIdentity(DEAD_UUID), true);
-    assert.equal(isUuidShapedPanelIdentity(LIVE_DECIMAL), false);
-    // A 20-digit unsigned 64-bit id is still not uuid-shaped.
-    assert.equal(isUuidShapedPanelIdentity('18446744073709551615'), false);
-  });
-
-  it('refuses only on a proven 3.x panel, and answers all three eras by name', async () => {
-    assert.deepEqual(await assessStoredPanelLink(async () => ({ addressing: 'id' }), DEAD_UUID), {
-      trusted: false,
-      because: 'uuidIdentityOn3xPanel',
-    });
-    assert.deepEqual(await assessStoredPanelLink(async () => ({ addressing: 'id' }), LIVE_DECIMAL), {
-      trusted: true,
-      because: 'identityIsCurrent',
-    });
-    assert.deepEqual(await assessStoredPanelLink(async () => ({ addressing: 'uuid' }), DEAD_UUID), {
-      trusted: true,
-      because: 'panelIs2x',
-    });
-    assert.deepEqual(
-      await assessStoredPanelLink(async () => ({ addressing: 'unknown' }), DEAD_UUID),
-      { trusted: true, because: 'panelEraUnknown' },
-    );
-    assert.deepEqual(
-      await assessStoredPanelLink(() => Promise.reject(new Error('panel down')), DEAD_UUID),
-      { trusted: true, because: 'panelEraUnknown' },
-    );
+  it('is "not a decimal": a uuid, an empty id and junk are stale, a panel id is not', () => {
+    assert.equal(isStalePanelIdentity(DEAD_UUID), true);
+    assert.equal(isStalePanelIdentity(''), true);
+    assert.equal(isStalePanelIdentity('rw-imported-7'), true);
+    assert.equal(isStalePanelIdentity(LIVE_DECIMAL), false);
+    // A 20-digit unsigned 64-bit id is still a decimal.
+    assert.equal(isStalePanelIdentity('18446744073709551615'), false);
   });
 });
 
 describe('SubscriptionDeletionService — the stale-link refusal', () => {
   it('THE PROOF: refuses the operator delete, writes nothing, and no panel deletion is reachable', async () => {
-    // The most important case in this file. `deletePanelUser` is not stubbed at
-    // all, so the only way this passes is that nothing downstream of the guard
-    // ran — and `writes` pins the same property from the database side, because
-    // the DELETE job is the sole route from this service to a panel deletion.
-    const panel = panelHarness({ addressing: 'id' });
-    const harness = deletionHarness(staleRow(), panel);
+    // The most important case in this file. The deletion service holds no
+    // panel adapter at all, so the DELETE job is the sole route from it to a
+    // panel deletion — and `writes` pins that no job, no status and no term
+    // change was written.
+    const harness = deletionHarness(staleRow());
 
     await assert.rejects(
       () => harness.service.deleteByOperator('sub-1'),
@@ -263,42 +241,35 @@ describe('SubscriptionDeletionService — the stale-link refusal', () => {
         const body = error.getResponse() as { code?: string; message?: string };
         assert.equal(body.code, SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE);
         assert.equal(body.message, SUBSCRIPTION_DELETE_STALE_PANEL_LINK_MESSAGE);
-        // The remedy must be NAMED. A refusal that only says something is wrong
-        // sends the operator to the other half of the duplicate pair, which is
-        // the same deletion wearing a different id.
-        assert.match(body.message ?? '', /reconciliation/i);
+        // The remedy must be NAMED — the list the automatic check leaves the
+        // unproven rows in, and the button that links one. A refusal that only
+        // says something is wrong sends the operator to the other half of the
+        // duplicate pair, which is the same deletion wearing a different id.
+        assert.ok((body.message ?? '').includes(UNLINKED_SUBSCRIPTIONS_PATH));
+        assert.ok((body.message ?? '').includes('«Привязать профиль»'));
         return true;
       },
     );
 
     assert.deepEqual(
-      panel.calls,
-      ['getPanelShape'],
-      'the era read is the ONLY thing this path may ask the panel',
-    );
-    assert.deepEqual(panel.deleted, []);
-    assert.deepEqual(
       harness.writes,
       [],
       'the refusal happens before the transaction: not one statement runs, so the row keeps its ' +
-        'history and stays inside the panel-link reconciliation that can repair it',
+        'history and stays inside the automatic link check that can repair it',
     );
     assert.deepEqual(harness.createdJobs, []);
     assert.deepEqual(harness.statuses, []);
     assert.deepEqual(harness.enqueued, []);
     assert.equal(harness.events.length, 1, 'an operator-driven refusal raises exactly one event');
-    assert.equal(
-      harness.events[0].metadata['code'],
-      SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
-    );
+    assert.equal(harness.events[0].metadata['code'], SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE);
+    assert.ok(String(harness.events[0].metadata['note']).includes(UNLINKED_SUBSCRIPTIONS_PATH));
   });
 
   it('refuses the self-service delete with the same code', async () => {
     // The cabinet's own delete reaches the same enqueue. It refuses too — the
     // alternative is a customer being able to press a button that removes
     // somebody else's service.
-    const panel = panelHarness({ addressing: 'id' });
-    const harness = deletionHarness(staleRow(), panel);
+    const harness = deletionHarness(staleRow());
 
     await assert.rejects(
       () => harness.service.delete({ userId: 'user-1', subscriptionId: 'sub-1' }),
@@ -309,91 +280,57 @@ describe('SubscriptionDeletionService — the stale-link refusal', () => {
       },
     );
     assert.deepEqual(harness.writes, []);
-    assert.deepEqual(panel.deleted, []);
   });
 
-  it('2.x panel: a uuid identity is CORRECT there, and the delete behaves exactly as before', async () => {
-    // The installations still on 2.x must not notice this guard at all.
-    const panel = panelHarness({ addressing: 'uuid' });
-    const harness = deletionHarness(staleRow(), panel);
+  it('an empty stored id names nobody either, and is refused the same way', async () => {
+    // "Not a decimal" is wider than "has a hyphen" on purpose: an empty string
+    // or imported junk is no identity a 3.x panel ever issued.
+    const harness = deletionHarness(staleRow({ remnawaveId: '' }));
 
-    const result = await harness.service.deleteByOperator('sub-1');
-
-    assert.deepEqual(result, { deleted: true, userId: 'user-1', hadRemnawaveProfile: true });
-    assert.equal(harness.createdJobs.length, 1, 'the panel revocation is armed, as it always was');
-    assert.equal(harness.createdJobs[0].action, SyncAction.DELETE);
-    assert.equal(harness.createdJobs[0].payload['targetRemnawaveId'], DEAD_UUID);
-    assert.deepEqual(harness.statuses, [SubscriptionStatus.DELETED]);
-    assert.deepEqual(harness.enqueued, ['job-1']);
-    assert.deepEqual(harness.events, [], 'nothing was refused, so nothing is reported');
-  });
-
-  it('unknown era: preserves today’s behaviour rather than converting "cannot tell" into "cannot act"', async () => {
-    const panel = panelHarness({ addressing: 'unknown' });
-    const harness = deletionHarness(staleRow(), panel);
-
-    await harness.service.deleteByOperator('sub-1');
-
-    assert.equal(harness.createdJobs.length, 1);
-    assert.deepEqual(harness.statuses, [SubscriptionStatus.DELETED]);
-  });
-
-  it('an unreachable panel is the unknown era too, and still deletes', async () => {
-    // Version detection fails for the same reasons requests fail. Refusing here
-    // would fire exactly when the panel is already answering with terminal
-    // errors and would turn those into "cannot act" — which the sync layer
-    // classifies TRANSIENT and retries forever with no alert.
-    const panel = panelHarness({ throws: true });
-    const harness = deletionHarness(staleRow(), panel);
-
-    await harness.service.deleteByOperator('sub-1');
-
-    assert.deepEqual(panel.calls, ['getPanelShape']);
-    assert.equal(harness.createdJobs.length, 1);
-    assert.deepEqual(harness.statuses, [SubscriptionStatus.DELETED]);
+    await assert.rejects(
+      () => harness.service.deleteByOperator('sub-1'),
+      (error: unknown) =>
+        ((error as ConflictException).getResponse() as { code?: string }).code ===
+        SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+    );
+    assert.deepEqual(harness.writes, []);
   });
 
   it('3.x panel with a current decimal identity: the healthy row deletes normally', async () => {
-    // The inverted-shape-test catcher. A guard that refused a decimal would
-    // make every correctly-linked subscription on a 3.x panel undeletable.
-    const panel = panelHarness({ addressing: 'id' });
+    // The inverted-test catcher. A guard that refused a decimal would make every
+    // correctly-linked subscription undeletable.
     const harness = deletionHarness(
       staleRow({ remnawaveId: LIVE_DECIMAL, remnawavePanelId: 5150, remnawavePanelUsername: 'rz_alice_sub' }),
-      panel,
     );
 
     await harness.service.deleteByOperator('sub-1');
 
     assert.equal(harness.createdJobs.length, 1);
+    assert.equal(harness.createdJobs[0].action, SyncAction.DELETE);
     assert.equal(harness.createdJobs[0].payload['targetRemnawaveId'], LIVE_DECIMAL);
     assert.equal(harness.createdJobs[0].payload['targetRemnawavePanelId'], 5150);
     assert.deepEqual(harness.statuses, [SubscriptionStatus.DELETED]);
+    assert.deepEqual(harness.enqueued, ['job-1']);
     assert.deepEqual(harness.events, []);
   });
 
-  it('a row that never had a profile is deleted without asking the panel anything', async () => {
-    const panel = panelHarness({ addressing: 'id' });
-    const harness = deletionHarness(staleRow({ remnawaveId: null, configUrl: null }), panel);
+  it('a row that never had a profile is deleted without a refusal', async () => {
+    const harness = deletionHarness(staleRow({ remnawaveId: null, configUrl: null }));
 
     await harness.service.deleteByOperator('sub-1');
 
-    assert.deepEqual(
-      panel.calls,
-      [],
-      'there is no panel deletion to refuse, so the ordinary delete pays no round-trip',
-    );
     assert.deepEqual(harness.createdJobs, [], 'no identity, no revocation job — unchanged');
     assert.deepEqual(harness.statuses, [SubscriptionStatus.DELETED]);
+    assert.deepEqual(harness.events, []);
   });
 
   it('the expired sweep DEFERS instead of throwing, and says which deferral it was', async () => {
     // A cron has nobody to answer to and cannot run the remedy. Throwing would
     // only become an unhandled rejection the sweep logs as "failed to
-    // schedule"; deferring leaves the row exactly where the reconciliation can
+    // schedule"; deferring leaves the row exactly where the link check can
     // still reach it, and the flag is what lets the sweep count this apart from
     // the transient deferrals that drain on their own.
-    const panel = panelHarness({ addressing: 'id' });
-    const harness = deletionHarness(staleRow({ status: SubscriptionStatus.EXPIRED }), panel);
+    const harness = deletionHarness(staleRow({ status: SubscriptionStatus.EXPIRED }));
 
     const result = await harness.service.deleteExpiredIfUnchanged({
       subscriptionId: 'sub-1',
@@ -404,9 +341,8 @@ describe('SubscriptionDeletionService — the stale-link refusal', () => {
 
     assert.deepEqual(result, { deleted: false, syncJobId: null, refusedStalePanelLink: true });
     assert.deepEqual(harness.writes, []);
-    assert.deepEqual(panel.deleted, []);
     assert.equal(harness.warnings.length, 1, 'the log line is unconditional');
-    assert.match(harness.warnings[0], /reconciliation/i);
+    assert.ok(harness.warnings[0].includes(UNLINKED_SUBSCRIPTIONS_PATH));
     assert.deepEqual(
       harness.events,
       [],
@@ -416,10 +352,8 @@ describe('SubscriptionDeletionService — the stale-link refusal', () => {
   });
 
   it('a healthy expired row still retires through the sweep, flag clear', async () => {
-    const panel = panelHarness({ addressing: 'id' });
     const harness = deletionHarness(
       staleRow({ status: SubscriptionStatus.EXPIRED, remnawaveId: LIVE_DECIMAL, remnawavePanelId: 5150 }),
-      panel,
     );
 
     const result = await harness.service.deleteExpiredIfUnchanged({
@@ -490,7 +424,7 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
     // customer at all. The local rows are committed BEFORE this loop by design,
     // so there is nothing left to refuse — only the upstream call is skipped.
     // `deletePanelUser` is again not stubbed, so reaching it is a crash.
-    const panel = panelHarness({ addressing: 'id' });
+    const panel = panelHarness();
     const harness = userDeletionHarness(
       [
         {
@@ -507,7 +441,7 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
     await harness.service.deleteUser('user-1');
 
     assert.deepEqual(harness.deletedUsers, ['user-1'], 'the customer IS deleted');
-    assert.deepEqual(panel.calls, ['getPanelShape']);
+    assert.deepEqual(panel.calls, [], 'the panel is not asked anything — not even its version');
     assert.deepEqual(panel.deleted, []);
     assert.equal(harness.errors.length, 1);
     assert.match(harness.errors[0], new RegExp(SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE));
@@ -518,8 +452,8 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
     );
   });
 
-  it('still deletes the panel account when the stored identity is current on 3.x', async () => {
-    const panel = panelHarness({ addressing: 'id', allowDelete: true });
+  it('still deletes the panel account when the stored identity is a decimal', async () => {
+    const panel = panelHarness({ allowDelete: true });
     const harness = userDeletionHarness(
       [
         {
@@ -536,7 +470,7 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
     await harness.service.deleteUser('user-1');
 
     assert.deepEqual(harness.deletedUsers, ['user-1']);
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUser']);
+    assert.deepEqual(panel.calls, ['deletePanelUser']);
     assert.deepEqual(panel.deleted, [
       { remnawaveId: LIVE_DECIMAL, panelId: 5150, panelUsername: 'rz_alice_sub' },
     ]);
@@ -546,7 +480,7 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
   it('one stale subscription does not stop a sibling row from being removed upstream', async () => {
     // The skip is per row. Folding it into "abandon the loop" would strand
     // every profile after the first damaged one.
-    const panel = panelHarness({ addressing: 'id', allowDelete: true });
+    const panel = panelHarness({ allowDelete: true });
     const harness = userDeletionHarness(
       [
         { id: 'sub-stale', remnawaveId: DEAD_UUID, remnawavePanelId: null, remnawavePanelUsername: 'rz_old', configUrl: null },
@@ -558,34 +492,10 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
     await harness.service.deleteUser('user-1');
 
     assert.deepEqual(harness.deletedUsers, ['user-1']);
-    assert.deepEqual(panel.calls, ['getPanelShape', 'getPanelShape', 'deletePanelUser']);
+    assert.deepEqual(panel.calls, ['deletePanelUser']);
     assert.deepEqual(panel.deleted, [
       { remnawaveId: LIVE_DECIMAL, panelId: 5150, panelUsername: 'rz_new' },
     ]);
-  });
-
-  it('2.x panel: a uuid identity is deleted upstream exactly as before', async () => {
-    const panel = panelHarness({ addressing: 'uuid', allowDelete: true });
-    const harness = userDeletionHarness(
-      [
-        {
-          id: 'sub-1',
-          remnawaveId: DEAD_UUID,
-          remnawavePanelId: null,
-          remnawavePanelUsername: 'rz_alice_sub',
-          configUrl: null,
-        },
-      ],
-      panel,
-    );
-
-    await harness.service.deleteUser('user-1');
-
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUser']);
-    assert.deepEqual(panel.deleted, [
-      { remnawaveId: DEAD_UUID, panelId: null, panelUsername: 'rz_alice_sub' },
-    ]);
-    assert.deepEqual(harness.errors, []);
   });
 });
 
@@ -594,43 +504,37 @@ describe('UserDeletionService — deleting a customer must stay possible', () =>
 /**
  * `deletePanelUserDevice` names its owner through the SAME `panelUserAddress`
  * fallback the subscription delete does — numeric fast path → `remnawavePanelId`
- * → the short uuid recovered from `config_url` → `remnawavePanelUsername`. So on
- * a 3.x panel an HWID revocation issued against an unrepaired row reaches
- * whatever account is LIVE at that address and unbinds a device from it. The
- * subscription delete has been guarded since the stale-link work; these three
- * call sites were not guarded at all.
+ * → the short uuid recovered from `config_url` → `remnawavePanelUsername`. So an
+ * HWID revocation issued against an unrepaired row reaches whatever account is
+ * LIVE at that address and unbinds a device from it.
  *
  * WHY THE STUB RECORDS RATHER THAN BEING ABSENT. The refusal cases assert that
  * `deletedDevices` is empty, and an empty array is only evidence if the fake
  * would have filled it — so `deletePanelUserDevice` is always present, always
  * records, and the `INERTNESS CONTROL` case beside each refusal proves it does
  * by driving the same harness with a healthy link and asserting the exact
- * arguments that arrive. Every "nothing was called" below is therefore a real
- * zero rather than a method that does not exist.
+ * arguments that arrive.
  */
 
 interface DevicePanelHarness {
   /** Every adapter method reached, in order. */
   readonly calls: string[];
-  /** Every `(identity, hwid, era)` triple that reached the adapter. */
-  readonly deletedDevices: Array<{ ref: unknown; hwid: string; era: unknown }>;
+  /** Every argument list that reached `deletePanelUserDevice`. */
+  readonly deletedDevices: unknown[][];
   readonly api: unknown;
 }
 
-function devicePanelHarness(
-  options: { addressing?: Addressing; throws?: boolean } = {},
-): DevicePanelHarness {
+function devicePanelHarness(): DevicePanelHarness {
   const calls: string[] = [];
-  const deletedDevices: DevicePanelHarness['deletedDevices'] = [];
+  const deletedDevices: unknown[][] = [];
   const api = {
     getPanelShape: async () => {
       calls.push('getPanelShape');
-      if (options.throws === true) throw new Error('Remnawave version could not be read');
-      return { addressing: options.addressing ?? 'unknown' };
+      throw new Error('the panel version must not be read on a device delete');
     },
-    deletePanelUserDevice: async (ref: unknown, hwid: string, era: unknown) => {
+    deletePanelUserDevice: async (...args: unknown[]) => {
       calls.push('deletePanelUserDevice');
-      deletedDevices.push({ ref, hwid, era });
+      deletedDevices.push(args);
       return { total: 2 };
     },
   };
@@ -673,12 +577,6 @@ function healthyDeviceRow(): DeviceRow {
   };
 }
 
-const STALE_IDENTITY = {
-  remnawaveId: DEAD_UUID,
-  panelId: null,
-  panelUsername: null,
-  panelShortUuid: 'OLDshortOLD',
-};
 const HEALTHY_IDENTITY = {
   remnawaveId: LIVE_DECIMAL,
   panelId: 5150,
@@ -734,7 +632,7 @@ function refusalBodyOf(error: unknown): { code?: string; message?: string; statu
 
 describe('device deletion is refused on a stale panel link, at every call site', () => {
   it('SITE 1 — internal deleteDevice (cabinet, current subscription): refuses and calls no panel deletion', async () => {
-    const panel = devicePanelHarness({ addressing: 'id' });
+    const panel = devicePanelHarness();
     const { controller, errors } = internalDeviceController(staleDeviceRow(), panel);
 
     const refusal = refusalBodyOf(
@@ -746,37 +644,29 @@ describe('device deletion is refused on a stale panel link, at every call site',
     assert.equal(
       refusal.message,
       SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
-      'reiwa serves a customer, who cannot open the Subscriptions page the operator sentence names',
+      'reiwa serves a customer, who cannot open the operator screen the operator sentence names',
     );
-    assert.deepEqual(
-      panel.calls,
-      ['getPanelShape'],
-      'the era read is the ONLY thing this path may ask the panel',
-    );
+    assert.deepEqual(panel.calls, [], 'the panel is asked nothing, not even its version');
     assert.deepEqual(panel.deletedDevices, [], 'no device was unbound on the panel');
     assert.equal(errors.length, 1, 'the refusal is said out loud once, so the orphan is traceable');
-    assert.match(errors[0], /reconciliation/i);
+    assert.ok(errors[0].includes(UNLINKED_SUBSCRIPTIONS_PATH));
   });
 
   it('SITE 1 — INERTNESS CONTROL: the same harness DOES record a legitimate revocation', async () => {
-    const panel = devicePanelHarness({ addressing: 'id' });
+    const panel = devicePanelHarness();
     const { controller, errors } = internalDeviceController(healthyDeviceRow(), panel);
 
     const result = await controller.deleteDevice('123456789', 'hwid-x');
 
     assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUserDevice']);
-    assert.deepEqual(panel.deletedDevices, [
-      // The identity, the hwid, AND the era: the observation the guard judged is
-      // the observation the adapter builds the request from. One `getPanelShape`
-      // above is the other half of that claim.
-      { ref: HEALTHY_IDENTITY, hwid: 'hwid-x', era: { addressing: 'id' } },
-    ]);
+    assert.deepEqual(panel.calls, ['deletePanelUserDevice']);
+    // The identity and the hwid, and nothing else: no era rides along any more.
+    assert.deepEqual(panel.deletedDevices, [[HEALTHY_IDENTITY, 'hwid-x']]);
     assert.deepEqual(errors, []);
   });
 
   it('SITE 2 — internal deleteSubscriptionDevice (cabinet, selected card): refuses and calls no panel deletion', async () => {
-    const panel = devicePanelHarness({ addressing: 'id' });
+    const panel = devicePanelHarness();
     const { controller, errors } = internalDeviceController(staleDeviceRow(), panel);
 
     const refusal = refusalBodyOf(
@@ -788,27 +678,25 @@ describe('device deletion is refused on a stale panel link, at every call site',
     assert.equal(refusal.status, 409);
     assert.equal(refusal.code, SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE);
     assert.equal(refusal.message, SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE);
-    assert.deepEqual(panel.calls, ['getPanelShape']);
+    assert.deepEqual(panel.calls, []);
     assert.deepEqual(panel.deletedDevices, []);
     assert.equal(errors.length, 1);
-    assert.match(errors[0], /reconciliation/i);
+    assert.ok(errors[0].includes(UNLINKED_SUBSCRIPTIONS_PATH));
   });
 
   it('SITE 2 — INERTNESS CONTROL: the same harness DOES record a legitimate revocation', async () => {
-    const panel = devicePanelHarness({ addressing: 'id' });
+    const panel = devicePanelHarness();
     const { controller } = internalDeviceController(healthyDeviceRow(), panel);
 
     const result = await controller.deleteSubscriptionDevice('123456789', 'sub-1', 'hwid-x');
 
     assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUserDevice']);
-    assert.deepEqual(panel.deletedDevices, [
-      { ref: HEALTHY_IDENTITY, hwid: 'hwid-x', era: { addressing: 'id' } },
-    ]);
+    assert.deepEqual(panel.calls, ['deletePanelUserDevice']);
+    assert.deepEqual(panel.deletedDevices, [[HEALTHY_IDENTITY, 'hwid-x']]);
   });
 
   it('SITE 3 — admin revokeDevice (operator panel): refuses with the OPERATOR sentence', async () => {
-    const panel = devicePanelHarness({ addressing: 'id' });
+    const panel = devicePanelHarness();
     const { controller } = adminSubscriptionsController(staleDeviceRow(), panel);
 
     const refusal = refusalBodyOf(
@@ -822,24 +710,22 @@ describe('device deletion is refused on a stale panel link, at every call site',
     assert.equal(
       refusal.message,
       SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE,
-      'this reader CAN run the repair, so the refusal names it',
+      'this reader CAN open the list, so the refusal names it',
     );
-    assert.match(refusal.message ?? '', /reconciliation/i);
-    assert.deepEqual(panel.calls, ['getPanelShape']);
+    assert.ok((refusal.message ?? '').includes(UNLINKED_SUBSCRIPTIONS_PATH));
+    assert.deepEqual(panel.calls, []);
     assert.deepEqual(panel.deletedDevices, []);
   });
 
   it('SITE 3 — INERTNESS CONTROL: the same harness DOES record a legitimate revocation', async () => {
-    const panel = devicePanelHarness({ addressing: 'id' });
+    const panel = devicePanelHarness();
     const { controller } = adminSubscriptionsController(healthyDeviceRow(), panel);
 
     const result = await controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never, { headers: {}, socket: {} } as never);
 
     assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUserDevice']);
-    assert.deepEqual(panel.deletedDevices, [
-      { ref: HEALTHY_IDENTITY, hwid: 'hwid-x', era: { addressing: 'id' } },
-    ]);
+    assert.deepEqual(panel.calls, ['deletePanelUserDevice']);
+    assert.deepEqual(panel.deletedDevices, [[HEALTHY_IDENTITY, 'hwid-x']]);
   });
 
   it('the two audiences get one code and two sentences, and the customer is never sent to an operator screen', () => {
@@ -850,10 +736,10 @@ describe('device deletion is refused on a stale panel link, at every call site',
       SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE,
       SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
     );
-    assert.match(SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE, /reconciliation/i);
+    assert.ok(SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_MESSAGE.includes(UNLINKED_SUBSCRIPTIONS_PATH));
     assert.doesNotMatch(
       SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
-      /reconciliation|Subscriptions page/i,
+      /Подписки|Инструменты|reconciliation|Subscriptions page/i,
       'naming a screen the customer cannot open is a dead end, not a next step',
     );
     // And it is a DIFFERENT code from the subscription refusal: a client that
@@ -865,34 +751,30 @@ describe('device deletion is refused on a stale panel link, at every call site',
   });
 });
 
-describe('device deletion on a link that is NOT stale is untouched', () => {
-  it('2.x panel: a uuid identity is what that panel issued, so the revocation goes through', async () => {
-    // Installations still on 2.x must not notice this guard at all.
-    const panel = devicePanelHarness({ addressing: 'uuid' });
-    const { controller } = internalDeviceController(staleDeviceRow(), panel);
+describe('the refusal reads no panel version — so no reading of one can move it', () => {
+  it('a uuid row is refused whatever the version probe would have said', async () => {
+    // The old guard trusted a uuid on a 2.x panel and on an unreadable version.
+    // Both answers are gone: a 2.x panel is refused outright, and an unreadable
+    // version is no evidence that a uuid names anybody on 3.x. The harness's
+    // `getPanelShape` throws — a guard that consulted it would fail here.
+    const panel = devicePanelHarness();
+    const { controller } = adminSubscriptionsController(staleDeviceRow(), panel);
+
+    await assert.rejects(
+      () => controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never, { headers: {}, socket: {} } as never),
+      ConflictException,
+    );
+    assert.deepEqual(panel.calls, []);
+  });
+
+  it('a decimal row revokes whatever the version probe would have said', async () => {
+    const panel = devicePanelHarness();
+    const { controller } = internalDeviceController(healthyDeviceRow(), panel);
 
     const result = await controller.deleteDevice('123456789', 'hwid-x');
 
     assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
-    assert.deepEqual(panel.deletedDevices, [
-      { ref: STALE_IDENTITY, hwid: 'hwid-x', era: { addressing: 'uuid' } },
-    ]);
-  });
-
-  it('an unreadable era still revokes — the fail-open is the same on this verb', async () => {
-    // Same stance as the subscription delete, and for the same reason: version
-    // detection fails for the reasons requests fail, so refusing on it would
-    // fire exactly when the panel is already answering with terminal errors.
-    const panel = devicePanelHarness({ throws: true });
-    const { controller } = adminSubscriptionsController(staleDeviceRow(), panel);
-
-    const result = await controller.revokeDevice('sub-1', 'hwid-x', { id: 'admin-1' } as never, { headers: {}, socket: {} } as never);
-
-    assert.deepEqual(result, { revoked: true, remainingDevices: 2 });
-    assert.deepEqual(panel.calls, ['getPanelShape', 'deletePanelUserDevice']);
-    assert.deepEqual(panel.deletedDevices, [
-      { ref: STALE_IDENTITY, hwid: 'hwid-x', era: { addressing: 'unknown' } },
-    ]);
+    assert.deepEqual(panel.calls, ['deletePanelUserDevice']);
   });
 });
 
@@ -1025,6 +907,26 @@ describe('ProfileSyncProcessor.handleDelete — the queued-job backlog', () => {
     );
 
     assert.deepEqual(panel.deleted, [], 'a uuid target is refused however the panel answers');
+  });
+
+  it('a refused target whose identity carries a transient-looking number is still TERMINAL', async () => {
+    // `classifyRecovery` reads a plain `Error`'s MESSAGE for
+    // `timeout|temporar|econn|429|502|503|504|unavailable`, and the refusal
+    // names the target it refused. A uuid carrying `503` therefore turned the
+    // refusal TRANSIENT: the recovery sweep reset it to PENDING every five
+    // minutes, forever, and the operator alert — which needs TERMINAL — never
+    // came. The class decides now, not the digits.
+    const panel = panelUsersHarness();
+    const { processor, failures } = deleteWorker('5030f2b3-1f1e-4f6a-9f2b-0a1b2c3d4e5f', panel);
+
+    await assert.rejects(
+      () => processor.process({ data: { syncJobId: 'sync-job-delete' } } as never),
+      new RegExp(SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE),
+    );
+
+    assert.equal(failures.length, 1);
+    const recorded = failures[0] as { data: { recoveryData?: { classification?: string } } };
+    assert.equal(recorded.data.recoveryData?.classification, 'TERMINAL');
   });
 
   it('a current decimal target is deleted, so ordinary retirement still works', async () => {

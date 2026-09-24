@@ -126,6 +126,32 @@ describe('linking a Remnawave profile on the card', () => {
     expect(within(reopened).getByRole('checkbox', { name: text('confirmWithoutProof') })).not.toBeChecked()
   })
 
+  it('refuses a 2.x UUID next to the field — the panel this build speaks has no such id — and sends nothing', async () => {
+    const user = userEvent.setup()
+    const { dialog, patch } = await openLinkDialog(user)
+
+    // The uuid is refused twice over — too long AND not digits — so the short
+    // shapes below are what pin the digits-only rule on its own.
+    for (const refused of ['f47ac10b-58cc-4372-a567-0e02b2c3d479', '-4471', '44-71', '4e3', '1'.repeat(21)]) {
+      const field = within(dialog).getByLabelText(text('linkLabel'))
+      await user.clear(field)
+      await user.type(field, refused)
+
+      expect(within(dialog).getByRole('alert')).toHaveTextContent(text('linkInvalid'))
+      expect(within(dialog).getByRole('button', { name: text('linkAction') })).toBeDisabled()
+      expect(field).toHaveAttribute('aria-invalid', 'true')
+    }
+    expect(patch).not.toHaveBeenCalled()
+
+    // Control: the same field takes the number, so the refusals above are about
+    // the value, not a dialog that refuses everything.
+    const field = within(dialog).getByLabelText(text('linkLabel'))
+    await user.clear(field)
+    await user.type(field, '4471')
+    expect(within(dialog).queryByRole('alert')).toBeNull()
+    expect(within(dialog).getByRole('button', { name: text('linkAction') })).toBeEnabled()
+  })
+
   it('says when the tick is needed and what it can never override', async () => {
     const user = userEvent.setup()
     const { dialog } = await openLinkDialog(user)

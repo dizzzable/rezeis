@@ -2791,14 +2791,14 @@ export const en = {
     traffic: {
       title: 'Per-user node traffic abuse',
       description:
-        'Advisory detector for users whose bandwidth is a clear outlier. Requires Remnawave 2.8 or newer, 3.x included, and activates automatically once the panel reports the capability.',
+        'Advisory detector for users whose bandwidth is a clear outlier. Requires Remnawave 3.x and activates automatically once the panel reports the capability.',
       fields: {
         enabled: {
           label: 'Traffic abuse detector',
           // A field hint is read on its own, with the section description
           // scrolled off or never read, so it cannot point at "that panel
           // capability" — both halves have to name their own subject.
-          hint: 'Also needs the panel’s per-node bandwidth endpoint, added in 2.8 — on panels older than that the detector stays off whatever this switch says.',
+          hint: 'Also needs the panel’s per-node bandwidth endpoint, which every Remnawave 3.x serves — on a panel that does not report it the detector stays off whatever this switch says.',
         },
         minGb: {
           label: 'Absolute floor (GB)',
@@ -3709,8 +3709,8 @@ export const en = {
       title: 'Depends on Remnawave version',
       detected: 'Panel version: {{version}}',
       unknown: 'Panel version unknown',
-      allVersions: 'works on all versions',
-      needs28: 'needs 2.8 or newer (3.x included)',
+      allVersions: 'works on every Remnawave 3.x',
+      needs3x: 'needs Remnawave 3.x',
       active: 'active',
       hwid: 'Device over-limit (HWID)',
       ipSharing: 'IP / network sharing',

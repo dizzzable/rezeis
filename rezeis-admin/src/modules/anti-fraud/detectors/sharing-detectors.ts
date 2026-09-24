@@ -46,8 +46,8 @@ import type { NodeFlapEvidence } from './remnawave-detectors';
  *
  * ── THE PANEL IS 3.x, AND THAT DELETED THREE THINGS FROM THIS FILE ─────────
  *
- * 1. `/api/ip-control/*`. It was the 2.x spelling of the live-connection
- *    family and panel 3.3.x does not serve it, so nothing here chooses between
+ * 1. The 2.x live-connection route family. Panel 3.3.x does not serve it
+ *    (`/api/connections/*` replaced it), so nothing here chooses between
  *    families any more. A 2.x panel is turned away ONCE, centrally, by
  *    `LegacyPanelRefusal` in `panel-transport.ts`; a second opinion at this
  *    call site is how the old code ended up with nine sites that each guessed

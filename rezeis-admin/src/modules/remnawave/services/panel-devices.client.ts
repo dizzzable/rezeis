@@ -25,9 +25,9 @@ import { decodePanelInstant, projectDeclaredKeys } from './panel-response-fields
  *
  * ── THIS CLIENT IS 3.x ONLY, and that removes three things ─────────────────
  *
- * 1. `/api/ip-control/*` is gone. It was the 2.x spelling of this family and
- *    no 3.x panel serves it, so the era branch that chose between `ip-control`
- *    and `connections` has nothing left to choose. There is deliberately NO
+ * 1. The 2.x spelling of this family is gone: no 3.x panel serves it, so the
+ *    era branch that chose between it and `connections` has nothing left to
+ *    choose. There is deliberately NO
  *    version check here either: `LegacyPanelRefusal` in `panel-transport.ts` is
  *    the one place a 2.x panel is turned away, and duplicating that decision per
  *    call site is how the old code ended up with nine sites that each guessed

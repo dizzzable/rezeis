@@ -280,10 +280,10 @@ export const en = {
         copyAria: 'Copy Remnawave profile identifier to clipboard',
         link: 'Link',
         linkTitle: 'Link an existing Remnawave profile',
-        linkHint: 'Enter the identifier of an existing profile from Remnawave: a UUID on panel 2.x, or a numeric profile id on panel 3.x. The profile is checked before it is linked.',
+        linkHint: 'Enter the numeric id of an existing Remnawave profile, as the panel shows it. The profile is checked before it is linked.',
         linkLabel: 'Remnawave profile identifier',
-        linkPlaceholder: 'UUID or numeric profile id',
-        linkInvalid: 'Enter a valid Remnawave profile identifier: a UUID (panel 2.x) or a numeric profile id (panel 3.x).',
+        linkPlaceholder: 'Numeric profile id, e.g. 4471',
+        linkInvalid: 'Enter the numeric profile id from Remnawave 3.x — digits only. A UUID from panel 2.x is no longer accepted.',
         confirmWithoutProof: 'I checked: this profile belongs to this customer',
         confirmWithoutProofHint:
           'Only needed when nothing proves it — no reiwa_id line naming this customer, and no matching Telegram id, e-mail or verified web-account e-mail. The link is then recorded in the audit log as confirmed by you, without proof. A reiwa_id line naming another customer refuses the link whatever you confirm.',
@@ -350,7 +350,7 @@ export const en = {
           notSentBack: {
             PROFILE_DELETED: 'The assigned limits were not sent to Remnawave: it reports the profile deleted.',
             SHARED_PROFILE:
-              'The assigned limits were not sent to Remnawave: this profile belongs to another subscription too. Merge them: Subscriptions → “Duplicate subscription merge”.',
+              'The assigned limits were not sent to Remnawave: this profile belongs to another subscription too. Merge them: Subscriptions → “Tools” → “Duplicate subscription merge”.',
             UNLINKED: 'The assigned limits were not sent to Remnawave: the subscription has no link to a Remnawave profile.',
           },
           limits: {
@@ -382,15 +382,15 @@ export const en = {
         },
       },
       deleteRefusal: {
-        openReconciliation: 'Open the panel link repair',
         stalePanelLink: {
           headline: 'Not deleted — the stored panel link is stale',
           body:
-            'This subscription still stores a 2.x Remnawave identifier while the panel now answers only to 3.x numeric ids, so the stored link can no longer be trusted to name the right customer account. Deleting it would remove whatever the address fallback resolves to — on an unrepaired duplicate pair, that is a paying customer’s live profile. Nothing was deleted.',
+            'This subscription stores a Remnawave identifier that is not a numeric profile id (the kind a 2.x panel used), so the stored link can no longer be trusted to name the right customer account. Deleting it would remove whatever the address fallback resolves to — on a duplicate pair, that is a paying customer’s live profile. Nothing was deleted.',
           step1:
-            'Open the panel link repair on the Subscriptions page and run the preview.',
-          step2: 'Repair for real once the preview looks right.',
+            'Open Subscriptions → “Tools” → “Subscriptions without a Remnawave link”: the automatic check links such subscriptions by itself, and this list says why it did not link this one.',
+          step2: 'If the profile is this customer’s, press “Link profile” on its row and enter the numeric Remnawave profile id.',
           step3: 'Come back here and delete this subscription again.',
+          open: 'Open “Tools” → “Subscriptions without a Remnawave link”',
         },
       },
       deleteConfirm: {

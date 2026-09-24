@@ -9,12 +9,14 @@ import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
 import { panelExpiryToLocal } from '../remnawave/services/panel-expiry';
 import { storedIdentityOf } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
+import { UNLINKED_SUBSCRIPTIONS_PATH } from '../remnawave/services/stale-panel-link';
 import {
   isInTermModel,
   panelPushOutranksRead,
   TERM_MODEL_MARKER_SELECT,
 } from '../remnawave/services/term-model-readback';
 import { SettingsService } from '../settings/services/settings.service';
+import { LIFETIME_RESTORE_CAUSE } from '../subscriptions/services/lifetime-restore.service';
 import { SubscriptionDeletionService } from '../subscriptions/services/subscription-deletion.service';
 import { ProfileSyncQueueService } from './profile-sync-queue.service';
 import { readPanelFailure, resolvePanelUserId } from './profile-sync.processor';
@@ -54,8 +56,8 @@ const NO_END_REASSERT_BATCH = 500;
  *   • a row that was never provisioned has neither column;
  *   • `reprovisionMissingProfile` and the DELETE worker's retirement clear all
  *     four in one statement;
- *   • the manual re-link endpoint refuses unless `remnawaveId` is null and
- *     writes them together.
+ *   • the manual re-link endpoint refuses unless `remnawaveId` is null (or not
+ *     a decimal) and writes them together.
  *
  * `undefined` is treated as absent on purpose: a caller whose `select` omits a
  * column must fall through to the ordinary detached path rather than have every
@@ -168,6 +170,10 @@ export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
    * release gets one redundant PATCH at most; a check of the profile first
    * would cost the same round trip.
    *
+   * «Вернуть бессрочность» COUNTS AS DONE. Its UPDATE (`LIFETIME_RESTORE_CAUSE`,
+   * `lifetime-restore.service.ts`) is built the same way and carries the same
+   * "no end", so a restored row is not queued a second, redundant PATCH.
+   *
    * Returns how many UPDATEs it queued.
    */
   public async reassertPanelNoEnd(limit: number = NO_END_REASSERT_BATCH): Promise<number> {
@@ -176,7 +182,9 @@ export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
         status: { not: SubscriptionStatus.DELETED },
         expiresAt: null,
         remnawaveId: { not: null },
-        syncJobs: { none: { cause: PANEL_NO_END_REASSERT_CAUSE } },
+        syncJobs: {
+          none: { cause: { in: [PANEL_NO_END_REASSERT_CAUSE, LIFETIME_RESTORE_CAUSE] } },
+        },
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: limit,
@@ -271,15 +279,15 @@ export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
       //
       // Soft-deleting one of those wrote `status = DELETED` with no revocation:
       // the profile kept serving a customer who had stopped paying, and the row
-      // simultaneously left the cabinet, this sweep, and
-      // `PanelLinkReconciliationService`, which selects `status <> DELETED` and
-      // is the only thing that can put the id back. One sweep turned a
+      // simultaneously left the cabinet, this sweep, and the automatic panel-link
+      // check (`PanelLinkReconciliationService`), which selects
+      // `status <> DELETED` and is what puts the id back. One sweep turned a
       // repairable row into a permanent unbilled profile, and counted it as a
       // success.
       //
       // Leaving them EXPIRED is recoverable and reported. It costs a slot in
-      // this batch, which is bounded and drains as soon as the reconciliation
-      // is run — the alternative costs a live profile, permanently.
+      // this batch, which is bounded and drains as soon as the rows are
+      // relinked — the alternative costs a live profile, permanently.
       if (hasLostPanelLink(candidate)) {
         lostLink += 1;
         continue;
@@ -302,11 +310,18 @@ export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
       const message =
         `Expired-profile cleanup: left ${lostLink} expired subscription(s) alone — their panel ` +
         'link was lost, so their panel profile is probably still live and unbilled. Soft-deleting ' +
-        'them would strand the profile and put the row out of reach of the panel-link repair. Run ' +
-        'the panel-link reconciliation; they retire normally once relinked.';
+        'them would strand the profile and put the row out of reach of the panel-link check. The ' +
+        'automatic check relinks the ones it can prove; the rest are listed under Subscriptions → ' +
+        'Tools. They retire normally once relinked.';
       this.logger.warn(message);
       this.events.warn(EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC, 'SYSTEM', message, {
         subscriptions: lostLink,
+        // The card prints no message; the remedy is its note.
+        note:
+          'Истёкшие подписки без привязки к профилю Remnawave не удалены: их профиль, скорее всего, ещё ' +
+          'работает. Автоматическая проверка привязки сама привязывает те, владельца которых может ' +
+          `доказать; остальные — в ${UNLINKED_SUBSCRIPTIONS_PATH}, кнопка «Привязать профиль». После ` +
+          'привязки они удалятся обычным порядком.',
       });
     }
     return deleted;
@@ -405,12 +420,12 @@ export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
     let selfHealed = 0;
     let deferred = 0;
     // Counted apart from `deferred`, because waiting does not fix it. A row
-    // whose stored identity is a 2.x uuid on a 3.x panel is refused by
+    // whose stored identity is not a 3.x numeric id (a 2.x uuid) is refused by
     // `SubscriptionDeletionService` — the identity would delete whatever the
     // address fallback resolves to rather than the profile it was written for —
-    // and it stays refused, every sweep, until an operator runs the panel-link
-    // reconciliation. Folding it into the transient count would hide a standing
-    // repair behind a number that is supposed to drain on its own.
+    // and it stays refused, every sweep, until the row is linked to its numeric
+    // id. Folding it into the transient count would hide a standing repair
+    // behind a number that is supposed to drain on its own.
     let refusedStaleLink = 0;
     const deferredKinds = new Set<string>();
     for (const subscription of candidates) {
@@ -581,13 +596,19 @@ export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
       // one sentence that says what to do about it.
       const message =
         `Expired-profile cleanup: refused ${refusedStaleLink} of ${candidates.length} ` +
-        'candidate(s) — their stored Remnawave identity is a 2.x uuid and the panel is 3.x, so ' +
+        'candidate(s) — their stored Remnawave identity is not a 3.x numeric id (a 2.x uuid), so ' +
         'deleting would remove whatever the address fallback resolves to instead of the profile ' +
-        'the row was written for. Run the panel-link reconciliation; they retire normally once ' +
-        'the identity is repaired.';
+        'the row was written for. The automatic link check relinks the ones it can prove; the rest ' +
+        'are listed under Subscriptions → Tools. They retire normally once relinked.';
       this.logger.warn(message);
       this.events.warn(EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC, 'SYSTEM', message, {
         subscriptions: refusedStaleLink,
+        // The card prints no message; the remedy is its note.
+        note:
+          'Истёкшие подписки с идентификатором Remnawave 2.x не удалены: по такому идентификатору ' +
+          'панель 3.x нашла бы чужой профиль. Автоматическая проверка привязки сама привязывает те, ' +
+          `владельца которых может доказать; остальные — в ${UNLINKED_SUBSCRIPTIONS_PATH}, кнопка ` +
+          '«Привязать профиль». После привязки они удалятся обычным порядком.',
       });
     }
     if (deferred > 0) {

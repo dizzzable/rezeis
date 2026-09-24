@@ -41,7 +41,7 @@ export const RBAC_ACTIONS = [
   /// guest threads can be restricted to a subset of agents.
   'archive',
   /// Anti-fraud — dropping a flagged user's live connections via Remnawave
-  /// `ip-control`. Separated from `resolve` because it is a destructive,
+  /// `/api/connections/drop`. Separated from `resolve` because it is a destructive,
   /// session-killing action distinct from triaging the signal row.
   'enforce',
   /// Advertising cabinet — approving / countering / rejecting partner-submitted

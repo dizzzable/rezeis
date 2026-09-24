@@ -50,10 +50,15 @@ describe('the card for a sync that failed for good', () => {
     assert.doesNotMatch(nextSteps, /Удалите профиль этого пользователя/);
   });
 
-  it('a DELETE refused over a 2.x uuid: repair the link first', () => {
+  it('a DELETE refused over a 2.x uuid: the subscription is gone, so the profile goes by hand', () => {
     const { why, nextSteps } = syncFailedForGoodCopy(SyncAction.DELETE, 5, STALE);
     assert.match(why, /идентификатор Remnawave 2\.x/);
-    assert.match(nextSteps, /«Подписки» → «Починка привязки к панели»/);
+    // The row is DELETED already, so no list can re-link it: «Подписки без
+    // привязки к Remnawave» shows live subscriptions only. What is left is the
+    // profile in the panel, found by the name it still answers to.
+    assert.match(nextSteps, /найдите его там по имени профиля этого пользователя и удалите вручную/);
+    assert.match(nextSteps, /Повторять задачу не нужно/);
+    assert.doesNotMatch(nextSteps, /Починка привязки к панели/);
   });
 
   it('a failed traffic reset: the path to the button that says «Сбросить»', () => {

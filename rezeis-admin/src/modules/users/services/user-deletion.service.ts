@@ -20,8 +20,7 @@ import { SubscriptionTermService } from '../../add-on-entitlements/services/subs
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
-  assessObservedPanelLink,
-  observePanelEra,
+  isStalePanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
 } from '../../remnawave/services/stale-panel-link';
 
@@ -175,38 +174,32 @@ export class UserDeletionService {
       // runs there is no local deletion left to refuse and nothing here can
       // make deleting a customer impossible. What IS still refusable is the
       // upstream call, and it is refused for exactly the reason
-      // `SubscriptionDeletionService` refuses the operator's: on a 3.x panel a
-      // uuid-shaped identity does not name the profile it was written for, and
-      // `panelUserAddress` resolves it through the stored subscription link to
-      // whatever profile is live at that address — on an unmerged duplicate
-      // pair, somebody else's.
+      // `SubscriptionDeletionService` refuses the operator's: an identity that
+      // is not a decimal names nobody on a 3.x panel, and `panelUserAddress`
+      // resolves it through the stored subscription link to whatever profile is
+      // live at that address — on an unmerged duplicate pair, somebody else's.
       //
       // SKIPPING LEAVES AN ORPHAN, AND THAT IS THE CHEAPER LOSS. An unbilled
       // profile keeps serving until an operator removes it by hand, which the
       // line below tells them to do, by name. Deleting on a guess removes a
       // paying customer's service and cannot be undone at all.
       //
-      // ONE OBSERVATION OF THE PANEL ERA, TAKEN HERE AND USED TWICE — by the
-      // refusal below and by the address `deletePanelUser` builds. Two
-      // independent `getPanelShape()` reads could disagree across the
-      // fifteen-second negative cache boundary and let a "proceed" decided on
-      // `'unknown'` be carried out against `'id'`, which is the reading that
-      // resolves this dead uuid to somebody else's live account.
-      const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
-      const trust = assessObservedPanelLink(era, identity.remnawaveId);
-      if (!trust.trusted) {
+      // The adapter refuses the same identity too (`StalePanelIdentityRefusal`);
+      // asking here first is what turns that refusal into this line, which
+      // names the profile to remove, instead of a generic failed delete.
+      if (isStalePanelIdentity(identity.remnawaveId)) {
         this.logger.error(
           `deleteUser: ${SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE} — subscription ` +
-            `${subscription.id} stores the 2.x identity '${subscription.remnawaveId ?? 'none'}' ` +
-            'and the panel is 3.x, so it no longer names the profile it was written for. The ' +
-            'user has been deleted locally and the panel deletion was SKIPPED: the profile ' +
-            `'${subscription.remnawavePanelUsername ?? 'unknown'}' is still live and must be ` +
-            'removed by hand.',
+            `${subscription.id} stores the identity '${subscription.remnawaveId ?? 'none'}', which ` +
+            'is not a 3.x numeric id (a 2.x uuid, or imported junk), so it names no profile on a ' +
+            'supported panel. The user has been deleted locally and the panel deletion was ' +
+            `SKIPPED: the profile '${subscription.remnawavePanelUsername ?? 'unknown'}' is ` +
+            'probably still live in Remnawave and must be removed there by hand.',
         );
         continue;
       }
       try {
-        await this.remnawaveApiService.deletePanelUser(identity, era);
+        await this.remnawaveApiService.deletePanelUser(identity);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         this.logger.warn(

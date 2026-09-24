@@ -13,10 +13,12 @@ import {
 
 /**
  * Capability detection decides, on a live paying panel, whether rezeis calls
- * endpoints that exist. Three panel lines are in play — 2.7.4 for paying
- * customers, 2.8.x for testers and 3.2.x — so every field is asserted in full
- * for every pinned version: an extra or renamed field fails these tests rather
- * than shipping as a silent shape change.
+ * endpoints that exist — and, since the 2.x cut, whether it calls the panel at
+ * all. This build speaks Remnawave 3.x only: a 2.x panel is READ (the version
+ * readers are the one thing its refusal lets through) and reported `tooOld`,
+ * so the Remnawave page can say "update the panel" rather than "untested". So
+ * every field is asserted in full for every pinned version: an extra or renamed
+ * field fails these tests rather than shipping as a silent shape change.
  */
 
 interface PanelMock {
@@ -54,6 +56,28 @@ async function capabilitiesOf(version: string): Promise<RemnawaveCapabilities> {
   return makeService(panelOn(version)).service.getCapabilities();
 }
 
+/**
+ * What every 2.x (and anything older) reads as now: read, refused, and nothing
+ * claimed about it. The flags describe what THIS BUILD can do with the panel,
+ * and it does nothing with a 2.x panel but read its version.
+ */
+function refused(version: string, major: number, minor: number, patch: number): RemnawaveCapabilities {
+  return {
+    version,
+    major,
+    minor,
+    patch,
+    supported: false,
+    tooOld: true,
+    reachable: true,
+    liveIpControl: false,
+    bandwidthNodesUsers: false,
+    userAddressing: 'unknown',
+    connectionsApi: 'unknown',
+    userLookups: { byTelegramId: false, byEmail: false },
+  };
+}
+
 // ── Controllable clock (the service reads Date.now for its cache window) ─────
 
 const originalDateNow = Date.now;
@@ -73,64 +97,22 @@ function advance(ms: number): void {
 }
 
 describe('RemnawaveVersionService — pinned panel versions', () => {
-  it('2.7.4 now warns, because 2.x support is being withdrawn', async () => {
-    // `supported` flipped deliberately on 30.08.2026. It is the FIRST half of
-    // withdrawing 2.x: the banner starts telling 2.x operators they are on a
-    // panel this integration no longer covers, while the 2.x branches below
-    // still answer. The second half — refusing 2.x out loud rather than letting
-    // it drift into silent 400s — is a separate change against the deletion
-    // path and is not made yet, which is why every other field here is
-    // unchanged.
-    assert.deepEqual(await capabilitiesOf('2.7.4'), {
-      version: '2.7.4',
-      major: 2,
-      minor: 7,
-      patch: 4,
-      supported: false,
-      reachable: true,
-      liveIpControl: false,
-      bandwidthNodesUsers: false,
-      userAddressing: 'uuid',
-      connectionsApi: 'ip-control',
-      userLookups: { byTelegramId: true, byEmail: true },
-    });
+  it('2.7.4 is refused: tooOld, and no capability claimed', async () => {
+    // The second half of withdrawing 2.x (the first, on 30.08.2026, only
+    // flipped `supported`). Every request to such a panel is refused now, so a
+    // flag saying "live connections work" or "addressed by uuid" would describe
+    // a request this build never sends.
+    assert.deepEqual(await capabilitiesOf('2.7.4'), refused('2.7.4', 2, 7, 4));
   });
 
-  it('2.8.0 warns for the same reason, with its own flags untouched', async () => {
-    // The capability flags are NOT the banner. 2.8 still reports live
-    // ip-control and the bandwidth endpoint, because it still has them — what
-    // changed is only whether we claim to have tested it.
-    assert.deepEqual(await capabilitiesOf('2.8.0'), {
-      version: '2.8.0',
-      major: 2,
-      minor: 8,
-      patch: 0,
-      supported: false,
-      reachable: true,
-      liveIpControl: true,
-      bandwidthNodesUsers: true,
-      userAddressing: 'uuid',
-      connectionsApi: 'ip-control',
-      userLookups: { byTelegramId: true, byEmail: true },
-    });
+  it('2.8.0 is refused the same way — its own endpoints no longer matter', async () => {
+    // 2.8 did serve `ip-control/*` and the bandwidth endpoint. The flags used
+    // to say so; nothing reads them from a 2.x panel any more.
+    assert.deepEqual(await capabilitiesOf('2.8.0'), refused('2.8.0', 2, 8, 0));
   });
 
-  it('2.9.0 keeps the 2.x shape but is outside the tested set', async () => {
-    assert.deepEqual(await capabilitiesOf('2.9.0'), {
-      version: '2.9.0',
-      major: 2,
-      minor: 9,
-      patch: 0,
-      // Not in the tested set: 2.9 has never been run against rezeis, so the
-      // operator keeps getting the untested-version banner.
-      supported: false,
-      reachable: true,
-      liveIpControl: true,
-      bandwidthNodesUsers: true,
-      userAddressing: 'uuid',
-      connectionsApi: 'ip-control',
-      userLookups: { byTelegramId: true, byEmail: true },
-    });
+  it('2.9.0 is refused too — the rule is the major, not the tested set', async () => {
+    assert.deepEqual(await capabilitiesOf('2.9.0'), refused('2.9.0', 2, 9, 0));
   });
 
   it('3.1.0 gets the 3.x shape but not the tested-version badge', async () => {
@@ -142,6 +124,8 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       // Not a stale leftover of the 3.x work: the tested set is exact, and
       // 3.1 has never been run. Only 3.2 earned its way in.
       supported: false,
+      // Untested is not refused: every request to it is built and sent.
+      tooOld: false,
       reachable: true,
       liveIpControl: true,
       bandwidthNodesUsers: true,
@@ -151,7 +135,7 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('3.2.1 is supported, with the 3.x shape rather than the 2.x one', async () => {
+  it('3.2.1 is supported, with the 3.x shape', async () => {
     assert.deepEqual(await capabilitiesOf('3.2.1'), {
       version: '3.2.1',
       major: 3,
@@ -160,15 +144,11 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       // 3.2 is in the tested set: it has been run against a live panel, so the
       // operator gets no untested-version banner.
       //
-      // `liveIpControl: true` below is not a contradiction, though the comment
-      // that used to sit here said it was — it claimed the flag "stays off
-      // because 3.x deleted `ip-control/*`". That was true while nothing read
-      // the replacement. The adapter now speaks `connections/*`, so live
-      // connection data IS available on 3.x, and the flag means exactly that:
-      // whether the data can be had, not which route family serves it. A
-      // comment describing the opposite of its own assertion is worse than no
-      // comment — the next reader "fixes" the assertion in the wrong direction.
+      // `liveIpControl: true` names whether live connection data can be had —
+      // the adapter reads it from `connections/*` — not which route family
+      // serves it. The historical name is kept because the SPA mirrors it.
       supported: true,
+      tooOld: false,
       reachable: true,
       liveIpControl: true,
       bandwidthNodesUsers: true,
@@ -185,6 +165,7 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       minor: 2,
       patch: 3,
       supported: true,
+      tooOld: false,
       reachable: true,
       liveIpControl: true,
       bandwidthNodesUsers: true,
@@ -206,6 +187,7 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       minor: 3,
       patch: 2,
       supported: true,
+      tooOld: false,
       reachable: true,
       liveIpControl: true,
       bandwidthNodesUsers: true,
@@ -215,13 +197,16 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('an unparseable version is reachable but wholly unknown', async () => {
+  it('an unparseable version is reachable but wholly unknown — and never refused', async () => {
     assert.deepEqual(await capabilitiesOf('nightly-build'), {
       version: 'nightly-build',
       major: null,
       minor: null,
       patch: null,
       supported: false,
+      // A version nobody can read is never refused (W3 §3.4): refusing it would
+      // turn a flaky recap endpoint into a dead integration.
+      tooOld: false,
       // The panel answered — it just did not answer with a semver.
       reachable: true,
       liveIpControl: false,
@@ -237,16 +222,17 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     // strings reports e.g. `2026.08.05`, which parses cleanly to major 2026.
     // The version *is* readable, so this never touches the unparseable branch
     // — it goes through `userAddressingFor` / `connectionsApiFor`, whose
-    // fallback is the only thing keeping rezeis from addressing a live panel
-    // by a scheme it does not run.
+    // fallback is the only thing keeping rezeis from claiming a scheme it does
+    // not run.
     assert.deepEqual(await capabilitiesOf('2026.08.05'), {
       version: '2026.08.05',
       major: 2026,
       minor: 8,
       patch: 5,
       supported: false,
+      // 2026 is not below 3: not refused.
+      tooOld: false,
       reachable: true,
-      // `major === 2 && minor >= 8` must not be fooled by a 2026.8 build.
       liveIpControl: false,
       bandwidthNodesUsers: true,
       userAddressing: 'unknown',
@@ -255,13 +241,14 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('a future 4.x is unknown rather than silently addressed as 3.x', async () => {
+  it('a future 4.x is unknown rather than silently described as 3.x', async () => {
     assert.deepEqual(await capabilitiesOf('4.0.0'), {
       version: '4.0.0',
       major: 4,
       minor: 0,
       patch: 0,
       supported: false,
+      tooOld: false,
       reachable: true,
       liveIpControl: false,
       bandwidthNodesUsers: true,
@@ -271,53 +258,51 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     });
   });
 
-  it('a pre-2.x panel is unknown rather than silently addressed as 2.x', async () => {
-    assert.deepEqual(await capabilitiesOf('1.9.9'), {
-      version: '1.9.9',
-      major: 1,
-      minor: 9,
-      patch: 9,
-      supported: false,
-      reachable: true,
-      liveIpControl: false,
-      bandwidthNodesUsers: false,
-      userAddressing: 'unknown',
-      connectionsApi: 'unknown',
-      userLookups: { byTelegramId: false, byEmail: false },
-    });
+  it('a pre-2.x panel is refused like a 2.x one', async () => {
+    // The rule is `major < 3`, the same rule the adapter's gate refuses on, so
+    // the banner says "not supported" exactly when every request is refused.
+    assert.deepEqual(await capabilitiesOf('1.9.9'), refused('1.9.9', 1, 9, 9));
   });
 
-  it('only majors 2 and 3 ever produce a concrete addressing / api family', async () => {
+  it('only major 3 ever produces a concrete addressing / api family', async () => {
     // The doc comments on `userAddressingFor` / `connectionsApiFor` claim
-    // "anything else stays unknown". Sweep the neighbourhood of the two known
-    // majors plus a calver major so that replacing either fallback with a
-    // concrete guess fails here instead of shipping.
-    for (const major of [0, 1, 4, 5, 9, 42, 2026]) {
-      const caps = await capabilitiesOf(`${major}.0.0`);
+    // "anything else stays unknown". Sweep the neighbourhood of 3, the retired
+    // 2 and a calver major, so that replacing either fallback with a concrete
+    // guess fails here instead of shipping.
+    for (const major of [0, 1, 2, 4, 5, 9, 42, 2026]) {
+      const caps = await capabilitiesOf(`${major}.8.0`);
       assert.equal(caps.major, major);
       assert.equal(
         caps.userAddressing,
         'unknown',
-        `major ${major} must not guess a user-addressing scheme`,
+        `major ${major} must not claim a user-addressing scheme`,
       );
       assert.equal(
         caps.connectionsApi,
         'unknown',
-        `major ${major} must not guess a live-connection endpoint family`,
+        `major ${major} must not claim a live-connection endpoint family`,
       );
     }
 
-    for (const [version, addressing, api] of [
-      ['2.8.0', 'uuid', 'ip-control'],
-      ['3.2.1', 'id', 'connections'],
+    const caps = await capabilitiesOf('3.2.1');
+    assert.equal(caps.userAddressing, 'id');
+    assert.equal(caps.connectionsApi, 'connections');
+  });
+
+  it('tooOld is exactly "major below 3", on both sides of the line', async () => {
+    for (const [version, expected] of [
+      ['0.1.0', true],
+      ['2.0.0', true],
+      ['2.8.35', true],
+      ['3.0.0', false],
+      ['3.4.3', false],
+      ['4.0.0', false],
     ] as const) {
-      const caps = await capabilitiesOf(version);
-      assert.equal(caps.userAddressing, addressing);
-      assert.equal(caps.connectionsApi, api);
+      assert.equal((await capabilitiesOf(version)).tooOld, expected, version);
     }
   });
 
-  it('an unreachable panel is unknown, not "2.x with everything off"', async () => {
+  it('an unreachable panel is unknown and not refused, not "2.x with everything off"', async () => {
     const { service } = makeService({
       recap: async () => {
         throw new Error('ECONNREFUSED');
@@ -332,6 +317,7 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
       minor: null,
       patch: null,
       supported: false,
+      tooOld: false,
       reachable: false,
       liveIpControl: false,
       bandwidthNodesUsers: false,
@@ -350,6 +336,7 @@ describe('RemnawaveVersionService — pinned panel versions', () => {
     assert.equal(caps.userAddressing, 'unknown');
     assert.equal(caps.connectionsApi, 'unknown');
     assert.equal(caps.reachable, false);
+    assert.equal(caps.tooOld, false);
   });
 });
 
@@ -374,12 +361,19 @@ describe('RemnawaveVersionService — version source', () => {
         throw new Error('recap not found');
       },
     ]) {
-      const harness = makeService({ recap, metadata: async () => ({ version: '2.8.0' }) });
+      const harness = makeService({ recap, metadata: async () => ({ version: '3.2.1' }) });
       const caps = await harness.service.getCapabilities();
-      assert.equal(caps.version, '2.8.0');
+      assert.equal(caps.version, '3.2.1');
       assert.equal(caps.liveIpControl, true);
       assert.equal(harness.counts.metadata, 1);
     }
+  });
+
+  it('reads a 2.x version from metadata too — that is how the page learns tooOld', async () => {
+    const harness = makeService({ recap: async () => null, metadata: async () => ({ version: '2.7.4' }) });
+    const caps = await harness.service.getCapabilities();
+    assert.equal(caps.version, '2.7.4');
+    assert.equal(caps.tooOld, true);
   });
 
   it('is unreachable when neither source carries a version', async () => {
@@ -397,7 +391,7 @@ describe('RemnawaveVersionService — version source', () => {
 
 describe('RemnawaveVersionService — cache windows', () => {
   it('caches a successful detection for the positive TTL', async () => {
-    const harness = makeService(panelOn('2.8.0'));
+    const harness = makeService(panelOn('3.2.1'));
     await harness.service.getCapabilities();
     advance(CAPABILITIES_CACHE_TTL_MS - 1);
     await harness.service.getCapabilities();
@@ -409,7 +403,7 @@ describe('RemnawaveVersionService — cache windows', () => {
   });
 
   it('holds a successful detection well past the negative TTL', async () => {
-    const harness = makeService(panelOn('2.8.0'));
+    const harness = makeService(panelOn('3.2.1'));
     await harness.service.getCapabilities();
     advance(CAPABILITIES_NEGATIVE_CACHE_TTL_MS * 4);
     await harness.service.getCapabilities();
@@ -433,11 +427,11 @@ describe('RemnawaveVersionService — cache windows', () => {
     // Past it — and still far inside the 5-minute positive window, which is
     // the whole point: a transient auth blip must not pin every capability to
     // all-false until the positive TTL expires.
-    version = '2.8.0';
+    version = '3.2.1';
     advance(2);
     const recovered = await harness.service.getCapabilities();
     assert.equal(harness.counts.recap, 2);
-    assert.equal(recovered.version, '2.8.0');
+    assert.equal(recovered.version, '3.2.1');
     assert.equal(recovered.liveIpControl, true);
     assert.ok(CAPABILITIES_NEGATIVE_CACHE_TTL_MS + 1 < CAPABILITIES_CACHE_TTL_MS);
   });
@@ -462,19 +456,22 @@ describe('RemnawaveVersionService — cache windows', () => {
     const harness = makeService({ recap: async () => ({ version }) });
 
     await harness.service.getCapabilities();
-    version = '2.8.0';
+    version = '3.2.1';
 
     const cached = await harness.service.getCapabilities();
     assert.equal(cached.version, '2.7.4');
     assert.equal(harness.counts.recap, 1);
 
+    // The upgraded panel is seen the moment it is asked for, not five minutes
+    // later: this is how the "update the panel" banner goes away.
     const forced = await harness.service.getCapabilities(true);
-    assert.equal(forced.version, '2.8.0');
+    assert.equal(forced.version, '3.2.1');
+    assert.equal(forced.tooOld, false);
     assert.equal(harness.counts.recap, 2);
 
     // The forced read replaces the cache rather than bypassing and discarding.
     const afterForce = await harness.service.getCapabilities();
-    assert.equal(afterForce.version, '2.8.0');
+    assert.equal(afterForce.version, '3.2.1');
     assert.equal(harness.counts.recap, 2);
   });
 });
@@ -566,13 +563,15 @@ describe('the tested set and the banner that names it', () => {
     }
   });
 
-  it('warns on every 2.x, which is the withdrawal starting', async () => {
+  it('never calls a 2.x supported — those versions were withdrawn, then refused', async () => {
     // Separate from the neighbours above, because these are not gaps in the
-    // range — they are versions that WERE tested and are being dropped on
-    // purpose. Kept as its own test so that a future edit restoring 2.x to the
-    // set has to delete a test that says why it was removed.
+    // range — they are versions that WERE tested and were dropped on purpose.
+    // Kept as its own test so that a future edit restoring 2.x to the set has
+    // to delete a test that says why it was removed.
     for (const version of ['2.7.4', '2.8.0', '2.8.35']) {
-      assert.equal((await capabilitiesOf(version)).supported, false, version);
+      const caps = await capabilitiesOf(version);
+      assert.equal(caps.supported, false, version);
+      assert.equal(caps.tooOld, true, version);
     }
   });
 });

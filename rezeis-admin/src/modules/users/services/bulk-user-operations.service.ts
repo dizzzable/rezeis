@@ -15,8 +15,11 @@ import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.inter
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
 import { isLifetimeSubscription } from '../../payments/utils/lifetime-renewal.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
-import { observePanelEra, type PanelEraObservation } from '../../remnawave/services/panel-version.util';
-import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  RemnawaveApiService,
+  StalePanelIdentityRefusal,
+} from '../../remnawave/services/remnawave-api.service';
+import { UNLINKED_SUBSCRIPTIONS_PATH } from '../../remnawave/services/stale-panel-link';
 import { UserBlockService } from './user-block.service';
 import { UserDeletionService } from './user-deletion.service';
 
@@ -357,47 +360,51 @@ export class BulkUserOperationsService {
    *
    * `attempted === 0` carries a REASON, because "no profiles" and "no panel
    * integration" are different things for an operator to act on.
+   *
+   * `refusedStale` counts the profiles the adapter refused because the stored
+   * identity is not a decimal (`StalePanelIdentityRefusal`) — the destructive
+   * verbs refuse such a row before any request, since the address fallback
+   * could resolve it to another customer. They are failures too, but the one
+   * failure a retry cannot fix, so the row's message names them apart.
    */
   private async forEachPanelProfile(
     userId: string,
-    run: (
-      identity: {
-        readonly remnawaveId: string;
-        readonly panelId: number | null;
-        readonly panelUsername: string | null;
-      },
-      era: PanelEraObservation,
-    ) => Promise<void>,
+    run: (identity: {
+      readonly remnawaveId: string;
+      readonly panelId: number | null;
+      readonly panelUsername: string | null;
+    }) => Promise<void>,
   ): Promise<{
     readonly attempted: number;
     readonly succeeded: number;
     readonly failed: number;
+    readonly refusedStale: number;
     readonly reason: string;
   }> {
     if (this.remnawaveApiService === undefined) {
-      return { attempted: 0, succeeded: 0, failed: 0, reason: 'VPN panel is not configured' };
+      return {
+        attempted: 0,
+        succeeded: 0,
+        failed: 0,
+        refusedStale: 0,
+        reason: 'VPN panel is not configured',
+      };
     }
     const subscriptions = await this.loadLinkedSubscriptions(userId);
-    // ONE reading of the panel era for this whole operation, carried by value
-    // into every profile. `getPanelShape()` caches a FAILURE for fifteen
-    // seconds, so two adjacent reads can legitimately disagree — and an action
-    // that addressed one profile as 2.x and the next as 3.x would half work.
-    const era = await observePanelEra(() => this.remnawaveApiService!.getPanelShape());
     let succeeded = 0;
     let failed = 0;
+    let refusedStale = 0;
     for (const subscription of subscriptions) {
       try {
-        await run(
-          {
-            remnawaveId: subscription.remnawaveId as string,
-            panelId: subscription.remnawavePanelId,
-            panelUsername: subscription.remnawavePanelUsername,
-          },
-          era,
-        );
+        await run({
+          remnawaveId: subscription.remnawaveId as string,
+          panelId: subscription.remnawavePanelId,
+          panelUsername: subscription.remnawavePanelUsername,
+        });
         succeeded += 1;
       } catch (err) {
         failed += 1;
+        if (err instanceof StalePanelIdentityRefusal) refusedStale += 1;
         this.logger.warn(
           `Bulk panel action failed for subscription ${subscription.id}: ${(err as Error).message}`,
         );
@@ -407,6 +414,7 @@ export class BulkUserOperationsService {
       attempted: subscriptions.length,
       succeeded,
       failed,
+      refusedStale,
       reason: 'No linked VPN profiles',
     };
   }
@@ -577,6 +585,8 @@ export class BulkUserOperationsService {
       // when it reached six.
 
       case 'reset_traffic': {
+        // Not a destructive verb: the reset reaches a stale row's profile
+        // through the address chain, as every read and PATCH does.
         const outcome = await this.forEachPanelProfile(user.id, async (identity) => {
           await this.remnawaveApiService?.resetPanelUserTraffic(identity);
         });
@@ -597,8 +607,13 @@ export class BulkUserOperationsService {
       }
 
       case 'revoke_devices': {
-        const outcome = await this.forEachPanelProfile(user.id, async (identity, era) => {
-          await this.remnawaveApiService?.deleteAllPanelUserDevices(identity, era);
+        // No check of its own, and none needed: `deleteAllPanelUserDevices`
+        // refuses a stored identity that is not a decimal before it resolves
+        // an address — the fallback could land on another customer's profile
+        // and unbind THEIR devices. This action used to reach that call with no
+        // stale-link check at all.
+        const outcome = await this.forEachPanelProfile(user.id, async (identity) => {
+          await this.remnawaveApiService?.deleteAllPanelUserDevices(identity);
         });
         if (outcome.attempted === 0) {
           return { userId, status: 'skipped', message: outcome.reason };
@@ -606,13 +621,19 @@ export class BulkUserOperationsService {
         await this.recordOperatorRow(BULK_AUDIT_ACTION.revoke_devices, input, batchId, user, {
           profiles: outcome.succeeded,
           failed: outcome.failed,
+          ...(outcome.refusedStale > 0 ? { refusedStalePanelLink: outcome.refusedStale } : {}),
         });
         return outcome.failed === 0
           ? { userId, status: 'ok' }
           : {
               userId,
               status: 'error',
-              message: `${outcome.failed} of ${outcome.attempted} profiles failed`,
+              message:
+                `${outcome.failed} of ${outcome.attempted} profiles failed` +
+                (outcome.refusedStale > 0
+                  ? ` (${outcome.refusedStale} refused: the stored Remnawave identifier is from ` +
+                    `panel 2.x — link it in ${UNLINKED_SUBSCRIPTIONS_PATH}, then run this again)`
+                  : ''),
             };
       }
 

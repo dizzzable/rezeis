@@ -3509,14 +3509,14 @@ describe('InternalUserService', () => {
     // Asserted through the real addressing function rather than by inspecting
     // the object: the property that matters is that a 3.x path can be BUILT
     // from what the service handed over.
-    assert.deepStrictEqual(panelUserAddress(panelReads[0] as StoredPanelIdentity, 'id'), {
+    assert.deepStrictEqual(panelUserAddress(panelReads[0] as StoredPanelIdentity), {
       kind: 'ready',
       segment: '4471',
     });
     // Counter-check: the stored string alone — what this call site used to pass
     // — names nothing on that panel.
     assert.equal(
-      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
+      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }).kind,
       'impossible',
     );
   });

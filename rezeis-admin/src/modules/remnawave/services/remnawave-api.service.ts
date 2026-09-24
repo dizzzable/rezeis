@@ -26,23 +26,26 @@ import {
   type PanelUserRef,
 } from './panel-user-address';
 import { resolvePanelBaseUrl } from './panel-base-url';
+import { PANEL_VERSION_PROBE } from './panel-clients.providers';
 import {
   decodePanelAuthStatus,
   decodeSquadOptionList,
   type PanelSquadListKey,
 } from './panel-response-decoders';
 import { PANEL_ROUTES, PANEL_USER_NOT_FOUND_ERROR_CODES } from './panel-routes';
+import { LEGACY_PANEL_REFUSAL_CODE, LEGACY_PANEL_REFUSAL_MESSAGE } from './panel-transport';
 import {
-  addressingForVersion,
   CAPABILITIES_CACHE_TTL_MS,
   CAPABILITIES_NEGATIVE_CACHE_TTL_MS,
-  connectionsApiForVersion,
   parseSemver,
   readPanelVersionFrom,
-  type PanelEraObservation,
-  type RemnawaveConnectionsApi,
-  type RemnawaveUserAddressing,
 } from './panel-version.util';
+import {
+  isStalePanelIdentity,
+  SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
+  SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE,
+  SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_CODE,
+} from './stale-panel-link';
 import {
   RemnawavePanelExpirySnapshot,
   RemnawaveStrictDevice,
@@ -160,6 +163,64 @@ export class RemnawaveUpstreamRejectionError extends HttpException {
 }
 
 /**
+ * Thrown by every THROWING send point of this adapter once the version probe
+ * has reported a Remnawave 2.x panel — the same refusal, from the same
+ * `PanelVersionGate`, that `LegacyPanelRefusal` gives the contract clients. No
+ * request was sent.
+ *
+ * NOT a `ServiceUnavailableException`, deliberately: the sync layer reads that
+ * one as TRANSIENT and would retry a 2.x panel forever without telling anybody.
+ * Nothing about the panel changes by waiting; the operator has to upgrade it.
+ * 502, like {@link RemnawaveUpstreamRejectionError}: the upstream is one this
+ * build cannot talk to. The body carries the code, and
+ * `admin-safe-exception.filter.ts` lists it in `SAFE_PRODUCT_CODES`, so a
+ * client can say «Обновите панель до 3.x» instead of "request failed"; the
+ * Russian sentence passes the filter's scrub as it is.
+ */
+export class RemnawavePanelTooOldError extends HttpException {
+  public constructor() {
+    super(
+      { code: LEGACY_PANEL_REFUSAL_CODE, message: LEGACY_PANEL_REFUSAL_MESSAGE },
+      HttpStatus.BAD_GATEWAY,
+    );
+    this.name = 'RemnawavePanelTooOldError';
+  }
+}
+
+/**
+ * Thrown by the destructive methods — profile delete, device delete, delete of
+ * every device, link rotation — for a stored identity that is not a decimal
+ * (`isStalePanelIdentity`), BEFORE any address is resolved and before any
+ * request. See `stale-panel-link.ts` for why such an identity names nobody on a
+ * supported panel and why resolving it could land on somebody else.
+ *
+ * THE ONE PLACE NOBODY CAN ROUTE AROUND. The call sites refuse too, each with
+ * wording for its own audience; this is the net under all of them, including a
+ * caller that never asked (the bulk «Удалить устройства» had no check at all).
+ *
+ * A plain `Error` whose message carries the wire code and NO interpolated id:
+ * a worker that reads the message to choose TRANSIENT or TERMINAL scans it for
+ * `429|502|503|504|…`, and a uuid or a cuid can contain those digits. None of
+ * `timeout|temporar|econn|unavailable` either, so it reads TERMINAL — waiting
+ * does not repair a stored identity.
+ */
+export class StalePanelIdentityRefusal extends Error {
+  public constructor(
+    public readonly code:
+      | typeof SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE
+      | typeof SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE
+      | typeof SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_CODE,
+  ) {
+    super(
+      `${code}: refused before any request — the stored Remnawave identity is not a decimal ` +
+        '3.x id, so it names no profile on a supported panel and the address fallback could ' +
+        'resolve it to another customer. Nothing was changed.',
+    );
+    this.name = 'StalePanelIdentityRefusal';
+  }
+}
+
+/**
  * The ONE upstream-status taxonomy in this adapter, shared by the strict
  * outcomes ({@link RemnawaveApiService.mapStrictTransport}) and the legacy
  * throwing transport. Two taxonomies would drift, and the drift is precisely
@@ -261,86 +322,52 @@ type StrictTransportFailure =
       readonly status: number;
       readonly retryAfterMs: number | null;
       readonly data: unknown;
-      /**
-       * The panel refused this request AND a forced version re-read, taken right
-       * then, came back with a DIFFERENT addressing than the one the request was
-       * built with. See {@link RemnawaveApiService.panelShapeMovedUnderUs}.
-       */
-      readonly addressingChanged?: boolean;
     }
-  | { readonly kind: 'network' };
+  | { readonly kind: 'network' }
+  /**
+   * NOTHING WAS SENT: the version probe reports a 2.x panel, and the adapter
+   * refuses it on every path (`RemnawaveApiService.panelIsTooOld`). Mapped to a
+   * TERMINAL `invalidContract` carrying `LEGACY_PANEL_REFUSAL_MESSAGE`, never to
+   * `unavailable`: waiting does not upgrade a panel, and a saga that defers on
+   * `unavailable` would defer forever without telling anybody.
+   */
+  | { readonly kind: 'tooOld' };
 
 /**
- * Which era of the panel API this deployment is talking to, as read from the
- * panel itself. `version` is kept alongside the two derived fields so a log line
- * or an error can say WHICH build produced the shape, rather than only that the
- * shape was one of two.
+ * What this adapter knows about the panel, as read from the panel itself —
+ * see {@link RemnawaveApiService.getPanelShape}.
  */
 export interface RemnawavePanelShape {
   readonly version: string | null;
-  readonly addressing: RemnawaveUserAddressing;
-  readonly connectionsApi: RemnawaveConnectionsApi;
-  /**
-   * Which by-selector user lookups this panel still serves.
-   *
-   * 2.7.4 and 2.8.x expose `GET /api/users/by-email/{email}` and
-   * `/api/users/by-telegram-id/{id}`. 3.x deleted both — measured, not inferred:
-   * on a live 3.2.1 they answer `404 Cannot GET`. The replacement is
-   * `GET /api/users/stream`, which on 3.2.x (and ONLY on 3.2.x — the 2.8 stream
-   * takes `cursor` and `size` and nothing else) accepts `email` and `telegramId`
-   * as filters.
-   *
-   * `false` therefore means "take the stream route", not "this lookup is
-   * impossible". An unknown panel reads TRUE here — i.e. on 2.x terms — which is
-   * the opposite of how the rest of this file treats "unknown"; the reason for
-   * the asymmetry is stated on {@link lookupsForVersion}, which is the function
-   * that decides it. (This sentence used to claim the opposite. Both branches
-   * here are pure reads, so a wrong guess costs one 404 rather than a wrong
-   * answer — but a cleanup driven by the wrong sentence would have flipped it.)
-   */
-  readonly userLookups: { readonly byTelegramId: boolean; readonly byEmail: boolean };
   /**
    * `GET /api/users/stream` — keyset pagination over the whole-panel user list,
-   * present from 2.8 onward (measured on live 2.8.1 and 3.2.1; 2.7.4 has no such
-   * route). The offset walk it replaces silently LOSES a row whenever the list
-   * shrinks mid-walk, and the arithmetic still reconciles, so the loss is
-   * invisible — see {@link RemnawavePanelUserList}.
+   * served by every 3.x (measured on live 3.2.1). The offset walk it replaces
+   * silently LOSES a row whenever the list shrinks mid-walk, and the arithmetic
+   * still reconciles, so the loss is invisible — see
+   * {@link RemnawavePanelUserList}.
    *
-   * An unknown version reads `false`: the offset route exists on every supported
-   * version, so the conservative choice is the one that always answers.
+   * An unknown version reads `false`: the offset route exists on every 3.x as
+   * well, so the conservative choice is the one that always answers.
    */
   readonly usersStream: boolean;
 }
 
 /**
- * `GET /api/users/stream`, per version. 2.8 and newer, including all of 3.x.
- * Spelled out rather than `major > 2 || (major === 2 && minor >= 8)` collapsed
- * into a range, because an unparseable version has to land on `false`.
+ * `GET /api/users/stream`, per version: every 3.x and anything newer. An
+ * unparseable version lands on `false` (the offset walk).
  */
 function usersStreamFor(version: string | null): boolean {
   const parsed = parseSemver(version);
   if (parsed === null) return false;
-  return parsed.major > 2 || (parsed.major === 2 && parsed.minor >= 8);
+  return parsed.major >= 3;
 }
 
 /**
- * The by-selector shortcuts, per major.
- *
- * `major === 2` and nothing else. An UNKNOWN version deliberately reads `true`
- * here, which is the opposite of how the rest of this file treats "unknown" —
- * and the asymmetry is the point. Everywhere else an unknown is dangerous
- * because a guessed identifier addresses somebody; here both branches are pure
- * reads that either find the right user or find nobody. So the tie goes to the
- * route every panel this integration has ever run against actually serves, and a
- * wrong guess costs one 404 rather than a wrong answer.
- */
-/**
  * Does the row the panel returned actually answer the question we asked?
  *
- * The filtered `stream` lookup is only safe with this check. `GET /api/users/stream`
- * accepts `email` / `telegramId` on 3.2.x and NOT on 2.8.x, where the query
- * object declares only `cursor` and `size` — an unknown key is stripped, the
- * panel serves the first keyset page, and `users[0]` is an arbitrary customer.
+ * The filtered `stream` lookup is only safe with this check. A build whose
+ * stream does not honour the `email` / `telegramId` filter strips the unknown
+ * key, serves the first keyset page, and `users[0]` is an arbitrary customer.
  * Handing that back as "the match" would show an operator somebody else's
  * profile and invite them to act on it. Verifying costs nothing and removes the
  * whole class.
@@ -358,24 +385,15 @@ function matchesUserSelector(
   return summary.telegramId !== null && summary.telegramId.trim() === selector.value.trim();
 }
 
-function lookupsForVersion(version: string | null): RemnawavePanelShape['userLookups'] {
-  const parsed = parseSemver(version);
-  const legacy = parsed === null || parsed.major === 2;
-  return { byTelegramId: legacy, byEmail: legacy };
-}
-
 /**
  * Remnawave panel user — shape returned by the panel API.
  */
 export interface RemnawavePanelUser {
   /**
-   * The panel's own identity for this row, as a string — the SAME dual meaning
-   * `Subscription.remnawaveId` carries, deliberately, so the two can be compared
-   * without a translation step:
-   *
-   *   2.7.4 / 2.8.x  the profile UUID
-   *   3.x            the numeric `id` in decimal, because 3.0 removed the uuid
-   *                  column from the users table outright
+   * The panel's own identity for this row, as a string: the numeric `id` in
+   * decimal, because 3.0 removed the uuid column from the users table outright.
+   * The SAME spelling `Subscription.remnawaveId` stores on 3.x, deliberately, so
+   * the two can be compared without a translation step.
    *
    * The field keeps the name `uuid` because it is a map key in a dozen places
    * (the import overlay, both anti-fraud bridges, the offender fingerprints) and
@@ -388,9 +406,7 @@ export interface RemnawavePanelUser {
   subscriptionUrl: string;
   telegramId: number | null;
   /**
-   * The panel's numeric user id. Present in every contract from 2.7 on — 2.x
-   * carries it alongside the uuid, 3.x keys everything by it. On 3.x this is the
-   * same value as {@link uuid}, parsed.
+   * The panel's numeric user id — the value {@link uuid} spells in decimal.
    */
   panelId: number | null;
   email: string | null;
@@ -525,18 +541,18 @@ export function decodePanelUserTraffic(raw: unknown): PanelUserTraffic | null {
  *   • `complete` says whether the walk reached the end of the list or stopped
  *     at the page ceiling.
  *
- * What it does NOT prove — ON 2.7.4 — is that these rows are a consistent
- * SNAPSHOT of the panel. There the walk uses `/api/users`, paginated by numeric
- * OFFSET over a list that keeps mutating: delete one user between page 0 and
- * page 1 and every later row shifts one place left, so one live user is never
- * served to us — and the arithmetic still reconciles, because the panel's own
- * `total` fell by exactly the same one. The count check cannot see that; it is
- * self-fulfilling.
+ * What it does NOT prove — WHEN THE PANEL VERSION COULD NOT BE READ — is that
+ * these rows are a consistent SNAPSHOT of the panel. Then the walk uses
+ * `/api/users`, paginated by numeric OFFSET over a list that keeps mutating:
+ * delete one user between page 0 and page 1 and every later row shifts one
+ * place left, so one live user is never served to us — and the arithmetic still
+ * reconciles, because the panel's own `total` fell by exactly the same one. The
+ * count check cannot see that; it is self-fulfilling.
  *
- * From 2.8 onward the walk uses `GET /api/users/stream`, which pages by a stable
- * cursor and cannot shift, so the hazard above is gone on those panels. It is
- * NOT gone on 2.7.4 — the route does not exist there — and 2.7.4 is the paying
- * production panel, so nothing downstream may assume otherwise.
+ * On a panel read as 3.x the walk uses `GET /api/users/stream`, which pages by a
+ * stable cursor and cannot shift, so the hazard above is gone there. A version
+ * read can fail at any moment, though, so nothing downstream may assume the
+ * stream was used.
  *
  * So a MISS in this list is strong EVIDENCE that the panel no longer has the
  * profile — it is not proof. Anything destructive keyed off a miss (writing
@@ -674,17 +690,16 @@ export const PANEL_USER_SPEC_REQUIRED_KEYS_3X: readonly string[] = [
 /**
  * Fields the decoder RECOGNISES that panel 3.x does not declare.
  *
- *   uuid         the 2.x identity spelling. Remnawave 3.0 dropped the column
- *                outright, but our own database still stores uuids recorded in
- *                that era, and rows carrying one must keep decoding until the
- *                reconciliation sweep reports zero stranded rows in production.
- *                Seeing `uuid` on a row is therefore NOT drift.
  *   telegram_id  the snake_case spelling {@link parsePanelUserRow} accepts as a
  *                fallback when `telegramId` is absent or not a number.
+ *
+ * `uuid` is NOT here any more. It was the 2.x identity spelling, and a 2.x
+ * panel is refused before any row is read, so a row carrying one is drift worth
+ * seeing, not a shape to decode.
  */
-export const PANEL_USER_LEGACY_ROW_KEYS: readonly string[] = ['uuid', 'telegram_id'];
+export const PANEL_USER_LEGACY_ROW_KEYS: readonly string[] = ['telegram_id'];
 
-/** Every key the decoder knows about, from either era. */
+/** Every key the decoder knows about. */
 export const PANEL_USER_KNOWN_ROW_KEYS: readonly string[] = [
   ...PANEL_USER_SPEC_REQUIRED_KEYS_3X,
   ...PANEL_USER_LEGACY_ROW_KEYS,
@@ -753,17 +768,11 @@ export function describePanelUserShapeDrift(candidate: object): PanelUserShapeDr
  * row onto a single bucket. Callers MUST NOT quietly shorten a list by the
  * nulls: {@link strictGetAllPanelUsers} counts them and refuses instead.
  *
- * WHICH FIELD IS THE IDENTITY depends on the panel era, and the row itself
- * says which: 2.x rows carry `uuid`, 3.x rows have no such field and are keyed
- * by the numeric `id`. Reading the row rather than asking `getPanelShape()`
- * keeps this decoder synchronous and — more importantly — correct even when
- * version detection is momentarily unavailable, because a row that HAS a uuid
- * came from a panel that uses them.
- *
- * Before this, a 3.x row decoded to `null` for want of a `uuid`, and
- * `strictGetAllPanelUsers` escalated a page of them to "none carried a usable
- * uuid" — a whole-read refusal. Safe, but it took the bulk list, the import
- * overlay and both anti-fraud bridges dark at once.
+ * THE IDENTITY IS THE NUMERIC `id`, in decimal: a 3.x row has no `uuid` at all.
+ * A row without a usable `id` is undecodable — never keyed by anything else, a
+ * `uuid` it may carry included — because a key that matches no stored
+ * `remnawaveId` would quietly turn "we could not read this row" into "this user
+ * is unknown to us", and the callers that act on absence would act.
  *
  * MODULE-LEVEL, NOT A METHOD, because the WRITE path needs it too. It reads
  * nothing off `this`, and `unwrapPanelUser` — the create/update response
@@ -789,23 +798,8 @@ function parsePanelUserRow(
   const value = candidate as Record<string, unknown>;
   const panelId =
     typeof value.id === 'number' && Number.isSafeInteger(value.id) ? value.id : null;
-  // The test is ABSENCE of the field, not emptiness of it, and the difference
-  // matters:
-  //   • no `uuid` key at all  → a 3.x row. Key it by the numeric id.
-  //   • `uuid` present but unusable (empty, wrong type) → a 2.x row that
-  //     arrived damaged. It must stay UNDECODABLE. Keying it by its numeric id
-  //     would mint a key that matches no `remnawaveId` stored from that era,
-  //     quietly turning "we could not read this row" into "this user is
-  //     unknown to us" — and the callers that act on absence would act.
-  const uuid =
-    value.uuid === undefined
-      ? panelId !== null
-        ? String(panelId)
-        : ''
-      : typeof value.uuid === 'string'
-        ? value.uuid
-        : '';
-  if (uuid.length === 0) return null;
+  if (panelId === null) return null;
+  const uuid = String(panelId);
   return {
     uuid,
     username: typeof value.username === 'string' ? value.username : '',
@@ -894,7 +888,7 @@ function unwrapPanelUser(
   if (user === null) {
     throw new Error(
       `Remnawave ${route} answered with a user body carrying no usable identity ` +
-        '(neither a 2.x `uuid` nor a numeric 3.x `id`); refusing to record a profile link from it',
+        '(no numeric `id`); refusing to record a profile link from it',
     );
   }
   return user;
@@ -950,7 +944,7 @@ function mapHwidDevice(raw: unknown): RemnawaveHwidDevice {
   };
 }
 
-// ── ip-control (active sessions / source IPs) ──────────────────────────────
+// ── live connections (active sessions / source IPs) ────────────────────────
 
 /** A single source IP a user was seen connecting from, with its last activity. */
 export interface RemnawaveIpSample {
@@ -1000,17 +994,12 @@ function mapNodeUsersIps(result: unknown): RemnawaveNodeUserIps[] {
   const out: RemnawaveNodeUserIps[] = [];
   for (const entry of users) {
     const r = (entry ?? {}) as Record<string, unknown>;
-    // 2.x sends the panel's numeric user id as a STRING here; 3.x sends it as a
-    // number. Accepting only the string quietly dropped every row on 3.x — an
-    // empty snapshot, which the sharing detector reads as "nobody online" and
-    // never as "we could not read this". Both spellings are the same value.
+    // 3.x sends the panel's numeric user id as a NUMBER here. (2.x sent a
+    // string, and accepting only that quietly dropped every 3.x row; a 2.x
+    // panel is refused before this is asked now.) Kept as its decimal string,
+    // the same spelling `Subscription.remnawaveId` stores on 3.x.
     const raw = r['userId'];
-    const userId =
-      typeof raw === 'string' && raw.length > 0
-        ? raw
-        : typeof raw === 'number' && Number.isSafeInteger(raw)
-          ? String(raw)
-          : null;
+    const userId = typeof raw === 'number' && Number.isSafeInteger(raw) ? String(raw) : null;
     if (userId === null) continue;
     out.push({ userId, ips: mapIpSamples(r['ips']) });
   }
@@ -1114,7 +1103,70 @@ export class RemnawaveApiService {
     // unconstructable would be a poor trade for a diagnostic.
     @Optional()
     private readonly systemEvents?: SystemEventsService,
+    // THE SAME `PanelVersionGate` the contract clients' `LegacyPanelRefusal`
+    // reads (`panel-clients.providers.ts`), so a 2.x panel gets one answer on
+    // every path and the version is probed once per cache window, not twice.
+    // `@Optional()` only for the specs that build this adapter by hand with
+    // two or three arguments; `RemnawaveModule` always provides it, and
+    // `test/remnawave-adapter-legacy-refusal.spec.ts` pins that it does.
+    // Typed by the one method read, not by the class, so a spec can hand in a
+    // plain object.
+    @Optional()
+    @Inject(PANEL_VERSION_PROBE)
+    private readonly versionGate?: { readMajor(): Promise<number | null> },
   ) {}
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  THE 2.x REFUSAL (the same gate, the same rule as `LegacyPanelRefusal`)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Set once the first refusal has been logged — see {@link panelIsTooOld}. */
+  private tooOldLogged = false;
+
+  /**
+   * True when the version probe has reported a major below 3, i.e. this is a
+   * Remnawave 2.x panel and nothing may be sent to it. Asked FIRST in each of
+   * this adapter's send points (`requestJson`, `requestJsonWithBody`,
+   * `strictHttp`, and the inline PATCH and DELETE), so no method can reach such
+   * a panel by taking a sender of its own. The two version readers
+   * (`getSystemRecap`, `getSystemMetadata`) are the only exemption: they are how
+   * the SPA learns the panel is too old, and two GETs of a version do no harm.
+   *
+   * THE RULE IS `LegacyPanelRefusal`'S: `major !== null && major < 3`. A version
+   * that cannot be read — a panel that is down, an expired token, no probe
+   * wired — is NEVER refused, and a probe that throws counts as unread: a
+   * refusal keyed on an unreadable version would fire exactly when the panel is
+   * already struggling.
+   *
+   * LOUD ONCE, QUIET PER CALL. The first refusal in a process is logged at error
+   * level with the remedy; later ones are not, because the fail-soft reads
+   * below swallow this into `null`/`[]` hundreds of times an hour and a line per
+   * call is a line nobody reads. The SPA says it too: the capability record's
+   * `tooOld` puts "not supported" on the Remnawave page.
+   */
+  private async panelIsTooOld(): Promise<boolean> {
+    if (this.versionGate === undefined) return false;
+    let major: number | null;
+    try {
+      major = await this.versionGate.readMajor();
+    } catch {
+      return false;
+    }
+    if (major === null || major >= 3) return false;
+    if (!this.tooOldLogged) {
+      this.tooOldLogged = true;
+      this.logger.error(
+        `Remnawave reports major version ${major}: 2.x is no longer supported, and every request ` +
+          `to it is refused (${LEGACY_PANEL_REFUSAL_CODE}). Update the panel to 3.x.`,
+      );
+    }
+    return true;
+  }
+
+  /** {@link panelIsTooOld}, for the send points that answer by throwing. */
+  private async refuseIfPanelTooOld(): Promise<void> {
+    if (await this.panelIsTooOld()) throw new RemnawavePanelTooOldError();
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  PANEL USER ROW SHAPE DRIFT (detect and report — never reject)
@@ -1163,8 +1215,8 @@ export class RemnawaveApiService {
    *
    * `unknown` is a real, expected answer and is NOT treated as a problem — the
    * version read fails for the same reasons requests fail, and this is a
-   * diagnostic, not a gate. It is reported as-is so an operator can tell "2.x
-   * panel drifted" from "3.x panel drifted" from "we could not tell".
+   * diagnostic, not a gate. It is reported as-is so an operator can tell "3.x
+   * panel drifted" from "a newer major drifted" from "we could not tell".
    */
   private detectedPanelEra(): string {
     const cached = this.panelShapeCache?.value;
@@ -1176,11 +1228,11 @@ export class RemnawaveApiService {
 
   private readonly reportPanelUserShapeDrift = (drift: PanelUserShapeDrift): void => {
     const now = Date.now();
-    // The era is part of the identity of a drift. A panel that reports 2.x is
-    // still read here — every row this sees arrives over this service's own
-    // HTTP helpers, which `LegacyPanelRefusal` does not wrap — and the SAME
-    // missing field means different things on a 2.x and a 3.x panel, so two
-    // operators reporting it must not produce indistinguishable events.
+    // The era is part of the identity of a drift: the SAME missing field means
+    // different things on a 3.x panel, on a newer major, and on a build whose
+    // version could not be read, so two operators reporting it must not produce
+    // indistinguishable events. (A 2.x panel sends no rows here at all: every
+    // read is refused before it goes out — see `panelIsTooOld`.)
     const signature = `era=${this.detectedPanelEra()}|${drift.signature}`;
     const seen = this.shapeDriftSeen.get(signature);
     if (seen !== undefined) {
@@ -1232,7 +1284,7 @@ export class RemnawaveApiService {
       unknownFields: drift.unknownFields,
       missingFields: drift.missingFields,
       // Which era the panel was detected as, and the exact build string it
-      // reported. Without these, an operator on 2.8 and an operator on 3.3
+      // reported. Without these, an operator on 3.3.2 and an operator on 3.4.4
       // filing the same drift are indistinguishable in the feed.
       panelEra: era,
       panelVersion: this.panelShapeCache?.value.version ?? null,
@@ -1254,45 +1306,43 @@ export class RemnawaveApiService {
   } | null = null;
 
   /**
-   * Which era of the panel API this deployment is pointed at.
+   * What this adapter knows about the panel it is pointed at: the version it
+   * reports, and whether it serves the keyset user stream.
+   *
+   * DETECTION, NOT ADDRESSING. This used to carry the panel's addressing era,
+   * its live-connection family and its lookup shortcuts, and every user-scoped
+   * request was built from them — which is how an unreadable version came to
+   * mean "2.x" at eight sites out of nine, and how a destructive request could
+   * be addressed from a second reading of the era than the one its guard
+   * judged. This build speaks 3.x only: every request is built in the 3.x shape,
+   * and a 2.x panel is refused before anything is built (`panelIsTooOld`). What
+   * is left here is the version, for the drift labels and for choosing the user
+   * walk.
    *
    * WHY THE ADAPTER OWNS THIS RATHER THAN ASKING `RemnawaveVersionService`: that
    * service is constructed WITH this one, so injecting it back would be a
-   * dependency cycle — and this is the layer that builds paths, so it is the
-   * layer that has to know. The two caches are independent by design; they cost
-   * one extra `GET /api/system/stats/recap` per five minutes and share both the
-   * TTL discipline and the source ORDER through `panel-version.util`, so they
-   * cannot drift on the answer, only on the moment they refresh it.
+   * dependency cycle. The two caches are independent by design; they cost one
+   * extra `GET /api/system/stats/recap` per five minutes and share both the TTL
+   * discipline and the source ORDER through `panel-version.util`, so they cannot
+   * drift on the answer, only on the moment they refresh it.
    *
-   * A failed read yields `'unknown'` on both fields and is cached for the SHORT
-   * window. `'unknown'` is not a default to fall back on: every caller refuses
-   * rather than guessing, because a guessed identifier addresses somebody.
+   * A failed read yields `version: null` and is cached for the SHORT window.
    */
   public async getPanelShape(force = false): Promise<RemnawavePanelShape> {
     const now = Date.now();
     if (!force && this.panelShapeCache !== null && now - this.panelShapeCache.at < this.panelShapeCache.ttlMs) {
       return this.panelShapeCache.value;
     }
-    // Latched for the duration of the version read, not just around the
-    // re-probe: the read goes out over the same transport as everything else, so
-    // a panel that refuses IT would otherwise ask "has the version moved?" and
-    // answer by reading the version again. See `panelShapeMovedUnderUs`.
-    this.shapeReprobeInFlight = true;
-    let version: string | null;
-    try {
-      version = await readPanelVersionFrom(
-        () => this.getSystemRecap(),
-        () => this.getSystemMetadata(),
-        (source, error) => this.logger.debug(`${source} version read failed: ${error.message}`),
-      );
-    } finally {
-      this.shapeReprobeInFlight = false;
-    }
+    // Through the two version readers, the only methods the 2.x refusal lets
+    // through — so this answers on a 2.x panel too, and the drift label and the
+    // capability record can say what the panel is.
+    const version = await readPanelVersionFrom(
+      () => this.getSystemRecap(),
+      () => this.getSystemMetadata(),
+      (source, error) => this.logger.debug(`${source} version read failed: ${error.message}`),
+    );
     const value: RemnawavePanelShape = {
       version,
-      addressing: addressingForVersion(version),
-      connectionsApi: connectionsApiForVersion(version),
-      userLookups: lookupsForVersion(version),
       usersStream: usersStreamFor(version),
     };
     this.panelShapeCache = {
@@ -1303,132 +1353,43 @@ export class RemnawaveApiService {
     return value;
   }
 
-  /** How often a refusal may force a version re-read. */
-  private static readonly SHAPE_REPROBE_MIN_INTERVAL_MS = CAPABILITIES_NEGATIVE_CACHE_TTL_MS;
-
   /**
-   * How long after a CONFIRMED shape change every refusal keeps counting as one
-   * built with the old shape.
+   * Turns what we stored about a profile into the path segment a 3.x panel
+   * wants, performing the one extra round-trip when the stored identity is not
+   * the numeric id itself.
    *
-   * Only requests already in flight, or built in the same tick, can still carry
-   * it — everything issued after the re-read uses the new one — so this is
-   * measured in seconds, not in cache windows.
-   */
-  private static readonly SHAPE_CHANGE_GRACE_MS = CAPABILITIES_NEGATIVE_CACHE_TTL_MS * 2;
-
-  private shapeReprobeAt = 0;
-  private shapeChangedAt = 0;
-  private shapeReprobeInFlight = false;
-
-  /**
-   * "Did the panel change era underneath this request?" — asked when, and only
-   * when, the panel has just REFUSED one.
-   *
-   * THE HOLE THIS CLOSES. The shape is cached for five minutes, and every
-   * user-scoped path is built from it. During an operator's 2.x → 3.x upgrade
-   * there is therefore a window in which every request is addressed the old way
-   * and the panel answers `400 expected number, received NaN`. A 400 is a
-   * terminal refusal by {@link classifyUpstreamStatus} — correctly, for its
-   * usual causes — so `ProfileSyncProcessor.classifyRecovery` marked those jobs
-   * TERMINAL and the recovery sweep never touched them again. The upgrade was
-   * over in a minute; the dead jobs were permanent, and each one is a customer
-   * whose subscription silently stopped syncing.
-   *
-   * Re-reading the version is only half a fix — the job that already failed is
-   * still terminal. So the answer here also decides the CLASS of that failure:
-   * a refusal whose addressing has provably moved is retryable, because the next
-   * attempt is built differently. Provably is the operative word. This does not
-   * guess from the status or from the error text; it re-reads the panel's own
-   * version and compares. A refusal on the merits — a bad body, a rejected
-   * status value, a bad token — re-reads the SAME addressing and stays terminal,
-   * so the forever-retry-with-no-alert hole the taxonomy was built to close
-   * stays closed.
-   *
-   * Cost when nothing has moved: one `GET /api/system/stats/recap`, at most once
-   * per {@link SHAPE_REPROBE_MIN_INTERVAL_MS}, and only after a request has
-   * already failed. The re-entrancy latch matters as much as the interval: the
-   * version read goes through this same transport, so without it a panel
-   * refusing the recap itself would re-probe forever.
-   */
-  private async panelShapeMovedUnderUs(): Promise<boolean> {
-    const now = Date.now();
-    // A change confirmed moments ago still explains this refusal: the requests
-    // that were in flight when it flipped all carry the old shape.
-    if (now - this.shapeChangedAt < RemnawaveApiService.SHAPE_CHANGE_GRACE_MS) return true;
-    if (this.shapeReprobeInFlight) return false;
-    if (now - this.shapeReprobeAt < RemnawaveApiService.SHAPE_REPROBE_MIN_INTERVAL_MS) return false;
-    // Nothing cached means nothing was built from a stale shape — the very first
-    // request cannot have been addressed the old way.
-    const before = this.panelShapeCache?.value ?? null;
-    if (before === null) return false;
-    this.shapeReprobeAt = now;
-    const after = await this.getPanelShape(true);
-    // `'unknown'` is not an era, it is a failed read — and version detection
-    // fails for exactly the reasons a request fails: a revoked token, a dead
-    // upstream. Accepting it as "the addressing moved" would turn every 401
-    // after a token revocation into a retryable failure, which is the
-    // forever-retry-with-no-alert hole reopened from the other side. Only a
-    // KNOWN era that differs from the one we addressed with counts.
-    if (after.addressing === 'unknown' || after.addressing === before.addressing) return false;
-    this.shapeChangedAt = Date.now();
-    this.logger.warn(
-      `Remnawave: the panel changed era under us — addressing was '${before.addressing}' ` +
-        `(version ${before.version ?? 'unknown'}), is now '${after.addressing}' ` +
-        `(version ${after.version ?? 'unknown'}). Requests refused while the old shape was ` +
-        'cached are retryable, not terminal.',
-    );
-    return true;
-  }
-
-  /**
-   * {@link panelShapeMovedUnderUs}, asked only for the statuses that a stale
-   * shape can actually produce: a refused request (`400 expected number,
-   * received NaN`) or a route this era does not serve (`connections/*` replaced
-   * `ip-control/*` on 3.x). A 404, a timeout and a 5xx are already retryable and
-   * do not need the question asked.
-   */
-  private async shapeMovedFor(err: unknown): Promise<boolean> {
-    if (!isAxiosError(err) || err.response === undefined) return false;
-    const statusClass = classifyUpstreamStatus(err.response.status);
-    if (statusClass !== 'rejected' && statusClass !== 'unsupported') return false;
-    return this.panelShapeMovedUnderUs();
-  }
-
-  /**
-   * Turns what we stored about a profile into the path segment this panel wants,
-   * performing the one extra round-trip when the stored identity is from the
-   * other era.
-   *
-   * The resolve step exists for exactly one situation: a profile created on 2.x
-   * whose panel has since been upgraded to 3.x, and which nothing has touched
-   * since — so no numeric id was ever recorded, and the panel's own migration
-   * dropped the uuid without preserving it anywhere. `POST /api/users/resolve`
-   * by the stored username is the only way back, and it exists on every 3.x
-   * panel (2.7.3's contract declares it too).
+   * The resolve step exists for a profile created on 2.x whose panel has since
+   * been upgraded to 3.x, and which nothing has touched since — so no numeric id
+   * was ever recorded, and the panel's own migration dropped the uuid without
+   * preserving it anywhere. `POST /api/users/resolve` by the stored short uuid or
+   * username is the way back.
    *
    * Returns `null` when the profile cannot be named on this panel at all.
    * Callers must treat that as "cannot act", never as "the profile is gone".
    *
-   * `era` IS THE CALLER'S ALREADY-TAKEN OBSERVATION, and passing one is how a
-   * guarded path proves the era it decided on is the era the address is built
-   * from. Omitting it keeps the old behaviour — this method reads the shape for
-   * itself — which is correct for the reads and the non-destructive writes that
-   * have nothing to agree with. The DESTRUCTIVE methods below do not offer that
-   * choice: they require an observation, so it is not possible to build a
-   * deletion address from a second, independent reading of the era.
+   * THE SEGMENT IS ALWAYS A DECIMAL, or this answers `null`. Everything built
+   * from it — the path, the `userId` in a device body — is a number the panel
+   * reads as a user id, and a segment of any other form could only be a guess.
+   *
+   * A DESTRUCTIVE METHOD NEVER GETS HERE WITH A STALE IDENTITY: each refuses a
+   * non-decimal stored identity first (`StalePanelIdentityRefusal`), because the
+   * fallback chain this walks can resolve a dead uuid to somebody else's live
+   * profile. Reads and PATCHes use the chain on purpose; it is what keeps a row
+   * linked on 2.x syncing.
    */
   public async resolvePanelSegment(
     ref: PanelUserRef,
-    era?: PanelEraObservation,
   ): Promise<{ readonly segment: string; readonly panelId: number | null } | null> {
     const identity = asStoredIdentity(ref);
-    const { addressing } = era ?? (await this.getPanelShape());
-    const address = panelUserAddress(identity, addressing);
+    const address = panelUserAddress(identity);
     if (address.kind === 'ready') {
-      return {
-        segment: address.segment,
-        panelId: isNumericPanelIdentity(address.segment) ? Number.parseInt(address.segment, 10) : null,
-      };
+      if (!isNumericPanelIdentity(address.segment)) {
+        this.logger.warn(
+          `Remnawave: cannot address panel profile — "${address.segment}" is not a decimal user id`,
+        );
+        return null;
+      }
+      return { segment: address.segment, panelId: Number.parseInt(address.segment, 10) };
     }
     if (address.kind === 'impossible') {
       this.logger.warn(`Remnawave: cannot address panel profile — ${address.reason}`);
@@ -1444,10 +1405,12 @@ export class RemnawaveApiService {
       );
       return null;
     }
-    return {
-      segment: addressing === 'id' ? String(resolved.id) : (resolved.uuid ?? String(resolved.id)),
-      panelId: resolved.id,
-    };
+    const segment = String(resolved.id);
+    if (!isNumericPanelIdentity(segment)) {
+      this.logger.warn(`Remnawave: the panel resolved a profile to "${segment}", which is not a decimal user id`);
+      return null;
+    }
+    return { segment, panelId: resolved.id };
   }
 
   /**
@@ -1459,32 +1422,43 @@ export class RemnawaveApiService {
    * subscription. The refusal is logged here once, with the operation name, so
    * an operator reading the log can see which feature went quiet and why.
    */
-  private async segmentFor(
-    ref: PanelUserRef,
-    operation: string,
-    era?: PanelEraObservation,
-  ): Promise<string | null> {
-    const resolved = await this.resolvePanelSegment(ref, era);
+  private async segmentFor(ref: PanelUserRef, operation: string): Promise<string | null> {
+    const resolved = await this.resolvePanelSegment(ref);
     if (resolved === null) {
       const identity = asStoredIdentity(ref);
       this.logger.warn(
         `Remnawave ${operation}: profile "${identity.remnawaveId}" cannot be addressed on this ` +
-          'panel version — treating as unavailable, NOT as missing',
+          'panel — treating as unavailable, NOT as missing',
       );
       return null;
     }
     return resolved.segment;
   }
 
+  /**
+   * The first statement of every destructive method: a stored identity that is
+   * not a decimal names nobody on a supported panel, so the verb is refused
+   * before an address is resolved or a request is built. See
+   * `stale-panel-link.ts` for the hazard and {@link StalePanelIdentityRefusal}
+   * for why it throws what it throws.
+   */
+  private refuseStaleIdentity(
+    ref: PanelUserRef,
+    code: StalePanelIdentityRefusal['code'],
+  ): void {
+    if (isStalePanelIdentity(asStoredIdentity(ref).remnawaveId)) {
+      throw new StalePanelIdentityRefusal(code);
+    }
+  }
+
   private async patchKeyFor(
     ref: PanelUserRef,
-  ): Promise<{ readonly uuid: string } | { readonly id: number } | { readonly username: string } | null> {
+  ): Promise<{ readonly id: number } | { readonly username: string } | null> {
     const identity = asStoredIdentity(ref);
-    const { addressing } = await this.getPanelShape();
-    const key = panelUserPatchKey(identity, addressing);
+    const key = panelUserPatchKey(identity);
     if (key !== null) return key;
 
-    const address = panelUserAddress(identity, addressing);
+    const address = panelUserAddress(identity);
     if (address.kind !== 'needsResolve' || !('shortUuid' in address.selector)) return null;
     const resolved = await this.resolvePanelIdentity(address.selector);
     if (resolved === null) {
@@ -1498,8 +1472,7 @@ export class RemnawaveApiService {
 
   /**
    * `POST /api/users/resolve` — maps any ONE of id / shortUuid / username onto
-   * the others. Present on 2.7.x, 2.8.x and 3.2.x alike; 2.x additionally
-   * returns the uuid, 3.x has none to return.
+   * the others.
    *
    * The panel refuses a body carrying more than one key ("Exactly one of id,
    * shortUuid, or username must be provided"), so this takes exactly one.
@@ -1513,7 +1486,6 @@ export class RemnawaveApiService {
     readonly id: number;
     readonly shortUuid: string | null;
     readonly username: string | null;
-    readonly uuid: string | null;
   } | null> {
     try {
       const raw = await this.requestJsonWithBody<unknown>('post', PANEL_ROUTES.resolveUser, selector);
@@ -1526,7 +1498,6 @@ export class RemnawaveApiService {
         id,
         shortUuid: typeof record['shortUuid'] === 'string' ? record['shortUuid'] : null,
         username: typeof record['username'] === 'string' ? record['username'] : null,
-        uuid: typeof record['uuid'] === 'string' ? record['uuid'] : null,
       };
     } catch {
       return null;
@@ -1598,17 +1569,18 @@ export class RemnawaveApiService {
       externalSquadUuid?: string | null;
     },
   ): Promise<RemnawavePanelUser> {
-    // Remnawave 2.7.x contract: PATCH /api/users (no UUID in URL!) — the
-    // UUID lives in the request body. Field names are camelCase, not the
+    // A send point of its own (the inline PATCH below), so it asks the 2.x
+    // refusal itself, first, before it resolves anything.
+    await this.refuseIfPanelTooOld();
+    // PATCH /api/users (no id in the URL!) — the identifier lives in the
+    // request body, as the number `id`. Field names are camelCase, not the
     // snake_case shape we used pre-v0.3.5; sending snake_case results in
     // a 200 OK with the description applied but every other field
     // silently ignored, which is why writeBackReiwaId silently no-op'd
     // for every imported user.
     //
-    // 3.x keeps the identifier in the body too, but names it `id` and wants the
-    // number. `panelUserPatchKey` picks the key this panel accepts — including
-    // the `username` fallback, which every supported version honours and which
-    // is the only key that works when version detection is down.
+    // `panelUserPatchKey` picks the key: the numeric id, or — for a row that
+    // never recorded one — the name the address chain resolves by.
     const identity = asStoredIdentity(ref);
     const key = await this.patchKeyFor(identity);
     if (key === null) {
@@ -1680,18 +1652,14 @@ export class RemnawaveApiService {
       }
       this.logger.error(`Remnawave PATCH /api/users failed: ${(err as Error).message}`);
       // A 400 here is a rejected body (a status the panel does not accept, a
-      // field it does not allow), not an outage — see `upstreamFailure`. Unless
-      // the panel changed era while this body was being built, in which case the
-      // rejected field is the KEY and the next attempt will send the other one.
-      throw this.upstreamFailure(err, 'patch', '/api/users', await this.shapeMovedFor(err));
+      // field it does not allow), not an outage — see `upstreamFailure`.
+      throw this.upstreamFailure(err, 'patch', '/api/users');
     }
     // DECODED OUTSIDE THE CATCH, deliberately. Inside it, the "body carries no
     // identity" error would be swallowed by the transport handler above and
     // re-thrown as `upstreamFailure` — a ServiceUnavailableException, which
-    // `classifyRecovery` calls TRANSIENT — and would additionally fire a version
-    // re-probe (`shapeMovedFor`) for a panel that answered perfectly well. The
-    // transport succeeded; only our reading of it failed, and the two must not
-    // be reported as the same thing.
+    // `classifyRecovery` calls TRANSIENT. The transport succeeded; only our
+    // reading of it failed, and the two must not be reported as the same thing.
     return unwrapPanelUser(raw, 'PATCH /api/users', this.reportPanelUserShapeDrift);
   }
 
@@ -1705,27 +1673,21 @@ export class RemnawaveApiService {
    * Any other upstream failure throws so BullMQ retries. See
    * `.kiro/specs/trial-aware-profile-cleanup`.
    *
-   * `era` IS REQUIRED, AND THAT IS THE POINT. Every caller of this method is
-   * guarded by `assessObservedPanelLink`, and the guard's answer is only worth
-   * anything if the address is built from the SAME reading of the panel era —
-   * `getPanelShape()` is cached for fifteen seconds on a failure, so two
-   * adjacent reads can legitimately disagree, and the disagreement that matters
-   * runs "guard saw `'unknown'`, so proceed" straight into "builder saw `'id'`,
-   * so fall back through `panelId` to whatever is live at that address". Taking
-   * the observation as an argument makes it impossible to write that call: the
-   * era cannot be re-read here, and a caller cannot produce one without going
-   * through `observePanelEra`.
+   * A STORED IDENTITY THAT IS NOT A DECIMAL IS REFUSED FIRST
+   * ({@link StalePanelIdentityRefusal}), before the address chain can resolve a
+   * dead 2.x uuid to whatever profile is live at its short uuid or name. The
+   * rule reads no panel version, so no reading of the version can loosen it.
    */
-  public async deletePanelUser(
-    ref: PanelUserRef,
-    era: PanelEraObservation,
-  ): Promise<{ isDeleted: boolean }> {
+  public async deletePanelUser(ref: PanelUserRef): Promise<{ isDeleted: boolean }> {
+    this.refuseStaleIdentity(ref, SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE);
+    // A send point of its own (the inline DELETE below).
+    await this.refuseIfPanelTooOld();
     const baseUrl = this.getBaseUrl();
     const token = this.configuration.token;
     if (baseUrl === null || token === null) {
       throw new ServiceUnavailableException('Remnawave integration is not configured');
     }
-    const segment = await this.segmentFor(ref, 'DELETE user', era);
+    const segment = await this.segmentFor(ref, 'DELETE user');
     if (segment === null) {
       // NOT `{isDeleted: true}`. The caller writes status DELETED and clears the
       // profile link on a true, so answering true here would detach a live
@@ -1736,10 +1698,10 @@ export class RemnawaveApiService {
     try {
       const response = await firstValueFrom(
         // 3.x answers `204 No Content` with an EMPTY body where 2.x answered
-        // `200 {"response":{"isDeleted":true}}`. The type below therefore
-        // describes 2.x only, and the `?? true` fallback is what carries 3.x:
-        // axios gives `''` for a 204, both optional chains yield undefined, and
-        // a 2xx from this route means the profile is gone either way.
+        // `200 {"response":{"isDeleted":true}}`. The type below keeps the older
+        // body (harmless tolerance), and the `?? true` fallback is what carries
+        // 3.x: axios gives `''` for a 204, both optional chains yield undefined,
+        // and a 2xx from this route means the profile is gone either way.
         this.httpService.request<
           { response?: { isDeleted?: boolean }; isDeleted?: boolean } | '' | undefined
         >({
@@ -1779,7 +1741,7 @@ export class RemnawaveApiService {
         );
       }
       this.logger.error(`Remnawave DELETE ${url} failed: ${(err as Error).message}`);
-      throw this.upstreamFailure(err, 'delete', url, await this.shapeMovedFor(err));
+      throw this.upstreamFailure(err, 'delete', url);
     }
   }
 
@@ -2007,10 +1969,10 @@ export class RemnawaveApiService {
    * projection and tolerates thin rows — a device missing a `deviceModel` must
    * still be listed and revocable, not turn the whole panel into an incident.
    *
-   * Wire contract (identical on 2.7.4 and 2.8.0, verified against both specs):
-   * `GET /api/hwid/devices/{userUuid}` → `{ response: { total, devices: [...] } }`.
-   * The 2.8.0 row adds `requestIp` and renames `userUuid`→`userId`; neither is
-   * read here (the user is addressed by URL UUID, never by a row field).
+   * Wire contract: `GET /api/hwid/devices/{userId}` →
+   * `{ response: { total, devices: [...] } }`. The row's owner field is never
+   * read here (the user is addressed by the id in the URL, never by a row
+   * field).
    */
   public async strictGetPanelUserDevices(
     ref: PanelUserRef,
@@ -2051,34 +2013,24 @@ export class RemnawaveApiService {
   /**
    * Deletes a specific HWID device from a user.
    *
-   * Remnawave 2.7.x contract: `POST /api/hwid/devices/delete` with a JSON
-   * body `{ userUuid, hwid }` — NOT a `DELETE` verb and NOT the old
-   * `/api/hwid/user` path (both 404 now). Returns `{ total }` (remaining
-   * device count) inside the usual `{ response: ... }` envelope.
+   * `POST /api/hwid/devices/delete` with a JSON body `{ userId, hwid }` — NOT a
+   * `DELETE` verb. Returns `{ total }` (remaining device count) inside the usual
+   * `{ response: ... }` envelope.
    *
-   * `era` IS REQUIRED for the reason {@link deletePanelUser} states, and this
-   * method had the defect TWICE OVER: it read the shape for the body's owner
-   * key and `segmentFor` read it again for the path, so even the owner key and
-   * the segment inside one request were built from two readings. One
-   * observation now serves the guard, the key and the segment alike.
-   *
-   * Different verb, same address mechanism, same loss: on an unrepaired
-   * duplicate pair the fallback resolves the stale row's identity to the LIVE
-   * customer, and this revokes a device they are using.
+   * Same address mechanism as {@link deletePanelUser}, same loss: on an
+   * unrepaired duplicate pair the fallback resolves the stale row's identity to
+   * the LIVE customer, and this revokes a device they are using. So a stored
+   * identity that is not a decimal is refused first, the same way.
    */
-  public async deletePanelUserDevice(
-    ref: PanelUserRef,
-    hwid: string,
-    era: PanelEraObservation,
-  ): Promise<{ total: number }> {
-    const { addressing } = era;
-    const segment = await this.segmentFor(ref, 'delete device', era);
-    if (segment === null) {
+  public async deletePanelUserDevice(ref: PanelUserRef, hwid: string): Promise<{ total: number }> {
+    this.refuseStaleIdentity(ref, SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE);
+    const segment = await this.segmentFor(ref, 'delete device');
+    const owner = segment === null ? null : panelDeviceOwnerKey(segment);
+    if (owner === null) {
       throw new ServiceUnavailableException('Remnawave profile cannot be addressed on this panel');
     }
-    // The owner key is `userUuid` on 2.x and `userId` (a NUMBER) on 3.x.
     const result = await this.requestJsonWithBody<unknown>('post', PANEL_ROUTES.deleteHwidDevice, {
-      ...panelDeviceOwnerKey(segment, addressing),
+      ...owner,
       hwid,
     });
     const root = (result as { response?: unknown })?.response ?? result;
@@ -2096,27 +2048,25 @@ export class RemnawaveApiService {
   /**
    * Deletes ALL HWID devices bound to a user's Remnawave profile.
    *
-   * Remnawave 2.7.x contract: `POST /api/hwid/devices/delete-all` with body
-   * `{ userUuid }`. Returns `{ total }` (should be 0) in the `{ response }`
-   * envelope. Used when regenerating a subscription so stale clients can't
-   * keep a slot.
+   * `POST /api/hwid/devices/delete-all` with body `{ userId }`. Returns
+   * `{ total }` (should be 0) in the `{ response }` envelope. Used when
+   * regenerating a subscription so stale clients can't keep a slot, and by the
+   * bulk «Удалить устройства».
    *
-   * `era` IS REQUIRED for the reason {@link deletePanelUser} states, and this
-   * method carried the same double read as its single-device sibling.
+   * The stale-identity refusal comes first, as on every destructive method. This
+   * one needs it most: the bulk action calls it with no check of its own.
    */
-  public async deleteAllPanelUserDevices(
-    ref: PanelUserRef,
-    era: PanelEraObservation,
-  ): Promise<{ total: number }> {
-    const { addressing } = era;
-    const segment = await this.segmentFor(ref, 'delete all devices', era);
-    if (segment === null) {
+  public async deleteAllPanelUserDevices(ref: PanelUserRef): Promise<{ total: number }> {
+    this.refuseStaleIdentity(ref, SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE);
+    const segment = await this.segmentFor(ref, 'delete all devices');
+    const owner = segment === null ? null : panelDeviceOwnerKey(segment);
+    if (owner === null) {
       throw new ServiceUnavailableException('Remnawave profile cannot be addressed on this panel');
     }
     const result = await this.requestJsonWithBody<unknown>(
       'post',
       PANEL_ROUTES.deleteAllHwidDevices,
-      panelDeviceOwnerKey(segment, addressing),
+      owner,
     );
     const root = (result as { response?: unknown })?.response ?? result;
     const record = (root ?? {}) as { total?: number; devices?: unknown };
@@ -2135,31 +2085,22 @@ export class RemnawaveApiService {
    * short UUID is invalidated and a brand-new subscription URL is issued, so
    * every previously-distributed link stops working.
    *
-   * Remnawave 2.7.x contract: `POST /api/users/{uuid}/actions/revoke`. Passing
-   * no body (or an empty one) rotates the short UUID; the response carries the
-   * fresh `subscriptionUrl`. Returns the new URL (or `null` if the panel
-   * omitted it).
+   * `POST /api/users/{id}/actions/revoke`. Passing no body (or an empty one)
+   * rotates the short UUID; the response carries the fresh `subscriptionUrl`.
+   * Returns the new URL (or `null` if the panel omitted it).
    *
-   * `era` IS REQUIRED, for the reason {@link deletePanelUser} states and with
-   * more at stake here than on any of the three deletions. This call is
-   * DESTRUCTIVE and its effect is IRREVERSIBLE: the panel discards the old
-   * short uuid, so every client link already in the customer's hands dies the
-   * instant it returns and no later call can put the old value back.
-   *
-   * It used to read the shape for itself inside {@link segmentFor}, one await
-   * after its caller's guard had read it — and the fifteen-second negative
-   * cache ({@link CAPABILITIES_NEGATIVE_CACHE_TTL_MS}) lets two such reads
-   * legitimately disagree, so "the guard saw `'unknown'`, therefore proceed"
-   * ran straight into "the builder saw `'id'`, therefore fall back through
-   * `panelId` — or the short uuid, or the username — to whatever is live at
-   * that address", and rotated a paying customer's link. Taking the observation
-   * as an argument makes that call impossible to write.
+   * The stale-identity refusal comes first, with more at stake here than on
+   * any of the three deletions. This call is DESTRUCTIVE and its effect is
+   * IRREVERSIBLE: the panel discards the old short uuid, so every client link
+   * already in the customer's hands dies the instant it returns and no later
+   * call can put the old value back — and a dead 2.x uuid resolved through the
+   * address chain would rotate a paying customer's link, not this row's.
    */
   public async regeneratePanelUserSubscription(
     ref: PanelUserRef,
-    era: PanelEraObservation,
   ): Promise<{ subscriptionUrl: string | null }> {
-    const segment = await this.segmentFor(ref, 'revoke subscription', era);
+    this.refuseStaleIdentity(ref, SUBSCRIPTION_REGENERATE_STALE_PANEL_LINK_CODE);
+    const segment = await this.segmentFor(ref, 'revoke subscription');
     if (segment === null) {
       throw new ServiceUnavailableException('Remnawave profile cannot be addressed on this panel');
     }
@@ -2208,10 +2149,13 @@ export class RemnawaveApiService {
 
   /**
    * Returns system recap (version, totals, this month).
+   *
+   * EXEMPT FROM THE 2.x REFUSAL — one of the two version readers
+   * (`getPanelShape`, `RemnawaveVersionService`); see {@link sendJson}.
    */
   public async getSystemRecap(): Promise<RemnawaveSystemRecapInterface | null> {
     try {
-      const response = await this.requestJson<{ response: RemnawaveSystemRecapInterface }>({
+      const response = await this.sendJson<{ response: RemnawaveSystemRecapInterface }>({
         method: 'get',
         url: '/api/system/stats/recap',
       });
@@ -2552,12 +2496,12 @@ export class RemnawaveApiService {
     }
   }
 
-  // ── ip-control: active sessions / source IPs ──────────────────────────────
+  // ── Live connections: active sessions / source IPs ────────────────────────
 
   /**
    * Fetches online users and their source IPs for a single node — the data
    * behind the panel's "Active sessions" view. Async on the panel side:
-   * `POST fetch-users-ips/{nodeUuid}` returns a `jobId` we then poll.
+   * `POST /api/connections/by-node/{nodeUuid}` returns a `jobId` we then poll.
    *
    * `null` means THIS NODE COULD NOT BE READ — the job failed, or the poll ran
    * out of budget. `[]` means the node was read and nobody was online. The
@@ -2567,20 +2511,15 @@ export class RemnawaveApiService {
   public async fetchUsersIpsForNode(
     nodeUuid: string,
   ): Promise<readonly RemnawaveNodeUserIps[] | null> {
-    const { connectionsApi } = await this.getPanelShape();
-    // `'unknown'` deliberately takes the 2.x paths rather than refusing: they
-    // are what every panel this integration has ever run against serves, and a
-    // wrong guess here costs a 404, not a wrong answer.
-    const is3x = connectionsApi === 'connections';
     try {
       const started = await this.requestJsonWithBody<{ response?: { jobId?: string } }>(
         'post',
-        is3x ? PANEL_ROUTES.connectionsByNodeStart(nodeUuid) : PANEL_ROUTES.ipControlNodeStart(nodeUuid),
+        PANEL_ROUTES.connectionsByNodeStart(nodeUuid),
         {},
       );
       const jobId = started?.response?.jobId;
       if (typeof jobId !== 'string' || jobId.length === 0) return null;
-      // `null` straight through, NOT `?? []`. `pollIpControlJob` returns null
+      // `null` straight through, NOT `?? []`. `pollConnectionsJob` returns null
       // for a job that completed with `success: false`, for `isFailed`, and for
       // the poll timeout — and flattening those to an empty array threw away the
       // exact distinction the guard inside it was added to preserve. The one
@@ -2588,35 +2527,29 @@ export class RemnawaveApiService {
       // on this node", so a node whose collection job failed or simply answered
       // slower than the 6-second budget was counted as clean. The big nodes are
       // both the slowest and the ones sharers live on.
-      return this.pollIpControlJob(
-        is3x ? PANEL_ROUTES.connectionsByNodeResult : PANEL_ROUTES.ipControlNodeResult,
-        jobId,
-        mapNodeUsersIps,
-      );
+      return this.pollConnectionsJob(PANEL_ROUTES.connectionsByNodeResult, jobId, mapNodeUsersIps);
     } catch {
       return null;
     }
   }
 
   /**
-   * Per-user IP drilldown across nodes (`POST fetch-ips/{uuid}` → poll).
-   * Used for on-demand inspection of one flagged user. Fail-soft → `[]`.
+   * Per-user IP drilldown across nodes (`POST /api/connections/by-user/{id}` →
+   * poll). Used for on-demand inspection of one flagged user. Fail-soft → `[]`.
    */
   public async fetchUserIps(ref: PanelUserRef): Promise<readonly RemnawaveUserNodeIps[]> {
-    const { connectionsApi } = await this.getPanelShape();
-    const is3x = connectionsApi === 'connections';
     const segment = await this.segmentFor(ref, 'live connections by user');
     if (segment === null) return [];
     try {
       const started = await this.requestJsonWithBody<{ response?: { jobId?: string } }>(
         'post',
-        is3x ? PANEL_ROUTES.connectionsByUserStart(segment) : PANEL_ROUTES.ipControlUserStart(segment),
+        PANEL_ROUTES.connectionsByUserStart(segment),
         {},
       );
       const jobId = started?.response?.jobId;
       if (typeof jobId !== 'string' || jobId.length === 0) return [];
-      const nodes = await this.pollIpControlJob(
-        is3x ? PANEL_ROUTES.connectionsByUserResult : PANEL_ROUTES.ipControlUserResult,
+      const nodes = await this.pollConnectionsJob(
+        PANEL_ROUTES.connectionsByUserResult,
         jobId,
         mapUserNodeIps,
       );
@@ -2628,24 +2561,17 @@ export class RemnawaveApiService {
 
   /**
    * Drops live connections for the given users or IPs across the targeted
-   * nodes (`POST drop-connections`). Used by the anti-fraud enforcement path.
+   * nodes (`POST /api/connections/drop`). Used by the anti-fraud enforcement
+   * path.
    */
   public async dropConnections(input: RemnawaveDropConnectionsInput): Promise<{ ok: boolean }> {
-    const { connectionsApi } = await this.getPanelShape();
-    if (connectionsApi !== 'connections') {
-      await this.requestJsonWithBody(
-        'post',
-        PANEL_ROUTES.ipControlDrop,
-        input as unknown as Record<string, unknown>,
-      );
-      return { ok: true };
-    }
-    // 3.x renamed the discriminator's user arm from `userUuids: string[]` to
-    // `userIds: number[]`. The values the caller holds come from stored
-    // `remnawaveId`s, which on a 3.x panel ARE the numeric ids as strings — so
-    // this is a parse, not a lookup. Anything that does not parse is dropped
-    // rather than sent: the panel would reject the whole request over one bad
-    // element, taking the enforcement action for every other user with it.
+    // The discriminator's user arm is `userIds: number[]` on the wire; callers
+    // still spell it `userUuids` (three of them — a rename of its own). The
+    // values the caller holds come from stored `remnawaveId`s, which on a 3.x
+    // panel ARE the numeric ids as strings — so this is a parse, not a lookup.
+    // Anything that does not parse is dropped rather than sent: the panel would
+    // reject the whole request over one bad element, taking the enforcement
+    // action for every other user with it.
     let body: Record<string, unknown>;
     if (input.dropBy.by === 'userUuids') {
       // `isNumericPanelIdentity` and NOT `Number.parseInt`. `parseInt` reads a
@@ -2681,11 +2607,11 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Polls an `ip-control` result endpoint until the job is completed or
+   * Polls a `connections` result endpoint until the job is completed or
    * failed, or a bounded number of attempts elapse. Returns the extracted
    * payload on completion, or `null` on failure/timeout.
    */
-  private async pollIpControlJob<T>(
+  private async pollConnectionsJob<T>(
     resultPath: (jobId: string) => string,
     jobId: string,
     extract: (result: unknown) => T,
@@ -2724,12 +2650,12 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Health probe for the admin Dashboard. Remnawave 2.8 changed
-   * `/api/system/health` to `{ runtimeMetrics: [...] }` (no status/version),
-   * while older builds returned `{ status, db, redis, version, uptime }`. A
-   * 2xx means the panel is reachable, so we default the status to "ok" and
-   * enrich the version from `/api/system/metadata` (the canonical 2.8 version
-   * source). Returns null when the panel is unreachable.
+   * Health probe for the admin Dashboard. `/api/system/health` answers
+   * `{ runtimeMetrics: [...] }` (no status/version), while older builds returned
+   * `{ status, db, redis, version, uptime }`. A 2xx means the panel is
+   * reachable, so we default the status to "ok" and enrich the version from
+   * `/api/system/metadata`. Returns null when the panel is unreachable — and on
+   * a 2.x panel, whose health read is refused like every other.
    */
   public async getRemnawaveHealth(): Promise<RemnawaveHealthInterface | null> {
     try {
@@ -2760,13 +2686,16 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Panel build metadata (`/api/system/metadata`) — the canonical version
-   * source on Remnawave 2.8 (also carries build number / git commit). Returns
-   * null when unreachable or the endpoint is absent.
+   * Panel build metadata (`/api/system/metadata`) — the second version source
+   * (also carries build number / git commit). Returns null when unreachable or
+   * the endpoint is absent.
+   *
+   * EXEMPT FROM THE 2.x REFUSAL — one of the two version readers; see
+   * {@link sendJson}.
    */
   public async getSystemMetadata(): Promise<{ readonly version: string | null } | null> {
     try {
-      const response = await this.requestJson<unknown>({
+      const response = await this.sendJson<unknown>({
         method: 'get',
         url: '/api/system/metadata',
       });
@@ -3038,29 +2967,13 @@ export class RemnawaveApiService {
     if (!input.telegramId && !input.username && !input.email && !input.subscriptionUuid) {
       return null;
     }
-    // Remnawave 2.8 dropped the catch-all `GET /api/users/resolve` in favour of
-    // dedicated by-selector lookups (the POST /resolve only accepts uuid/
-    // username/shortUuid). We branch to the matching `by-*` endpoint so all
-    // four admin selectors keep working on 2.7.4 and 2.8.0.
-    //
-    // On 3.x two of those four are gone — `by-email` and `by-telegram-id` answer
-    // `404 Cannot GET` on a live 3.2.1 — and the replacement is `stream` with a
-    // filter. Without this branch an operator searching a real customer by email
-    // on a 3.x panel is told "no such user", because the 404 lands in the
-    // catch-all below and comes back as `null`. Name lookups and short-uuid
-    // lookups need no branch: those two routes survive on every version.
-    // The `unknown` case is NOT a coin flip between the two. Guessing legacy on
-    // a 3.x panel yields a 404 that surfaces to the operator as "no such user";
-    // guessing the stream on a 2.8 panel is WORSE, because 2.8's stream declares
-    // only `cursor` and `size`, silently drops the filter and returns the first
-    // keyset page — an ARBITRARY customer presented as the match. So an
-    // unidentified panel tries the legacy route first and falls back to the
-    // stream, and every stream answer is checked against the selector that was
-    // asked for. That check is what makes the fallback safe on a panel that
-    // ignored the filter.
-    const { userLookups } = await this.getPanelShape();
-    const legacyFirst = userLookups.byEmail || userLookups.byTelegramId;
-
+    // Short uuid and name have routes of their own (`by-short-uuid`,
+    // `by-username`). E-mail and Telegram id do not on 3.x — `by-email` and
+    // `by-telegram-id` answer `404 Cannot GET` on a live 3.2.1 — so they go
+    // through `GET /api/users/stream` with a filter, and every stream answer is
+    // checked against the selector that was asked for (`matchesUserSelector`):
+    // a build that ignored the filter would otherwise hand back an ARBITRARY
+    // customer as the match.
     if (input.subscriptionUuid) {
       return this.readUserSummary(
         `/api/users/by-short-uuid/${encodeURIComponent(input.subscriptionUuid)}`,
@@ -3075,20 +2988,8 @@ export class RemnawaveApiService {
       : { key: 'telegramId' as const, value: input.telegramId ?? '' };
     if (selector.value.length === 0) return null;
 
-    const legacyUrl =
-      selector.key === 'email'
-        ? `/api/users/by-email/${encodeURIComponent(selector.value)}`
-        : `/api/users/by-telegram-id/${encodeURIComponent(selector.value)}`;
     // `size=1`: this is a lookup, not a walk.
     const streamUrl = `/api/users/stream?size=1&${selector.key}=${encodeURIComponent(selector.value)}`;
-
-    if (legacyFirst) {
-      const found = await this.readUserSummary(legacyUrl);
-      if (found !== null) return found;
-      // A confident 2.x reading means the route exists and genuinely has no
-      // match; only an UNIDENTIFIED panel earns the second attempt.
-      if (userLookups.byEmail && userLookups.byTelegramId) return null;
-    }
     const streamed = await this.readUserSummary(streamUrl);
     if (streamed === null) return null;
     return matchesUserSelector(streamed, selector) ? streamed : null;
@@ -3302,7 +3203,9 @@ export class RemnawaveApiService {
         branding: decoded.value.branding,
       };
     } catch (error) {
-      if (error instanceof ServiceUnavailableException) {
+      // The 2.x refusal goes out as itself: "update the panel", not "the panel
+      // is unavailable" — the second invites a retry that can never succeed.
+      if (error instanceof ServiceUnavailableException || error instanceof RemnawavePanelTooOldError) {
         throw error;
       }
       throw new ServiceUnavailableException('Remnawave auth status is unavailable');
@@ -3381,8 +3284,8 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Absolute desired-limit PATCH. UUID travels in the BODY (2.7.x/2.8.x
-   * contract), canonical unlimited (`null`) is encoded as upstream `0`. Returns
+   * Absolute desired-limit PATCH. The numeric id travels in the BODY, canonical
+   * unlimited (`null`) is encoded as upstream `0`. Returns
    * the panel's post-write user so the caller can compare, but callers MUST
    * still `strictGetPanelUser` for an independent read-back before advancing
    * the applied revision.
@@ -3434,25 +3337,20 @@ export class RemnawaveApiService {
    * Validates the envelope, that `total` matches the row count, that every
    * `hwid` is unique + non-empty and every `createdAt` is present — a device
    * plan must never be built on an inconsistent list. Row owner fields are
-   * ignored (the user is addressed by URL UUID, never by a trusted row field).
+   * ignored (the user is addressed by the id in the URL, never by a trusted row
+   * field).
    *
-   * `era` IS OPTIONAL HERE AND REQUIRED ON THE DELETE, and the split is the one
-   * {@link resolvePanelSegment} already draws: a destructive verb may not build
-   * its address from a second, independent reading of the era, while a read has
-   * nothing to agree with and keeps its old behaviour when nothing is passed.
-   *
-   * A GUARDED CALLER SHOULD STILL PASS ONE. This read is not destructive, but
-   * both of its callers act on it: the planner turns it into the persisted
-   * target list, and the executor turns the final one into the post-condition
-   * written to `postconditionMetadata` before a plan certifies itself APPLIED.
-   * Read off a profile the guard did not clear, that certificate describes
-   * somebody else's device list.
+   * NOT refused for a stale identity here — a read destroys nothing — but both
+   * device-reduction callers refuse one BEFORE they read: the planner turns this
+   * list into the persisted target list, and the executor turns the final one
+   * into the post-condition a plan certifies itself APPLIED with. Read off the
+   * profile a stale uuid's fallback lands on, either would describe somebody
+   * else's devices.
    */
   public async strictListUserDevices(
     ref: PanelUserRef,
-    era?: PanelEraObservation,
   ): Promise<RemnawaveStrictOutcome<RemnawaveStrictDeviceList>> {
-    const segment = await this.segmentFor(ref, 'strict list devices', era);
+    const segment = await this.segmentFor(ref, 'strict list devices');
     if (segment === null) return strictUnavailable();
     const transport = await this.strictHttp('get', PANEL_ROUTES.userHwidDevices(segment));
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
@@ -3533,11 +3431,11 @@ export class RemnawaveApiService {
    *    unsupported /
    *    notFound
    *   invalidContract — we could not PARSE what arrived: a page with no `users`
-   *                     array, rows of which none carried a uuid, rows we had
+   *                     array, rows of which none carried a numeric id, rows we had
    *                     to drop, an empty read the panel would not confirm, or
    *                     a row count the panel reported and then contradicted
    *
-   * Rows without a usable `uuid` are STILL dropped (see
+   * Rows without a usable numeric `id` are STILL dropped (see
    * {@link parsePanelUserRow} — letting one through corrupts identity
    * downstream). What changed is that dropping one is no longer free: decoded ≠
    * rows received is `invalidContract`, so the caller decides.
@@ -3580,8 +3478,8 @@ export class RemnawaveApiService {
     // never served — and the arithmetic still reconciles, because the panel's
     // own `total` fell by the same one. That user then MISSES in the overlay map
     // and gets written EXPIRED. `/api/users/stream` pages by a stable cursor and
-    // cannot do that. It exists from 2.8 onward (measured on live 2.8.1 and
-    // 3.2.1); 2.7.4 has no such route and keeps the offset walk.
+    // cannot do that; every 3.x serves it. A version that could not be read
+    // keeps the offset walk, which every 3.x serves too.
     const { usersStream } = await this.getPanelShape();
     let cursor: string | null = null;
 
@@ -3603,7 +3501,11 @@ export class RemnawaveApiService {
         // every later "missing" verdict unsound, so the whole read is refused.
         this.logger.warn(
           `strictGetAllPanelUsers page ${pageIndex} failed: ${
-            transport.kind === 'network' ? 'network/timeout' : `HTTP ${transport.status}`
+            transport.kind === 'network'
+              ? 'network/timeout'
+              : transport.kind === 'tooOld'
+                ? 'refused — the panel is 2.x'
+                : `HTTP ${transport.status}`
           }`,
         );
         return this.mapStrictTransport(transport);
@@ -3698,7 +3600,7 @@ export class RemnawaveApiService {
     // a different thing from a read that is merely short.
     if (rawRowsSeen > 0 && decoded.length === 0) {
       return strictInvalidContract(
-        `panel returned ${rawRowsSeen} user rows and none carried a usable uuid`,
+        `panel returned ${rawRowsSeen} user rows and none carried a usable numeric id`,
       );
     }
     if (decoded.length !== rawRowsSeen) {
@@ -3754,38 +3656,33 @@ export class RemnawaveApiService {
   }
 
   /**
-   * Exact single-HWID delete with a STABLE body `{ userUuid, hwid }` (never a
+   * Exact single-HWID delete with a STABLE body `{ userId, hwid }` (never a
    * row-owner field). Returns the remaining `total` on success; 404 → the row
    * was already absent (`notFound`) — the caller treats that as idempotent
    * success only after a strict read-back.
+   *
+   * A stored identity that is not a decimal is refused first, as on every
+   * destructive method — here as a TERMINAL `invalidContract` rather than a
+   * throw, because the device saga speaks outcomes. The fallback chain would
+   * otherwise unbind a device from whatever profile is LIVE at a dead uuid's
+   * short uuid or name.
    */
   public async strictDeleteUserDevice(
     ref: PanelUserRef,
     hwid: string,
-    era: PanelEraObservation,
   ): Promise<RemnawaveStrictOutcome<{ readonly total: number }>> {
-    // THE CALLER'S OBSERVATION, REQUIRED — the last destructive method that
-    // took its own. It already collapsed the two readings INSIDE this method
-    // into one (the owner key in the body and the segment in the path must at
-    // minimum describe the same panel), but that left the reading its GUARD
-    // decided on and the reading this address is built from as two separate
-    // reads of a value that caches failure for fifteen seconds. The guard
-    // seeing `'unknown'` — the deliberate fail-open, which stays — while this
-    // method saw `'id'` a moment later is the whole hazard: the `'id'` branch
-    // falls back through `remnawavePanelId` → the short uuid from `config_url`
-    // → `remnawavePanelUsername` and unbinds a device from whatever profile is
-    // LIVE at that address.
-    //
-    // REQUIRED rather than optional, matching `deletePanelUser`,
-    // `deletePanelUserDevice`, `deleteAllPanelUserDevices` and
-    // `regeneratePanelUserSubscription`: with exactly one caller the ripple is
-    // contained, and required is what makes "this cannot re-read the era" a
-    // property of the type rather than of a convention.
-    const { addressing } = era;
-    const segment = await this.segmentFor(ref, 'strict delete device', era);
+    if (isStalePanelIdentity(asStoredIdentity(ref).remnawaveId)) {
+      const refusal = new StalePanelIdentityRefusal(SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_CODE);
+      return strictInvalidContract(refusal.message);
+    }
+    const segment = await this.segmentFor(ref, 'strict delete device');
     if (segment === null) return strictUnavailable();
+    const owner = panelDeviceOwnerKey(segment);
+    if (owner === null) {
+      return strictInvalidContract(`the resolved panel user id "${segment}" is not a decimal id`);
+    }
     const transport = await this.strictHttp('post', PANEL_ROUTES.deleteHwidDevice, {
-      ...panelDeviceOwnerKey(segment, addressing),
+      ...owner,
       hwid,
     });
     if (transport.kind !== 'ok') return this.mapStrictTransport(transport);
@@ -3810,19 +3707,11 @@ export class RemnawaveApiService {
       return strictInvalidContract('user envelope is not an object');
     }
     const r = root as Record<string, unknown>;
-    // Same rule as `parsePanelUserRow`, and for the same reason: the ROW says
-    // which era it came from. A 2.x row carries `uuid`; a 3.x row has no such
-    // key and is named by the numeric `id`. Reading the row rather than asking
-    // `getPanelShape()` keeps this decoder synchronous and correct even while
-    // version detection is momentarily down.
-    //
-    // Test ABSENCE (`=== undefined`), not emptiness. A 2.x row whose uuid came
-    // back as `''` is DAMAGED and must stay undecodable — falling back to the id
-    // there would quietly accept a row this parser exists to reject.
+    // Same rule as `parsePanelUserRow`: a 3.x row is named by its numeric `id`,
+    // and a row without a usable one is refused, never keyed by anything else.
     const panelId =
       typeof r['id'] === 'number' && Number.isSafeInteger(r['id']) ? (r['id'] as number) : null;
-    const uuid =
-      r['uuid'] === undefined ? (panelId !== null ? String(panelId) : undefined) : r['uuid'];
+    const uuid = panelId !== null ? String(panelId) : undefined;
     const status = r['status'];
     const createdAt = r['createdAt'];
     const traffic = r['trafficLimitBytes'];
@@ -3831,8 +3720,8 @@ export class RemnawaveApiService {
     const trafficLimitStrategy = r['trafficLimitStrategy'];
     const activeInternalSquads = r['activeInternalSquads'];
     const externalSquadUuid = r['externalSquadUuid'];
-    if (typeof uuid !== 'string' || uuid.length === 0) {
-      return strictInvalidContract('user has neither a uuid nor a numeric id');
+    if (uuid === undefined) {
+      return strictInvalidContract('user has no numeric id');
     }
     if (typeof status !== 'string' || status.length === 0) {
       return strictInvalidContract('user missing status');
@@ -3956,20 +3845,11 @@ export class RemnawaveApiService {
   /** Maps a non-ok transport result onto a normalized strict outcome. */
   private mapStrictTransport<T>(transport: StrictTransportFailure): RemnawaveStrictOutcome<T> {
     if (transport.kind === 'network') return strictUnavailable();
+    // Terminal, and the operator's sentence rides along: a 2.x panel does not
+    // become a 3.x one by retrying.
+    if (transport.kind === 'tooOld') return strictInvalidContract(LEGACY_PANEL_REFUSAL_MESSAGE);
     const { status, retryAfterMs } = transport;
-    const statusClass = classifyUpstreamStatus(status);
-    // The panel changed era between the moment this request was addressed and
-    // the moment it was refused — proven by a forced version re-read, not
-    // guessed from the status. The request was built wrong, the next one will
-    // not be, so the caller must defer rather than give up. See
-    // `panelShapeMovedUnderUs`.
-    if (
-      transport.addressingChanged === true &&
-      (statusClass === 'rejected' || statusClass === 'unsupported')
-    ) {
-      return strictUnavailable(retryAfterMs);
-    }
-    switch (statusClass) {
+    switch (classifyUpstreamStatus(status)) {
       case 'notFound':
         return strictNotFound();
       case 'unsupported':
@@ -3997,18 +3877,13 @@ export class RemnawaveApiService {
    *    `ServiceUnavailableException`, i.e. unchanged, still retryable. A panel
    *    restart must never become a dead job.
    *
-   * `addressingChanged` is the one thing that moves a refusal back into the
-   * retryable arm, and it is never inferred here: the caller obtains it from
-   * {@link shapeMovedFor}, which re-reads the panel's own version and finds it
-   * has moved. Neither an upgrade nor a rollback should leave dead jobs behind.
+   * (A refusal used to be moved back into the retryable arm when a forced
+   * version re-read found the panel's addressing era had changed under the
+   * request. No request is shaped by the era any more, so there is nothing for
+   * an upgrade to have changed.)
    */
-  private upstreamFailure(
-    err: unknown,
-    method: string,
-    url: string,
-    addressingChanged = false,
-  ): Error {
-    if (isAxiosError(err) && err.response !== undefined && !addressingChanged) {
+  private upstreamFailure(err: unknown, method: string, url: string): Error {
+    if (isAxiosError(err) && err.response !== undefined) {
       const statusClass = classifyUpstreamStatus(err.response.status);
       if (statusClass === 'rejected' || statusClass === 'unsupported') {
         return new RemnawaveUpstreamRejectionError(err.response.status, method, url);
@@ -4020,15 +3895,16 @@ export class RemnawaveApiService {
   /**
    * Raw transport for strict operations. Unlike {@link requestJson} it does
    * NOT collapse failures into a single exception: it distinguishes an HTTP
-   * status response (with a parsed `Retry-After`) from a network/timeout error
-   * and from a not-configured integration, so the strict mappers can classify
-   * the outcome.
+   * status response (with a parsed `Retry-After`) from a network/timeout error,
+   * from a not-configured integration and from a refused 2.x panel, so the
+   * strict mappers can classify the outcome.
    */
   private async strictHttp(
     method: 'get' | 'post' | 'patch' | 'delete',
     url: string,
     body?: Record<string, unknown>,
   ): Promise<{ readonly kind: 'ok'; readonly data: unknown } | StrictTransportFailure> {
+    if (await this.panelIsTooOld()) return { kind: 'tooOld' };
     const baseUrl = this.getBaseUrl();
     const token = this.configuration.token;
     if (baseUrl === null || token === null) {
@@ -4055,13 +3931,7 @@ export class RemnawaveApiService {
         const status = err.response.status;
         const retryAfterMs = parseRetryAfterMs(err.response.headers);
         this.logger.warn(`Remnawave strict ${method.toUpperCase()} ${url} → HTTP ${status}`);
-        return {
-          kind: 'status',
-          status,
-          retryAfterMs,
-          data: err.response.data,
-          addressingChanged: await this.shapeMovedFor(err),
-        };
+        return { kind: 'status', status, retryAfterMs, data: err.response.data };
       }
       this.logger.warn(
         `Remnawave strict ${method.toUpperCase()} ${url} transport error: ${(err as Error).message}`,
@@ -4070,7 +3940,25 @@ export class RemnawaveApiService {
     }
   }
 
+  /** The ordinary throwing GET/…: the 2.x refusal first, then {@link sendJson}. */
   private async requestJson<TResponse>(input: {
+    readonly method: 'post' | 'get' | 'put' | 'delete' | 'patch';
+    readonly url: string;
+  }): Promise<TResponse> {
+    await this.refuseIfPanelTooOld();
+    return this.sendJson<TResponse>(input);
+  }
+
+  /**
+   * The body-less sender WITHOUT the 2.x refusal. Called by {@link requestJson}
+   * after the refusal, and directly by exactly two methods: `getSystemRecap` and
+   * `getSystemMetadata`, the version readers. They are what tells a 2.x panel
+   * apart — gated, a 2.x panel would read as "version unknown" and the SPA could
+   * not say "too old" — and two GETs of a version do such a panel no harm.
+   * `test/remnawave-adapter-legacy-refusal.spec.ts` holds the exemption to
+   * exactly those two by calling every public method against a 2.x panel.
+   */
+  private async sendJson<TResponse>(input: {
     readonly method: 'post' | 'get' | 'put' | 'delete' | 'patch';
     readonly url: string;
   }): Promise<TResponse> {
@@ -4100,7 +3988,7 @@ export class RemnawaveApiService {
       this.logger.warn(
         `Remnawave ${input.method.toUpperCase()} ${input.url} failed: ${(err as Error).message}`,
       );
-      throw this.upstreamFailure(err, input.method, input.url, await this.shapeMovedFor(err));
+      throw this.upstreamFailure(err, input.method, input.url);
     }
   }
 
@@ -4109,6 +3997,7 @@ export class RemnawaveApiService {
     url: string,
     body: Record<string, unknown>,
   ): Promise<TResponse> {
+    await this.refuseIfPanelTooOld();
     const baseUrl = this.getBaseUrl();
     const token = this.configuration.token;
     if (baseUrl === null || token === null) {
@@ -4132,7 +4021,7 @@ export class RemnawaveApiService {
       return response.data;
     } catch (err: unknown) {
       this.logger.error(`Remnawave ${method.toUpperCase()} ${url} failed: ${(err as Error).message}`);
-      throw this.upstreamFailure(err, method, url, await this.shapeMovedFor(err));
+      throw this.upstreamFailure(err, method, url);
     }
   }
 

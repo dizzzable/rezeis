@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import * as contractPanel27 from '@remnawave/contract-panel-2.7';
 import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
 import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
 import * as contractPanel33 from '@remnawave/contract-panel-3.3';
@@ -191,12 +190,12 @@ describe('a captured 3.3.2 squad answer flows through untouched', () => {
 describe('a squad answer the release’s own contract refuses is still read', () => {
   /**
    * The captured body with `responseHeadersAdd` / `responseHeadersRemove`
-   * spelled the way the 2.x releases spelled it: `responseHeaders`.
+   * folded back into the single `responseHeaders` field they replaced.
    *
    * This is the outage, reproduced. It ran in the other direction — a client
-   * pinned to a 2.x contract meeting a 3.x panel — but the failure is the same
-   * one and it is symmetric: a squad row whose header field is spelled for a
-   * different era than the schema reading it expects.
+   * pinned to an older contract meeting a newer panel — but the failure is the
+   * same one and it is symmetric: a squad row whose header field is spelled for
+   * a different release than the schema reading it expects.
    */
   function renamedExternalSquads(): unknown {
     const body = clone(captured('external-squads')) as {
@@ -210,15 +209,16 @@ describe('a squad answer the release’s own contract refuses is still read', ()
     return body;
   }
 
-  it('is genuinely refused by panel 3.3’s own contract and accepted by the 2.7 line — not vacuous', () => {
+  it('is genuinely refused by panel 3.3’s own contract — not vacuous', () => {
     // Without this the two below would pass against a body no schema objects
-    // to, and would be measuring nothing.
+    // to, and would be measuring nothing. The captured body itself is
+    // accepted, so the refusal is the renamed field's and nothing else's.
     assert.equal(
       contractPanel33.GetExternalSquadsCommand.ResponseSchema.safeParse(renamedExternalSquads()).success,
       false,
     );
     assert.equal(
-      contractPanel27.GetExternalSquadsCommand.ResponseSchema.safeParse(renamedExternalSquads()).success,
+      contractPanel33.GetExternalSquadsCommand.ResponseSchema.safeParse(captured('external-squads')).success,
       true,
     );
   });

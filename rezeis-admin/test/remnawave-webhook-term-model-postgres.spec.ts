@@ -59,16 +59,12 @@ const run = testUrl === undefined ? describe.skip : describe;
 const FLAGS = [
   'ADDON_ENTITLEMENT_SHADOW',
   'ADDON_ENTITLEMENT_DIRECT_PURCHASE',
-  'ADDON_PROJECTION_SYNC',
-  'ADDON_RENEWAL_ADDONS',
   'ADDON_DEVICE_CLEANUP_AUTO',
 ] as const;
-/** The shipped target: stages 1, 2 and 6 ON, 3 and 5 OFF. */
+/** The shipped target: stages 1, 2 and 6 ON. */
 const STAGES_1_2_6: Readonly<Record<(typeof FLAGS)[number], 'true' | 'false'>> = {
   ADDON_ENTITLEMENT_SHADOW: 'true',
   ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true',
-  ADDON_PROJECTION_SYNC: 'false',
-  ADDON_RENEWAL_ADDONS: 'false',
   ADDON_DEVICE_CLEANUP_AUTO: 'true',
 };
 const PLAN: Limits = { trafficLimit: 100, deviceLimit: 3 };
@@ -508,7 +504,7 @@ run('a Remnawave webhook against a subscription in the term model (PostgreSQL)',
     await pushOfOurs(owner, SyncJobStatus.COMPLETED, ago(60_000));
     // An event that states only the expiry is decided the same way.
     await withFlags(STAGES_1_2_6, () =>
-      panelEvent(owner, { expireAt: at(5).toISOString() }, ago(120_000), 'user.expires_in_72_hours'),
+      panelEvent(owner, { expireAt: at(5).toISOString() }, ago(120_000), 'user.expiration'),
     );
     assert.equal((await row(owner)).expiresAt?.getTime(), before?.getTime());
   });

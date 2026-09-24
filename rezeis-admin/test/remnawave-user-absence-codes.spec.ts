@@ -18,6 +18,7 @@ import { PanelUsersClient } from '../src/modules/remnawave/services/panel-users.
 import {
   RemnawaveApiService,
   RemnawaveProfileNotFoundError,
+  StalePanelIdentityRefusal,
 } from '../src/modules/remnawave/services/remnawave-api.service';
 
 /**
@@ -106,46 +107,25 @@ function userFixture(version: string): { version: string; response: Record<strin
 type Row = PanelIdentityColumns & { readonly remnawaveId: string };
 
 /**
- * The three deployments this build has to be right on at once.
+ * The two kinds of row this build has to be right on at once.
  *
- * `fixtures` names the directory the captured body comes from; 3.2.1 stands in
+ * The version names the directory the captured body comes from; 3.2.1 stands in
  * for the operator's 3.2.3, which answers identically (the guard spec pins 3.2.3
  * routes and codes against the vendor package).
  *
- * The 3.x row is the MIGRATED shape, not a natively-3.x one: a profile created
- * on 2.x whose panel was later upgraded, so `remnawaveId` is still the old uuid
- * and the numeric id lives in `remnawavePanelId`. That is the population the
- * reporting operator has, and it exercises the id-addressing fallback rather
- * than the trivial "the stored string is already the id" path.
+ * The 3.2.1 row is the MIGRATED shape: a profile created on 2.x whose panel was
+ * later upgraded, so `remnawaveId` is still the old uuid and the numeric id
+ * lives in `remnawavePanelId`. That is the population the reporting operator
+ * has, and it exercises the id-addressing fallback — which READS and PATCHES
+ * still take. What such a row can no longer do is be DELETED on the panel:
+ * that verb refuses a stored identity that is not a decimal (see
+ * `stale-panel-identity.spec.ts`), so the delete cases below run on the 3.3.2
+ * row, linked natively on 3.x, and the migrated row pins the refusal instead.
  */
 const ERAS = [
   {
-    version: '2.7.4',
-    label: '2.7.4 (paying production)',
-    row: {
-      remnawaveId: '11111111-1111-4111-8111-111111111111',
-      remnawavePanelId: 41,
-      remnawavePanelUsername: 'rz_sub_1',
-      configUrl: null,
-    },
-    route: '/api/users/11111111-1111-4111-8111-111111111111',
-    patchKey: { uuid: '11111111-1111-4111-8111-111111111111' },
-  },
-  {
-    version: '2.8.0',
-    label: '2.8.0 (testers)',
-    row: {
-      remnawaveId: '22222222-2222-4222-8222-222222222222',
-      remnawavePanelId: 42,
-      remnawavePanelUsername: 'rz_sub_2',
-      configUrl: null,
-    },
-    route: '/api/users/22222222-2222-4222-8222-222222222222',
-    patchKey: { uuid: '22222222-2222-4222-8222-222222222222' },
-  },
-  {
     version: '3.2.1',
-    label: '3.2.1 (the operator hitting this)',
+    label: '3.2.1, a row linked on 2.x (the operator hitting this)',
     row: {
       remnawaveId: '33333333-3333-4333-8333-333333333333',
       remnawavePanelId: 2,
@@ -154,6 +134,20 @@ const ERAS = [
     },
     route: '/api/users/2',
     patchKey: { id: 2 },
+    deletable: false,
+  },
+  {
+    version: '3.3.2',
+    label: '3.3.2, a row linked on 3.x',
+    row: {
+      remnawaveId: '7',
+      remnawavePanelId: 7,
+      remnawavePanelUsername: 'rz_sub_332',
+      configUrl: null,
+    },
+    route: '/api/users/7',
+    patchKey: { id: 7 },
+    deletable: true,
   },
 ] as const satisfies ReadonlyArray<{
   version: string;
@@ -161,6 +155,7 @@ const ERAS = [
   row: Row;
   route: string;
   patchKey: Record<string, unknown>;
+  deletable: boolean;
 }>;
 
 type DeletionInput = {
@@ -229,14 +224,14 @@ function sweepOver(panelUsers: PanelUsersClient, row: Row) {
  * pins and the thing production must actually read.
  */
 const PANEL_SAYS_ABSENT: ReadonlyArray<readonly [string, unknown]> = [
-  ['A063 exactly as 2.8.1 and 3.2.x send it', {
+  ['A063 exactly as 3.2.x sends it', {
     errorCode: 'A063',
     message: 'User with specified params not found',
   }],
   ['A063 carrying no message', { errorCode: 'A063' }],
   ['A063 in a build that names the field `code`', { code: 'A063' }],
-  // 2.7.4 was never measured on a live panel, and the same route may answer
-  // either code; an identity-addressed read is confirmed absence under both.
+  // The same route may answer either code across builds; an identity-addressed
+  // read is confirmed absence under both.
   ['A025 exactly as the write endpoints send it', { errorCode: 'A025', message: 'User not found' }],
 ];
 
@@ -301,9 +296,9 @@ describe('the same read still reaches its other outcomes — this is not a harne
      * The captured body verbatim, with only `expireAt` moved.
      *
      * Moved rather than used as captured because the fixtures carry absolute
-     * dates: 3.2.1's is weeks away and 2.x's is in 2099, so "is this past the
-     * grace cutoff" would be answered by the calendar and the test would
-     * silently change meaning on a future run.
+     * dates that are weeks away, so "is this past the grace cutoff" would be
+     * answered by the calendar and the test would silently change meaning on a
+     * future run.
      */
     const withExpiry = (offsetMs: number): unknown => {
       const fixture = userFixture(era.version);
@@ -377,11 +372,14 @@ describe('the code depends on the METHOD, and all of those readings are correct'
 
         assert.deepEqual(userCalls().map((call) => call.url), ['/api/users']);
         assert.deepEqual(
-          (userCalls()[0]?.data as Record<string, unknown> | undefined)?.[
-            'uuid' in era.patchKey ? 'uuid' : 'id'
-          ],
-          Object.values(era.patchKey)[0],
-          'the write must have named the profile the way this era keys it',
+          (userCalls()[0]?.data as Record<string, unknown> | undefined)?.['id'],
+          era.patchKey.id,
+          'the write must have named the profile by its numeric id',
+        );
+        assert.equal(
+          'uuid' in ((userCalls()[0]?.data as Record<string, unknown> | undefined) ?? {}),
+          false,
+          'no uuid key: a 3.x panel ignores it and answers 400',
         );
         assert.ok(
           raised instanceof RemnawaveProfileNotFoundError,
@@ -394,14 +392,13 @@ describe('the code depends on the METHOD, and all of those readings are correct'
         );
       });
 
-      it(`${era.label}: DELETE answered ${shape} completes the job`, async () => {
-        const { service: api } = panelOn(era.version, () => httpError(404, body));
+      if (era.deletable) {
+        it(`${era.label}: DELETE answered ${shape} completes the job`, async () => {
+          const { service: api } = panelOn(era.version, () => httpError(404, body));
 
-        assert.deepEqual(
-          await api.deletePanelUser(identity(), await api.getPanelShape()),
-          { isDeleted: true },
-        );
-      });
+          assert.deepEqual(await api.deletePanelUser(identity()), { isDeleted: true });
+        });
+      }
     }
 
     it(`${era.label}: PATCH answered a bare 404 stays transient and is retried`, async () => {
@@ -415,19 +412,41 @@ describe('the code depends on the METHOD, and all of those readings are correct'
       assert.ok(raised instanceof ServiceUnavailableException);
     });
 
-    it(`${era.label}: DELETE answered a bare 404 is retried, never reported as deleted`, async () => {
-      const { service: api } = panelOn(era.version, () => httpError(404, undefined));
+    if (era.deletable) {
+      it(`${era.label}: DELETE answered a bare 404 is retried, never reported as deleted`, async () => {
+        const { service: api } = panelOn(era.version, () => httpError(404, undefined));
 
-      const raised = await api
-        .deletePanelUser(identity(), await api.getPanelShape())
-        .then(() => null, (err: unknown) => err);
+        const raised = await api
+          .deletePanelUser(identity())
+          .then(() => null, (err: unknown) => err);
 
-      assert.ok(
-        raised instanceof ServiceUnavailableException,
-        'reporting `isDeleted: true` here detaches a live subscription during a proxy outage',
-      );
-    });
+        assert.ok(
+          raised instanceof ServiceUnavailableException,
+          'reporting `isDeleted: true` here detaches a live subscription during a proxy outage',
+        );
+      });
+    } else {
+      it(`${era.label}: DELETE is refused before anything is sent — whatever the panel would answer`, async () => {
+        // The recorded numeric id would reach SOME profile; whether it is still
+        // this customer's is exactly what a stored 2.x uuid cannot prove.
+        const { service: api, userCalls } = panelOn(era.version, () => httpError(404, undefined));
+
+        const raised = await api
+          .deletePanelUser(identity())
+          .then(() => null, (err: unknown) => err);
+
+        assert.ok(raised instanceof StalePanelIdentityRefusal, `expected the stale refusal, got ${String(raised)}`);
+        assert.deepEqual(userCalls(), []);
+      });
+    }
   }
+
+  it('both kinds of row are covered, so neither branch above is dead', () => {
+    assert.deepEqual(
+      ERAS.map((era) => era.deletable).sort(),
+      [false, true],
+    );
+  });
 });
 
 describe('A063 from an ATTRIBUTE lookup answers a different question and must not retire anyone', () => {

@@ -39,7 +39,7 @@ import { realTermHooks } from './helpers/term-model-hooks';
  *    connection and a reset that happened (S7);
  *  - the fresh status comes from Remnawave's own answer to the push
  *    (`ProfileSyncProcessor`): the PATCH's (S2), the reset's after it (S9),
- *    the POST's (S10), the read-back of the versioned write (S11). An older
+ *    the POST's (S10). An older
  *    push's answer never overwrites what a newer push is establishing (S5),
  *    and never moves a status the panel's own date decides (S8); a crossing
  *    into LIMITED it reports tells the customer, once (S4);
@@ -82,17 +82,6 @@ const notices: Array<{ readonly userId: string; readonly type: string }> = [];
 const enqueued: string[] = [];
 
 type Owner = { readonly userId: string; readonly subscriptionId: string; readonly panelId: number };
-
-async function withProjectionSync<T>(on: boolean, body: () => Promise<T>): Promise<T> {
-  const previous = process.env['ADDON_PROJECTION_SYNC'];
-  process.env['ADDON_PROJECTION_SYNC'] = on ? 'true' : 'false';
-  try {
-    return await body();
-  } finally {
-    if (previous === undefined) delete process.env['ADDON_PROJECTION_SYNC'];
-    else process.env['ADDON_PROJECTION_SYNC'] = previous;
-  }
-}
 
 /** A linked subscription on a 3 / 100 GB plan, in the model unless `outside`. */
 async function subscription(
@@ -212,8 +201,6 @@ interface PanelAnswers {
   readonly patch?: string;
   /** …to the reset of the traffic counter a renewal's UPDATE makes after it. */
   readonly reset?: string;
-  /** …to `GET /api/users/{id}`, the versioned write's read-back. */
-  readonly read?: string;
   /** …to `POST /api/users`. */
   readonly create?: string;
 }
@@ -228,7 +215,6 @@ function processorFor(owner: Owner, answers: PanelAnswers): ProfileSyncProcessor
   const panel = {
     updateUser: async () => answer(answers.patch),
     resetTraffic: async () => answer(answers.reset),
-    getUserById: async () => answer(answers.read),
     createUser: async () => answer(answers.create),
     getUserByUsername: async () => missing,
     resolveUser: async () => missing,
@@ -256,23 +242,14 @@ async function runPush(
   options: {
     readonly action?: SyncAction;
     readonly payload?: Record<string, unknown>;
-    readonly versioned?: boolean;
   } = {},
 ): Promise<string> {
-  let versioned: { aggregateKey: string; desiredRevision: bigint } | Record<string, never> = {};
-  if (options.versioned === true) {
-    const projection = await prisma.subscriptionEffectiveProjection.findUniqueOrThrow({
-      where: { subscriptionId: owner.subscriptionId },
-    });
-    versioned = { aggregateKey: owner.subscriptionId, desiredRevision: projection.desiredRevision };
-  }
   const job = await prisma.profileSyncJob.create({
     data: {
       subscriptionId: owner.subscriptionId,
       action: options.action ?? SyncAction.UPDATE,
       status: SyncJobStatus.PENDING,
       payload: (options.payload ?? { source: 'ADMIN_MUTATION' }) as Prisma.InputJsonObject,
-      ...versioned,
     },
     select: { id: true },
   });
@@ -385,9 +362,7 @@ run('the status of a subscription in the term model against late Remnawave repor
       where: { id: owner.subscriptionId },
       data: { status: SubscriptionStatus.ACTIVE, expiresAt: renewed },
     });
-    await withProjectionSync(false, () =>
-      runPush(owner, { patch: 'ACTIVE', reset: 'ACTIVE' }, { payload: { source: 'PAYMENT_COMPLETION', resetTraffic: true } }),
-    );
+    await runPush(owner, { patch: 'ACTIVE', reset: 'ACTIVE' }, { payload: { source: 'PAYMENT_COMPLETION', resetTraffic: true } });
     // Remnawave expired the profile a minute ago; the event arrives only now.
     await panelEvent(owner, 'user.expired', 'EXPIRED', ago(60_000), { expireAt: at(-1).toISOString() });
     const after = await row(owner);
@@ -407,7 +382,7 @@ run('the status of a subscription in the term model against late Remnawave repor
     const owner = await subscription(plan, { status: SubscriptionStatus.LIMITED });
     // The top-up: the limit goes up, the status is left for Remnawave to say.
     await prisma.subscription.update({ where: { id: owner.subscriptionId }, data: { trafficLimit: 150 } });
-    await withProjectionSync(false, () => runPush(owner, { patch: 'ACTIVE' }));
+    await runPush(owner, { patch: 'ACTIVE' });
     assert.equal((await row(owner)).status, SubscriptionStatus.ACTIVE, 'the push’s answer says ACTIVE');
     await panelEvent(owner, 'user.limited', 'LIMITED', ago(60_000));
     assert.equal((await row(owner)).status, SubscriptionStatus.ACTIVE, 'the late event is older than the top-up');
@@ -453,7 +428,7 @@ run('the status of a subscription in the term model against late Remnawave repor
     assert.equal((await row(owner)).status, SubscriptionStatus.ACTIVE, 'a push of ours is on its way: not yet');
     assert.deepEqual(limitNotices(owner), []);
     // The queued push lands; Remnawave answers with the profile, still LIMITED.
-    await withProjectionSync(false, () => runJob(owner, queued, { patch: 'LIMITED' }));
+    await runJob(owner, queued, { patch: 'LIMITED' });
     assert.equal((await row(owner)).status, SubscriptionStatus.LIMITED, 'the answer is Remnawave’s own, after our change');
     assert.equal(limitNotices(owner).length, 1, 'the customer hears it from the answer');
     // Remnawave repeats itself: nothing crosses twice.
@@ -528,9 +503,7 @@ run('the status of a subscription in the term model against late Remnawave repor
         select: { id: true },
       });
       await entry.newer(owner);
-      await withProjectionSync(false, () =>
-        processorFor(owner, { patch: 'LIMITED' }).process({ data: { syncJobId: job.id } } as never),
-      );
+      await processorFor(owner, { patch: 'LIMITED' }).process({ data: { syncJobId: job.id } } as never);
       assert.equal(
         (await row(owner)).status,
         entry.taken ? SubscriptionStatus.LIMITED : SubscriptionStatus.ACTIVE,
@@ -558,7 +531,7 @@ run('the status of a subscription in the term model against late Remnawave repor
     ];
     for (const entry of cases) {
       const owner = await subscription(plan, { status: entry.status, expiresAt: entry.expiresAt });
-      await withProjectionSync(false, () => runPush(owner, { patch: entry.answer }));
+      await runPush(owner, { patch: entry.answer });
       assert.equal((await row(owner)).status, entry.after, entry.name);
     }
   });
@@ -576,24 +549,22 @@ run('the status of a subscription in the term model against late Remnawave repor
     const queued = await pushOfOurs(racing, SyncJobStatus.PENDING);
     await panelEvent(racing, 'user.disabled', 'DISABLED', new Date());
     assert.equal((await row(racing)).status, SubscriptionStatus.ACTIVE, 'withheld while our push is on its way');
-    await withProjectionSync(false, () => runJob(racing, queued, { patch: 'DISABLED' }));
+    await runJob(racing, queued, { patch: 'DISABLED' });
     assert.equal((await row(racing)).status, SubscriptionStatus.DISABLED, 'taken from the answer');
 
     // A blocked owner: the push itself sends DISABLED, and the row keeps its status.
     const blocked = await subscription(plan);
     await prisma.user.update({ where: { id: blocked.userId }, data: { isBlocked: true } });
-    const blockPush = await withProjectionSync(false, () => runPush(blocked, { patch: 'DISABLED' }));
+    const blockPush = await runPush(blocked, { patch: 'DISABLED' });
     assert.equal((await row(blocked)).status, SubscriptionStatus.ACTIVE, 'never DISABLED from a blocked owner’s answer');
     assert.equal(await statusSentOf(blockPush), 'DISABLED', 'the status the PATCH carried is recorded');
 
     // The operator switched it off in the panel; an answer of ACTIVE later
     // (switched on in Remnawave during a push) does not undo that.
     const operatorOff = await subscription(plan, { status: SubscriptionStatus.DISABLED });
-    const toggle = await withProjectionSync(false, () =>
-      runPush(operatorOff, { patch: 'DISABLED' }, { payload: { source: 'ADMIN_MUTATION', propagateStatus: true } }),
-    );
+    const toggle = await runPush(operatorOff, { patch: 'DISABLED' }, { payload: { source: 'ADMIN_MUTATION', propagateStatus: true } });
     assert.equal(await statusSentOf(toggle), 'DISABLED');
-    await withProjectionSync(false, () => runPush(operatorOff, { patch: 'ACTIVE' }));
+    await runPush(operatorOff, { patch: 'ACTIVE' });
     assert.equal((await row(operatorOff)).status, SubscriptionStatus.DISABLED, 'the panel’s own switch-off is kept');
 
     // A decision made before this release, its value never recorded: kept too.
@@ -608,7 +579,7 @@ run('the status of a subscription in the term model against late Remnawave repor
         payload: { source: 'ADMIN_MUTATION', propagateStatus: true },
       },
     });
-    await withProjectionSync(false, () => runPush(legacyOff, { patch: 'ACTIVE' }));
+    await runPush(legacyOff, { patch: 'ACTIVE' });
     assert.equal((await row(legacyOff)).status, SubscriptionStatus.DISABLED, 'an unknown decision counts as the operator’s');
 
     // Switched off in Remnawave (taken from the event), then back on in
@@ -616,21 +587,19 @@ run('the status of a subscription in the term model against late Remnawave repor
     const remnawaveOff = await subscription(plan);
     await panelEvent(remnawaveOff, 'user.disabled', 'DISABLED', new Date());
     assert.equal((await row(remnawaveOff)).status, SubscriptionStatus.DISABLED, 'nothing of ours is newer: taken');
-    await withProjectionSync(false, () => runPush(remnawaveOff, { patch: 'ACTIVE' }));
+    await runPush(remnawaveOff, { patch: 'ACTIVE' });
     assert.equal((await row(remnawaveOff)).status, SubscriptionStatus.ACTIVE, 'Remnawave’s DISABLED, Remnawave’s ACTIVE');
 
     // The operator's last decision was ACTIVE: a later Remnawave-side
     // DISABLED is Remnawave's, and so is the switch-on that lifts it.
     const operatorOn = await subscription(plan);
-    const switchOn = await withProjectionSync(false, () =>
-      runPush(operatorOn, { patch: 'ACTIVE' }, { payload: { source: 'ADMIN_MUTATION', propagateStatus: true } }),
-    );
+    const switchOn = await runPush(operatorOn, { patch: 'ACTIVE' }, { payload: { source: 'ADMIN_MUTATION', propagateStatus: true } });
     assert.equal(await statusSentOf(switchOn), 'ACTIVE');
     // Stamped after that push completed: a genuine report, taken.
     await new Promise((resolve) => setTimeout(resolve, 5));
     await panelEvent(operatorOn, 'user.disabled', 'DISABLED', new Date());
     assert.equal((await row(operatorOn)).status, SubscriptionStatus.DISABLED);
-    await withProjectionSync(false, () => runPush(operatorOn, { patch: 'ACTIVE' }));
+    await runPush(operatorOn, { patch: 'ACTIVE' });
     assert.equal((await row(operatorOn)).status, SubscriptionStatus.ACTIVE, 'the panel’s last word was ACTIVE');
   });
 
@@ -760,26 +729,17 @@ run('the status of a subscription in the term model against late Remnawave repor
   it('S9 a renewal’s UPDATE resets the counter after its PATCH: the reset’s answer is the fresher one', async () => {
     const plan = await createPlan(fx, PLAN);
     const owner = await subscription(plan, { status: SubscriptionStatus.LIMITED });
-    await withProjectionSync(false, () =>
-      runPush(owner, { patch: 'LIMITED', reset: 'ACTIVE' }, { payload: { source: 'PAYMENT_COMPLETION', resetTraffic: true } }),
-    );
+    await runPush(owner, { patch: 'LIMITED', reset: 'ACTIVE' }, { payload: { source: 'PAYMENT_COMPLETION', resetTraffic: true } });
     assert.equal((await row(owner)).status, SubscriptionStatus.ACTIVE);
   });
 
   it('S10 a CREATE takes the status of the profile it minted', async () => {
     const plan = await createPlan(fx, PLAN);
     const owner = await subscription(plan, { status: SubscriptionStatus.LIMITED, unlinked: true });
-    await withProjectionSync(false, () => runPush(owner, { create: 'ACTIVE' }, { action: SyncAction.CREATE }));
+    await runPush(owner, { create: 'ACTIVE' }, { action: SyncAction.CREATE });
     const after = await row(owner);
     assert.equal(after.remnawaveId, String(owner.panelId), 'linked');
     assert.equal(after.status, SubscriptionStatus.ACTIVE, 'a fresh profile has passed no traffic');
-  });
-
-  it('S11 the versioned write takes the status of its read-back', async () => {
-    const plan = await createPlan(fx, PLAN);
-    const owner = await subscription(plan, { status: SubscriptionStatus.LIMITED });
-    await withProjectionSync(true, () => runPush(owner, { patch: 'LIMITED', read: 'ACTIVE' }, { versioned: true }));
-    assert.equal((await row(owner)).status, SubscriptionStatus.ACTIVE);
   });
 
   // ── Outside the model, and the facts ──────────────────────────────────────
@@ -787,7 +747,7 @@ run('the status of a subscription in the term model against late Remnawave repor
   it('S6 a subscription outside the model keeps today’s behaviour: the late event mirrors, the answer is not read', async () => {
     const plan = await createPlan(fx, PLAN);
     const renewed = await subscription(plan, { outside: true });
-    await withProjectionSync(false, () => runPush(renewed, { patch: 'ACTIVE' }));
+    await runPush(renewed, { patch: 'ACTIVE' });
     const old = at(-1);
     await panelEvent(renewed, 'user.expired', 'EXPIRED', ago(60_000), { expireAt: old.toISOString() });
     const mirrored = await row(renewed);
@@ -798,7 +758,7 @@ run('the status of a subscription in the term model against late Remnawave repor
     assert.equal(cards(EVENT_TYPES.REMNAWAVE_USER_EXPIRED).length, 1);
 
     const limited = await subscription(plan, { outside: true, status: SubscriptionStatus.LIMITED });
-    await withProjectionSync(false, () => runPush(limited, { patch: 'ACTIVE' }));
+    await runPush(limited, { patch: 'ACTIVE' });
     assert.equal((await row(limited)).status, SubscriptionStatus.LIMITED, 'the answer is not read outside the model');
   });
 

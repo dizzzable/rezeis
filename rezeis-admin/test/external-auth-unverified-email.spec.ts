@@ -169,7 +169,6 @@ function platformPolicy(): InternalPlatformPolicyInterface {
     accessMode: AccessMode.PUBLIC,
     inviteModeStartedAt: null,
     defaultCurrency: Currency.RUB,
-    renewalAddOns: false,
   };
 }
 

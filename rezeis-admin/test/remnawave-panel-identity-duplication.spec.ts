@@ -10,11 +10,12 @@ import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-o
 /**
  * ONE PANEL PROFILE, TWO LOCAL ROWS — how it happens and what it destroys.
  *
- * `Subscription.remnawaveId` carries a DUAL meaning by design: Remnawave 2.x
- * keys profiles by a uuid, 3.x dropped the uuid column outright and keys them
- * by a numeric id, and a row linked in the 2.x era deliberately keeps its uuid
- * after the operator upgrades. `RemnawaveApiService.parsePanelUserRow` mirrors
- * that on the way in — `uuid` is `String(id)` for a 3.x row.
+ * `Subscription.remnawaveId` carries a DUAL meaning by history: Remnawave 2.x
+ * keyed profiles by a uuid, 3.x dropped the uuid column outright and keys them
+ * by a numeric id, and a row linked in the 2.x era keeps its uuid after the
+ * operator upgrades. `RemnawaveApiService.parsePanelUserRow` keys every row it
+ * reads by its numeric id — `uuid` is `String(id)` — and a 2.x panel is no
+ * longer read at all, so the only uuid left in play is the one a row STORES.
  *
  * `RemnawaveImporterService` asked "do I already know this profile?" as one
  * bare string compared to one column. Across the 2.x → 3.x boundary that
@@ -284,39 +285,13 @@ describe('RemnawaveImporterService recognises one panel profile across both pane
 
   it('matches a row whose stored identity IS the identity the panel reports', async () => {
     // The plain arm, and the only one that ever worked. Kept as its own test so
-    // that removing it from the OR is visible.
-    const harness = buildImporter({
-      rows: [legacyRow()],
-      panelUsers: [
-        decodedPanelRow({
-          era: '2.x',
-          username: 'rz_owner',
-          panelId: PANEL_ID,
-          legacyUuid: LEGACY_UUID,
-          description: `reiwa_id: ${OWNER_ID}`,
-        }),
-      ],
-    });
-
-    const summary = await harness.service.run({ mode: 'sync', createdBy: null });
-
-    assert.equal(summary.subscriptionsCreated, 0);
-    assert.equal(summary.subscriptionsUpdated, 1);
-    assert.equal(harness.rows.length, 1);
-  });
-
-  it('matches a 3.x-provisioned row after the operator rolls the panel BACK to 2.x', async () => {
-    // The third arm, `remnawaveId = String(panelId)`, and the one scenario that
-    // isolates it: on a 3.x panel `uuid` and `String(panelId)` are the same
-    // string, so the arm only does work when the panel reports a uuid while a
-    // local row holds the decimal. That is a DOWNGRADE, which this build
-    // supports — it is the single build for 2.7.4 and 3.x alike, and an
-    // operator who hits trouble on 3.x rolls back.
+    // that removing it from the OR is visible: a row linked on 3.x stores the
+    // decimal the panel reports, and no supplementary column is needed.
     const harness = buildImporter({
       rows: [legacyRow({ remnawaveId: String(PANEL_ID), remnawavePanelId: null })],
       panelUsers: [
         decodedPanelRow({
-          era: '2.x',
+          era: '3.x',
           username: 'rz_owner',
           panelId: PANEL_ID,
           legacyUuid: LEGACY_UUID,

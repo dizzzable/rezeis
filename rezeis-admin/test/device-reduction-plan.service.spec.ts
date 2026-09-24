@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { STALE_PANEL_LINK } from '../src/modules/add-on-entitlements/services/device-reduction-execution.service';
 import { DeviceReductionPlanService } from '../src/modules/add-on-entitlements/services/device-reduction-plan.service';
 import {
   panelUserAddress,
@@ -8,23 +9,23 @@ import {
 } from '../src/modules/remnawave/services/panel-user-address';
 
 function devices(...rows: Array<[string, string]>) {
-  return { kind: 'ok' as const, value: { devices: rows.map(([hwid, createdAt]) => ({ hwid, createdAt })), total: rows.length }, detectedVersion: '2.8.0' };
+  return { kind: 'ok' as const, value: { devices: rows.map(([hwid, createdAt]) => ({ hwid, createdAt })), total: rows.length }, detectedVersion: '3.2.1' };
 }
 
 /**
  * A subscription row as Prisma actually returns it once the select asks for the
  * panel identity.
  *
- * The two supplementary columns are populated by DEFAULT, because that is the
- * production shape: every supported panel version puts a numeric `id` and a
- * `username` on every user row, so both are recorded the moment a profile is
- * linked. A fake that left them out would let a service which never reads them
+ * The stored identity is a decimal — what a 3.x link stores — and the two
+ * supplementary columns are populated by DEFAULT, because that is the
+ * production shape: every user row carries a numeric `id` and a `username`, so
+ * both are recorded the moment a profile is linked. A fake that left them out would let a service which never reads them
  * pass every test here and then be unable to name a profile on an upgraded
  * panel.
  */
 function subscriptionRow(patch: Record<string, unknown> = {}) {
   return {
-    remnawaveId: 'rem-1',
+    remnawaveId: '4711',
     remnawavePanelId: 4711,
     remnawavePanelUsername: 'rz_alice_sub',
     status: 'ACTIVE',
@@ -40,6 +41,7 @@ function build(options: {
   const created: Array<Record<string, unknown>> = [];
   const selects: unknown[] = [];
   const listRefs: unknown[] = [];
+  const incidents: Array<Record<string, unknown>> = [];
   const prisma = {
     subscriptionEffectiveProjection: {
       findUnique: async () =>
@@ -59,6 +61,12 @@ function build(options: {
         return { id: 'plan-1', ...args.create };
       },
     },
+    entitlementIncident: {
+      upsert: async (args: { create: Record<string, unknown> }) => {
+        incidents.push(args.create);
+        return { id: 'inc-1' };
+      },
+    },
   };
   const remnawave = {
     strictListUserDevices: async (ref: unknown) => {
@@ -67,7 +75,7 @@ function build(options: {
     },
   };
   const service = new DeviceReductionPlanService(prisma as never, remnawave as never);
-  return { service, created, selects, listRefs };
+  return { service, created, selects, listRefs, incidents };
 }
 
 describe('DeviceReductionPlanService (T-011b)', () => {
@@ -110,26 +118,35 @@ describe('DeviceReductionPlanService (T-011b)', () => {
     assert.deepStrictEqual(listRefs, [], 'no profile ⇒ the panel is never asked');
   });
 
-  it('addresses the panel with the recorded numeric id when the stored id is a stale 2.x uuid', async () => {
-    // The upgraded-panel case: the profile was created on 2.x, the operator has
-    // since moved to 3.x, and the panel's own migration dropped the uuid column
-    // — so `remnawaveId` names nobody. Only the recorded numeric id can find it.
-    const staleUuid = '330f2b38-1362-46ab-b5c0-dea32167eff9';
-    const { service, listRefs } = build({
-      subscription: subscriptionRow({ remnawaveId: staleUuid, remnawavePanelId: 8123 }),
-    });
+  it('addresses the panel with the full stored identity', async () => {
+    const { service, listRefs } = build();
 
     await service.planForSubscription('sub-1');
 
     assert.deepStrictEqual(listRefs, [
-      { remnawaveId: staleUuid, panelId: 8123, panelUsername: 'rz_alice_sub' },
+      { remnawaveId: '4711', panelId: 4711, panelUsername: 'rz_alice_sub' },
     ]);
-    // What the adapter does with it on a 3.x panel: the numeric id, never the
-    // dead uuid and never a resolve-by-name round trip.
-    assert.deepStrictEqual(panelUserAddress(listRefs[0] as StoredPanelIdentity, 'id'), {
+    assert.deepStrictEqual(panelUserAddress(listRefs[0] as StoredPanelIdentity), {
       kind: 'ready',
-      segment: '8123',
+      segment: '4711',
     });
+  });
+
+  it('refuses a row that still stores a 2.x uuid before the panel is asked, and persists no plan', async () => {
+    // The recorded numeric id would reach SOME profile, and its devices would
+    // become this subscription's targets. The full matrix is in
+    // `device-reduction-plan-stale-panel-link.spec.ts`; this is its footprint.
+    const { service, listRefs, created, incidents } = build({
+      subscription: subscriptionRow({ remnawaveId: '330f2b38-1362-46ab-b5c0-dea32167eff9', remnawavePanelId: 8123 }),
+    });
+
+    const outcome = await service.planForSubscription('sub-1');
+
+    assert.deepStrictEqual(outcome, { status: 'BLOCKED', reason: STALE_PANEL_LINK });
+    assert.deepStrictEqual(listRefs, [], 'the panel is never asked');
+    assert.deepStrictEqual(created, [], 'no plan is written');
+    assert.equal(incidents.length, 1);
+    assert.equal(incidents[0]?.['summaryCode'], STALE_PANEL_LINK);
   });
 
   it('selects the supplementary identity columns alongside remnawaveId', async () => {

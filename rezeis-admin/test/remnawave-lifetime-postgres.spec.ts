@@ -256,7 +256,6 @@ run('a subscription with no end date against Remnawave (PostgreSQL)', () => {
   before(async () => {
     process.env.DATABASE_URL = testUrl;
     process.env.DATABASE_POOL_SIZE = '4';
-    process.env['ADDON_PROJECTION_SYNC'] = 'false';
     prisma = new PrismaService();
     await prisma.$connect();
     fx = termModelFixtures(prisma, `rwlt-${process.pid}-${Date.now()}`);
@@ -344,7 +343,7 @@ run('a subscription with no end date against Remnawave (PostgreSQL)', () => {
         expiresAt: null,
       }, outside ? 'outside the model' : 'in the model');
       assert.deepEqual(cards(EVENT_TYPES.REMNAWAVE_USER_EXPIRED), [], 'no «Подписка закончилась — Продлить» for a plan bought for ever');
-      await panelEvent(owner, 'user.expires_in_24_hours', 'ACTIVE', at(1));
+      await panelEvent(owner, 'user.expiration', 'ACTIVE', at(1));
       assert.deepEqual(cards(EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON), [], 'nor «скоро истекает»');
     }
 

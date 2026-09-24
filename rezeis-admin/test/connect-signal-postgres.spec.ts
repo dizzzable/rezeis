@@ -609,7 +609,6 @@ run('the connection signal in PostgreSQL', () => {
       const connectedAt = new Date(Date.now() - 3 * HOUR);
       const reads: string[] = [];
       const api = {
-        getPanelShape: async () => ({ addressing: 'id' }),
         getPanelUserOutcome: async (identity: { remnawaveId: string }) => {
           reads.push(identity.remnawaveId);
           switch (identity.remnawaveId) {

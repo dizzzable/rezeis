@@ -14,9 +14,9 @@ import { RemnawaveApiService } from './remnawave-api.service';
 
 // The two shape unions and the version→shape derivation live in
 // `panel-version.util.ts`, with no dependencies of their own, because
-// `RemnawaveApiService` needs the same answer to build its paths and cannot
-// inject this service back without a cycle. Re-exported here so every existing
-// importer keeps working.
+// `RemnawaveApiService` reads the same version and cannot inject this service
+// back without a cycle. Re-exported here so every existing importer keeps
+// working.
 export type {
   RemnawaveConnectionsApi,
   RemnawaveUserAddressing,
@@ -24,9 +24,10 @@ export type {
 
 /**
  * Direct user-lookup shortcuts (`/api/users/by-telegram-id/{id}`,
- * `/api/users/by-email/{email}`). Present on 2.7 and 2.8, gone on 3.x, which
- * keeps only short-uuid / username lookups. `false` means "route through the
- * generic resolve path", so the unknown case is safe rather than ambiguous.
+ * `/api/users/by-email/{email}`). Remnawave 2.x had them; 3.x deleted both, and
+ * 3.x is the only version this build speaks, so both are always `false`. Kept
+ * as a wire field because the admin SPA reads it; "false" means "the adapter
+ * looks users up through `GET /api/users/stream`".
  */
 export interface RemnawaveUserLookups {
   readonly byTelegramId: boolean;
@@ -35,36 +36,21 @@ export interface RemnawaveUserLookups {
 
 /**
  * Detected Remnawave panel version + the capability facts rezeis derives from
- * it. `supported` tells the admin SPA whether to show a "compatible" or an
- * "untested version" banner; the rest let the app light up (or stand down
- * from) version-specific behaviour automatically once a panel upgrades,
- * without a redeploy or a manual toggle:
+ * it, for the admin SPA. Nothing on the server reads this record to shape a
+ * request: every request goes out in the 3.x shape, and a 2.x panel is refused
+ * outright.
+ *   • `supported`            — the detected `major.minor` is in the tested set:
+ *                              no banner.
+ *   • `tooOld`               — the panel is 2.x. rezeis refuses every request
+ *                              to it («Обновите панель до 3.x»), so the SPA says
+ *                              "not supported" rather than "untested".
  *   • `liveIpControl`        — this build can read live connections from this
- *                              panel, whichever family serves them:
- *                              `/api/ip-control/*` once it matured (2.8+), or
- *                              `/api/connections/*` on 3.x. Drives the Live tab
- *                              and the IP-sharing detector.
+ *                              panel (`/api/connections/*`, 3.x). Drives the
+ *                              Live tab. The historical name is a wire field.
  *   • `bandwidthNodesUsers`  — `POST /api/bandwidth-stats/nodes/users`.
- *   • `userAddressing`       — uuid- vs id-addressed user paths.
- *   • `connectionsApi`       — which live-connection family exists.
- *   • `userLookups`          — which by-telegram-id / by-email shortcuts exist.
- *
- * The three latter fields are NOT descriptive any more. This note used to say
- * "nothing consumes them yet, and adding them does not enable any 3.x
- * behaviour", which is false in the direction that makes a reader believe 3.x
- * is unwired:
- *   • `connectionsApi`  — `classifyLiveConnectionBlindness` (sharing-detectors)
- *                         reads it to decide whether a panel HAS live-connection
- *                         data at all, and the adapter picks `/api/connections/*`
- *                         over `/api/ip-control/*` from the same fact;
- *   • `userAddressing`  — drives `panelUserAddress`, i.e. how every user-scoped
- *                         route names a profile;
- *   • `userLookups`     — picks the by-telegram-id / by-email shortcut over the
- *                         generic resolve.
- * The adapter reads its own copy of these through `getPanelShape()`, so both
- * sides derive them from `panel-version.util` and cannot disagree; the SPA
- * reads them from this record. The one-place-to-read-the-panel-shape-from
- * intent stands, with an explicit "we do not know" state.
+ *   • `userAddressing`       — `'id'` on 3.x, `'unknown'` otherwise.
+ *   • `connectionsApi`       — `'connections'` on 3.x, `'unknown'` otherwise.
+ *   • `userLookups`          — always false; see {@link RemnawaveUserLookups}.
  */
 export interface RemnawaveCapabilities {
   readonly version: string | null;
@@ -73,6 +59,12 @@ export interface RemnawaveCapabilities {
   readonly patch: number | null;
   /** True when the detected `major.minor` is in the tested set (see below). */
   readonly supported: boolean;
+  /**
+   * True when the panel reported a major below 3 — the rule
+   * `LegacyPanelRefusal` and the adapter's gate refuse on. A version that could
+   * not be read is never too old.
+   */
+  readonly tooOld: boolean;
   /** True when the panel responded at all (version could be read). */
   readonly reachable: boolean;
   readonly liveIpControl: boolean;
@@ -95,23 +87,24 @@ export interface RemnawaveCapabilities {
  * `/api/system/metadata` both reported `3.4.1`; `/api/users/{numericId}`
  * answered; a missing user came back `A063`, which
  * `PANEL_USER_NOT_FOUND_ERROR_CODES` already carries; both squad routes
- * answered on their trailing slash; `/api/connections/drop` existed and
- * `/api/ip-control/*` was gone, which is the 3.x shape this adapter expects.
+ * answered on their trailing slash; `/api/connections/drop` existed, which is
+ * the 3.x live-connection family this adapter speaks.
  *
  * 2.7 AND 2.8 ARE GONE FROM THIS SET DELIBERATELY, and their absence is one
  * half of withdrawing 2.x support rather than an oversight. The other half —
  * refusing 2.x out loud instead of letting it drift into silent 400s — is in
- * place as well: `LegacyPanelRefusal` in `panel-transport.ts` answers every
- * command of the users, devices and infra clients with `REZEIS_PANEL_TOO_OLD`
- * once the version probe reports a major below 3. So a 2.x operator gets the
- * banner and a refused sync; besides the probe, only what
- * `remnawave-api.service.ts` sends over its own HTTP helpers still reaches such
- * a panel. If you are here because a 2.x install broke, that is the intended
- * outcome, not a regression to undo.
+ * place on every path: `LegacyPanelRefusal` in `panel-transport.ts` answers
+ * every command of the users, devices and infra clients with
+ * `REZEIS_PANEL_TOO_OLD`, and `remnawave-api.service.ts` refuses before each of
+ * its own HTTP sends, once the version probe reports a major below 3. Only the
+ * version reads themselves still reach such a panel. So a 2.x operator gets the
+ * "not supported" banner (`tooOld`) and a refusal everywhere. If you are here
+ * because a 2.x install broke, that is the intended outcome, not a regression
+ * to undo.
  *
  * Being in this set means "the operator gets no banner", not "every screen is
- * equally capable". 3.x reports `liveIpControl: true`: it replaced the
- * `ip-control/*` family with `connections/*`, and the adapter speaks it.
+ * equally capable". Every 3.x reports `liveIpControl: true`: it serves
+ * `connections/*`, and the adapter speaks it.
  *
  * Membership is keyed on `major.minor`, so this set cannot tell 3.4.1 from
  * 3.4.10 and never has: both are the single `'3.4'` entry, and a patch-level
@@ -170,6 +163,8 @@ export class RemnawaveVersionService {
         minor: null,
         patch: null,
         supported: false,
+        // A version nobody could read is never refused — see `LegacyPanelRefusal`.
+        tooOld: false,
         reachable: version !== null,
         liveIpControl: false,
         bandwidthNodesUsers: false,
@@ -185,41 +180,33 @@ export class RemnawaveVersionService {
       minor,
       patch,
       supported: TESTED_VERSIONS.has(`${major}.${minor}`),
+      // The same rule `LegacyPanelRefusal` and the adapter's gate refuse on, so
+      // the banner says "not supported" exactly when every request is refused.
+      tooOld: major < 3,
       reachable: true,
       // "This build can read live connections from this panel" — which is the
       // question every consumer actually asks, despite the historical name.
-      //
-      // It is NOT `connectionsApi !== 'unknown'`. That would light up on 2.7.4,
-      // which serves `ip-control/*` but not maturely enough to drive the Live
-      // tab or the IP-sharing detector. The two eras qualify for different
-      // reasons and both have to be stated:
-      //   2.x  — only 2.8 and newer, where `ip-control/*` matured;
-      //   3.x  — `connections/*`, now that the adapter speaks it. Before that
-      //          reader existed this had to stay false, or the detector would
-      //          have walked every node for guaranteed 404s and reported a
-      //          clean panel. The two changes were required to land together.
-      // `major === 3`, not `major > 2`: a 4.x or calver build has an UNKNOWN
-      // connections family, and claiming we can read live data from a panel
-      // whose shape we cannot name is the same guess this file refuses to make
-      // everywhere else.
-      liveIpControl: major === 3 || (major === 2 && minor >= 8),
-      // `POST /api/bandwidth-stats/nodes/users` is absent on 2.7.4 and present
-      // on both 2.8.0 and 3.2.1, so this one really is "2.8 or newer".
-      bandwidthNodesUsers: major > 2 || (major === 2 && minor >= 8),
+      // `/api/connections/*` on 3.x, and nothing else: a 2.x panel is refused,
+      // and a 4.x or calver build has an UNKNOWN connections family — claiming
+      // we can read live data from a panel whose shape we cannot name is the
+      // same guess this file refuses to make everywhere else.
+      liveIpControl: major === 3,
+      // `POST /api/bandwidth-stats/nodes/users`, present on every 3.x.
+      bandwidthNodesUsers: major > 2,
       userAddressing: userAddressingFor(major),
       connectionsApi: connectionsApiFor(major),
-      // Both shortcuts exist on 2.7.4 and 2.8.0 and were dropped in 3.x. Any
-      // other major reads false — the generic resolve path always works, so
-      // "unknown" degrades safely here without needing a third value.
-      userLookups: { byTelegramId: major === 2, byEmail: major === 2 },
+      // Both shortcuts were dropped in 3.x; see `RemnawaveUserLookups`.
+      userLookups: { byTelegramId: false, byEmail: false },
     };
   }
 
   /**
    * Reads the panel version from `/api/system/stats/recap` (authoritative
-   * `version` field on every tested build), falling back to the canonical
-   * 2.8 source `/api/system/metadata`. Returns `null` when the panel is
-   * unreachable or omits the field.
+   * `version` field on every tested build), falling back to
+   * `/api/system/metadata`. Returns `null` when the panel is unreachable or
+   * omits the field. Both reads are the adapter's two version readers, the
+   * only methods its 2.x refusal lets through — which is what lets this record
+   * say `tooOld` at all.
    */
   private async readVersion(): Promise<string | null> {
     // The order — recap, then metadata — is shared with the adapter's own shape

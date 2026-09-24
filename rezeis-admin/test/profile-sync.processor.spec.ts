@@ -2588,6 +2588,83 @@ describe('ProfileSyncProcessor', () => {
     ]);
   });
 
+  it("does not adopt this customer's profile when its subscription_id line names ANOTHER of their subscriptions", async () => {
+    // The `reiwa_id` line proves the CUSTOMER; the `subscription_id` line says
+    // WHICH of their subscriptions the profile was made for. A customer with two
+    // subscriptions has two profiles that both carry their `reiwa_id`, and
+    // adopting the other one would put two rows on one profile — a later
+    // delete of either takes the other's service with it.
+    const profileOf = (id: number, name: string, subscriptionId: string) => ({
+      status: 200,
+      data: {
+        response: {
+          id,
+          username: name,
+          subscriptionUrl: `https://sub/${name}`,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          description: `name: Test\nreiwa_id: user-1\nsubscription_id: ${subscriptionId}`,
+        },
+      },
+    });
+    const { linkWrites, failureWrites, requests } = await runCreate({
+      expectRejection: false,
+      fallbackUsernames: ['rz_login_9c1d_sub'],
+      respond: (request) => {
+        if (request.url === '/api/users/by-username/rz_login_sub') {
+          return profileOf(1301, 'rz_login_sub', 'subscription-2');
+        }
+        if (request.url.startsWith('/api/users/by-username/')) return USER_NOT_FOUND;
+        return profileOf(1302, 'rz_login_9c1d_sub', 'subscription-1');
+      },
+    });
+
+    assert.equal(failureWrites.length, 0);
+    const created = requests.find((request) => request.method.toLowerCase() === 'post' && request.url === '/api/users/');
+    assert.equal(
+      (created?.data as Record<string, unknown> | undefined)?.['username'],
+      'rz_login_9c1d_sub',
+      'a profile of its own is created under the fallback name',
+    );
+    assert.equal(linkWrites.length, 1);
+    assert.equal(
+      ((linkWrites[0] as { data: Record<string, unknown> }).data)['remnawaveId'],
+      '1302',
+      'the other subscription\'s profile 1301 is not linked here',
+    );
+  });
+
+  it('control: the same profile IS adopted when its subscription_id line names this subscription', async () => {
+    const { linkWrites, requests } = await runCreate({
+      expectRejection: false,
+      fallbackUsernames: ['rz_login_9c1d_sub'],
+      respond: (request) => {
+        if (request.url === '/api/users/by-username/rz_login_sub') {
+          return {
+            status: 200,
+            data: {
+              response: {
+                id: 1301,
+                username: 'rz_login_sub',
+                subscriptionUrl: 'https://sub/rz_login_sub',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                description: 'name: Test\nreiwa_id: user-1\nsubscription_id: subscription-1',
+              },
+            },
+          };
+        }
+        if (request.url.startsWith('/api/users/by-username/')) return USER_NOT_FOUND;
+        return { status: 200, data: { response: { id: 1301, username: 'rz_login_sub' } } };
+      },
+    });
+
+    assert.equal(
+      requests.some((request) => request.method.toLowerCase() === 'post' && request.url === '/api/users/'),
+      false,
+      'nothing new is created',
+    );
+    assert.equal(((linkWrites[0] as { data: Record<string, unknown> }).data)['remnawaveId'], '1301');
+  });
+
   // ── Live 400 #3: PATCH /api/users only accepts ACTIVE | DISABLED ──────────
 
   /**

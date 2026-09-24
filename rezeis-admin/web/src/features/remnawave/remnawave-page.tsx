@@ -53,11 +53,13 @@ export default function RemnaWavePage() {
 
   // Detected panel version + capability flags. The Live tab is gated on
   // `liveIpControl`, which answers "can this build read live sessions from
-  // this panel" across BOTH endpoint families — `ip-control/*` once it matured
-  // on 2.8, `connections/*` on 3.x. Deliberately not a version comparison
-  // here: a `>= 2.8` test would have shown the tab on 3.x while every request
-  // 404'd, and a `major === 2` test would hide a tab that works. No manual
-  // toggle, no redeploy.
+  // this panel" — `connections/*`, which every 3.x serves. Deliberately not a
+  // version comparison here: the server owns that decision. No manual toggle,
+  // no redeploy.
+  //
+  // This query keeps working on a Remnawave 2.x panel: the version read is the
+  // one request the server still sends to such a panel, precisely so that this
+  // page can say WHY everything else is refused.
   const { data: capabilities } = useQuery({
     queryKey: KEYS.version,
     queryFn: remnawaveApi.getCapabilities,
@@ -65,16 +67,24 @@ export default function RemnaWavePage() {
     staleTime: 5 * 60_000,
   })
   const liveAvailable = capabilities?.liveIpControl ?? false
+  const panelTooOld = capabilities?.tooOld === true
 
   if (statusError) {
+    // On a 2.x panel the status read is refused too, so this branch is where
+    // such a panel lands. "Could not connect — check configuration" would send
+    // the operator to the wrong fix; the configuration is fine.
     return (
       <div className="space-y-6">
         <PageHeader />
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>{t('remnaWavePage.connectionError')}</AlertTitle>
-          <AlertDescription>{t('remnaWavePage.connectionErrorDescription')}</AlertDescription>
-        </Alert>
+        {panelTooOld ? (
+          <PanelTooOldAlert version={capabilities?.version ?? null} />
+        ) : (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>{t('remnaWavePage.connectionError')}</AlertTitle>
+            <AlertDescription>{t('remnaWavePage.connectionErrorDescription')}</AlertDescription>
+          </Alert>
+        )}
       </div>
     )
   }
@@ -122,8 +132,13 @@ export default function RemnaWavePage() {
           no longer supported. `remnawave-version.service.spec.ts` reads the
           backend set and both locales' prose and fails when they disagree; a
           comment is not one of the three, so it must not hold a fourth copy.
-          Membership is decided backend-side by `supported`. */}
-      {capabilities && capabilities.reachable && !capabilities.supported ? (
+          Membership is decided backend-side by `supported`.
+
+          A 2.x panel is not "untested": every request to it is refused, so it
+          gets its own notice instead of this one (`tooOld`). */}
+      {panelTooOld ? (
+        <PanelTooOldAlert version={capabilities?.version ?? null} />
+      ) : capabilities && capabilities.reachable && !capabilities.supported ? (
         <Alert>
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>{t('remnaWavePage.versionWarning.title')}</AlertTitle>
@@ -194,6 +209,18 @@ export default function RemnaWavePage() {
 }
 
 type TabKey = 'dashboard' | 'live' | 'infra' | 'catalog' | 'users' | 'costs' | 'settings'
+
+/** Remnawave 2.x: the server refuses every request to it — "update the panel". */
+function PanelTooOldAlert({ version }: { version: string | null }) {
+  const { t } = useTranslation()
+  return (
+    <Alert variant="destructive" data-testid="remnawave-panel-too-old">
+      <AlertCircle className="h-4 w-4" />
+      <AlertTitle>{t('remnaWavePage.panelTooOld.title', { version: version ?? '2.x' })}</AlertTitle>
+      <AlertDescription>{t('remnaWavePage.panelTooOld.description')}</AlertDescription>
+    </Alert>
+  )
+}
 
 function PageHeader() {
   const { t } = useTranslation()

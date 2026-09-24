@@ -673,7 +673,6 @@ function platformPolicy(overrides: Partial<InternalPlatformPolicyInterface> = {}
     accessMode: 'PUBLIC',
     inviteModeStartedAt: null,
     defaultCurrency: 'RUB',
-    renewalAddOns: false,
     ...overrides,
   };
 }

@@ -1,15 +1,15 @@
 /**
  * Info hover that explains which anti-fraud detectors are active on the
  * currently-detected Remnawave panel version. Some detectors (IP-sharing,
- * per-user node traffic) rely on panel APIs the panel itself only grew later,
- * so they self-activate once it upgrades — this surfaces that to the operator.
+ * per-user node traffic) rely on panel APIs this build reads only from a
+ * Remnawave 3.x, so they self-activate once the panel reports them — this
+ * surfaces that to the operator.
  *
  * Both rows are rendered from the capability the backend reports, never from a
- * version comparison here. That matters for IP-sharing: it reads live
- * connections, which are `ip-control/*` on 2.8 and `connections/*` on 3.x
- * after the panel deleted the older family. The adapter speaks both, so
- * `liveIpControl` is true on either, and the floor stated to the operator when
- * it is false — 2.8 — is the same floor for both rows.
+ * version comparison here. IP-sharing reads live connections from
+ * `connections/*`, which every 3.x serves; a 2.x panel is refused outright, so
+ * the floor stated to the operator when a capability is off — 3.x — is the
+ * same floor for both rows.
  */
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
@@ -37,6 +37,10 @@ export function FraudVersionInfo() {
 
   const live = caps?.liveIpControl ?? false
   const bandwidth = caps?.bandwidthNodesUsers ?? false
+  // The HWID detector needs no special capability, but a 2.x panel is refused
+  // on every path, its HWID reads included — "active" would be a lie there.
+  // An unreadable version is not refused, so it keeps the row on.
+  const hwid = caps?.tooOld !== true
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -58,9 +62,9 @@ export function FraudVersionInfo() {
               : t('fraudPage.versionInfo.unknown')}
           </p>
           <ul className="space-y-1.5">
-            <DetectorRow active label={t('fraudPage.versionInfo.hwid')} note={t('fraudPage.versionInfo.allVersions')} />
-            <DetectorRow active={live} label={t('fraudPage.versionInfo.ipSharing')} note={t('fraudPage.versionInfo.needs28')} />
-            <DetectorRow active={bandwidth} label={t('fraudPage.versionInfo.perUserTraffic')} note={t('fraudPage.versionInfo.needs28')} />
+            <DetectorRow active={hwid} label={t('fraudPage.versionInfo.hwid')} note={t('fraudPage.versionInfo.allVersions')} />
+            <DetectorRow active={live} label={t('fraudPage.versionInfo.ipSharing')} note={t('fraudPage.versionInfo.needs3x')} />
+            <DetectorRow active={bandwidth} label={t('fraudPage.versionInfo.perUserTraffic')} note={t('fraudPage.versionInfo.needs3x')} />
           </ul>
           <p className="text-[11px] text-muted-foreground">{t('fraudPage.versionInfo.note')}</p>
         </TooltipContent>

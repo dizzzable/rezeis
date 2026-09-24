@@ -76,7 +76,6 @@ function buildService(options: {
   };
 
   const remnawave = {
-    getPanelShape: async () => ({ addressing: 'numeric', connectionsApi: 'connections' }),
     resetPanelUserTraffic: async () => {
       panelCall += 1;
       calls.push('reset')

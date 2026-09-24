@@ -113,7 +113,10 @@ export class AxiosPanelTransport implements PanelTransport {
 /**
  * LegacyPanelRefusal
  * ══════════════════
- * The one place a panel this build no longer supports is turned away.
+ * Where the contract clients turn away a panel this build no longer supports.
+ * The old adapter (`RemnawaveApiService`) turns it away too, before each of its
+ * own HTTP sends, reading the SAME `PanelVersionGate` with the SAME rule, so a
+ * 2.x panel gets one answer on every path.
  *
  * Support for Remnawave 2.x was removed deliberately, with the alternative
  * named and rejected: letting 3.x-shaped requests go out and collect `400`s at
@@ -129,11 +132,10 @@ export class AxiosPanelTransport implements PanelTransport {
  * is a state every healthy 3.x panel passes through. A refusal keyed on it
  * fires exactly when the panel is already struggling, and the sync layer reads
  * "cannot act" as transient, so the result is an endless retry loop with no
- * alert. `stale-panel-link.ts` reached the same conclusion for its own guard
- * and recorded it. Unknown therefore proceeds AS 3.X — which after this change
- * is the only supported era and so the only sensible guess. That is the exact
- * inverse of the old default, where unknown meant 2.x at eight sites out of
- * nine, and it is the single behavioural change this refusal carries with it.
+ * alert. Unknown therefore proceeds AS 3.X — the only supported era and so the
+ * only sensible guess — and no request anywhere is shaped by the version any
+ * more. The destructive paths' own safety net (`stale-panel-link.ts`) reads no
+ * version at all, so an unknown one cannot loosen it either.
  *
  * It does not gate the version probe itself. The probe is what produces the
  * answer this gate reads, so gating it would be a circular wait. That is
@@ -170,9 +172,16 @@ export class LegacyPanelRefusal implements PanelTransport {
  */
 export const LEGACY_PANEL_REFUSAL_CODE = 'REZEIS_PANEL_TOO_OLD';
 
+/**
+ * One sentence for every path a 2.x panel is refused on — the contract clients
+ * here, and the old adapter's throwing senders and strict reads. Russian and
+ * free of every word `admin-safe-exception.filter.ts` scrubs, because it reaches
+ * the operator as it is.
+ */
 export const LEGACY_PANEL_REFUSAL_MESSAGE =
   'Панель Remnawave версии 2.x больше не поддерживается. ' +
-  'Обновите панель до 3.x — до этого синхронизация профилей, устройств и подписок работать не будет.';
+  'Обновите панель до 3.x — до этого rezeis не выполняет в ней ничего, кроме проверки версии: ' +
+  'ни синхронизации профилей и подписок, ни действий с устройствами, ни чтения узлов и пользователей.';
 
 /** Appends defined query parameters; leaves the path untouched when there are none. */
 function appendQuery(

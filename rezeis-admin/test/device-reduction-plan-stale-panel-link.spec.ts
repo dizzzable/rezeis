@@ -9,40 +9,28 @@ import { DeviceReductionPlanService } from '../src/modules/add-on-entitlements/s
  *
  * `device-reduction-stale-panel-link.spec.ts` covers the EXECUTION guard, which
  * refuses to delete against a link that cannot be trusted to name the right
- * customer. This file covers the half that runs FIRST, and the defect that
- * survived that fix.
+ * customer. This file covers the half that runs FIRST.
  *
  * -- WHAT THE EXECUTION GUARD DOES NOT COVER ---------------------------------
  *
- * `DeviceReductionPlanService.planForSubscription` reads
- * `strictListUserDevices` on the stored identity and asks NO era question at
- * all. `panelUserAddress` falls back -- numeric fast path -> `remnawavePanelId`
- * -> the short uuid recovered from `config_url` -> `remnawavePanelUsername` --
- * so on a 3.x panel a dead 2.x uuid still resolves to whatever profile is LIVE
- * at that address. The planner therefore reads A DIFFERENT CUSTOMER'S DEVICE
- * LIST and writes THEIR hwids into `selectedDevices` as this subscription's
- * targets.
- *
- * The execution guard then refuses to run that plan -- nothing is deleted --
- * but the row is still there, and an operator inspecting it sees a
- * coherent-looking plan about device identifiers that were never this
- * subscriber's. Persisting somebody else's hwids under a customer's
- * subscription is the defect on its own, independent of whether anything is
- * ever deleted.
+ * `DeviceReductionPlanService.planForSubscription` reads `strictListUserDevices`
+ * on the stored identity. `panelUserAddress` falls back -- numeric fast path ->
+ * `remnawavePanelId` -> the short uuid recovered from `config_url` ->
+ * `remnawavePanelUsername` -- so a dead 2.x uuid still resolves to whatever
+ * profile is LIVE at that address. Unguarded, the planner reads A DIFFERENT
+ * CUSTOMER'S DEVICE LIST and writes THEIR hwids into `selectedDevices` as this
+ * subscription's targets.
  *
  * -- WHY THE ANSWER IS "PERSIST NOTHING", NOT "PERSIST A BLOCKED PLAN" -------
  *
- * The planner has no `block()`: every BLOCKED outcome it already returns
- * (`STRICT_LIST_*`, `INVALID_SOURCE_DATA`, `DORMANT_RETENTION_CONFLICT`)
- * persists no plan, and its own docstring says so -- "that refusal blocks here,
- * so no plan is ever persisted for an operator to approve". A blocked plan here
- * would be worse than useless, and one line explains why: the upsert is keyed
- * `(subscriptionId, projectionRevision)` with an EMPTY `update`, so the first
- * row written at a revision is the row FOREVER. A placeholder written while the
- * link was stale would still be sitting there, empty, after the reconciliation
- * repaired the link -- and the re-plan that should have produced the real
- * targets would silently return the placeholder instead. Persisting nothing
- * keeps the revision usable, and the case below proves exactly that.
+ * The upsert is keyed `(subscriptionId, projectionRevision)` with an EMPTY
+ * `update`, so the first row written at a revision is the row FOREVER. A
+ * placeholder written while the link was stale would still be sitting there
+ * after the link was repaired -- and the re-plan that should have produced the
+ * real targets would silently return the placeholder instead.
+ *
+ * THE GUARD READS NO PANEL VERSION ("not a decimal" is the whole test). The
+ * harness's `getPanelShape` records the call and throws.
  *
  * EVERY REFUSAL HERE PINS A POSITIVE SIDE. "No plan was written" passes just as
  * happily for a service that crashed before reaching any of it, so each zero is
@@ -66,14 +54,8 @@ const LIVE_DECIMAL = '5150';
 const EXPECTED_REASON = 'STALE_PANEL_LINK';
 
 /**
- * Timestamps are RELATIVE TO NOW, never literals.
- *
- * `selectDeviceReductionTargets` classifies every row against `Date.now()` for
- * the dormancy rule, so a fixture dated `2026-01-01` is a fixture whose meaning
- * changes every day it is not looked at. Nothing here carries a `lastSeenAt`,
- * so the activity gate reads every row as `unknown` and the dormancy rule is
- * inert; the ages exist only so the rows are plausible and so newest-first has
- * a deterministic answer.
+ * Timestamps are RELATIVE TO NOW, never literals: `selectDeviceReductionTargets`
+ * classifies every row against `Date.now()` for the dormancy rule.
  */
 function daysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -102,16 +84,13 @@ const FOREIGN_DEVICES = okList(['victim-laptop', 200], ['victim-phone', 3]);
 const OWN_DEVICES = okList(['own-desktop', 200], ['own-phone', 3]);
 
 interface PanelRecord {
-  /** Ordered verbs, so "the era is read once, first" is a claim about ORDER. */
+  /** Ordered verbs. */
   readonly calls: string[];
-  /** The identity handed to each strict READ, by value. */
-  readonly lists: unknown[];
+  /** Every argument list handed to a strict READ, by value. */
+  readonly lists: unknown[][];
 }
 
 interface Opts {
-  readonly addressing?: 'id' | 'uuid' | 'unknown';
-  /** An unreachable panel: the shape read throws rather than answering. */
-  readonly throws?: boolean;
   readonly remnawaveId?: string | null;
   readonly subscription?: Record<string, unknown> | null;
   readonly projection?: {
@@ -133,8 +112,7 @@ function subscriptionRow(remnawaveId: string | null) {
 }
 
 /** The identity the adapter must receive -- asserted BY VALUE, never by count. */
-const STALE_IDENTITY = { remnawaveId: DEAD_UUID, panelId: 8123, panelUsername: 'rz_alice_sub' };
-const HEALTHY_IDENTITY = { ...STALE_IDENTITY, remnawaveId: LIVE_DECIMAL };
+const HEALTHY_IDENTITY = { remnawaveId: LIVE_DECIMAL, panelId: 8123, panelUsername: 'rz_alice_sub' };
 
 function build(opts: Opts = {}) {
   const record: PanelRecord = { calls: [], lists: [] };
@@ -202,12 +180,11 @@ function build(opts: Opts = {}) {
   const remnawave = {
     getPanelShape: async () => {
       record.calls.push('getPanelShape');
-      if (opts.throws === true) throw new Error('panel unreachable');
-      return { addressing: opts.addressing ?? 'id' };
+      throw new Error('the panel version must not be read by the planner');
     },
-    strictListUserDevices: async (ref: unknown) => {
+    strictListUserDevices: async (...args: unknown[]) => {
       record.calls.push('strictListUserDevices');
-      record.lists.push(ref);
+      record.lists.push(args);
       return opts.strictList ?? FOREIGN_DEVICES;
     },
   };
@@ -232,7 +209,7 @@ describe('device reduction PLANNING on a stale panel link', () => {
     // The whole defect in one case. Without the guard the planner reads
     // `victim-laptop`/`victim-phone` off a profile that belongs to somebody
     // else and writes `victim-phone` into sub-1's plan as its target.
-    const { service, plans, panel } = build({ addressing: 'id' });
+    const { service, plans, panel } = build();
 
     const outcome = await service.planForSubscription('sub-1');
 
@@ -244,11 +221,17 @@ describe('device reduction PLANNING on a stale panel link', () => {
       'and the wrong customer device list is not even READ -- the hwids never ' +
         'enter this process, so they cannot be persisted by any later edit',
     );
-    assert.deepEqual(
-      panel.calls,
-      ['getPanelShape'],
-      'the era read is the ONLY panel traffic a refused planning pass produces',
-    );
+    assert.deepEqual(panel.calls, [], 'a refused planning pass produces no panel traffic at all');
+  });
+
+  it('an empty stored id is refused the same way', async () => {
+    const { service, plans, panel } = build({ remnawaveId: '' });
+
+    const outcome = await service.planForSubscription('sub-1');
+
+    assert.deepEqual(outcome, { status: 'BLOCKED', reason: EXPECTED_REASON });
+    assert.deepEqual(planRows(plans), []);
+    assert.deepEqual(panel.calls, []);
   });
 
   it('INERTNESS CONTROL: the same harness DOES persist a plan when the link is repaired', async () => {
@@ -256,7 +239,6 @@ describe('device reduction PLANNING on a stale panel link', () => {
     // threw before reaching the upsert. Same harness, same stubs, one repaired
     // row -- and the assertion is on the ROW and on the ARGUMENTS, not a count.
     const { service, plans, panel } = build({
-      addressing: 'id',
       remnawaveId: LIVE_DECIMAL,
       strictList: OWN_DEVICES,
     });
@@ -264,7 +246,10 @@ describe('device reduction PLANNING on a stale panel link', () => {
     const outcome = await service.planForSubscription('sub-1');
 
     assert.equal(outcome.status, 'PLANNED');
-    assert.deepEqual(panel.lists, [HEALTHY_IDENTITY], 'the read is addressed from the repaired row');
+    // The identity alone -- no era rides along -- and the device read is the
+    // only panel call: the version is never asked.
+    assert.deepEqual(panel.lists, [[HEALTHY_IDENTITY]], 'the read is addressed from the repaired row');
+    assert.deepEqual(panel.calls, ['strictListUserDevices']);
     const [row] = planRows(plans);
     assert.deepEqual(hwidsOf(row), ['own-phone'], 'newest-first, and it is HIS device');
     assert.equal(row?.['desiredLimit'], 1);
@@ -274,19 +259,14 @@ describe('device reduction PLANNING on a stale panel link', () => {
 
   it('the refused revision stays USABLE: no placeholder row poisons the later repair', async () => {
     // Why the answer is "persist nothing" rather than "persist a blocked plan".
-    // The upsert is keyed `(subscriptionId, projectionRevision)` with an EMPTY
-    // `update`, so whatever is written first at a revision is what an operator
-    // sees forever. A placeholder written during the stale window would survive
-    // the reconciliation and the re-plan would return IT instead of the real
-    // targets.
-    const stale = build({ addressing: 'id' });
+    const stale = build();
     await stale.service.planForSubscription('sub-1');
     assert.deepEqual(planRows(stale.plans), [], 'the stale pass left nothing behind');
 
-    // The operator runs the panel link reconciliation; `remnawaveId` is
-    // rewritten to the decimal. Same revision, same subscription, same table.
+    // The row is relinked -- by the automatic link check, or by «Привязать
+    // профиль» -- and `remnawaveId` is rewritten to the decimal. Same revision,
+    // same subscription, same table.
     const repaired = build({
-      addressing: 'id',
       remnawaveId: LIVE_DECIMAL,
       strictList: OWN_DEVICES,
     });
@@ -304,13 +284,11 @@ describe('device reduction PLANNING on a stale panel link', () => {
 
   it('the operator is TOLD, once, and re-planning does not become an incident storm', async () => {
     // The boundary sweep re-enters planning every five minutes until a terminal
-    // outcome, and a stale link is not terminal by itself -- only the
-    // reconciliation clears it. Without an incident the subscription would
-    // stall forever in silence; with one incident per tick the operator would
-    // be buried. So the refusal is keyed by `(subscription, revision)`, exactly
-    // as the existing dormancy refusal is, and for the same reason: NO PLAN
-    // EXISTS to hang it off.
-    const { service, incidents } = build({ addressing: 'id' });
+    // outcome, and a stale link is not terminal by itself. Without an incident
+    // the subscription would stall forever in silence; with one incident per
+    // tick the operator would be buried. So the refusal is keyed by
+    // `(subscription, revision)`, exactly as the existing dormancy refusal is.
+    const { service, incidents } = build();
 
     await service.planForSubscription('sub-1');
     await service.planForSubscription('sub-1');
@@ -340,43 +318,17 @@ describe('device reduction PLANNING on a stale panel link', () => {
     );
   });
 
-  it('ONE OBSERVATION: the era is read once per planning pass, and BEFORE the device read', async () => {
-    // The defect the observation shape exists to close, restated on this flow.
-    // `getPanelShape()` caches a FAILURE for fifteen seconds, so two readings
-    // taken microseconds apart can legitimately disagree -- and the
-    // disagreement that hurts runs "the guard saw 'unknown', so proceed" into
-    // "the address builder saw 'id', so fall back through panelId to whatever
-    // is live at that address". One reading per pass is the property; a second
-    // one anywhere in this method is the defect being re-introduced.
-    const { service, panel } = build({
-      addressing: 'id',
-      remnawaveId: LIVE_DECIMAL,
-      strictList: OWN_DEVICES,
-    });
-
-    await service.planForSubscription('sub-1');
-
-    assert.deepEqual(
-      panel.calls,
-      ['getPanelShape', 'strictListUserDevices'],
-      'exactly one era read, and it precedes the device list rather than following it',
-    );
-  });
-
   it('a subscription with no panel profile still asks the panel NOTHING', async () => {
     // The guard must not move in front of the cheap local disqualifications.
-    // Most swept subscriptions never reach the panel at all, and an era read
-    // per swept subscription would be a new round trip on a path that used to
-    // be pure database work.
     const { service, panel } = build({ remnawaveId: null });
 
     const outcome = await service.planForSubscription('sub-1');
 
     assert.equal(outcome.status, 'NOT_APPLICABLE');
-    assert.deepEqual(panel.calls, [], 'no profile means neither era nor devices are asked for');
+    assert.deepEqual(panel.calls, [], 'no profile means no device read');
   });
 
-  it('an unlimited desired limit short-circuits before the era is read', async () => {
+  it('an unlimited desired limit short-circuits before the guard', async () => {
     const { service, panel } = build({
       projection: { id: 'proj-1', desiredRevision: 1n, desiredDeviceLimit: null },
     });
@@ -388,14 +340,13 @@ describe('device reduction PLANNING on a stale panel link', () => {
   });
 });
 
-// -- THE THREE STATES THAT MUST NOT NOTICE THE GUARD -------------------------
+// -- THE STATES THAT MUST NOT NOTICE THE GUARD -------------------------------
 
 describe('device reduction PLANNING on a link that is NOT stale is untouched', () => {
-  it('3.x panel, current decimal identity: the ordinary plan is unchanged', async () => {
-    // The inverted-shape-test catcher: a guard that refused a decimal would
-    // stop every correctly-linked reduction on a 3.x panel.
+  it('a current decimal identity: the ordinary plan is unchanged', async () => {
+    // The inverted-test catcher: a guard that refused a decimal would stop every
+    // correctly-linked reduction.
     const { service, plans, panel } = build({
-      addressing: 'id',
       remnawaveId: LIVE_DECIMAL,
       strictList: OWN_DEVICES,
     });
@@ -403,71 +354,26 @@ describe('device reduction PLANNING on a link that is NOT stale is untouched', (
     const outcome = await service.planForSubscription('sub-1');
 
     assert.equal(outcome.status, 'PLANNED');
-    assert.deepEqual(panel.lists, [HEALTHY_IDENTITY]);
+    assert.deepEqual(panel.lists, [[HEALTHY_IDENTITY]]);
     assert.deepEqual(hwidsOf(planRows(plans)[0]), ['own-phone']);
   });
 
-  it('2.x panel: a uuid identity is what that panel issued, so planning runs', async () => {
-    // Installations still on 2.x must not notice this guard at all -- there the
-    // stored uuid is CORRECT and this population is empty.
-    const { service, plans, panel } = build({ addressing: 'uuid', strictList: OWN_DEVICES });
-
-    const outcome = await service.planForSubscription('sub-1');
-
-    assert.equal(outcome.status, 'PLANNED');
-    assert.deepEqual(panel.lists, [STALE_IDENTITY], 'addressed from the uuid, which 2.x answers to');
-    assert.deepEqual(hwidsOf(planRows(plans)[0]), ['own-phone']);
-  });
-
-  it('THE FAIL-OPEN: an unreachable panel must NOT become a new way for PLANNING to fail', async () => {
-    // THIS STANCE IS DELIBERATE AND IS ASSERTED FOR ALL FOUR SIBLING GUARDS.
-    // Version detection fails for the same reasons requests fail -- an
-    // unreachable panel, an expired token, a panel mid-restart -- so a refusal
-    // keyed on it would fire exactly when the panel is already answering with
-    // terminal errors. `observePanelEra` turns a throw into 'unknown', and
-    // 'unknown' is trusted. What an unreachable panel produces here is the
-    // answer it always produced: the strict list says `unavailable` and the
-    // pass DEFERS, durably retryable and raising nothing.
+  it('an outage still DEFERS, as it always has -- the guard did not turn it into a refusal', async () => {
+    // What an unreachable panel produces here is the answer it always produced:
+    // the strict list says `unavailable` and the pass DEFERS, durably retryable
+    // and raising nothing. The guard reads no version, so an outage cannot
+    // reach it at all.
     const { service, plans, incidents, panel } = build({
-      throws: true,
+      remnawaveId: LIVE_DECIMAL,
       strictList: { kind: 'unavailable', retryAfterMs: null },
     });
 
     const outcome = await service.planForSubscription('sub-1');
 
     assert.deepEqual(outcome, { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' });
-    assert.deepEqual(
-      panel.lists,
-      [STALE_IDENTITY],
-      'the stale-shaped identity is still USED when the era cannot be read -- ' +
-        'the guard did not turn an outage into a refusal',
-    );
+    assert.deepEqual(panel.lists, [[HEALTHY_IDENTITY]]);
     assert.deepEqual(planRows(plans), [], 'an unavailable list plans nothing, as before');
-    assert.deepEqual([...incidents.values()], [], 'an unreadable era raises no incident');
-  });
-
-  it('an unreadable era with a healthy device read still plans normally', async () => {
-    // The half of the fail-open that the DEFERRED case above cannot show: when
-    // the era read fails but the device read succeeds, a plan is still built.
-    // Otherwise "fail-open" could be satisfied by a service that always defers.
-    const { service, plans } = build({ throws: true, strictList: OWN_DEVICES });
-
-    const outcome = await service.planForSubscription('sub-1');
-
-    assert.equal(outcome.status, 'PLANNED');
-    assert.deepEqual(hwidsOf(planRows(plans)[0]), ['own-phone']);
-  });
-
-  it('an era the panel REPORTED as unknown behaves the same as an unreachable one', async () => {
-    // The other half of 'unknown': the shape read succeeded and could not
-    // classify the version. Asserted separately because a guard could easily
-    // catch one and not the other.
-    const { service, plans } = build({ addressing: 'unknown', strictList: OWN_DEVICES });
-
-    const outcome = await service.planForSubscription('sub-1');
-
-    assert.equal(outcome.status, 'PLANNED');
-    assert.deepEqual(hwidsOf(planRows(plans)[0]), ['own-phone']);
+    assert.deepEqual([...incidents.values()], [], 'an outage raises no incident');
   });
 });
 

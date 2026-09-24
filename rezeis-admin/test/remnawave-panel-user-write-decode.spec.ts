@@ -15,18 +15,16 @@
  * and the device list were permanently empty, and nothing retried because
  * nothing had failed.
  *
- * So these tests assert the DECODED result of the two writes, on the bodies of
- * all three panel eras in production — 2.7.4 (paying), 2.8.0 (testers), 3.2.x
- * (the operator who reported this) — and every fixture is pinned to the vendor's
- * own record of that body rather than to whatever our decoder happens to read.
+ * So these tests assert the DECODED result of the two writes on the verbatim
+ * 3.2.1 capture, pinned to the vendor's own contracts rather than to whatever
+ * our decoder happens to read. (The 2.x bodies are gone with the 2.x cut: such
+ * a panel is refused before any write is sent.)
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import * as contractPanel27 from '@remnawave/contract-panel-2.7';
-import * as contractPanel28 from '@remnawave/contract-panel-2.8';
 import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
 import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
 import { of } from 'rxjs';
@@ -48,33 +46,11 @@ function fixture(rel: string): PanelFixture {
   ) as PanelFixture;
 }
 
-/**
- * The 2.x write fixtures, named ONCE so the two loops below cannot fall out of
- * step about what they cover — and so their eventual deletion is a single,
- * visible edit rather than two.
- *
- * Both loops register their `it(...)` calls FROM this list. An empty list
- * therefore registers zero tests and both blocks report green having asserted
- * nothing, which is this repository's signature failure mode arriving on a
- * timer: retiring the 2.x fixtures is a planned, gated phase. Each loop is
- * followed by a liveness floor that fails loudly instead.
- */
-const TWO_X_WRITE_FIXTURES = ['2.7.4/created-user.json', '2.8.0/created-user.json'] as const;
-
 /** The two write commands, typed structurally: each release is a separate zod build. */
 interface UserWriteContract {
   readonly CreateUserCommand: { readonly ResponseSchema: { safeParse(value: unknown): { success: boolean } } };
   readonly UpdateUserCommand: { readonly ResponseSchema: { safeParse(value: unknown): { success: boolean } } };
 }
-
-/**
- * The contract each 2.x fixture's release ships, per the vendor's own table:
- * panel 2.7.3–2.7.4 ships 2.7.2, panel 2.8.0–2.8.1 ships 2.8.35.
- */
-const SHIPPED_2X_CONTRACT: Readonly<Record<string, UserWriteContract>> = {
-  '2.7.4/created-user.json': contractPanel27 as unknown as UserWriteContract,
-  '2.8.0/created-user.json': contractPanel28 as unknown as UserWriteContract,
-};
 
 const CONFIG = {
   host: 'remnawave',
@@ -141,49 +117,20 @@ function linkFields(user: RemnawavePanelUser) {
 
 interface EraCase {
   readonly label: string;
-  /** What `/api/system/stats/recap` reports, i.e. which era we are addressing. */
+  /** What `/api/system/stats/recap` reports. */
   readonly version: string;
   readonly file: string;
-  /** How an UPDATE names this profile, exactly as the row would hand it over. */
+  /** How an UPDATE names this profile, exactly as the link path stored it. */
   readonly ref: PanelUserRef;
   readonly expected: ReturnType<typeof linkFields>;
 }
 
 const ERAS: readonly EraCase[] = [
   {
-    label: '2.7.4 (paying production)',
-    version: '2.7.4',
-    file: '2.7.4/created-user.json',
-    ref: '11111111-1111-4111-8111-111111111111',
-    expected: {
-      uuid: '11111111-1111-4111-8111-111111111111',
-      // The numeric id is on the 2.x row too, and recording it is the ONLY
-      // thing that keeps this profile addressable after the operator upgrades:
-      // the panel's own 3.x migration drops the uuid and never gives it back.
-      panelId: 4471,
-      username: 'rz_sub_1',
-      subscriptionUrl: 'https://panel.example/sub/abc',
-      createdAt: '2024-03-31T10:15:00.000Z',
-    },
-  },
-  {
-    label: '2.8.0 (testers)',
-    version: '2.8.0',
-    file: '2.8.0/created-user.json',
-    ref: '22222222-2222-4222-8222-222222222222',
-    expected: {
-      uuid: '22222222-2222-4222-8222-222222222222',
-      panelId: 8123,
-      username: 'rz_sub_2',
-      subscriptionUrl: 'https://panel.example/sub/def',
-      createdAt: '2025-02-28T23:59:59.000Z',
-    },
-  },
-  {
     // The body is the verbatim 3.2.1 capture; the version reported is the
-    // operator's actual build. Both are `addressing: 'id'`, and the fixture
-    // guard below parses this same body through BOTH contracts — 3.2.0, which
-    // panel 3.2.1 ships, and 3.2.3, which that operator's panel ships.
+    // operator's actual build. The fixture guard below parses this same body
+    // through BOTH contracts — 3.2.0, which panel 3.2.1 ships, and 3.2.3, which
+    // that operator's panel ships.
     label: '3.2.3 (the operator who reported the defect)',
     version: '3.2.3',
     file: '3.2.1/user.json',
@@ -224,64 +171,10 @@ describe('PATCH /api/users — the same body through the same decoder', () => {
   }
 });
 
-describe('2.7.4 keeps every field it already had — nothing narrows for the paying version', () => {
-  /**
-   * The decoder must be a SUPERSET of the assertion it replaces. The old
-   * `unwrapPanelUser` handed callers the panel's own object, so on 2.x every one
-   * of these fields already read correctly; the fix must not quietly drop or
-   * rename any of them while it repairs 3.x.
-   */
-  const CARRIED_THROUGH = [
-    'uuid',
-    'username',
-    'status',
-    'subscriptionUrl',
-    'telegramId',
-    'email',
-    'expireAt',
-    'createdAt',
-    'lastTrafficResetAt',
-    'trafficLimitBytes',
-    'hwidDeviceLimit',
-    'trafficLimitStrategy',
-    'tag',
-    'description',
-    'activeInternalSquads',
-    'externalSquadUuid',
-  ] as const;
-
-  let registered = 0;
-  for (const rel of TWO_X_WRITE_FIXTURES) {
-    registered += 1;
-    it(`${rel}: every field the cast produced survives, and panelId is added`, async () => {
-      const loaded = fixture(rel);
-      const raw = loaded.response;
-      const { service } = panelOn(loaded.version, loaded);
-
-      const created = await service.createPanelUser(createInput(raw['username'] as string));
-      const decoded = created as unknown as Record<string, unknown>;
-
-      for (const key of CARRIED_THROUGH) {
-        assert.deepStrictEqual(decoded[key], raw[key], `${rel}: ${key} changed`);
-      }
-      assert.equal(created.panelId, raw['id'], `${rel}: panelId must come from the row's id`);
-    });
-  }
-
-  // LIVENESS FLOOR — see `TWO_X_WRITE_FIXTURES`. The expected count is a
-  // LITERAL and not `TWO_X_WRITE_FIXTURES.length`: comparing the loop against
-  // the list it just iterated is satisfied by an empty list too, which is
-  // exactly the state this must fail on.
-  it('registered one case per 2.x write fixture', () => {
-    assert.ok(registered > 0, 'the 2.x write fixture list is empty — this block asserts nothing');
-    assert.equal(registered, 2, 'the 2.x write fixture coverage changed — was that deliberate?');
-  });
-});
-
 describe('a 2xx body with no usable identity is refused, never half-decoded', () => {
   const UNREADABLE: ReadonlyArray<readonly [string, unknown]> = [
     [
-      'a row carrying neither a uuid nor an id',
+      'a row carrying no id',
       { response: { username: 'rz_sub_1', subscriptionUrl: 'https://panel.example/sub/abc' } },
     ],
     [
@@ -291,18 +184,17 @@ describe('a 2xx body with no usable identity is refused, never half-decoded', ()
       '<html>backend is restarting</html>',
     ],
     [
-      // The row is from the uuid era and its uuid arrived damaged. Keying it by
-      // the numeric id would mint an identity matching no `remnawaveId` ever
-      // stored from that era — "we could not read this" silently becoming "this
-      // user is unknown to us".
-      'a 2.x row whose uuid arrived empty (must NOT fall back to the numeric id)',
-      { response: { uuid: '', id: 4471, username: 'rz_sub_1' } },
+      // What a 2.x panel answered. Keying it by the uuid would mint an identity
+      // no 3.x panel can address — "we could not read this" silently becoming
+      // a stored link that names nobody.
+      'a row whose only identity is a uuid (must NOT be keyed by it)',
+      { response: { uuid: '11111111-1111-4111-8111-111111111111', username: 'rz_sub_1' } },
     ],
   ];
 
   for (const [label, body] of UNREADABLE) {
     it(`POST refuses ${label}`, async () => {
-      const { service } = panelOn('2.7.4', body);
+      const { service } = panelOn('3.3.2', body);
 
       await assert.rejects(
         () => service.createPanelUser(createInput('rz_sub_1')),
@@ -315,10 +207,12 @@ describe('a 2xx body with no usable identity is refused, never half-decoded', ()
     });
 
     it(`PATCH refuses ${label}`, async () => {
-      const { service } = panelOn('2.7.4', body);
+      const { service } = panelOn('3.3.2', body);
 
       await assert.rejects(
-        () => service.updatePanelUser('11111111-1111-4111-8111-111111111111', { description: 'x' }),
+        () => service.updatePanelUser({ remnawaveId: '4471', panelId: 4471, panelUsername: 'rz_sub_1' }, {
+          description: 'x',
+        }),
         (err: unknown) => {
           assert.match((err as Error).message, /PATCH \/api\/users/);
           // NOT laundered into ServiceUnavailableException by the transport
@@ -333,55 +227,11 @@ describe('a 2xx body with no usable identity is refused, never half-decoded', ()
   }
 });
 
-describe("the write fixtures are the panel's record, not ours", () => {
-  /**
-   * Quoted verbatim from `CreateUserResponseDto.response.required` in
-   * `icon/Remnawave API v274.json`. `Remnawave API v280.json` declares the
-   * identical array, and so does `UpdateUserResponseDto` in both specs — which
-   * is why one fixture per era answers for POST and PATCH alike.
-   *
-   * Without this guard the fixtures could be trimmed to whatever the decoder
-   * happens to read, which is exactly how the defect survived: the mocks agreed
-   * with the code instead of with the panel.
-   */
-  const REQUIRED_2X = [
-    'uuid', 'id', 'shortUuid', 'username', 'expireAt', 'telegramId', 'email',
-    'description', 'tag', 'hwidDeviceLimit', 'externalSquadUuid', 'trojanPassword',
-    'vlessUuid', 'ssPassword', 'subRevokedAt', 'lastTrafficResetAt', 'createdAt',
-    'updatedAt', 'subscriptionUrl', 'activeInternalSquads', 'userTraffic',
-  ] as const;
-
-  let registered = 0;
-  for (const rel of TWO_X_WRITE_FIXTURES) {
-    registered += 2;
-    it(`${rel} carries every field the 2.x DTO guarantees — uuid AND id`, () => {
-      const keys = Object.keys(fixture(rel).response);
-      for (const name of REQUIRED_2X) {
-        assert.ok(keys.includes(name), `${rel}: the panel always sends ${name}`);
-      }
-    });
-
-    it(`${rel} parses as the create/update response of the contract its release ships`, () => {
-      const body = { response: fixture(rel).response };
-      const shipped = SHIPPED_2X_CONTRACT[rel];
-      assert.ok(shipped !== undefined, `${rel}: no shipped contract recorded`);
-      assert.equal(shipped.CreateUserCommand.ResponseSchema.safeParse(body).success, true, rel);
-      assert.equal(shipped.UpdateUserCommand.ResponseSchema.safeParse(body).success, true, rel);
-    });
-  }
-
-  // LIVENESS FLOOR — see `TWO_X_WRITE_FIXTURES`. Two cases per fixture, and the
-  // total is a LITERAL for the same reason as the block above: an empty list
-  // satisfies any comparison drawn from itself.
-  it('registered both cases for every 2.x write fixture', () => {
-    assert.ok(registered > 0, 'the 2.x write fixture list is empty — this block asserts nothing');
-    assert.equal(registered, 4, 'the 2.x write fixture coverage changed — was that deliberate?');
-  });
-
+describe("the write fixture is the panel's record, not ours", () => {
   it('3.2.x has no uuid to give — the fact the whole defect rests on', () => {
     const body = { response: fixture('3.2.1/user.json').response };
 
-    // ABSENCE of the key, not emptiness: that is what the decoder branches on.
+    // ABSENCE of the key, not emptiness.
     assert.equal('uuid' in body.response, false);
     assert.equal(typeof body.response['id'], 'number');
     // The capture's own release first — panel 3.2.1 ships contract 3.2.0 — and

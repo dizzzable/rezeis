@@ -363,14 +363,14 @@ describe('SharingDetectors — HWID overage', () => {
     const remna = new RemnawaveApiService(
       {
         request: () =>
-          // 3 rows on the wire, one of which carries no uuid → 2 decoded.
+          // 3 rows on the wire, one of which carries no numeric id → 2 decoded.
           of({
             data: {
               response: {
                 users: [
-                  { uuid: 'u1', hwidDeviceLimit: 3, id: 1 },
-                  { uuid: '', hwidDeviceLimit: 3, id: 2 },
-                  { uuid: 'u3', hwidDeviceLimit: 3, id: 3 },
+                  { hwidDeviceLimit: 3, id: 1 },
+                  { hwidDeviceLimit: 3, id: null },
+                  { hwidDeviceLimit: 3, id: 3 },
                 ],
                 total: 3,
               },
@@ -394,8 +394,8 @@ describe('SharingDetectors — HWID overage', () => {
       panelInfraDouble().client,
       tunablesFromEnv(),
     );
-    // `u1` survived the read and is 99 devices over a limit of 3 — scoring it
-    // would be scoring a fraction of the panel.
+    // Profile 1 survived the read and is 99 devices over a limit of 3 — scoring
+    // it would be scoring a fraction of the panel.
     assert.deepEqual(await detectors.detectHwidOverage(NOW), []);
   });
 

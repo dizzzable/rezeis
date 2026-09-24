@@ -11,8 +11,8 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
-  assessObservedPanelLink,
-  observePanelEra,
+  isStalePanelIdentity,
+  UNLINKED_SUBSCRIPTIONS_PATH,
 } from '../../remnawave/services/stale-panel-link';
 import {
   DEVICE_DORMANCY_HORIZON_DAYS,
@@ -58,14 +58,13 @@ export type DeviceReductionPlanOutcome =
  * victim. This service builds a deterministic, immutable removal plan:
  *
  *  1. read the authoritative projection (desired finite limit + revision);
- *  2. observe the panel era ONCE and refuse outright if the stored identity
- *     cannot be trusted to name the right customer on it — a 2.x uuid on a
- *     proven 3.x panel resolves, through the address fallback, to whatever
- *     profile is LIVE at that address, so the device list would be somebody
- *     else's and their hwids would be persisted as this plan's targets;
- *  3. strict-read the panel device list with that same observation
- *     (fail-closed: unavailable → defer, malformed → block, absent profile →
- *     not-applicable);
+ *  2. refuse outright if the stored identity is not a decimal
+ *     (`isStalePanelIdentity`) — such an identity names nobody on a 3.x panel
+ *     and resolves, through the address fallback, to whatever profile is LIVE
+ *     at that address, so the device list would be somebody else's and their
+ *     hwids would be persisted as this plan's targets;
+ *  3. strict-read the panel device list (fail-closed: unavailable → defer,
+ *     malformed → block, absent profile → not-applicable);
  *  4. select exact targets deterministically (newest-first, tie hwid DESC) -
  *     which REFUSES rather than answering when the newest-first rule would
  *     delete a device seen recently and keep one dormant for a full billing
@@ -187,10 +186,10 @@ export class DeviceReductionPlanService {
     // question this method answers. The strict read below is addressed through
     // the same `panelUserAddress` fallback every other verb uses — numeric fast
     // path → `remnawavePanelId` → the short uuid recovered from `config_url` →
-    // `remnawavePanelUsername` — so on a 3.x panel a dead 2.x uuid still
-    // resolves to whatever profile is LIVE at that address. The list that comes
-    // back is then A DIFFERENT CUSTOMER'S, and every hwid in it is persisted
-    // into `selectedDevices` as this subscription's targets.
+    // `remnawavePanelUsername` — so a dead 2.x uuid still resolves to whatever
+    // profile is LIVE at that address. The list that comes back is then A
+    // DIFFERENT CUSTOMER'S, and every hwid in it is persisted into
+    // `selectedDevices` as this subscription's targets.
     //
     // Nothing is deleted — the execution guard sees to that — and the row is
     // still wrong: an operator inspecting it reads a coherent-looking plan about
@@ -203,19 +202,15 @@ export class DeviceReductionPlanService {
     // weaker guarantee than never having held them. Refusing here also makes the
     // plan's whole input either this customer's or nothing at all.
     //
-    // ONE OBSERVATION, TAKEN ONCE PER PASS AND THEN HANDED ON. `getPanelShape()`
-    // caches a FAILURE for fifteen seconds, so two readings taken microseconds
-    // apart can legitimately disagree, and the disagreement that hurts runs "the
-    // guard saw unknown, so proceed" into "the address builder saw id, so fall
-    // back through panelId to whatever is live at that address". So the reading
-    // is threaded into the read below rather than left to be taken a second time
-    // inside the adapter. `assessObservedPanelLink` is synchronous and pure
-    // precisely so it CANNOT reach for the era itself.
+    // NO PANEL VERSION IS READ, and none needs to be. A decimal proceeds under
+    // every reading of the version and a non-decimal is refused under every
+    // reading, so an unreadable version can neither loosen this nor trip it:
+    // an outage still DEFERS below, as it always has.
     //
     // AFTER THE LOCAL DISQUALIFICATIONS, NOT BEFORE THEM. Every branch above
     // this line is pure database work and most swept subscriptions end on one of
-    // them; asking the panel first would add a round trip per swept subscription
-    // to answer a question those rows never reach.
+    // them; the order keeps the refusal's incident for rows that would really
+    // have been planned.
     //
     // AND IT PERSISTS NOTHING. There is no `block()` in this half and there
     // should not be: a plan is keyed `(subscriptionId, projectionRevision)` and
@@ -224,21 +219,13 @@ export class DeviceReductionPlanService {
     // window would outlive the repair, and the re-plan that should produce the
     // real targets would return IT instead. Persisting nothing leaves the
     // revision usable — the same shape every other refusal here already has.
-    //
-    // THE FAIL-OPEN IS PRESERVED EXACTLY. `observePanelEra` turns a throw into
-    // `'unknown'`, and `'unknown'` is trusted — as is a proven 2.x panel, where a
-    // uuid-shaped identity is CORRECT and this population is empty. Version
-    // detection fails for the same reasons requests fail, so a refusal keyed on
-    // it would fire exactly when the panel is already answering with terminal
-    // errors, and planning would BLOCK for an outage that has always DEFERRED.
-    const era = await observePanelEra(() => this.remnawaveApiService.getPanelShape());
-    if (!assessObservedPanelLink(era, identity.remnawaveId).trusted) {
+    if (isStalePanelIdentity(identity.remnawaveId)) {
       this.logger.error(
-        `Device reduction planning refused for ${subscriptionId}: its stored 2.x identifier ` +
-          'does not name the account it was written for on a 3.x panel, so planning would ' +
-          'have selected another customer’s devices as this subscription’s targets. ' +
-          'Nothing was read and no plan was written. Run the panel link reconciliation, then ' +
-          're-run the boundary.',
+        `Device reduction planning refused for ${subscriptionId}: its stored Remnawave identity ` +
+          'is not a 3.x numeric id, so planning could have selected another customer’s devices ' +
+          'as this subscription’s targets. Nothing was read and no plan was written. The ' +
+          'automatic link check re-links it if it can prove the owner; otherwise it is listed in ' +
+          `${UNLINKED_SUBSCRIPTIONS_PATH}. Then re-run the boundary.`,
       );
       await this.raisePlanningIncident({
         subscriptionId,
@@ -246,13 +233,12 @@ export class DeviceReductionPlanService {
         summaryCode: STALE_PANEL_LINK,
         metadata: {
           projectionRevision: projection.desiredRevision.toString(),
-          panelEra: era.addressing,
         },
       });
       return { status: 'BLOCKED', reason: STALE_PANEL_LINK };
     }
 
-    const listing = await this.remnawaveApiService.strictListUserDevices(identity, era);
+    const listing = await this.remnawaveApiService.strictListUserDevices(identity);
     switch (listing.kind) {
       case 'unavailable':
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
@@ -281,9 +267,9 @@ export class DeviceReductionPlanService {
       // one does not mean the panel sent us something we cannot read, it means
       // we read it fine and the answer was "destroy the phone in their hand".
       // It is one of the two refusals here that only a PERSON can clear — the
-      // other being the stale-link guard above, which needs the panel link
-      // reconciliation run — and that is why both raise an incident while the
-      // panel-integration refusals below do not. See `raisePlanningIncident`.
+      // other being the stale-link guard above, which needs the subscription
+      // linked to its numeric id — and that is why both raise an incident while
+      // the panel-integration refusals below do not. See `raisePlanningIncident`.
       if (err instanceof DeviceRetentionConflictError) {
         this.logger.warn(
           `Device reduction refused for ${subscriptionId}: would delete ` +
@@ -348,9 +334,10 @@ export class DeviceReductionPlanService {
    * TWO REFUSALS COME THROUGH HERE and they are the only two that must: a
    * dormancy conflict, where the newest-first rule would delete the phone in
    * the customer's hand, and a stale panel link, where the stored identity
-   * cannot be trusted to name the right customer at all. Both are refusals only
-   * a PERSON can clear — one by choosing which device goes, the other by
-   * running the panel link reconciliation — and the boundary sweep re-enters
+   * cannot be trusted to name the right customer at all. Both are refusals a
+   * PERSON may have to clear — one by choosing which device goes, the other by
+   * linking the subscription to its numeric id (the automatic link check does it
+   * when it can prove the owner) — and the boundary sweep re-enters
    * every five minutes until it reaches a terminal outcome. Without a row the
    * subscription stalls forever in silence. The other BLOCKED outcomes here
    * (`STRICT_LIST_*`, `INVALID_SOURCE_DATA`) describe a panel that is answering

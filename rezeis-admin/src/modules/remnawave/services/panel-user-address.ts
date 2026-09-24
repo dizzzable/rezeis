@@ -1,40 +1,41 @@
-// From the dependency-free util, not from `remnawave-version.service`: that
-// service is constructed WITH the adapter, and importing it here would put a
-// cycle between the adapter and the thing that tells it which shape to build.
-import type { RemnawaveUserAddressing } from './panel-version.util';
 // Type-only, and it stays that way: `panelIdentityLookup` below hands back a
 // `where` for callers to run, it never runs one itself, so this module remains
 // reasonable (and testable) without a database.
 import type { Prisma } from '@prisma/client';
 
+// The decimal test lives in the dependency-free safety-net module, so the
+// destructive paths' refusal, this module's addressing and the boot count all
+// read ONE spelling of "a 3.x panel id". Re-exported: most callers import it
+// from here.
+import { isNumericPanelIdentity } from './stale-panel-link';
+
+export { isNumericPanelIdentity };
+
 /**
- * How rezeis names ONE panel profile when talking to a panel, across the three
- * panel versions a stored profile can come from.
+ * How rezeis names ONE panel profile when talking to a Remnawave 3.x panel —
+ * the only version this build speaks.
  *
- * Remnawave 2.7.4 and 2.8.0 key users by a UUID. Remnawave 3.x deleted that
- * column outright — a 3.x user row has no `uuid` at all — and re-keyed every
- * user-scoped route on the numeric `id`. Handing a 2.x UUID to a 3.x panel does
- * not 404; it fails validation with `400 expected number, received NaN`. That
- * is the safe direction (nothing downstream reads a 400 as "the profile is
- * gone"), but it is still a dead integration, so the address has to be built
- * per version rather than assumed.
+ * 3.x deleted the user uuid column outright and keys every user-scoped route on
+ * the numeric `id`. A profile linked while the panel was still 2.x, though,
+ * keeps its uuid in our database: the panel's own migration drops the uuid, we
+ * do not. So the address is built from what we stored, never assumed.
  *
- * The three facts this module reasons over, all stored on `Subscription`:
- *   • `remnawaveId`     — the panel's own identity as a string. A 2.x UUID, or
- *                         a 3.x numeric id in decimal. Never parsed to GUESS
- *                         the version: a profile created on 2.x keeps its UUID
- *                         here after the operator upgrades to 3.x.
- *   • `panelId`         — the numeric id. Both 2.x and 3.x expose it on every
- *                         user row, so it accumulates on its own long before
- *                         anybody upgrades.
+ * The facts this module reasons over, all stored on `Subscription`:
+ *   • `remnawaveId`     — the panel's own identity as a string: the numeric id
+ *                         in decimal for anything linked on 3.x, a uuid for a
+ *                         row linked back on 2.x. Never parsed into a number
+ *                         unless it IS a decimal (`Number.parseInt` reads
+ *                         `330f2b38-…` as 330 — another customer).
+ *   • `panelId`         — the numeric id. 2.x put it on every user row too, so
+ *                         a row linked on 2.x has usually been carrying it.
  *   • `panelUsername`   — the name the profile was created under. The last
  *                         resort, and the only one that survives an upgrade
  *                         performed before we ever recorded the numeric id.
  *   • `panelShortUuid`  — the stable subscription short UUID, recovered from
- *                         our saved subscription URL. On 3.x it is a safer
- *                         resolver than username because customer-facing links
- *                         are unique panel material, while usernames are
- *                         deterministic and can be reused after reprovisioning.
+ *                         our saved subscription URL. A safer resolver than
+ *                         username: customer-facing links are unique panel
+ *                         material, while usernames are deterministic and can be
+ *                         reused after reprovisioning.
  */
 export interface StoredPanelIdentity {
   /**
@@ -73,15 +74,14 @@ export type PanelResolveSelector =
 /**
  * How a caller names a profile to the adapter.
  *
- * A bare string is the stored `remnawaveId` and nothing more. It is enough for:
- *   • any 2.x panel — the stored string IS the uuid the path wants;
- *   • any profile CREATED on 3.x — the stored string is already the numeric id.
+ * A bare string is the stored `remnawaveId` and nothing more. It is enough for
+ * any profile CREATED on 3.x — the stored string is already the numeric id.
  *
- * It is NOT enough for exactly one case: a profile created on 2.x whose panel
- * has since been upgraded to 3.x and which nothing has touched since. There the
- * adapter needs the recorded numeric id or the recorded panel username, and a
- * caller that passes only the string gets a refusal with a log line naming the
- * profile — never a guess, and never a silent success against another user.
+ * It is NOT enough for a profile created on 2.x whose panel has since been
+ * upgraded to 3.x. There the adapter needs the recorded numeric id, the short
+ * uuid or the panel username, and a caller that passes only the string gets a
+ * refusal with a log line naming the profile — never a guess, and never a
+ * silent success against another user.
  *
  * Callers are migrated to the full object one module at a time; the union is
  * what makes that incremental instead of one forty-site change.
@@ -242,14 +242,6 @@ export function configUrlShortIds(value: string | null): string[] {
   return ids;
 }
 
-/** A decimal integer with no sign, no separators, no leading `+`. */
-const DECIMAL_ID = /^\d+$/;
-
-/** True when the stored identity is a numeric panel id rather than a 2.x UUID. */
-export function isNumericPanelIdentity(remnawaveId: string): boolean {
-  return DECIMAL_ID.test(remnawaveId);
-}
-
 /**
  * Both angles a BATCH of panel identities has to be matched on locally, plus
  * the map back from a fetched row to the identity the caller asked about.
@@ -342,165 +334,115 @@ export function panelIdentityLookup(identities: readonly string[]): PanelIdentit
 }
 
 /**
- * Builds the path segment for a user-scoped route, or says why it cannot.
+ * Builds the path segment for a user-scoped route on a 3.x panel, or says why
+ * it cannot.
  *
- * WHAT `'unknown'` DOES, since this docstring used to claim the opposite: it
- * yields the STORED identity unchanged, not `impossible`. Refusing was the first
- * design and it was wrong for a reason worth keeping written down — version
- * detection folds every failure (401, timeout, DNS, an unconfigured token) into
- * "no version", so a refusal would fire exactly when the panel is already
- * answering with terminal errors, and would convert those into "cannot act",
- * which the sync layer classifies as TRANSIENT. Forever-retry with no alert.
+ * ONE SET OF RULES, WHATEVER THE VERSION PROBE SAYS. This used to take the
+ * panel's addressing era as a second argument and, on an unreadable version,
+ * send the stored string unchanged — a uuid to a panel that answers only to
+ * numbers. The only era this build speaks is 3.x (a 2.x panel is refused before
+ * any request is built), so an unreadable version is addressed exactly as a
+ * proven 3.x one: every request goes out in the one shape a supported panel
+ * accepts.
  *
- * What stays impossible on `'unknown'` is the thing that was actually dangerous:
- * CONVERTING between the two identity forms without the material to do it. The
- * stored string names the right profile or nobody; a converted one can name
- * somebody else. See the `'unknown'` branch below, which says this again at the
- * point where it is enforced, and the test that pins it.
+ * The chain below keeps a row linked on 2.x reachable for READS and PATCHes.
+ * It must never feed a verb that destroys: a stale uuid resolved through it can
+ * land on another customer's live profile, which is why every destructive
+ * adapter method refuses a non-decimal identity (`isStalePanelIdentity`,
+ * `stale-panel-link.ts`) BEFORE it asks this function anything.
  */
-export function panelUserAddress(
-  identity: StoredPanelIdentity,
-  addressing: RemnawaveUserAddressing,
-): PanelAddress {
+export function panelUserAddress(identity: StoredPanelIdentity): PanelAddress {
   const stored = identity.remnawaveId;
-  const storedIsNumeric = isNumericPanelIdentity(stored);
-
-  switch (addressing) {
-    case 'id': {
-      // Fast path: the profile was created on 3.x, so what we stored IS the id.
-      if (storedIsNumeric) return { kind: 'ready', segment: stored };
-      // Created on 2.x, panel since upgraded. The numeric id is usually already
-      // here, because every ordinary read of a 2.x row carried one.
-      //
-      // Tested as a safe integer, not merely as `!== null`. A caller that built
-      // this object from a row it selected WITHOUT the column hands over
-      // `undefined`, which passes a null check and produces the path segment
-      // `"undefined"` — a request that 404s against a panel where the profile is
-      // very much alive, and reads to the caller as "the profile is gone".
-      if (Number.isSafeInteger(identity.panelId)) {
-        return { kind: 'ready', segment: String(identity.panelId) };
-      }
-      // Never touched since the upgrade. The saved subscription link carries
-      // the shortUuid, which the 3.x resolver still accepts and which is safer
-      // than username: usernames are deterministic and can be reused after a
-      // reprovision, while a stale shortUuid names the right profile or nobody.
-      if (typeof identity.panelShortUuid === 'string' && identity.panelShortUuid.length > 0) {
-        return { kind: 'needsResolve', selector: { shortUuid: identity.panelShortUuid } };
-      }
-      // The name is the last way back: the panel's 3.x migration drops the uuid
-      // without preserving it anywhere.
-      // An empty string is not a name — resolving by it would ask the panel
-      // "which user is called nothing?" and act on whatever came back.
-      if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
-        return { kind: 'needsResolve', selector: { username: identity.panelUsername } };
-      }
-      return {
-        kind: 'impossible',
-        reason:
-          `profile "${stored}" is a 2.x uuid, the panel is 3.x, and neither a numeric id, ` +
-          'subscription short UUID nor panel username was ever recorded for it',
-      };
-    }
-    case 'uuid': {
-      // Fast path: created on 2.x, still on 2.x.
-      if (!storedIsNumeric) return { kind: 'ready', segment: stored };
-      // A numeric identity on a uuid-addressed panel means the profile was made
-      // on 3.x and the operator has since rolled back. We never stored a uuid
-      // for it — 3.x had none to give — so only the name can recover it.
-      if (typeof identity.panelShortUuid === 'string' && identity.panelShortUuid.length > 0) {
-        return { kind: 'needsResolve', selector: { shortUuid: identity.panelShortUuid } };
-      }
-      if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
-        return { kind: 'needsResolve', selector: { username: identity.panelUsername } };
-      }
-      return {
-        kind: 'impossible',
-        reason:
-          `profile "${stored}" is a 3.x numeric id, the panel is 2.x, and no panel username ` +
-          'was recorded for it',
-      };
-    }
-    case 'unknown':
-      // Use the stored identity unchanged. This is NOT the guess this module
-      // exists to prevent — that guess is CONVERTING between the two forms
-      // without the material to do it, which can name a different profile. The
-      // stored string names either the right profile or nobody: on the panel
-      // that issued it, it is correct; on the other era it fails validation with
-      // `400 expected number, received NaN` or a plain 404, and no caller reads
-      // either as "the profile is gone".
-      //
-      // Refusing here instead looked safer and was worse. Version detection
-      // fails for the same reasons a request fails — an unreachable panel, a bad
-      // token — so a refusal would fire exactly when the panel is already
-      // answering with terminal errors, and would convert those into "cannot
-      // act", which the sync layer classifies as TRANSIENT. That is the
-      // forever-retry-with-no-alert hole, entered on purpose.
-      return { kind: 'ready', segment: stored };
+  // Fast path: the profile was created on 3.x, so what we stored IS the id.
+  if (isNumericPanelIdentity(stored)) return { kind: 'ready', segment: stored };
+  // Created on 2.x, panel since upgraded. The numeric id is usually already
+  // here, because every ordinary read of a 2.x row carried one.
+  //
+  // Tested as a safe integer, not merely as `!== null`. A caller that built
+  // this object from a row it selected WITHOUT the column hands over
+  // `undefined`, which passes a null check and produces the path segment
+  // `"undefined"` — a request that 404s against a panel where the profile is
+  // very much alive, and reads to the caller as "the profile is gone".
+  if (Number.isSafeInteger(identity.panelId)) {
+    return { kind: 'ready', segment: String(identity.panelId) };
   }
+  // Never touched since the upgrade. The saved subscription link carries the
+  // shortUuid, which the 3.x resolver accepts and which is safer than username:
+  // usernames are deterministic and can be reused after a reprovision, while a
+  // stale shortUuid names the right profile or nobody.
+  if (typeof identity.panelShortUuid === 'string' && identity.panelShortUuid.length > 0) {
+    return { kind: 'needsResolve', selector: { shortUuid: identity.panelShortUuid } };
+  }
+  // The name is the last way back: the panel's 3.x migration drops the uuid
+  // without preserving it anywhere.
+  // An empty string is not a name — resolving by it would ask the panel "which
+  // user is called nothing?" and act on whatever came back.
+  if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
+    return { kind: 'needsResolve', selector: { username: identity.panelUsername } };
+  }
+  return {
+    kind: 'impossible',
+    reason:
+      `profile "${stored}" is not a 3.x numeric id, and neither a numeric id, ` +
+      'subscription short UUID nor panel username was ever recorded for it',
+  };
 }
 
 /**
  * The key half of a `PATCH /api/users` body.
  *
- * This request is the one write that needs no version branch at all: every
- * contract from 2.7 through 3.4.4 accepts `username` as an alternative key
- * (2.7.3's own contract declares `uuid` and `username` both optional under an
- * "at least one of" refinement, and 3.2.1 answers `400 At least one of
- * username, id must be provided`). We still prefer the immutable identifier
- * and keep the name as a fallback — an operator who renames a profile by hand
- * in the panel would otherwise silently retarget every later write.
+ * Every 3.x contract accepts `id` or `username` here (3.2.1 answers `400 At
+ * least one of username, id must be provided`). We prefer the immutable
+ * identifier and keep the name as a fallback — an operator who renames a
+ * profile by hand in the panel would otherwise silently retarget every later
+ * write.
  *
- * ON AN UNIDENTIFIED PANEL THE NAME IS STILL THE FALLBACK, NOT THE PREFERENCE.
- * This function used to invert its own rule there, reasoning that `{uuid}` is
- * dropped by 3.x and `{id}` by 2.x, so only the name is certain to land. It is —
- * and that is the problem. Landing is not the goal; landing ON THE RIGHT PROFILE
- * is. Panel usernames are DETERMINISTIC, so a profile that was deleted and
- * re-provisioned carries the same name as the one we are holding an identity
- * for, and a write keyed by that name silently retargets a live profile that
- * merely inherited the name. Keying by the stored identifier instead names the
- * right profile or NOBODY: the wrong-era key is dropped and the panel answers
- * `400 At least one of …`, which no caller reads as success. That is the same
- * "names the right profile or nobody" rule {@link panelUserAddress} states for
- * its own `'unknown'` branch, and this was the one place that broke it.
+ * THE NAME IS THE FALLBACK, NOT THE PREFERENCE, and landing is not the goal —
+ * landing ON THE RIGHT PROFILE is. Panel usernames are DETERMINISTIC, so a
+ * profile that was deleted and re-provisioned carries the same name as the one
+ * we hold an identity for, and a write keyed by that name silently retargets a
+ * live profile that merely inherited it. So the name is used only when the
+ * stored identity has no numeric id to give and resolving by name is the
+ * address chain's own last step.
+ *
+ * THE FORM OF THE SEGMENT PICKS THE KEY, and a segment that is not a decimal
+ * answers `null` ("cannot act"). It must never fall through to `{ id }`:
+ * `Number.parseInt('330f2b38-…')` is 330, another customer's id. There is no
+ * `{ uuid }` key any more — a 3.x panel drops it and answers `400 At least one
+ * of username, id must be provided`.
  */
 export function panelUserPatchKey(
   identity: StoredPanelIdentity,
-  addressing: RemnawaveUserAddressing,
-): { readonly uuid: string } | { readonly id: number } | { readonly username: string } | null {
-  const address = panelUserAddress(identity, addressing);
+): { readonly id: number } | { readonly username: string } | null {
+  const address = panelUserAddress(identity);
   if (address.kind === 'ready') {
-    // The FORM of the segment picks the key, not the addressing. On an
-    // identified panel the two agree by construction — a uuid always carries
-    // hyphens and a panel id is always decimal, so `'uuid'` addressing can only
-    // produce a non-numeric segment and `'id'` only a numeric one. On
-    // `'unknown'` the segment is the stored string unchanged, and its form is
-    // the only honest evidence of which era issued it.
-    return isNumericPanelIdentity(address.segment)
-      ? { id: Number.parseInt(address.segment, 10) }
-      : { uuid: address.segment };
+    if (!isNumericPanelIdentity(address.segment)) return null;
+    const id = Number.parseInt(address.segment, 10);
+    return Number.isSafeInteger(id) ? { id } : null;
   }
   if (address.kind === 'needsResolve') {
+    // A short uuid is resolved to the numeric id by the adapter
+    // (`patchKeyFor`), which can make the round-trip this pure function cannot.
     if ('username' in address.selector) return { username: address.selector.username };
     return null;
   }
-  if (typeof identity.panelUsername === 'string' && identity.panelUsername.length > 0) {
-    return { username: identity.panelUsername };
-  }
+  // `impossible`: no id, no short uuid and no name was ever recorded, so there
+  // is nothing left to key the write by.
   return null;
 }
 
 /**
- * The owner field of a HWID device request body.
+ * The owner field of a HWID device request body: `userId`, the number.
  *
- * 2.x names it `userUuid`, 3.x names it `userId` and wants the number. Same
- * split as the path segment, different key, so it gets its own helper rather
- * than a second `if` at each of the three call sites.
+ * CHOSEN BY THE FORM OF THE SEGMENT, and a segment that is not a decimal is
+ * refused (`null`), never parsed. `Number.parseInt` reads a LEADING run of
+ * digits and stops, so a stale 2.x uuid like `330f2b38-…` would become user 330
+ * — somebody else — and the request would unbind THEIR device. The destructive
+ * adapter methods refuse a non-decimal stored identity before they get here;
+ * this is the check at the point where the number is actually made.
  */
-export function panelDeviceOwnerKey(
-  segment: string,
-  addressing: RemnawaveUserAddressing,
-): { readonly userUuid: string } | { readonly userId: number } {
-  return addressing === 'id'
-    ? { userId: Number.parseInt(segment, 10) }
-    : { userUuid: segment };
+export function panelDeviceOwnerKey(segment: string): { readonly userId: number } | null {
+  if (!isNumericPanelIdentity(segment)) return null;
+  const userId = Number.parseInt(segment, 10);
+  return Number.isSafeInteger(userId) ? { userId } : null;
 }

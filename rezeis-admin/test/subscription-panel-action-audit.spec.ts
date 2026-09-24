@@ -60,7 +60,6 @@ function buildController(options: { readonly panelThrows?: boolean } = {}) {
       order.push('panel');
       if (options.panelThrows === true) throw new Error('panel refused');
     },
-    getPanelShape: async () => ({ addressing: 'id', connectionsApi: 'connections' }),
     deletePanelUserDevice: async () => {
       order.push('panel');
       if (options.panelThrows === true) throw new Error('panel refused');

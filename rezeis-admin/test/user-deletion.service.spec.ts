@@ -31,7 +31,7 @@ interface ProfileSnapshotRow {
 }
 
 const DEFAULT_PROFILE_SNAPSHOT: readonly ProfileSnapshotRow[] = [
-  { id: 'sub-1', remnawaveId: 'rw-1', remnawavePanelId: 4471, remnawavePanelUsername: 'rz_bob_1' },
+  { id: 'sub-1', remnawaveId: '4471', remnawavePanelId: 4471, remnawavePanelUsername: 'rz_bob_1' },
 ];
 
 /** A stored row, as opposed to the projection the snapshot selects out of it. */
@@ -345,15 +345,29 @@ describe('UserDeletionService', () => {
       'count:trial-claim',
       'snapshot:profiles',
       'delete:user',
-      'delete:panel:rw-1',
+      'delete:panel:4471',
     ]);
   });
 
-  it('addresses the panel by the recorded numeric id when remnawaveId is a stale 2.x uuid', async () => {
-    // Created on 2.x, panel since upgraded to 3.x, nothing re-synced. The
-    // stored string names nothing there; the recorded id is the only route to
-    // the profile, and this is the last chance to use it — the local rows are
-    // already gone.
+  it('hands the panel the full snapshotted identity, enough to BUILD the 3.x path', async () => {
+    const { service, state } = buildService();
+
+    await service.deleteUser('user-1');
+
+    assert.equal(state.panelRefs.length, 1);
+    // Through the real addressing function: what matters is that a 3.x path can
+    // be BUILT from what the service handed over — the local rows are gone.
+    assert.deepStrictEqual(panelUserAddress(state.panelRefs[0] as StoredPanelIdentity), {
+      kind: 'ready',
+      segment: '4471',
+    });
+  });
+
+  it('skips — never guesses — the panel delete of a profile stored as a 2.x uuid, and names it', async () => {
+    // The customer is deleted locally all the same: this path must never block.
+    // What is refused is the upstream call, because the address fallback would
+    // carry the dead uuid to the recorded numeric id and delete whoever is live
+    // there. The orphan is the cheaper loss, and the log line names it.
     const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
     const { service, state } = buildService({
       profileSnapshot: [
@@ -365,22 +379,19 @@ describe('UserDeletionService', () => {
         },
       ],
     });
+    const errors: string[] = [];
+    (service as unknown as { logger: { error: (message: string) => void } }).logger.error = (message: string) => {
+      errors.push(message);
+    };
 
-    await service.deleteUser('user-1');
+    await assert.doesNotReject(() => service.deleteUser('user-1'));
 
-    assert.equal(state.panelRefs.length, 1);
-    // Through the real addressing function: what matters is that a 3.x path can
-    // be BUILT from what the service handed over.
-    assert.deepStrictEqual(panelUserAddress(state.panelRefs[0] as StoredPanelIdentity, 'id'), {
-      kind: 'ready',
-      segment: '4471',
-    });
-    // Counter-check: the stored string alone — what this call site used to pass
-    // — names nothing on that panel, so the assertion above is not free.
-    assert.equal(
-      panelUserAddress({ remnawaveId: staleUuid, panelId: null, panelUsername: null }, 'id').kind,
-      'impossible',
-    );
+    assert.equal(state.order.includes('delete:user'), true, 'the customer is deleted locally');
+    assert.deepStrictEqual(state.panelRefs, [], 'and nothing is deleted on the panel');
+    assert.equal(errors.length, 1);
+    assert.match(errors[0] ?? '', /SUBSCRIPTION_DELETE_STALE_PANEL_LINK/);
+    assert.match(errors[0] ?? '', /sub-upgraded/);
+    assert.match(errors[0] ?? '', /rz_bob_1/);
   });
 
   it('snapshots a damaged panel link so the orphaned profile is reported, not lost', async () => {
@@ -403,7 +414,7 @@ describe('UserDeletionService', () => {
         {
           userId: 'user-1',
           id: 'sub-healthy',
-          remnawaveId: 'rw-1',
+          remnawaveId: '4471',
           remnawavePanelId: 4471,
           remnawavePanelUsername: 'rz_bob_1',
           configUrl: 'https://sub.example.test/api/sub/aaa',
@@ -431,7 +442,7 @@ describe('UserDeletionService', () => {
         {
           userId: 'user-2',
           id: 'sub-someone-else',
-          remnawaveId: 'rw-2',
+          remnawaveId: '5150',
           remnawavePanelId: 5150,
           remnawavePanelUsername: 'rz_carol_1',
           configUrl: 'https://sub.example.test/api/sub/ccc',
@@ -444,7 +455,7 @@ describe('UserDeletionService', () => {
     // The addressable profile is still deleted, and only that one.
     assert.deepStrictEqual(
       state.panelRefs.map((ref) => (ref as StoredPanelIdentity).remnawaveId),
-      ['rw-1'],
+      ['4471'],
     );
     // The damaged one is reported — by id, and by the panel username, which is
     // the only handle an operator has left for finding it in the panel.
@@ -488,7 +499,7 @@ describe('UserDeletionService', () => {
     await assert.doesNotReject(() => service.deleteUser('user-1'));
 
     assert.equal(state.order.includes('delete:user'), true);
-    assert.equal(state.order[state.order.length - 1], 'delete:panel:rw-1');
+    assert.equal(state.order[state.order.length - 1], 'delete:panel:4471');
   });
 
   it('maps a nested foreign-key restriction to the same safe conflict and leaves Remnawave intact', async () => {
@@ -500,7 +511,7 @@ describe('UserDeletionService', () => {
     // what is holding the account.
     await assertProtectedHistoryConflict(() => service.deleteUser('user-1'), null);
 
-    assert.equal(state.order.includes('delete:panel:rw-1'), false);
+    assert.equal(state.order.includes('delete:panel:4471'), false);
   });
 
   it('maps a concurrent already-deleted row to a stable not-found response', async () => {
@@ -512,7 +523,7 @@ describe('UserDeletionService', () => {
         error instanceof NotFoundException && error.message === 'User not found',
     );
 
-    assert.equal(state.order.includes('delete:panel:rw-1'), false);
+    assert.equal(state.order.includes('delete:panel:4471'), false);
   });
 
   it('retries a serializable write conflict without duplicating external cleanup', async () => {
@@ -524,7 +535,7 @@ describe('UserDeletionService', () => {
       state.order.filter((entry) => entry === `transaction:${Prisma.TransactionIsolationLevel.Serializable}`).length,
       2,
     );
-    assert.equal(state.order.filter((entry) => entry === 'delete:panel:rw-1').length, 1);
+    assert.equal(state.order.filter((entry) => entry === 'delete:panel:4471').length, 1);
   });
 
   it('projects user.deleted only to that user and strips admin/deleted-user metadata', () => {

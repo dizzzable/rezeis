@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-// Namespace imports: the 2.x and 3.x lines export different command NAMES
-// (`GetUserByUuidCommand` vs `GetUserByIdCommand`), and a named import of a
-// symbol a later release removes would fail at load rather than as an assertion.
-import * as contractPanel27 from '@remnawave/contract-panel-2.7';
-import * as contractPanel28 from '@remnawave/contract-panel-2.8';
+// Namespace imports: releases export different command NAMES, and a named
+// import of a symbol a later release removes would fail at load rather than as
+// an assertion.
+//
+// No 2.x contract is imported. This build refuses a 2.x panel on every path
+// and builds no request in its shape, so there is no 2.x route left to pin.
 import * as contractPanel321 from '@remnawave/contract-panel-3.2.1';
 import * as contractPanel323 from '@remnawave/contract-panel-3.2.3';
 import * as contractPanel33 from '@remnawave/contract-panel-3.3';
@@ -33,8 +34,6 @@ import {
  * (https://docs.rw/sdk/typescript-sdk/), installed as devDependency aliases
  * named by PANEL release:
  *
- *   `@remnawave/contract-panel-2.7`    backend-contract 2.7.2   panel 2.7.3–2.7.4
- *   `@remnawave/contract-panel-2.8`    backend-contract 2.8.35  panel 2.8.0–2.8.1
  *   `@remnawave/contract-panel-3.2.1`  backend-contract 3.2.0   panel 3.2.0–3.2.1
  *   `@remnawave/contract-panel-3.2.3`  backend-contract 3.2.3   panel 3.2.3
  *   `@remnawave/contract-panel-3.3`    backend-contract 3.4.2   panel 3.3.0–3.3.2
@@ -42,8 +41,8 @@ import {
  *   `@remnawave/contract-panel-3.4.4`  backend-contract 3.4.15  panel 3.4.4
  *
  * None of them is a runtime dependency — `panel-command-conformance.spec.ts`
- * guards that — so they cost the image nothing. The 3.x routes are checked
- * against every 3.x release, the 2.x routes against both 2.x releases.
+ * guards that — so they cost the image nothing. The routes are checked against
+ * every 3.x release.
  */
 
 /**
@@ -76,11 +75,6 @@ const THREE_X: readonly Release[] = [
   { panels: '3.3.0–3.3.2', contract: '3.4.2', module: contractPanel33 as unknown as ContractNamespace },
   { panels: '3.4.0–3.4.3', contract: '3.4.13', module: contractPanel343 as unknown as ContractNamespace },
   { panels: '3.4.4', contract: '3.4.15', module: contractPanel344 as unknown as ContractNamespace },
-];
-
-const TWO_X: readonly Release[] = [
-  { panels: '2.7.3–2.7.4', contract: '2.7.2', module: contractPanel27 as unknown as ContractNamespace },
-  { panels: '2.8.0–2.8.1', contract: '2.8.35', module: contractPanel28 as unknown as ContractNamespace },
 ];
 
 /** `url` off an export, or `null` when the release does not export that command. */
@@ -200,64 +194,6 @@ describe('Remnawave 3.x routes match every 3.x release', () => {
   });
 });
 
-describe('Remnawave 2.x routes match both 2.x releases', () => {
-  // The 2.x half of `PANEL_ROUTES`: the same operations, addressed by UUID, plus
-  // the `ip-control/*` family that 3.x deleted outright.
-  const UUID = '330f2b38-1362-46ab-b5c0-dea32167eff9';
-
-  const CASES: ReadonlyArray<readonly [string, string, string, string | undefined]> = [
-    ['GET one profile', route(PANEL_ROUTES.user(UUID)), 'GetUserByUuidCommand', UUID],
-    ['DELETE one profile', route(PANEL_ROUTES.deleteUser(UUID)), 'DeleteUserCommand', UUID],
-    ['reset traffic', route(PANEL_ROUTES.resetUserTraffic(UUID)), 'ResetUserTrafficCommand', UUID],
-    [
-      'revoke subscription',
-      route(PANEL_ROUTES.revokeUserSubscription(UUID)),
-      'RevokeUserSubscriptionCommand',
-      UUID,
-    ],
-    ['devices of one profile', route(PANEL_ROUTES.userHwidDevices(UUID)), 'GetUserHwidDevicesCommand', UUID],
-    ['delete one device', route(PANEL_ROUTES.deleteHwidDevice), 'DeleteUserHwidDeviceCommand', undefined],
-    [
-      'delete every device',
-      route(PANEL_ROUTES.deleteAllHwidDevices),
-      'DeleteAllUserHwidDevicesCommand',
-      undefined,
-    ],
-    ['drop connections (2.x)', route(PANEL_ROUTES.ipControlDrop), 'DropConnectionsCommand', undefined],
-  ];
-
-  for (const [label, ours, command, arg] of CASES) {
-    it(`${label}: ${ours}`, () => {
-      for (const release of TWO_X) {
-        assert.equal(ours, vendorUrl(release, command, arg), `contract ${release.contract} (panel ${release.panels})`);
-      }
-    });
-  }
-
-  it('checks the 2.x families too', () => {
-    assert.equal(CASES.length, 8);
-    const families = new Set(CASES.map(([, ours]) => ours.split('/')[2]));
-    assert.deepEqual([...families].sort(), ['hwid', 'ip-control', 'users']);
-  });
-
-  it('the two 2.x releases agree on every path either of them publishes', () => {
-    const [v27, v28] = TWO_X as readonly [Release, Release];
-    const drifted: string[] = [];
-    let compared = 0;
-    for (const name of Object.keys(v27.module)) {
-      if (!name.endsWith('Command')) continue;
-      const a = urlOf(v27, name);
-      const b = urlOf(v28, name);
-      if (a === null || b === null) continue;
-      compared += 1;
-      if (a !== b) drifted.push(`${name}: ${a} -> ${b}`);
-    }
-    // Anchor: the comparison really walked the contract.
-    assert.ok(compared > 100, `only ${compared} commands compared`);
-    assert.deepEqual(drifted, []);
-  });
-});
-
 describe('Remnawave "no such user" codes match every release', () => {
   interface Errors {
     readonly USER_NOT_FOUND: { readonly code: string; readonly httpCode: number; readonly message: string };
@@ -267,11 +203,11 @@ describe('Remnawave "no such user" codes match every release', () => {
       readonly message: string;
     };
   }
-  const RELEASES = [...TWO_X, ...THREE_X];
+  const RELEASES = THREE_X;
   const errorsOf = (release: Release): Errors => release.module['ERRORS'] as Errors;
 
   it('both codes are the vendor’s, and both mean a missing user, in every release', () => {
-    assert.equal(RELEASES.length, 7);
+    assert.equal(RELEASES.length, 5);
     for (const release of RELEASES) {
       const errors = errorsOf(release);
       assert.equal(errors.USER_NOT_FOUND.code, 'A025', release.contract);

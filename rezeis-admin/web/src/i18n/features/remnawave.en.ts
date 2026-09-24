@@ -23,6 +23,14 @@ export const en = {
       // this sentence and fails if it names a different set than the code does.
       description: 'Detected panel version {{version}}. This integration is tested against 3.2, 3.3 and 3.4. Some features may misbehave — update rezeis or the panel.',
     },
+    // Shown INSTEAD of `versionWarning` when the panel is Remnawave 2.x: the
+    // server refuses every request to such a panel, so "untested" would
+    // understate it. Names no tested version on purpose — the list lives in
+    // `versionWarning.description` alone, and a spec reads it there.
+    panelTooOld: {
+      title: 'Panel version {{version}} is not supported',
+      description: 'rezeis works only with Remnawave 3.x and refuses every request to this panel: profile sync, nodes, hosts, statistics, user search and device removal are all off. Update the panel to 3.x.',
+    },
     live: {
       subtitle: 'Active sessions and source IPs per node, read live from the panel.',
       pickNode: 'Pick a node',

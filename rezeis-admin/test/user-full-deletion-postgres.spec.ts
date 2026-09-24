@@ -72,7 +72,6 @@ function nextTelegramId(): bigint {
  */
 const panelDeletes: string[] = [];
 const recordingPanel = {
-  getPanelShape: async () => ({ shape: 'id' as const }),
   deletePanelUser: async (identity: { readonly remnawaveId?: string }) => {
     panelDeletes.push(identity.remnawaveId ?? 'unknown');
   },
@@ -365,9 +364,12 @@ run('«Удалить полностью» — the account goes, the books stay'
     // and the deletion would silently leave a live profile behind.
     const user = await createUser();
     const subscriptionId = await createSubscriptionWithTerm(user.id);
+    // A decimal, as a 3.x link stores: a non-decimal identity is SKIPPED by the
+    // user deletion (it names nobody on a 3.x panel), which is its own case.
+    const panelIdentity = String(900_000 + (process.pid % 90_000));
     await prisma.subscription.update({
       where: { id: subscriptionId },
-      data: { remnawaveId: `${prefix}-panel` },
+      data: { remnawaveId: panelIdentity },
     });
     await createPayment(user.id, '99.00');
     panelDeletes.length = 0;
@@ -376,7 +378,7 @@ run('«Удалить полностью» — the account goes, the books stay'
 
     assert.deepEqual(
       panelDeletes,
-      [`${prefix}-panel`],
+      [panelIdentity],
       'the panel profile was never asked to go, so the customer is deleted and their VPN keeps working',
     );
   });

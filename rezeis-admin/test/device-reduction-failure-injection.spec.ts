@@ -20,7 +20,7 @@ function okList(...hwids: string[]) {
   return {
     kind: 'ok' as const,
     value: { devices: hwids.map((hwid) => ({ hwid, createdAt: '2026-01-01T00:00:00Z' })), total: hwids.length },
-    detectedVersion: '2.8.0',
+    detectedVersion: '3.2.1',
   };
 }
 
@@ -41,10 +41,11 @@ function build(plan: Record<string, unknown>, listQueue: unknown[]) {
       findUnique: async () => ({ desiredRevision: 4n, desiredDeviceLimit: 1 }),
     },
     subscription: {
-      // Both supplementary identity columns present, as every real row has
-      // them: 2.x and 3.x alike put a numeric id and a username on every user.
+      // A decimal identity — the only kind a 3.x panel issues, and the only
+      // kind the saga reaches the panel with — and both supplementary columns
+      // present, as every real row has them.
       findUnique: async () => ({
-        remnawaveId: 'rem-1',
+        remnawaveId: '4711',
         remnawavePanelId: 4711,
         remnawavePanelUsername: 'rz_alice_sub',
         status: 'ACTIVE',
@@ -61,7 +62,7 @@ function build(plan: Record<string, unknown>, listQueue: unknown[]) {
     strictListUserDevices: async () => (queue.length > 0 ? queue.shift() : okList('old')),
     strictDeleteUserDevice: async (_ref: unknown, hwid: string) => {
       deleteCalls.push(hwid);
-      return { kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' };
+      return { kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' };
     },
   };
   const completion = {

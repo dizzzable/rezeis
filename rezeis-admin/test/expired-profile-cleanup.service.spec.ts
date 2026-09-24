@@ -7,7 +7,11 @@ import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import { EVENT_TYPES } from '../src/common/services/system-events.service';
-import { ExpiredProfileCleanupService } from '../src/modules/profile-sync/expired-profile-cleanup.service';
+import {
+  ExpiredProfileCleanupService,
+  PANEL_NO_END_REASSERT_CAUSE,
+} from '../src/modules/profile-sync/expired-profile-cleanup.service';
+import { LIFETIME_RESTORE_CAUSE } from '../src/modules/subscriptions/services/lifetime-restore.service';
 import { PanelCommandExecutor } from '../src/modules/remnawave/services/panel-command.executor';
 import { AxiosPanelTransport } from '../src/modules/remnawave/services/panel-transport';
 import { PanelUsersClient } from '../src/modules/remnawave/services/panel-users.client';
@@ -536,10 +540,18 @@ describe('ExpiredProfileCleanupService', () => {
     assert.deepStrictEqual(deletions.map((d) => d.subscriptionId), ['detached-1']);
     assert.equal(count, 1);
 
-    // And the two survivors are reported, with a number an operator can act on.
+    // And the two survivors are reported, with a number an operator can act on
+    // and the place to act — the card prints `note` as its «📝 Заметка».
     assert.equal(warned.length, 1);
     assert.equal(warned[0]?.[0], EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC);
-    assert.deepStrictEqual(warned[0]?.[3], { subscriptions: 2 });
+    const metadata = warned[0]?.[3] as Record<string, unknown>;
+    assert.deepStrictEqual(Object.keys(metadata).sort(), ['note', 'subscriptions']);
+    assert.equal(metadata['subscriptions'], 2);
+    assert.match(
+      String(metadata['note']),
+      /«Подписки» → «Инструменты» → «Подписки без привязки к Remnawave», кнопка «Привязать профиль»/,
+    );
+    assert.doesNotMatch(String(metadata['note']), /Починка привязки к панели/);
   });
 
   it('honours a wider grace window in the cutoff (graceDays=7)', async () => {
@@ -670,6 +682,50 @@ describe('ExpiredProfileCleanupService', () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(passes(), 0);
     assert.deepEqual(queued, []);
+  });
+
+  it('counts «Вернуть бессрочность» as done: a restored row gets no second "no end" PATCH', async () => {
+    // Both UPDATEs carry the same "no end"; the restore's own job is the
+    // record that the panel already has it. The fake evaluates the `none`
+    // filter the service builds, row by row, so a cause dropped from it
+    // re-selects the restored row here exactly as PostgreSQL would.
+    const rows = [
+      { id: 'sub-restored', jobs: [LIFETIME_RESTORE_CAUSE] },
+      { id: 'sub-reasserted', jobs: [PANEL_NO_END_REASSERT_CAUSE] },
+      { id: 'sub-untouched', jobs: ['SOMETHING_ELSE'] },
+      { id: 'sub-fresh', jobs: [] as string[] },
+    ];
+    const created: string[] = [];
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async (args: {
+            where: { syncJobs: { none: { cause: { in: readonly string[] } } } };
+          }) => {
+            const excluded = args.where.syncJobs.none.cause.in;
+            return rows
+              .filter((row) => !row.jobs.some((cause) => excluded.includes(cause)))
+              .map((row) => ({ id: row.id }));
+          },
+        },
+        profileSyncJob: {
+          create: async (args: { data: { subscriptionId: string } }) => {
+            created.push(args.data.subscriptionId);
+            return { id: `job-${args.data.subscriptionId}` };
+          },
+        },
+      } as never,
+      eventsMock(),
+      settingsMock({ deleteEnabled: false }),
+      panelUsersMock(-30 * DAY_MS),
+      deletionMock([]),
+      { enqueue: async () => undefined } as never,
+    );
+
+    const queuedCount = await service.reassertPanelNoEnd();
+
+    assert.deepEqual(created, ['sub-untouched', 'sub-fresh']);
+    assert.equal(queuedCount, 2);
   });
 });
 

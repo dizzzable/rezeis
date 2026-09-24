@@ -254,23 +254,24 @@ function adapter(handler: () => unknown) {
 }
 
 describe('strictListUserDevices carries lastSeenAt (defect 1 root cause)', () => {
-  it('2.7.4: reads the row `updatedAt` as last activity', async () => {
-    const outcome = await adapter(() => of({ data: fixture('2.7.4/devices.json') }))
-      .strictListUserDevices('11111111-1111-4111-8111-111111111111');
-    assert.equal(outcome.kind, 'ok');
-    if (outcome.kind !== 'ok') return;
-    assert.deepEqual(
-      outcome.value.devices.map((d) => [d.hwid, d.lastSeenAt]),
-      [
-        ['hwid-older', '2026-06-01T00:00:00.000Z'],
-        ['hwid-newer', '2026-06-15T00:00:00.000Z'],
-      ],
-    );
-  });
-
-  it('2.8.0: reads the row `lastSeenAt`', async () => {
-    const outcome = await adapter(() => of({ data: fixture('2.8.0/devices.json') }))
-      .strictListUserDevices('22222222-2222-4222-8222-222222222222');
+  it('a build that names it `lastSeenAt` is read too, ahead of `updatedAt`', async () => {
+    const outcome = await adapter(() =>
+      of({
+        data: {
+          response: {
+            total: 1,
+            devices: [
+              {
+                hwid: 'hwid-seen',
+                createdAt: '2026-05-01T00:00:00.000Z',
+                updatedAt: '2026-05-02T00:00:00.000Z',
+                lastSeenAt: '2026-07-01T00:00:00.000Z',
+              },
+            ],
+          },
+        },
+      }),
+    ).strictListUserDevices('2');
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.devices[0]!.lastSeenAt, '2026-07-01T00:00:00.000Z');
@@ -298,7 +299,7 @@ describe('strictListUserDevices carries lastSeenAt (defect 1 root cause)', () =>
     // version that never sends it must not strand every reduction.
     const outcome = await adapter(() =>
       of({ data: { response: { total: 1, devices: [{ hwid: 'a', createdAt: '2026-01-01T00:00:00Z' }] } } }),
-    ).strictListUserDevices('u');
+    ).strictListUserDevices('2');
     assert.equal(outcome.kind, 'ok');
     if (outcome.kind !== 'ok') return;
     assert.equal(outcome.value.devices[0]!.lastSeenAt, null);
@@ -324,7 +325,7 @@ function liveRow(hwid: string, createdDaysAgo: number, seenDaysAgo: number | nul
 }
 
 function okList(...devices: unknown[]) {
-  return { kind: 'ok' as const, value: { devices, total: devices.length }, detectedVersion: '2.8.0' };
+  return { kind: 'ok' as const, value: { devices, total: devices.length }, detectedVersion: '3.2.1' };
 }
 
 function buildExecutor(opts: {
@@ -365,7 +366,7 @@ function buildExecutor(opts: {
     },
     subscription: {
       findUnique: async () => ({
-        remnawaveId: 'rem-1',
+        remnawaveId: '4711',
         remnawavePanelId: 4711,
         remnawavePanelUsername: 'rz_alice_sub',
         configUrl: null,
@@ -385,7 +386,7 @@ function buildExecutor(opts: {
       listQueue.length > 0 ? listQueue.shift() : okList(liveRow('hw-laptop', 104, 1)),
     strictDeleteUserDevice: async (_ref: unknown, hwid: string) => {
       deleteCalls.push(hwid);
-      return { kind: 'ok', value: { total: 1 }, detectedVersion: '2.8.0' };
+      return { kind: 'ok', value: { total: 1 }, detectedVersion: '3.2.1' };
     },
   };
   const boundary = {
@@ -540,7 +541,7 @@ describe('device reduction planner - refuses and raises an incident (defect 1)',
       },
       subscription: {
         findUnique: async () => ({
-          remnawaveId: 'rem-1',
+          remnawaveId: '4711',
           remnawavePanelId: 4711,
           remnawavePanelUsername: 'rz_alice_sub',
           configUrl: null,

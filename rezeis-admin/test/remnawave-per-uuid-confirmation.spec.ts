@@ -47,7 +47,16 @@ const CONFIG = {
   webhookSecret: null,
 } as const;
 
-/** The uuid every test asks about: a live customer the prefix does not cover. */
+/**
+ * The id every test asks about: a live customer the prefix does not cover —
+ * the panel's 25 002nd profile, one past the last row the walk can reach.
+ */
+const MISSING_ID = '25002';
+
+/**
+ * What a backup made in the 2.x era names the same customer by. A 3.x panel
+ * has no uuid column to look it up in.
+ */
 const MISSING_UUID = '11111111-1111-4111-8111-111111111111';
 
 /**
@@ -55,17 +64,16 @@ const MISSING_UUID = '11111111-1111-4111-8111-111111111111';
  * stops at the ceiling and the read comes back `ok` with `complete: false`.
  * That is the state a large production panel is in on EVERY import.
  */
-const OVER_CEILING = Array.from({ length: 25_001 }, (_, i) => `u-${i}`);
+const OVER_CEILING = Array.from({ length: 25_001 }, (_, i) => String(i + 1));
 
-/** A well-formed panel row (2.7.4 / 2.8.0 wire shape). */
-function row(uuid: string) {
+/** A well-formed 3.x panel row, keyed by its numeric id. */
+function row(id: string) {
   return {
-    uuid,
-    username: `name-${uuid}`,
+    id: Number(id),
+    username: `name-${id}`,
     status: 'ACTIVE',
-    subscriptionUrl: `https://example.test/${uuid}`,
+    subscriptionUrl: `https://example.test/${id}`,
     telegramId: 123,
-    id: 7,
     email: null,
     expireAt: '2030-01-01T00:00:00.000Z',
     createdAt: '2025-01-01T00:00:00.000Z',
@@ -88,7 +96,7 @@ function axiosError(status: number, data?: unknown) {
   };
 }
 
-/** How `/api/users/{uuid}` behaves for the uuid under test. */
+/** How `/api/users/{id}` behaves for the id under test. */
 type SingleRead =
   | { readonly kind: 'status'; readonly status: number; readonly data?: unknown }
   | { readonly kind: 'network' }
@@ -148,7 +156,7 @@ function buildPanel(
         }
         const start = Number.parseInt(url.searchParams.get('start') ?? '0', 10);
         const users = roster.slice(start, start + 500).map((u) => row(u));
-        return of({ data: { response: { users, total: roster.length }, version: '2.8.0' } });
+        return of({ data: { response: { users, total: roster.length }, version: '3.3.2' } });
       },
     } as never,
     { ...CONFIG, token: options.token === undefined ? CONFIG.token : options.token } as never,
@@ -161,15 +169,19 @@ async function truncatedLookup(service: RemnawaveApiService): Promise<PanelLooku
   const lookup = await buildPanelLookup(() => service.strictGetAllPanelUsers());
   assert.equal(lookup.reachable, true, 'a truncated read is still a usable read');
   assert.equal(lookup.complete, false, 'this is the state that drives per-uuid confirmation');
-  assert.equal(lookup.map.has(MISSING_UUID), false, 'the uuid under test must MISS the prefix');
+  assert.equal(lookup.map.has(MISSING_ID), false, 'the id under test must MISS the prefix');
   return lookup;
 }
 
 /** Drives the seam exactly as all three importers wire it. */
-async function resolveThroughService(service: RemnawaveApiService, lookup: PanelLookup) {
+async function resolveThroughService(
+  service: RemnawaveApiService,
+  lookup: PanelLookup,
+  identity: string = MISSING_ID,
+) {
   const unconfirmed: Array<{ uuid: string; reason: string }> = [];
   const resolved = await resolvePanelProfile(
-    MISSING_UUID,
+    identity,
     lookup,
     (uuid) => service.getPanelUser(uuid),
     {
@@ -226,10 +238,28 @@ describe('per-uuid confirmation: a panel that did not answer never expires anybo
       );
       // …and the degrade is never silent.
       assert.equal(unconfirmed.length, 1);
-      assert.equal(unconfirmed[0].uuid, MISSING_UUID);
+      assert.equal(unconfirmed[0].uuid, MISSING_ID);
       assert.match(unconfirmed[0].reason, /unconfirmed/);
     });
   }
+
+  it('a backup that still names the customer by a 2.x uuid is never expired, and costs no read', async () => {
+    // The panel keys its list by numeric id, and a uuid is not in that
+    // namespace: a miss there proves nothing, and there is no route on a 3.x
+    // panel that could prove anything about a uuid either.
+    const { service, singleReads } = buildPanel(OVER_CEILING, PANEL_SAYS_GONE);
+    const lookup = await truncatedLookup(service);
+    const { panel, known, unconfirmed } = await resolveThroughService(service, lookup, MISSING_UUID);
+
+    assert.equal(panel, null);
+    assert.equal(known, false);
+    assert.equal(
+      reconcileMissingPanelStatus(known, SubscriptionStatus.ACTIVE),
+      SubscriptionStatus.ACTIVE,
+    );
+    assert.equal(unconfirmed.length, 1, 'the gap is reported, not silent');
+    assert.deepEqual(singleReads, [], 'not one request names the uuid');
+  });
 
   it('a genuine 404 still expires a stale backup row — unchanged', async () => {
     const { service, singleReads } = buildPanel(OVER_CEILING, PANEL_SAYS_GONE);
@@ -245,7 +275,7 @@ describe('per-uuid confirmation: a panel that did not answer never expires anybo
     assert.deepEqual(unconfirmed, [], 'a proven absence is not a degrade');
     // The best-effort read that returned nothing, then the strict one that
     // proved the nothing.
-    assert.deepEqual(singleReads, [MISSING_UUID, MISSING_UUID]);
+    assert.deepEqual(singleReads, [MISSING_ID, MISSING_ID]);
   });
 
   it('a live profile past the ceiling is overlaid on ONE read, as before', async () => {
@@ -254,11 +284,11 @@ describe('per-uuid confirmation: a panel that did not answer never expires anybo
     const { panel, known, unconfirmed } = await resolveThroughService(service, lookup);
 
     assert.equal(known, true);
-    assert.equal(panel?.uuid, MISSING_UUID);
+    assert.equal(panel?.uuid, MISSING_ID);
     assert.deepEqual(unconfirmed, []);
-    // Healthy 2.7.4 / 2.8.0 behaviour is unchanged: no confirmation round trip
-    // is spent on the common miss (a user who simply lives past the ceiling).
-    assert.deepEqual(singleReads, [MISSING_UUID]);
+    // No confirmation round trip is spent on the common miss (a user who
+    // simply lives past the ceiling).
+    assert.deepEqual(singleReads, [MISSING_ID]);
   });
 
   it('a profile the strict read CAN see but the overlay read cannot is left alone', async () => {
@@ -287,7 +317,7 @@ async function resolvePanelProfileWithSplitReads(
 ) {
   const unconfirmed: Array<{ uuid: string; reason: string }> = [];
   const resolved = await resolvePanelProfile(
-    MISSING_UUID,
+    MISSING_ID,
     lookup,
     async () => null,
     {
@@ -367,7 +397,7 @@ describe('StealthnetImporterService — the importer that expires unconditionall
         {
           id: 'source-sub-1',
           owner_id: 'client-1',
-          remnawave_uuid: MISSING_UUID,
+          remnawave_uuid: MISSING_ID,
           subscription_index: 1,
           tariff_id: null,
           gift_status: null,
@@ -397,7 +427,7 @@ describe('StealthnetImporterService — the importer that expires unconditionall
       SubscriptionStatus.ACTIVE,
       'a panel that could not answer must not cost a paying customer their subscription',
     );
-    assert.deepEqual(singleReads, [MISSING_UUID, MISSING_UUID]);
+    assert.deepEqual(singleReads, [MISSING_ID, MISSING_ID]);
   });
 
   it('still expires a profile the panel proves is gone (404)', async () => {
@@ -412,7 +442,7 @@ describe('StealthnetImporterService — the importer that expires unconditionall
     await run;
     assert.equal(updates.length, 1);
     assert.equal(updates[0].data.status, SubscriptionStatus.ACTIVE);
-    assert.equal(updates[0].data.configUrl, `https://example.test/${MISSING_UUID}`);
+    assert.equal(updates[0].data.configUrl, `https://example.test/${MISSING_ID}`);
   });
 });
 
@@ -461,7 +491,7 @@ describe('RemnashopImporterService — the backup status is kept, not overwritte
       subscriptions: [
         {
           id: 1,
-          user_remna_id: MISSING_UUID,
+          user_remna_id: MISSING_ID,
           user_telegram_id: 123,
           status: backupStatus,
           is_trial: false,
@@ -538,7 +568,7 @@ describe('AltshopImporterService — the third caller of the same seam', () => {
       subscriptions: [
         {
           id: 1,
-          user_remna_id: MISSING_UUID,
+          user_remna_id: MISSING_ID,
           user_telegram_id: 123,
           status: 'ACTIVE',
           is_trial: false,
