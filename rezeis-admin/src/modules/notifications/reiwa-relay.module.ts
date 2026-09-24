@@ -53,6 +53,11 @@ export function buildRelayUndeliveredRecorder(
  * see `undelivered-record.ts` for the cycle this keeps out of the file graph.
  * `SystemEventsService` comes from the global `SystemEventsModule`. The
  * processor takes the same token, so both roads share one alert window.
+ *
+ * The recorder is exported for a third road: the settings delivery check
+ * (`bot-config/config-versions/config-delivery-check.service.ts`), whose card
+ * about a save the cabinet did not take is this relay's `reiwa.relay_undelivered`
+ * and has to count against the same windows.
  */
 @Module({
   imports: [BullModule.registerQueue({ name: REIWA_RELAY_QUEUE })],
@@ -66,6 +71,6 @@ export function buildRelayUndeliveredRecorder(
       useFactory: buildRelayUndeliveredRecorder,
     },
   ],
-  exports: [ReiwaRelayQueueService],
+  exports: [ReiwaRelayQueueService, RELAY_UNDELIVERED_RECORDER],
 })
 export class ReiwaRelayModule {}

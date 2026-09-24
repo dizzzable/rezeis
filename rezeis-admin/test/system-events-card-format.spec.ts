@@ -1781,6 +1781,11 @@ describe('a broadcast the panel refused to send', () => {
     const cases = [
       ['subscription.synced', { reason: 'regenerated_link_lost' }, '🔗 <b>Событие: Новая ссылка подписки не сохранилась</b>'],
       ['system.remnawave_sync', { reason: 'merge_stopped' }, '⏸ <b>Событие: Слияние подписок-дубликатов остановилось</b>'],
+      [
+        'reiwa.relay_undelivered',
+        { reason: 'config_not_delivered' },
+        '🧭 <b>Событие: Изменение настроек не дошло до кабинета</b>',
+      ],
       // Its `reason` is the adoption failure's own text, so the flag decides.
       [
         'system.web_push_unconfigured',

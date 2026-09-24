@@ -1,8 +1,13 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Inject, Logger } from '@nestjs/common';
+import { Inject, Logger, Optional } from '@nestjs/common';
 import { Job, UnrecoverableError } from 'bullmq';
 
 import { EVENT_TYPES, type SystemEventsService } from '../../common/services/system-events.service';
+import {
+  CONFIG_DELIVERY_TRACKER,
+  isConfigHintEvent,
+  type ConfigDeliveryTracker,
+} from '../bot-config/config-versions/config-versions.constants';
 // Imported from the backup module rather than reimplemented: that file is
 // where the relay-outcome retry classification was first reasoned out, in
 // detail, for exactly this question. Three modules now read it (backup,
@@ -157,8 +162,31 @@ export class ReiwaRelayProcessor extends WorkerHost {
     @Inject(RELAY_UNDELIVERED_RECORDER)
     private readonly recordUndeliveredSend: UndeliveredRecorder,
     private readonly prismaService: PrismaService,
+    /**
+     * The settings delivery check (`bot-config/config-versions/`). With it, a
+     * cache hint that ran out of attempts raises no card of its own: the
+     * cabinet's version poll catches a lost hint within twenty seconds, and two
+     * minutes after the save the check warns only if the cabinet still holds
+     * the old copy — the owner's rule. The hint's outcome goes to the check as
+     * evidence instead. Absent in a module built without it: the old card.
+     */
+    @Optional()
+    @Inject(CONFIG_DELIVERY_TRACKER)
+    private readonly deliveryTracker?: ConfigDeliveryTracker,
   ) {
     super();
+  }
+
+  /** A cache hint's final outcome, told to the delivery check. Never throws. */
+  private async settleHint(event: ReiwaRelayEvent, delivered: boolean, status: string): Promise<void> {
+    if (this.deliveryTracker === undefined || !isConfigHintEvent(event)) return;
+    try {
+      await this.deliveryTracker.hintSettled(event, delivered, status);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Could not record the outcome of ${event} for the delivery check: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -184,6 +212,7 @@ export class ReiwaRelayProcessor extends WorkerHost {
 
     if (isRelayDelivered(event, outcome)) {
       await this.rememberChannelPost(job.data, outcome);
+      await this.settleHint(event, true, outcome.status);
       return { event, status: outcome.status, delivered: true };
     }
 
@@ -207,7 +236,13 @@ export class ReiwaRelayProcessor extends WorkerHost {
       );
     }
 
-    await this.recordUndelivered(job, outcome);
+    if (this.deliveryTracker !== undefined && isConfigHintEvent(event)) {
+      // A cache hint out of attempts: no card here — the delivery check decides,
+      // two minutes after the save, from what the cabinet holds.
+      await this.settleHint(event, false, outcome.status);
+    } else {
+      await this.recordUndelivered(job, outcome);
+    }
     // Nothing further is coming for this relay. A broadcast's channel post
     // that certainly never went up must stop reading as a public copy on the
     // broadcast page — see `rememberLostChannelPost`.

@@ -1,7 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { buildWebhookSignature } from '../../../common/http/webhook-signature.util';
 import { ReiwaRelayQueueService } from '../../notifications/services/reiwa-relay-queue.service';
+import {
+  CONFIG_DELIVERY_TRACKER,
+  type ConfigDeliveryTracker,
+  type ConfigHintEvent,
+} from '../config-versions/config-versions.constants';
 
 /**
  * ReiwaCacheInvalidatorService
@@ -24,6 +29,12 @@ import { ReiwaRelayQueueService } from '../../notifications/services/reiwa-relay
  * Enabled only when BOTH `REIWA_URL` and `WEBHOOK_SECRET_HEADER` are set.
  * All calls are best-effort and fire-and-forget: a save in admin must NEVER
  * fail because reiwa is down.
+ *
+ * Every hint is also told to the settings delivery check
+ * (`config-versions/config-delivery-check.service.ts`), whether or not the
+ * webhook is configured: the cabinet's version poll delivers the change either
+ * way, the versions it polls are recomputed from here on, and two minutes later
+ * the operator hears about it only if the cabinet still holds the old copy.
  */
 @Injectable()
 export class ReiwaCacheInvalidatorService {
@@ -38,7 +49,16 @@ export class ReiwaCacheInvalidatorService {
    */
   private readonly timeoutMs = 5_000;
 
-  public constructor(private readonly relayQueue: ReiwaRelayQueueService) {
+  public constructor(
+    private readonly relayQueue: ReiwaRelayQueueService,
+    /**
+     * By token and optional: this service is declared in seven modules, and
+     * the tracker's module is global — see `CONFIG_DELIVERY_TRACKER`.
+     */
+    @Optional()
+    @Inject(CONFIG_DELIVERY_TRACKER)
+    private readonly deliveryTracker?: ConfigDeliveryTracker,
+  ) {
     const baseUrl = (process.env.REIWA_URL ?? '').trim().replace(/\/+$/, '');
     this.secret = (process.env.WEBHOOK_SECRET_HEADER ?? '').trim() || null;
     this.endpoint = baseUrl.length > 0 ? `${baseUrl}/api/v1/webhooks/rezeis` : null;
@@ -60,7 +80,7 @@ export class ReiwaCacheInvalidatorService {
    * eventually.
    */
   public async invalidate(reason: string): Promise<void> {
-    await this.relayQueue.enqueue('reiwa.bot.invalidate', { reason });
+    await this.hint('reiwa.bot.invalidate', reason);
   }
 
   /**
@@ -73,7 +93,17 @@ export class ReiwaCacheInvalidatorService {
    * to make an actual attempt.
    */
   public async invalidateNow(reason: string): Promise<boolean> {
-    return this.dispatch('reiwa.bot.invalidate', { reason });
+    const tracked = this.trackHint('reiwa.bot.invalidate', reason);
+    const ok = await this.dispatch('reiwa.bot.invalidate', { reason });
+    await tracked;
+    // An attempt was made only with the webhook configured; without it there
+    // is no outcome to report, and the check goes by the cabinet's poll alone.
+    if (this.endpoint !== null && this.secret !== null) {
+      await this.deliveryTracker
+        ?.hintSettled('reiwa.bot.invalidate', ok, ok ? 'delivered' : 'failed')
+        .catch(() => undefined);
+    }
+    return ok;
   }
 
   /**
@@ -83,7 +113,7 @@ export class ReiwaCacheInvalidatorService {
    * every caller `void`s this, and the policy cache TTL is 60s.
    */
   public async invalidatePolicy(reason: string): Promise<void> {
-    await this.relayQueue.enqueue('reiwa.platform.policy_invalidated', { reason });
+    await this.hint('reiwa.platform.policy_invalidated', reason);
   }
 
   /**
@@ -93,7 +123,7 @@ export class ReiwaCacheInvalidatorService {
    * theme without waiting for the HTTP cache TTL (~60s). Queued, bounded.
    */
   public async invalidateBranding(reason: string): Promise<void> {
-    await this.relayQueue.enqueue('reiwa.branding.invalidate', { reason });
+    await this.hint('reiwa.branding.invalidate', reason);
   }
 
   /**
@@ -104,7 +134,7 @@ export class ReiwaCacheInvalidatorService {
    * bounded.
    */
   public async invalidateLanding(reason: string): Promise<void> {
-    await this.relayQueue.enqueue('reiwa.landing.invalidate', { reason });
+    await this.hint('reiwa.landing.invalidate', reason);
   }
 
   /**
@@ -114,7 +144,30 @@ export class ReiwaCacheInvalidatorService {
    * bounded, and fired only after the write has actually landed.
    */
   public async invalidateConnectPage(reason: string): Promise<void> {
-    await this.relayQueue.enqueue('reiwa.connect-page.invalidate', { reason });
+    await this.hint('reiwa.connect-page.invalidate', reason);
+  }
+
+  /**
+   * Queue one hint, and tell the delivery check. The tracker is started first:
+   * its first act — the versions bust — is synchronous, so a poll that follows
+   * the hint is already told the save.
+   */
+  private async hint(event: ConfigHintEvent, reason: string): Promise<void> {
+    const tracked = this.trackHint(event, reason);
+    await this.relayQueue.enqueue(event, { reason });
+    await tracked;
+  }
+
+  private async trackHint(event: ConfigHintEvent, reason: string): Promise<void> {
+    if (this.deliveryTracker === undefined) return;
+    try {
+      await this.deliveryTracker.hintSent(event, reason);
+    } catch (err: unknown) {
+      // The tracker promises not to throw; a save must not fail if it does.
+      this.logger.warn(
+        `Delivery check not scheduled for ${event}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async dispatch(

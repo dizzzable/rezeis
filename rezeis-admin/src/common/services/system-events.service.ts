@@ -3955,7 +3955,16 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },
   // No message: its sentence is `Reiwa relay did not deliver <route>
   // (<status>)`, and the route and the status are both in the details block.
-  'reiwa.relay_undelivered': { emoji: '📡', title: 'Вебхук в reiwa не доставлен' },
+  'reiwa.relay_undelivered': {
+    emoji: '📡',
+    title: 'Вебхук в reiwa не доставлен',
+    // `ConfigDeliveryCheckService`: two minutes after a settings save the
+    // cabinet or the bot still holds the old version — the webhook may well
+    // have arrived, so the card says what did not.
+    variants: variantsByReason({
+      config_not_delivered: { emoji: '🧭', title: 'Изменение настроек не дошло до кабинета' },
+    }),
+  },
   // The message carries what the operator does about it («Telegram отклонил
   // токен бота — проверьте…»), which no metadata key renders.
   'telegram.direct_undelivered': {
