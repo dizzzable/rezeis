@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
 import { AuthModule } from '../auth/auth.module';
 import { PointsModule } from '../points/points.module';
 import { InternalUserModule } from '../internal-user/internal-user.module';
@@ -33,6 +34,11 @@ import { UserDeletionService } from './services/user-deletion.service';
  */
 @Module({
   imports: [
+    // The term model's services: the subscription editor rotates a term on a
+    // plan assignment and moves it with an expiry edit, and user deletion
+    // retires a subscription's durable rows. It imports nothing that reaches
+    // back here, so no `forwardRef`.
+    AddOnEntitlementsModule,
     AuthModule,
     PointsModule,
     InternalUserModule,

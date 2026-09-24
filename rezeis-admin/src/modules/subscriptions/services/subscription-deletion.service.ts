@@ -1,7 +1,5 @@
 import { ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import {
-  DeviceReductionPlanState,
-  EffectiveProjectionState,
   Prisma,
   SubscriptionStatus,
   SyncAction,
@@ -12,6 +10,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
+import { retireDurableRowsInTransaction } from '../../add-on-entitlements/services/durable-retirement.util';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
@@ -387,33 +386,21 @@ export class SubscriptionDeletionService {
           userId: current.userId,
         };
       }
-      await this.addOnEntitlementService.terminateForSubscriptionDeletion(tx, {
-        subscriptionId: subscription.id,
-        correlationId: options.correlationId,
-        reason: 'SUBSCRIPTION_DELETED',
-      });
-      await this.subscriptionTermService.closeForSubscriptionDeletion(tx, subscription.id);
+      // What a subscription that is going away owes the term model — its live
+      // add-ons reversed, its terms closed, its projection DELETED, its open
+      // device plans superseded — through the one helper every deletion path
+      // shares (user deletion and the boundary sweep's retirement call it too).
+      await retireDurableRowsInTransaction(
+        tx,
+        { entitlements: this.addOnEntitlementService, terms: this.subscriptionTermService },
+        {
+          subscriptionId: subscription.id,
+          correlationId: options.correlationId,
+          reason: 'SUBSCRIPTION_DELETED',
+        },
+      );
 
       const supersededAt = new Date();
-      await tx.subscriptionEffectiveProjection.updateMany({
-        where: { subscriptionId: subscription.id },
-        data: { state: EffectiveProjectionState.DELETED },
-      });
-      await tx.deviceReductionPlan.updateMany({
-        where: {
-          subscriptionId: subscription.id,
-          state: {
-            in: [
-              DeviceReductionPlanState.PENDING,
-              DeviceReductionPlanState.IN_PROGRESS,
-              DeviceReductionPlanState.BLOCKED,
-            ],
-          },
-        },
-        data: {
-          state: DeviceReductionPlanState.SUPERSEDED,
-        },
-      });
       await tx.profileSyncJob.updateMany({
         where: {
           subscriptionId: subscription.id,

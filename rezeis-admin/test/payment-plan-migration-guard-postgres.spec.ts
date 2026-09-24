@@ -12,6 +12,7 @@ import { PaymentReconciliationService } from '../src/modules/payments/services/p
 import { LATE_PLAN_MIGRATION_RENEWAL_CODE } from '../src/modules/payments/services/payment-renewal-plan-migration-guard.util';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PaymentWebhookInboxService } from '../src/modules/payments/services/payment-webhook-inbox.service';
+import { ADD_ON_ROLLOUT_FLAG_NAMES } from './helpers/rollout-flags';
 
 /**
  * A RENEWAL PAID AFTER A PLAN MIGRATION, against a real PostgreSQL (decision 10).
@@ -283,6 +284,10 @@ run('a renewal paid after a plan migration, on PostgreSQL', () => {
   before(async () => {
     process.env.DATABASE_URL = testUrl;
     process.env.DATABASE_POOL_SIZE = '8';
+    // Written against every stage off (the legacy renewal); the durable cases
+    // turn stage 1 on themselves (`withDurableTerms`). Spelled out: stages 1, 2
+    // and 6 default ON since the 24.09.2026 flip.
+    for (const flag of ADD_ON_ROLLOUT_FLAG_NAMES) process.env[flag] = 'false';
     prisma = new PrismaService();
     await prisma.$connect();
 
@@ -646,9 +651,24 @@ run('a renewal paid after a plan migration, on PostgreSQL', () => {
   it('does not keep a renewal for the old plan created an hour after the move — well past the ten-minute window', async () => {
     // Pins `moved_at >= payment.created_at - 10 minutes` on the engine:
     // `timestamptz` against `timestamptz`, the payment row's own instant.
+    //
+    // A checkout drafted AFTER the move priced the old plan only because the
+    // plan the move put it on renews onto it (archived, replaced on renewal).
+    // Onto a plan that renews as itself, such a payment was drafted before a
+    // plan change and is converted instead (`readRenewalPricedBeforePlanChange`).
     const user = await createUser('after-old');
+    const replacedOnRenew = await createPlan('replaced-on-renew', {
+      trafficLimit: currentPlan.trafficLimit,
+      deviceLimit: currentPlan.deviceLimit,
+      internalSquads: currentPlan.internalSquads,
+      externalSquad: currentPlan.externalSquad,
+    });
+    await prisma.plan.update({
+      where: { id: replacedOnRenew.id },
+      data: { isArchived: true, archivedRenewMode: 'REPLACE_ON_RENEW', replacementPlanIds: [oldPlan.id] },
+    });
     const subscriptionId = await createSubscriptionOn(user, oldPlan, new Date(Date.now() + 10 * DAY_MS));
-    await move(subscriptionId, oldPlan, currentPlan, new Date(Date.now() - 2 * HOUR_MS));
+    await move(subscriptionId, oldPlan, replacedOnRenew, new Date(Date.now() - 2 * HOUR_MS));
     const payment = await createPayment({
       userId: user,
       subscriptionId,
@@ -714,7 +734,8 @@ run('a renewal paid after a plan migration, on PostgreSQL', () => {
 
   it('does not keep a renewal when the subscription was never moved, whatever plan the payment is for', async () => {
     // The lookup is bound to the subscription: another subscription's move says
-    // nothing about this payment, which renews onto the plan it bought.
+    // nothing about this payment, which renews onto the plan it bought — the
+    // one its own plan, archived, is replaced by on renewal.
     const user = await createUser('not-moved');
     const chosenPlan = await createPlan('chosen', {
       trafficLimit: 300,
@@ -722,7 +743,17 @@ run('a renewal paid after a plan migration, on PostgreSQL', () => {
       internalSquads: [`${prefix}-squad-chosen`],
       externalSquad: null,
     });
-    const subscriptionId = await createSubscriptionOn(user, oldPlan, new Date(Date.now() + 10 * DAY_MS));
+    const ownPlan = await createPlan('own-replaced', {
+      trafficLimit: oldPlan.trafficLimit,
+      deviceLimit: oldPlan.deviceLimit,
+      internalSquads: oldPlan.internalSquads,
+      externalSquad: oldPlan.externalSquad,
+    });
+    await prisma.plan.update({
+      where: { id: ownPlan.id },
+      data: { isArchived: true, archivedRenewMode: 'REPLACE_ON_RENEW', replacementPlanIds: [chosenPlan.id] },
+    });
+    const subscriptionId = await createSubscriptionOn(user, ownPlan, new Date(Date.now() + 10 * DAY_MS));
     const neighbour = await createSubscriptionOn(user, oldPlan, new Date(Date.now() + 10 * DAY_MS));
     const payment = await createPayment({
       userId: user,
@@ -792,6 +823,54 @@ run('a renewal paid after a plan migration, on PostgreSQL', () => {
       assert.equal((terms[1]!.planSnapshot as Record<string, unknown>)['selectedDurationDays'], PAID_DAYS);
       assertOneReviewCompletion(payment.paymentId, [subscriptionId], runId);
     });
+  });
+
+  it('a late renewal first aligns the tail: bonus days the sweep has not caught up with are not lost', async () => {
+    // Every flag off: the subscription is in the model, and the renewal's term
+    // follows that row.
+    const user = await createUser('drifted');
+    const expiresAt = new Date(Date.now() + 10 * DAY_MS);
+    const subscriptionId = await createSubscriptionOn(user, oldPlan, expiresAt);
+    const payment = await createPayment({
+      userId: user,
+      subscriptionId,
+      purchaseType: PurchaseType.RENEW,
+      status: TransactionStatus.PENDING,
+      createdAt: new Date(Date.now() - 2 * HOUR_MS),
+      planSnapshot: renewalOf(oldPlan),
+    });
+    await move(subscriptionId, oldPlan, currentPlan, new Date(Date.now() - HOUR_MS));
+    // The term still ends where the period stood before five bonus days moved
+    // `expiresAt`; the hourly drift sweep has not run yet.
+    await prisma.subscriptionTerm.create({
+      data: {
+        subscriptionId,
+        generation: 1,
+        status: 'ACTIVE',
+        planId: currentPlan.id,
+        planSnapshot: snapshotOn(currentPlan) as Prisma.InputJsonValue,
+        startsAt: new Date(Date.now() - 20 * DAY_MS),
+        endsAt: new Date(expiresAt.getTime() - 5 * DAY_MS),
+        baseTrafficLimitBytes: 200n * GIB,
+        baseDeviceLimit: 5,
+        trafficResetStrategy: 'NO_RESET',
+      },
+    });
+
+    await deliverSuccess(payment.paymentId);
+
+    const terms = await prisma.subscriptionTerm.findMany({ where: { subscriptionId }, orderBy: { generation: 'asc' } });
+    assert.deepEqual(
+      terms.map((term) => [term.generation, term.status, term.planId]),
+      [
+        [1, 'ACTIVE', currentPlan.id],
+        [2, 'SCHEDULED', currentPlan.id],
+      ],
+    );
+    assert.equal(terms[0]!.endsAt?.getTime(), expiresAt.getTime(), 'the ACTIVE term caught up with the bonus days');
+    assert.equal(terms[1]!.startsAt.getTime(), expiresAt.getTime(), 'the renewal follows the real end');
+    const row = await prisma.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+    assert.equal(terms[1]!.endsAt?.getTime(), row.expiresAt?.getTime(), 'the chain ends where the subscription does');
   });
 
   it('fails closed when the current plan is gone but a term chain exists: nothing applied, the payment left for replay', async () => {

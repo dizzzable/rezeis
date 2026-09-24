@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 import { selectGrantableTrialPlan } from '../src/modules/subscriptions/services/grantable-trial-plan.util';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * THE PANEL'S "GRANT TRIAL" BUTTON HANDED OUT A DIFFERENT PRODUCT.
@@ -251,6 +252,7 @@ async function panelGrant(rows: readonly PlanRow[]): Promise<{
         return { subscriptionId: 'sub-1' };
       },
     } as never,
+    NOT_IN_TERM_MODEL as never,
   );
 
   await controller.grantTrial('42', ACTING_ADMIN, ACTING_REQUEST);

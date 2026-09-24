@@ -15,6 +15,7 @@ import {
   isUnmintableSnapshotTrafficLimit,
   parsePromocodePlanSnapshot,
 } from '../src/modules/promocodes/utils/promocode-mappers.util';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * THE READ SIDE OF THE ZERO-GIGABYTE PROBLEM, AND THE DECISION TAKEN ABOUT IT.
@@ -172,7 +173,7 @@ async function mint(
   const createCalls: Array<{ data: { trafficLimit?: number | null } }> = [];
   const updateCalls: Array<unknown> = [];
   const errorLogs: string[] = [];
-  const service = new PromocodeRewardsService();
+  const service = new PromocodeRewardsService(NOT_IN_TERM_MODEL as never);
   // The loudness of the refusal is part of the decision, so it is asserted.
   // `REWARD_NOT_APPLICABLE` on its own is shared with several ordinary
   // outcomes; without this line an operator has nothing to act on.

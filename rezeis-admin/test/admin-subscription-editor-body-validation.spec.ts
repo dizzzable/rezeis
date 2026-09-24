@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException, HttpException } from '@nestjs/common';
 
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * `PATCH /admin/users/subscriptions/:id` HAS NO DTO, SO IT HAS NO VALIDATION
@@ -112,6 +113,7 @@ function buildEditor(): {
     { warn: () => undefined } as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller, updates };
 }

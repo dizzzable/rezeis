@@ -14,6 +14,7 @@ import {
   type RecordedAddOnContribution,
 } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 import { PlanSnapshotSyncService } from '../src/modules/subscriptions/services/plan-snapshot-sync.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * ONE READER FOR "WHO OWNS THIS LIMIT", AND THE TWO POPULATIONS IT USED TO LOSE
@@ -235,11 +236,13 @@ describe('a plan edit still reaches a customer who is holding an add-on', () => 
 describe('the projection baseline removes the recorded contribution exactly once', () => {
   const TERM = { baseTrafficLimitBytes: 100n * GIB, baseDeviceLimit: 3 };
 
-  it('reaches the term baseline, and neither the un-subtracted nor the twice-subtracted column', () => {
+  it('reaches the column’s own share, and neither the un-subtracted nor the twice-subtracted column', () => {
     // 20 devices in the column, 5 recorded, 15 in the snapshot. Subtract once and
-    // the row is INHERITED so the paid term governs (3). Subtract nothing and it
-    // reads OVERRIDDEN at 20; subtract twice and it reads OVERRIDDEN at 10. Three
-    // distinct answers, so no two mistakes can satisfy the same assertion.
+    // the row is INHERITED at 15 — its own share, which is the baseline whatever
+    // the term's base says. Subtract nothing and it reads OVERRIDDEN
+    // at 20; subtract twice and it reads OVERRIDDEN at 10. Three distinct
+    // answers, none of them the term's 3, so no two mistakes can satisfy the
+    // same assertion.
     const baseline = resolveEntitlementBaseline({
       term: TERM,
       subscription: {
@@ -251,10 +254,12 @@ describe('the projection baseline removes the recorded contribution exactly once
     });
 
     assert.deepStrictEqual([...baseline.overriddenKeys], []);
-    assert.equal(baseline.baseDeviceLimit, 3);
+    assert.equal(baseline.baseDeviceLimit, 15);
     assert.notEqual(baseline.baseDeviceLimit, 20, 'the contribution was never taken out of the column');
     assert.notEqual(baseline.baseDeviceLimit, 10, 'the contribution was taken out twice');
-    assert.equal(baseline.baseTrafficLimitBytes, 100n * GIB);
+    assert.notEqual(baseline.baseDeviceLimit, 3, 'the term’s frozen base undid the column');
+    // Traffic the same way: 1074 in the column less the 50 recorded.
+    assert.equal(baseline.baseTrafficLimitBytes, BigInt(PLAN_TRAFFIC_AT_ASSIGNMENT) * GIB);
   });
 
   it('still attributes a genuinely operator-set column to the operator', () => {
@@ -290,11 +295,13 @@ describe('an unreadable snapshot is UNDECIDABLE and not OVERRIDDEN', () => {
     assert.notEqual(ownership.deviceLimit, 'OVERRIDDEN');
   });
 
-  it('lets an imported customer buy the upgrade they paid for', () => {
-    // This is what the distinction BUYS, and why collapsing the two states is a
-    // regression even where no renewal changes. Resolving an unreadable snapshot
-    // toward the COLUMN would mean an imported subscriber could buy a plan
-    // change, be charged, and stay on the old limits with nothing to show for it.
+  it('keeps an imported row’s own limits, and still never calls them the operator’s', () => {
+    // An unreadable snapshot keeps the row's own columns: the column path keeps
+    // them at a renewal, and a term minted from the plan must not take them
+    // away. A PAID plan change still reaches the row — the upgrade writes its
+    // snapshot, with the keys, and the carried columns before it recomputes
+    // (`plan-change-keeps-limits-above-plan-postgres.spec.ts`). The verdict
+    // stays UNDECIDABLE: nothing here is attributed to an operator.
     const baseline = resolveEntitlementBaseline({
       term: { baseTrafficLimitBytes: 500n * GIB, baseDeviceLimit: 7 },
       subscription: { trafficLimit: 100, deviceLimit: 2, planSnapshot: unreadableLimits },
@@ -302,9 +309,8 @@ describe('an unreadable snapshot is UNDECIDABLE and not OVERRIDDEN', () => {
     });
 
     assert.deepStrictEqual([...baseline.overriddenKeys], []);
-    assert.equal(baseline.baseDeviceLimit, 7, 'the paid term must govern an UNDECIDABLE row');
-    assert.notEqual(baseline.baseDeviceLimit, 2, 'collapsing UNDECIDABLE into OVERRIDDEN pins the old limit');
-    assert.equal(baseline.baseTrafficLimitBytes, 500n * GIB);
+    assert.equal(baseline.baseDeviceLimit, 2, 'the term minted from the plan took the row’s own limit away');
+    assert.equal(baseline.baseTrafficLimitBytes, 100n * GIB);
   });
 
   it('reads as OVERRIDDEN the moment the snapshot actually carries the key', () => {
@@ -371,26 +377,36 @@ async function runBulkAssignment(
   storedSnapshot: unknown,
 ): Promise<{ readonly written: Record<string, unknown> | null; readonly skippedAlreadyAssigned: number }> {
   const updates: Array<Record<string, unknown>> = [];
-  const service = new BulkPlanAssignmentService(
-    {
-      plan: { findUnique: async () => ASSIGNED_PLAN },
-      subscription: {
-        findMany: async () => [
-          {
-            id: 'sub-bulk-1',
-            status: SubscriptionStatus.ACTIVE,
-            remnawaveId: 'panel-1',
-            planSnapshot: storedSnapshot,
-          },
-        ],
-        update: async (args: { readonly data: Record<string, unknown> }) => {
-          updates.push(args.data);
-          return {};
+  const db = {
+    plan: { findUnique: async () => ASSIGNED_PLAN },
+    subscription: {
+      findMany: async () => [
+        {
+          id: 'sub-bulk-1',
+          status: SubscriptionStatus.ACTIVE,
+          remnawaveId: 'panel-1',
+          planSnapshot: storedSnapshot,
         },
+      ],
+      // The limit carry re-reads the row under its lock.
+      findUnique: async () => ({ trafficLimit: 100, deviceLimit: 3, planSnapshot: storedSnapshot }),
+      update: async (args: { readonly data: Record<string, unknown> }) => {
+        updates.push(args.data);
+        return {};
       },
-      profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
-    } as never,
+    },
+    subscriptionEffectiveProjection: { findUnique: async () => null },
+    // Never paid for in the panel: the assignment asks, and finds nothing.
+    transaction: { findFirst: async () => null },
+    transactionItem: { findFirst: async () => null },
+    profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
+    $queryRaw: async () => [{ id: 'sub-bulk-1' }],
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(db),
+  };
+  const service = new BulkPlanAssignmentService(
+    db as never,
     { enqueue: async () => undefined } as never,
+    NOT_IN_TERM_MODEL as never,
   );
 
   const result = await service.assignPlan({
@@ -471,7 +487,7 @@ describe('a bulk-assigned subscription still receives its plan renames', () => {
 
   it('keeps the import-domain planId marker, so a second run still skips an assigned row', async () => {
     // `planId` is NOT a duplicate of `id` to be tidied away. It is what
-    // `isImportedOrUnassigned` tests, and it is the ONLY key the altshop and
+    // `readBulkAssignmentSnapshot` tests, and it is the ONLY key the altshop and
     // remnashop importers carry across a re-import — dropping it would let a
     // re-import silently unlink the plan and a re-run re-plan a subscription an
     // operator already assigned.

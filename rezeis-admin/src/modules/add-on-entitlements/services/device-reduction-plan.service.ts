@@ -30,7 +30,20 @@ import {
 import { STALE_PANEL_LINK } from './device-reduction-execution.service';
 
 export type DeviceReductionPlanOutcome =
-  | { readonly status: 'NOT_APPLICABLE'; readonly reason: string }
+  | {
+      readonly status: 'NOT_APPLICABLE';
+      readonly reason: string;
+      /**
+       * Present exactly when there is NOTHING TO REDUCE at this revision — the
+       * desired device limit is unlimited, or no panel profile holds a device
+       * (`UNLIMITED_DEVICES`, `NO_PANEL_PROFILE`, `PANEL_PROFILE_ABSENT`). The
+       * boundary sweep then completes the expiry at this revision
+       * (`completeUnreducibleDeviceExpiryForSubscription`) instead of planning
+       * it again every tick. Absent where there is no projection to name, or
+       * the row is DELETED (retirement handles that one).
+       */
+      readonly projectionRevision?: bigint;
+    }
   | { readonly status: 'VERIFIED'; readonly projectionRevision: bigint }
   | { readonly status: 'PLANNED'; readonly planId: string; readonly targetCount: number }
   | { readonly status: 'DEFERRED'; readonly reason: string }
@@ -133,7 +146,11 @@ export class DeviceReductionPlanService {
     }
     // Unlimited desired devices ⇒ nothing can be over the limit.
     if (projection.desiredDeviceLimit === null) {
-      return { status: 'NOT_APPLICABLE', reason: 'UNLIMITED_DEVICES' };
+      return {
+        status: 'NOT_APPLICABLE',
+        reason: 'UNLIMITED_DEVICES',
+        projectionRevision: projection.desiredRevision,
+      };
     }
 
     const subscription = await this.prismaService.subscription.findUnique({
@@ -153,7 +170,11 @@ export class DeviceReductionPlanService {
     });
     const identity = storedIdentityOf(subscription);
     if (subscription === null || identity === null) {
-      return { status: 'NOT_APPLICABLE', reason: 'NO_PANEL_PROFILE' };
+      return {
+        status: 'NOT_APPLICABLE',
+        reason: 'NO_PANEL_PROFILE',
+        projectionRevision: projection.desiredRevision,
+      };
     }
     if (subscription.status === SubscriptionStatus.DELETED) {
       return { status: 'NOT_APPLICABLE', reason: 'SUBSCRIPTION_DELETED' };
@@ -237,7 +258,11 @@ export class DeviceReductionPlanService {
         return { status: 'DEFERRED', reason: 'PANEL_UNAVAILABLE' };
       case 'notFound':
         // No panel profile to reduce.
-        return { status: 'NOT_APPLICABLE', reason: 'PANEL_PROFILE_ABSENT' };
+        return {
+          status: 'NOT_APPLICABLE',
+          reason: 'PANEL_PROFILE_ABSENT',
+          projectionRevision: projection.desiredRevision,
+        };
       case 'unsupported':
       case 'invalidContract':
         this.logger.warn(

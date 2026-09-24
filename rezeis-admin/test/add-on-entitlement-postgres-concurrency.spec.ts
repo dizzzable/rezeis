@@ -733,6 +733,10 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       data: {
         id, userId, status: 'ACTIVE', planSnapshot: {},
         trafficLimit: 100, deviceLimit: 3, remnawaveId: `${prefix}-rw-ledger`,
+        // Ends where its term does. With no expiry the subscription is
+        // lifetime, and the ledger — which aligns the term with the expiry
+        // first — rightly finds no end to sell "until the end" against.
+        expiresAt: new Date('2030-01-01T00:00:00.000Z'),
       },
     });
     await prisma.subscriptionTerm.create({
@@ -809,6 +813,10 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       data: {
         id, userId, status: 'ACTIVE', planSnapshot: {},
         trafficLimit: 150, deviceLimit: 3, remnawaveId: `${prefix}-rw-boundary`,
+        // The subscription ends where its term does. With no expiry at all it
+        // would be a LIFETIME row, and the sweep's alignment would rightly open
+        // the term and the add-on that ends with it.
+        expiresAt: past,
       },
     });
     const term = await prisma.subscriptionTerm.create({
@@ -986,7 +994,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     }
   });
 
-  it('renewal producer: schedules a gen-2 SCHEDULED term after a committed renewal only when the shadow flag is on', async () => {
+  it('renewal producer: schedules a gen-2 SCHEDULED term after a committed renewal whenever an ACTIVE term exists, the flag or not', async () => {
     const gib = 1024n * 1024n * 1024n;
     const planId = `${prefix}-renew-plan`;
     await prisma.plan.create({
@@ -1003,8 +1011,9 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     );
 
     // Renews a subscription that already has an ACTIVE durable term (cutover
-    // done) and returns its id. The renewal itself commits regardless of the
-    // flag — the flag only gates the best-effort SCHEDULED term production.
+    // done) and returns its id. The renewal's term follows that ROW; the flag
+    // only decides who ENTERS the model, so a rollback cannot leave the
+    // old term's base in force.
     async function renewWithActiveTerm(suffix: string, termEndsAt: Date): Promise<string> {
       const id = `${prefix}-renew-${suffix}`;
       await prisma.subscription.create({
@@ -1033,9 +1042,15 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       return id;
     }
 
-    // Flag OFF (default): the renewal commits, but NO scheduled term is produced.
-    const offId = await renewWithActiveTerm('off', new Date('2030-01-01T00:00:00.000Z'));
-    assert.equal(await prisma.subscriptionTerm.count({ where: { subscriptionId: offId, status: 'SCHEDULED' } }), 0);
+    // Flag OFF (default): the subscription is in the model, so the renewal
+    // still appends its term, at the current term's end.
+    const offEndsAt = new Date('2030-01-01T00:00:00.000Z');
+    const offId = await renewWithActiveTerm('off', offEndsAt);
+    const offScheduled = await prisma.subscriptionTerm.findFirstOrThrow({
+      where: { subscriptionId: offId, status: 'SCHEDULED' },
+    });
+    assert.equal(offScheduled.generation, 2);
+    assert.equal(offScheduled.startsAt.getTime(), offEndsAt.getTime());
     assert.equal((await prisma.subscription.findUniqueOrThrow({ where: { id: offId } })).status, 'ACTIVE');
 
     // Flag ON: a gen-2 SCHEDULED term starts at the current term end and runs
@@ -1291,8 +1306,24 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     assert.equal(scheduled.endsAt!.getTime(), new Date('2030-03-31T00:00:00.000Z').getTime());
     assert.equal(scheduled.baseTrafficLimitBytes, 100n * gib);
     assert.equal(scheduled.baseDeviceLimit, 3);
-    // The line without a durable term stays legacy — no terms scheduled.
-    assert.equal(await prisma.subscriptionTerm.count({ where: { subscriptionId: noTerm } }), 0);
+    // The line without a durable term ENTERS the model — stage 1 is on — and
+    // gets its renewal term too. It had no expiry (a lifetime row), so its
+    // open-ended first term is closed at the renewal and the renewal's term
+    // follows it, where a renewal of a lifetime row used to throw.
+    const noTermTerms = await prisma.subscriptionTerm.findMany({
+      where: { subscriptionId: noTerm },
+      orderBy: { generation: 'asc' },
+    });
+    assert.deepEqual(
+      noTermTerms.map((term) => [term.generation, term.status]),
+      [
+        [1, 'ACTIVE'],
+        [2, 'SCHEDULED'],
+      ],
+    );
+    assert.notEqual(noTermTerms[0]!.endsAt, null, 'the open tail was closed');
+    assert.equal(noTermTerms[1]!.startsAt.getTime(), noTermTerms[0]!.endsAt!.getTime());
+    assert.equal(noTermTerms[1]!.baseTrafficLimitBytes, 200n * gib);
   });
 
   it('createPending accepts a combined-renewal transaction bound via a line and rejects a target without a matching line', async () => {

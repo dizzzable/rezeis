@@ -16,6 +16,7 @@ import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/subscription-quote.service';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { realTermHooks } from './helpers/term-model-hooks';
 
 /**
  * A plan change keeps what the subscription held ABOVE its old plan, on
@@ -252,7 +253,10 @@ run('a plan change keeps what the subscription held above its old plan (PostgreS
   before(async () => {
     process.env.DATABASE_URL = testUrl;
     process.env.DATABASE_POOL_SIZE = '4';
-    for (const flag of DURABLE_FLAGS) delete process.env[flag];
+    // Written against the legacy column path; the durable cases turn stages 1
+    // and 2 on themselves (`withDurableModel`). OFF spelled out: they default
+    // ON since the 24.09.2026 flip.
+    for (const flag of DURABLE_FLAGS) process.env[flag] = 'false';
     prisma = new PrismaService();
     await prisma.$connect();
     const events = { info: () => undefined, warn: () => undefined, error: () => undefined, emit: () => undefined };
@@ -278,6 +282,7 @@ run('a plan change keeps what the subscription held above its old plan (PostgreS
       events as never,
       {} as never,
       {} as never,
+      realTermHooks(prisma),
     );
   });
 

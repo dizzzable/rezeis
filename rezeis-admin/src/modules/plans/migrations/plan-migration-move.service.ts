@@ -1,4 +1,4 @@
-import { HttpException, Injectable, Logger } from '@nestjs/common';
+import { ConflictException, HttpException, Injectable, Logger } from '@nestjs/common';
 import {
   PlanAvailability,
   PlanMigrationItemStatus,
@@ -10,18 +10,16 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
-import { provisionalResetAnchor } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { resolveRecordedAddOnContribution } from '../../add-on-entitlements/services/configured-baseline.util';
 import {
   EffectiveProjectionService,
   type RecomputeProjectionResult,
 } from '../../add-on-entitlements/services/effective-projection.service';
+import { rotatePlanChangeTermInTransaction } from '../../add-on-entitlements/services/subscription-term-hooks.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detectors';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { isRetryableTransactionConflict } from '../../referrals/services/referral-qualification.service';
-import { displayPlanName } from '../utils/plan-deletion.util';
 import { subscriptionsOnPlanWhere } from '../utils/subscriptions-on-plan.util';
 import {
   PLAN_MIGRATION_BENIGN_SKIP_REASONS,
@@ -65,8 +63,8 @@ export const PLAN_MIGRATION_AUDIT_SOURCE = 'plan_migration';
 /** `cause` of a versioned sync job, next to the upgrade's `PLAN_CHANGE`. */
 export const PLAN_MIGRATION_SYNC_CAUSE = 'PLAN_MIGRATION';
 
-/** Length of the term an already-expired subscription is rotated onto. */
-const EXPIRED_TERM_WINDOW_MS = 1_000;
+/** `snapshotSource` of the term a move rotates a subscription onto. */
+const PLAN_MIGRATION_TERM = 'PLAN_MIGRATION_TERM';
 
 /** The run fields one move needs: identity, source, and the creator's audit context. */
 export interface PlanMigrationRunContext {
@@ -178,10 +176,11 @@ interface Blocker {
  *
  * The limits and snapshot come from `computePlanMigration`, the function the
  * preview showed the operator. A subscription with an ACTIVE durable term gets
- * that term rotated onto the target — the paid upgrade's own pieces
- * (`SubscriptionTermService.createScheduledInTransaction` +
- * `activateInTransaction`, then `EffectiveProjectionService.recomputeInTransaction`)
- * WITHOUT its expiry reset: the new term ends where the subscription does —
+ * that term rotated onto the target through the shared plan-change rotation
+ * (`rotatePlanChangeTermInTransaction`: align the tail, then
+ * `SubscriptionTermService.rotateForPlanChangeInTransaction`, then the ACTIVE
+ * `EffectiveProjectionService.recomputeInTransaction`) WITHOUT an expiry reset:
+ * the new term ends where the subscription does —
  * and its numeric columns mirror the recomputed projection. Add-ons bound to the
  * ended term stay ACTIVE and keep counting, exactly as after an upgrade: the
  * projection sums a subscription's active add-ons whatever term they hang on.
@@ -522,16 +521,61 @@ export class PlanMigrationMoveService {
       pendingRenewalForSource: false,
     });
 
-    // 7. The durable term, decided by the term row and not by a rollout flag:
-    // add-on expiry recomputes the projection with no flag in sight.
+    // 7. The subscription FIRST — the target's snapshot, the limits the
+    // computation chose, the squads — and only then the term. The recompute
+    // below builds `desired` on the subscription's own share of its columns
+    // (`entitlement-baseline.ts`), so the target reaches `desired`
+    // through what is written here, as it does for «Назначить план» and the
+    // bulk assignment; a kept individual value stays the absolute number it
+    // was, because it is written as that number. Run before this write, the
+    // recompute read the SOURCE plan's columns and the move wrote them back.
+    //
+    // Who moved the device limit, for the reduction trigger.
+    if (computed.after.deviceLimit !== subscription.deviceLimit) {
+      await tx.$executeRaw`SELECT set_config('rezeis.device_limit_source', ${OPERATOR_LIMIT_SOURCE}, true)`;
+    }
+    await tx.subscription.update({
+      where: { id: subscription.id },
+      data: {
+        planSnapshot: computed.planSnapshot as Prisma.InputJsonValue,
+        trafficLimit: computed.after.trafficLimit,
+        deviceLimit: computed.after.deviceLimit,
+        internalSquads: [...computed.after.internalSquads],
+        externalSquad: computed.after.externalSquad,
+        isTrial: computed.after.isTrial,
+      },
+    });
+
+    // 8. The durable term, decided by the term row and not by a rollout flag:
+    // add-on expiry recomputes the projection with no flag in sight. The
+    // shared plan-change rotation — the one «Назначить план» and the bulk
+    // assignment use: align the tail, rotate onto the target, recompute in
+    // ACTIVE mode. Queued terms REFUSE (nobody paid for the move), which the
+    // skip rules above already guarantee under these locks.
     let projection: RecomputeProjectionResult | null = null;
     let rotatedTermId: string | null = null;
     if (context.hasActiveTerm) {
-      rotatedTermId = await this.rotateActiveTerm(tx, subscription, target);
-      projection = await this.effectiveProjectionService.recomputeInTransaction(tx, {
-        subscriptionId: subscription.id,
-        mode: 'ACTIVE',
-      });
+      const moved = await rotatePlanChangeTermInTransaction(
+        tx,
+        { terms: this.subscriptionTermService, projections: this.effectiveProjectionService },
+        {
+          subscriptionId: subscription.id,
+          plan: target,
+          snapshotSource: PLAN_MIGRATION_TERM,
+          scheduledTerms: 'REFUSE',
+        },
+        { correlationId: `plan-migration:${run.id}:${subscription.id}` },
+      );
+      if (moved.outcome !== 'ROTATED') {
+        // Unreachable: the ACTIVE term, the absence of a queued one and the
+        // row's status were all read under the locks this transaction holds.
+        // Refused loudly rather than moving the plan without its term.
+        throw new ConflictException(
+          `The durable term of subscription ${subscription.id} could not be rotated (${moved.outcome}). Retry.`,
+        );
+      }
+      rotatedTermId = moved.termId;
+      projection = moved.projection;
     }
     const numeric =
       projection === null
@@ -544,20 +588,18 @@ export class PlanMigrationMoveService {
       externalSquad: computed.after.externalSquad,
     };
 
-    // 8. Who moved the device limit, for the reduction trigger.
-    if (written.deviceLimit !== subscription.deviceLimit) {
-      await tx.$executeRaw`SELECT set_config('rezeis.device_limit_source', ${OPERATOR_LIMIT_SOURCE}, true)`;
+    // 9. The columns mirror `desired` where the projection lands elsewhere —
+    // a live add-on or a term's bonus summed on top — as every projection
+    // writer leaves them.
+    if (written.trafficLimit !== computed.after.trafficLimit || written.deviceLimit !== computed.after.deviceLimit) {
+      if (written.deviceLimit !== subscription.deviceLimit) {
+        await tx.$executeRaw`SELECT set_config('rezeis.device_limit_source', ${OPERATOR_LIMIT_SOURCE}, true)`;
+      }
+      await tx.subscription.update({
+        where: { id: subscription.id },
+        data: { trafficLimit: written.trafficLimit, deviceLimit: written.deviceLimit },
+      });
     }
-
-    // 9. The subscription.
-    await tx.subscription.update({
-      where: { id: subscription.id },
-      data: {
-        planSnapshot: computed.planSnapshot as Prisma.InputJsonValue,
-        ...written,
-        isTrial: computed.after.isTrial,
-      },
-    });
 
     // 10. The push, only for a linked ACTIVE/LIMITED row. UPDATE, no status, no
     // traffic reset; versioned when a projection backs it, as the upgrade does.
@@ -615,71 +657,6 @@ export class PlanMigrationMoveService {
        WHERE "id" = ${item.id}
     `);
     return syncJobId;
-  }
-
-  /**
-   * Ends the ACTIVE term and activates one on the target plan that ends where
-   * the subscription does — the paid upgrade's `startUpgradeTermInTransaction`
-   * without its expiry reset and without cancelling scheduled terms (a move
-   * with one is skipped before it gets here).
-   *
-   * The term snapshot is the upgrade's shape. Its base limits are the PLAN's
-   * (what a term records is what the plan gives); the operator's individual
-   * values are applied by the projection recompute that follows, from the
-   * subscription's own columns — `resolveEntitlementBaseline`.
-   *
-   * An already-expired subscription (an ACTIVE term is only ever ended by the
-   * next activation, never by time) gets a one-second term ending at its
-   * expiry: `subscription_terms_generation_check` requires `ends_at >
-   * starts_at`, so neither a term starting now nor a zero-length one would
-   * insert. Nothing of the period is left to describe, and the renewal that
-   * brings the subscription back schedules its own term from now.
-   */
-  private async rotateActiveTerm(
-    tx: Prisma.TransactionClient,
-    subscription: { readonly id: string; readonly expiresAt: Date | null; readonly planSnapshot: Prisma.JsonValue },
-    target: MigrationTargetPlan,
-  ): Promise<string> {
-    const now = new Date();
-    const endsAt = subscription.expiresAt;
-    const startsAt =
-      endsAt !== null && endsAt.getTime() <= now.getTime()
-        ? new Date(endsAt.getTime() - EXPIRED_TERM_WINDOW_MS)
-        : now;
-    const stored =
-      typeof subscription.planSnapshot === 'object' &&
-      subscription.planSnapshot !== null &&
-      !Array.isArray(subscription.planSnapshot)
-        ? (subscription.planSnapshot as Record<string, unknown>)
-        : {};
-    const selectedDurationDays = stored['selectedDurationDays'];
-    const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
-      subscriptionId: subscription.id,
-      planId: target.id,
-      planSnapshot: {
-        id: target.id,
-        name: displayPlanName(target),
-        description: target.description,
-        tag: target.tag,
-        type: target.type,
-        icon: target.icon ?? null,
-        trafficLimit: target.trafficLimit,
-        deviceLimit: target.deviceLimit,
-        trafficLimitStrategy: target.trafficLimitStrategy,
-        internalSquads: [...target.internalSquads],
-        externalSquad: target.externalSquad,
-        ...(typeof selectedDurationDays === 'number' ? { selectedDurationDays } : {}),
-        snapshotSource: 'PLAN_MIGRATION_TERM',
-      } as Prisma.InputJsonValue,
-      startsAt,
-      endsAt,
-      baseTrafficLimitBytes: target.trafficLimit === null ? null : BigInt(target.trafficLimit) * GIB_BYTES,
-      baseDeviceLimit: target.deviceLimit <= 0 ? null : target.deviceLimit,
-      trafficResetStrategy: target.trafficLimitStrategy,
-      resetAnchorAt: provisionalResetAnchor(target.trafficLimitStrategy, startsAt),
-    });
-    await this.subscriptionTermService.activateInTransaction(tx, created.id, now);
-    return created.id;
   }
 
   private async decide(

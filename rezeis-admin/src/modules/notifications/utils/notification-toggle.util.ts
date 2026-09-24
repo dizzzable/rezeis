@@ -90,6 +90,12 @@ export function isNotificationDeliveryEnabled(
  * schedule, and a customer who does not want it is entitled to say so. One
  * key covers both of its types (`connect_help_trial` resolves to it). Being on
  * this list also makes it mailable, which the help's e-mail step relies on.
+ *
+ * `addon_ends_in_3_days` and `addon_ended` — a dated add-on three days before
+ * it ends and when it has ended (`AddOnExpiryNoticeService`) — are here for
+ * the expiry family's reason, and each is ONE switch for its three templates
+ * (`SUBSCRIBER_SWITCH_OF_TYPE`). Being mailable is what the owner asked of
+ * them: the bot and the letter.
  */
 export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
   'expires_in_3_days',
@@ -98,7 +104,34 @@ export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
   'expired',
   'expired_1_day_ago',
   'connect_help',
+  'addon_ends_in_3_days',
+  'addon_ended',
 ] as const;
+
+/**
+ * Types whose customer switch is another type's: one switch in the cabinet,
+ * each with its own template and its own operator toggle.
+ *
+ * A device add-on's notice has its own words for each setting of
+ * `ADDON_DEVICE_CLEANUP_AUTO` (the devices disconnected by themselves, or new
+ * ones refused) — three templates per moment — and the customer is asked once:
+ * «За 3 дня до окончания опции», «Когда опция закончилась». Not the alias
+ * map above: that one drives the template lookup too (`fetchTemplate` reads the
+ * canonical type first), and a device notice would be sent in the traffic
+ * notice's words.
+ */
+const SUBSCRIBER_SWITCH_OF_TYPE: Readonly<Record<string, string>> = {
+  addon_devices_ends_in_3_days: 'addon_ends_in_3_days',
+  addon_devices_auto_ends_in_3_days: 'addon_ends_in_3_days',
+  addon_devices_ended: 'addon_ended',
+  addon_devices_auto_ended: 'addon_ended',
+};
+
+/** The customer's switch for `type`: its canonical key, or the switch it shares. */
+function subscriberSwitchOf(type: string): string {
+  const key = resolveToggleKey(type);
+  return SUBSCRIBER_SWITCH_OF_TYPE[key] ?? key;
+}
 
 export type SubscriberMutableNotificationType =
   (typeof SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES)[number];
@@ -121,7 +154,8 @@ export function isSubscriberNotificationEnabled(prefs: unknown, type: string): b
   // renders fine, because `fetchTemplate` canonicalizes too — so without this
   // the alias would sail past a switch the subscriber had turned off, and the
   // one delivery a person explicitly asked to stop is the one that arrives.
-  const key = resolveToggleKey(type);
+  // And the switch a type shares with others (`SUBSCRIBER_SWITCH_OF_TYPE`).
+  const key = subscriberSwitchOf(type);
   if (!isSubscriberMutableType(key)) return true;
   if (prefs === null || typeof prefs !== 'object' || Array.isArray(prefs)) return true;
   return (prefs as Record<string, unknown>)[key] !== false;
@@ -147,7 +181,7 @@ function isSubscriberMutableType(key: string): boolean {
  * placement approvals — while the cabinet offered a way to stop exactly five.
  */
 export function isSubscriberMailableType(type: string): boolean {
-  return isSubscriberMutableType(resolveToggleKey(type));
+  return isSubscriberMutableType(subscriberSwitchOf(type));
 }
 
 /**

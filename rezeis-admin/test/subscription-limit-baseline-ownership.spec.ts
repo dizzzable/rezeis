@@ -9,6 +9,7 @@ import { ReferralPointsExchangeService } from '../src/modules/referrals/services
 import { RemnawaveWebhookService } from '../src/modules/remnawave/services/remnawave-webhook.service';
 import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 import { PlanSnapshotSyncService } from '../src/modules/subscriptions/services/plan-snapshot-sync.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * WHO OWNS A SUBSCRIPTION'S LIMIT BASELINE
@@ -294,6 +295,7 @@ describe('referral points traffic top-up', () => {
       } as never,
       { enqueue: async () => undefined } as never,
       new PointsWalletService(),
+      NOT_IN_TERM_MODEL as never,
     );
 
     await service.executeExchange({ userId: 'user-1', type: 'TRAFFIC', points: 100 });
@@ -359,7 +361,12 @@ describe('panel webhook limit mirror', () => {
           columnWrites.push(args.data);
           return { count: 1 };
         },
-        findMany: async () => {
+        findMany: async (args: { readonly where?: { readonly terms?: { readonly some?: unknown } } }) => {
+          // The rows of this profile that are IN the term model: none. This
+          // subscription has no term, so it is the mirror these cases are
+          // about; the model's own rules are pinned against PostgreSQL in
+          // `remnawave-webhook-term-model-postgres.spec.ts`.
+          if (args.where?.terms?.some !== undefined) return [];
           snapshotReads += 1;
           return [{ id: 'sub-1', planSnapshot: storedSnapshot }];
         },

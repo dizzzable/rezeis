@@ -1,22 +1,35 @@
+import { Logger } from '@nestjs/common';
+
 import { ResetCapabilityMap, ResetStrategy } from './domain/reset-cycle-policy';
 
 /**
  * Staged rollout flags for the durable add-on entitlement feature.
  *
- * Every flag defaults to OFF so the feature is dormant out of the box: the
- * legacy one-time top-up path stays authoritative until an operator opts a
- * stage in. Flags are read from the environment (resolved per call so tests
- * can vary `process.env` without module-reload gymnastics) — they are
- * deployment-time toggles, deliberately NOT panel-editable, so a stage can
- * never be flipped from the admin UI by accident.
+ * Each flag has a DEFAULT in {@link ADD_ON_ROLLOUT_FLAG_DEFAULTS}, which is
+ * what an install gets while the variable is unset. Flags are read from the
+ * environment (resolved per call so tests can vary `process.env` without
+ * module-reload gymnastics) — they are deployment-time toggles, deliberately
+ * NOT panel-editable, so a stage can never be flipped from the admin UI by
+ * accident: entry into the model is one-way per subscription, and the web and
+ * worker processes must change together, which a `.env` edit plus
+ * `docker compose up -d` does and a settings row does not.
  *
  * Rollout order (each stage assumes the previous):
- *  1. `entitlementShadow`       — shadow projection built, legacy authoritative.
+ *  1. `entitlementShadow`       — subscriptions ENTER the term model (the
+ *                                 background cutover and the renewal/upgrade
+ *                                 term producers); legacy limits stay what is
+ *                                 pushed.
  *  2. `directPurchase`          — new checkouts commit the ledger.
  *  3. `projectionSync`          — versioned desired writes drive Remnawave.
  *  4. `resetExpiry.<strategy>`  — per-strategy commercial reset expiry (after parity).
  *  5. `renewalAddOns`           — scheduled renewal composition.
- *  6. `deviceCleanupAuto`       — automatic HWID reduction (last).
+ *  6. `deviceCleanupAuto`       — automatic HWID reduction.
+ *
+ * WHAT A FLAG DOES NOT DECIDE. Once a subscription has a term, how that term
+ * is rotated, aligned and expired follows the term row, never a flag: the
+ * boundary sweep, the cutover's `ensureTermInTransaction`, the plan-change
+ * rotation and the tail alignment read no flag at all. Turning stage 1 off
+ * therefore stops NEW entrants; it does not strand the ones already in.
  */
 export interface AddOnRolloutFlags {
   readonly entitlementShadow: boolean;
@@ -27,22 +40,118 @@ export interface AddOnRolloutFlags {
   readonly resetExpiry: Readonly<Record<Exclude<ResetStrategy, 'NO_RESET'>, boolean>>;
 }
 
-function parseBoolean(value: string | undefined): boolean {
-  return value === 'true' || value === '1';
+/** Every rollout variable this module reads. */
+export type AddOnRolloutFlagName =
+  | 'ADDON_ENTITLEMENT_SHADOW'
+  | 'ADDON_ENTITLEMENT_DIRECT_PURCHASE'
+  | 'ADDON_PROJECTION_SYNC'
+  | 'ADDON_RENEWAL_ADDONS'
+  | 'ADDON_DEVICE_CLEANUP_AUTO'
+  | 'ADDON_RESET_EXPIRY_DAY'
+  | 'ADDON_RESET_EXPIRY_WEEK'
+  | 'ADDON_RESET_EXPIRY_MONTH'
+  | 'ADDON_RESET_EXPIRY_MONTH_ROLLING';
+
+export type AddOnRolloutFlagDefaults = Readonly<Record<AddOnRolloutFlagName, boolean>>;
+
+/**
+ * THE DEFAULTS, IN ONE PLACE: what an install runs with while the variable is
+ * unset.
+ *
+ * STAGES 1, 2 AND 6 ARE ON, STAGES 3, 4 AND 5 OFF — the owner's decision of
+ * 24.09.2026, shipped once renewals, upgrades and plan changes gated on the
+ * term row, payments brought subscriptions in lazily, and the background
+ * cutover existed (`EntitlementCutoverJobService`). An install that sets
+ * nothing gets the model on its first boot of this version. Why the OFF ones
+ * stay OFF:
+ *   - stage 3: the versioned PATCH omits `expireAt`, `status`, `description`
+ *     and the contacts, so a paid upgrade would never move the panel expiry;
+ *   - stage 4: no parity evidence against the served Remnawave 3.x lines;
+ *   - stage 5: the owner's decision.
+ *
+ * An explicit value always wins over the default, in BOTH directions — see
+ * {@link parseFlag}. That is what makes the flip reversible per install with
+ * one `.env` line per stage (`ADDON_ENTITLEMENT_SHADOW=false` and so on); what
+ * switching off does NOT undo is in `docs/operator-add-on-entitlements-rollout.md`
+ * («Rollback»). `.env.example` and `docs/environment.md` state every default
+ * below, and `add-on-rollout.config.spec.ts` holds them to it.
+ */
+export const ADD_ON_ROLLOUT_FLAG_DEFAULTS: AddOnRolloutFlagDefaults = {
+  ADDON_ENTITLEMENT_SHADOW: true,
+  ADDON_ENTITLEMENT_DIRECT_PURCHASE: true,
+  ADDON_PROJECTION_SYNC: false,
+  ADDON_RENEWAL_ADDONS: false,
+  ADDON_DEVICE_CLEANUP_AUTO: true,
+  ADDON_RESET_EXPIRY_DAY: false,
+  ADDON_RESET_EXPIRY_WEEK: false,
+  ADDON_RESET_EXPIRY_MONTH: false,
+  ADDON_RESET_EXPIRY_MONTH_ROLLING: false,
+};
+
+const LOGGER = new Logger('AddOnRolloutFlags');
+
+/** `name=value` pairs already warned about, so a per-call read warns once. */
+const warnedUnknownValues = new Set<string>();
+
+/** What an operator writes for ON, and for OFF — compared lower-cased and trimmed. */
+const ON_SPELLINGS: ReadonlySet<string> = new Set(['true', '1', 'on', 'yes']);
+const OFF_SPELLINGS: ReadonlySet<string> = new Set(['false', '0', 'off', 'no']);
+
+/**
+ * One rollout flag, read against its default.
+ *
+ * `true`, `1`, `on` or `yes` is ON and `false`, `0`, `off` or `no` is OFF,
+ * case-insensitively and with surrounding whitespace ignored; unset or empty is
+ * the default. Anything else is the default too, with a warning naming the
+ * variable — once per distinct value, because flags are read per call.
+ *
+ * THE OFF SPELLINGS ARE THE ONES THAT MATTER. With a default that is ON, the
+ * only way an operator turns a stage off is an explicit value, and the old
+ * reader (`value === 'true' || value === '1'`) could not express that at all:
+ * everything that was not ON was simply "not ON", which is the default again.
+ * A `False` or ` false` that silently kept a stage ON would be the one
+ * rollback that does not roll back — and so would `off` and `no`, which this
+ * reader also took for the default until 24.09.2026: once the defaults are
+ * ON, an operator who "switched it off" in their own words would have got it
+ * ON, with only a log line to say so.
+ */
+export function parseFlag(
+  value: string | undefined,
+  defaultValue: boolean,
+  name: string = 'ADDON_*',
+): boolean {
+  if (value === undefined) return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '') return defaultValue;
+  if (ON_SPELLINGS.has(normalized)) return true;
+  if (OFF_SPELLINGS.has(normalized)) return false;
+  const key = `${name}=${value}`;
+  if (!warnedUnknownValues.has(key)) {
+    warnedUnknownValues.add(key);
+    LOGGER.warn(
+      `${name}="${value}" is not a recognised value (true, 1, on, yes; false, 0, off, no); ` +
+        `using the default, ${defaultValue ? 'ON' : 'OFF'}`,
+    );
+  }
+  return defaultValue;
 }
 
-export function resolveAddOnRolloutFlags(env: NodeJS.ProcessEnv = process.env): AddOnRolloutFlags {
+export function resolveAddOnRolloutFlags(
+  env: NodeJS.ProcessEnv = process.env,
+  defaults: AddOnRolloutFlagDefaults = ADD_ON_ROLLOUT_FLAG_DEFAULTS,
+): AddOnRolloutFlags {
+  const flag = (name: AddOnRolloutFlagName): boolean => parseFlag(env[name], defaults[name], name);
   return {
-    entitlementShadow: parseBoolean(env.ADDON_ENTITLEMENT_SHADOW),
-    directPurchase: parseBoolean(env.ADDON_ENTITLEMENT_DIRECT_PURCHASE),
-    projectionSync: parseBoolean(env.ADDON_PROJECTION_SYNC),
-    renewalAddOns: parseBoolean(env.ADDON_RENEWAL_ADDONS),
-    deviceCleanupAuto: parseBoolean(env.ADDON_DEVICE_CLEANUP_AUTO),
+    entitlementShadow: flag('ADDON_ENTITLEMENT_SHADOW'),
+    directPurchase: flag('ADDON_ENTITLEMENT_DIRECT_PURCHASE'),
+    projectionSync: flag('ADDON_PROJECTION_SYNC'),
+    renewalAddOns: flag('ADDON_RENEWAL_ADDONS'),
+    deviceCleanupAuto: flag('ADDON_DEVICE_CLEANUP_AUTO'),
     resetExpiry: {
-      DAY: parseBoolean(env.ADDON_RESET_EXPIRY_DAY),
-      WEEK: parseBoolean(env.ADDON_RESET_EXPIRY_WEEK),
-      MONTH: parseBoolean(env.ADDON_RESET_EXPIRY_MONTH),
-      MONTH_ROLLING: parseBoolean(env.ADDON_RESET_EXPIRY_MONTH_ROLLING),
+      DAY: flag('ADDON_RESET_EXPIRY_DAY'),
+      WEEK: flag('ADDON_RESET_EXPIRY_WEEK'),
+      MONTH: flag('ADDON_RESET_EXPIRY_MONTH'),
+      MONTH_ROLLING: flag('ADDON_RESET_EXPIRY_MONTH_ROLLING'),
     },
   };
 }

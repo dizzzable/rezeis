@@ -158,6 +158,8 @@ function build(opts: Opts = {}) {
 
 describe('DeviceReductionExecutionService (T-011c)', () => {
   it('is a no-op when the deviceCleanupAuto flag is off', async () => {
+    // Explicitly OFF: the flag defaults ON since the 24.09.2026 flip.
+    process.env['ADDON_DEVICE_CLEANUP_AUTO'] = 'false';
     const { service, planUpdates, deleteCalls } = build();
     const outcome = await service.executePlan('plan-1');
     assert.equal(outcome.status, 'AUTO_DISABLED');

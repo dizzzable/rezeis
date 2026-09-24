@@ -24,6 +24,7 @@ function lookup(overrides: Partial<PanelLookup> = {}): PanelLookup {
     reachable: true,
     complete: true,
     keyKind: 'id',
+    readAt: new Date(),
     ...overrides,
   };
 }

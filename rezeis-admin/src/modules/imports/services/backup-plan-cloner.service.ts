@@ -439,7 +439,7 @@ export class BackupPlanClonerService {
           id: targetPlan.id,
           // `planId` STAYS, and is not a duplicate to be tidied away: it is the
           // import domain's "this imported row has been linked to a real plan"
-          // marker. `isImportedOrUnassigned` tests it, the re-link loop above
+          // marker. `readBulkAssignmentSnapshot` tests it, the re-link loop above
           // skips a row that already carries one, and the altshop / remnashop
           // importers rebuild the snapshot from donor facts carrying `planId`
           // and only `planId` — so dropping it would make a re-import silently

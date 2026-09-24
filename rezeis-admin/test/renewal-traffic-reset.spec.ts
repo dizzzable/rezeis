@@ -5,6 +5,12 @@ import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * Paying for another period gives the period's traffic back
@@ -56,6 +62,8 @@ function renewalTx(input: {
       }),
     },
     subscriptionEffectiveProjection: { findUnique: async () => null },
+    // Not in the term model: the renewal stays on the columns.
+    subscriptionTerm: { findFirst: async () => null },
     profileSyncJob: {
       create: async ({ data }: { data: Record<string, unknown> }) => {
         input.onJob(data);

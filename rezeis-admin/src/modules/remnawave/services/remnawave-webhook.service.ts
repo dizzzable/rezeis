@@ -1,11 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Inject } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { remnawaveConfig } from '../../../common/config/remnawave.config';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import { isNumericPanelIdentity } from './panel-user-address';
 import {
@@ -26,6 +28,12 @@ import {
 } from '../../connect-signal/connect-evidence.util';
 import { decodePanelUserTraffic, RemnawaveApiService } from './remnawave-api.service';
 import { SubscriptionNoticePayloadService } from './subscription-notice-payload.service';
+import {
+  finishTermModelReadback,
+  IN_TERM_MODEL,
+  judgeTermModelReadback,
+  OUTSIDE_TERM_MODEL,
+} from './term-model-readback';
 import { panelTrafficLimitToGb } from '../utils/panel-traffic-limit.util';
 
 /**
@@ -489,7 +497,31 @@ export class RemnawaveWebhookService {
      */
     private readonly noticePayload: SubscriptionNoticePayloadService,
     private readonly userNotifications: UserNotificationsService,
+    /**
+     * Reaches `ProfileSyncQueueService` at call time, for the one push this
+     * service queues (`finishTermModelReadback`). A constructor dependency would
+     * close a module cycle — `ProfileSyncModule` imports this module — so the
+     * same `ModuleRef` escape hatch `SystemEventsService` uses. `@Optional()`
+     * and last because a dozen specs build this service positionally; without
+     * it the job row is still written, and the five-minute profile-sync sweep
+     * queues it.
+     */
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {}
+
+  /** `undefined` until first asked; `null` when this runtime has no queue. */
+  private profileSyncQueue?: ProfileSyncQueueService | null;
+
+  private resolveProfileSyncQueue(): ProfileSyncQueueService | null {
+    if (this.profileSyncQueue !== undefined) return this.profileSyncQueue;
+    try {
+      this.profileSyncQueue = this.moduleRef?.get(ProfileSyncQueueService, { strict: false }) ?? null;
+    } catch {
+      this.profileSyncQueue = null;
+    }
+    return this.profileSyncQueue;
+  }
 
   /**
    * Validates the webhook signature (HMAC-SHA256).
@@ -578,11 +610,22 @@ export class RemnawaveWebhookService {
     // the change immediately. Best-effort — a reconcile failure must never
     // drop the webhook (Activity Feed + cards still proceed).
     //
-    // Echo-safe: this writes ONLY to the local DB and never enqueues a
-    // profile-sync push (those are enqueued by subscription mutation services,
-    // not by a DB write), so there is no panel↔rezeis loop. Panel is the
-    // source of truth for runtime state; rezeis still owns commercial fields
-    // (plan snapshot, price, isTrial), which this never touches.
+    // Echo-safe. For a subscription outside the term model this writes ONLY to
+    // the local DB and never enqueues a profile-sync push (those are enqueued
+    // by subscription mutation services, not by a DB write), so there is no
+    // panel↔rezeis loop. Panel is the source of truth for runtime state;
+    // rezeis still owns commercial fields (plan snapshot, price, isTrial),
+    // which this never touches.
+    //
+    // A subscription IN the term model is the one exception, and only for its
+    // limits: those are commercial there (add-ons are sold into them), so the
+    // event is read as a report and a Remnawave profile holding other limits
+    // gets rezeis' own pushed back. That push does not loop either: the echo
+    // of a push of ours is stamped by the panel before that push is recorded
+    // as completed here, which `panelPushOutranksRead` reads as "not newer
+    // than our own state", and nothing is pushed for it. See
+    // `reconcileSubscriptionFromEvent` and `term-model-readback.ts`, the rule
+    // every Remnawave read-back shares.
     if (normalized.startsWith('user.')) {
       // Attribution first, and out loud. Everything below keys the local
       // profile off the panel identity, and when that cannot be read they ALL
@@ -782,6 +825,10 @@ export class RemnawaveWebhookService {
    * payload (`data`, 2.x) and overlays them onto every non-deleted
    * subscription whose `remnawaveId` matches. Partial: only fields present
    * in the payload are written; status falls back to the event name.
+   *
+   * A subscription in the durable term model takes its status the same way,
+   * but its limits and its expiry by the rules under "In the term model"
+   * below (`reconcileRowsInTermModel`).
    */
   private async reconcileSubscriptionFromEvent(
     normalizedEvent: string,
@@ -817,11 +864,16 @@ export class RemnawaveWebhookService {
         : undefined) ?? statusFromEventName(normalizedEvent);
     if (status !== undefined) update.status = status;
 
-    // Expiry: ISO string → Date.
+    // Expiry: ISO string → Date. Kept as a plain value too, for the rows in
+    // the term model (see below), which do not take it from `update`.
+    let mirroredExpiresAt: Date | undefined;
     const expireAt = str('expireAt');
     if (expireAt !== undefined) {
       const parsed = new Date(expireAt);
-      if (!Number.isNaN(parsed.getTime())) update.expiresAt = parsed;
+      if (!Number.isNaN(parsed.getTime())) {
+        mirroredExpiresAt = parsed;
+        update.expiresAt = parsed;
+      }
     }
 
     // Traffic limit: panel is bytes (0 = unlimited); local is GB (null =
@@ -877,6 +929,55 @@ export class RemnawaveWebhookService {
       status: { not: SubscriptionStatus.DELETED },
     };
 
+    // ── In the term model: the limits are the panel's, the expiry is guarded ──
+    //
+    // A subscription with an ACTIVE term (the durable add-on model) holds its
+    // limits as "own share + the add-ons the projection recorded", and every
+    // recompute reads the own share back as the column less that recorded
+    // share (`add-on-entitlements/domain/entitlement-baseline.ts`). Copying
+    // Remnawave's limits into such a column is therefore not a mirror but a
+    // decision about the customer's own plan — and a wrong one whenever the
+    // event predates the panel's own last change. A +2 device purchase mirrors
+    // 5; an event still carrying the 3 the profile had before that purchase's
+    // push landed writes 3; at the add-on's end own = 3 − 2 = 1, and the
+    // automatic device reduction deletes down to 1 on a 3-device plan. The
+    // same echo after an add-on ENDED brings it back as the customer's own
+    // until the next renewal.
+    //
+    // Nothing in the event tells that stale echo from a limit an operator set
+    // in Remnawave's own UI. A record of what rezeis pushed cannot either: an
+    // edit back to a value pushed earlier reads as an echo, and an old event
+    // delivered late carries a value pushed earlier still. Timing can say
+    // "stale" (`panelPushOutranksRead`) but never "genuine" — a panel write
+    // that queued no push, or clocks that disagree, would pass a stale value
+    // for news, and here that costs devices. So for a subscription in the
+    // model THE PANEL IS THE SOURCE OF TRUTH FOR ITS LIMITS: an event never
+    // writes them, in the columns or in the snapshot, and a Remnawave profile
+    // found holding other limits than rezeis would push gets rezeis' own pushed
+    // back (`reconcileRowsInTermModel`). An operator changes a limit in the
+    // panel — «Пользователи» → подписка → «Быстрые действия» — where the model
+    // records it as the subscription's own.
+    //
+    // Its EXPIRY is still taken from the event, as Remnawave-side extensions
+    // always were, unless the panel's own last change is newer than the event
+    // (`panelPushOutranksRead`). That is the same stale echo, and in the model
+    // it is not harmless either: the term and its «until the end of the
+    // subscription» add-ons follow `expiresAt`, so a paid renewal or bonus
+    // days rolled back to an earlier date would end those add-ons for good.
+    // STATUS is taken as before: Remnawave derives it from usage and the
+    // clock, and only the event can tell it.
+    //
+    // The same rule governs every other Remnawave read-back — the import sync,
+    // the ↻ refresh, the backup re-imports — and lives in one place,
+    // `term-model-readback.ts`.
+    //
+    // A subscription OUTSIDE the model keeps exactly the behaviour described
+    // above and below: the same statement, narrowed to rows with no ACTIVE
+    // term. An event that states neither a limit nor an expiry leaves the
+    // model nothing to decide and stays one statement for every row.
+    const modelDecides = mirrorsALimit || mirroredExpiresAt !== undefined;
+    const outsideModel: Prisma.SubscriptionWhereInput = modelDecides ? { ...where, ...OUTSIDE_TERM_MODEL } : where;
+
     // Read BEFORE the write, and only when this event is the one that can
     // produce a notice. The question is whether the subscription CROSSED
     // into LIMITED, and after the update every row reads LIMITED whether it
@@ -890,7 +991,55 @@ export class RemnawaveWebhookService {
           })
         : [];
 
-    const result = await this.prismaService.subscription.updateMany({ where, data: update });
+    const result = await this.prismaService.subscription.updateMany({ where: outsideModel, data: update });
+
+    // Additive second pass, never a replacement for the write above. It exists
+    // only to move `planSnapshot` to wherever the columns just landed, and it
+    // writes nothing else — on the rows outside the term model, the only ones
+    // whose columns that write moved.
+    //
+    // KNOWN LIMIT, accepted: this is a read-modify-write on the JSON with no
+    // row lock, so two panel events for the same profile arriving together can
+    // clobber each other's key. Doing it in one statement means
+    // `UPDATE … SET plan_snapshot = plan_snapshot || …`, which needs
+    // `panelIdentityWhere`'s predicate restated in raw SQL — a THIRD expression
+    // of "which row does this panel identity name", after this one and
+    // `panel-user-address.ts`'s plural sibling. A stale limit that the next
+    // renewal corrects anyway is the smaller hazard than a divergent identity
+    // predicate, which would silently reconcile the wrong customer.
+    if (result.count > 0 && mirrorsALimit) {
+      const targets = await this.prismaService.subscription.findMany({
+        where: outsideModel,
+        select: { id: true, planSnapshot: true },
+      });
+      for (const target of targets) {
+        let planSnapshot = target.planSnapshot as unknown;
+        if (mirroredTrafficLimit !== undefined) {
+          planSnapshot = patchSnapshotNumeric(planSnapshot, 'trafficLimit', mirroredTrafficLimit);
+        }
+        if (mirroredDeviceLimit !== undefined) {
+          planSnapshot = patchSnapshotNumeric(planSnapshot, 'deviceLimit', mirroredDeviceLimit);
+        }
+        await this.prismaService.subscription.update({
+          where: { id: target.id },
+          data: { planSnapshot: planSnapshot as Prisma.InputJsonValue },
+        });
+      }
+    }
+
+    const inModel = modelDecides
+      ? await this.reconcileRowsInTermModel({
+          normalizedEvent,
+          where,
+          remnawaveId,
+          eventAt: webhookEventTime(payload, new Date()),
+          status,
+          expiresAt: mirroredExpiresAt,
+          trafficLimitBytes,
+          hwidDeviceLimit: mirroredDeviceLimit,
+          rowsOutsideModel: result.count,
+        })
+      : 0;
 
     // ONE MESSAGE PER CUSTOMER, not one per row.
     //
@@ -909,44 +1058,91 @@ export class RemnawaveWebhookService {
       await this.notifyTrafficLimited(subscription);
     }
 
-    // Additive second pass, never a replacement for the write above. It exists
-    // only to move `planSnapshot` to wherever the columns just landed, and it
-    // writes nothing else.
-    //
-    // KNOWN LIMIT, accepted: this is a read-modify-write on the JSON with no
-    // row lock, so two panel events for the same profile arriving together can
-    // clobber each other's key. Doing it in one statement means
-    // `UPDATE … SET plan_snapshot = plan_snapshot || …`, which needs
-    // `panelIdentityWhere`'s predicate restated in raw SQL — a THIRD expression
-    // of "which row does this panel identity name", after this one and
-    // `panel-user-address.ts`'s plural sibling. A stale limit that the next
-    // renewal corrects anyway is the smaller hazard than a divergent identity
-    // predicate, which would silently reconcile the wrong customer.
-    if (result.count > 0 && mirrorsALimit) {
-      const targets = await this.prismaService.subscription.findMany({
-        where,
-        select: { id: true, planSnapshot: true },
-      });
-      for (const target of targets) {
-        let planSnapshot = target.planSnapshot as unknown;
-        if (mirroredTrafficLimit !== undefined) {
-          planSnapshot = patchSnapshotNumeric(planSnapshot, 'trafficLimit', mirroredTrafficLimit);
-        }
-        if (mirroredDeviceLimit !== undefined) {
-          planSnapshot = patchSnapshotNumeric(planSnapshot, 'deviceLimit', mirroredDeviceLimit);
-        }
-        await this.prismaService.subscription.update({
-          where: { id: target.id },
-          data: { planSnapshot: planSnapshot as Prisma.InputJsonValue },
-        });
-      }
-    }
-
-    if (result.count > 0) {
+    if (result.count + inModel > 0) {
       this.logger.log(
-        `Reconciled ${result.count} subscription(s) from panel event ${normalizedEvent} (remnawaveId=${remnawaveId})`,
+        `Reconciled ${result.count + inModel} subscription(s) from panel event ${normalizedEvent} ` +
+          `(remnawaveId=${remnawaveId}${inModel > 0 ? `, ${inModel} in the term model` : ''})`,
       );
     }
+  }
+
+  /**
+   * The rows `where` names that are IN the term model (an ACTIVE term), for an
+   * event that states a limit or an expiry — the rules are under "In the term
+   * model" in `reconcileSubscriptionFromEvent`, and they are the rule every
+   * Remnawave read-back shares (`term-model-readback.ts`). Per row:
+   *
+   *  - STATUS is written, as for every subscription;
+   *  - EXPIRY is written unless the panel's own state outranks the event;
+   *  - LIMITS are never written. When the event is newer than the panel's own
+   *    state and the profile holds other limits than rezeis would push, ONE
+   *    UPDATE is queued to push rezeis' own again — never for a profile two
+   *    live rows name, a row with no panel link, or a profile the event
+   *    reports deleted (`judgeTermModelReadback` says why for each).
+   *
+   * Returns how many rows it wrote.
+   */
+  private async reconcileRowsInTermModel(input: {
+    readonly normalizedEvent: string;
+    readonly where: Prisma.SubscriptionWhereInput;
+    readonly remnawaveId: string;
+    /** When the panel stamped the event (`webhookEventTime`). */
+    readonly eventAt: Date;
+    readonly status: SubscriptionStatus | undefined;
+    readonly expiresAt: Date | undefined;
+    /** As the panel stated them — bytes, and devices `>= 0` — or `undefined`. */
+    readonly trafficLimitBytes: number | undefined;
+    readonly hwidDeviceLimit: number | undefined;
+    /** How many rows outside the model the same identity named. */
+    readonly rowsOutsideModel: number;
+  }): Promise<number> {
+    const rows = await this.prismaService.subscription.findMany({
+      where: { ...input.where, ...IN_TERM_MODEL },
+      select: { id: true, remnawaveId: true, trafficLimit: true, deviceLimit: true },
+    });
+    if (rows.length === 0) return 0;
+    const sharedProfile = rows.length + input.rowsOutsideModel > 1;
+
+    let written = 0;
+    for (const row of rows) {
+      const verdict = await judgeTermModelReadback(this.prismaService, {
+        subscriptionId: row.id,
+        remnawaveId: row.remnawaveId,
+        columns: row,
+        stated: {
+          ...(input.trafficLimitBytes === undefined ? {} : { trafficLimitBytes: input.trafficLimitBytes }),
+          ...(input.hwidDeviceLimit === undefined ? {} : { hwidDeviceLimit: input.hwidDeviceLimit }),
+        },
+        readAt: input.eventAt,
+        sharedProfile,
+        profileDeleted: input.normalizedEvent === 'user.deleted',
+      });
+
+      const data: Prisma.SubscriptionUpdateManyMutationInput = {};
+      if (input.status !== undefined) data.status = input.status;
+      if (input.expiresAt !== undefined && verdict.takeExpiry) data.expiresAt = input.expiresAt;
+      if (Object.keys(data).length > 0) {
+        const result = await this.prismaService.subscription.updateMany({
+          where: { id: row.id, status: { not: SubscriptionStatus.DELETED } },
+          data,
+        });
+        written += result.count;
+      }
+
+      // After the write above: the push is built from the columns when it
+      // runs, and must carry an expiry this same event may just have brought.
+      // Queued at once when this runtime has the queue; otherwise the
+      // five-minute profile-sync sweep picks the PENDING row up.
+      const queue = this.resolveProfileSyncQueue();
+      await finishTermModelReadback(this.prismaService, verdict, {
+        subscriptionId: row.id,
+        profile: input.remnawaveId,
+        source: 'Remnawave webhook',
+        logger: this.logger,
+        ...(queue === null ? {} : { enqueue: (syncJobId: string) => queue.enqueue(syncJobId) }),
+      });
+    }
+    return written;
   }
 
 

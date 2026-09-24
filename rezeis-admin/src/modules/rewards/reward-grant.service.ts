@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import { clampDiscountPercent } from '../../common/utils/discount.util';
+import { grantTermLimitBonusInTransaction } from '../add-on-entitlements/services/term-limit-bonus.util';
 import { displayPlanName } from '../plans/utils/plan-deletion.util';
 import { PointsWalletService } from '../points/services/points-wallet.service';
 import { patchSnapshotNumeric } from '../subscriptions/services/plan-inherited-limits.util';
@@ -131,7 +132,7 @@ export class RewardGrantService {
 
   private async applyTraffic(
     tx: Prisma.TransactionClient,
-    input: { readonly userId: string; readonly grant: RewardGrant },
+    input: { readonly userId: string; readonly grant: RewardGrant; readonly origin: RewardOrigin },
   ): Promise<RewardApplication> {
     const subId = await resolveActiveSubscriptionId(tx, input.userId);
     if (subId === null) {
@@ -154,6 +155,20 @@ export class RewardGrantService {
     if (sub?.trafficLimit == null) {
       // Unlimited traffic has nothing to top up.
       return { kind: 'TRAFFIC', trafficGb: input.grant.amount, subscriptionId: subId, syncSubscriptionId: null };
+    }
+    // In the term model the bonus goes on the terms and lasts to the end of
+    // the period it was won in — `grantTermLimitBonusInTransaction`, a plain
+    // function over this transaction, so this module imports no add-on module
+    // and stays a leaf (`wheel-settings.util.spec.ts`).
+    const inModel = await grantTermLimitBonusInTransaction(tx, {
+      subscriptionId: subId,
+      resource: 'TRAFFIC',
+      value: input.grant.amount,
+      source: 'REWARD',
+      sourceRef: `${input.origin.pointsSource}:${input.origin.referenceKey}`,
+    });
+    if (inModel.outcome === 'GRANTED') {
+      return { kind: 'TRAFFIC', trafficGb: input.grant.amount, subscriptionId: subId, syncSubscriptionId: subId };
     }
     const trafficLimitAfter = sub.trafficLimit + input.grant.amount;
     // The snapshot moves with the column, exactly as the promocode

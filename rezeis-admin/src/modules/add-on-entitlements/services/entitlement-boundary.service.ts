@@ -4,7 +4,9 @@ import {
   AddOnEntitlementState,
   AddOnLifetime,
   AddOnType,
+  EntitlementIncidentKind,
   Prisma,
+  SubscriptionStatus,
   SubscriptionTermStatus,
   SyncAction,
   SyncJobStatus,
@@ -17,10 +19,13 @@ import { resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
 import { resolveOperatorConfiguredLimits } from '../domain/entitlement-baseline';
 import { ResetStrategy } from '../domain/reset-cycle-policy';
+import { withoutTermLimitBonuses } from '../domain/term-limit-bonus';
 import { AddOnEntitlementService } from './add-on-entitlement.service';
+import { DurableRetirementResult, retireDurableRowsInTransaction } from './durable-retirement.util';
 import { ensureLiveResetEpoch, LiveResetEpoch } from './reset-epoch.util';
 import { EffectiveProjectionService } from './effective-projection.service';
 import { SubscriptionTermService } from './subscription-term.service';
+import { pruneEndedTermLimitBonusesInTransaction } from './term-limit-bonus.util';
 
 export interface BoundaryActivationResult {
   readonly activated: boolean;
@@ -59,11 +64,13 @@ function decodeDeferredPlanActivation(
   }
   const value = snapshot as Record<string, unknown>;
   if (typeof value.id !== 'string' || value.id.trim().length === 0) return null;
+  // The term's free limit bonuses stay on the term, the one place they count
+  // (`../domain/term-limit-bonus.ts`); the row's snapshot is what the plan gave.
   const decoded: {
     planSnapshot: Prisma.InputJsonValue;
     internalSquads?: readonly string[];
     externalSquad?: string | null;
-  } = { planSnapshot: snapshot as Prisma.InputJsonValue };
+  } = { planSnapshot: withoutTermLimitBonuses(value) as Prisma.InputJsonValue };
   if (Array.isArray(value.internalSquads) && value.internalSquads.every((entry) => typeof entry === 'string')) {
     decoded.internalSquads = value.internalSquads;
   }
@@ -448,6 +455,53 @@ export class EntitlementBoundaryService {
     projectionRevision: bigint,
     now: Date = new Date(),
   ): Promise<VerifiedDeviceExpiryCompletionResult> {
+    return this.completeDeviceExpiryInTransaction(tx, subscriptionId, projectionRevision, now, {
+      reason: 'DEVICE_REDUCTION_VERIFIED',
+      commandKeyPrefix: 'device-expiry-complete',
+    });
+  }
+
+  /**
+   * Completes the EXPIRING device add-ons of a subscription on which there is
+   * NOTHING TO REDUCE at `projectionRevision` — the planner's `NOT_APPLICABLE`
+   * that carries a revision: the desired device limit is unlimited, or there is
+   * no panel profile to hold a device (none linked, or the panel says it is
+   * gone). No plan can ever be built for such a row, so leaving the add-on
+   * EXPIRING only brought it back to the sweep every five minutes for another
+   * planning call and another panel read, forever.
+   *
+   * The same revision guard as a verified completion, under the same row lock:
+   * a newer boundary (another device add-on beginning its expiry) moves the
+   * revision, and this answers SUPERSEDED instead of completing an add-on the
+   * planner never looked at. Its own command key, so it can never collide with
+   * the verified completion's recorded payload.
+   */
+  public async completeUnreducibleDeviceExpiryForSubscription(
+    subscriptionId: string,
+    projectionRevision: bigint,
+    plannerReason: string,
+    now: Date = new Date(),
+  ): Promise<VerifiedDeviceExpiryCompletionResult> {
+    return this.prismaService.$transaction((tx) =>
+      this.completeDeviceExpiryInTransaction(tx, subscriptionId, projectionRevision, now, {
+        reason: 'DEVICE_REDUCTION_NOT_APPLICABLE',
+        commandKeyPrefix: 'device-expiry-not-applicable',
+        metadata: { plannerReason },
+      }),
+    );
+  }
+
+  private async completeDeviceExpiryInTransaction(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+    projectionRevision: bigint,
+    now: Date,
+    completion: {
+      readonly reason: string;
+      readonly commandKeyPrefix: string;
+      readonly metadata?: Prisma.InputJsonObject;
+    },
+  ): Promise<VerifiedDeviceExpiryCompletionResult> {
     // Projection recomputes serialize on this same row. Reading the revision only
     // after acquiring the lock prevents an older panel verification from
     // completing entitlements introduced by a newer expiry boundary.
@@ -479,17 +533,54 @@ export class EntitlementBoundaryService {
     });
     let completed = 0;
     for (const entitlement of due) {
+      // A REFUNDED device add-on comes through this queue too
+      // (`AddOnRefundService`: the refund begins its expiry, so its reduction
+      // is retried like an expiry's). Its reduction done, it ends as the
+      // refund it is — REVERSED, «Отменена» to the customer — not EXPIRED.
+      const refund = await tx.entitlementIncident.findFirst({
+        where: { entitlementId: entitlement.id, kind: EntitlementIncidentKind.REFUND_OR_CHARGEBACK },
+        orderBy: { createdAt: 'asc' },
+        select: { summaryCode: true },
+      });
       const transition = await this.addOnEntitlementService.transitionInTransaction(tx, {
         entitlementId: entitlement.id,
-        command: 'COMPLETE_EXPIRY',
-        commandKey: `device-expiry-complete:${entitlement.id}`,
+        command: refund === null ? 'COMPLETE_EXPIRY' : 'REVERSE',
+        commandKey: `${completion.commandKeyPrefix}:${entitlement.id}`,
         correlationId: `device-expiry:${subscriptionId}`,
         actorType: AddOnEntitlementActorType.SYSTEM,
-        reason: 'DEVICE_REDUCTION_VERIFIED',
+        reason: refund?.summaryCode ?? completion.reason,
+        ...(completion.metadata === undefined && refund === null
+          ? {}
+          : { metadata: { ...completion.metadata, ...(refund === null ? {} : { reductionReason: completion.reason }) } }),
       });
       if (transition.changed) completed += 1;
     }
     return { status: 'COMPLETED', completed };
+  }
+
+  /**
+   * Retires the durable rows of a subscription that is already DELETED — see
+   * `retireDurableRowsInTransaction`. Under the row lock; `retired: false`
+   * when the row is gone or not DELETED (then nothing is written).
+   *
+   * The boundary sweep's answer to a DELETED row it finds due. Before it, such
+   * a row threw in the projection recompute on every tick: the boundary
+   * transaction rolled back, and the row came straight back five minutes later.
+   */
+  public async retireDeletedSubscription(
+    subscriptionId: string,
+  ): Promise<{ readonly retired: boolean } & Partial<DurableRetirementResult>> {
+    return this.prismaService.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ readonly status: SubscriptionStatus }>>(Prisma.sql`
+        SELECT "status"::text AS "status"
+        FROM "subscriptions"
+        WHERE "id" = ${subscriptionId}
+        FOR UPDATE
+      `);
+      if (locked[0]?.status !== SubscriptionStatus.DELETED) return { retired: false };
+      const result = await this.retireInTransaction(tx, subscriptionId);
+      return { retired: true, ...result };
+    });
   }
 
   public async expireDueForSubscription(
@@ -497,6 +588,29 @@ export class EntitlementBoundaryService {
     now: Date = new Date(),
   ): Promise<BoundaryExpiryResult> {
     return this.prismaService.$transaction(async (tx) => {
+      // ALIGN BEFORE EXPIRING. `expiresAt` moves without the term (bonus days,
+      // an operator edit, a pull from Remnawave); an UNTIL_SUBSCRIPTION_END
+      // add-on must end with the SUBSCRIPTION, so the tail term and the add-ons
+      // that end with it are moved first, under the row lock this also takes —
+      // and only what is still due after that is expired. See
+      // `SubscriptionTermService.alignTailToExpiryInTransaction`.
+      const alignment = await this.subscriptionTermService.alignTailToExpiryInTransaction(
+        tx,
+        subscriptionId,
+        { correlationId: `boundary-align:${subscriptionId}` },
+      );
+      if (alignment.outcome === 'SUBSCRIPTION_DELETED') {
+        // Retired, not expired: the recompute below refuses a DELETED row, and
+        // throwing here would bring the row back on every tick.
+        await this.retireInTransaction(tx, subscriptionId);
+        return { began: 0, expired: 0, changed: false, desiredRevision: null, syncJobIds: [], deviceExpiryTriggered: false };
+      }
+
+      // A free limit bonus a paid upgrade carried with an end of its own
+      // (`until`) comes off the terms once that end has passed; the recompute
+      // below then drops it, as it drops an expired add-on.
+      const endedBonusTerms = await pruneEndedTermLimitBonusesInTransaction(tx, subscriptionId, now);
+
       const due = await tx.addOnEntitlement.findMany({
         where: {
           subscriptionId,
@@ -505,7 +619,7 @@ export class EntitlementBoundaryService {
         },
         select: { id: true, type: true, state: true },
       });
-      if (due.length === 0) {
+      if (due.length === 0 && endedBonusTerms === 0) {
         return { began: 0, expired: 0, changed: false, desiredRevision: null, syncJobIds: [], deviceExpiryTriggered: false };
       }
 
@@ -598,5 +712,20 @@ export class EntitlementBoundaryService {
       );
       return { began, expired, changed: true, desiredRevision, syncJobIds, deviceExpiryTriggered };
     });
+  }
+
+  private retireInTransaction(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+  ): Promise<DurableRetirementResult> {
+    return retireDurableRowsInTransaction(
+      tx,
+      { entitlements: this.addOnEntitlementService, terms: this.subscriptionTermService },
+      {
+        subscriptionId,
+        correlationId: `boundary-deleted:${subscriptionId}`,
+        reason: 'SUBSCRIPTION_DELETED',
+      },
+    );
   }
 }

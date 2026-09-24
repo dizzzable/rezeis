@@ -10,8 +10,12 @@ import {
 import { TrafficResetService } from './traffic-reset.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
-import { resolveIntakeResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
+import {
+  resolveAddOnRolloutFlags,
+  resolveIntakeResetCapabilities,
+} from '../../add-on-entitlements/add-on-rollout.config';
 import { resolveAddOnLifetimeGrant } from '../../add-on-entitlements/domain/add-on-lifetime';
+import { isAddOnPurchaseDated } from '../../add-on-entitlements/domain/add-on-purchase-dating';
 import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
 import { ResetCapabilityMap } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import {
@@ -33,6 +37,17 @@ export interface AddOnEligibilityInfo {
    * the type simpler and shown the customer an offer that had already expired.
    */
   readonly expiresAt: string | null;
+  /**
+   * Whether this purchase is recorded in the ledger as an entitlement that ENDS
+   * — at `expiresAt` — rather than as the legacy increment, which is permanent
+   * (`isAddOnPurchaseDated`, the fulfilment's own gates). `true` only then:
+   * with stage 2 off, for a subscription the purchase cannot bring into the
+   * model, for a lifetime subscription, for a traffic reset, it is `false`, and
+   * `expiresAt` is then no promise. The cabinet says «Действует до …» only on
+   * `true` — and a cabinet meeting a panel older than the field, which sends
+   * none, says nothing.
+   */
+  readonly dated: boolean;
   readonly explanationCode: string;
 }
 
@@ -124,6 +139,15 @@ const EMPTY_RESULT = (): AddOnEligibilityResult => ({
  * Only eligible add-ons are returned; ineligible ones are withheld. This
  * endpoint is authoritative for discovery but never for money — checkout
  * re-validates and prices server-side.
+ *
+ * ── Dated, or permanent ───────────────────────────────────────────────────
+ *
+ * `expiresAt` is when the grant WOULD end; `dated` says whether it will —
+ * whether the purchase is recorded in the ledger with that end, or is the
+ * legacy increment, which never ends (stage 2 off, a subscription the purchase
+ * cannot bring into the model, a lifetime subscription). The rule is the
+ * fulfilment's, in `isAddOnPurchaseDated`; the cabinet shows a date only when
+ * `dated` is true.
  *
  * Baseline resolution prefers the subscription's ACTIVE durable term. When no
  * term exists yet (pre-cutover; rollout flags default OFF) it falls back to a
@@ -222,6 +246,7 @@ export class AddOnEligibilityService {
 
     const capabilities = this.getResetCapabilities();
     const now = new Date();
+    const dating = await this.readPurchaseDating(subscriptionId, term, subscription.expiresAt, now);
 
     const addOns: EligibleAddOn[] = [];
     for (const addOn of catalog) {
@@ -230,14 +255,20 @@ export class AddOnEligibilityService {
         addOn.applicablePlanIds.includes(resolved.planId);
       if (!appliesToPlan) continue;
 
-      const eligibility = this.evaluate(
+      const evaluated = this.evaluate(
         addOn.type,
         addOn.lifetime,
         resolved.baseline,
         capabilities,
         now,
       );
-      if (eligibility === null) continue;
+      if (evaluated === null) continue;
+      const eligibility: AddOnEligibilityInfo = {
+        ...evaluated,
+        dated:
+          evaluated.expiresAt !== null &&
+          isAddOnPurchaseDated({ type: addOn.type, lifetime: addOn.lifetime, ...dating }),
+      };
 
       addOns.push({
         id: addOn.id,
@@ -268,6 +299,40 @@ export class AddOnEligibilityService {
       target: { subscriptionId, termId: resolved.termId, planId: resolved.planId },
       addOns,
     };
+  }
+
+  /**
+   * What `isAddOnPurchaseDated` needs about this subscription, read once per
+   * listing: the flags, its terms, its expiry. With stage 2 off no purchase is
+   * dated, and the term reads are skipped.
+   */
+  private async readPurchaseDating(
+    subscriptionId: string,
+    activeTerm: { readonly endsAt: Date | null } | null,
+    subscriptionExpiresAt: Date | null,
+    now: Date,
+  ): Promise<{
+    readonly flags: { readonly directPurchase: boolean; readonly entitlementShadow: boolean };
+    readonly activeTerm: { readonly endsAt: Date | null } | null;
+    readonly hasAnyTerm: boolean;
+    readonly scheduledTermQueued: boolean;
+    readonly subscriptionExpiresAt: Date | null;
+    readonly now: Date;
+  }> {
+    const flags = resolveAddOnRolloutFlags();
+    const base = { flags, activeTerm, subscriptionExpiresAt, now };
+    if (!flags.directPurchase) return { ...base, hasAnyTerm: activeTerm !== null, scheduledTermQueued: false };
+    const hasAnyTerm =
+      activeTerm !== null ||
+      (await this.prismaService.subscriptionTerm.findFirst({ where: { subscriptionId }, select: { id: true } })) !==
+        null;
+    const scheduledTermQueued =
+      activeTerm !== null &&
+      (await this.prismaService.subscriptionTerm.findFirst({
+        where: { subscriptionId, status: SubscriptionTermStatus.SCHEDULED },
+        select: { id: true },
+      })) !== null;
+    return { ...base, hasAnyTerm, scheduledTermQueued };
   }
 
   /**
@@ -414,7 +479,7 @@ export class AddOnEligibilityService {
     },
     capabilities: ResetCapabilityMap,
     now: Date,
-  ): AddOnEligibilityInfo | null {
+  ): Omit<AddOnEligibilityInfo, 'dated'> | null {
     // Resource-baseline eligibility: an add-on can only extend a FINITE limit.
     // The predicate is shared with the direct-purchase checkout and both
     // capture paths so the OFFER and the money paths cannot answer it

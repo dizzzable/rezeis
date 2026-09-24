@@ -19,6 +19,12 @@ import { PlanCatalogService } from '../src/modules/plans/services/plan-catalog.s
 import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/subscription-quote.service';
 import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * MOVING SUBSCRIPTIONS OFF A PLAN, against a real PostgreSQL.

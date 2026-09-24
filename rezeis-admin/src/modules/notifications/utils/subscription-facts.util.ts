@@ -182,6 +182,64 @@ export function buildSubscriptionFacts(
   return out;
 }
 
+/**
+ * Raw facts an add-on notice's payload carries (`AddOnExpiryNoticeService`):
+ * the add-on's kind, its size — gigabytes for traffic, a count for devices —
+ * and when it ends. Stored JSON, so every field is read as `unknown`.
+ */
+export interface AddOnFactsInput {
+  readonly type: unknown;
+  readonly total: unknown;
+  readonly endsAt: unknown;
+  /** IANA zone the operator configured. Falls back to UTC. */
+  readonly timezone?: string | null;
+}
+
+/** «устройство / устройства / устройств», «device / devices». */
+function devicesWord(count: number, locale: NotificationLocaleTag): string {
+  if (locale === 'en') return count === 1 ? 'device' : 'devices';
+  switch (new Intl.PluralRules('ru-RU').select(count)) {
+    case 'one':
+      return 'устройство';
+    case 'many':
+      return 'устройств';
+    default:
+      return 'устройства';
+  }
+}
+
+/**
+ * The words an add-on notice prints, for the locale in hand — derived here
+ * for the reason the subscription's are (see the header): «+2 устройства» and
+ * «+2 devices», «28 сентября» and «28 September».
+ *
+ * `{{addonValue}}` is the add-on as it adds — «+10 ГБ», «+2 устройства»;
+ * `{{addonAmount}}` the same without the plus, for a sentence that says by
+ * how much; `{{endsDate}}`, `{{endsTime}}` and `{{endsDateTime}}` when it
+ * ends. A payload without an add-on gives nothing, and each fact it cannot
+ * read collapses, as the others do.
+ */
+export function buildAddOnFacts(input: AddOnFactsInput, locale: NotificationLocaleTag): Record<string, string> {
+  const out: Record<string, string> = {};
+  const total = typeof input.total === 'number' && Number.isFinite(input.total) && input.total > 0 ? input.total : null;
+  if (total !== null && (input.type === 'EXTRA_TRAFFIC' || input.type === 'EXTRA_DEVICES')) {
+    const amount =
+      input.type === 'EXTRA_TRAFFIC'
+        ? `${formatAmount(total)} ${WORDS[locale].gb}`
+        : `${formatAmount(total)} ${devicesWord(total, locale)}`;
+    out['addonAmount'] = amount;
+    out['addonValue'] = `+${amount}`;
+  }
+  const when = parseInstant(typeof input.endsAt === 'string' ? input.endsAt : null);
+  if (when !== null) {
+    const zone = normaliseZone(input.timezone);
+    out['endsDate'] = formatDate(when, locale, zone);
+    out['endsTime'] = formatTime(when, zone);
+    out['endsDateTime'] = `${out['endsDate']}, ${out['endsTime']}`;
+  }
+  return out;
+}
+
 function parseInstant(value: string | null | undefined): Date | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   const parsed = new Date(value);

@@ -6,6 +6,7 @@ import { PlanAvailability } from '@prisma/client';
 
 import { TRIAL_CLAIM_LIMIT_MESSAGE } from '../src/modules/plans/utils/trial-settings.util';
 import { SubscriptionMutationsService } from '../src/modules/subscriptions/services/subscription-mutations.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 describe('SubscriptionMutationsService trial claims', () => {
   it('serializes concurrent free grants and stops exactly at maxClaims=2', async () => {
@@ -163,7 +164,7 @@ function createTrialGrantHarness(input: { readonly maxClaims: number }) {
     enqueue: async (id: string) => {
       enqueued.push(id);
     },
-  } as never);
+  } as never, NOT_IN_TERM_MODEL as never);
 
   return {
     subscriptions,

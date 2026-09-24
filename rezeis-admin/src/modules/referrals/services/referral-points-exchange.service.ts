@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  AddOnEntitlementActorType,
   PointsLedgerSource,
   Prisma,
   ReferralPointsExchangeType,
@@ -11,6 +12,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SubscriptionTermHooksService } from '../../add-on-entitlements/services/subscription-term-hooks.service';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
@@ -91,6 +93,7 @@ export class ReferralPointsExchangeService {
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly pointsWallet: PointsWalletService,
+    private readonly subscriptionTermHooks: SubscriptionTermHooksService,
   ) {}
 
   public async getExchangeOptions(userId: string): Promise<ExchangeOptionsResponse> {
@@ -285,6 +288,13 @@ export class ReferralPointsExchangeService {
           where: { id: subscription.id },
           data: { expiresAt: expiresAtAfter, status: SubscriptionStatus.ACTIVE },
         });
+        // The tail term and the add-ons sold "until the end of the
+        // subscription" follow the new end, inside the exchange.
+        await this.subscriptionTermHooks.followExpiryInTransaction(input.tx, subscription.id, {
+          correlationId: `points-exchange-days:${input.exchangeId}`,
+          actorType: AddOnEntitlementActorType.USER,
+          actorId: input.input.userId,
+        });
         const syncJobId = await this.createSubscriptionSyncJob(input.tx, subscription, {
           source: 'REFERRAL_EXCHANGE_DAYS',
           pointsExchangeType: input.input.type,
@@ -317,28 +327,42 @@ export class ReferralPointsExchangeService {
         const trafficGb = Math.min(input.computedValue, input.config.traffic.maxTrafficGb);
         if (trafficGb <= 0) throw new BadRequestException('Traffic exchange has no reward');
         await this.spendPoints(input.tx, input.input.userId, input.pointsToCharge, input.exchangeId, input.input.type);
-        const trafficLimitAfter = subscription.trafficLimit + trafficGb;
-        // The snapshot moves with the column, exactly as the promocode
-        // EXTRA_TRAFFIC reward does. That leaves the two in step, so
-        // `resolveInheritedPlanLimitUpdate` reads the subscription as still
-        // tracking its plan and the customer's next renewal resets the traffic
-        // to the plan's own limit.
-        //
-        // Deliberate, and the same rule for both reward paths: a points-bought
-        // top-up is a bonus for the CURRENT period, not a permanent change to
-        // the priced good. Omitting this write would silently declare an
-        // operator override and make the top-up outlive every future renewal.
-        await input.tx.subscription.update({
-          where: { id: subscription.id },
-          data: {
-            trafficLimit: trafficLimitAfter,
-            planSnapshot: patchSnapshotNumeric(
-              subscription.planSnapshot,
-              'trafficLimit',
-              trafficLimitAfter,
-            ) as Prisma.InputJsonValue,
-          },
+        // In the term model the top-up goes on the terms and lasts to the end
+        // of the period it was bought in (`grantLimitBonusInTransaction`).
+        const inModel = await this.subscriptionTermHooks.grantLimitBonusInTransaction(input.tx, {
+          subscriptionId: subscription.id,
+          resource: 'TRAFFIC',
+          value: trafficGb,
+          source: 'POINTS_EXCHANGE',
+          sourceRef: input.exchangeId,
         });
+        let trafficLimitAfter = subscription.trafficLimit + trafficGb;
+        if (inModel.outcome === 'GRANTED') {
+          trafficLimitAfter = inModel.trafficLimit ?? trafficLimitAfter;
+        } else {
+          // The snapshot moves with the column, exactly as the promocode
+          // EXTRA_TRAFFIC reward does. That leaves the two in step, so
+          // `resolveInheritedPlanLimitUpdate` reads the subscription as still
+          // tracking its plan and the customer's next renewal resets the
+          // traffic to the plan's own limit.
+          //
+          // Deliberate, and the same rule for both reward paths: a
+          // points-bought top-up is a bonus for the CURRENT period, not a
+          // permanent change to the priced good. Omitting this write would
+          // silently declare an operator override and make the top-up outlive
+          // every future renewal.
+          await input.tx.subscription.update({
+            where: { id: subscription.id },
+            data: {
+              trafficLimit: trafficLimitAfter,
+              planSnapshot: patchSnapshotNumeric(
+                subscription.planSnapshot,
+                'trafficLimit',
+                trafficLimitAfter,
+              ) as Prisma.InputJsonValue,
+            },
+          });
+        }
         const syncJobId = await this.createSubscriptionSyncJob(input.tx, subscription, {
           source: 'REFERRAL_EXCHANGE_TRAFFIC',
           pointsExchangeType: input.input.type,

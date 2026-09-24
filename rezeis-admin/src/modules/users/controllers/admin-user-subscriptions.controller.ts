@@ -24,6 +24,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   NotFoundException,
   Param,
   Patch,
@@ -32,7 +33,14 @@ import {
   ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
-import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+import {
+  AddOnEntitlementActorType,
+  Plan,
+  Prisma,
+  SubscriptionStatus,
+  SyncAction,
+  SyncJobStatus,
+} from '@prisma/client';
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -49,6 +57,7 @@ import { sameSquadSet } from '../../plans/utils/plan-squads.util';
 import {
   panelRefreshWrites,
   panelReportedRezeisOwnedFields,
+  type PanelRefreshWrites,
 } from '../../remnawave/services/panel-field-ownership';
 import {
   isNumericPanelIdentity,
@@ -60,6 +69,14 @@ import {
   observePanelEra,
   staleDeviceDeleteRefusalBody,
 } from '../../remnawave/services/stale-panel-link';
+import {
+  describeLimitsVerdict,
+  finishTermModelReadback,
+  judgePanelRowReadback,
+  TERM_MODEL_MARKER_SELECT,
+  withoutWithheldReadbackFields,
+} from '../../remnawave/services/term-model-readback';
+import { panelProfileClaims } from '../../imports/services/remnawave-importer.service';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
 import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
 import type {
@@ -67,11 +84,16 @@ import type {
   QuantityLimits,
 } from '../../subscriptions/services/plan-inherited-limits.util';
 import { resolvePlanChangeLimitCarryInTransaction } from '../../add-on-entitlements/services/configured-baseline.util';
+import type { RecomputeProjectionResult } from '../../add-on-entitlements/services/effective-projection.service';
+import { SubscriptionTermHooksService } from '../../add-on-entitlements/services/subscription-term-hooks.service';
+import type { AlignTailOptions } from '../../add-on-entitlements/services/subscription-term.service';
+import { numericColumnsFromProjection } from '../../plans/migrations/plan-migration-compute.util';
 import { SubscriptionDeletionService } from '../../subscriptions/services/subscription-deletion.service';
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
+import { PLAN_ASSIGNMENT_REFUSAL_CODES } from './plan-assignment-refusals';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from './subscription-sync-refusals';
 import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detectors';
 
@@ -195,6 +217,13 @@ function panelProfileNumericId(panelId: number | null, pastedIdentity: string): 
  * in `metadata`, exactly as `user.subscription.deleted` already does.
  */
 const SUBSCRIPTION_LIMITS_CHANGED_ACTION = 'user.subscription.limits_changed';
+
+/**
+ * `snapshotSource` of the term «Назначить план» rotates a subscription onto —
+ * what traces a term back to this route (plan migration writes
+ * `PLAN_MIGRATION_TERM`, a paid upgrade its own).
+ */
+export const ADMIN_PLAN_ASSIGNMENT_TERM = 'ADMIN_PLAN_ASSIGNMENT_TERM';
 
 /**
  * What produced the change — see {@link SUBSCRIPTION_LIMITS_CHANGED_ACTION}.
@@ -444,6 +473,8 @@ function readOperatorExpireDays(raw: unknown): number {
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
 @RequirePermission('subscriptions', 'view')
 export class AdminUserSubscriptionsController {
+  private readonly logger = new Logger(AdminUserSubscriptionsController.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
@@ -451,6 +482,7 @@ export class AdminUserSubscriptionsController {
     private readonly systemEvents: SystemEventsService,
     private readonly subscriptionDeletionService: SubscriptionDeletionService,
     private readonly subscriptionMutationsService: SubscriptionMutationsService,
+    private readonly subscriptionTermHooks: SubscriptionTermHooksService,
   ) {}
 
   // ── Subscription Mutations ─────────────────────────────────────────────
@@ -468,6 +500,8 @@ export class AdminUserSubscriptionsController {
 
     const data: Prisma.SubscriptionUpdateInput = {};
     let assignedPlanId: string | null = null;
+    // The assigned plan: what a subscription in the term model is rotated onto.
+    let assignedPlan: Plan | null = null;
     // The assigned plan's own two quantity limits. What the row WRITES is
     // resolved inside the transaction below — see the carry there.
     let assignedPlanLimits: QuantityLimits | null = null;
@@ -515,6 +549,7 @@ export class AdminUserSubscriptionsController {
       writtenLimits.externalSquad = plan.externalSquad ?? null;
       assignedPlanLimits = { trafficLimit: plan.trafficLimit, deviceLimit: plan.deviceLimit };
       assignedPlanId = plan.id;
+      assignedPlan = plan;
     }
     if (body.trafficLimit !== undefined && assignedPlanId === null) {
       // Validated, not coerced — this route has no DTO, so the gate every other
@@ -575,7 +610,15 @@ export class AdminUserSubscriptionsController {
       || body.expiresAt !== undefined
       || body.status !== undefined;
     const carryOnto = assignedPlanLimits;
+    const rotateOnto = assignedPlan;
+    // Who moved it, on the add-on events a term re-timing writes.
+    const termEdit: AlignTailOptions = {
+      correlationId: `admin-subscription-edit:${subscriptionId}`,
+      actorType: AddOnEntitlementActorType.ADMIN,
+      actorId: admin.id,
+    };
     const outcome = await this.prismaService.$transaction(async (tx) => {
+      let carried: QuantityLimits | null = null;
       if (carryOnto !== null) {
         // What the subscription holds ABOVE its old plan — a paid add-on (with
         // the durable model off it lives nowhere but these columns), an
@@ -585,6 +628,7 @@ export class AdminUserSubscriptionsController {
         // row lock so an add-on increment committed a moment ago is part of it
         // rather than overwritten.
         const carry = await resolvePlanChangeLimitCarryInTransaction(tx, subscriptionId, carryOnto);
+        carried = carry.columns;
         data.trafficLimit = carry.columns.trafficLimit;
         data.deviceLimit = carry.columns.deviceLimit;
         writtenLimits.trafficLimit = carry.columns.trafficLimit;
@@ -608,10 +652,71 @@ export class AdminUserSubscriptionsController {
         // existed.
         await tx.$executeRaw`SELECT set_config('rezeis.device_limit_source', ${OPERATOR_LIMIT_SOURCE}, true)`;
       }
-      const updated = await tx.subscription.update({
+      let updated = await tx.subscription.update({
         where: { id: subscriptionId },
         data,
       });
+
+      // ── THE TERM MODEL, decided by the term row and never by a flag ────────
+      //
+      // A PLAN ASSIGNMENT ROTATES THE TERM. The recompute builds `desired` on
+      // the carried columns written above — their own share, whoever wrote it
+      // (`entitlement-baseline.ts`) — and live add-ons are summed once on top:
+      // the carried columns already hold their recorded share, which the
+      // recompute subtracts first. The rotation keeps the TERM right as well:
+      // the period on the plan the subscription is now on (the base a column
+      // that cannot be read falls back to), and no queued term minted for the
+      // old plan left to start later and copy the old plan's snapshot back. The
+      // columns then mirror `desired`, as every other projection writer leaves
+      // them.
+      //
+      // A queued renewal term is cancelled — its paid days are already in
+      // `expiresAt`, which the new term runs to — unless it carries add-ons
+      // bought for it: that paid period is not the operator's to cancel here.
+      //
+      // ANY OTHER WRITE OF `expiresAt` moves the tail term with it, so an
+      // add-on sold "until the end of the subscription" ends when the
+      // subscription does. (The rotation aligns first, for the same reason.)
+      // Neither reads a rollout flag: a subscription with no term is left
+      // exactly as the column path always left it.
+      let projection: RecomputeProjectionResult | null = null;
+      if (rotateOnto !== null && carried !== null) {
+        const moved = await this.subscriptionTermHooks.rotateForPlanChangeInTransaction(
+          tx,
+          {
+            subscriptionId,
+            plan: rotateOnto,
+            snapshotSource: ADMIN_PLAN_ASSIGNMENT_TERM,
+            scheduledTerms: 'CANCEL_UNBOUND',
+          },
+          termEdit,
+        );
+        if (moved.outcome === 'SCHEDULED_TERMS_BLOCK') {
+          // With a code the SPA puts in the operator's language (listed in
+          // `SAFE_PRODUCT_CODES`, or the filter strips it); the sentence stays
+          // for a client that does not know the code yet.
+          throw new ConflictException({
+            code: PLAN_ASSIGNMENT_REFUSAL_CODES.queuedRenewalWithAddOns,
+            message:
+              'A paid renewal period is queued for this subscription and carries add-ons bought for it ' +
+              `(${moved.boundEntitlements}). Assigning a plan now would cancel that period, so nothing ` +
+              'was changed. Assign the plan once the queued period has started.',
+          });
+        }
+        if (moved.outcome === 'ROTATED') {
+          projection = moved.projection;
+          const mirrored = numericColumnsFromProjection(projection, carried);
+          // The audit describes what reached the row.
+          writtenLimits.trafficLimit = mirrored.trafficLimit;
+          writtenLimits.deviceLimit = mirrored.deviceLimit;
+          if (mirrored.trafficLimit !== updated.trafficLimit || mirrored.deviceLimit !== updated.deviceLimit) {
+            updated = await tx.subscription.update({ where: { id: subscriptionId }, data: mirrored });
+          }
+        }
+      } else if (data.expiresAt !== undefined) {
+        await this.subscriptionTermHooks.followExpiryInTransaction(tx, subscriptionId, termEdit);
+      }
+
       // A generic editor update must never provision a second panel profile
       // for an imported/legacy row whose link is missing. Creation remains an
       // explicit "give subscription" flow; operators can repair a link before
@@ -629,6 +734,17 @@ export class AdminUserSubscriptionsController {
           subscriptionId: updated.id,
           action: SyncAction.UPDATE,
           status: SyncJobStatus.PENDING,
+          // Versioned only when a projection backs the change, exactly as the
+          // paid upgrade and plan migration: a job carrying neither field stays
+          // on the legacy absolute update, which is also what every job gets
+          // while `ADDON_PROJECTION_SYNC` is off.
+          ...(projection === null
+            ? {}
+            : {
+                aggregateKey: updated.id,
+                desiredRevision: projection.desiredRevision,
+                cause: 'PLAN_CHANGE',
+              }),
           payload: {
             source: 'ADMIN_MUTATION',
             // Remnawave only receives status when the operator explicitly
@@ -1033,6 +1149,9 @@ export class AdminUserSubscriptionsController {
         remnawavePanelId: true,
         remnawavePanelUsername: true,
         userId: true,
+        trafficLimit: true,
+        deviceLimit: true,
+        ...TERM_MODEL_MARKER_SELECT,
       },
     });
     const identity = storedIdentityOf(sub);
@@ -1052,6 +1171,12 @@ export class AdminUserSubscriptionsController {
     // it uses for a genuinely missing profile, so the old message told an
     // operator their profile was gone whenever the panel merely blinked — and
     // "gone" is what makes someone start repairing a link that was never broken.
+    //
+    // Timed BEFORE the request: a subscription in the term model takes the
+    // expiry from this read only when nothing rezeis pushed landed after it —
+    // a push that completes while the answer travels is newer than the answer
+    // (`term-model-readback.ts`).
+    const readAt = new Date();
     const outcome = await this.remnawaveApiService.getPanelUserOutcome(identity);
     if (outcome.kind === 'unavailable') {
       return {
@@ -1084,19 +1209,76 @@ export class AdminUserSubscriptionsController {
     //
     // So the refresh adopts ONLY what the panel alone can know, and adopts
     // nothing the panel did not positively state — see `panelRefreshWrites`.
-    const refreshed = panelRefreshWrites(panelUser);
+    const stated = panelRefreshWrites(panelUser);
+    // A subscription in the term model follows the rule every Remnawave
+    // read-back shares (`term-model-readback.ts`): the expiry is taken only
+    // when nothing rezeis pushed landed after `readAt` — this button used to
+    // roll a paid renewal back to the date its push had not yet reached — and
+    // a profile holding other limits than rezeis would push gets rezeis' own
+    // pushed back. The limits were never taken here in any case.
+    const verdict = await judgePanelRowReadback(this.prismaService, {
+      existing: sub === null ? null : { ...sub, id: subscriptionId },
+      panel: panelUser,
+      readAt,
+      claims: [
+        ...panelProfileClaims(panelUser),
+        ...(sub?.remnawaveId == null ? [] : [{ remnawaveId: sub.remnawaveId }]),
+      ],
+    });
+    const refreshed: PanelRefreshWrites =
+      verdict === null ? stated : withoutWithheldReadbackFields(stated, verdict);
     if (Object.keys(refreshed).length > 0) {
-      await this.prismaService.subscription.update({
-        where: { id: subscriptionId },
-        data: refreshed,
+      await this.prismaService.$transaction(async (tx) => {
+        await tx.subscription.update({
+          where: { id: subscriptionId },
+          data: refreshed,
+        });
+        // The pull moves `expiresAt` to whatever the panel holds — forward, or
+        // BACK to a date an extension that never reached the panel did not
+        // move. The tail term follows it either way, in the same transaction,
+        // so the add-ons that end with the subscription show the date it now
+        // ends on.
+        if (refreshed.expiresAt !== undefined) {
+          await this.subscriptionTermHooks.followExpiryInTransaction(tx, subscriptionId, {
+            correlationId: `admin-subscription-refresh:${subscriptionId}`,
+            actorType: AddOnEntitlementActorType.ADMIN,
+            actorId: admin.id,
+          });
+        }
       });
     }
+    // After the write: the push is built from the columns when it runs, and
+    // must carry the expiry this read may just have brought in.
+    const readbackInput = {
+      subscriptionId,
+      profile: panelUser.uuid,
+      source: 'Refresh from Remnawave',
+    };
+    const limitsPutBack =
+      verdict === null
+        ? null
+        : await finishTermModelReadback(this.prismaService, verdict, {
+            ...readbackInput,
+            logger: this.logger,
+            enqueue: (syncJobId) => this.profileSyncQueueService.enqueue(syncJobId),
+          });
+    const limitsNote = verdict === null ? null : describeLimitsVerdict(verdict.limits, readbackInput);
     // The same action name the all-subscriptions button writes, with the one
     // subscription named — so "who re-synced this" is one query whether the
-    // operator pushed one row or all of them.
+    // operator pushed one row or all of them. In the term model the audit row
+    // also says what became of the expiry and the limits the panel reported,
+    // so a put-back, or the reason for none, is on record beside the press.
     await this.auditLog(admin, req, 'user.sync.requested', {
       subscriptionId,
       refreshed: Object.keys(refreshed),
+      ...(verdict === null
+        ? {}
+        : {
+            panelLimits: verdict.limits,
+            expiryTaken: verdict.takeExpiry,
+            ...(limitsPutBack === null ? {} : { limitsPutBackSyncJobId: limitsPutBack }),
+            ...(limitsNote === null ? {} : { panelLimitsNote: limitsNote }),
+          }),
     });
     return {
       synced: true,
@@ -1269,19 +1451,26 @@ export class AdminUserSubscriptionsController {
     const startedAt = new Date();
     const expiresAt = new Date(startedAt.getTime() + body.durationDays * 24 * 60 * 60 * 1000);
 
-    const subscription = await this.prismaService.subscription.create({
-      data: {
-        userId: user.id,
-        status: SubscriptionStatus.ACTIVE,
-        isTrial: false,
-        planSnapshot: buildPlanSnapshot(plan),
-        trafficLimit: plan.trafficLimit,
-        deviceLimit: plan.deviceLimit,
-        internalSquads: plan.internalSquads,
-        externalSquad: plan.externalSquad,
-        startedAt,
-        expiresAt,
-      },
+    const subscription = await this.prismaService.$transaction(async (tx) => {
+      const created = await tx.subscription.create({
+        data: {
+          userId: user.id,
+          status: SubscriptionStatus.ACTIVE,
+          isTrial: false,
+          planSnapshot: buildPlanSnapshot(plan),
+          trafficLimit: plan.trafficLimit,
+          deviceLimit: plan.deviceLimit,
+          internalSquads: plan.internalSquads,
+          externalSquad: plan.externalSquad,
+          startedAt,
+          expiresAt,
+        },
+      });
+      // Its first term, in the same transaction, while stage 1 is on: an add-on
+      // bought on it a minute later is then ledgered with an end date, not the
+      // permanent increment a subscription outside the model still gets.
+      await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, created.id);
+      return created;
     });
 
     await this.auditLog(admin, req, 'user.subscription.given', {

@@ -14,6 +14,8 @@ import {
   USER_DELETE_PROTECTED_HISTORY_CODE,
   UserDeletionService,
 } from '../src/modules/users/services/user-deletion.service';
+import { AddOnEntitlementService } from '../src/modules/add-on-entitlements/services/add-on-entitlement.service';
+import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
 
 /**
  * A subscription row as the deletion snapshot selects it. Both supplementary
@@ -117,6 +119,11 @@ function buildService(overrides: Partial<FakeState> = {}) {
   };
 
   const transactionClient = {
+    // The row locks taken before the cutover-only term model rows are
+    // discarded. No subscription rows here, so nothing is discarded; that half
+    // is proved against real foreign keys in
+    // `entitlement-deletion-hygiene-postgres.spec.ts`.
+    $queryRaw: async () => [],
     transaction: {
       count: async () => {
         state.order.push('count:transaction');
@@ -200,7 +207,7 @@ function buildService(overrides: Partial<FakeState> = {}) {
     },
   };
 
-  const service = new UserDeletionService(prisma as never, remnawave as never);
+  const service = new UserDeletionService(prisma as never, remnawave as never, new AddOnEntitlementService(), new SubscriptionTermService());
   const logger = (service as unknown as { logger: { warn: (message: string) => void } }).logger;
   logger.warn = (message: string) => {
     state.loggedWarnings.push(message);

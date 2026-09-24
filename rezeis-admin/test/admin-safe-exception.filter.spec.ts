@@ -12,8 +12,10 @@ import {
 
 import {
   AdminSafeExceptionFilter,
+  CODES_CARRYING_BLOCKED_BY,
   CODES_CARRYING_REASON,
   CODES_CARRYING_REAUTH_FACTOR,
+  SAFE_BLOCKED_BY_KEYS,
   SAFE_PRODUCT_CODES,
   SAFE_REFUSAL_REASONS,
 } from '../src/common/filters/admin-safe-exception.filter';
@@ -29,6 +31,7 @@ import {
   SUBSCRIPTION_DEVICE_DELETE_STALE_PANEL_LINK_SUBSCRIBER_MESSAGE,
 } from '../src/modules/remnawave/services/stale-panel-link';
 import { renewalItemNotPriceable } from '../src/modules/subscriptions/services/subscription-renewal.service';
+import type { DeleteBlockers } from '../src/modules/users/services/user-deletion.service';
 
 interface CapturedResponse {
   statusCode?: number;
@@ -588,6 +591,80 @@ describe('AdminSafeExceptionFilter', () => {
     const body = assertResponseBody(captured.body);
     assert.equal(body.code, 'RENEWAL_ITEM_NOT_PRICEABLE');
     assert.equal(body.errorCode, 'RENEWAL_ITEM_NOT_PRICEABLE');
+  });
+
+  it('forwards what a refused deletion names — rebuilt from the allowlisted counters only', () => {
+    // Stripped, the dialog read every refusal as an empty list: «нельзя» with
+    // no subject, whatever the service had counted.
+    const captured = runFilter(
+      new ConflictException({
+        code: 'USER_DELETE_PROTECTED_HISTORY',
+        message: 'refused',
+        blockedBy: {
+          transactions: 0,
+          trialClaims: 1,
+          paidTerms: 2,
+          openIncidents: 1,
+          addOnPurchases: 1.5,
+          resetPeriods: -1,
+          deviceReductions: '3',
+          subscriptionId: 'sub-secret',
+        },
+      }),
+      { originalUrl: '/api/admin/users/12345', headers: {} },
+    );
+
+    assert.equal(captured.statusCode, 409);
+    const body = assertResponseBody(captured.body);
+    assert.equal(body.code, 'USER_DELETE_PROTECTED_HISTORY');
+    assert.deepEqual(body.blockedBy, { transactions: 0, trialClaims: 1, paidTerms: 2, openIncidents: 1 });
+  });
+
+  it('forwards counters on no other code, and none a refusal did not count', () => {
+    const undeclared = assertResponseBody(
+      runFilter(
+        new ConflictException({
+          code: 'SUBSCRIPTION_LIMIT_REACHED',
+          message: 'The user has reached the maximum number of active subscriptions.',
+          blockedBy: { transactions: 3 },
+        }),
+        { originalUrl: '/api/admin/users/12345', headers: {} },
+      ).body,
+    );
+    assert.equal('blockedBy' in undeclared, false);
+    const nothingCounted = assertResponseBody(
+      runFilter(new ConflictException({ code: 'USER_DELETE_PROTECTED_HISTORY', message: 'refused' }), {
+        originalUrl: '/api/admin/users/12345',
+        headers: {},
+      }).body,
+    );
+    assert.equal('blockedBy' in nothingCounted, false);
+    assert.deepEqual(
+      [...CODES_CARRYING_BLOCKED_BY].filter((code) => !SAFE_PRODUCT_CODES.has(code)),
+      [],
+      'a code listed only in CODES_CARRYING_BLOCKED_BY forwards neither its code nor its counters',
+    );
+  });
+
+  it('allowlists exactly the counters a refused deletion is built from', () => {
+    // Typed as the refusal's own shape: a counter added to or renamed in
+    // `ProtectedHistoryCounts` / `DurableHistoryCounts` fails `typecheck:test`
+    // here before it can be stripped on the way to the dialog.
+    const everyCounter: Required<DeleteBlockers> = {
+      transactions: 1,
+      promocodeActivations: 1,
+      referralPointsExchanges: 1,
+      referralRewards: 1,
+      partnerTransactions: 1,
+      partnerWithdrawals: 1,
+      trialClaims: 1,
+      addOnPurchases: 1,
+      paidTerms: 1,
+      resetPeriods: 1,
+      deviceReductions: 1,
+      openIncidents: 1,
+    };
+    assert.deepEqual([...SAFE_BLOCKED_BY_KEYS].sort(), Object.keys(everyCounter).sort());
   });
 });
 

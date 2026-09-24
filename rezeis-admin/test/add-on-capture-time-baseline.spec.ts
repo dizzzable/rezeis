@@ -3,6 +3,12 @@ import { afterEach, describe, it } from 'node:test';
 import 'reflect-metadata';
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every stage off (stage 1's lazy entry would take the row
+// lock these fakes do not stage); the direct-purchase cases turn stage 2 on
+// themselves.
+pinAddOnStagesOffForThisFile();
 
 /**
  * What is true at the QUOTE is not what is true at the CAPTURE
@@ -205,6 +211,8 @@ function renewalEnv(input: {
     },
   };
   const terms = {
+    // The tail is aligned before a renewal appends; already aligned here.
+    alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
     createScheduledInTransaction: async (_tx: unknown, termInput: Record<string, unknown>) => {
       termCreates.push(termInput);
       return { id: 'term-renewed', generation: 2, status: 'SCHEDULED' };
@@ -394,10 +402,10 @@ describe('renewal capture — a limit change between quote and capture is caught
 
 // ── Direct-purchase capture ────────────────────────────────────────────────
 
-const ORIGINAL_DIRECT_PURCHASE = process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'];
 afterEach(() => {
-  if (ORIGINAL_DIRECT_PURCHASE === undefined) delete process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'];
-  else process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'] = ORIGINAL_DIRECT_PURCHASE;
+  // Back to the file's pinned OFF; the pin puts the real environment back
+  // after the file.
+  process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'] = 'false';
 });
 
 /** Drives the REAL `applyAddOnTopUp` → `applyAddOnViaLedger` over a staged store. */
@@ -489,7 +497,9 @@ function directPurchaseEnv(input: {
     { info: () => undefined } as never,
     entitlements as never,
     projections as never,
-    {} as never,
+    // The ledger aligns the term with the subscription's expiry before reading
+    // it; this staged term already ends where the subscription does.
+    { alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }) } as never,
     // `TrafficResetService` — the sixth dependency. A paid RESET_TRAFFIC add-on
     // is performed after the fulfilment transaction commits; these specs never
     // buy one, but the constructor takes all six.

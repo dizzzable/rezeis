@@ -36,8 +36,8 @@ import {
  * they could not buy. Agreement by hand is what failed; the only repair that
  * cannot fail again is one reader.
  *
- * The rule itself — INHERITED / OVERRIDDEN / UNDECIDABLE, and why UNDECIDABLE
- * deliberately resolves toward the PLAN — is NOT restated here. It lives in
+ * The rule itself — the subscription's own share of its columns, with the
+ * term's base as the fallback — is NOT restated here. It lives in
  * `../domain/entitlement-baseline.ts` and this file only calls it.
  */
 
@@ -83,10 +83,16 @@ export async function resolveConfiguredEntitlementBaseline(
     readonly subscription: ConfiguredBaselineSubscription;
   },
 ): Promise<EntitlementBaseline> {
+  const row = await db.subscriptionEffectiveProjection.findUnique({
+    where: { subscriptionId: input.subscriptionId },
+    select: { activeTrafficContributionBytes: true, activeDeviceContribution: true },
+  });
   return resolveEntitlementBaseline({
     term: input.term,
     subscription: input.subscription,
-    recorded: await resolveRecordedAddOnContribution(db, input.subscriptionId),
+    // No row: nothing recorded, and the term's base stands — the same answer
+    // the recompute gives (`resolveEntitlementBaseline`).
+    recorded: row === null ? null : recordedAddOnContributionOf(row),
   });
 }
 

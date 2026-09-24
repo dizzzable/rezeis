@@ -90,7 +90,7 @@ describe('reading a subscriber switch', () => {
     assert.equal(isSubscriberNotificationEnabled({ broadcast: false }, 'broadcast'), true);
   });
 
-  it('covers exactly the expiry family and «Помощь с подключением»', () => {
+  it('covers exactly the expiry family, «Помощь с подключением» and a paid add-on’s end', () => {
     // Named here so widening the list is a deliberate edit in two places
     // rather than a quiet one in a constant.
     assert.deepEqual([...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES], [
@@ -100,6 +100,8 @@ describe('reading a subscriber switch', () => {
       'expired',
       'expired_1_day_ago',
       'connect_help',
+      'addon_ends_in_3_days',
+      'addon_ended',
     ]);
   });
 

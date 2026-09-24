@@ -9,6 +9,12 @@ import {
   resolveInheritedPlanLimitUpdate,
 } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 import { buildPlanSnapshot as buildAdminPlanSnapshot } from '../src/modules/users/utils/plan-snapshot.util';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const GIB = 1024n * 1024n * 1024n;
@@ -360,6 +366,8 @@ function makeService(prisma: unknown, termCreated: { value: boolean }) {
     {} as never,
     {} as never,
     {
+      // The tail is aligned before a renewal appends; already aligned here.
+      alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
       createScheduledInTransaction: async () => {
         termCreated.value = true;
         return { id: 'term-2', generation: 2, status: 'SCHEDULED' };
@@ -371,8 +379,8 @@ function makeService(prisma: unknown, termCreated: { value: boolean }) {
 
 async function withShadowFlag<T>(enabled: boolean, run: () => Promise<T>): Promise<T> {
   const previous = process.env.ADDON_ENTITLEMENT_SHADOW;
-  if (enabled) process.env.ADDON_ENTITLEMENT_SHADOW = 'true';
-  else delete process.env.ADDON_ENTITLEMENT_SHADOW;
+  // OFF is spelled out: unset means ON since the 24.09.2026 flip.
+  process.env.ADDON_ENTITLEMENT_SHADOW = enabled ? 'true' : 'false';
   try {
     return await run();
   } finally {

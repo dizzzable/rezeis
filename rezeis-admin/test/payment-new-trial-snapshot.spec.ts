@@ -4,6 +4,12 @@ import { describe, it } from 'node:test';
 import { PlanAvailability } from '@prisma/client';
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 describe('PaymentSubscriptionMutationService NEW checkout availability', () => {
   it('keeps a paid trial marked as trial when its live plan changes TRIAL to ALL', async () => {

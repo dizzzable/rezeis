@@ -305,11 +305,20 @@ const FORMERLY_PRINTED: readonly Fixture[] = [
       updated: 7,
       skippedDeleted: 1,
       skippedAlreadyAssigned: 2,
+      skippedNotImported: 3,
+      skippedPurchasedHere: 1,
       skippedNoSubscription: 0,
       errors: 0,
       syncJobsCreated: 7,
     },
-    says: ['✅ Тариф назначен подпискам: 7', '⏭ Уже на этом тарифе: 2'],
+    // «Тариф уже назначен», not «уже на этом тарифе»: a bought subscription on
+    // another plan is skipped under it too.
+    says: [
+      '✅ Тариф назначен подпискам: 7',
+      '⏭ Тариф уже назначен: 2',
+      '⏭ Куплены или продлены в панели: 1',
+      '⏭ Не из импорта: 3',
+    ],
   },
   {
     producer: 'ImportProcessor.enqueuePostImportSync',

@@ -9,6 +9,7 @@ import { PointsWalletService } from '../src/modules/points/services/points-walle
 import { AccountMergeService } from '../src/modules/account-merge/services/account-merge.service';
 import { TRIAL_CLAIM_LIMIT_MESSAGE } from '../src/modules/plans/utils/trial-settings.util';
 import { SubscriptionMutationsService } from '../src/modules/subscriptions/services/subscription-mutations.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * A merge consolidates two identities into one, and trial quota is global per
@@ -298,7 +299,7 @@ function createMergeWorld() {
   );
   const mutationsService = new SubscriptionMutationsService(prisma as never, {
     enqueue: async () => undefined,
-  } as never);
+  } as never, NOT_IN_TERM_MODEL as never);
 
   return {
     claims,

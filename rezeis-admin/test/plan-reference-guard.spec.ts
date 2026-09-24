@@ -14,6 +14,7 @@ import {
 import { ReferralPointsExchangeService } from '../src/modules/referrals/services/referral-points-exchange.service';
 import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
 import { buildPlanReferenceDb, PlanReferenceDbSeed, Row } from './fixtures/plan-reference-db';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * THE ONE ANSWER TO "WHAT STILL USES THIS PLAN".
@@ -839,7 +840,7 @@ describe('the gift plan is read the way the points exchange reads it', () => {
       settings: { findFirst: async () => ({ referralSettings }) },
       $transaction: async <T>(fn: (client: unknown) => Promise<T>): Promise<T> => fn(tx),
     };
-    const exchange = new ReferralPointsExchangeService(prisma as never, {} as never, {} as never);
+    const exchange = new ReferralPointsExchangeService(prisma as never, {} as never, {} as never, NOT_IN_TERM_MODEL as never);
     await assert.rejects(
       () => exchange.executeExchange({ userId: 'user-1', type: 'GIFT_SUBSCRIPTION', points: 10 }),
       /Gift subscription plan not found/,

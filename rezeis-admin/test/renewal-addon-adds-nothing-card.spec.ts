@@ -238,6 +238,8 @@ function renewalEnv(input: {
     },
   };
   const terms = {
+    // The tail is aligned before a renewal appends; already aligned here.
+    alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
     createScheduledInTransaction: async (_tx: unknown, termInput: { readonly subscriptionId: string }) => ({
       id: `term-${termInput.subscriptionId}`,
       generation: 2,

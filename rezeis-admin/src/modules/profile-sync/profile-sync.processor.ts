@@ -33,6 +33,7 @@ import {
   isUuidShapedPanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
 } from '../remnawave/services/stale-panel-link';
+import { toPanelDeviceLimit, toPanelTrafficLimitBytes } from '../remnawave/utils/panel-limit-wire.util';
 import {
   PROFILE_SYNC_CONCURRENCY,
   PROFILE_SYNC_MAX_ATTEMPTS,
@@ -1043,7 +1044,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       description: naming.description,
       tag,
       expireAt,
-      trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024, // GB → bytes
+      trafficLimitBytes: toPanelTrafficLimitBytes(subscription.trafficLimit), // GB → bytes
       hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
       // Optional and never nullable upstream: a plan snapshot with no strategy
       // (every 3x-ui import) must OMIT the field rather than send an explicit
@@ -1652,7 +1653,10 @@ export class ProfileSyncProcessor extends WorkerHost {
         ...(panelStatus !== null ? { status: panelStatus } : {}),
         tag,
         expireAt: subscription.expiresAt?.toISOString(),
-        trafficLimitBytes: (subscription.trafficLimit ?? 0) * 1024 * 1024 * 1024,
+        // The same two functions the webhook compares a panel event against
+        // (`panel-limit-wire.util.ts`): the echo of this PATCH must read as
+        // "in step", or the webhook would push it again.
+        trafficLimitBytes: toPanelTrafficLimitBytes(subscription.trafficLimit),
         hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
         // Never nullable upstream; absence means "leave the panel's strategy
         // alone", which is what a plan with no opinion wants.
@@ -3444,20 +3448,4 @@ function toPanelStatus(status: SubscriptionStatus | null | undefined): 'ACTIVE' 
   if (status === SubscriptionStatus.ACTIVE) return 'ACTIVE';
   if (status === SubscriptionStatus.DISABLED) return 'DISABLED';
   return null;
-}
-
-/**
- * Maps rezeis' device-limit convention to Remnawave's `hwidDeviceLimit`.
- *
- * In rezeis, `-1` or `null` means "unlimited devices". Remnawave validates
- * `hwidDeviceLimit >= 0` and treats `0` as unlimited, so a `-1`/null limit
- * MUST be sent as `0` — otherwise the panel rejects the create/update with
- * `400 "Device limit must be greater than 0"` and the profile is never
- * provisioned.
- */
-function toPanelDeviceLimit(deviceLimit: number | null | undefined): number {
-  if (deviceLimit === null || deviceLimit === undefined || deviceLimit < 0) {
-    return 0;
-  }
-  return deviceLimit;
 }

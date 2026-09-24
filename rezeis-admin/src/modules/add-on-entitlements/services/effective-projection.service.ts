@@ -9,20 +9,21 @@ import {
 
 import { resolveEntitlementBaseline } from '../domain/entitlement-baseline';
 import { addDeviceLimit, addTrafficLimit } from '../domain/subscription-limit';
+import { sumTermLimitBonuses } from '../domain/term-limit-bonus';
 
 /**
  * Recompute the desired effective limits for a subscription from its
  * authoritative baseline term plus the sum of its ACTIVE add-on entitlements.
  *
- * Source of truth is `baseline + active entitlements`. The baseline is the
- * term's, EXCEPT for a field an operator has individually configured, which the
- * plan does not get to take back — see
+ * Source of truth is `baseline + active entitlements` (and the ACTIVE term's
+ * free limit bonuses). The baseline is the subscription's own share of its
+ * `trafficLimit`/`deviceLimit` columns — the column less the contribution the
+ * previous row recorded — whoever wrote it; the term's base is the fallback for
+ * a column that cannot be read that way — see
  * `../domain/entitlement-baseline.ts` for the rule and its reasoning. The
- * mutable `Subscription.trafficLimit/deviceLimit` columns remain compatibility
- * mirrors and are never the source of the desired value; they are read only to
- * decide, against the stored `planSnapshot`, which fields the operator owns.
- * Unlimited is the canonical `null` and is absorbing: an unlimited baseline
- * stays unlimited regardless of contributions.
+ * columns mirror `desired`, so the recorded contribution is exactly what
+ * separates the two. Unlimited is the canonical `null` and is absorbing:
+ * an unlimited baseline stays unlimited regardless of contributions.
  */
 export interface RecomputeProjectionInput {
   readonly subscriptionId: string;
@@ -57,6 +58,8 @@ type ActiveTerm = {
   readonly id: string;
   readonly baseTrafficLimitBytes: bigint | null;
   readonly baseDeviceLimit: number | null;
+  /** Read for its free limit bonuses (`../domain/term-limit-bonus.ts`). */
+  readonly planSnapshot: unknown;
 };
 type ExistingProjection = {
   readonly id: string;
@@ -102,7 +105,8 @@ export class EffectiveProjectionService {
       SELECT
         "id",
         "base_traffic_limit_bytes" AS "baseTrafficLimitBytes",
-        "base_device_limit" AS "baseDeviceLimit"
+        "base_device_limit" AS "baseDeviceLimit",
+        "plan_snapshot" AS "planSnapshot"
       FROM "subscription_terms"
       WHERE "subscription_id" = ${input.subscriptionId} AND "status" = 'ACTIVE'
     `);
@@ -125,6 +129,15 @@ export class EffectiveProjectionService {
         deviceContribs.push(Number(row.totalValue));
       }
     }
+    // The ACTIVE term's free limit bonuses (a promo code, a points exchange, a
+    // quest or a prize) count exactly like a live add-on, for exactly as long
+    // as that term is the active one — `../domain/term-limit-bonus.ts`. Being
+    // a contribution is also what keeps them out of the ownership test below:
+    // the recorded share is subtracted from the columns before they are
+    // compared with the snapshot.
+    const bonuses = sumTermLimitBonuses(term.planSnapshot);
+    if (bonuses.trafficBytes > 0n) trafficContribs.push(bonuses.trafficBytes);
+    if (bonuses.devices > 0) deviceContribs.push(bonuses.devices);
 
     // Checked sums (overflow/negative → LimitArithmeticError). Using a 0/[]
     // base gives the total contribution while reusing the same guards.
@@ -147,16 +160,17 @@ export class EffectiveProjectionService {
       },
     });
 
-    // The term baseline is what the customer BOUGHT; it is not automatically
-    // what this ONE subscription is entitled to. An operator can configure a
-    // single customer from the Users page while that customer keeps being
-    // billed for the plan, and the term is minted from the plan, so activating
-    // it would otherwise hand the plan's number back and — because the
-    // versioned sync worker reads `desired*` off the projection row, not the
-    // mirrored columns — push it into the panel.
+    // What this ONE subscription is entitled to before add-ons is what its
+    // columns hold less what the previous row recorded as add-ons — an
+    // operator's value, an import's own limits, a legacy increment, a refund's
+    // lowering alike. The term's base is minted once and never moves, so
+    // taking it for every field that reads as the plan's (or cannot be read)
+    // undid each of those at the next recompute, and — because the versioned
+    // sync worker reads `desired*` off the projection row — pushed the undoing
+    // into the panel.
     //
-    // This is the one place the correction can live: every writer that mirrors
-    // a projection (term activation, boundary expiry, `forceReconcile`,
+    // This is the one place the rule can live: every writer that mirrors a
+    // projection (term activation, boundary expiry, `forceReconcile`,
     // `reverseEntitlement`, add-on fulfillment, plan change) reads the desired
     // state from here. Correcting it at those call sites instead would be five
     // copies of one rule, which is how they drift.
@@ -179,11 +193,15 @@ export class EffectiveProjectionService {
             subscription: configured,
             // The contribution the PREVIOUS row recorded — the one the columns
             // were mirrored from, and therefore the only quantity that can be
-            // subtracted back out of them.
-            recorded: {
-              activeTrafficContributionBytes: existing?.activeTrafficContributionBytes ?? 0n,
-              activeDeviceContribution: existing?.activeDeviceContribution ?? 0,
-            },
+            // subtracted back out of them. No row yet: nothing recorded, and
+            // the term's base stands (`resolveEntitlementBaseline`).
+            recorded:
+              existing === null
+                ? null
+                : {
+                    activeTrafficContributionBytes: existing.activeTrafficContributionBytes,
+                    activeDeviceContribution: existing.activeDeviceContribution,
+                  },
           });
 
     const baseTraffic = baseline.baseTrafficLimitBytes;

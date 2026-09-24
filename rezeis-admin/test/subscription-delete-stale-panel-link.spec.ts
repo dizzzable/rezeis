@@ -18,6 +18,9 @@ import {
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
 import { UserDeletionService } from '../src/modules/users/services/user-deletion.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
+import { AddOnEntitlementService } from '../src/modules/add-on-entitlements/services/add-on-entitlement.service';
+import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
 
 /**
  * THE STALE-LINK DELETE GUARD.
@@ -448,6 +451,9 @@ function userDeletionHarness(
   const prisma = {
     $transaction: async (cb: (tx: unknown) => Promise<unknown>) =>
       cb({
+        // The subscription row locks the deletion takes before it discards
+        // cutover-only term rows; no rows here, so nothing is discarded.
+        $queryRaw: async () => [],
         transaction: { count: async () => 0 },
         promocodeActivation: { count: async () => 0 },
         referralPointsExchange: { count: async () => 0 },
@@ -464,7 +470,7 @@ function userDeletionHarness(
         },
       }),
   };
-  const service = new UserDeletionService(prisma as never, panel.api as never);
+  const service = new UserDeletionService(prisma as never, panel.api as never, new AddOnEntitlementService(), new SubscriptionTermService());
   const logger = (
     service as unknown as { logger: { error: (m: string) => void; warn: (m: string) => void } }
   ).logger;
@@ -714,6 +720,7 @@ function adminSubscriptionsController(row: DeviceRow | null, panel: DevicePanelH
     { info: () => undefined } as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller };
 }

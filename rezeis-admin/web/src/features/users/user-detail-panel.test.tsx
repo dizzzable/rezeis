@@ -123,6 +123,47 @@ describe('UserDetailPanel accessibility', () => {
     expect(deleteSpy).toHaveBeenLastCalledWith('/admin/users/12345?mode=full')
   })
 
+  it('names what the add-on model holds when that is what refused the delete', async () => {
+    // An account with no payment of its own whose subscription holds a paid
+    // renewal period and an open incident used to be refused with nothing
+    // named at all.
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { ...BASE_USER } })
+    vi.spyOn(api, 'delete').mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'USER_DELETE_PROTECTED_HISTORY',
+          message: 'refused',
+          blockedBy: {
+            transactions: 0,
+            promocodeActivations: 0,
+            referralPointsExchanges: 0,
+            referralRewards: 0,
+            partnerTransactions: 0,
+            partnerWithdrawals: 0,
+            trialClaims: 0,
+            addOnPurchases: 0,
+            paidTerms: 1,
+            resetPeriods: 0,
+            deviceReductions: 0,
+            openIncidents: 2,
+          },
+        },
+      },
+    })
+
+    renderWithProviders(<UserDetailPanel telegramId="12345" />)
+    await user.click(await screen.findByRole('button', { name: 'Delete user?' }))
+    await user.type(screen.getByPlaceholderText('DELETE'), 'DELETE')
+    await user.click(await screen.findByRole('button', { name: 'Delete forever' }))
+
+    expect(await screen.findByText('Paid subscription periods: 1')).toBeInTheDocument()
+    expect(screen.getByText('Open incidents: 2')).toBeInTheDocument()
+    expect(screen.queryByText('Add-on purchases: 0')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete in full' })).toBeInTheDocument()
+  })
+
   it('names compact profile action controls', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {

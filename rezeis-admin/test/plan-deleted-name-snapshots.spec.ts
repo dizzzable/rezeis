@@ -14,6 +14,13 @@ import { ReferralPointsExchangeService } from '../src/modules/referrals/services
 import { RewardGrantService } from '../src/modules/rewards/reward-grant.service';
 import { SubscriptionMutationsService } from '../src/modules/subscriptions/services/subscription-mutations.service';
 import { buildPlanReferenceDb, PlanReferenceDb, Row } from './fixtures/plan-reference-db';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * A DELETED PLAN REACHES SUBSCRIBERS UNDER THE NAME IT WAS SOLD AS.
@@ -132,7 +139,7 @@ describe('the name a hidden plan is granted under', () => {
       $transaction: async <T>(callback: (client: unknown) => Promise<T>): Promise<T> => callback(tx),
     };
 
-    await new SubscriptionMutationsService(prisma as never, { enqueue: async () => undefined } as never).grantTrial({
+    await new SubscriptionMutationsService(prisma as never, { enqueue: async () => undefined } as never, NOT_IN_TERM_MODEL as never).grantTrial({
       userId: 'user-1',
       planId: HIDDEN_ID,
       durationDays: 14,
@@ -179,6 +186,7 @@ describe('the name a hidden plan is granted under', () => {
       } as never,
       {} as never,
       new PointsWalletService(),
+      NOT_IN_TERM_MODEL as never,
     );
 
     await service.executeExchange({ userId: 'user-1', type: 'GIFT_SUBSCRIPTION', points: 500 });
@@ -197,6 +205,8 @@ describe('the name a paid invoice on a hidden plan is fulfilled under', () => {
       {} as never,
       {} as never,
       {
+        // The tail is aligned before a renewal appends; already aligned here.
+        alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
         createScheduledInTransaction: async (_tx: unknown, input: { planSnapshot: Record<string, unknown> }) => {
           captured.termSnapshot = input.planSnapshot;
           return { id: 'term-2', generation: 2, status: 'SCHEDULED' };
@@ -291,10 +301,13 @@ describe('the name a paid invoice on a hidden plan is fulfilled under', () => {
         },
       },
       subscriptionEffectiveProjection: { findUnique: async () => null },
+      // Not in the term model: the renewal stays on the columns.
+      subscriptionTerm: { findFirst: async () => null },
       profileSyncJob: { create: async () => ({ id: 'sync-1' }) },
     };
     const previousShadow = process.env.ADDON_ENTITLEMENT_SHADOW;
-    delete process.env.ADDON_ENTITLEMENT_SHADOW;
+    // Stage 1 explicitly OFF: unset means ON since the 24.09.2026 flip.
+    process.env.ADDON_ENTITLEMENT_SHADOW = 'false';
     try {
       const service = paymentService({
         transactionItem: { findMany: async () => [item] },

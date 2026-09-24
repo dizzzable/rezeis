@@ -5,6 +5,7 @@ import { PromocodeAvailability, PromocodeRewardType, SubscriptionStatus } from '
 
 import { PromocodeInterface } from '../src/modules/promocodes/interfaces/promocode.interface';
 import { PromocodeRewardsService } from '../src/modules/promocodes/services/promocode-rewards.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 function buildPromocode(overrides: Partial<PromocodeInterface> = {}): PromocodeInterface {
   return {
@@ -42,7 +43,7 @@ function buildPromocode(overrides: Partial<PromocodeInterface> = {}): PromocodeI
 describe('PromocodeRewardsService', () => {
   it('applies discount rewards with bounded percentage values', async () => {
     const updateCalls: unknown[] = [];
-    const service = new PromocodeRewardsService();
+    const service = new PromocodeRewardsService(NOT_IN_TERM_MODEL as never);
 
     const result = await service.applyReward({
       transactionClient: {
@@ -70,7 +71,7 @@ describe('PromocodeRewardsService', () => {
 
   it('extends active subscriptions for duration rewards', async () => {
     const updateCalls: unknown[] = [];
-    const service = new PromocodeRewardsService();
+    const service = new PromocodeRewardsService(NOT_IN_TERM_MODEL as never);
     const expiresAt = new Date('2026-12-01T00:00:00.000Z');
 
     const result = await service.applyReward({
@@ -110,7 +111,7 @@ describe('PromocodeRewardsService', () => {
 
   it('creates local subscription rows from subscription reward plan snapshots', async () => {
     const createCalls: unknown[] = [];
-    const service = new PromocodeRewardsService();
+    const service = new PromocodeRewardsService(NOT_IN_TERM_MODEL as never);
     const result = await service.applyReward({
       transactionClient: {
         subscription: {

@@ -11,22 +11,40 @@ import {
 function build(options: {
   due?: Array<{ id: string; type: string; state?: string }>;
   activeTerm?: { id: string } | null;
+  alignment?: Record<string, unknown>;
 } = {}) {
   const transitions: Array<{ command: string; commandKey: string; entitlementId: string }> = [];
   const recomputes: string[] = [];
+  /** Every step of the expiry, in order — the alignment must come first. */
+  const steps: string[] = [];
+  const retirements: string[] = [];
   const tx = {
     addOnEntitlement: {
-      findMany: async () =>
-        (options.due ?? [{ id: 'ent-1', type: 'EXTRA_TRAFFIC' }]).map((row) => ({
+      findMany: async () => {
+        steps.push('read-due');
+        return (options.due ?? [{ id: 'ent-1', type: 'EXTRA_TRAFFIC' }]).map((row) => ({
           state: 'ACTIVE',
           ...row,
-        })),
+        }));
+      },
     },
     subscriptionTerm: {
       findFirst: async () => (options.activeTerm === undefined ? { id: 'term-1' } : options.activeTerm),
     },
     subscription: {
       update: async () => ({ id: 'sub-1', remnawaveId: 'rem-1' }),
+    },
+    subscriptionEffectiveProjection: {
+      updateMany: async () => {
+        retirements.push('projection-deleted');
+        return { count: 1 };
+      },
+    },
+    deviceReductionPlan: {
+      updateMany: async () => {
+        retirements.push('plans-superseded');
+        return { count: 0 };
+      },
     },
     profileSyncJob: {
       create: async () => ({ id: 'job-1' }),
@@ -40,6 +58,10 @@ function build(options: {
       transitions.push({ command: input.command, commandKey: input.commandKey, entitlementId: input.entitlementId });
       return { entitlementId: input.entitlementId, state: 'X', changed: true, eventId: 'e' };
     },
+    terminateForSubscriptionDeletion: async (_t: unknown, input: { subscriptionId: string; reason: string }) => {
+      retirements.push(`terminated:${input.subscriptionId}:${input.reason}`);
+      return 1;
+    },
   };
   const projection = {
     recomputeInTransaction: async (_t: unknown, input: { subscriptionId: string }) => {
@@ -49,9 +71,16 @@ function build(options: {
   };
   const terms = {
     activateInTransaction: async () => ({ id: 'term-1', status: 'ACTIVE', changed: true }),
+    alignTailToExpiryInTransaction: async () => {
+      steps.push('align');
+      return options.alignment ?? { outcome: 'UNCHANGED', termId: 'term-1' };
+    },
+    closeForSubscriptionDeletion: async (_t: unknown, subscriptionId: string) => {
+      retirements.push(`terms-closed:${subscriptionId}`);
+    },
   };
   const service = new EntitlementBoundaryService(prisma as never, entitlements as never, terms as never, projection as never);
-  return { service, transitions, recomputes };
+  return { service, transitions, recomputes, steps, retirements };
 }
 
 describe('EntitlementBoundaryService (T-008)', () => {
@@ -109,6 +138,31 @@ describe('EntitlementBoundaryService (T-008)', () => {
     assert.equal(transitions.length, 2);
     assert.deepEqual(recomputes, [], 'no active term → no projection recompute');
     assert.equal(result.desiredRevision, null);
+  });
+
+  it('aligns the tail term to the subscription expiry BEFORE it reads what is due', async () => {
+    const { service, steps } = build({ due: [{ id: 'ent-1', type: 'EXTRA_TRAFFIC' }] });
+    await service.expireDueForSubscription('sub-1');
+    assert.deepEqual(steps, ['align', 'read-due']);
+  });
+
+  it('retires a DELETED subscription instead of expiring and recomputing it', async () => {
+    const { service, transitions, recomputes, steps, retirements } = build({
+      due: [{ id: 'ent-1', type: 'EXTRA_TRAFFIC' }],
+      alignment: { outcome: 'SUBSCRIPTION_DELETED' },
+    });
+    const result = await service.expireDueForSubscription('sub-1');
+    assert.deepEqual(retirements, [
+      'terminated:sub-1:SUBSCRIPTION_DELETED',
+      'terms-closed:sub-1',
+      'projection-deleted',
+      'plans-superseded',
+    ]);
+    assert.deepEqual(steps, ['align'], 'nothing is read as due on a DELETED row');
+    assert.deepEqual(transitions, []);
+    assert.deepEqual(recomputes, [], 'the recompute refuses a DELETED row — it must not be reached');
+    assert.equal(result.began, 0);
+    assert.deepEqual(result.syncJobIds, []);
   });
 
   it('activates a due scheduled term and its pending entitlements atomically', async () => {
@@ -350,6 +404,12 @@ describe('EntitlementBoundaryService (T-008)', () => {
       subscriptionEffectiveProjection: {
         findUnique: async () => ({ desiredRevision: 4n }),
       },
+      // The second one was refunded: the refund recorded it
+      // (`AddOnRefundService`) and handed it to this queue.
+      entitlementIncident: {
+        findFirst: async (args: { where: { entitlementId: string } }) =>
+          args.where.entitlementId === 'ent-device-expiring-2' ? { summaryCode: 'ADDON_REFUNDED' } : null,
+      },
     };
     const service = new EntitlementBoundaryService(
       { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
@@ -380,6 +440,14 @@ describe('EntitlementBoundaryService (T-008)', () => {
       'device-expiry-complete:ent-device-expiring',
       'device-expiry-complete:ent-device-expiring-2',
     ]);
+    // An expired add-on ends EXPIRED; a refunded one ends as the refund it is.
+    assert.deepStrictEqual(
+      commands.map((entry) => [entry.command, entry.reason]),
+      [
+        ['COMPLETE_EXPIRY', 'DEVICE_REDUCTION_VERIFIED'],
+        ['REVERSE', 'ADDON_REFUNDED'],
+      ],
+    );
   });
 
   it('does not complete EXPIRING devices when the locked projection revision is newer', async () => {

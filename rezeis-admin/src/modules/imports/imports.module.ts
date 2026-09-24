@@ -1,6 +1,7 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
+import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
 import { AuthModule } from '../auth/auth.module';
 import { PointsModule } from '../points/points.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
@@ -22,6 +23,8 @@ import { ThreeXuiImporterService } from './services/threexui-importer.service';
 
 @Module({
   imports: [
+    // The bulk plan assignment rotates a term where the cutover made one.
+    AddOnEntitlementsModule,
     AuthModule,
     PointsModule,
     RemnawaveModule,

@@ -341,10 +341,13 @@ function readLimitsBeforeAddOns(
  *
  * OVERRIDDEN and UNDECIDABLE are deliberately DISTINCT and must stay so. They
  * agree about the renewal — both leave the column alone — but they disagree
- * about what a PAID term is worth: `entitlement-baseline.ts` resolves
- * UNDECIDABLE toward the PLAN, because otherwise an imported subscriber with an
- * unreadable snapshot could buy an upgrade, be charged, and stay on the old
- * limits. Collapsing the two is a regression even where no renewal changes.
+ * about a PAID plan change: `resolvePlanChangeLimitCarry` carries what an
+ * operator set above the old plan (OVERRIDDEN) and gives an unreadable field
+ * the new plan (UNDECIDABLE), because otherwise an imported subscriber could
+ * buy an upgrade, be charged, and stay on the old limits. Collapsing the two
+ * is a regression even where no renewal changes. (The projection's baseline no
+ * longer branches on them: it is the column's own share either way —
+ * `entitlement-baseline.ts`.)
  */
 export function resolvePlanLimitOwnership(input: {
   readonly current: PlanInheritedLimits;

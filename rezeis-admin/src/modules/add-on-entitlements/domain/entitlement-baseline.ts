@@ -38,34 +38,54 @@ import { GIB_BYTES } from './cutover-baseline';
  * `forceReconcile`, `reverseEntitlement`, add-on fulfillment, plan change)
  * inherits it from one place instead of agreeing by hand.
  *
- * ── The rule ──────────────────────────────────────────────────────────────
+ * ── The rule (24.09.2026) ────────────────────────────────────────────────
  *
- * The override test is NOT re-derived here. It is
- * {@link resolvePlanLimitOwnership}, called once, for all four fields:
+ * THE BASELINE IS THE SUBSCRIPTION'S OWN SHARE OF ITS COLUMNS — the column
+ * with the contribution the projection last recorded taken back out — whoever
+ * wrote it, whatever the snapshot says. The term's base is only the FALLBACK,
+ * for a column that cannot be read as "own share + recorded contribution" (a
+ * device column at or below the live add-ons, a traffic column not a whole
+ * number of GiB above them).
  *
- *   column === snapshot   INHERITED   → the term's plan baseline stands.
- *   column !== snapshot   OVERRIDDEN  → the operator's value IS the baseline,
- *                                       and add-ons layer on top of it.
- *   snapshot unreadable   UNDECIDABLE → the term's plan baseline stands.
+ * WHY THE COLUMNS AND NOT THE TERM. The columns are where every writer
+ * outside the ledger writes: the operator's editor, a legacy add-on increment
+ * (stage 2 off, a rollback, the ledger's fallback), an import, the Remnawave
+ * pull and webhook, bulk operations, a refund's lowering. The rule used to be
+ * that only an OVERRIDDEN field (column ≠ snapshot) kept its column, and an
+ * INHERITED or UNDECIDABLE one took the term's base — frozen when the term was
+ * minted, usually by the cutover from the columns of that day. So every such
+ * write was undone at the next recompute (an add-on purchase or expiry, a term
+ * activation), mirrored into the columns and pushed:
  *
- * UNDECIDABLE resolves toward the PLAN here, and that is the one place this
- * file departs from the renewal reader, on purpose. The renewal reader is
- * deciding whether to WRITE over a column, so "do nothing" preserves. This is
- * deciding what a paid term is worth, and the same projection carries paid PLAN
- * CHANGES: resolving an unreadable snapshot toward the column would mean an
- * imported/legacy subscriber could buy an upgrade and stay on the old limits,
- * with the money taken. That is a larger, quieter harm than the one it would
- * avoid, and preserving nothing here is also exactly today's behaviour for
- * those rows, so nothing regresses. The cost is stated plainly: a legacy row
- * with no readable snapshot still loses a hand-set limit when its term
- * activates.
+ *  - a never-assigned import (a snapshot with no limit keys: UNDECIDABLE)
+ *    at 200 GB / 5 renewed into a term minted from the plan's 100 / 3, and was
+ *    cut to 100 / 3 when that term started — where the column path keeps what
+ *    it has (an unreadable snapshot PRESERVES the column).
+ *  - an operator's raise on such an import came back down at the next
+ *    purchase; an operator's cut of a grandfathered raise to the plan's value
+ *    (INHERITED) came back up, to the base the cutover had minted with it.
+ *  - A refund lowering a legacy add-on to the plan's value came back the same
+ *    way, and so did a Remnawave-side change mirrored into the columns.
  *
- * Separating UNDECIDABLE from OVERRIDDEN is the whole reason this file needs a
- * THREE-way answer rather than the renewal fragment, which merges them (both
- * simply omit the key). It no longer re-derives that distinction from a
- * key-presence probe of its own: the shared reader returns it, so the two
- * cannot drift apart, and a refactor that collapses the two states breaks this
- * file's callers rather than silently changing what a paid term is worth.
+ * Each writer keeps the lifetime it has on the column path, because nothing
+ * about how the columns are written changes: an OVERRIDDEN value survives a
+ * renewal (the renewal's refresh leaves it alone), an INHERITED one is put
+ * back to the plan by the next renewal's refresh — written into the columns at
+ * the payment, as the column path writes it, and taken from there.
+ *
+ * WHAT A TERM CHANGE STILL MOVES. Every path that moves a subscription onto a
+ * plan writes the plan's snapshot and the columns it carries BEFORE it
+ * recomputes — a paid upgrade, «Назначить план», the bulk assignment, a plan
+ * migration — so the new plan reaches `desired` through the columns. That is
+ * also why the old reason for resolving UNDECIDABLE toward the plan ("an
+ * imported subscriber could buy an upgrade and stay on the old limits") no
+ * longer holds: the upgrade's snapshot carries the keys, and its carried
+ * columns are the new plan's.
+ *
+ * The ownership verdict (INHERITED / OVERRIDDEN / UNDECIDABLE) is still
+ * computed — by {@link resolvePlanLimitOwnership}, once, for all four fields —
+ * and still returned as `overriddenKeys`: it is what the renewal refresh and
+ * the plan-change carry decide on, and what a capture-time check compares.
  *
  * ── Removing the add-ons before comparing ─────────────────────────────────
  *
@@ -154,14 +174,25 @@ export function resolveOperatorConfiguredLimits(input: {
 }
 
 /**
- * Resolve the baseline a projection recompute must build its desired state on.
+ * Resolve the baseline a projection recompute must build its desired state on:
+ * the subscription's own share of its columns, or the term's base where the
+ * columns cannot be read that way — see "The rule" above.
  *
  * `recorded` is the contribution the PREVIOUS projection row carries, not the
  * one about to be computed: the columns were mirrored from that row, so it is
  * the only quantity that can be subtracted back out of them. When an add-on has
- * since expired or been reversed, the stale contribution is removed from the
- * column, the remainder matches the snapshot, and the baseline returns to the
- * plan — which is how a genuinely drifted column is still corrected.
+ * since expired or been reversed, its stale share is removed from the column
+ * here and the new contribution no longer carries it — which is how the
+ * add-on's end reaches `desired` without touching what the subscription owns.
+ *
+ * `null` when the subscription has NO projection row yet: nothing has ever
+ * recorded how much of its columns is add-ons, so they cannot be split, and
+ * the rule is the one before 24.09.2026 — an operator's value (OVERRIDDEN) is
+ * read off the column, everything else stands on the term's base, minted by
+ * the cutover from these same columns in the transaction that creates the
+ * first row. Only a row that reached the term model some other way can meet
+ * this, and reading all of its columns as its own would count any live add-on
+ * in them twice.
  */
 export function resolveEntitlementBaseline(input: {
   readonly term: {
@@ -173,7 +204,7 @@ export function resolveEntitlementBaseline(input: {
     readonly deviceLimit: number;
     readonly planSnapshot: unknown;
   };
-  readonly recorded: RecordedAddOnContribution;
+  readonly recorded: RecordedAddOnContribution | null;
 }): EntitlementBaseline {
   const { ownership, base } = resolvePlanLimitOwnership({
     current: {
@@ -182,24 +213,32 @@ export function resolveEntitlementBaseline(input: {
       deviceLimit: input.subscription.deviceLimit,
     },
     planSnapshot: input.subscription.planSnapshot,
-    recorded: input.recorded,
+    recorded: input.recorded ?? undefined,
   });
 
   const overriddenKeys: PlanInheritedLimitKey[] = [];
-  let baseTrafficLimitBytes = input.term.baseTrafficLimitBytes;
-  if (ownership.trafficLimit === 'OVERRIDDEN') {
-    overriddenKeys.push('trafficLimit');
-    const value = base.trafficLimit;
-    baseTrafficLimitBytes =
-      value === null || value === undefined ? null : BigInt(value) * GIB_BYTES;
-  }
+  if (ownership.trafficLimit === 'OVERRIDDEN') overriddenKeys.push('trafficLimit');
+  if (ownership.deviceLimit === 'OVERRIDDEN') overriddenKeys.push('deviceLimit');
 
-  let baseDeviceLimit = input.term.baseDeviceLimit;
-  if (ownership.deviceLimit === 'OVERRIDDEN') {
-    overriddenKeys.push('deviceLimit');
-    const value = base.deviceLimit;
-    baseDeviceLimit = value === undefined || value <= 0 ? null : value;
-  }
+  // The subscription's own share, INHERITED, OVERRIDDEN or UNDECIDABLE alike:
+  // `base` holds a field exactly when its column reads as own share plus the
+  // recorded contribution. With no row recorded yet, only an operator's value
+  // (OVERRIDDEN) is read off the column, as before the rule; the rest stands on
+  // the term's base, which the cutover minted from these columns. Unlimited
+  // stays unlimited (`null`; a device column at or below zero is the product's
+  // unlimited).
+  const ownTraffic =
+    input.recorded === null && ownership.trafficLimit !== 'OVERRIDDEN' ? undefined : base.trafficLimit;
+  const baseTrafficLimitBytes =
+    ownTraffic === undefined
+      ? input.term.baseTrafficLimitBytes
+      : ownTraffic === null
+        ? null
+        : BigInt(ownTraffic) * GIB_BYTES;
+  const ownDevices =
+    input.recorded === null && ownership.deviceLimit !== 'OVERRIDDEN' ? undefined : base.deviceLimit;
+  const baseDeviceLimit =
+    ownDevices === undefined ? input.term.baseDeviceLimit : ownDevices <= 0 ? null : ownDevices;
 
   return { baseTrafficLimitBytes, baseDeviceLimit, overriddenKeys };
 }

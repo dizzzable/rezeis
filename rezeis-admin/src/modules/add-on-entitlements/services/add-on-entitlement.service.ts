@@ -251,7 +251,10 @@ export class AddOnEntitlementService {
     if (subscription.length !== 1) {
       throw new NotFoundException('Subscription not found');
     }
-    if (subscription[0]?.status !== 'ACTIVE') {
+    // LIMITED as well: out of traffic is exactly when "+50 GB" is bought,
+    // and the offer and the checkout both sell to it. Refused here, that sale
+    // fell back to the PERMANENT legacy increment.
+    if (subscription[0]?.status !== 'ACTIVE' && subscription[0]?.status !== 'LIMITED') {
       throw new ConflictException('Subscription is not active for add-on fulfillment');
     }
     const term = await tx.$queryRaw<Array<{ id: string; subscriptionId: string }>>(Prisma.sql`

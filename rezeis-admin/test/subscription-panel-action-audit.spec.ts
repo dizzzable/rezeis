@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * Who reset this customer's traffic, and who unbound their device.
@@ -74,6 +75,7 @@ function buildController(options: { readonly panelThrows?: boolean } = {}) {
     { info: () => undefined } as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller, audits, order };
 }

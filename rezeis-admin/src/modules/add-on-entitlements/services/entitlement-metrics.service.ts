@@ -11,6 +11,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { CutoverProgress, readCutoverProgress } from './entitlement-cutover.service';
 
 const DEFAULT_OBJECTIVE_MS = 5 * 60_000;
 const DEFAULT_ALERT_MS = 15 * 60_000;
@@ -34,6 +35,12 @@ export interface EntitlementMetrics {
   readonly deviceReductionPlansByState: Readonly<Record<DeviceReductionPlanState, number>>;
   readonly openIncidentsByKind: Readonly<Record<EntitlementIncidentKind, number>>;
   readonly slo: EntitlementSlo;
+  /**
+   * Where the background cutover stands: subscriptions not DELETED, how many
+   * are in the term model, how many are not yet, and how many are held out by
+   * a `CUTOVER_FAILED` incident. Counts only.
+   */
+  readonly cutover: CutoverProgress;
 }
 
 function parseMs(value: string | undefined, fallback: number): number {
@@ -119,6 +126,8 @@ export class EntitlementMetricsService {
       }),
     ]);
 
+    const cutover = await readCutoverProgress(this.prismaService);
+
     const ageMs = (row: { createdAt: Date } | null): number | null =>
       row === null ? null : Math.max(0, now.getTime() - row.createdAt.getTime());
 
@@ -137,6 +146,7 @@ export class EntitlementMetricsService {
         pendingSyncOverAlert: pendingSyncAlert,
         oldestPendingSyncAgeMs: ageMs(oldestPendingSync),
       },
+      cutover,
     };
   }
 }

@@ -182,6 +182,19 @@ export class AdminDuplicateSubscriptionMergeController {
                 column: moved.column,
                 moved: moved.moved,
               })),
+              // WHAT WAS DELETED, NOT MOVED: the duplicate's durable rows that
+              // record no money — its terms, projection and closed incidents.
+              // They cannot be undone by reattaching anything —
+              // the merge deleted them — so this row is the only record that
+              // they existed. `?? []` for the reason `stoppedEarly` reads
+              // `?? null` above: a field missing from a report must not cost
+              // the audit row.
+              discardedCutoverRows: (row.discardedCutoverRows ?? []).map((discard) => ({
+                relation: discard.relation,
+                model: discard.model,
+                column: discard.column,
+                discarded: discard.discarded,
+              })),
             })),
           } as Prisma.InputJsonObject,
           adminUser: { connect: { id: admin.id } },

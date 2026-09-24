@@ -7,6 +7,16 @@ import {
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
+import {
+  describeDurableRows,
+  discardDisposableRowsInTransaction,
+} from '../../add-on-entitlements/services/cutover-disposal.util';
+import {
+  DurableRetirementServices,
+  retireDurableRowsInTransaction,
+} from '../../add-on-entitlements/services/durable-retirement.util';
+import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
@@ -65,6 +75,24 @@ export interface ProtectedHistoryCounts {
   readonly trialClaims: number;
 }
 
+/**
+ * The add-on model's records of money on the account's subscriptions, which an
+ * ORDINARY deletion cannot take with them (`describeDurableRows`): summed per
+ * kind over the subscriptions that hold any. Named in the refusal beside the
+ * counters above — a refusal that named nothing left the operator guessing, as
+ * the merge of duplicates never did. «Удалить полностью» retires them instead.
+ */
+export interface DurableHistoryCounts {
+  readonly addOnPurchases: number;
+  readonly paidTerms: number;
+  readonly resetPeriods: number;
+  readonly deviceReductions: number;
+  readonly openIncidents: number;
+}
+
+/** What a refused ordinary deletion names. */
+export type DeleteBlockers = ProtectedHistoryCounts & Partial<DurableHistoryCounts>;
+
 function totalProtected(counts: ProtectedHistoryCounts): number {
   return (
     counts.transactions +
@@ -105,9 +133,17 @@ interface RemnawaveProfileSnapshot {
 export class UserDeletionService {
   private readonly logger = new Logger(UserDeletionService.name);
 
+  /**
+   * The two term-model services come from `AddOnEntitlementsModule`, which
+   * `UsersModule` imports. Required, not optional: a module that provided this
+   * service without them should fail at boot, not retire durable rows through
+   * a private copy nobody wired.
+   */
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly remnawaveApiService: RemnawaveApiService,
+    private readonly addOnEntitlementService: AddOnEntitlementService,
+    private readonly subscriptionTermService: SubscriptionTermService,
   ) {}
 
   public async deleteUser(
@@ -204,7 +240,10 @@ export class UserDeletionService {
               // Counted INSIDE this transaction and at Serializable, so the
               // summary the operator is shown afterwards describes what was
               // actually moved rather than what a read a moment earlier saw.
-              const summary = await moveProtectedHistoryToHolder(tx, userId, counts);
+              const summary = await moveProtectedHistoryToHolder(tx, userId, counts, {
+                entitlements: this.addOnEntitlementService,
+                terms: this.subscriptionTermService,
+              });
               await tx.user.delete({ where: { id: userId } });
               return { profileSnapshots, summary };
             }
@@ -214,6 +253,22 @@ export class UserDeletionService {
             }
 
             const profileSnapshots = await snapshotPanelProfiles(tx, userId);
+
+            // THE MODEL'S OWN ROWS ARE NOT HISTORY. The background cutover
+            // gives every live subscription a first term and a projection,
+            // minted from its own columns, and both are `Restrict` on it — so
+            // without this, the cascade below hit the foreign key for every
+            // account that has a subscription at all, and the operator was
+            // told "protected history" about an account with none. Rows that
+            // record no money — those, the terms a plan change rotated them
+            // onto, closed incidents — go with the subscription. Money (an
+            // add-on, a paid term, a reset period, a device plan, an open
+            // incident) refuses, and the refusal NAMES it: it used to reach the
+            // cascade's foreign key and come back as an unnamed conflict.
+            const kept = await discardDisposableRowsOfUser(tx, userId);
+            if (kept !== null) {
+              throw protectedHistoryConflict({ ...counts, ...kept });
+            }
 
             await tx.user.delete({ where: { id: userId } });
             return {
@@ -251,7 +306,7 @@ export class UserDeletionService {
   }
 }
 
-function protectedHistoryConflict(blockedBy?: ProtectedHistoryCounts): ConflictException {
+function protectedHistoryConflict(blockedBy?: DeleteBlockers): ConflictException {
   return new ConflictException({
     code: USER_DELETE_PROTECTED_HISTORY_CODE,
     message: USER_DELETE_PROTECTED_HISTORY_MESSAGE,
@@ -328,11 +383,21 @@ async function countProtectedHistory(
  * The trial ledger is the one thing destroyed outright, on the owner's
  * decision of 21.09.2026: a test account that took the free trial could never
  * be cleared, which is the whole reason this path exists.
+ *
+ * AND THE TERM MODEL IS TOLD, before the subscriptions turn DELETED: each one's
+ * live add-ons are reversed, its terms closed, its projection marked DELETED
+ * and its open device plans superseded — what the operator's own «удалить
+ * подписку» does (`SubscriptionDeletionService`), through the same
+ * `retireDurableRowsInTransaction`. Marking the rows DELETED with a bulk update
+ * and nothing else left an ACTIVE add-on on a DELETED row: the boundary sweep
+ * picked it at its end, the projection recompute refused the DELETED row, and
+ * the whole boundary transaction rolled back — on every tick, for good.
  */
 async function moveProtectedHistoryToHolder(
   tx: Prisma.TransactionClient,
   userId: string,
   counts: ProtectedHistoryCounts,
+  durable: DurableRetirementServices,
 ): Promise<UserDeletionSummary> {
   const original = await tx.user.findUnique({
     where: { id: userId },
@@ -414,6 +479,24 @@ async function moveProtectedHistoryToHolder(
     where: { userId },
     data: { userId: holder.id, isActive: false },
   });
+  // Row locks first, in id order: the lock every durable writer — the boundary
+  // sweep, a payment — takes before it touches a term or an add-on, so this
+  // deletion queues behind one in flight instead of deadlocking with it (a
+  // deadlock surfaces as P2039/P2010, which the retry below does not catch).
+  const owned = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "subscriptions"
+    WHERE "user_id" = ${userId}
+    ORDER BY "id"
+    FOR UPDATE
+  `);
+  for (const { id } of owned) {
+    await retireDurableRowsInTransaction(tx, durable, {
+      subscriptionId: id,
+      correlationId: `user-delete:${userId}`,
+      reason: 'USER_DELETED',
+    });
+  }
   await tx.subscription.updateMany({
     where: { userId },
     data: {
@@ -437,6 +520,41 @@ async function moveProtectedHistoryToHolder(
     })),
     purged: { trialClaims: purgedTrialClaims.count },
   };
+}
+
+/**
+ * Deletes the durable rows that record no money of each of the account's
+ * subscriptions (see `discardDisposableRowsInTransaction`), under their row
+ * locks, taken in id order like every other writer here.
+ *
+ * Returns `null` when every subscription's rows went, or else what the others
+ * hold, summed per kind — the caller refuses with it, and its transaction then
+ * rolls back whatever this did discard.
+ */
+async function discardDisposableRowsOfUser(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<DurableHistoryCounts | null> {
+  const owned = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "subscriptions"
+    WHERE "user_id" = ${userId}
+    ORDER BY "id"
+    FOR UPDATE
+  `);
+  const kept = { addOnPurchases: 0, paidTerms: 0, resetPeriods: 0, deviceReductions: 0, openIncidents: 0 };
+  let refused = false;
+  for (const { id } of owned) {
+    if ((await discardDisposableRowsInTransaction(tx, id)) !== null) continue;
+    refused = true;
+    const held = await describeDurableRows(tx, id);
+    kept.addOnPurchases += held.entitlements;
+    kept.paidTerms += held.paidTerms;
+    kept.resetPeriods += held.resetEpochs;
+    kept.deviceReductions += held.devicePlans;
+    kept.openIncidents += held.openIncidents;
+  }
+  return refused ? kept : null;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 
+import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
 import { AuthModule } from '../auth/auth.module';
 import { PointsModule } from '../points/points.module';
 import { PartnersModule } from '../partners/partners.module';
@@ -15,7 +16,9 @@ import { ReferralQualificationService } from './services/referral-qualification.
 import { ReferralsService } from './services/referrals.service';
 
 @Module({
-  imports: [AuthModule, forwardRef(() => PartnersModule), ProfileSyncModule, PointsModule],
+  // `AddOnEntitlementsModule`: a points exchange for days moves the term with
+  // the expiry (`ReferralPointsExchangeService`).
+  imports: [AddOnEntitlementsModule, AuthModule, forwardRef(() => PartnersModule), ProfileSyncModule, PointsModule],
   controllers: [AdminReferralsController, InternalReferralsController],
   providers: [
     ReferralsService,

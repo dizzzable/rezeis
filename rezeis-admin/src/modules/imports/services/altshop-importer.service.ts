@@ -22,11 +22,18 @@ import { PointsWalletService } from '../../points/services/points-wallet.service
 import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
+  finishTermModelReadback,
+  judgePanelRowReadback,
+  TERM_MODEL_MARKER_SELECT,
+  withoutWithheldReadbackFields,
+} from '../../remnawave/services/term-model-readback';
+import {
   lockTrialClaimUser,
   recordConsumedLegacyTrialAvailability,
   recordConsumedTrialSubscription,
 } from '../../subscriptions/services/trial-claim-ledger.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import { panelProfileClaims } from './remnawave-importer.service';
 import {
   buildPanelLookup,
   isLivePanelStatus,
@@ -594,14 +601,25 @@ export class AltshopImporterService {
     // itself wrote. Keying on the identifier anyway would find nothing on the
     // second run and mint a duplicate subscription — and, once the sync ran, a
     // duplicate panel profile beside it.
+    // With what `judgePanelRowReadback` needs below: a row in the term model
+    // takes the panel overlay by the rule every Remnawave read-back shares.
+    const existingSelect = {
+      id: true,
+      userId: true,
+      planSnapshot: true,
+      remnawaveId: true,
+      trafficLimit: true,
+      deviceLimit: true,
+      ...TERM_MODEL_MARKER_SELECT,
+    } as const;
     const existing = foreignPanel
       ? await this.prismaService.subscription.findFirst({
           where: { userId, planSnapshot: { path: ['sourceSubscriptionId'], equals: source.id } },
-          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+          select: existingSelect,
         })
       : await this.prismaService.subscription.findFirst({
           where: { remnawaveId },
-          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+          select: existingSelect,
         });
 
     // A foreign panel is asked nothing: every answer it could give is about
@@ -663,10 +681,20 @@ export class AltshopImporterService {
       ...(foreignPanel && !fresh ? {} : panelOwned),
     };
     if (existing) {
+      // In the term model the overlaid limits are not taken, nor the overlaid
+      // expiry when the panel's own push is newer than the read; everything
+      // else, and every row outside the model, is written as before.
+      const verdict = await judgePanelRowReadback(this.prismaService, {
+        existing,
+        panel,
+        readAt: panelLookup.readAt,
+        claims: panel === null ? [] : panelProfileClaims(panel),
+      });
+      const data = verdict === null ? subscriptionData : withoutWithheldReadbackFields(subscriptionData, verdict);
       if (source.is_trial === true) {
         await this.prismaService.$transaction(async (tx) => {
           await lockTrialClaimUser(tx, userId);
-          await tx.subscription.update({ where: { id: existing.id }, data: subscriptionData });
+          await tx.subscription.update({ where: { id: existing.id }, data });
           await recordConsumedTrialSubscription(tx, {
             userId,
             planId: null,
@@ -676,7 +704,15 @@ export class AltshopImporterService {
           });
         });
       } else {
-        await this.prismaService.subscription.update({ where: { id: existing.id }, data: subscriptionData });
+        await this.prismaService.subscription.update({ where: { id: existing.id }, data });
+      }
+      if (verdict !== null) {
+        await finishTermModelReadback(this.prismaService, verdict, {
+          subscriptionId: existing.id,
+          profile: panelAnchor ?? existing.id,
+          source: 'Altshop import',
+          logger: this.logger,
+        });
       }
       return { outcome: 'updated', leftUnlinked: foreignPanel && linkedHere === null };
     }

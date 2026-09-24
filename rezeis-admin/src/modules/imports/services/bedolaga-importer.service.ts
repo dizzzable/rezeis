@@ -23,7 +23,14 @@ import {
   recordConsumedTrialSubscription,
 } from '../../subscriptions/services/trial-claim-ledger.util';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  finishTermModelReadback,
+  judgePanelRowReadback,
+  TERM_MODEL_MARKER_SELECT,
+  withoutWithheldReadbackFields,
+} from '../../remnawave/services/term-model-readback';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import { panelProfileClaims } from './remnawave-importer.service';
 import {
   buildPanelLookup,
   panelSubscriptionState,
@@ -511,17 +518,29 @@ export class BedolagaImporterService {
     // of our own customers. Looking it up would find that stranger's row and
     // refuse the import for the whole base. The durable key across re-runs is
     // then the stamp this importer itself wrote, scoped to the person.
+    //
+    // With what `judgePanelRowReadback` needs below: a row in the term model
+    // takes the panel overlay by the rule every Remnawave read-back shares.
+    const existingSelect = {
+      id: true,
+      userId: true,
+      planSnapshot: true,
+      remnawaveId: true,
+      trafficLimit: true,
+      deviceLimit: true,
+      ...TERM_MODEL_MARKER_SELECT,
+    } as const;
     const existing = foreignPanel
       ? await this.prismaService.subscription.findFirst({
           where: {
             userId,
             planSnapshot: { path: ['sourceSubscriptionId'], equals: sub.id },
           },
-          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+          select: existingSelect,
         })
       : await this.prismaService.subscription.findFirst({
           where: { OR: [{ remnawaveId: anchor }, { remnawavePanelId: panelId }] },
-          select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+          select: existingSelect,
         });
     // A profile that already belongs to somebody else here is a refusal, not a
     // rebind: silently moving a live subscription between two customers is the
@@ -664,9 +683,19 @@ export class BedolagaImporterService {
         };
 
     if (existing !== null) {
+      // In the term model the overlaid limits are not taken, nor the overlaid
+      // expiry when the panel's own push is newer than the read; everything
+      // else, and every row outside the model, is written as before.
+      const verdict = await judgePanelRowReadback(this.prismaService, {
+        existing,
+        panel,
+        readAt: panelLookup.readAt,
+        claims: panel === null ? [] : panelProfileClaims(panel),
+      });
+      const data = verdict === null ? shared : withoutWithheldReadbackFields(shared, verdict);
       await this.prismaService.$transaction(async (tx) => {
         if (sub.is_trial) await lockTrialClaimUser(tx, userId);
-        await tx.subscription.update({ where: { id: existing.id }, data: shared });
+        await tx.subscription.update({ where: { id: existing.id }, data });
         if (sub.is_trial) {
           await recordConsumedTrialSubscription(tx, {
             userId,
@@ -677,6 +706,14 @@ export class BedolagaImporterService {
           });
         }
       });
+      if (verdict !== null) {
+        await finishTermModelReadback(this.prismaService, verdict, {
+          subscriptionId: existing.id,
+          profile: panelAnchor ?? existing.id,
+          source: 'Bedolaga import',
+          logger: this.logger,
+        });
+      }
       return { outcome: 'updated', leftUnlinked: foreignPanel && linkedHere === null };
     }
 

@@ -13,6 +13,12 @@ import {
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { ProviderSubscriptionService } from '../src/modules/payments/services/provider-subscription.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * A new purchase's provider subscription (Platega, RollyPay) is named on the
@@ -20,7 +26,7 @@ import { ProviderSubscriptionService } from '../src/modules/payments/services/pr
  *
  * Before, the row waited for the next look at the provider — up to a day — to
  * be bound, and meanwhile the checkout guard admitted a second autopay on the
- * new subscription and the sweep could not check it (R-money laterList 11).
+ * new subscription and the sweep could not check it.
  * The real fulfilment write, over a double whose rows the real guard reads.
  */
 

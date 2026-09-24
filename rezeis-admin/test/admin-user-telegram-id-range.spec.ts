@@ -8,6 +8,7 @@ import { PointsWalletService } from '../src/modules/points/services/points-walle
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
 import { AdminUserWebController } from '../src/modules/users/controllers/admin-user-web.controller';
 import { MAX_POSTGRES_BIGINT } from '../src/common/utils/postgres-bigint.util';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * `User.telegramId` is Postgres `int8`. Every value in this file is a decimal
@@ -259,6 +260,7 @@ describe('AdminUserSubscriptionsController telegramId range', () => {
       undefined as never,
       undefined as never,
       undefined as never,
+      NOT_IN_TERM_MODEL as never,
     );
   }
 

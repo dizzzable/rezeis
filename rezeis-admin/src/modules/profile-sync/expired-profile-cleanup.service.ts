@@ -8,6 +8,11 @@ import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-e
 import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
 import { storedIdentityOf } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
+import {
+  isInTermModel,
+  panelPushOutranksRead,
+  TERM_MODEL_MARKER_SELECT,
+} from '../remnawave/services/term-model-readback';
 import { SettingsService } from '../settings/services/settings.service';
 import { SubscriptionDeletionService } from '../subscriptions/services/subscription-deletion.service';
 import { readPanelFailure, resolvePanelUserId } from './profile-sync.processor';
@@ -299,6 +304,9 @@ export class ExpiredProfileCleanupService {
         remnawavePanelUsername: true,
         configUrl: true,
         expiresAt: true,
+        // Whether the row is in the term model: its self-heal below follows
+        // the rule every Remnawave read-back shares.
+        ...TERM_MODEL_MARKER_SELECT,
       },
       take: CLEANUP_BATCH,
       orderBy: { expiresAt: 'asc' },
@@ -331,6 +339,10 @@ export class ExpiredProfileCleanupService {
       // columns are selected above: without them such a row is unaddressable,
       // and an unaddressable profile defers every sweep, forever, for a
       // subscription that will never be retired.
+      //
+      // Timed BEFORE the panel is asked: a push of rezeis' own that completes
+      // while the answer travels is newer than the answer.
+      const readAt = new Date();
       const address = await resolvePanelUserId(this.panelUsers, identity);
       const panelOutcome =
         address.kind === 'ok' ? await this.panelUsers.getUserById(address.userId) : null;
@@ -379,6 +391,21 @@ export class ExpiredProfileCleanupService {
       // Panel says the subscription is NOT expired past the grace cutoff — the
       // local `expiresAt` was stale. Self-heal it and skip deletion.
       if (panelExpiryMs !== null && panelExpiryMs >= cutoff.getTime()) {
+        // Unless the row is in the term model and a push of rezeis' own is
+        // newer than this read — the rule every Remnawave read-back shares
+        // (`term-model-readback.ts`). Then the later date is the one that
+        // push is replacing — a refund's end, an operator's shortening, not
+        // yet landed — and healing to it would revive what rezeis ended.
+        // Neither healed nor deleted on such a read: the next sweep asks the
+        // panel again, after the push.
+        if (
+          isInTermModel(subscription) &&
+          (await panelPushOutranksRead(this.prismaService, subscription.id, readAt))
+        ) {
+          deferred += 1;
+          deferredKinds.add('pushOfOursNewer');
+          continue;
+        }
         const reviveActive = panelExpiryMs > Date.now();
         try {
           await this.prismaService.subscription.update({

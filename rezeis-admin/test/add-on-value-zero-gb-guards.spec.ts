@@ -11,6 +11,12 @@ import {
   AdminAddOnUpdateDto,
 } from '../src/modules/add-ons/dto/admin-add-on.dto';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every stage off: the legacy increment, and a ledger case
+// that turns stage 2 on by itself. Stage 1's lazy entry would take the row
+// lock these fakes do not stage.
+pinAddOnStagesOffForThisFile();
 
 /**
  * A ZERO-GIGABYTE SUBSCRIPTION IS NOT REPRESENTABLE — THE ADD-ON ENTRY POINTS.
@@ -113,15 +119,16 @@ describe('an add-on value is a whole, positive number of units', () => {
 
 // ── 2. The legacy increment: the last place a raw column is written ────────
 
-const ORIGINAL_DIRECT_PURCHASE = process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'];
 afterEach(() => {
-  if (ORIGINAL_DIRECT_PURCHASE === undefined) delete process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'];
-  else process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'] = ORIGINAL_DIRECT_PURCHASE;
+  // Back to the file's pinned OFF; the pin puts the real environment back
+  // after the file.
+  process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'] = 'false';
 });
 
 /**
- * Drives the REAL `applyAddOnTopUp` with the direct-purchase rollout flag OFF,
- * which is its default and which sends every capture down the legacy increment.
+ * Drives the REAL `applyAddOnTopUp` with the direct-purchase rollout flag OFF —
+ * explicitly, since it defaults ON from 24.09.2026 — which sends every capture
+ * down the legacy increment.
  */
 function legacyTopUpEnv(input: {
   readonly trafficLimit: number | null;
@@ -137,8 +144,7 @@ function legacyTopUpEnv(input: {
    */
   readonly viaLedger?: boolean;
 }) {
-  if (input.viaLedger === true) process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'] = 'true';
-  else delete process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'];
+  process.env['ADDON_ENTITLEMENT_DIRECT_PURCHASE'] = input.viaLedger === true ? 'true' : 'false';
 
   const subUpdates: Array<Record<string, unknown>> = [];
   const transactionWrites: Array<Record<string, unknown>> = [];
@@ -211,7 +217,9 @@ function legacyTopUpEnv(input: {
     { info: () => undefined } as never,
     entitlements as never,
     projections as never,
-    {} as never,
+    // The ledger aligns the term with the subscription's expiry before reading
+    // it; this staged term already ends where the subscription does.
+    { alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }) } as never,
     // `TrafficResetService` — the sixth dependency, unused here: a paid
     // RESET_TRAFFIC add-on is performed after the fulfilment transaction
     // commits, and nothing in these specs buys one.

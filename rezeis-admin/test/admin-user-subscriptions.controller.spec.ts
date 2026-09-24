@@ -23,6 +23,7 @@ import { AdminUserSubscriptionsController } from '../src/modules/users/controlle
 import { AdminSafeExceptionFilter } from '../src/common/filters/admin-safe-exception.filter';
 import { OPERATOR_LIMIT_SOURCE } from '../src/modules/anti-fraud/detectors/sharing-detectors';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from '../src/modules/users/controllers/subscription-sync-refusals';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * The one message `linkRemnawaveProfile` gives an operator whose identifier is
@@ -169,6 +170,7 @@ function linkRepairFor(options: {
     {} as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller, updateCalls, guardQueries, auditWrites };
 }
@@ -234,6 +236,7 @@ describe('AdminUserSubscriptionsController', () => {
       { warn: () => undefined } as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     const result = await controller.updateSubscription(
@@ -286,6 +289,7 @@ describe('AdminUserSubscriptionsController', () => {
       { warn: (...args: unknown[]) => { warned.push(args); } } as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     const result = await controller.updateSubscription(
@@ -349,6 +353,7 @@ describe('AdminUserSubscriptionsController', () => {
       { warn: (...args: unknown[]) => { warned.push(args); } } as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     await controller.updateSubscription(
@@ -403,6 +408,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     const result = await controller.linkRemnawaveProfile(
@@ -436,6 +442,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     await assert.rejects(
@@ -505,6 +512,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     const result = await controller.linkRemnawaveProfile(
@@ -557,6 +565,7 @@ describe('AdminUserSubscriptionsController', () => {
         {} as never,
         {} as never,
         {} as never,
+        NOT_IN_TERM_MODEL as never,
       );
 
       await assert.rejects(
@@ -743,6 +752,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     await assert.rejects(
@@ -1007,6 +1017,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     const failure = await captureRejection(() =>
@@ -1048,6 +1059,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     const failure = await captureRejection(() =>
@@ -1089,6 +1101,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     await controller.getDevices('subscription-1');
@@ -1136,6 +1149,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     let thrown: unknown = null;
@@ -1171,6 +1185,7 @@ describe('AdminUserSubscriptionsController', () => {
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
 
     assert.deepStrictEqual(await controller.getDevices('subscription-1'), {
@@ -1234,22 +1249,27 @@ describe('syncSubscription — an unreachable panel is not a missing profile', (
   ) {
     const updates: unknown[] = [];
     const panelReads: string[] = [];
+    const db = {
+      subscription: {
+        findUnique: async () => row,
+        update: async (input: unknown) => { updates.push(input); return {}; },
+      },
+      // The audit sink these routes now write to. Inert here: what these
+      // cases are about is what the panel refresh adopts, and the operator
+      // trail has its own coverage.
+      adminAuditLog: { create: async () => ({}) },
+      // The refresh writes in a transaction, beside the term alignment an
+      // adopted expiry needs (a no-op here: nothing is in the term model).
+      $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(db),
+    };
     const controller = new AdminUserSubscriptionsController(
-      {
-        subscription: {
-          findUnique: async () => row,
-          update: async (input: unknown) => { updates.push(input); return {}; },
-        },
-        // The audit sink these routes now write to. Inert here: what these
-        // cases are about is what the panel refresh adopts, and the operator
-        // trail has its own coverage.
-        adminAuditLog: { create: async () => ({}) },
-      } as never,
+      db as never,
       { getPanelUserOutcome: async () => { panelReads.push('read'); return outcome; } } as never,
       {} as never,
       {} as never,
       {} as never,
       {} as never,
+      NOT_IN_TERM_MODEL as never,
     );
     return { controller, updates, panelReads };
   }
@@ -1437,30 +1457,35 @@ function syncOver(options: {
     ...options.stored,
   };
   const updates: Array<Record<string, unknown>> = [];
-  const controller = new AdminUserSubscriptionsController(
-    {
-      subscription: {
-        findUnique: async () => ({ ...stored }),
-        update: async (input: unknown) => {
-          const data = (input as { data: Record<string, unknown> }).data;
-          updates.push(data);
-          for (const [column, value] of Object.entries(data)) {
-            if (value === undefined) continue;
-            stored[column] = value;
-          }
-          return { ...stored };
-        },
+  const db = {
+    subscription: {
+      findUnique: async () => ({ ...stored }),
+      update: async (input: unknown) => {
+        const data = (input as { data: Record<string, unknown> }).data;
+        updates.push(data);
+        for (const [column, value] of Object.entries(data)) {
+          if (value === undefined) continue;
+          stored[column] = value;
+        }
+        return { ...stored };
       },
-      // The audit sink the refresh now writes to. Inert here: these cases are
-      // about which columns a refresh adopts, and the operator trail has its
-      // own coverage.
-      adminAuditLog: { create: async () => ({}) },
-    } as never,
+    },
+    // The audit sink the refresh now writes to. Inert here: these cases are
+    // about which columns a refresh adopts, and the operator trail has its
+    // own coverage.
+    adminAuditLog: { create: async () => ({}) },
+    // The refresh writes in a transaction, beside the term alignment an
+    // adopted expiry needs (a no-op here: nothing is in the term model).
+    $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(db),
+  };
+  const controller = new AdminUserSubscriptionsController(
+    db as never,
     { getPanelUserOutcome: async () => options.outcome } as never,
     {} as never,
     {} as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller, updates, stored };
 }
@@ -1718,6 +1743,7 @@ function editorHarness(options: {
     { warn: () => undefined } as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
 
   return {

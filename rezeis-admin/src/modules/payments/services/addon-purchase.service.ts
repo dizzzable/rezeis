@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -33,6 +34,7 @@ import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
 } from '../../add-on-entitlements/services/configured-baseline.util';
+import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
@@ -80,6 +82,9 @@ export interface AddOnCheckoutInput {
  */
 @Injectable()
 export class AddOnPurchaseService {
+  /** Aligns a drifted term before its window is read: see `checkout`. */
+  private readonly subscriptionTermService: SubscriptionTermService;
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly pricingService: PricingService,
@@ -89,7 +94,13 @@ export class AddOnPurchaseService {
     private readonly settingsService: SettingsService,
     private readonly accessModeGuard: AccessModeGuard,
     private readonly systemEvents: SystemEventsService,
-  ) {}
+    // Exported by `AddOnEntitlementsModule`, which `PaymentsModule` imports, so
+    // Nest injects the shared instance; `@Optional()` only keeps the unit
+    // specs' hand-built checkouts compiling. The service holds no state.
+    @Optional() subscriptionTermService?: SubscriptionTermService,
+  ) {
+    this.subscriptionTermService = subscriptionTermService ?? new SubscriptionTermService();
+  }
 
   public async checkout(input: AddOnCheckoutInput): Promise<InternalPaymentCheckoutInterface> {
     // Two-layer enforcement (Property 2): add-on purchases are gated
@@ -200,10 +211,18 @@ export class AddOnPurchaseService {
     // `deviceLimit <= 0` — which is a fourth, independent derivation of "is
     // this already unlimited". It agreed with `AddOnEligibilityService` on an
     // OVERRIDDEN row and DISAGREED on an UNDECIDABLE one: an imported row whose
-    // `planSnapshot` carries no limit keys and whose `deviceLimit` is 0 is
-    // correctly OFFERED the add-on (UNDECIDABLE resolves toward the PLAN, so
-    // the term's finite baseline stands), and this guard then answered 400. The
-    // customer was shown a product they could not buy.
+    // `planSnapshot` carries no limit keys and whose `deviceLimit` is 0 was
+    // OFFERED the add-on (the rule then resolved UNDECIDABLE toward the term's
+    // finite base), and this guard answered 400. The customer was shown a
+    // product they could not buy.
+    //
+    // The rule has moved since (`entitlement-baseline.ts`): once the
+    // row has a projection row, every field — UNDECIDABLE included — reads as
+    // the row's own share of its columns, so that import reads 0 devices, i.e.
+    // unlimited, and is neither offered nor sold device add-ons; only before
+    // its first projection row does the term's base still stand. Which answer
+    // is right is the shared reader's business. This guard's is to give the
+    // same one as the offer.
     //
     // So it asks the shared reader with the same three inputs the offer uses —
     // the ACTIVE term's `base*`, the subscription's columns + `planSnapshot`,
@@ -216,21 +235,43 @@ export class AddOnPurchaseService {
     // the offer uses, which derives the baseline from the subscription's own
     // columns. The operator's value IS the baseline there, so no override
     // resolution applies and no projection row is read.
-    const activeTerm = await this.prismaService.subscriptionTerm.findFirst({
-      where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
-      select: {
-        baseTrafficLimitBytes: true,
-        baseDeviceLimit: true,
-        // The three fields the LIFETIME guard below needs. They are selected
-        // here rather than in a second query because they describe the same
-        // term the resource baseline is resolved against: reading the window
-        // from one row and the limits from another is how two guards start
-        // judging two different terms.
-        endsAt: true,
-        trafficResetStrategy: true,
-        resetAnchorAt: true,
-      },
-    });
+    const readActiveTerm = () =>
+      this.prismaService.subscriptionTerm.findFirst({
+        where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
+        select: {
+          baseTrafficLimitBytes: true,
+          baseDeviceLimit: true,
+          // The three fields the LIFETIME guard below needs. They are selected
+          // here rather than in a second query because they describe the same
+          // term the resource baseline is resolved against: reading the window
+          // from one row and the limits from another is how two guards start
+          // judging two different terms.
+          endsAt: true,
+          trafficResetStrategy: true,
+          resetAnchorAt: true,
+        },
+      });
+    let activeTerm = await readActiveTerm();
+    // ── A DRIFTED TERM IS ALIGNED BEFORE ITS WINDOW IS READ ──────────────
+    //
+    // Bonus days, an operator's edit or a pull from Remnawave move `expiresAt`
+    // without the term, and the hourly drift sweep may not have reached it yet.
+    // Read as it stood, the window was the stale one: a term whose end had
+    // passed refused an add-on the subscription can still take for its real
+    // remaining time (and the fulfilment of a draft already made fell back to
+    // the permanent increment). So a term that does not end where the
+    // subscription does is aligned first, under the row lock, and read again —
+    // the same move the ledger makes at fulfilment. A term that already agrees
+    // costs nothing; with a renewal queued the queued term is the one aligned,
+    // and an add-on bought now still ends with the CURRENT period.
+    if (activeTerm !== null && activeTerm.endsAt?.getTime() !== subscription.expiresAt?.getTime()) {
+      const aligned = await this.prismaService.$transaction((tx) =>
+        this.subscriptionTermService.alignTailToExpiryInTransaction(tx, subscription.id, {
+          correlationId: `addon-checkout:${subscription.id}`,
+        }),
+      );
+      if (aligned.outcome === 'ALIGNED') activeTerm = await readActiveTerm();
+    }
     let baseline: {
       readonly baseTrafficLimitBytes: bigint | null;
       readonly baseDeviceLimit: number | null;

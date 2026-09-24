@@ -14,6 +14,12 @@ import {
   resolvePlanMigrationGuardCandidate,
   type LatePlanMigrationRenewal,
 } from '../src/modules/payments/services/payment-renewal-plan-migration-guard.util';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * A RENEWAL FOR A PLAN THE SUBSCRIPTION WAS MOVED OFF (decision 10)
@@ -58,6 +64,8 @@ interface PlanRow {
   readonly internalSquads: string[];
   readonly externalSquad: string | null;
   readonly deletedAt: Date | null;
+  readonly isArchived?: boolean;
+  readonly archivedRenewMode?: 'SELF_RENEW' | 'REPLACE_ON_RENEW';
 }
 
 /** The plan being deleted. Soft-deleted, so its name carries the rename suffix. */
@@ -92,6 +100,19 @@ const CURRENT_PLAN: PlanRow = {
   internalSquads: ['squad-current'],
   externalSquad: null,
   deletedAt: null,
+};
+
+/**
+ * The same plan, archived to be REPLACED on renewal. A renewal checkout
+ * created after the move can price another plan than the current one only
+ * then (`getSourceSelection` offers the replacements); for a current plan that
+ * renews as itself, a renewal for another plan was drafted before the plan
+ * changed, and `readRenewalPricedBeforePlanChange` converts it instead.
+ */
+const CURRENT_PLAN_REPLACED_ON_RENEW: PlanRow = {
+  ...CURRENT_PLAN,
+  isArchived: true,
+  archivedRenewMode: 'REPLACE_ON_RENEW',
 };
 
 interface SubscriptionRow {
@@ -398,12 +419,21 @@ function createWorld(seed: {
     subscriptionEffectiveProjection: { findUnique: async () => null },
     subscriptionTerm: {
       findFirst: async (args: {
-        readonly where: { readonly subscriptionId: string; readonly status: string | { readonly in: string[] } };
+        readonly where: { readonly subscriptionId: string; readonly status?: string | { readonly in: string[] } };
       }) => {
+        // No status asks for any term: how entering the term model tells a
+        // subscription already in it (`ensureTermInTransaction`).
         const statuses =
-          typeof args.where.status === 'string' ? [args.where.status] : args.where.status.in;
+          args.where.status === undefined
+            ? null
+            : typeof args.where.status === 'string'
+              ? [args.where.status]
+              : args.where.status.in;
         const rows = staged.terms
-          .filter((term) => term.subscriptionId === args.where.subscriptionId && statuses.includes(term.status))
+          .filter(
+            (term) =>
+              term.subscriptionId === args.where.subscriptionId && (statuses === null || statuses.includes(term.status)),
+          )
           .sort((left, right) => right.generation - left.generation);
         return rows[0] ?? null;
       },
@@ -428,6 +458,9 @@ function createWorld(seed: {
         staged.transactionUpdates.push({ id: args.where.id, data: structuredClone(args.data) });
         return {};
       },
+      // An upgrade's read of the payments its paid remainder is counted from:
+      // none in this world.
+      findMany: async () => [],
     },
     transactionItem: {
       updateMany: async (args: {
@@ -521,6 +554,9 @@ function createWorld(seed: {
         staged.termCreates.push(structuredClone(input));
         return { id, generation, status: 'SCHEDULED' };
       },
+      // What the real alignment answers for a subscription with no term; the
+      // one upgrade here (`does not guard a paid upgrade`) has none.
+      alignTailToExpiryInTransaction: async () => ({ outcome: 'NOT_IN_MODEL' }),
     } as never,
     {} as never,
   );
@@ -849,8 +885,10 @@ describe('a single renewal the guard must leave alone', () => {
 
   it('does not keep a renewal created an hour after the move — the contract’s time boundary', async () => {
     // Pins `moved_at >= payment.created_at - 10 minutes`: a checkout created
-    // well after the move did not price the old plan before it.
+    // well after the move did not price the old plan before it — it priced it
+    // as the current plan's replacement.
     const world = createWorld({
+      plans: [OLD_PLAN, CURRENT_PLAN_REPLACED_ON_RENEW],
       subscriptions: [subscriptionOn(CURRENT_PLAN)],
       transaction: renewalForOldPlan(),
       migrationItems: [movedOffOldPlan({ movedAt: new Date(NOW - 3 * HOUR_MS) })],
@@ -865,6 +903,7 @@ describe('a single renewal the guard must leave alone', () => {
   it('does not keep a renewal created eleven minutes after the move', async () => {
     const payment = renewalForOldPlan();
     const world = createWorld({
+      plans: [OLD_PLAN, CURRENT_PLAN_REPLACED_ON_RENEW],
       subscriptions: [subscriptionOn(CURRENT_PLAN)],
       transaction: payment,
       migrationItems: [movedOffOldPlan({ movedAt: new Date(payment.createdAt.getTime() - 11 * MINUTE_MS) })],
@@ -879,6 +918,7 @@ describe('a single renewal the guard must leave alone', () => {
     // The lookup is bound to this subscription: a move of some other one says
     // nothing about this payment.
     const world = createWorld({
+      plans: [OLD_PLAN, CURRENT_PLAN_REPLACED_ON_RENEW],
       subscriptions: [subscriptionOn(CURRENT_PLAN)],
       transaction: renewalForOldPlan(),
       migrationItems: [movedOffOldPlan({ subscriptionId: 'sub-other' })],
@@ -893,6 +933,7 @@ describe('a single renewal the guard must leave alone', () => {
   it('does not keep a renewal whose move never happened', async () => {
     for (const status of ['FAILED', 'SKIPPED', 'PENDING'] as const) {
       const world = createWorld({
+        plans: [OLD_PLAN, CURRENT_PLAN_REPLACED_ON_RENEW],
         subscriptions: [subscriptionOn(CURRENT_PLAN)],
         transaction: renewalForOldPlan(),
         migrationItems: [movedOffOldPlan({ status, movedAt: status === 'PENDING' ? null : new Date(NOW - HOUR_MS) })],

@@ -223,3 +223,25 @@ jobs:
           test/user-full-deletion-postgres.spec.ts
           test/payments-withheld-conversion-postgres.spec.ts
           test/plan-change-keeps-limits-above-plan-postgres.spec.ts
+          test/upgrade-paid-remainder-postgres.spec.ts
+          test/renewal-priced-before-upgrade-postgres.spec.ts
+          test/add-on-cutover-job-postgres.spec.ts
+          test/term-alignment-postgres.spec.ts
+          test/entitlement-boundary-sweep-postgres.spec.ts
+          test/entitlement-deletion-hygiene-postgres.spec.ts
+          test/duplicate-merge-cutover-postgres.spec.ts
+          test/saved-payment-method-charge-lock-postgres.spec.ts
+          test/addon-refund-postgres.spec.ts
+          test/admin-assign-plan-term-postgres.spec.ts
+          test/subscription-writers-term-postgres.spec.ts
+          test/bulk-plan-assignment-postgres.spec.ts
+          test/device-expiry-nothing-to-reduce-postgres.spec.ts
+          test/duplicate-merge-audit-postgres.spec.ts
+          test/addon-expiry-notice-postgres.spec.ts
+          test/durable-payment-paths-postgres.spec.ts
+          test/durable-disposal-postgres.spec.ts
+          test/add-on-offer-dated-postgres.spec.ts
+          test/limit-bonus-lifetime-postgres.spec.ts
+          test/term-baseline-own-share-postgres.spec.ts
+          test/remnawave-webhook-term-model-postgres.spec.ts
+          test/panel-readback-term-model-postgres.spec.ts

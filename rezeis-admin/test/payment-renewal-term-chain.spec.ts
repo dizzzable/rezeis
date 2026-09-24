@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 describe('PaymentSubscriptionMutationService renewal term queue', () => {
   for (const blockedSource of [
@@ -104,6 +110,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       // every time, because a hard zero where a row might exist is a second,
       // divergent derivation of the baseline.
       subscriptionEffectiveProjection: { findUnique: async () => null },
+      // Not in the term model: the renewal's term follows the ROW, and there is none.
+      subscriptionTerm: { findFirst: async () => null },
       profileSyncJob: { create: async () => ({ id: 'job-1', subscriptionId: 'sub-1' }) },
       transaction: { update: async () => undefined },
     };
@@ -154,7 +162,9 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       selectedDurationDays: 30,
     });
 
-    assert.equal(lockQueries, 1);
+    // Once to renew it, once where its term row is read (the renewal's term
+    // follows the row whatever the flags say).
+    assert.equal(lockQueries, 2);
     assert.ok(captured.updateData);
     assert.equal(
       (captured.updateData.expiresAt as Date).getTime(),
@@ -191,6 +201,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       },
     };
     const terms = {
+      // The tail is aligned before a renewal appends; already aligned here.
+      alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
       createScheduledInTransaction: async (_tx: unknown, input: Record<string, unknown>) => {
         creates.push(input);
         return { id: 'term-new', generation: 3, status: 'SCHEDULED' };
@@ -273,6 +285,10 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       // every time, because a hard zero where a row might exist is a second,
       // divergent derivation of the baseline.
       subscriptionEffectiveProjection: { findUnique: async () => null },
+      // The row of the plan the snapshot names is gone, which is what makes a
+      // renewal onto ANOTHER plan an ordinary one (the renewal offers the
+      // catalogue to choose from) rather than one priced before a plan change.
+      plan: { findUnique: async () => null },
       profileSyncJob: {
         create: async () => ({ id: 'job-1', subscriptionId: 'sub-1', targetRemnawaveId: 'rw-1' }),
       },
@@ -280,6 +296,8 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
     };
     const prisma = { $transaction: async (fn: (client: unknown) => unknown) => fn(tx) };
     const terms = {
+      // The tail is aligned before a renewal appends; already aligned here.
+      alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
       createScheduledInTransaction: async (_tx: unknown, input: Record<string, unknown>) => {
         termCreates.push(input);
         return { id: 'term-new', status: 'SCHEDULED', generation: 2 };
@@ -367,7 +385,7 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       transaction: { update: async () => undefined },
     };
     const prisma = { $transaction: async (fn: (client: unknown) => unknown) => fn(tx) };
-    const terms = { createScheduledInTransaction: async () => ({ id: 'term-new', status: 'SCHEDULED', generation: 2 }) };
+    const terms = { alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }), createScheduledInTransaction: async () => ({ id: 'term-new', status: 'SCHEDULED', generation: 2 }) };
     const service = new PaymentSubscriptionMutationService(prisma as never, { info: () => undefined } as never, {} as never, {} as never, terms as never, {} as never);
     const renew = (service as unknown as { renewSubscriptionFromPayment(input: { transaction: unknown; purchasedPlan: unknown; selectedDurationDays: number }): Promise<unknown> }).renewSubscriptionFromPayment.bind(service);
     try {
@@ -376,7 +394,9 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
         purchasedPlan: { id: 'plan-future', name: 'Future', description: null, tag: null, type: 'BOTH', trafficLimit: 1024, deviceLimit: 1, trafficLimitStrategy: 'NO_RESET', internalSquads: ['future-squad'], externalSquad: null },
         selectedDurationDays: 30,
       });
-      assert.equal(findUniqueCalls, 2);
+      // The lock, entering the term model (it re-reads under the lock) and the
+      // re-read after the term: every read after the first is the locked row.
+      assert.equal(findUniqueCalls, 3);
       assert.ok(captured.updateData);
       assert.equal((captured.updateData.expiresAt as Date).getTime(), lockedExpiry.getTime() + 30 * 86_400_000);
     } finally {

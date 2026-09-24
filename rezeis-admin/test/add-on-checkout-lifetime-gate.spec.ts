@@ -104,10 +104,14 @@ async function withEnv(
   }
 }
 
-/** Every rollout flag this file cares about, explicitly OFF. */
+/**
+ * Every rollout flag this file cares about, explicitly OFF — spelled `'false'`,
+ * not unset: `directPurchase` defaults ON since the 24.09.2026 flip, so an
+ * unset variable is no longer "off".
+ */
 const FLAGS_OFF = {
-  ADDON_ENTITLEMENT_DIRECT_PURCHASE: undefined,
-  ADDON_RESET_EXPIRY_MONTH: undefined,
+  ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'false',
+  ADDON_RESET_EXPIRY_MONTH: 'false',
 } as const;
 
 interface Answer {
@@ -119,6 +123,8 @@ interface Answer {
   readonly providerCalls: number;
   readonly inlineGrants: number;
   readonly marker: Record<string, unknown> | null;
+  /** How many times the checkout aligned the term with the subscription's expiry. */
+  readonly alignments: number;
 }
 
 function refusalCodeOf(error: BadRequestException): string | null {
@@ -181,8 +187,20 @@ async function askBoth(world: {
   );
 
   const created: Array<{ data: Record<string, unknown> }> = [];
-  const counters = { providerCalls: 0, inlineGrants: 0 };
+  const counters = { providerCalls: 0, inlineGrants: 0, alignments: 0 };
+  // What `alignTailToExpiryInTransaction` does to a lone ACTIVE term that has
+  // drifted: its end follows the subscription's expiry. The offer above read
+  // the term before this, as the cabinet reads it before it checks out.
+  const terms = {
+    alignTailToExpiryInTransaction: async () => {
+      counters.alignments += 1;
+      if (termRow === null) return { outcome: 'NOT_IN_MODEL' };
+      termRow.endsAt = subscriptionRow.expiresAt;
+      return { outcome: 'ALIGNED', termId: termRow.id };
+    },
+  };
   const checkoutPrisma = {
+    $transaction: async (run: (tx: unknown) => Promise<unknown>) => run({}),
     user: { findFirst: async () => ({ id: 'user-1' }) },
     paymentGateway: {
       findUnique: async () => ({
@@ -193,7 +211,9 @@ async function askBoth(world: {
       }),
     },
     subscription: { findUnique: async () => subscriptionRow },
-    subscriptionTerm: { findFirst: async () => termRow },
+    // A fresh object per read, as Prisma returns: a checkout that aligned the
+    // term but kept the row it read before must see the stale window.
+    subscriptionTerm: { findFirst: async () => (termRow === null ? null : { ...termRow }) },
     subscriptionEffectiveProjection: { findUnique: async () => null },
     addOn: {
       findUnique: async () => ({
@@ -250,6 +270,7 @@ async function askBoth(world: {
     { getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC' }) } as never,
     { evaluate: () => null } as never,
     { info: () => undefined } as never,
+    terms as never,
   );
 
   let bought = false;
@@ -280,6 +301,7 @@ async function askBoth(world: {
     providerCalls: counters.providerCalls,
     inlineGrants: counters.inlineGrants,
     marker: draft === undefined ? null : (draft.data.planSnapshot as Record<string, unknown>),
+    alignments: counters.alignments,
   };
 }
 
@@ -333,7 +355,7 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
     // a reset epoch; with it off the reset flag alone changes nothing about what
     // the money path can deliver.
     await withEnv(
-      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: undefined },
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'false' },
       async () => {
         const answer = await askBoth({ lifetime: 'UNTIL_NEXT_RESET' });
 
@@ -438,6 +460,9 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
       const answer = await askBoth({
         lifetime: 'UNTIL_SUBSCRIPTION_END',
         term: { endsAt: CLOSED_WINDOW_ENDED_AT },
+        // The subscription ended with it: an expired subscription still
+        // carrying its ACTIVE term, which nothing aligns anywhere later.
+        sub: { expiresAt: CLOSED_WINDOW_ENDED_AT },
       });
 
       assert.equal(answer.offered, false, 'a closed window is not a period anything can be delivered for');
@@ -479,6 +504,7 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
         const answer = await askBoth({
           lifetime: 'UNTIL_NEXT_RESET',
           term: { endsAt: CLOSED_WINDOW_ENDED_AT },
+          sub: { expiresAt: CLOSED_WINDOW_ENDED_AT },
         });
 
         assert.equal(answer.offered, true, 'a reset boundary does not depend on the term window');
@@ -498,12 +524,34 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
       const answer = await askBoth({
         lifetime: 'UNTIL_SUBSCRIPTION_END',
         term: { endsAt: null },
+        // A lifetime subscription: its term never ends because it never does.
+        sub: { expiresAt: null },
       });
 
       assert.equal(answer.offered, false, 'an open-ended term has no "subscription end" to expire at');
       assert.equal(answer.bought, false);
       assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
       assert.equal(answer.draftsCreated, 0);
+      assert.equal(answer.alignments, 0, 'a term that already ends where the subscription does is read as it is');
+    });
+  });
+
+  it('sells UNTIL_SUBSCRIPTION_END on a DRIFTED term: aligned with the subscription’s expiry before it is read', async () => {
+    // Bonus days moved `expiresAt` 30 days on; the term still ends where the
+    // period stood, already in the past. Read as it stood, checkout refused a
+    // subscription that runs for months — and a draft made just before the
+    // term's end was fulfilled onto the PERMANENT increment.
+    await withEnv(FLAGS_OFF, async () => {
+      const answer = await askBoth({
+        lifetime: 'UNTIL_SUBSCRIPTION_END',
+        term: { endsAt: CLOSED_WINDOW_ENDED_AT },
+        sub: { expiresAt: new Date(Date.now() + 30 * DAY_MS) },
+      });
+
+      assert.equal(answer.alignments, 1);
+      assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused the aligned window');
+      assert.equal(answer.draftsCreated, 1);
+      assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
     });
   });
 

@@ -541,8 +541,137 @@ const CONNECT_HELP_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   },
 ];
 
+/**
+ * «Купить снова»: the cabinet's add-on purchase, for the subscription the
+ * notice is about — the notice carries `subscriptionId`, and the fanout adds
+ * it to a bare `/addons` (`linkButtonsToSubscription`), so the page opens on
+ * that subscription's offers instead of asking which one.
+ */
+const ADD_ON_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
+  { labelRu: '🔁 Купить снова', labelEn: '🔁 Buy again', kind: 'webApp', target: '/addons' },
+  { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
+];
+
+/** A device add-on's notice: the devices page beside «Купить снова» — where the customer chooses which stay. */
+const ADD_ON_DEVICE_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
+  { labelRu: '🔁 Купить снова', labelEn: '🔁 Buy again', kind: 'webApp', target: '/addons' },
+  { labelRu: '📱 Устройства', labelEn: '📱 Devices', kind: 'webApp', target: '/subscription/devices' },
+];
+
+const ADD_ON_RENEWAL_RU = '\n\nПродление подписки опцию не продлевает: когда она закончится, её можно купить снова.';
+const ADD_ON_RENEWAL_EN =
+  '\n\nRenewing the subscription does not renew the add-on: once it ends, you can buy it again.';
+
+/**
+ * A dated add-on — one bought while the durable model is on — three days
+ * before it ends and when it has ended (`AddOnExpiryNoticeService`). Add-ons
+ * bought before the model have no end and get neither.
+ *
+ * SIX TEMPLATES, because a device add-on's end means two different things: with
+ * `ADDON_DEVICE_CLEANUP_AUTO` on, the extra devices are disconnected by
+ * themselves, newest first; with it off, they stay and new ones over the limit
+ * do not connect. Each text is written out whole, where the operator reads and
+ * edits it in «Карта бота», and the sender picks the one for the add-on and
+ * the flag. The customer has ONE switch per moment for all three
+ * (`SUBSCRIBER_SWITCH_OF_TYPE`).
+ *
+ * The words are the cabinet's own: «Дополнительные опции» / «Мои опции» in
+ * Russian, "Add-ons" in English.
+ *
+ * The placeholders: `{{addon}}` the add-on's name as it was sold,
+ * `{{addonValue}}` «+2 устройства» / «+10 ГБ», `{{addonAmount}}` the same
+ * without the plus, `{{endsDate}}` / `{{endsTime}}` / `{{endsDateTime}}` when
+ * it ends, in the operator's time zone; `{{plan}}`, `{{profile}}` and the
+ * subscription's own `{{expiresDate}}` as in the expiry notices.
+ */
+const ADD_ON_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: 'addon_ends_in_3_days',
+    title: '⏳ Дополнительный трафик заканчивается через 3 дня',
+    titleEn: '⏳ Extra traffic ends in 3 days',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» действует до {{endsDateTime}}. ' +
+      'После этого лимит трафика станет меньше на {{addonAmount}}.' +
+      ADD_ON_RENEWAL_RU,
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription runs until {{endsDateTime}}. ' +
+      'After that, your traffic limit goes down by {{addonAmount}}.' +
+      ADD_ON_RENEWAL_EN,
+    buttons: ADD_ON_BUTTONS,
+  },
+  {
+    type: 'addon_ended',
+    title: '⌛ Дополнительный трафик закончился',
+    titleEn: '⌛ Extra traffic has ended',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» закончилась {{endsDateTime}}: ' +
+      'лимит трафика стал меньше на {{addonAmount}}.\n\nЕё можно купить снова.',
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription ended on {{endsDateTime}}: ' +
+      'your traffic limit went down by {{addonAmount}}.\n\nYou can buy it again.',
+    buttons: ADD_ON_BUTTONS,
+  },
+  {
+    // `ADDON_DEVICE_CLEANUP_AUTO` off: the devices stay, new ones do not connect.
+    type: 'addon_devices_ends_in_3_days',
+    title: '⏳ Дополнительные устройства заканчиваются через 3 дня',
+    titleEn: '⏳ Extra devices end in 3 days',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» действует до {{endsDateTime}}. ' +
+      'После этого новые устройства сверх лимита подключить не получится.' +
+      ADD_ON_RENEWAL_RU,
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription runs until {{endsDateTime}}. ' +
+      'After that, new devices over the limit will not connect.' +
+      ADD_ON_RENEWAL_EN,
+    buttons: ADD_ON_DEVICE_BUTTONS,
+  },
+  {
+    type: 'addon_devices_ended',
+    title: '⌛ Дополнительные устройства закончились',
+    titleEn: '⌛ Extra devices have ended',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» закончилась {{endsDateTime}}. ' +
+      'Новые устройства сверх лимита подключить не получится.\n\nЕё можно купить снова.',
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription ended on {{endsDateTime}}. ' +
+      'New devices over the limit will not connect.\n\nYou can buy it again.',
+    buttons: ADD_ON_DEVICE_BUTTONS,
+  },
+  {
+    // `ADDON_DEVICE_CLEANUP_AUTO` on: the extra devices go by themselves, newest first.
+    type: 'addon_devices_auto_ends_in_3_days',
+    title: '⏳ Дополнительные устройства заканчиваются через 3 дня',
+    titleEn: '⏳ Extra devices end in 3 days',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» действует до {{endsDateTime}}. ' +
+      'После этого лишние устройства отключатся сами — сначала самые новые. ' +
+      'Чтобы выбрать, какие оставить, отключите лишние заранее: «Подписка» → «Управление устройствами».' +
+      ADD_ON_RENEWAL_RU,
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription runs until {{endsDateTime}}. ' +
+      'After that, the extra devices are disconnected automatically, newest first. ' +
+      'To choose which ones stay, disconnect the extra ones yourself beforehand: “Subscription” → “Manage devices”.' +
+      ADD_ON_RENEWAL_EN,
+    buttons: ADD_ON_DEVICE_BUTTONS,
+  },
+  {
+    type: 'addon_devices_auto_ended',
+    title: '⌛ Дополнительные устройства закончились',
+    titleEn: '⌛ Extra devices have ended',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» закончилась {{endsDateTime}}. ' +
+      'Лишние устройства отключаются сами — сначала самые новые.\n\nЕё можно купить снова.',
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription ended on {{endsDateTime}}. ' +
+      'The extra devices are being disconnected automatically, newest first.\n\nYou can buy it again.',
+    buttons: ADD_ON_DEVICE_BUTTONS,
+  },
+];
+
 export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   ...DURATION_TEMPLATES,
+  ...ADD_ON_TEMPLATES,
   ...REFERRAL_TEMPLATES,
   ...POINTS_TEMPLATES,
   ...PARTNER_TEMPLATES,

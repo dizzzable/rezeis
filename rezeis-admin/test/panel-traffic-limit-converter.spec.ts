@@ -104,7 +104,10 @@ async function webhookWrites(trafficLimitBytes: number): Promise<Written> {
         written = args.data['trafficLimit'] as number | null;
         return { count: 1 };
       },
-      findMany: async () => [{ id: 'sub-1', planSnapshot: {} }],
+      // The snapshot pass reads the row; the term-model pass finds no row in
+      // the model (a subscription there never takes the panel's limits).
+      findMany: async (args: { readonly where?: { readonly terms?: { readonly some?: unknown } } }) =>
+        args.where?.terms?.some !== undefined ? [] : [{ id: 'sub-1', planSnapshot: {} }],
       update: async () => ({}),
     },
   };

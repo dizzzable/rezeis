@@ -11,6 +11,12 @@ import {
   RemnawavePanelUser,
   RemnawavePanelUserList,
 } from '../../remnawave/services/remnawave-api.service';
+import {
+  finishTermModelReadback,
+  judgePanelRowReadback,
+  TERM_MODEL_MARKER_SELECT,
+  withoutWithheldReadbackFields,
+} from '../../remnawave/services/term-model-readback';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import {
   readProfileOwnerMarker,
@@ -86,8 +92,12 @@ interface RunInput {
  * `remnawavePanelId: null` would match every row that has none — turning "who
  * is this profile" into "anybody". Same shape as the retirement fence in
  * `ProfileSyncProcessor.handleDelete`.
+ *
+ * Exported for the other readers of a panel row that must ask the same
+ * question — whether a second live row names this profile — before they push
+ * anything to it (`term-model-readback.ts`).
  */
-function panelProfileClaims(panelUser: RemnawavePanelUser): Prisma.SubscriptionWhereInput[] {
+export function panelProfileClaims(panelUser: RemnawavePanelUser): Prisma.SubscriptionWhereInput[] {
   const claims: Prisma.SubscriptionWhereInput[] = [{ remnawaveId: panelUser.uuid }];
   const panelId = panelUser.panelId;
   if (panelId !== null && Number.isSafeInteger(panelId)) {
@@ -183,6 +193,12 @@ export class RemnawaveImporterService {
     // backup importers (which fail soft to their donor values), there is no
     // safe degraded mode here — anything short of a vouched-for read refuses.
     let bulk: RemnawaveStrictOutcome<RemnawavePanelUserList>;
+    // When this run ASKED the panel — before the page walk, not after it. A
+    // subscription in the term model takes an expiry from this read only when
+    // nothing rezeis pushed to its profile landed after this instant: a push
+    // that completes while the walk runs, or while this loop reaches the row,
+    // is newer than what was read (`term-model-readback.ts`).
+    const readAt = new Date();
     try {
       bulk = await this.remnawaveApiService.strictGetAllPanelUsers();
     } catch (err) {
@@ -267,7 +283,7 @@ export class RemnawaveImporterService {
         }
 
         // ── Subscription sync ─────────────────────────────────────────────
-        const subResult = await this.syncSubscription(userId, panelUser, input.importRecordId ?? null);
+        const subResult = await this.syncSubscription(userId, panelUser, input.importRecordId ?? null, readAt);
         if (subResult === 'created') subscriptionsCreated += 1;
         if (subResult === 'updated') subscriptionsUpdated += 1;
 
@@ -494,11 +510,22 @@ export class RemnawaveImporterService {
 
   /**
    * Create or update a Subscription linked to the Remnawave profile.
+   *
+   * An existing row IN THE TERM MODEL is updated by the rule every Remnawave
+   * read-back shares (`term-model-readback.ts`): its limits are never taken
+   * from the panel — a profile holding other ones gets rezeis' own pushed back
+   * — and its expiry only when nothing rezeis pushed landed after `readAt`.
+   * Everything else, and every row outside the model or being created, is
+   * written as before.
+   *
+   * `readAt` is the moment `run` ASKED the panel, and has no default on
+   * purpose: "now" is after the answer, which is the one wrong time.
    */
   private async syncSubscription(
     userId: string,
     panelUser: RemnawavePanelUser,
     importRecordId: string | null,
+    readAt: Date,
   ): Promise<'created' | 'updated' | 'skipped'> {
     // Is any local row ALREADY this panel profile? Asked over every sound
     // spelling of the profile's identity — see `panelProfileClaims`. Oldest
@@ -508,7 +535,15 @@ export class RemnawaveImporterService {
     const existing = await this.prismaService.subscription.findFirst({
       where: { OR: panelProfileClaims(panelUser) },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, userId: true, planSnapshot: true },
+      select: {
+        id: true,
+        userId: true,
+        planSnapshot: true,
+        remnawaveId: true,
+        trafficLimit: true,
+        deviceLimit: true,
+        ...TERM_MODEL_MARKER_SELECT,
+      },
     });
 
     const status = this.mapStatus(panelUser.status);
@@ -565,11 +600,32 @@ export class RemnawaveImporterService {
     };
 
     if (existing) {
+      // In the term model: asked BEFORE the write, which then leaves the limits
+      // out (and the expiry, when the panel's own state outranks this read).
+      const verdict = await judgePanelRowReadback(this.prismaService, {
+        existing,
+        panel: panelUser,
+        readAt,
+        claims: panelProfileClaims(panelUser),
+      });
       // Update existing subscription
       await this.prismaService.subscription.update({
         where: { id: existing.id },
-        data: subscriptionData,
+        data: verdict === null ? subscriptionData : withoutWithheldReadbackFields(subscriptionData, verdict),
       });
+      if (verdict !== null) {
+        // After the write: the push is built from the columns when it runs.
+        // Queued, not sent from here — this service has no queue, and the
+        // five-minute profile-sync sweep picks the PENDING row up. (The backup
+        // imports' «Синхронизировать с панелью после импорта» skips a row that
+        // already has a push waiting, so it never doubles this one.)
+        await finishTermModelReadback(this.prismaService, verdict, {
+          subscriptionId: existing.id,
+          profile: panelUser.uuid,
+          source: 'Remnawave import',
+          logger: this.logger,
+        });
+      }
       // If subscription belongs to a different user (edge case: user was re-matched)
       if (existing.userId !== userId) {
         await this.prismaService.subscription.update({

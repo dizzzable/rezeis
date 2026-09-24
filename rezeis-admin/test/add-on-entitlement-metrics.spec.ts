@@ -21,14 +21,29 @@ function build(options: {
   counts?: Record<string, number>;
   oldestStranded?: { createdAt: Date } | null;
   oldestPendingSync?: { createdAt: Date } | null;
+  cutover?: { eligible: number; inModel: number; held: number };
 } = {}) {
   let countCall = 0;
   const countValues = options.counts ?? {};
+  const cutover = options.cutover ?? { eligible: 0, inModel: 0, held: 0 };
   const prisma = {
     addOnEntitlement: { groupBy: async () => options.entStates ?? [] },
     subscriptionEffectiveProjection: { groupBy: async () => options.projStates ?? [] },
     deviceReductionPlan: { groupBy: async () => options.planStates ?? [] },
-    entitlementIncident: { groupBy: async () => options.incidents ?? [] },
+    entitlementIncident: {
+      groupBy: async () => options.incidents ?? [],
+      // The cutover's "needs attention": CUTOVER_FAILED incidents still OPEN.
+      count: async (input: { where: { summaryCode?: string; state?: { in: string[] } } }) => {
+        assert.equal(input.where.summaryCode, 'CUTOVER_FAILED');
+        assert.deepEqual(input.where.state, { in: ['OPEN'] });
+        return cutover.held;
+      },
+    },
+    subscription: {
+      // "In the model" is the count that asks for a term; the other is eligible.
+      count: async (input: { where: { terms?: unknown } }) =>
+        input.where.terms === undefined ? cutover.eligible : cutover.inModel,
+    },
     transaction: {
       count: async () => (countCall++, countValues[`tx-${countCall}`] ?? 0),
       findFirst: async () => options.oldestStranded ?? null,
@@ -91,6 +106,12 @@ describe('EntitlementMetricsService (T-012)', () => {
     const m = await service.collect();
     assert.equal(m.slo.objectiveMs, 60_000);
     assert.equal(m.slo.alertMs, 120_000);
+  });
+
+  it('reports where the background cutover stands', async () => {
+    const service = build({ cutover: { eligible: 120, inModel: 95, held: 3 } });
+    const m = await service.collect();
+    assert.deepEqual(m.cutover, { eligible: 120, inModel: 95, remaining: 25, needAttention: 3 });
   });
 
   it('reports null ages when nothing is stranded or pending', async () => {

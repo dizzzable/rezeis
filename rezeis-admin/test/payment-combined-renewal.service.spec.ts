@@ -4,6 +4,12 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 interface ItemRow {
   id: string;
@@ -452,7 +458,9 @@ describe('PaymentSubscriptionMutationService — combined renewal', () => {
     const { syncJobs } = await env.service.applyCompletedTransaction(env.transaction as never);
 
     assert.equal(syncJobs.length, 1);
-    assert.equal(env.lockStatements.length, 1, 'source is locked even without durable terms');
+    // Twice: to renew it, and where its term row is read — the renewal's term
+    // follows that row whatever the flags say.
+    assert.equal(env.lockStatements.length, 2, 'source is locked even without durable terms');
     assert.equal(
       env.committedSubs.get('sub-1')!.expiresAt!.getTime(),
       expiry.getTime() + 30 * DAY_MS,
@@ -677,6 +685,8 @@ function createEnv(input: {
     {} as never,
     {} as never,
     {
+      // The tail is aligned before a renewal appends; already aligned here.
+      alignTailToExpiryInTransaction: async () => ({ outcome: 'UNCHANGED', termId: 'term-active' }),
       createScheduledInTransaction: async (_tx: unknown, termInput: Record<string, unknown>) => {
         termCreates.push(termInput);
         return { id: `term-${termCreates.length + 1}`, generation: termCreates.length + 1, status: 'SCHEDULED' };

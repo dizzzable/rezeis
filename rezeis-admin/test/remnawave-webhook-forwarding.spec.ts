@@ -59,6 +59,9 @@ function buildService(panelUsage: PanelUsage | null = null): {
         reconciled.push(args);
         return { count: 1 };
       },
+      // No snapshot to patch, and no row of this profile in the term model:
+      // these cases are about the mirror every other subscription gets.
+      findMany: async () => [],
     },
   };
   const config = { webhookSecret: null };
@@ -425,6 +428,8 @@ describe('panel user identity across panel versions', () => {
             user: { id: 'user-1', telegramId: 858568447n, name: 'Anna', username: 'anna' },
           };
         },
+        // No snapshot to patch, and no row of this profile in the term model.
+        findMany: async () => [],
       },
       user: { updateMany: async () => ({ count: 0 }), findUnique: async () => null },
     };

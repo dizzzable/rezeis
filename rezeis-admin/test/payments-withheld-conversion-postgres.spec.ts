@@ -18,11 +18,13 @@ import { PaymentReconciliationService } from '../src/modules/payments/services/p
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PaymentWebhookInboxService } from '../src/modules/payments/services/payment-webhook-inbox.service';
 import { PlanReferenceGuardService } from '../src/modules/plans/services/plan-reference-guard.service';
+import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
+import { ADD_ON_ROLLOUT_FLAG_NAMES } from './helpers/rollout-flags';
 
 /**
  * A trial's conversion paid after another payment converted the trial, on
  * PostgreSQL, through the real reconciliation, fulfilment, webhook inbox and
- * plan deletion guard (R2-support-money M1).
+ * plan deletion guard.
  *
  * It used to throw out of fulfilment. What that left, and what each check
  * below now reads instead:
@@ -189,300 +191,328 @@ const OPERATOR: CurrentAdminInterface = {
 };
 const REQUEST: RequestMetadataInterface = { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' };
 
-run('a trial conversion paid after another payment converted the trial, on PostgreSQL', () => {
-  before(async () => {
-    process.env.DATABASE_URL = testUrl;
-    process.env.DATABASE_POOL_SIZE = '4';
-    prisma = new PrismaService();
-    await prisma.$connect();
+/**
+ * Twice. With every `ADDON_*` stage OFF: the legacy path, and where an install
+ * stands after switching the durable model off (rollback). And on the shipped
+ * defaults (stages 1, 2 and 6 ON, 24.09.2026), where the conversion that IS
+ * applied brings its subscription into the term model on the way.
+ */
+for (const stages of ['off (rollback)', 'as shipped'] as const) {
+  run(`a trial conversion paid after another payment converted the trial, on PostgreSQL — stages ${stages}`, () => {
+    const savedFlags = new Map<string, string | undefined>();
+    before(() => {
+      for (const name of ADD_ON_ROLLOUT_FLAG_NAMES) {
+        savedFlags.set(name, process.env[name]);
+        if (stages === 'as shipped') delete process.env[name];
+        else process.env[name] = 'false';
+      }
+    });
+    after(() => {
+      for (const [name, value] of savedFlags) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    });
 
-    const record =
-      (severity: Emitted['severity']) =>
-      (type: string, _category: string, message: string, metadata: Record<string, unknown> = {}) => {
-        events.push({ severity, type, message, metadata });
-      };
-    const systemEvents = { info: record('INFO'), warn: record('WARNING'), error: record('ERROR'), emit: () => undefined };
-    const mutation = new PaymentSubscriptionMutationService(
-      prisma,
-      systemEvents as never,
-      new AddOnEntitlementService(),
-      new EffectiveProjectionService(),
-      new SubscriptionTermService(),
-      {} as never,
-    );
-    reconciliation = new PaymentReconciliationService(
-      prisma,
-      new PaymentWebhookInboxService(prisma),
-      mutation,
-      {
-        notifyWebhookFailed: async (input: { readonly event: { readonly id: string } }) => {
-          hooks.webhookFailedAlerts.push(input.event.id);
-        },
-      } as never,
-      {
-        processPartnerEarning: async (input: { readonly sourceTransactionId: string }) => {
-          hooks.partner.push(input.sourceTransactionId);
-        },
-        reverseEarningsForTransaction: async () => 0,
-      } as never,
-      {
-        qualifyReferralAfterPurchase: async (transactionId: string) => {
-          hooks.referral.push(transactionId);
-          return null;
-        },
-        reverseQualificationForTransaction: async () => undefined,
-      } as never,
-      { enqueue: async () => undefined } as never,
-      systemEvents as never,
-      { enqueueRegisterIncome: async () => undefined, enqueueCancelIncome: async () => undefined } as never,
-      {
-        recordFirstPurchase: async (input: { readonly id: string }) => {
-          hooks.ads.push(input.id);
-        },
-        revertConversion: async () => undefined,
-      } as never,
-      { upsertFromYookassaPayment: async () => undefined, disableAutopayForProviderMethod: async () => undefined } as never,
-      { verifyCompletion: async () => ({ outcome: 'CONFIRMED' }) } as never,
-      {
-        creditForTransactionBestEffort: async (transaction: { readonly id: string }) => {
-          hooks.cashback.push(transaction.id);
-          return null;
-        },
-        reverseForTransactionBestEffort: async () => undefined,
-      } as never,
-      { create: async () => undefined } as never,
-    );
-    // Nothing reaches a provider when a withheld refund is recorded: no HTTP
-    // client, no payload redaction.
-    refunds = new PaymentRefundService(prisma, {} as never, {} as never, reconciliation);
+    before(async () => {
+      process.env.DATABASE_URL = testUrl;
+      process.env.DATABASE_POOL_SIZE = '4';
+      prisma = new PrismaService();
+      await prisma.$connect();
+
+      const record =
+        (severity: Emitted['severity']) =>
+        (type: string, _category: string, message: string, metadata: Record<string, unknown> = {}) => {
+          events.push({ severity, type, message, metadata });
+        };
+      const systemEvents = { info: record('INFO'), warn: record('WARNING'), error: record('ERROR'), emit: () => undefined };
+      const mutation = new PaymentSubscriptionMutationService(
+        prisma,
+        systemEvents as never,
+        new AddOnEntitlementService(),
+        new EffectiveProjectionService(),
+        new SubscriptionTermService(),
+        {} as never,
+      );
+      reconciliation = new PaymentReconciliationService(
+        prisma,
+        new PaymentWebhookInboxService(prisma),
+        mutation,
+        {
+          notifyWebhookFailed: async (input: { readonly event: { readonly id: string } }) => {
+            hooks.webhookFailedAlerts.push(input.event.id);
+          },
+        } as never,
+        {
+          processPartnerEarning: async (input: { readonly sourceTransactionId: string }) => {
+            hooks.partner.push(input.sourceTransactionId);
+          },
+          reverseEarningsForTransaction: async () => 0,
+        } as never,
+        {
+          qualifyReferralAfterPurchase: async (transactionId: string) => {
+            hooks.referral.push(transactionId);
+            return null;
+          },
+          reverseQualificationForTransaction: async () => undefined,
+        } as never,
+        { enqueue: async () => undefined } as never,
+        systemEvents as never,
+        { enqueueRegisterIncome: async () => undefined, enqueueCancelIncome: async () => undefined } as never,
+        {
+          recordFirstPurchase: async (input: { readonly id: string }) => {
+            hooks.ads.push(input.id);
+          },
+          revertConversion: async () => undefined,
+        } as never,
+        { upsertFromYookassaPayment: async () => undefined, disableAutopayForProviderMethod: async () => undefined } as never,
+        { verifyCompletion: async () => ({ outcome: 'CONFIRMED' }) } as never,
+        {
+          creditForTransactionBestEffort: async (transaction: { readonly id: string }) => {
+            hooks.cashback.push(transaction.id);
+            return null;
+          },
+          reverseForTransactionBestEffort: async () => undefined,
+        } as never,
+        { create: async () => undefined } as never,
+      );
+      // Nothing reaches a provider when a withheld refund is recorded: no HTTP
+      // client, no payload redaction.
+      refunds = new PaymentRefundService(prisma, {} as never, {} as never, reconciliation);
+    });
+
+    after(async () => {
+      if (prisma === undefined) return;
+      await prisma.adminAuditLog.deleteMany({ where: { adminUserId: { in: created.admins } } });
+      await prisma.adminUser.deleteMany({ where: { id: { in: created.admins } } });
+      await prisma.paymentWebhookEvent.deleteMany({ where: { paymentId: { in: created.paymentIds } } });
+      // Terms, projections and the rest of the term model's rows go in the order
+      // their foreign keys allow; sync jobs go with their subscriptions (cascade).
+      await removeDurableFixtures(prisma, created.users);
+      await prisma.plan.deleteMany({ where: { id: { in: created.plans } } });
+      await prisma.$disconnect();
+    });
+
+    it('is processed, settled and withheld; its plan can be deleted; the dashboard has no failure for it', async () => {
+      const planId = await createPlan();
+      const userId = await createUser();
+      const subscription = await createConvertedSubscription(userId, planId);
+      const first = await createConversion({
+        userId,
+        subscriptionId: subscription.id,
+        planId,
+        status: TransactionStatus.COMPLETED,
+        fulfilledAt: new Date(Date.now() - 5 * 60 * 1000),
+      });
+      const second = await createConversion({
+        userId,
+        subscriptionId: subscription.id,
+        planId,
+        status: TransactionStatus.PENDING,
+      });
+      const untouched = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+
+      const eventId = await deliverSuccess(second.paymentId);
+
+      // 1. The notification is processed, not failed: nothing for the dashboard's
+      //    «failed payment webhook(s)» (it counts FAILED, `dashboard.service.ts`).
+      const event = await prisma.paymentWebhookEvent.findUniqueOrThrow({ where: { id: eventId } });
+      assert.equal(event.status, PaymentWebhookLifecycleStatus.PROCESSED);
+      assert.equal(
+        await prisma.paymentWebhookEvent.count({
+          where: { status: PaymentWebhookLifecycleStatus.FAILED, paymentId: second.paymentId },
+        }),
+        0,
+      );
+      assert.deepEqual(hooks.webhookFailedAlerts, []);
+
+      // 2. The payment is settled — nothing keeps its plan from being deleted.
+      const settled = await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } });
+      assert.equal(settled.status, TransactionStatus.COMPLETED);
+      assert.ok(settled.fulfilledAt !== null);
+      const gatewayData = settled.gatewayData as Record<string, unknown>;
+      assert.equal(typeof gatewayData['conversionWithheldAt'], 'string');
+      assert.equal(gatewayData['trialConvertedByPaymentId'], first.paymentId);
+      const counts = await new PlanReferenceGuardService(prisma).countReferences([planId]);
+      assert.equal(counts.get(planId)?.unsettledPayments, 0);
+
+      // 3. Applied to nothing, paid out on nothing; the operator told once.
+      const current = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+      assert.equal(current.expiresAt?.getTime(), untouched.expiresAt?.getTime());
+      assert.deepEqual(current.planSnapshot, untouched.planSnapshot);
+      for (const list of [hooks.partner, hooks.referral, hooks.cashback, hooks.ads]) {
+        assert.equal(list.includes(second.id), false);
+      }
+      // Never announced as a completed sale; the operator's notice is its own type.
+      assert.deepEqual(completionsFor(second.paymentId), []);
+      const notices = withheldNoticesFor(second.paymentId);
+      assert.equal(notices.length, 1);
+      assert.equal(notices[0]!.severity, 'WARNING');
+      assert.equal(notices[0]!.metadata['trialConvertedByPaymentId'], first.paymentId);
+      assert.match(String(notices[0]!.metadata['note']), /Верните деньги у платёжного провайдера \(PLATEGA\)/);
+
+      // A replay changes nothing and says nothing again.
+      const replayId = await deliverSuccess(second.paymentId);
+      assert.equal(
+        (await prisma.paymentWebhookEvent.findUniqueOrThrow({ where: { id: replayId } })).status,
+        PaymentWebhookLifecycleStatus.PROCESSED,
+      );
+      assert.equal(withheldNoticesFor(second.paymentId).length, 1);
+      assert.deepEqual(completionsFor(second.paymentId), []);
+      assert.deepEqual(
+        await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } }),
+        settled,
+      );
+    });
+
+    it('converts a trial that a plan migration made regular — no payment converted it — as before', async () => {
+      const planId = await createPlan();
+      const userId = await createUser();
+      const subscription = await createConvertedSubscription(userId, planId);
+      const conversion = await createConversion({
+        userId,
+        subscriptionId: subscription.id,
+        planId,
+        status: TransactionStatus.PENDING,
+      });
+
+      await deliverSuccess(conversion.paymentId);
+
+      const applied = await prisma.transaction.findUniqueOrThrow({ where: { id: conversion.id } });
+      assert.equal(applied.status, TransactionStatus.COMPLETED);
+      assert.ok(applied.fulfilledAt !== null);
+      assert.equal('conversionWithheldAt' in ((applied.gatewayData as Record<string, unknown> | null) ?? {}), false);
+      const upgraded = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+      assert.equal(
+        Math.round(((upgraded.expiresAt?.getTime() ?? 0) - Date.now()) / DAY_MS),
+        30,
+        'the payer gets the term they paid for',
+      );
+      // Which half this is: as shipped, the applied conversion brought the
+      // subscription into the term model on the way; with the stages off it
+      // stays on the legacy columns.
+      assert.equal(
+        (await prisma.subscriptionTerm.count({ where: { subscriptionId: subscription.id, status: 'ACTIVE' } })) > 0,
+        stages === 'as shipped',
+        `in the term model with the stages ${stages}`,
+      );
+      const completions = completionsFor(conversion.paymentId);
+      assert.equal(completions.length, 1);
+      assert.equal(completions[0]!.severity, 'INFO');
+      assert.deepEqual(withheldNoticesFor(conversion.paymentId), []);
+    });
+
+    it('«Отметить возврат»: reverses a withheld payment once, attributed, and leaves the subscription alone', async () => {
+      const planId = await createPlan();
+      const userId = await createUser();
+      const subscription = await createConvertedSubscription(userId, planId);
+      const first = await createConversion({
+        userId,
+        subscriptionId: subscription.id,
+        planId,
+        status: TransactionStatus.COMPLETED,
+        fulfilledAt: new Date(Date.now() - 5 * 60 * 1000),
+      });
+      const second = await createConversion({ userId, subscriptionId: subscription.id, planId, status: TransactionStatus.PENDING });
+      await deliverSuccess(second.paymentId);
+      const before = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+      const admin = await prisma.adminUser.create({
+        data: { login: `${prefix}-admin-${next()}`, loginNormalized: `${prefix}-admin-${counter}`, passwordHash: 'not-a-hash' },
+      });
+      created.admins.push(admin.id);
+      const operator = { ...OPERATOR, id: admin.id };
+
+      const recorded = await refunds.recordWithheldRefund({ transactionId: second.id, currentAdmin: operator, requestMetadata: REQUEST });
+
+      assert.equal(recorded.recorded, true);
+      const reversed = await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } });
+      assert.equal(reversed.status, TransactionStatus.CANCELED);
+      const gatewayData = reversed.gatewayData as Record<string, unknown>;
+      assert.equal(typeof gatewayData['refundReversedAt'], 'string');
+      assert.equal(recorded.refundedAt, gatewayData['refundReversedAt']);
+      assert.equal(gatewayData['manualRefundRecordedBy'], admin.id);
+      assert.equal(gatewayData['refundRevocationSkippedReason'], 'CONVERSION_NOT_APPLIED');
+      // The withheld mark stays: the lists keep saying what the payment was.
+      assert.equal(typeof gatewayData['conversionWithheldAt'], 'string');
+      const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+      assert.equal(after.status, before.status);
+      assert.equal(after.expiresAt?.getTime(), before.expiresAt?.getTime());
+      assert.deepEqual(after.planSnapshot, before.planSnapshot);
+      assert.equal(await prisma.profileSyncJob.count({ where: { subscriptionId: subscription.id } }), 0);
+      const audit = await prisma.adminAuditLog.findMany({
+        where: { action: 'payments.transaction.withheld_refund_recorded', adminUserId: admin.id },
+      });
+      assert.equal(audit.length, 1);
+      assert.equal((audit[0]!.metadata as Record<string, unknown>)['transactionId'], second.id);
+      assert.equal(raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId).length, 1);
+      assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), [], 'the refund of a sale nobody was told about');
+
+      // Again: nothing more — no second reversal, audit row or event.
+      const again = await refunds.recordWithheldRefund({ transactionId: second.id, currentAdmin: operator, requestMetadata: REQUEST });
+      assert.deepEqual(again, { transactionId: second.id, recorded: false, refundedAt: recorded.refundedAt });
+      assert.deepEqual(await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } }), reversed);
+      assert.equal(
+        await prisma.adminAuditLog.count({ where: { action: 'payments.transaction.withheld_refund_recorded', adminUserId: admin.id } }),
+        1,
+      );
+      assert.equal(raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId).length, 1);
+      assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), [], 'the refund of a sale nobody was told about');
+
+      // A provider's late refund notice for it changes nothing more.
+      await deliver(second.paymentId, PaymentGatewayType.PLATEGA, 'CHARGEBACKED', { status: 'CHARGEBACKED' });
+      assert.equal(raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId).length, 1);
+      assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), []);
+
+      // The payment that did convert the trial is refused, and stays as it was.
+      const firstBefore = await prisma.transaction.findUniqueOrThrow({ where: { id: first.id } });
+      await assert.rejects(
+        refunds.recordWithheldRefund({ transactionId: first.id, currentAdmin: operator, requestMetadata: REQUEST }),
+        (error: unknown) => error instanceof ConflictException && error.message === 'PAYMENT_NOT_WITHHELD',
+      );
+      assert.deepEqual(await prisma.transaction.findUniqueOrThrow({ where: { id: first.id } }), firstBefore);
+    });
+
+    it("a provider's refund notice for a withheld payment reverses it, and tells the operator alone", async () => {
+      // Cryptomus reports a completed refund as `refund_paid`, with no amount.
+      const planId = await createPlan();
+      const userId = await createUser();
+      const subscription = await createConvertedSubscription(userId, planId);
+      await createConversion({
+        userId,
+        subscriptionId: subscription.id,
+        planId,
+        status: TransactionStatus.COMPLETED,
+        fulfilledAt: new Date(Date.now() - 5 * 60 * 1000),
+        gatewayType: PaymentGatewayType.CRYPTOMUS,
+      });
+      const second = await createConversion({
+        userId,
+        subscriptionId: subscription.id,
+        planId,
+        status: TransactionStatus.PENDING,
+        gatewayType: PaymentGatewayType.CRYPTOMUS,
+      });
+      await deliverSuccess(second.paymentId, PaymentGatewayType.CRYPTOMUS);
+      assert.equal(withheldNoticesFor(second.paymentId).length, 1);
+      const before = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+
+      const eventId = await deliver(second.paymentId, PaymentGatewayType.CRYPTOMUS, 'refund_paid', { status: 'refund_paid' });
+
+      assert.equal(
+        (await prisma.paymentWebhookEvent.findUniqueOrThrow({ where: { id: eventId } })).status,
+        PaymentWebhookLifecycleStatus.PROCESSED,
+      );
+      const refunded = await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } });
+      assert.equal(refunded.status, TransactionStatus.CANCELED);
+      assert.equal(typeof (refunded.gatewayData as Record<string, unknown>)['refundReversedAt'], 'string');
+      const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
+      assert.equal(after.expiresAt?.getTime(), before.expiresAt?.getTime());
+      assert.deepEqual(after.planSnapshot, before.planSnapshot);
+      const told = raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId);
+      assert.equal(told.length, 1);
+      assert.equal(told[0]!.metadata['conversionWithheld'], true);
+      assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), []);
+      assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUND_PARTIAL, second.paymentId), []);
+    });
   });
-
-  after(async () => {
-    if (prisma === undefined) return;
-    await prisma.adminAuditLog.deleteMany({ where: { adminUserId: { in: created.admins } } });
-    await prisma.adminUser.deleteMany({ where: { id: { in: created.admins } } });
-    const users = created.users;
-    await prisma.paymentWebhookEvent.deleteMany({ where: { paymentId: { in: created.paymentIds } } });
-    await prisma.profileSyncJob.deleteMany({ where: { subscription: { userId: { in: users } } } });
-    await prisma.subscriptionTerm.deleteMany({ where: { subscription: { userId: { in: users } } } });
-    await prisma.transaction.deleteMany({ where: { userId: { in: users } } });
-    await prisma.subscription.deleteMany({ where: { userId: { in: users } } });
-    await prisma.plan.deleteMany({ where: { id: { in: created.plans } } });
-    await prisma.user.deleteMany({ where: { id: { in: users } } });
-    await prisma.$disconnect();
-  });
-
-  it('is processed, settled and withheld; its plan can be deleted; the dashboard has no failure for it', async () => {
-    const planId = await createPlan();
-    const userId = await createUser();
-    const subscription = await createConvertedSubscription(userId, planId);
-    const first = await createConversion({
-      userId,
-      subscriptionId: subscription.id,
-      planId,
-      status: TransactionStatus.COMPLETED,
-      fulfilledAt: new Date(Date.now() - 5 * 60 * 1000),
-    });
-    const second = await createConversion({
-      userId,
-      subscriptionId: subscription.id,
-      planId,
-      status: TransactionStatus.PENDING,
-    });
-    const untouched = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-
-    const eventId = await deliverSuccess(second.paymentId);
-
-    // 1. The notification is processed, not failed: nothing for the dashboard's
-    //    «failed payment webhook(s)» (it counts FAILED, `dashboard.service.ts`).
-    const event = await prisma.paymentWebhookEvent.findUniqueOrThrow({ where: { id: eventId } });
-    assert.equal(event.status, PaymentWebhookLifecycleStatus.PROCESSED);
-    assert.equal(
-      await prisma.paymentWebhookEvent.count({
-        where: { status: PaymentWebhookLifecycleStatus.FAILED, paymentId: second.paymentId },
-      }),
-      0,
-    );
-    assert.deepEqual(hooks.webhookFailedAlerts, []);
-
-    // 2. The payment is settled — nothing keeps its plan from being deleted.
-    const settled = await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } });
-    assert.equal(settled.status, TransactionStatus.COMPLETED);
-    assert.ok(settled.fulfilledAt !== null);
-    const gatewayData = settled.gatewayData as Record<string, unknown>;
-    assert.equal(typeof gatewayData['conversionWithheldAt'], 'string');
-    assert.equal(gatewayData['trialConvertedByPaymentId'], first.paymentId);
-    const counts = await new PlanReferenceGuardService(prisma).countReferences([planId]);
-    assert.equal(counts.get(planId)?.unsettledPayments, 0);
-
-    // 3. Applied to nothing, paid out on nothing; the operator told once.
-    const current = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-    assert.equal(current.expiresAt?.getTime(), untouched.expiresAt?.getTime());
-    assert.deepEqual(current.planSnapshot, untouched.planSnapshot);
-    for (const list of [hooks.partner, hooks.referral, hooks.cashback, hooks.ads]) {
-      assert.equal(list.includes(second.id), false);
-    }
-    // Never announced as a completed sale; the operator's notice is its own type.
-    assert.deepEqual(completionsFor(second.paymentId), []);
-    const notices = withheldNoticesFor(second.paymentId);
-    assert.equal(notices.length, 1);
-    assert.equal(notices[0]!.severity, 'WARNING');
-    assert.equal(notices[0]!.metadata['trialConvertedByPaymentId'], first.paymentId);
-    assert.match(String(notices[0]!.metadata['note']), /Верните деньги у платёжного провайдера \(PLATEGA\)/);
-
-    // A replay changes nothing and says nothing again.
-    const replayId = await deliverSuccess(second.paymentId);
-    assert.equal(
-      (await prisma.paymentWebhookEvent.findUniqueOrThrow({ where: { id: replayId } })).status,
-      PaymentWebhookLifecycleStatus.PROCESSED,
-    );
-    assert.equal(withheldNoticesFor(second.paymentId).length, 1);
-    assert.deepEqual(completionsFor(second.paymentId), []);
-    assert.deepEqual(
-      await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } }),
-      settled,
-    );
-  });
-
-  it('converts a trial that a plan migration made regular — no payment converted it — as before', async () => {
-    const planId = await createPlan();
-    const userId = await createUser();
-    const subscription = await createConvertedSubscription(userId, planId);
-    const conversion = await createConversion({
-      userId,
-      subscriptionId: subscription.id,
-      planId,
-      status: TransactionStatus.PENDING,
-    });
-
-    await deliverSuccess(conversion.paymentId);
-
-    const applied = await prisma.transaction.findUniqueOrThrow({ where: { id: conversion.id } });
-    assert.equal(applied.status, TransactionStatus.COMPLETED);
-    assert.ok(applied.fulfilledAt !== null);
-    assert.equal('conversionWithheldAt' in ((applied.gatewayData as Record<string, unknown> | null) ?? {}), false);
-    const upgraded = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-    assert.equal(
-      Math.round(((upgraded.expiresAt?.getTime() ?? 0) - Date.now()) / DAY_MS),
-      30,
-      'the payer gets the term they paid for',
-    );
-    const completions = completionsFor(conversion.paymentId);
-    assert.equal(completions.length, 1);
-    assert.equal(completions[0]!.severity, 'INFO');
-    assert.deepEqual(withheldNoticesFor(conversion.paymentId), []);
-  });
-
-  it('«Отметить возврат»: reverses a withheld payment once, attributed, and leaves the subscription alone', async () => {
-    const planId = await createPlan();
-    const userId = await createUser();
-    const subscription = await createConvertedSubscription(userId, planId);
-    const first = await createConversion({
-      userId,
-      subscriptionId: subscription.id,
-      planId,
-      status: TransactionStatus.COMPLETED,
-      fulfilledAt: new Date(Date.now() - 5 * 60 * 1000),
-    });
-    const second = await createConversion({ userId, subscriptionId: subscription.id, planId, status: TransactionStatus.PENDING });
-    await deliverSuccess(second.paymentId);
-    const before = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-    const admin = await prisma.adminUser.create({
-      data: { login: `${prefix}-admin`, loginNormalized: `${prefix}-admin`, passwordHash: 'not-a-hash' },
-    });
-    created.admins.push(admin.id);
-    const operator = { ...OPERATOR, id: admin.id };
-
-    const recorded = await refunds.recordWithheldRefund({ transactionId: second.id, currentAdmin: operator, requestMetadata: REQUEST });
-
-    assert.equal(recorded.recorded, true);
-    const reversed = await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } });
-    assert.equal(reversed.status, TransactionStatus.CANCELED);
-    const gatewayData = reversed.gatewayData as Record<string, unknown>;
-    assert.equal(typeof gatewayData['refundReversedAt'], 'string');
-    assert.equal(recorded.refundedAt, gatewayData['refundReversedAt']);
-    assert.equal(gatewayData['manualRefundRecordedBy'], admin.id);
-    assert.equal(gatewayData['refundRevocationSkippedReason'], 'CONVERSION_NOT_APPLIED');
-    // The withheld mark stays: the lists keep saying what the payment was.
-    assert.equal(typeof gatewayData['conversionWithheldAt'], 'string');
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-    assert.equal(after.status, before.status);
-    assert.equal(after.expiresAt?.getTime(), before.expiresAt?.getTime());
-    assert.deepEqual(after.planSnapshot, before.planSnapshot);
-    assert.equal(await prisma.profileSyncJob.count({ where: { subscriptionId: subscription.id } }), 0);
-    const audit = await prisma.adminAuditLog.findMany({
-      where: { action: 'payments.transaction.withheld_refund_recorded', adminUserId: admin.id },
-    });
-    assert.equal(audit.length, 1);
-    assert.equal((audit[0]!.metadata as Record<string, unknown>)['transactionId'], second.id);
-    assert.equal(raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId).length, 1);
-    assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), [], 'the refund of a sale nobody was told about');
-
-    // Again: nothing more — no second reversal, audit row or event.
-    const again = await refunds.recordWithheldRefund({ transactionId: second.id, currentAdmin: operator, requestMetadata: REQUEST });
-    assert.deepEqual(again, { transactionId: second.id, recorded: false, refundedAt: recorded.refundedAt });
-    assert.deepEqual(await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } }), reversed);
-    assert.equal(
-      await prisma.adminAuditLog.count({ where: { action: 'payments.transaction.withheld_refund_recorded', adminUserId: admin.id } }),
-      1,
-    );
-    assert.equal(raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId).length, 1);
-    assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), [], 'the refund of a sale nobody was told about');
-
-    // A provider's late refund notice for it changes nothing more.
-    await deliver(second.paymentId, PaymentGatewayType.PLATEGA, 'CHARGEBACKED', { status: 'CHARGEBACKED' });
-    assert.equal(raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId).length, 1);
-    assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), []);
-
-    // The payment that did convert the trial is refused, and stays as it was.
-    const firstBefore = await prisma.transaction.findUniqueOrThrow({ where: { id: first.id } });
-    await assert.rejects(
-      refunds.recordWithheldRefund({ transactionId: first.id, currentAdmin: operator, requestMetadata: REQUEST }),
-      (error: unknown) => error instanceof ConflictException && error.message === 'PAYMENT_NOT_WITHHELD',
-    );
-    assert.deepEqual(await prisma.transaction.findUniqueOrThrow({ where: { id: first.id } }), firstBefore);
-  });
-
-  it("a provider's refund notice for a withheld payment reverses it, and tells the operator alone", async () => {
-    // Cryptomus reports a completed refund as `refund_paid`, with no amount.
-    const planId = await createPlan();
-    const userId = await createUser();
-    const subscription = await createConvertedSubscription(userId, planId);
-    await createConversion({
-      userId,
-      subscriptionId: subscription.id,
-      planId,
-      status: TransactionStatus.COMPLETED,
-      fulfilledAt: new Date(Date.now() - 5 * 60 * 1000),
-      gatewayType: PaymentGatewayType.CRYPTOMUS,
-    });
-    const second = await createConversion({
-      userId,
-      subscriptionId: subscription.id,
-      planId,
-      status: TransactionStatus.PENDING,
-      gatewayType: PaymentGatewayType.CRYPTOMUS,
-    });
-    await deliverSuccess(second.paymentId, PaymentGatewayType.CRYPTOMUS);
-    assert.equal(withheldNoticesFor(second.paymentId).length, 1);
-    const before = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-
-    const eventId = await deliver(second.paymentId, PaymentGatewayType.CRYPTOMUS, 'refund_paid', { status: 'refund_paid' });
-
-    assert.equal(
-      (await prisma.paymentWebhookEvent.findUniqueOrThrow({ where: { id: eventId } })).status,
-      PaymentWebhookLifecycleStatus.PROCESSED,
-    );
-    const refunded = await prisma.transaction.findUniqueOrThrow({ where: { id: second.id } });
-    assert.equal(refunded.status, TransactionStatus.CANCELED);
-    assert.equal(typeof (refunded.gatewayData as Record<string, unknown>)['refundReversedAt'], 'string');
-    const after = await prisma.subscription.findUniqueOrThrow({ where: { id: subscription.id } });
-    assert.equal(after.expiresAt?.getTime(), before.expiresAt?.getTime());
-    assert.deepEqual(after.planSnapshot, before.planSnapshot);
-    const told = raisedFor(EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED, second.paymentId);
-    assert.equal(told.length, 1);
-    assert.equal(told[0]!.metadata['conversionWithheld'], true);
-    assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUNDED, second.paymentId), []);
-    assert.deepEqual(raisedFor(EVENT_TYPES.PAYMENT_REFUND_PARTIAL, second.paymentId), []);
-  });
-});
+}

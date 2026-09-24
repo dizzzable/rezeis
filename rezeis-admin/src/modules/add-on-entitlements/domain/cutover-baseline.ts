@@ -1,5 +1,7 @@
 import { TrafficLimitStrategy } from '@prisma/client';
 
+import { boundedTermWindow } from './term-window';
+
 /**
  * Grandfather-cutover baseline derivation (pure).
  *
@@ -17,10 +19,15 @@ import { TrafficLimitStrategy } from '@prisma/client';
  *    This also removes the legacy footgun where buying EXTRA_DEVICES turned an
  *    unlimited subscription finite via `0 + N = N`.
  *
- * The term window is provenance during rollout (reset/expiry stay disabled):
- * `startsAt = createdAt`, `endsAt = expiresAt` only when it is strictly after
- * `startsAt` (otherwise `null`, so the additive CHECK `ends_at > starts_at`
- * always holds).
+ * The term window ends where the subscription does: `endsAt = expiresAt`, and
+ * `startsAt = createdAt`, pulled back to `expiresAt − 1 s` when `createdAt` is
+ * not strictly before it (`boundedTermWindow`). So the additive CHECK
+ * `ends_at > starts_at` always holds, and the term is open-ended ONLY for a
+ * lifetime subscription (`expiresAt = null`). A lapsed import used to get an
+ * open end here, which the renewal producer cannot append after — a paid
+ * renewal was then left unfulfilled. `NON_POSITIVE_TERM_WINDOW` still marks
+ * such a row AMBIGUOUS, because `expiresAt <= createdAt` is a data anomaly worth
+ * counting; the term itself is now well-formed.
  */
 export const GIB_BYTES = 1024n * 1024n * 1024n;
 
@@ -78,16 +85,10 @@ export function deriveCutoverBaseline(input: CutoverBaselineInput): CutoverBasel
     trafficResetStrategy = TrafficLimitStrategy.NO_RESET;
   }
 
-  const startsAt = input.createdAt;
-  let endsAt: Date | null;
-  if (input.expiresAt === null) {
-    endsAt = null;
-  } else if (input.expiresAt.getTime() > startsAt.getTime()) {
-    endsAt = input.expiresAt;
-  } else {
+  if (input.expiresAt !== null && input.expiresAt.getTime() <= input.createdAt.getTime()) {
     reasons.push('NON_POSITIVE_TERM_WINDOW');
-    endsAt = null;
   }
+  const { startsAt, endsAt } = boundedTermWindow(input.createdAt, input.expiresAt);
 
   return {
     baseTrafficLimitBytes,

@@ -17,11 +17,18 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
 import {
+  finishTermModelReadback,
+  judgePanelRowReadback,
+  TERM_MODEL_MARKER_SELECT,
+  withoutWithheldReadbackFields,
+} from '../../remnawave/services/term-model-readback';
+import {
   lockTrialClaimUser,
   recordConsumedLegacyTrialAvailability,
   recordConsumedTrialSubscription,
 } from '../../subscriptions/services/trial-claim-ledger.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import { panelProfileClaims } from './remnawave-importer.service';
 import {
   buildPanelLookup,
   isLivePanelStatus,
@@ -564,14 +571,25 @@ export class RemnashopImporterService {
       // this importer itself wrote: without it a second import finds nothing
       // and mints a duplicate subscription for every customer, with a duplicate
       // panel profile behind it once the sync runs.
+      // With what `judgePanelRowReadback` needs below: a row in the term model
+      // takes the panel overlay by the rule every Remnawave read-back shares.
+      const existingSelect = {
+        id: true,
+        userId: true,
+        planSnapshot: true,
+        remnawaveId: true,
+        trafficLimit: true,
+        deviceLimit: true,
+        ...TERM_MODEL_MARKER_SELECT,
+      } as const;
       const existing = foreignPanel
         ? await this.prismaService.subscription.findFirst({
             where: { userId, planSnapshot: { path: ['sourceSubscriptionId'], equals: sub.id } },
-            select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+            select: existingSelect,
           })
         : await this.prismaService.subscription.findFirst({
             where: { remnawaveId: sub.user_remna_id },
-            select: { id: true, userId: true, planSnapshot: true, remnawaveId: true },
+            select: existingSelect,
           });
 
       // Remnawave is the truth: if the panel still has this profile, overlay
@@ -646,12 +664,22 @@ export class RemnashopImporterService {
       };
 
       if (existing) {
+        // In the term model the overlaid limits are not taken, nor the overlaid
+        // expiry when the panel's own push is newer than the read; everything
+        // else, and every row outside the model, is written as before.
+        const verdict = await judgePanelRowReadback(this.prismaService, {
+          existing,
+          panel,
+          readAt: panelLookup.readAt,
+          claims: panel === null ? [] : panelProfileClaims(panel),
+        });
+        const data = verdict === null ? subscriptionData : withoutWithheldReadbackFields(subscriptionData, verdict);
         if (sub.is_trial) {
           await this.prismaService.$transaction(async (tx) => {
             await lockTrialClaimUser(tx, userId);
             await tx.subscription.update({
               where: { id: existing.id },
-              data: subscriptionData,
+              data,
             });
             await recordConsumedTrialSubscription(tx, {
               userId,
@@ -664,7 +692,15 @@ export class RemnashopImporterService {
         } else {
           await this.prismaService.subscription.update({
             where: { id: existing.id },
-            data: subscriptionData,
+            data,
+          });
+        }
+        if (verdict !== null) {
+          await finishTermModelReadback(this.prismaService, verdict, {
+            subscriptionId: existing.id,
+            profile: panelAnchor ?? existing.id,
+            source: 'Remnashop import',
+            logger: this.logger,
           });
         }
         return { outcome: 'updated', leftUnlinked: foreignPanel && linkedHere === null };

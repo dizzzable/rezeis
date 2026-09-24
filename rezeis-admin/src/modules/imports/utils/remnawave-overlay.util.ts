@@ -123,6 +123,14 @@ export interface PanelLookup {
    * per-profile confirmation and nothing else.
    */
   readonly keyKind: 'id' | 'uuid' | 'mixed' | 'unknown';
+  /**
+   * When the panel was ASKED — before the bulk read, so every profile this run
+   * overlays, the per-UUID confirmations included, was read no earlier. A
+   * subscription in the term model takes an expiry from the overlay only when
+   * nothing rezeis pushed to its profile landed after this instant
+   * (`term-model-readback.ts`).
+   */
+  readonly readAt: Date;
 }
 
 /** Whole-string digits — the shape a 3.x identity decodes to. */
@@ -157,14 +165,15 @@ function looksNumeric(key: string): boolean {
 export async function buildPanelLookup(
   fetchAll: () => Promise<RemnawaveStrictOutcome<RemnawavePanelUserList>>,
 ): Promise<PanelLookup> {
+  const readAt = new Date();
   let outcome: RemnawaveStrictOutcome<RemnawavePanelUserList>;
   try {
     outcome = await fetchAll();
   } catch {
-    return { map: new Map(), reachable: false, complete: false, keyKind: 'unknown' };
+    return { map: new Map(), reachable: false, complete: false, keyKind: 'unknown', readAt };
   }
   if (outcome.kind !== 'ok') {
-    return { map: new Map(), reachable: false, complete: false, keyKind: 'unknown' };
+    return { map: new Map(), reachable: false, complete: false, keyKind: 'unknown', readAt };
   }
 
   const map = new Map<string, RemnawavePanelUser>();
@@ -181,7 +190,7 @@ export async function buildPanelLookup(
   // producer written before the flag existed) carries no `complete`, and the
   // adapter — the only real producer — always sets it, so absence means "not
   // truncated" and never silently switches the whole overlay into per-UUID mode.
-  return { map, reachable: true, complete: outcome.value.complete !== false, keyKind };
+  return { map, reachable: true, complete: outcome.value.complete !== false, keyKind, readAt };
 }
 
 /**

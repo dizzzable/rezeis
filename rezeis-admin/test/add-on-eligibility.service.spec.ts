@@ -359,7 +359,8 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     const prevReset = process.env.ADDON_RESET_EXPIRY_MONTH;
     const prevDirect = process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
     process.env.ADDON_RESET_EXPIRY_MONTH = 'true';
-    delete process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE;
+    // Explicitly OFF: unset is ON since the 24.09.2026 flip.
+    process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = 'false';
     try {
       const result = await service.listForSubscription('sub-1');
       assert.equal(result.addOns.length, 0, 'reset-scoped add-on is withheld when directPurchase is OFF');

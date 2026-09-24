@@ -5,6 +5,7 @@ import { NotFoundException } from '@nestjs/common';
 
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
 import { buildPlanReferenceDb } from './fixtures/plan-reference-db';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * AN OPERATOR CANNOT PUT A SUBSCRIPTION ON A DELETED PLAN FROM A STALE PAGE.
@@ -80,6 +81,12 @@ function harness() {
               updated.push(args.data);
               return { ...row, ...args.data };
             },
+            // «Выдать подписку» creates inside a transaction now, beside the
+            // hook that enters the term model (nothing enters here).
+            create: async (args: { data: Record<string, unknown> }) => {
+              created.push(args.data);
+              return { id: 'sub-new', remnawaveId: null, ...args.data };
+            },
           },
           subscriptionEffectiveProjection: { findUnique: async () => null },
           profileSyncJob: { create: async () => ({ id: 'sync-2' }) },
@@ -90,6 +97,7 @@ function harness() {
     { warn: () => undefined } as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller, created, updated };
 }

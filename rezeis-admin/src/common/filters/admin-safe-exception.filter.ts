@@ -46,6 +46,13 @@ interface SafeErrorResponse {
    * the values in `SAFE_REFUSAL_REASONS` — see `extractSafeReason`.
    */
   reason?: string;
+  /**
+   * What a refused deletion names, counted per kind. Carried only by the codes
+   * in `CODES_CARRYING_BLOCKED_BY`, and only as the keys in
+   * `SAFE_BLOCKED_BY_KEYS` with whole non-negative counts — see
+   * `extractSafeBlockedBy`.
+   */
+  blockedBy?: Readonly<Record<string, number>>;
   error?: string;
 }
 
@@ -377,6 +384,17 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // Refused, not linked — and without the code the cabinet could only say
   // "external sign-in failed", which sends the customer to try again forever.
   'EXTERNAL_EMAIL_UNVERIFIED_ACCOUNT',
+  // The customer's «Автосписание» switch or «Отвязать» met a payment being made
+  // with that method (409, `saved-payment-method.service.ts`): nothing changed,
+  // and the same action goes through in a minute. The cabinet's «Способы
+  // оплаты» says exactly that; stripped of the code it could only say the
+  // change failed. Also the 503 a charge answers when another holds the method.
+  'SAVED_PAYMENT_METHOD_BUSY',
+  // «Назначить план» met a paid renewal period queued with add-ons bought for
+  // it (409, `users/controllers/plan-assignment-refusals.ts`): nothing
+  // changed. The SPA says so in the operator's language; stripped of the code
+  // it could only print the server's English sentence.
+  'PLAN_ASSIGNMENT_BLOCKED_BY_QUEUED_RENEWAL',
 ]);
 /**
  * Codes whose refusal is meaningless without naming the credential it wants.
@@ -469,6 +487,40 @@ export const CODES_CARRYING_MIN_WITHDRAWAL_AMOUNT: ReadonlySet<string> = new Set
  */
 export const CODES_CARRYING_REASON: ReadonlySet<string> = new Set<string>([
   'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE',
+]);
+/**
+ * Codes whose refusal names what it was refused on, counted. Same subset rule
+ * as the sets above, on a sixth field.
+ *
+ * The ordinary user deletion counts what holds the account — payments, trial
+ * claims, the add-on model's paid rows — and the SPA prints those counts and
+ * offers «Удалить полностью» against them. Stripped here, every refusal reached
+ * the dialog as an empty list, which is the «нельзя» with no subject the
+ * counters were written to end (`user-deletion.service.ts`).
+ */
+export const CODES_CARRYING_BLOCKED_BY: ReadonlySet<string> = new Set<string>([
+  'USER_DELETE_PROTECTED_HISTORY',
+]);
+/**
+ * And the counters that field may hold: `ProtectedHistoryCounts` and
+ * `DurableHistoryCounts` (`users/services/user-deletion.service.ts`), restated
+ * as literals for the reason given on `SAFE_REFUSAL_REASONS`. Only a safe
+ * non-negative whole number is written for each; any other key or value
+ * leaves nothing behind.
+ */
+export const SAFE_BLOCKED_BY_KEYS: ReadonlySet<string> = new Set<string>([
+  'transactions',
+  'promocodeActivations',
+  'referralPointsExchanges',
+  'referralRewards',
+  'partnerTransactions',
+  'partnerWithdrawals',
+  'trialClaims',
+  'addOnPurchases',
+  'paidTerms',
+  'resetPeriods',
+  'deviceReductions',
+  'openIncidents',
 ]);
 /**
  * And the values that field may hold: every reason the panel refuses
@@ -648,6 +700,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
       const holdUntil = extractSafeHoldUntil(payload);
       const minWithdrawalAmount = extractSafeMinWithdrawalAmount(payload);
       const reason = extractSafeReason(payload);
+      const blockedBy = extractSafeBlockedBy(payload);
       return {
         timestamp,
         path,
@@ -663,6 +716,7 @@ export class AdminSafeExceptionFilter implements ExceptionFilter {
         ...(holdUntil ? { holdUntil } : {}),
         ...(minWithdrawalAmount !== undefined ? { minWithdrawalAmount } : {}),
         ...(reason ? { reason } : {}),
+        ...(blockedBy ? { blockedBy } : {}),
         ...(error ? { error } : {}),
       };
     }
@@ -818,6 +872,27 @@ function extractSafeReason(
   if (!payload || !CODES_CARRYING_REASON.has(payload.code)) return undefined;
   const candidate = payload.body.reason;
   return typeof candidate === 'string' && SAFE_REFUSAL_REASONS.has(candidate) ? candidate : undefined;
+}
+
+/**
+ * The `blockedBy` passthrough, gated on the code and then REBUILT, like
+ * `issues`: a fresh object of the allowlisted keys whose value is a safe
+ * non-negative whole number. Anything else in the body's object — another key,
+ * a string, a fraction, a nested object — leaves nothing behind. `undefined`
+ * when nothing survives.
+ */
+function extractSafeBlockedBy(
+  payload: { readonly code: string; readonly body: Record<string, unknown> } | undefined,
+): Readonly<Record<string, number>> | undefined {
+  if (!payload || !CODES_CARRYING_BLOCKED_BY.has(payload.code)) return undefined;
+  const candidate: unknown = payload.body.blockedBy;
+  if (!isRecord(candidate)) return undefined;
+  const counts: Record<string, number> = {};
+  for (const key of SAFE_BLOCKED_BY_KEYS) {
+    const value: unknown = candidate[key];
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) counts[key] = value;
+  }
+  return Object.keys(counts).length === 0 ? undefined : counts;
 }
 
 /**

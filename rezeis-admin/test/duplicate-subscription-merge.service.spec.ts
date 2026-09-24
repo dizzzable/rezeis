@@ -162,6 +162,7 @@ const TABLE_NAMES = [
   'referralPointsExchange',
   'trialClaim',
   'subscriptionTerm',
+  'subscriptionResetEpoch',
   'addOnEntitlement',
   'subscriptionEffectiveProjection',
   'deviceReductionPlan',
@@ -383,6 +384,27 @@ function prismaHarness(seed: Partial<Record<TableName, Array<Record<string, unkn
       };
       writes.push(write);
       matched.forEach((row) => Object.assign(row, input.data));
+      harness.afterWrite?.(write);
+      return { count: matched.length };
+    },
+    // Recorded like every other write — `data: { deleted: true }` — so the
+    // one-transaction case and the rollback see a deletion as the statement
+    // it is, not as nothing.
+    deleteMany: async (input: { where: Record<string, unknown> }): Promise<{ count: number }> => {
+      const matched = tables[name].filter((row) => matchesWhere(row, input.where));
+      const write: RecordedWrite = {
+        model: name,
+        where: input.where,
+        data: { deleted: true },
+        tx: txOf(),
+        matched: matched.length,
+      };
+      writes.push(write);
+      tables[name].splice(
+        0,
+        tables[name].length,
+        ...tables[name].filter((row) => !matched.includes(row)),
+      );
       harness.afterWrite?.(write);
       return { count: matched.length };
     },
@@ -1106,12 +1128,24 @@ describe('DuplicateSubscriptionMergeService — reattachment', () => {
   });
 });
 
+/** The term the automatic cutover mints on the duplicate, and its projection. */
+function cutoverRowsOnDuplicate() {
+  return {
+    subscriptionTerm: [
+      { id: 'term-cutover', subscriptionId: 'sub-new-duplicate', generation: 1, status: 'ACTIVE' },
+    ],
+    subscriptionEffectiveProjection: [
+      { id: 'proj-cutover', subscriptionId: 'sub-new-duplicate', baselineTermId: 'term-cutover' },
+    ],
+  };
+}
+
 describe('DuplicateSubscriptionMergeService — refusals that protect data', () => {
-  it('refuses when the duplicate carries entitlement-lifecycle history', async () => {
+  it('refuses when the duplicate carries a PAID add-on beside its cutover term, and says so', async () => {
     const prisma = prismaHarness({
       subscription: [survivorRow(), duplicateRow()],
-      subscriptionTerm: [{ id: 'term-1', subscriptionId: 'sub-new-duplicate' }],
-      addOnEntitlement: [{ id: 'ent-1', subscriptionId: 'sub-new-duplicate' }],
+      ...cutoverRowsOnDuplicate(),
+      addOnEntitlement: [{ id: 'ent-1', subscriptionId: 'sub-new-duplicate', state: 'EXPIRED' }],
     });
     const panel = panelHarness();
 
@@ -1119,8 +1153,167 @@ describe('DuplicateSubscriptionMergeService — refusals that protect data', () 
 
     assert.equal(report.merged, 0);
     assert.equal(report.rows[0].refusal, 'entitlementHistoryOnDuplicate');
-    assert.match(report.rows[0].reason ?? '', /SubscriptionTerm: 1/);
-    assert.match(report.rows[0].reason ?? '', /AddOnEntitlement: 1/);
+    assert.match(report.rows[0].reason ?? '', /AddOnEntitlement: 1 \(add-on purchases\)/);
+    assert.match(report.rows[0].reason ?? '', /must be resolved by hand/);
+    // Only what records money is named: the cutover's term is not what holds
+    // the pair, and naming it would send the operator after the wrong row.
+    assert.doesNotMatch(report.rows[0].reason ?? '', /SubscriptionTerm: \d/);
+    assert.deepEqual(prisma.writes, []);
+    assert.deepEqual(report.rows[0].discardedCutoverRows, []);
+    assert.equal(prisma.tables.subscriptionTerm.length, 1, 'the paid duplicate keeps its term');
+  });
+
+  it('refuses a duplicate whose terms show a renewal, even with no add-on at all', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      subscriptionTerm: [
+        { id: 'term-cutover', subscriptionId: 'sub-new-duplicate', generation: 1, status: 'ACTIVE' },
+        {
+          id: 'term-renewal',
+          subscriptionId: 'sub-new-duplicate',
+          generation: 2,
+          status: 'SCHEDULED',
+          planSnapshot: { snapshotSource: 'RENEWAL_TERM' },
+        },
+      ],
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.rows[0].refusal, 'entitlementHistoryOnDuplicate');
+    assert.match(report.rows[0].reason ?? '', /SubscriptionTerm: 1 paid/);
+    assert.deepEqual(prisma.writes, []);
+  });
+
+  it('refuses a term of a source this build does not know: read as money, never thrown away', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      subscriptionTerm: [
+        { id: 'term-cutover', subscriptionId: 'sub-new-duplicate', generation: 1, status: 'ENDED' },
+        { id: 'term-unknown', subscriptionId: 'sub-new-duplicate', generation: 2, status: 'ACTIVE', planSnapshot: {} },
+      ],
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.rows[0].refusal, 'entitlementHistoryOnDuplicate');
+    assert.match(report.rows[0].reason ?? '', /SubscriptionTerm: 1 paid/);
+    assert.deepEqual(prisma.writes, []);
+  });
+
+  it('merges a duplicate an operator assigned a plan to: the rotated chain records no money', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      subscriptionTerm: [
+        { id: 'term-cutover', subscriptionId: 'sub-new-duplicate', generation: 1, status: 'ENDED' },
+        {
+          id: 'term-assigned',
+          subscriptionId: 'sub-new-duplicate',
+          generation: 2,
+          status: 'ACTIVE',
+          planSnapshot: { snapshotSource: 'ADMIN_PLAN_ASSIGNMENT_TERM' },
+        },
+      ],
+      subscriptionEffectiveProjection: [
+        { id: 'proj-assigned', subscriptionId: 'sub-new-duplicate', baselineTermId: 'term-assigned' },
+      ],
+      // Accepted by the operator long ago: closed, it holds nothing.
+      entitlementIncident: [{ id: 'inc-closed', subscriptionId: 'sub-new-duplicate', state: 'ACKNOWLEDGED' }],
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.merged, 1, report.rows[0].reason ?? '');
+    assert.deepEqual(
+      report.rows[0].discardedCutoverRows.map((discard) => `${discard.model}=${discard.discarded}`),
+      ['SubscriptionEffectiveProjection=1', 'SubscriptionTerm=2', 'EntitlementIncident=1'],
+    );
+    assert.deepEqual(orphanedOnRetiredRows(prisma, 'subscriptionTerm', 'subscriptionId'), []);
+    assert.deepEqual(orphanedOnRetiredRows(prisma, 'entitlementIncident', 'subscriptionId'), []);
+  });
+
+  it('refuses a duplicate with an OPEN incident, and names it', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      ...cutoverRowsOnDuplicate(),
+      entitlementIncident: [{ id: 'inc-open', subscriptionId: 'sub-new-duplicate', state: 'OPEN' }],
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.rows[0].refusal, 'entitlementHistoryOnDuplicate');
+    assert.match(report.rows[0].reason ?? '', /EntitlementIncident: 1 open/);
+    assert.deepEqual(prisma.writes, []);
+  });
+
+  it('merges a duplicate whose only durable rows are the cutover term and projection, deleting them', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      subscriptionTerm: [
+        // The survivor's own cutover term — must survive untouched.
+        { id: 'term-survivor', subscriptionId: 'sub-old-survivor', generation: 1, status: 'ACTIVE' },
+        ...cutoverRowsOnDuplicate().subscriptionTerm,
+      ],
+      subscriptionEffectiveProjection: [
+        { id: 'proj-survivor', subscriptionId: 'sub-old-survivor', baselineTermId: 'term-survivor' },
+        ...cutoverRowsOnDuplicate().subscriptionEffectiveProjection,
+      ],
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.merged, 1, report.rows[0].reason ?? '');
+    assert.deepEqual(report.rows[0].discardedCutoverRows, [
+      { relation: 'effectiveProjection', model: 'SubscriptionEffectiveProjection', column: 'subscription_id', discarded: 1 },
+      { relation: 'terms', model: 'SubscriptionTerm', column: 'subscription_id', discarded: 1 },
+    ]);
+    assert.deepEqual(prisma.tables.subscriptionTerm.map((row) => row['id']), ['term-survivor']);
+    assert.deepEqual(prisma.tables.subscriptionEffectiveProjection.map((row) => row['id']), ['proj-survivor']);
+    assert.deepEqual(orphanedOnRetiredRows(prisma, 'subscriptionTerm', 'subscriptionId'), []);
+    // Deleted inside the merge's one transaction, projection before term.
+    const deletions = prisma.writes.filter((write) => write.data['deleted'] === true);
+    assert.deepEqual(deletions.map((write) => write.model), ['subscriptionEffectiveProjection', 'subscriptionTerm']);
+    assert.ok(deletions.every((write) => write.tx !== null));
+  });
+
+  it('previews the cutover rows a real run would discard', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      ...cutoverRowsOnDuplicate(),
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: true, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.wouldMerge, 1);
+    assert.deepEqual(
+      report.rows[0].discardedCutoverRows.map((row) => `${row.model}=${row.discarded}`),
+      ['SubscriptionEffectiveProjection=1', 'SubscriptionTerm=1'],
+    );
+    assert.deepEqual(prisma.writes, []);
+    assert.equal(prisma.tables.subscriptionTerm.length, 1);
+  });
+
+  it('previews a closed incident among what a real run would discard', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      ...cutoverRowsOnDuplicate(),
+      entitlementIncident: [{ id: 'inc-closed', subscriptionId: 'sub-new-duplicate', state: 'RESOLVED' }],
+    });
+    const panel = panelHarness();
+
+    const report = await service(prisma, panel).merge({ dryRun: true, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.wouldMerge, 1);
+    assert.deepEqual(
+      report.rows[0].discardedCutoverRows.map((row) => `${row.model}=${row.discarded}`),
+      ['SubscriptionEffectiveProjection=1', 'SubscriptionTerm=1', 'EntitlementIncident=1'],
+    );
     assert.deepEqual(prisma.writes, []);
   });
 
@@ -1936,9 +2129,12 @@ describe('DuplicateSubscriptionMergeService — conditions that change under the
     const prisma = prismaHarness({ subscription: [survivorRow(), duplicateRow()] });
     prisma.onLock = () => {
       prisma.commitExternally(() => {
+        // A renewal's term, not the cutover's: generation 2, queued.
         prisma.tables.subscriptionTerm.push({
           id: 'term-mid-flight',
           subscriptionId: 'sub-new-duplicate',
+          generation: 2,
+          status: 'SCHEDULED',
         });
       });
     };
@@ -1973,6 +2169,30 @@ describe('DuplicateSubscriptionMergeService — conditions that change under the
     assert.equal(prisma.subscription('sub-new-duplicate')['remnawaveId'], '5150');
     assert.equal(prisma.subscription('sub-old-survivor')['remnawaveId'], DEAD_UUID);
     assert.deepEqual(retiredRowsStillNamingAProfile(prisma), []);
+  });
+
+  it('discards a cutover term that the background job landed on the duplicate inside the window', async () => {
+    // The background cutover committing its term on the importer's duplicate
+    // while this merge waited on the advisory lock — the likeliest window of
+    // all. It is the cutover's own derivation, so it goes with the row.
+    const prisma = prismaHarness({ subscription: [survivorRow(), duplicateRow()] });
+    prisma.onLock = () => {
+      prisma.commitExternally(() => {
+        prisma.tables.subscriptionTerm.push(...cutoverRowsOnDuplicate().subscriptionTerm);
+        prisma.tables.subscriptionEffectiveProjection.push(
+          ...cutoverRowsOnDuplicate().subscriptionEffectiveProjection,
+        );
+      });
+    };
+
+    const report = await service(prisma, panelHarness()).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.merged, 1, report.rows[0].reason ?? '');
+    assert.equal(report.rows[0].discardedCutoverRows.length, 2);
+    assert.deepEqual(prisma.tables.subscriptionTerm, []);
+    assert.deepEqual(prisma.tables.subscriptionEffectiveProjection, []);
+    assert.deepEqual(orphanedOnRetiredRows(prisma, 'subscriptionTerm', 'subscriptionId'), []);
+    assert.equal(prisma.subscription('sub-new-duplicate')['status'], SubscriptionStatus.DELETED);
   });
 
   it('refuses a TrialClaim created on the survivor inside the window, instead of raising P2002', async () => {

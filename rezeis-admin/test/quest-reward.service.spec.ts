@@ -108,6 +108,9 @@ function makeService(cfg: {
       calls.subLock.push(a);
       return [];
     },
+    // No subscription here is in the durable term model: the bonus takes the
+    // column path (`grantTermLimitBonusInTransaction` answers NOT_IN_MODEL).
+    subscriptionTerm: { findFirst: async () => null },
   };
 
   const prisma = {

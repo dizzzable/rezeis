@@ -5,6 +5,7 @@ import {
   GIB_BYTES,
   deriveCutoverBaseline,
 } from '../src/modules/add-on-entitlements/domain/cutover-baseline';
+import { LAPSED_TERM_WINDOW_MS } from '../src/modules/add-on-entitlements/domain/term-window';
 
 const createdAt = new Date('2026-01-01T00:00:00.000Z');
 const expiresAt = new Date('2026-02-01T00:00:00.000Z');
@@ -92,7 +93,25 @@ describe('deriveCutoverBaseline', () => {
     assert.ok(result.ambiguousReasons.includes('UNKNOWN_RESET_STRATEGY'));
   });
 
-  it('drops a non-positive term window to null and flags it (keeps ends_at > starts_at)', () => {
+  it('closes a lapsed window one second before expiry instead of leaving it open, and flags it', () => {
+    // The import shape: the row was created AFTER it had already expired. An
+    // open end here meant "never expires", and the renewal producer cannot
+    // append after one — a paid renewal was left unfulfilled.
+    const lapsedAt = new Date('2025-11-15T08:30:00.000Z');
+    const result = deriveCutoverBaseline({
+      trafficLimit: 10,
+      deviceLimit: 1,
+      trafficLimitStrategy: 'MONTH',
+      createdAt,
+      expiresAt: lapsedAt,
+    });
+    assert.equal(result.endsAt?.getTime(), lapsedAt.getTime());
+    assert.equal(result.startsAt.getTime(), lapsedAt.getTime() - 1_000);
+    assert.equal(result.classification, 'AMBIGUOUS');
+    assert.deepEqual(result.ambiguousReasons, ['NON_POSITIVE_TERM_WINDOW']);
+  });
+
+  it('closes an equal-instant window the same way (ends_at > starts_at still holds)', () => {
     const result = deriveCutoverBaseline({
       trafficLimit: 10,
       deviceLimit: 1,
@@ -100,9 +119,42 @@ describe('deriveCutoverBaseline', () => {
       createdAt,
       expiresAt: createdAt, // expiresAt == createdAt → not strictly after
     });
-    assert.equal(result.endsAt, null);
-    assert.equal(result.classification, 'AMBIGUOUS');
+    assert.equal(result.endsAt?.getTime(), createdAt.getTime());
+    assert.equal(result.startsAt.getTime(), createdAt.getTime() - 1_000);
     assert.ok(result.ambiguousReasons.includes('NON_POSITIVE_TERM_WINDOW'));
+  });
+
+  it('pulls the start back for a window shorter than a second, without flagging it', () => {
+    const almost = new Date(createdAt.getTime() + 400);
+    const result = deriveCutoverBaseline({
+      trafficLimit: 10,
+      deviceLimit: 1,
+      trafficLimitStrategy: 'MONTH',
+      createdAt,
+      expiresAt: almost,
+    });
+    assert.equal(result.endsAt?.getTime(), almost.getTime());
+    assert.equal(result.startsAt.getTime(), almost.getTime() - 1_000);
+    assert.equal(result.classification, 'MATCHED');
+  });
+
+  it('leaves the window open ONLY for a lifetime subscription', () => {
+    const result = deriveCutoverBaseline({
+      trafficLimit: 10,
+      deviceLimit: 1,
+      trafficLimitStrategy: 'MONTH',
+      createdAt,
+      expiresAt: null,
+    });
+    assert.equal(result.endsAt, null);
+    assert.equal(result.startsAt.getTime(), createdAt.getTime());
+    assert.equal(result.classification, 'MATCHED');
+  });
+
+  it('uses a one-second lapsed window', () => {
+    // A literal, not the constant: a fixture read from the value it pins would
+    // move with it.
+    assert.equal(LAPSED_TERM_WINDOW_MS, 1_000);
   });
 
   it('flags a negative traffic anomaly and falls back to a finite zero baseline', () => {

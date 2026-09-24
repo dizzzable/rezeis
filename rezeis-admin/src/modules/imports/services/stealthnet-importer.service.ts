@@ -16,8 +16,15 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  finishTermModelReadback,
+  judgePanelRowReadback,
+  TERM_MODEL_MARKER_SELECT,
+  withoutWithheldReadbackFields,
+} from '../../remnawave/services/term-model-readback';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import { ImportSummary } from '../interfaces/import-summary.interface';
+import { panelProfileClaims } from './remnawave-importer.service';
 import { StealthnetReferralSyncService } from './stealthnet-referral-sync.service';
 import {
   buildPanelLookup,
@@ -566,14 +573,25 @@ export class StealthnetImporterService {
     // itself wrote. Keying on the identifier anyway would find nothing on the
     // second run and mint a duplicate subscription — and, once the sync ran, a
     // duplicate panel profile beside it.
+    //
+    // With what `judgePanelRowReadback` needs below: a row in the term model
+    // takes the panel overlay by the rule every Remnawave read-back shares.
+    const existingSelect = {
+      id: true,
+      userId: true,
+      remnawaveId: true,
+      trafficLimit: true,
+      deviceLimit: true,
+      ...TERM_MODEL_MARKER_SELECT,
+    } as const;
     const existing = foreignPanel
       ? await this.prismaService.subscription.findFirst({
           where: { userId, planSnapshot: { path: ['sourceSubscriptionId'], equals: sub.id } },
-          select: { id: true, userId: true, remnawaveId: true },
+          select: existingSelect,
         })
       : await this.prismaService.subscription.findFirst({
           where: { remnawaveId: sub.remnawave_uuid },
-          select: { id: true, userId: true, remnawaveId: true },
+          select: existingSelect,
         });
 
     const tariff = sub.tariff_id ? tariffById.get(sub.tariff_id) : undefined;
@@ -683,10 +701,27 @@ export class StealthnetImporterService {
         };
 
     if (existing) {
+      // In the term model the overlaid limits are not taken, nor the overlaid
+      // expiry when the panel's own push is newer than the read; everything
+      // else, and every row outside the model, is written as before.
+      const verdict = await judgePanelRowReadback(this.prismaService, {
+        existing,
+        panel,
+        readAt: panelLookup.readAt,
+        claims: panel === null ? [] : panelProfileClaims(panel),
+      });
       await this.prismaService.subscription.update({
         where: { id: existing.id },
-        data: dataShared,
+        data: verdict === null ? dataShared : withoutWithheldReadbackFields(dataShared, verdict),
       });
+      if (verdict !== null) {
+        await finishTermModelReadback(this.prismaService, verdict, {
+          subscriptionId: existing.id,
+          profile: panelAnchor ?? existing.id,
+          source: 'STEALTHNET import',
+          logger: this.logger,
+        });
+      }
       if (existing.userId !== userId) {
         await this.prismaService.subscription.update({
           where: { id: existing.id },

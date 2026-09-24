@@ -55,6 +55,8 @@ function buildService(): {
         return { count: 1 };
       },
       findFirst: async () => null,
+      // No snapshot to patch, and no row of this profile in the term model.
+      findMany: async () => [],
     },
     user: {
       updateMany: async () => ({ count: 0 }),
@@ -275,9 +277,12 @@ describe('RemnawaveWebhookService payload sanitization — user events', () => {
     // Reconcile runs off the raw payload, after sanitization — the ordering
     // in `handleEvent` only holds while `sanitizePayload` stays non-mutating.
     assert.equal(reconciled.length, 1);
+    // The event states limits, so this statement takes the rows OUTSIDE the
+    // term model; a row in it is reconciled by its own rules, apart.
     assert.deepEqual(reconciled[0]!.where, {
       remnawaveId: '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
       status: { not: 'DELETED' },
+      terms: { none: { status: 'ACTIVE' } },
     });
     assert.equal(reconciled[0]!.data['status'], 'EXPIRED');
     assert.deepEqual(reconciled[0]!.data['expiresAt'], new Date('2026-08-05T09:00:00.000Z'));

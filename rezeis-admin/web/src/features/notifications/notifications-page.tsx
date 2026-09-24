@@ -87,6 +87,14 @@ const USER_NOTIFICATION_KEYS = [
   'expired',
   'limited',
   'expired_1_day_ago',
+  // A dated add-on three days before its end and at it: traffic, then devices
+  // with ADDON_DEVICE_CLEANUP_AUTO off and on — the sender picks by the flag.
+  'addon_ends_in_3_days',
+  'addon_ended',
+  'addon_devices_ends_in_3_days',
+  'addon_devices_ended',
+  'addon_devices_auto_ends_in_3_days',
+  'addon_devices_auto_ended',
   'referral_attached',
   'referral_reward',
   'referral_qualified',
@@ -169,6 +177,10 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // whoever ticked payment.refunded or payment.refund_partial.
     'payment.chargeback_unmatched',
     'payment.method_saved', 'payment.method_unbound', 'payment.method_autopay_updated',
+    // An operator ended a customer autopay from the user card, without a
+    // refund. Operator-only; also delivered to whoever ticked
+    // payment.method_autopay_updated.
+    'payment.autopay_stopped_by_operator',
     'payment.autopay_confirmation_required',
     // A paid renewal add-on line whose capture-time baseline absorbs it, so it
     // is on course to deliver nothing. Grouped under PAYMENT rather than

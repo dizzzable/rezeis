@@ -12,6 +12,7 @@ import { PromocodePlanSnapshotDto } from '../src/modules/promocodes/dto/promocod
 import { PromocodeInterface } from '../src/modules/promocodes/interfaces/promocode.interface';
 import { PromocodeRewardsService } from '../src/modules/promocodes/services/promocode-rewards.service';
 import { AdminUserSubscriptionsController } from '../src/modules/users/controllers/admin-user-subscriptions.controller';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
  * A ZERO-GIGABYTE SUBSCRIPTION IS NOT REPRESENTABLE, SO NOTHING MAY MINT ONE.
@@ -154,7 +155,7 @@ function buildPromocode(plan: PromocodeInterface['plan']): PromocodeInterface {
 
 async function mintFromPromocode(trafficLimit: number | null): Promise<number | null | undefined> {
   const createCalls: Array<{ data: { trafficLimit?: number | null } }> = [];
-  const service = new PromocodeRewardsService();
+  const service = new PromocodeRewardsService(NOT_IN_TERM_MODEL as never);
 
   await service.applyReward({
     transactionClient: {
@@ -255,6 +256,7 @@ function buildEditor(): {
     { warn: () => undefined } as never,
     {} as never,
     {} as never,
+    NOT_IN_TERM_MODEL as never,
   );
   return { controller, updates };
 }

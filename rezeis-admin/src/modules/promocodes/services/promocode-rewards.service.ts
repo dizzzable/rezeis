@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  AddOnEntitlementActorType,
   Prisma,
   PromocodeRewardType,
   SubscriptionStatus,
@@ -8,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import { clampDiscountPercent } from '../../../common/utils/discount.util';
+import { SubscriptionTermHooksService } from '../../add-on-entitlements/services/subscription-term-hooks.service';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import {
   PromocodeActionInput,
@@ -33,6 +35,8 @@ import { isUnmintableSnapshotTrafficLimit } from '../utils/promocode-mappers.uti
 @Injectable()
 export class PromocodeRewardsService {
   private readonly logger = new Logger(PromocodeRewardsService.name);
+
+  public constructor(private readonly subscriptionTermHooks: SubscriptionTermHooksService) {}
 
   /**
    * Applies the resolved reward to the matching aggregate. Returns `true`
@@ -197,6 +201,25 @@ export class PromocodeRewardsService {
     await transactionClient.$queryRaw(
       Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`,
     );
+  }
+
+  /**
+   * After bonus days moved `expiresAt`, inside the activation: the tail term
+   * and the add-ons sold "until the end of the subscription" follow the new
+   * end. Without it such an add-on ended on the old date, days before the
+   * subscription it was bought for — until the hourly drift sweep caught up.
+   * `NOT_IN_MODEL` (nothing written) for a subscription with no term.
+   */
+  private async followBonusDays(
+    transactionClient: Prisma.TransactionClient,
+    subscriptionId: string,
+    input: { readonly promocode: PromocodeInterface; readonly userId: string },
+  ): Promise<void> {
+    await this.subscriptionTermHooks.followExpiryInTransaction(transactionClient, subscriptionId, {
+      correlationId: `promocode-days:${input.promocode.id}:${subscriptionId}`,
+      actorType: AddOnEntitlementActorType.USER,
+      actorId: input.userId,
+    });
   }
 
   private isEligibleTarget(
@@ -368,6 +391,7 @@ export class PromocodeRewardsService {
       where: { id: input.targetSubscriptionId },
       data: { expiresAt: nextExpiry },
     });
+    await this.followBonusDays(input.transactionClient, input.targetSubscriptionId, input);
     const syncJobId = await this.enqueueSubscriptionSync({
       transactionClient: input.transactionClient,
       subscriptionId: input.targetSubscriptionId,
@@ -409,19 +433,32 @@ export class PromocodeRewardsService {
     ) {
       return { applied: false, rewardValue: 0 };
     }
-    const nextLimit = subscription.trafficLimit + input.additionalGigabytes;
-    const nextSnapshot = patchSnapshotNumeric(
-      subscription.planSnapshot,
-      'trafficLimit',
-      nextLimit,
-    ) as Prisma.InputJsonValue;
-    await input.transactionClient.subscription.update({
-      where: { id: input.targetSubscriptionId },
-      data: {
-        trafficLimit: nextLimit,
-        planSnapshot: nextSnapshot,
-      },
+    // In the term model the bonus goes on the terms, where it lasts to the
+    // end of the period it was given in (`grantLimitBonusInTransaction`);
+    // outside it the column and the snapshot move together, so the next
+    // renewal puts the plan back. Both end the bonus at the next renewal.
+    const inModel = await this.subscriptionTermHooks.grantLimitBonusInTransaction(input.transactionClient, {
+      subscriptionId: input.targetSubscriptionId,
+      resource: 'TRAFFIC',
+      value: input.additionalGigabytes,
+      source: 'PROMOCODE',
+      sourceRef: input.promocode.id,
     });
+    if (inModel.outcome === 'NOT_IN_MODEL') {
+      const nextLimit = subscription.trafficLimit + input.additionalGigabytes;
+      const nextSnapshot = patchSnapshotNumeric(
+        subscription.planSnapshot,
+        'trafficLimit',
+        nextLimit,
+      ) as Prisma.InputJsonValue;
+      await input.transactionClient.subscription.update({
+        where: { id: input.targetSubscriptionId },
+        data: {
+          trafficLimit: nextLimit,
+          planSnapshot: nextSnapshot,
+        },
+      });
+    }
     const syncJobId = await this.enqueueSubscriptionSync({
       transactionClient: input.transactionClient,
       subscriptionId: input.targetSubscriptionId,
@@ -463,19 +500,31 @@ export class PromocodeRewardsService {
     ) {
       return { applied: false, rewardValue: 0 };
     }
-    const nextLimit = subscription.deviceLimit + input.additionalDevices;
-    const nextSnapshot = patchSnapshotNumeric(
-      subscription.planSnapshot,
-      'deviceLimit',
-      nextLimit,
-    ) as Prisma.InputJsonValue;
-    await input.transactionClient.subscription.update({
-      where: { id: input.targetSubscriptionId },
-      data: {
-        deviceLimit: nextLimit,
-        planSnapshot: nextSnapshot,
-      },
+    // The same two homes as the traffic bonus above. On the terms it is no
+    // add-on: when it ends, no device is taken off the panel — as a renewal
+    // lowering the column never took one off either.
+    const inModel = await this.subscriptionTermHooks.grantLimitBonusInTransaction(input.transactionClient, {
+      subscriptionId: input.targetSubscriptionId,
+      resource: 'DEVICES',
+      value: input.additionalDevices,
+      source: 'PROMOCODE',
+      sourceRef: input.promocode.id,
     });
+    if (inModel.outcome === 'NOT_IN_MODEL') {
+      const nextLimit = subscription.deviceLimit + input.additionalDevices;
+      const nextSnapshot = patchSnapshotNumeric(
+        subscription.planSnapshot,
+        'deviceLimit',
+        nextLimit,
+      ) as Prisma.InputJsonValue;
+      await input.transactionClient.subscription.update({
+        where: { id: input.targetSubscriptionId },
+        data: {
+          deviceLimit: nextLimit,
+          planSnapshot: nextSnapshot,
+        },
+      });
+    }
     const syncJobId = await this.enqueueSubscriptionSync({
       transactionClient: input.transactionClient,
       subscriptionId: input.targetSubscriptionId,
@@ -538,6 +587,7 @@ export class PromocodeRewardsService {
         where: { id: input.targetSubscriptionId },
         data: { expiresAt: nextExpiry },
       });
+      await this.followBonusDays(input.transactionClient, input.targetSubscriptionId, input);
       const syncJobId = await this.enqueueSubscriptionSync({
         transactionClient: input.transactionClient,
         subscriptionId: input.targetSubscriptionId,
@@ -611,6 +661,12 @@ export class PromocodeRewardsService {
       where: { id: input.userId, currentSubscriptionId: null },
       data: { currentSubscriptionId: createdSubscription.id },
     });
+    // Its first term, inside the activation, while stage 1 is on — a promo
+    // code's subscription buys add-ons like any other.
+    await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(
+      input.transactionClient,
+      createdSubscription.id,
+    );
     const syncJobId = await this.enqueueSubscriptionSync({
       transactionClient: input.transactionClient,
       subscriptionId: createdSubscription.id,

@@ -25,10 +25,11 @@ type Projection = {
 };
 
 /**
- * The subscription row the recompute reads to decide which limit fields the
- * OPERATOR owns. The default is the shape a fresh row actually has —
- * `planSnapshot` defaults to `{}` in the schema — which carries none of the
- * four keys and is therefore UNDECIDABLE, leaving the term baseline in force.
+ * The subscription row the recompute reads its own share of. The default is
+ * the shape a fresh row actually has — `planSnapshot` defaults to `{}` in the
+ * schema — which carries none of the four keys and is therefore UNDECIDABLE;
+ * with no projection row yet (`existing: null`) the term baseline stands. A
+ * case with a projection row gives the row columns that mirror it.
  */
 type SubscriptionRow = {
   trafficLimit: number | null;
@@ -142,25 +143,28 @@ describe('EffectiveProjectionService.recomputeInTransaction', () => {
   });
 
   it('is value-idempotent: identical desired state does not advance the revision', async () => {
+    const gb = 1024n * 1024n * 1024n;
     const existing: Projection = {
       id: 'proj-1',
       baselineTermId: 'term-1',
       desiredRevision: 7n,
-      baseTrafficLimitBytes: 100n,
+      baseTrafficLimitBytes: 100n * gb,
       baseDeviceLimit: 2,
-      activeTrafficContributionBytes: 50n,
+      activeTrafficContributionBytes: 50n * gb,
       activeDeviceContribution: 1,
-      desiredTrafficLimitBytes: 150n,
+      desiredTrafficLimitBytes: 150n * gb,
       desiredDeviceLimit: 3,
       state: 'SHADOW',
     };
     const { service, tx, updates } = build({
-      activeTerms: [{ id: 'term-1', baseTrafficLimitBytes: 100n, baseDeviceLimit: 2 }],
+      activeTerms: [{ id: 'term-1', baseTrafficLimitBytes: 100n * gb, baseDeviceLimit: 2 }],
       contributions: [
-        { type: 'EXTRA_TRAFFIC', totalValue: 50n },
+        { type: 'EXTRA_TRAFFIC', totalValue: 50n * gb },
         { type: 'EXTRA_DEVICES', totalValue: 1n },
       ],
       existing,
+      // The columns mirror that row, as every projection writer leaves them.
+      subscription: { trafficLimit: 150, deviceLimit: 3, planSnapshot: {} },
     });
 
     const result = await service.recomputeInTransaction(tx as never, { subscriptionId: 'sub-1' });
@@ -171,22 +175,24 @@ describe('EffectiveProjectionService.recomputeInTransaction', () => {
   });
 
   it('advances the revision by one when the desired state changes', async () => {
+    const gb = 1024n * 1024n * 1024n;
     const existing: Projection = {
       id: 'proj-1',
       baselineTermId: 'term-1',
       desiredRevision: 7n,
-      baseTrafficLimitBytes: 100n,
+      baseTrafficLimitBytes: 100n * gb,
       baseDeviceLimit: 2,
       activeTrafficContributionBytes: 0n,
       activeDeviceContribution: 0,
-      desiredTrafficLimitBytes: 100n,
+      desiredTrafficLimitBytes: 100n * gb,
       desiredDeviceLimit: 2,
       state: 'SHADOW',
     };
     const { service, tx, updates } = build({
-      activeTerms: [{ id: 'term-1', baseTrafficLimitBytes: 100n, baseDeviceLimit: 2 }],
-      contributions: [{ type: 'EXTRA_TRAFFIC', totalValue: 50n }],
+      activeTerms: [{ id: 'term-1', baseTrafficLimitBytes: 100n * gb, baseDeviceLimit: 2 }],
+      contributions: [{ type: 'EXTRA_TRAFFIC', totalValue: 50n * gb }],
       existing,
+      subscription: { trafficLimit: 100, deviceLimit: 2, planSnapshot: {} },
     });
 
     const result = await service.recomputeInTransaction(tx as never, {
@@ -196,7 +202,7 @@ describe('EffectiveProjectionService.recomputeInTransaction', () => {
 
     assert.equal(result.changed, true);
     assert.equal(result.desiredRevision, 8n);
-    assert.equal(result.desiredTrafficLimitBytes, 150n);
+    assert.equal(result.desiredTrafficLimitBytes, 150n * gb);
     assert.equal(result.state, 'PENDING');
     assert.equal(updates.length, 1);
     assert.equal((updates[0]!.data as { desiredRevision: bigint }).desiredRevision, 8n);
@@ -292,13 +298,15 @@ describe('EffectiveProjectionService baseline honours operator overrides', () =>
     assert.equal(written.desiredDeviceLimit, 17);
   });
 
-  it('a subscription that was never individually adjusted still takes the plan baseline', async () => {
-    // The plan now gives 4 and the column still reads 3, which is what the
-    // stored snapshot says the plan gave — INHERITED, so the term wins.
+  it('a subscription that was never individually adjusted takes the plan through its columns', async () => {
+    // The plan now gives 4: the renewal's refresh wrote the column 4 and the
+    // snapshot 4 (INHERITED), and the renewal's term records 4 as well. The
+    // plan reaches `desired` through the column — the way it reaches every
+    // subscription on the column path — and the add-on layers on top.
     const { service, tx } = build({
       activeTerms: [{ id: 'term-2', baseTrafficLimitBytes: null, baseDeviceLimit: 4 }],
       contributions: [{ type: 'EXTRA_DEVICES', totalValue: ADD_ON_DEVICES }],
-      subscription: { trafficLimit: null, deviceLimit: PLAN_DEVICES, planSnapshot: planSnapshot() },
+      subscription: { trafficLimit: null, deviceLimit: 4, planSnapshot: planSnapshot({ deviceLimit: 4 }) },
       existing: priorProjection({ baseDeviceLimit: PLAN_DEVICES, desiredDeviceLimit: PLAN_DEVICES }),
     });
 
@@ -309,7 +317,28 @@ describe('EffectiveProjectionService baseline honours operator overrides', () =>
 
     assert.equal(result.baseDeviceLimit, 4, 'a never-adjusted column must not freeze the plan out');
     assert.equal(result.desiredDeviceLimit, 9);
-    assert.notEqual(result.desiredDeviceLimit, 8, 'deriving 8 means the column was treated as an override');
+  });
+
+  it('a column set to the plan’s value is the baseline, not the base a term was minted with', async () => {
+    // The cutover minted the term's base from the columns of that day: the
+    // plan's 3 plus a grandfathered +2 = 5. The operator has since cut the
+    // column back to 3 — the plan's value, so it reads INHERITED. The term's 5
+    // must not come back: 3 + the add-on's 5 = 8, not 10.
+    const { service, tx } = build({
+      activeTerms: [{ id: 'term-1', baseTrafficLimitBytes: null, baseDeviceLimit: 5 }],
+      contributions: [{ type: 'EXTRA_DEVICES', totalValue: ADD_ON_DEVICES }],
+      subscription: { trafficLimit: null, deviceLimit: PLAN_DEVICES, planSnapshot: planSnapshot() },
+      existing: priorProjection({ baseDeviceLimit: 5, desiredDeviceLimit: 5 }),
+    });
+
+    const result = await service.recomputeInTransaction(tx as never, {
+      subscriptionId: 'sub-1',
+      mode: 'ACTIVE',
+    });
+
+    assert.equal(result.baseDeviceLimit, PLAN_DEVICES);
+    assert.equal(result.desiredDeviceLimit, 8);
+    assert.notEqual(result.desiredDeviceLimit, 10, 'deriving 10 means the term took the cut back');
   });
 
   it('removes the contribution the previous projection recorded before comparing', async () => {
@@ -360,9 +389,13 @@ describe('EffectiveProjectionService baseline honours operator overrides', () =>
     assert.notEqual(result.desiredDeviceLimit, 8, 'the stale add-on share was never taken back');
   });
 
-  it('leaves the term baseline in force when the stored snapshot is unreadable', async () => {
-    // Imported/legacy rows carry a snapshot with none of the four keys. The
-    // term baseline has to stand or a paid plan change never reaches them.
+  it('keeps an imported row’s own limits when its snapshot is unreadable', async () => {
+    // Imported/legacy rows carry a snapshot with none of the four keys
+    // (UNDECIDABLE). Their columns are what they have — the donor's limits, a
+    // legacy add-on, an operator's value — and the column path keeps them at
+    // a renewal. A term minted from the plan's 10 must not replace them. (A
+    // paid plan change still reaches them: it writes its snapshot and carried
+    // columns before it recomputes.)
     const { service, tx } = build({
       activeTerms: [{ id: 'term-2', baseTrafficLimitBytes: null, baseDeviceLimit: 10 }],
       contributions: [],
@@ -375,8 +408,26 @@ describe('EffectiveProjectionService baseline honours operator overrides', () =>
       mode: 'ACTIVE',
     });
 
-    assert.equal(result.baseDeviceLimit, 10);
-    assert.notEqual(result.baseDeviceLimit, PLAN_DEVICES, 'an unreadable snapshot must not freeze the column in');
+    assert.equal(result.baseDeviceLimit, PLAN_DEVICES);
+    assert.notEqual(result.baseDeviceLimit, 10, 'the term minted from the plan took the row’s own limit away');
+  });
+
+  it('with no projection row yet, only an operator’s value is read off the column', async () => {
+    // Nothing has recorded how much of the column is add-ons: an INHERITED or
+    // UNDECIDABLE field stands on the term's base, which the cutover minted
+    // from these same columns — reading the column here would count a live
+    // add-on in it twice.
+    const { service, tx } = build({
+      activeTerms: [{ id: 'term-1', baseTrafficLimitBytes: null, baseDeviceLimit: PLAN_DEVICES }],
+      contributions: [{ type: 'EXTRA_DEVICES', totalValue: ADD_ON_DEVICES }],
+      subscription: { trafficLimit: null, deviceLimit: 8, planSnapshot: { id: 'plan-old' } },
+      existing: null,
+    });
+
+    const result = await service.recomputeInTransaction(tx as never, { subscriptionId: 'sub-1' });
+
+    assert.equal(result.baseDeviceLimit, PLAN_DEVICES);
+    assert.equal(result.desiredDeviceLimit, 8, 'deriving 13 counts the add-on in the column twice');
   });
 
   it('an operator-raised traffic limit is the baseline in bytes, with the add-on on top', async () => {

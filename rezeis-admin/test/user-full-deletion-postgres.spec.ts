@@ -17,6 +17,8 @@ import {
   USER_DELETE_PROTECTED_HISTORY_CODE,
   UserDeletionService,
 } from '../src/modules/users/services/user-deletion.service';
+import { AddOnEntitlementService } from '../src/modules/add-on-entitlements/services/add-on-entitlement.service';
+import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
 
 /**
  * «УДАЛИТЬ ПОЛНОСТЬЮ», AGAINST REAL FOREIGN KEYS.
@@ -174,7 +176,7 @@ run('«Удалить полностью» — the account goes, the books stay'
     process.env.DATABASE_URL = testUrl;
     prisma = new PrismaService();
     await prisma.$connect();
-    service = new UserDeletionService(prisma, recordingPanel);
+    service = new UserDeletionService(prisma, recordingPanel, new AddOnEntitlementService(), new SubscriptionTermService());
   });
 
   after(async () => {

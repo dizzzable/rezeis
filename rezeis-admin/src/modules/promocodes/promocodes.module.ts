@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
 import { AuthModule } from '../auth/auth.module';
 import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { AdminPromocodesController } from './controllers/admin-promocodes.controller';
@@ -25,7 +26,9 @@ import { PromocodesStatsService } from './services/promocodes-stats.service';
  *  - `portal`      — branching activation contract for the user-facing edge
  */
 @Module({
-  imports: [AuthModule, ProfileSyncModule],
+  // `AddOnEntitlementsModule`: a SUBSCRIPTION reward enters the term model and
+  // bonus days move the term with the expiry (`PromocodeRewardsService`).
+  imports: [AddOnEntitlementsModule, AuthModule, ProfileSyncModule],
   // ORDER IS LOAD-BEARING — same failure as `plans.module.ts`, same fix.
   // `AdminPromocodesStatsController` is mounted on `admin/promocodes/stats`;
   // `AdminPromocodesController` is mounted on `admin/promocodes` and declares

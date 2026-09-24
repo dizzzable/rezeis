@@ -6,6 +6,7 @@ import { SubscriptionStatus } from '@prisma/client';
 
 import { ReferralPointsExchangeService } from '../src/modules/referrals/services/referral-points-exchange.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
+import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 const referralSettings = {
   points_exchange: {
@@ -20,7 +21,7 @@ describe('ReferralPointsExchangeService', () => {
     const service = new ReferralPointsExchangeService({
       user: { findUnique: async () => ({ points: 250 }) },
       settings: { findFirst: async () => ({ referralSettings }) },
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     const result = await service.getExchangeOptions('user-1');
 
@@ -54,7 +55,7 @@ describe('ReferralPointsExchangeService', () => {
     const service = new ReferralPointsExchangeService({
       user: { findUnique: async () => ({ points: 25 }) },
       settings: { findFirst: async () => ({ referralSettings: camelSettings }) },
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     const result = await service.getExchangeOptions('user-1');
 
@@ -75,7 +76,7 @@ describe('ReferralPointsExchangeService', () => {
     const service = new ReferralPointsExchangeService({
       user: { findUnique: async () => null },
       settings: { findFirst: async () => ({ referralSettings }) },
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     await assert.rejects(service.getExchangeOptions('missing-user'), NotFoundException);
   });
@@ -123,7 +124,7 @@ describe('ReferralPointsExchangeService', () => {
       }),
     } as never, {
       enqueue: async (jobId: string) => queueCalls.push(jobId),
-    } as never, new PointsWalletService());
+    } as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     const result = await service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200, subscriptionId: 'sub-1' });
 
@@ -179,7 +180,7 @@ describe('ReferralPointsExchangeService', () => {
       }),
     } as never, {
       enqueue: async (jobId: string) => queueCalls.push(jobId),
-    } as never, new PointsWalletService());
+    } as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     await assert.rejects(
       service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 200 }),
@@ -216,7 +217,7 @@ describe('ReferralPointsExchangeService', () => {
           }),
         },
       }),
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     await assert.rejects(
       service.executeExchange({ userId: 'user-1', type: 'SUBSCRIPTION_DAYS', points: 100, subscriptionId: 'legacy-sub' }),
@@ -274,7 +275,7 @@ describe('ReferralPointsExchangeService', () => {
         referralPointsExchange: { create: async () => ({ id: 'exchange-gift-1' }) },
         pointsLedgerEntry: { findUnique: async () => null, create: async () => ({ id: 'ledger-1' }) },
       }),
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     // User typed 1000 points, but a gift is a fixed-price item: charge exactly
     // points_cost (500) and mint one code.
@@ -330,7 +331,7 @@ describe('ReferralPointsExchangeService', () => {
         referralPointsExchange: { create: async () => ({ id: 'exchange-discount-1' }) },
         pointsLedgerEntry: { findUnique: async () => null, create: async () => ({ id: 'ledger-1' }) },
       }),
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     // 200 points / 10 = 20%, but capped: 45 + 20 → clamp to 50 (not 65).
     await service.executeExchange({ userId: 'user-1', type: 'DISCOUNT', points: 200 });
@@ -344,7 +345,7 @@ describe('ReferralPointsExchangeService', () => {
   it('rejects disabled exchange configurations', async () => {
     const service = new ReferralPointsExchangeService({
       settings: { findFirst: async () => ({ referralSettings: { points_exchange: { exchange_enabled: false } } }) },
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     await assert.rejects(service.executeExchange({ userId: 'user-1', type: 'TRAFFIC', points: 50 }), BadRequestException);
   });
@@ -366,7 +367,7 @@ describe('ReferralPointsExchangeService', () => {
           return { referralSettings: { points_exchange: { exchange_enabled: false } } };
         },
       },
-    } as never, {} as never, new PointsWalletService());
+    } as never, {} as never, new PointsWalletService(), NOT_IN_TERM_MODEL as never);
 
     const result = await service.executeExchange({
       userId: 'user-1',

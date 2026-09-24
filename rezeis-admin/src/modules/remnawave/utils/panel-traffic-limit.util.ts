@@ -32,8 +32,8 @@ const BYTES_PER_GIB = 1024 ** 3;
  *
  *   • DEVICES — `Subscription.deviceLimit <= 0` is UNLIMITED. The same file
  *     calls `<= 0` "the product's canonical unlimited", and
- *     `profile-sync.processor.ts#toPanelDeviceLimit` maps null/undefined/
- *     negative to `0` when pushing, because Remnawave spells unlimited devices
+ *     `panel-limit-wire.util.ts#toPanelDeviceLimit` (what the push sends) maps
+ *     null/undefined/negative to `0`, because Remnawave spells unlimited devices
  *     `hwidDeviceLimit: 0` too. Moving devices to `-1` so the two columns would
  *     read alike was proposed and declined: it would rewrite every unlimited
  *     row in the database and put us out of step with the panel for no gain.
@@ -49,8 +49,8 @@ const BYTES_PER_GIB = 1024 ** 3;
  *
  *   1. locally the row now says the customer may move zero bytes, which is not
  *      what they paid for and not what the panel says;
- *   2. on the way back OUT it becomes a lie in the other direction —
- *      `profile-sync.processor.ts` sends `(trafficLimit ?? 0) * 1024 ** 3`, so
+ *   2. on the way back OUT it becomes a lie in the other direction — the push
+ *      sends `(trafficLimit ?? 0) * 1024 ** 3` (`panel-limit-wire.util.ts`), so
  *      the `0` we just invented is pushed to the panel as `0` bytes, which
  *      Remnawave reads as UNLIMITED. A 0.4 GB cap silently becomes no cap.
  *

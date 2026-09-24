@@ -196,7 +196,7 @@ export const en = {
     assignDialog: {
       title: 'Assign plan to imported users',
       description:
-        'All imported subscriptions without a plan will be assigned the selected one. Their Remnawave limits stay untouched right now — the new limits apply on the next renewal or upgrade.',
+        'Imported subscriptions without a plan will be assigned the selected one. Subscriptions that already have a plan, or were bought or renewed in the panel, are left as they are. Their Remnawave limits stay untouched right now — the new limits apply on the next renewal or upgrade.',
       planLabel: 'Plan',
       planPlaceholder: 'Select a plan',
       applyImmediately: 'Apply limits immediately',

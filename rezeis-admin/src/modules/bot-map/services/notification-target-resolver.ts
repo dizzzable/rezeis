@@ -30,6 +30,8 @@ export function resolveTerminalRouteFor(type: string): MiniAppRoute {
   // «Помощь с подключением»: its deep link is `/dashboard?connect=help`, and
   // the dashboard is the page that opens the connection screen from it.
   if (isConnectHelpType(t)) return '/dashboard';
+  // An add-on's end, or its approach: the add-on page, where it is bought again.
+  if (isAddOnNoticeType(t)) return '/addons';
   if (t.includes('support')) return '/support';
   if (t.includes('expir') || t.includes('limited')) return '/renew';
   if (t.includes('partner')) return '/partner';
@@ -63,6 +65,8 @@ export function resolveNotificationCategory(type: string): NotificationCategory 
   // rail has no group of its own for them; one would need the SPA's group
   // list and labels as well as this function.
   if (isConnectHelpType(t)) return 'expires';
+  // An add-on of a subscription ending: with the subscription's own notices.
+  if (isAddOnNoticeType(t)) return 'expires';
   if (t.startsWith('expires_') || t === 'expired' || t === 'limited' || t.startsWith('expired_')) {
     return 'expires';
   }
@@ -86,4 +90,9 @@ export function resolveNotificationCategory(type: string): NotificationCategory 
 /** Both types of «Помощь с подключением»: paid, and trial or gift. */
 function isConnectHelpType(lowerCaseType: string): boolean {
   return lowerCaseType === 'connect_help' || lowerCaseType === 'connect_help_trial';
+}
+
+/** A dated add-on three days before its end, or at it — the six `addon_*` types. */
+function isAddOnNoticeType(lowerCaseType: string): boolean {
+  return lowerCaseType.startsWith('addon_');
 }

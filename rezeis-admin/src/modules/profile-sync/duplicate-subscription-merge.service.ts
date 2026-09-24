@@ -3,6 +3,12 @@ import { Prisma, SubscriptionStatus, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import {
+  describeDurableRows,
+  discardDisposableRowsInTransaction,
+  type DiscardedDurableRows,
+  type DurableRowsOnSubscription,
+} from '../add-on-entitlements/services/cutover-disposal.util';
 import { panelShortUuidFromConfigUrl } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
 import { PanelLinkReconciliationService } from './panel-link-reconciliation.service';
@@ -58,9 +64,11 @@ export type DuplicateMergeRefusal =
   /** Neither row is bound to the profile they resolve to. */
   | 'neitherHoldsIdentity'
   /**
-   * The duplicate carries entitlement-lifecycle history — terms, add-on
-   * entitlements, an effective projection, device-reduction plans or
-   * entitlement incidents. See {@link BLOCKING_RELATIONS}.
+   * The duplicate carries paid or operator history in the add-on model — an
+   * add-on entitlement in any state, a renewal, upgrade or plan-change term, a
+   * reset period, a device-reduction plan or an incident. The term and
+   * projection the automatic cutover minted on their own do NOT refuse: they
+   * are discarded with the row. See {@link BLOCKING_RELATIONS}.
    */
   | 'entitlementHistoryOnDuplicate'
   /** Both rows hold a trial claim, and `trial_claims.subscription_id` is UNIQUE. */
@@ -79,6 +87,19 @@ export interface DuplicateMergeReattachment {
   /** The column that carries it, as it is spelled in the database. */
   readonly column: string;
   readonly moved: number;
+}
+
+/**
+ * One relation of the duplicate whose rows were (or would be) DELETED rather
+ * than moved: durable rows that record no money — the cutover's term, the
+ * terms a plan change rotated it onto, their projection, closed incidents
+ * (`describeDurableRows`). Listed so the run's audit row says what went.
+ */
+export interface DuplicateMergeDiscard {
+  readonly relation: string;
+  readonly model: string;
+  readonly column: string;
+  readonly discarded: number;
 }
 
 export interface DuplicateMergeRow {
@@ -135,6 +156,13 @@ export interface DuplicateMergeRow {
   readonly duplicateHoldsLiveIdentity: boolean | null;
   /** Every relation that moved, or would move, with its count. */
   readonly reattached: readonly DuplicateMergeReattachment[];
+  /**
+   * The duplicate's durable rows that record no money (its terms, projection
+   * and closed incidents), deleted (or to be deleted) with it. Empty on every
+   * refusal and whenever the duplicate had none. The field keeps its name: the
+   * audit rows of earlier runs carry it.
+   */
+  readonly discardedCutoverRows: readonly DuplicateMergeDiscard[];
   /** Non-terminal sync jobs of the duplicate that were (or would be) superseded. */
   readonly supersededSyncJobs: number;
 }
@@ -389,12 +417,17 @@ const SYNC_JOB_RELATION = {
  *   • `entitlement_incidents` reference the entitlements above.
  *
  * So a pair whose duplicate carries any of them is REFUSED and named, which is
- * the outcome this service prefers to a silent choice. In the population this
- * defect actually produced the group is always empty: the duplicate was minted
- * by `RemnawaveImporterService`, which writes a bare `subscriptions` row and
- * creates no term, no projection and no entitlement — those come only from
- * `SubscriptionTermService.create` and `EffectiveProjectionService`, which the
- * importer never calls.
+ * the outcome this service prefers to a silent choice — WITH ONE EXCEPTION,
+ * and it is the common case. The duplicate this defect produces is minted by
+ * `RemnawaveImporterService`, which writes a bare `subscriptions` row; but the
+ * background cutover gives every live row its first term and projection within
+ * minutes, so a refusal on ANY term would refuse every such pair from then on.
+ * Rows that record no money — that first term, the terms a plan change rotated
+ * it onto («Назначить план», the bulk assignment, a plan migration), their
+ * projection and closed incidents, with no entitlement, paid term, reset
+ * period, device plan or open incident beside them (`describeDurableRows`) —
+ * are DELETED with the row (`discardDisposableRowsInTransaction`) instead of
+ * refusing it. Anything that records money still refuses.
  */
 const BLOCKING_RELATIONS = [
   {
@@ -443,6 +476,7 @@ type CountClient = Pick<
   | 'referralPointsExchange'
   | 'trialClaim'
   | 'subscriptionTerm'
+  | 'subscriptionResetEpoch'
   | 'addOnEntitlement'
   | 'subscriptionEffectiveProjection'
   | 'deviceReductionPlan'
@@ -792,6 +826,7 @@ export class DuplicateSubscriptionMergeService {
       survivorHoldsLiveIdentity: null,
       duplicateHoldsLiveIdentity: null,
       reattached: [],
+      discardedCutoverRows: [],
       supersededSyncJobs: 0,
     });
 
@@ -1111,6 +1146,7 @@ export class DuplicateSubscriptionMergeService {
           status: { in: [SyncJobStatus.PENDING, SyncJobStatus.FAILED] },
         },
       });
+      const durable = await describeDurableRows(this.prismaService, duplicate.id);
       return {
         survivorSubscriptionId: survivor.id,
         duplicateSubscriptionId: duplicate.id,
@@ -1126,6 +1162,12 @@ export class DuplicateSubscriptionMergeService {
         survivorHoldsLiveIdentity: survivorHolds,
         duplicateHoldsLiveIdentity: duplicateHolds,
         reattached,
+        discardedCutoverRows: discardList({
+          terms: durable.terms,
+          projections: durable.projections,
+          // A pair that got this far has no OPEN incident: every one is closed.
+          incidents: durable.incidents,
+        }),
         supersededSyncJobs: superseded,
       };
     }
@@ -1236,6 +1278,7 @@ export class DuplicateSubscriptionMergeService {
       survivorHoldsLiveIdentity: plan.holds.survivor,
       duplicateHoldsLiveIdentity: plan.holds.duplicate,
       reattached: [],
+      discardedCutoverRows: [],
       supersededSyncJobs: 0,
     });
     const raceLost = (what: string, detail: string | null = null): DuplicateMergeRow =>
@@ -1320,6 +1363,25 @@ export class DuplicateSubscriptionMergeService {
           },
         });
         if (retired.count === 0) throw new MergeRaceError(`subscription ${duplicate.id}`);
+
+        // ── 1b. THE DUPLICATE'S NO-MONEY DURABLE ROWS GO WITH IT ─────────────
+        //
+        // AFTER step 1, because step 1 is what took the duplicate's row lock,
+        // and every writer of terms, projections and add-ons takes that lock
+        // first — the background cutover, a payment, the boundary sweep. So
+        // what is classified here is what exists at commit: nothing can land
+        // on the duplicate between this read and the end of the transaction.
+        // Step 0 asked the same question without the lock, for the named
+        // refusal; this is the answer that counts. Rows that record no money
+        // are deleted; anything else refuses the merge whole, with the same
+        // reason step 0 gives.
+        const discardedRows = await discardDisposableRowsInTransaction(tx, duplicate.id);
+        if (discardedRows === null) {
+          throw new MergeConditionError(
+            'entitlementHistoryOnDuplicate',
+            paidHistoryReason(duplicate.id, await describeDurableRows(tx, duplicate.id)),
+          );
+        }
 
         // ── 2. THE SURVIVOR TAKES THE IDENTITY ───────────────────────────────
         //
@@ -1433,6 +1495,7 @@ export class DuplicateSubscriptionMergeService {
           survivorHoldsLiveIdentity: plan.holds.survivor,
           duplicateHoldsLiveIdentity: plan.holds.duplicate,
           reattached,
+          discardedCutoverRows: discardList(discardedRows),
           supersededSyncJobs: superseded.count,
         };
       });
@@ -1500,18 +1563,11 @@ export class DuplicateSubscriptionMergeService {
     survivorId: string,
     duplicateId: string,
   ): Promise<{ refusal: DuplicateMergeRefusal; reason: string } | null> {
-    const blocked = await this.blockingRowsOn(client, duplicateId);
-    if (blocked.length > 0) {
-      return {
-        refusal: 'entitlementHistoryOnDuplicate',
-        reason:
-          `subscription ${duplicateId} carries entitlement-lifecycle history that cannot be ` +
-          `re-parented (${blocked.map((b) => `${b.model}: ${b.moved}`).join(', ')}). ` +
-          'Subscription terms are unique per (subscription, generation), add-on entitlements sit ' +
-          'behind a composite non-deferrable foreign key to their term, and the effective ' +
-          'projection is unique per subscription — so there is no statement order that moves them ' +
-          'safely. This pair must be resolved by hand. Nothing was changed.',
-      };
+    // A duplicate whose durable rows record no money passes: they are
+    // discarded under its row lock in step 1b.
+    const durable = await describeDurableRows(client, duplicateId);
+    if (!durable.disposable) {
+      return { refusal: 'entitlementHistoryOnDuplicate', reason: paidHistoryReason(duplicateId, durable) };
     }
     const survivorClaims = await client.trialClaim.count({
       where: { subscriptionId: survivorId },
@@ -1618,26 +1674,57 @@ export class DuplicateSubscriptionMergeService {
         'pre-flight checks name the offending relation by itself.',
     );
   }
+}
 
-  /** The blocking relations the duplicate actually carries, with counts. */
-  private async blockingRowsOn(
-    client: CountClient,
-    duplicateId: string,
-  ): Promise<DuplicateMergeReattachment[]> {
-    const found: DuplicateMergeReattachment[] = [];
-    for (const relation of BLOCKING_RELATIONS) {
-      const count = await relation.count(client, duplicateId);
-      if (count > 0) {
-        found.push({
-          relation: relation.relation,
-          model: relation.model,
-          column: relation.column,
-          moved: count,
-        });
-      }
-    }
-    return found;
+/**
+ * The refusal an operator reads when the duplicate holds money in the add-on
+ * model — every kind that records it named with its count, and what to do.
+ * Only those: a plan-change term, a projection or a closed incident never
+ * refuses a merge, so naming them would send the operator after the wrong row.
+ */
+function paidHistoryReason(duplicateId: string, durable: DurableRowsOnSubscription): string {
+  const held = [
+    durable.entitlements > 0 ? `AddOnEntitlement: ${durable.entitlements} (add-on purchases)` : null,
+    durable.paidTerms > 0 ? `SubscriptionTerm: ${durable.paidTerms} paid (renewal, upgrade or refund terms)` : null,
+    durable.resetEpochs > 0 ? `SubscriptionResetEpoch: ${durable.resetEpochs} (reset periods)` : null,
+    durable.devicePlans > 0 ? `DeviceReductionPlan: ${durable.devicePlans} (device reductions)` : null,
+    durable.openIncidents > 0 ? `EntitlementIncident: ${durable.openIncidents} open (incidents)` : null,
+  ].filter((entry): entry is string => entry !== null);
+  return (
+    `subscription ${duplicateId} holds history that a merge cannot move (${held.join(', ')}). ` +
+    'What records no money goes with a retired row: the first term the automatic cutover creates, ' +
+    'the terms a plan change moved it onto, their projection and closed incidents. Add-on purchases, ' +
+    'paid renewal and upgrade terms, reset periods, device reductions and open incidents are records ' +
+    'of money. Terms are unique per (subscription, generation), add-on entitlements sit behind a ' +
+    'composite non-deferrable foreign key to their term, and the effective projection is unique per ' +
+    'subscription, so there is no statement order that moves them safely. This pair must be resolved ' +
+    'by hand. Nothing was changed.'
+  );
+}
+
+/** The discarded durable rows, as the report lists them: only what was there. */
+function discardList(rows: DiscardedDurableRows): DuplicateMergeDiscard[] {
+  const list: DuplicateMergeDiscard[] = [];
+  if (rows.projections > 0) {
+    list.push({
+      relation: 'effectiveProjection',
+      model: 'SubscriptionEffectiveProjection',
+      column: 'subscription_id',
+      discarded: rows.projections,
+    });
   }
+  if (rows.terms > 0) {
+    list.push({ relation: 'terms', model: 'SubscriptionTerm', column: 'subscription_id', discarded: rows.terms });
+  }
+  if (rows.incidents > 0) {
+    list.push({
+      relation: 'entitlementIncidents',
+      model: 'EntitlementIncident',
+      column: 'subscription_id',
+      discarded: rows.incidents,
+    });
+  }
+  return list;
 }
 
 /** Thrown inside the transaction so Prisma rolls the whole merge back. */
@@ -1740,6 +1827,7 @@ function stoppedRow(pair: DuplicateMergePairInput, stop: DuplicateMergeStop): Du
     survivorHoldsLiveIdentity: null,
     duplicateHoldsLiveIdentity: null,
     reattached: [],
+    discardedCutoverRows: [],
     supersededSyncJobs: 0,
   };
 }

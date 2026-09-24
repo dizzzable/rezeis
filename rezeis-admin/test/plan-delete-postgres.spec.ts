@@ -20,6 +20,13 @@ import { RewardGrantService } from '../src/modules/rewards/reward-grant.service'
 import { SubscriptionMutationsService } from '../src/modules/subscriptions/services/subscription-mutations.service';
 import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/subscription-quote.service';
 import { SubscriptionRenewalService } from '../src/modules/subscriptions/services/subscription-renewal.service';
+import { realTermHooks } from './helpers/term-model-hooks';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * DELETING A PLAN, against a real PostgreSQL (plan-deletion contract v2).
@@ -567,7 +574,7 @@ run('plan deletion on PostgreSQL', () => {
       const subscription = await prisma.subscription.findFirst({ where: { userId }, select: { planSnapshot: true } });
       return (subscription?.planSnapshot as Record<string, unknown> | undefined)?.id;
     };
-    const mutations = new SubscriptionMutationsService(prisma, { enqueue: async () => undefined } as never);
+    const mutations = new SubscriptionMutationsService(prisma, { enqueue: async () => undefined } as never, realTermHooks(prisma));
 
     // A quest's DAYS → GRANT_TRIAL fallback, and any admin-free trial grant.
     const trialUser = await createUser('grant-trial');
@@ -609,7 +616,7 @@ run('plan deletion on PostgreSQL', () => {
     assert.equal(stamped.deletedWhileOnSale, false);
 
     const adUser = await createUser('grant-ad-archived');
-    await new AdSignupBonusService(prisma, new SubscriptionMutationsService(prisma, { enqueue: async () => undefined } as never)).grantIfEligible({
+    await new AdSignupBonusService(prisma, new SubscriptionMutationsService(prisma, { enqueue: async () => undefined } as never, realTermHooks(prisma))).grantIfEligible({
       userId: adUser,
       bonusType: 'TARIFF',
       bonusJson: { tariffPlanId: plan, tariffDurationDays: 14 },

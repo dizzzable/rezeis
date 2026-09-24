@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SubscriptionTermHooksService } from '../../add-on-entitlements/services/subscription-term-hooks.service';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
@@ -48,6 +49,7 @@ export class SubscriptionMutationsService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
+    private readonly subscriptionTermHooks: SubscriptionTermHooksService,
   ) {}
 
   /**
@@ -112,10 +114,19 @@ export class SubscriptionMutationsService {
     const nextExpiry = new Date(
       baseDate.getTime() + input.additionalDays * 24 * 60 * 60 * 1000,
     );
-    const updated = await this.prismaService.subscription.update({
-      where: { id: input.subscriptionId },
-      data: { expiresAt: nextExpiry, status: SubscriptionStatus.ACTIVE },
-      select: { id: true, expiresAt: true },
+    const updated = await this.prismaService.$transaction(async (tx) => {
+      const extended = await tx.subscription.update({
+        where: { id: input.subscriptionId },
+        data: { expiresAt: nextExpiry, status: SubscriptionStatus.ACTIVE },
+        select: { id: true, expiresAt: true },
+      });
+      // The tail term, and the add-ons sold "until the end of the
+      // subscription", follow the new end — in the same transaction, so a
+      // reader never sees the subscription extended and its add-ons not.
+      await this.subscriptionTermHooks.followExpiryInTransaction(tx, input.subscriptionId, {
+        correlationId: `subscription-extend:${input.subscriptionId}`,
+      });
+      return extended;
     });
     this.logger.log(
       `Subscription ${input.subscriptionId} extended by ${input.additionalDays}d → ${nextExpiry.toISOString()}`,
@@ -203,6 +214,10 @@ export class SubscriptionMutationsService {
           expiresAt,
         },
       });
+      // Its first term, while stage 1 is on — the trial a customer is most
+      // likely to buy an extra device for. Without it that add-on would be the
+      // permanent increment a subscription outside the model still gets.
+      await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, subscription.id);
       await tx.trialClaim.create({
         data: {
           userId: input.userId,
